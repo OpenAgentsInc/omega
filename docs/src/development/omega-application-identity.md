@@ -45,9 +45,36 @@ For example:
 OMEGA_IDENTITY_FIXTURE=ready cargo run --profile release-fast
 ```
 
-These states are presentation fixtures. Identity actions remain disabled until
-secure custody is connected, and the masked import preview contains no private
-key material.
+These states are presentation fixtures and never write secure custody. The
+masked import preview contains no private key material.
+
+## Native identity custody
+
+`omega_identity::IdentityService` is the secure native boundary for creating,
+importing, opening, signing with, inspecting, and resetting an Omega identity.
+It stores one 32-byte Nostr secret in the operating system credential provider
+under the current release channel's `KeyringLocator`. There is no environment,
+plaintext-file, app-data, or auto-generation fallback.
+
+Creation and import are explicit transactions. Omega serializes each mutation
+with a process-global mutex and a channel-scoped cross-process operating-system
+lock, writes the credential, reads it through a fresh credential-provider
+entry, derives its public key, and compares that key with the expected identity.
+Only after that comparison succeeds does it atomically write the public
+manifest and completion record. A mismatch, missing read-back, malformed public
+record, locked provider, or lost credential leaves custody non-ready and denies
+signing.
+
+The public API accepts a zeroizing import wrapper but has no secret-return
+operation. Signing accepts only a validated `AdmittedSigningRequest` bound to
+the active identity and returns the signed public Nostr event. Reset requires
+the expected identity, verifies that credential deletion is visible through a
+fresh read, removes only the public identity documents, and requires a
+relaunch.
+
+System credential and cross-process lock operations are synchronous. GPUI
+callers must run them on the background executor and propagate
+`CustodyError` to the onboarding UI instead of blocking the foreground thread.
 
 ## Native identity provenance
 

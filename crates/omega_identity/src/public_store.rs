@@ -39,6 +39,47 @@ pub fn write_completion_record(
     write_public_document(path.as_ref(), record)
 }
 
+pub fn read_identity_manifest(
+    path: impl AsRef<Path>,
+    channel: AppChannel,
+) -> Result<Option<IdentityManifest>, PublicStoreError> {
+    let Some(bytes) = read_public_document(path.as_ref())? else {
+        return Ok(None);
+    };
+    let manifest: IdentityManifest = serde_json::from_slice(&bytes)?;
+    manifest.validate(channel)?;
+    Ok(Some(manifest))
+}
+
+pub fn read_completion_record(
+    path: impl AsRef<Path>,
+    manifest: &IdentityManifest,
+    channel: AppChannel,
+) -> Result<Option<CompletionRecord>, PublicStoreError> {
+    let Some(bytes) = read_public_document(path.as_ref())? else {
+        return Ok(None);
+    };
+    let record: CompletionRecord = serde_json::from_slice(&bytes)?;
+    record.validate_against(manifest, channel)?;
+    Ok(Some(record))
+}
+
+fn read_public_document(path: &Path) -> Result<Option<Vec<u8>>, PublicStoreError> {
+    match fs::read(path) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+pub(crate) fn remove_public_document(path: &Path) -> Result<(), PublicStoreError> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
+
 fn write_public_document(
     path: &Path,
     value: &impl serde::Serialize,
@@ -92,16 +133,25 @@ mod tests {
             .expect("write completion");
 
         let stored_manifest: IdentityManifest =
-            serde_json::from_slice(&fs::read(manifest_path).expect("read stored manifest"))
+            serde_json::from_slice(&fs::read(&manifest_path).expect("read stored manifest"))
                 .expect("parse stored manifest");
         stored_manifest
             .validate(AppChannel::Dev)
             .expect("stored manifest remains valid");
 
         let stored_completion: crate::CompletionRecord =
-            serde_json::from_slice(&fs::read(completion_path).expect("read stored completion"))
+            serde_json::from_slice(&fs::read(&completion_path).expect("read stored completion"))
                 .expect("parse stored completion");
         assert_eq!(stored_completion, completion);
+        assert_eq!(
+            read_identity_manifest(&manifest_path, AppChannel::Dev).expect("read public manifest"),
+            Some(manifest.clone())
+        );
+        assert_eq!(
+            read_completion_record(&completion_path, &manifest, AppChannel::Dev)
+                .expect("read completion record"),
+            Some(completion)
+        );
     }
 
     #[test]

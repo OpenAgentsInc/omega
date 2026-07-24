@@ -398,6 +398,10 @@ impl CompletionRecord {
         Ok(())
     }
 
+    pub fn receipt_ref(&self) -> &ReceiptRef {
+        &self.receipt_ref
+    }
+
     pub fn validate_against(
         &self,
         manifest: &IdentityManifest,
@@ -446,6 +450,9 @@ pub enum RecoveryState {
 pub enum CustodyRequest {
     Inspect,
     Create {
+        request_ref: ReceiptRef,
+    },
+    Import {
         request_ref: ReceiptRef,
     },
     Open {
@@ -517,20 +524,27 @@ impl AdmittedSigningRequest {
     }
 
     pub fn event_id(&self, identity: &PublicIdentity) -> Result<EventId, ContractError> {
+        let mut unsigned_event = self.unsigned_event(identity)?;
+        Ok(unsigned_event.id())
+    }
+
+    pub(crate) fn unsigned_event(
+        &self,
+        identity: &PublicIdentity,
+    ) -> Result<UnsignedEvent, ContractError> {
         self.validate()?;
         identity.validate()?;
         if &self.identity_ref != identity.identity_ref() {
             return Err(ContractError::SigningNotAdmitted);
         }
         let public_key = identity.public_key_hex.public_key()?;
-        let mut unsigned_event = UnsignedEvent::new(
+        Ok(UnsignedEvent::new(
             public_key,
             Timestamp::from_secs(self.event.created_at),
             Kind::from_u16(self.event.kind),
             self.parsed_tags()?,
             self.event.content.clone(),
-        );
-        Ok(unsigned_event.id())
+        ))
     }
 
     fn parsed_tags(&self) -> Result<Vec<Tag>, ContractError> {

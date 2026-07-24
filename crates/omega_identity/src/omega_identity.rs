@@ -7,8 +7,12 @@
 //! ```
 
 mod contract;
+mod custody;
+mod mutation_lock;
 mod public_store;
 mod secret;
 
 pub use contract::*;
+pub use custody::*;
 pub use public_store::*;
+pub use secret::{ImportedSecret, InvalidImportedSecret};
