@@ -6700,6 +6700,7 @@ dependencies = [
 name = "feedback"
 version = "0.1.0"
 dependencies = [
+ "app_identity",
  "client",
  "extension_host",
  "gpui",

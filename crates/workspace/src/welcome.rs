@@ -32,7 +32,7 @@ pub struct OpenRecentProject {
 actions!(
     zed,
     [
-        /// Show the Zed welcome screen
+        /// Show the Omega welcome screen
         ShowWelcome
     ]
 );
@@ -448,9 +448,9 @@ impl Render for WelcomePage {
         };
 
         let welcome_label = if self.fallback_to_recent_projects {
-            "Welcome back to Zed"
+            "Welcome back to Omega"
         } else {
-            "Welcome to Zed"
+            "Welcome to Omega"
         };
 
         h_flex()
@@ -473,14 +473,16 @@ impl Render for WelcomePage {
                     .overflow_y_scroll()
                     .child(
                         h_flex()
+                            .id("welcome-brand")
                             .w_full()
                             .justify_center()
                             .mb_4()
                             .gap_4()
-                            .child(Vector::square(VectorName::ZedLogo, rems_from_px(45.)))
+                            .aria_label("Omega, published by OpenAgents")
+                            .child(Vector::square(VectorName::OmegaLogo, rems_from_px(45.)))
                             .child(
                                 v_flex().child(Headline::new(welcome_label)).child(
-                                    Label::new("The editor for what's next")
+                                    Label::new("Your last IDE.")
                                         .size(LabelSize::Small)
                                         .color(Color::Muted)
                                         .italic(),

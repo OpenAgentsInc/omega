@@ -427,7 +427,7 @@ pub mod feedback {
     actions!(
         feedback,
         [
-            /// Opens email client to send feedback to Zed support.
+            /// Opens email client to send feedback to OpenAgents support.
             EmailZed,
             /// Opens the bug report form.
             FileBugReport,

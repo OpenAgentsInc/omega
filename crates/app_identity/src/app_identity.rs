@@ -2,6 +2,23 @@ use std::{env, str::FromStr, sync::LazyLock};
 
 pub const BINARY_NAME: &str = "omega";
 
+/// Public product name shown in the Omega shell.
+pub const PRODUCT_NAME: &str = "Omega";
+/// Publisher shown beside Omega product surfaces.
+pub const PUBLISHER_NAME: &str = "OpenAgents";
+/// Tagline used on welcome and onboarding headers.
+pub const PRODUCT_TAGLINE: &str = "Your last IDE.";
+/// Owned Omega repository.
+pub const PRODUCT_REPOSITORY_URL: &str = "https://github.com/OpenAgentsInc/omega";
+/// Owned documentation entry point for Help actions.
+pub const PRODUCT_DOCS_URL: &str = "https://github.com/OpenAgentsInc/omega#readme";
+/// Bug report destination for Help actions.
+pub const PRODUCT_BUG_REPORT_URL: &str =
+    "https://github.com/OpenAgentsInc/omega/issues/new?template=10_bug_report.yml";
+/// Feature request destination for Help actions.
+pub const PRODUCT_FEATURE_REQUEST_URL: &str =
+    "https://github.com/OpenAgentsInc/omega/issues/new/choose";
+
 pub static CHANNEL: LazyLock<AppChannel> = LazyLock::new(|| {
     let channel_name = if cfg!(debug_assertions) {
         env::var("ZED_RELEASE_CHANNEL")
@@ -86,6 +103,8 @@ pub struct InvalidAppChannel;
 
 #[cfg(test)]
 mod icon_family;
+#[cfg(test)]
+mod shell_branding;
 
 #[cfg(test)]
 mod tests {

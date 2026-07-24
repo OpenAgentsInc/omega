@@ -108,9 +108,9 @@ use zed_actions::{
     OpenServerSettings, OpenSettingsFile, OpenStatusPage, OpenZedUrl, Quit,
 };
 
-const DOCS_URL: &str = "https://zed.dev/docs/";
-const STATUS_URL: &str = "https://status.zed.dev";
-const MERCH_URL: &str = "https://merch.zed.dev/";
+const DOCS_URL: &str = app_identity::PRODUCT_DOCS_URL;
+const STATUS_URL: &str = "https://www.openagents.com/";
+const MERCH_URL: &str = "https://www.openagents.com/";
 
 pub struct CrashHandler(pub Arc<crashes::Client>);
 
@@ -729,19 +729,19 @@ fn show_software_emulation_warning_if_needed(
         let (graphics_api, docs_url, open_url) = if cfg!(target_os = "windows") {
             (
                 "DirectX",
-                "https://zed.dev/docs/windows",
-                "https://zed.dev/docs/windows",
+                app_identity::PRODUCT_DOCS_URL,
+                app_identity::PRODUCT_DOCS_URL,
             )
         } else {
             (
                 "Vulkan",
-                "https://zed.dev/docs/linux",
-                "https://zed.dev/docs/linux#zed-fails-to-open-windows",
+                app_identity::PRODUCT_DOCS_URL,
+                app_identity::PRODUCT_DOCS_URL,
             )
         };
         let message = format!(
             db::indoc! {r#"
-            Zed uses {} for rendering and requires a compatible GPU.
+            Omega uses {} for rendering and requires a compatible GPU.
 
             Currently you are using a software emulated GPU ({}) which
             will result in awful performance.
@@ -1660,7 +1660,7 @@ fn open_about_window(cx: &mut App) {
     cx.open_window(
         WindowOptions {
             titlebar: Some(TitlebarOptions {
-                title: Some("About Zed".into()),
+                title: Some("About Omega".into()),
                 appears_transparent: true,
                 traffic_light_position: Some(point(px(12.), px(12.))),
             }),
