@@ -97,6 +97,11 @@ entry indexes under its channel data directory before acknowledging thread or
 turn creation. After a full app-process restart, the bridge reloads the
 journal, reopens the matching Agent thread through `ThreadMetadataStore`, and
 continues evidence refresh against the same entry boundaries.
+When `AcpThread::send` resolves, the bridge first seals the turn and releases
+its mutable correlation-state guard, then atomically persists the completed or
+failed disposition. Evidence refresh and owner interruption follow the same
+borrow-before-persist boundary so an ACP completion cannot be left durably as
+`streaming` by a `RefCell` borrow panic.
 
 `append_system_note` remains typed `unavailable`. The current `AcpThread`
 entry model contains user messages, assistant messages, tool calls,

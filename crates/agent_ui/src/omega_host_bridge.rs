@@ -524,40 +524,12 @@ async fn dispatch_turn(
             let thread = thread_for_completion.read(cx);
             (thread.entries().len(), thread.had_error())
         });
-        let now = Utc::now().to_rfc3339();
-        let mut bridge = state_for_completion.borrow_mut();
-        if let Some(host_thread) = bridge
-            .threads
-            .iter_mut()
-            .find(|thread| thread.turns.iter().any(|turn| turn.turn_ref == turn_ref))
-        {
-            let changed = if let Some(turn) = host_thread
-                .turns
-                .iter_mut()
-                .find(|turn| turn.turn_ref == turn_ref)
-            {
-                if turn.disposition.is_none() {
-                    if result.is_ok() && !had_error {
-                        turn.phase = "completed".to_string();
-                        turn.disposition = Some("completed".to_string());
-                    } else {
-                        turn.phase = "failed".to_string();
-                        turn.disposition = Some("failed".to_string());
-                    }
-                    turn.end_entry_index = Some(end_entry_index);
-                    turn.updated_at = now;
-                    true
-                } else {
-                    false
-                }
-            } else {
-                false
-            };
-            if changed {
-                host_thread.revision += 1;
-            }
-        }
-        if let Err(error) = persist_correlation_journal(&state_for_completion.borrow()) {
+        if let Err(error) = record_turn_completion(
+            &state_for_completion,
+            &turn_ref,
+            end_entry_index,
+            result.is_ok() && !had_error,
+        ) {
             log::error!("failed to persist Omega Full Auto host correlation: {error:#}");
         }
     })
@@ -637,20 +609,22 @@ fn refresh_evidence(
         turn.disposition = Some("completed".to_string());
         turn.end_entry_index = Some(entry_count);
         turn.updated_at = Utc::now().to_rfc3339();
-        let mut bridge = state.borrow_mut();
-        if let Some(host_thread) = bridge
-            .threads
-            .iter_mut()
-            .find(|thread| thread.thread_id.to_key_string() == params.thread_ref)
-            && let Some(stored_turn) = host_thread
-                .turns
-                .iter_mut()
-                .find(|stored_turn| stored_turn.turn_ref == turn.turn_ref)
-            && stored_turn.disposition.is_none()
         {
-            *stored_turn = turn.clone();
-            host_thread.revision += 1;
-            revision = host_thread.revision;
+            let mut bridge = state.borrow_mut();
+            if let Some(host_thread) = bridge
+                .threads
+                .iter_mut()
+                .find(|thread| thread.thread_id.to_key_string() == params.thread_ref)
+                && let Some(stored_turn) = host_thread
+                    .turns
+                    .iter_mut()
+                    .find(|stored_turn| stored_turn.turn_ref == turn.turn_ref)
+                && stored_turn.disposition.is_none()
+            {
+                *stored_turn = turn.clone();
+                host_thread.revision += 1;
+                revision = host_thread.revision;
+            }
         }
         persist_state(state)?;
     }
@@ -769,21 +743,23 @@ async fn interrupt_turn(
     };
     cancel.await;
     let end_entry_index = cx.update(|cx| thread.read(cx).entries().len());
-    let mut bridge = state.borrow_mut();
-    if let Some(host_thread) = bridge
-        .threads
-        .iter_mut()
-        .find(|thread| thread.thread_id.to_key_string() == params.thread_ref)
-        && let Some(turn) = host_thread
-            .turns
-            .iter_mut()
-            .find(|turn| turn.turn_ref == turn_ref)
     {
-        turn.phase = "interrupted".to_string();
-        turn.disposition = Some("owner_interrupted".to_string());
-        turn.end_entry_index = Some(end_entry_index);
-        turn.updated_at = Utc::now().to_rfc3339();
-        host_thread.revision += 1;
+        let mut bridge = state.borrow_mut();
+        if let Some(host_thread) = bridge
+            .threads
+            .iter_mut()
+            .find(|thread| thread.thread_id.to_key_string() == params.thread_ref)
+            && let Some(turn) = host_thread
+                .turns
+                .iter_mut()
+                .find(|turn| turn.turn_ref == turn_ref)
+        {
+            turn.phase = "interrupted".to_string();
+            turn.disposition = Some("owner_interrupted".to_string());
+            turn.end_entry_index = Some(end_entry_index);
+            turn.updated_at = Utc::now().to_rfc3339();
+            host_thread.revision += 1;
+        }
     }
     persist_state(state)?;
     Ok(json!({ "interrupted": true }))
@@ -956,6 +932,49 @@ fn persist_state(state: &Rc<RefCell<HostBridgeState>>) -> Result<(), HostRespons
             "Omega Full Auto host correlation could not be persisted: {error:#}"
         ))
     })
+}
+
+fn record_turn_completion(
+    state: &Rc<RefCell<HostBridgeState>>,
+    turn_ref: &str,
+    end_entry_index: usize,
+    succeeded: bool,
+) -> anyhow::Result<()> {
+    {
+        let mut bridge = state.borrow_mut();
+        if let Some(host_thread) = bridge
+            .threads
+            .iter_mut()
+            .find(|thread| thread.turns.iter().any(|turn| turn.turn_ref == turn_ref))
+        {
+            let changed = if let Some(turn) = host_thread
+                .turns
+                .iter_mut()
+                .find(|turn| turn.turn_ref == turn_ref)
+            {
+                if turn.disposition.is_none() {
+                    if succeeded {
+                        turn.phase = "completed".to_string();
+                        turn.disposition = Some("completed".to_string());
+                    } else {
+                        turn.phase = "failed".to_string();
+                        turn.disposition = Some("failed".to_string());
+                    }
+                    turn.end_entry_index = Some(end_entry_index);
+                    turn.updated_at = Utc::now().to_rfc3339();
+                    true
+                } else {
+                    false
+                }
+            } else {
+                false
+            };
+            if changed {
+                host_thread.revision += 1;
+            }
+        }
+    }
+    persist_correlation_journal(&state.borrow())
 }
 
 fn persist_correlation_journal(state: &HostBridgeState) -> anyhow::Result<()> {
@@ -1220,6 +1239,48 @@ mod tests {
             restored[0].turns[0].disposition.as_deref(),
             Some("completed")
         );
+    }
+
+    #[test]
+    fn completed_turn_is_persisted_after_releasing_mutable_state_borrow() {
+        let directory = tempdir().expect("tempdir");
+        let path = directory.path().join(CORRELATION_FILE);
+        let thread_id = ThreadId::new();
+        let state = Rc::new(RefCell::new(HostBridgeState {
+            workspace: None,
+            threads: vec![HostThread {
+                workspace_ref: "workspace.omega.supervised".to_string(),
+                lane: CODEX_LOCAL_LANE.to_string(),
+                operation_ref: "operation.full-auto.1".to_string(),
+                thread_id,
+                conversation: None,
+                turns: vec![HostTurn {
+                    turn_ref: "turn.full-auto.1".to_string(),
+                    lane: CODEX_LOCAL_LANE.to_string(),
+                    account_ref: None,
+                    model: None,
+                    provider_session_ref: "session.native.1".to_string(),
+                    start_entry_index: 2,
+                    end_entry_index: None,
+                    phase: "streaming".to_string(),
+                    disposition: None,
+                    created_at: "2026-07-24T12:00:00Z".to_string(),
+                    updated_at: "2026-07-24T12:00:00Z".to_string(),
+                }],
+                revision: 1,
+            }],
+            correlation_path: path.clone(),
+            load_error: None,
+        }));
+
+        record_turn_completion(&state, "turn.full-auto.1", 7, true).expect("record completed turn");
+
+        let restored = load_correlation_journal(&path).expect("load correlation journal");
+        let turn = &restored[0].turns[0];
+        assert_eq!(restored[0].revision, 2);
+        assert_eq!(turn.phase, "completed");
+        assert_eq!(turn.disposition.as_deref(), Some("completed"));
+        assert_eq!(turn.end_entry_index, Some(7));
     }
 
     #[test]
