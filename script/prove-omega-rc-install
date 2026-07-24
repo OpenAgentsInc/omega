@@ -15,6 +15,7 @@ import tempfile
 import time
 from pathlib import Path
 from typing import Any
+from xml.parsers.expat import ExpatError
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -387,13 +388,7 @@ def validate_effectd_node_entitlements(
         ["codesign", "-d", "--entitlements", "-", "--xml", str(node_path)],
         description=f"{label} omega-effectd Node entitlement inspection",
     )
-    xml_start = details.find("<?xml")
-    if xml_start < 0:
-        raise ProofError(f"{label} omega-effectd Node entitlements are unreadable")
-    try:
-        entitlements = plistlib.loads(details[xml_start:].encode("utf-8"))
-    except plistlib.InvalidFileException as error:
-        raise ProofError(f"{label} omega-effectd Node entitlements are invalid") from error
+    entitlements = parse_codesign_entitlements(details, label)
     expected = {
         "com.apple.security.cs.allow-jit": True,
         "com.apple.security.cs.allow-unsigned-executable-memory": True,
@@ -403,6 +398,22 @@ def validate_effectd_node_entitlements(
     (output_dir / f"entitlements-{label}-effectd-node.plist").write_bytes(
         plistlib.dumps(entitlements, sort_keys=True)
     )
+
+
+def parse_codesign_entitlements(details: str, label: str) -> dict[str, Any]:
+    xml_start = details.find("<?xml")
+    xml_end_marker = "</plist>"
+    xml_end = details.find(xml_end_marker, xml_start)
+    if xml_start < 0 or xml_end < 0:
+        raise ProofError(f"{label} omega-effectd Node entitlements are unreadable")
+    xml_end += len(xml_end_marker)
+    try:
+        entitlements = plistlib.loads(details[xml_start:xml_end].encode("utf-8"))
+    except (plistlib.InvalidFileException, ExpatError) as error:
+        raise ProofError(f"{label} omega-effectd Node entitlements are invalid") from error
+    if not isinstance(entitlements, dict):
+        raise ProofError(f"{label} omega-effectd Node entitlements are not a dictionary")
+    return entitlements
 
 
 def probe_effectd_initialize_health(program: Path) -> dict[str, Any]:
@@ -914,6 +925,18 @@ def self_test() -> None:
             pass
         else:
             raise ProofError("self-test accepted a mismatched source Node pin")
+
+        entitlement_fixture = plistlib.dumps(
+            {
+                "com.apple.security.cs.allow-jit": True,
+                "com.apple.security.cs.allow-unsigned-executable-memory": True,
+            }
+        ).decode("utf-8")
+        parsed_entitlements = parse_codesign_entitlements(
+            f"{entitlement_fixture}\nExecutable=/fixture/node", "self-test"
+        )
+        if parsed_entitlements.get("com.apple.security.cs.allow-jit") is not True:
+            raise ProofError("self-test failed to isolate codesign entitlement XML")
 
         manual = {
             "schema": "openagents.omega.installed-brand-evidence.v1",
