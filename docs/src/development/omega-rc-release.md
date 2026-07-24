@@ -1,0 +1,109 @@
+# Omega RC release procedure
+
+This document is the owned OpenAgents procedure for producing and publishing
+`v0.2.0-rc1`. It replaces inherited Zed release automation for this candidate.
+
+## Goal
+
+Produce a signed macOS arm64 candidate:
+
+- Artifact: `Omega-v0.2.0-rc1-macos-arm64.dmg`
+- Volume name: `Omega RC`
+- Bundle identifier: `com.openagents.omega.rc`
+- Team ID: `HQWSG26L43`
+- Signing identity: `Developer ID Application: OpenAgents, Inc. (HQWSG26L43)`
+
+Publish only to `OpenAgentsInc/omega` as a **prerelease**. Never mark the
+candidate as GitHub `latest`.
+
+## Owner secrets
+
+Keep these off the repository and out of commit messages:
+
+| Secret | Purpose |
+| --- | --- |
+| OpenAgents Developer ID certificate / keychain access | `codesign` |
+| `APPLE_NOTARIZATION_KEY` | App Store Connect API key PEM |
+| `APPLE_NOTARIZATION_KEY_ID` | Key id |
+| `APPLE_NOTARIZATION_ISSUER_ID` | Issuer id |
+| GitHub release token with `contents: write` on `OpenAgentsInc/omega` | Prerelease upload |
+
+Notarization is optional for local contract validation. A release record must
+not claim notarization or stapling unless those steps actually completed.
+
+## Local command
+
+From a clean checkout on the release commit:
+
+```sh
+script/bundle-omega-rc --dry-run
+```
+
+Dry-run checks:
+
+- clean git tree
+- OpenAgents signing identity availability
+- release-record JSON schema and required digests
+
+Full package attempt:
+
+```sh
+script/bundle-omega-rc
+```
+
+The command temporarily sets the preview channel and package version `0.2.0`,
+restores those files on exit, refuses a dirty tree, fails clearly when the
+OpenAgents signing identity is missing, does not attach Zed commercial terms,
+copies `LICENSE-GPL` / `LICENSE-APACHE` into the disk image, and writes:
+
+```text
+target/omega-rc/Omega-v0.2.0-rc1-macos-arm64.dmg
+target/omega-rc/omega-v0.2.0-rc1-macos-arm64.release.json
+```
+
+## Release record digests
+
+The JSON release record binds at least:
+
+- source commit
+- upstream commit when available
+- `Cargo.lock` SHA-256
+- icon-family manifest and pinned icon digests
+- package SHA-256 when the DMG exists
+- signing identity and team id
+- notarization attempted / stapled / status
+- `publication.prerelease = true` and `publication.latest = false`
+
+Validate schema after any hand edit:
+
+```sh
+script/bundle-omega-rc --dry-run
+cargo test -p app_identity release_record -- --nocapture
+```
+
+## Publication checklist
+
+1. Confirm the release record `source.commit` matches the intended git SHA.
+2. Confirm `digests.package_sha256` matches `shasum -a 256` of the DMG.
+3. Confirm notarization status honestly (`not_attempted`, `submit_failed`, or
+   `submitted_and_stapled`).
+4. Create a GitHub **prerelease** tagged `v0.2.0-rc1` on
+   `OpenAgentsInc/omega`.
+5. Upload the DMG and release-record JSON.
+6. Do **not** set the release as latest.
+7. Do **not** publish through Zed release workflows or Zed artifact names.
+
+## Owner blockers
+
+These remain outside the script's local contract:
+
+- An Omega-owned provisioning profile for `com.openagents.omega.rc`. The
+  inherited preview profile still belongs to Zed team `MQ55VZLNZQ`.
+- Notarization API credentials when a stapled Gatekeeper-ready DMG is required.
+- Human confirmation of the GitHub prerelease upload.
+
+## Legal packaging
+
+macOS and Windows packaging must not present Zed commercial Terms of Service.
+Keep GPL, Apache, and generated third-party notices. Windows Inno Setup uses
+`script/terms/open-source-notices.rtf`.

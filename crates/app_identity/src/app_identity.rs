@@ -118,6 +118,8 @@ mod icon_family;
 #[cfg(test)]
 mod public_branding;
 #[cfg(test)]
+mod release_record;
+#[cfg(test)]
 mod service_isolation;
 #[cfg(test)]
 mod shell_branding;

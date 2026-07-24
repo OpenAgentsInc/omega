@@ -9,9 +9,9 @@ open_result=false
 local_install=false
 can_code_sign=false
 
-# This must match the team in the provisioning profile.
-IDENTITY="Zed Industries, Inc."
-APPLE_NOTARIZATION_TEAM="MQ55VZLNZQ"
+# Prefer OpenAgents Developer ID. Override with MACOS_SIGNING_IDENTITY when needed.
+IDENTITY="${MACOS_SIGNING_IDENTITY:-Developer ID Application: OpenAgents, Inc. (HQWSG26L43)}"
+APPLE_NOTARIZATION_TEAM="${APPLE_NOTARIZATION_TEAM:-HQWSG26L43}"
 
 # Function for displaying help info
 help_info() {
@@ -245,7 +245,19 @@ function sign_app_binaries() {
     else
         dmg_target_directory="target/${target_triple}/${target_dir}"
         dmg_source_directory="${dmg_target_directory}/dmg"
-        dmg_file_path="${dmg_target_directory}/Zed-${arch_suffix}.dmg"
+        channel_slug="${ZED_RELEASE_CHANNEL:-$(<crates/zed/RELEASE_CHANNEL)}"
+        case "${channel_slug}" in
+            preview|rc) volume_name="Omega RC" ;;
+            nightly) volume_name="Omega Nightly" ;;
+            stable) volume_name="Omega" ;;
+            *) volume_name="Omega Dev" ;;
+        esac
+        if [[ "${arch_suffix}" = "aarch64" ]]; then
+            dmg_arch="arm64"
+        else
+            dmg_arch="x86_64"
+        fi
+        dmg_file_path="${dmg_target_directory}/Omega-${dmg_arch}.dmg"
         xcode_bin_dir_path="$(xcode-select -p)/usr/bin"
 
         rm -rf ${dmg_source_directory}
@@ -253,20 +265,24 @@ function sign_app_binaries() {
         mv "${app_path}" "${dmg_source_directory}"
         notarization_key_file=$(mktemp)
 
+        echo "Adding open-source license notices to ${dmg_source_directory}"
+        cp LICENSE-GPL LICENSE-APACHE "${dmg_source_directory}/"
+        if [[ -f assets/licenses.md ]]; then
+            cp assets/licenses.md "${dmg_source_directory}/"
+        fi
+
         echo "Adding symlink to /Applications to ${dmg_source_directory}"
         ln -s /Applications ${dmg_source_directory}
 
         echo "Creating final DMG at ${dmg_file_path} using ${dmg_source_directory}"
-        hdiutil create -volname Zed -srcfolder "${dmg_source_directory}" -ov -format UDZO "${dmg_file_path}"
+        hdiutil create -volname "${volume_name}" -srcfolder "${dmg_source_directory}" -ov -format UDZO "${dmg_file_path}"
 
         # If someone runs this bundle script locally, a symlink will be placed in `dmg_source_directory`.
         # This symlink causes CPU issues with Zed if the Zed codebase is the project being worked on, so we simply remove it for now.
         echo "Removing symlink to /Applications from ${dmg_source_directory}"
         rm ${dmg_source_directory}/Applications
 
-        echo "Adding license agreement to DMG"
-        npm install --global dmg-license minimist
-        dmg-license script/terms/terms.json "${dmg_file_path}"
+        # Do not attach Zed commercial terms. GPL/Apache notices are copied into the image above.
 
         if [[ $can_code_sign = true ]]; then
             echo "Notarizing DMG with Apple"

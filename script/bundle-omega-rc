@@ -1,0 +1,526 @@
+#!/usr/bin/env bash
+# Owned Omega RC macOS package entry point (OMEGA-BRAND-05).
+#
+# Produces (or dry-runs the contract for):
+#   Omega-v0.2.0-rc1-macos-arm64.dmg
+#
+# Does not claim notarization success. Notarization runs only when owner
+# notarization secrets are present; otherwise the release record records that
+# notarization was not attempted.
+
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT"
+
+readonly OMEGA_RC_VERSION="0.2.0-rc1"
+readonly OMEGA_RC_SEMVER="0.2.0"
+readonly OMEGA_RC_CHANNEL="preview"
+readonly OMEGA_RC_DISPLAY_CHANNEL="rc"
+readonly OMEGA_TEAM_ID="HQWSG26L43"
+readonly OMEGA_SIGNING_IDENTITY="Developer ID Application: OpenAgents, Inc. (${OMEGA_TEAM_ID})"
+readonly OMEGA_BUNDLE_ID="com.openagents.omega.rc"
+readonly OMEGA_VOLUME_NAME="Omega RC"
+readonly OMEGA_ARTIFACT_NAME="Omega-v${OMEGA_RC_VERSION}-macos-arm64.dmg"
+readonly OMEGA_RELEASE_RECORD_SCHEMA_VERSION=1
+
+DRY_RUN=false
+SKIP_BUILD=false
+TARGET_TRIPLE="aarch64-apple-darwin"
+OUTPUT_DIR="${ROOT}/target/omega-rc"
+RELEASE_RECORD_PATH=""
+
+usage() {
+  cat <<EOF
+Usage: ${0##*/} [--dry-run] [--skip-build] [--output-dir DIR] [--release-record PATH]
+
+Owned Omega RC packaging for macOS arm64.
+
+Options:
+  --dry-run              Validate prerequisites and release-record schema without
+                         compiling, signing, or notarizing.
+  --skip-build           Reuse an existing DMG at the expected output path and
+                         only refresh the release record (still requires a clean
+                         tree and signing identity check when a package exists).
+  --output-dir DIR       Directory for the DMG and release record
+                         (default: target/omega-rc).
+  --release-record PATH  Explicit release-record JSON path.
+  -h, --help             Show this help.
+
+Environment (owner secrets; never commit):
+  MACOS_CERTIFICATE / MACOS_CERTIFICATE_PASSWORD
+      Optional keychain import path (same shape as script/bundle-mac).
+  APPLE_NOTARIZATION_KEY / APPLE_NOTARIZATION_KEY_ID / APPLE_NOTARIZATION_ISSUER_ID
+      Required only when notarization should be attempted after signing.
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --dry-run) DRY_RUN=true ;;
+    --skip-build) SKIP_BUILD=true ;;
+    --output-dir)
+      OUTPUT_DIR="$2"
+      shift
+      ;;
+    --release-record)
+      RELEASE_RECORD_PATH="$2"
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "error: unknown argument: $1" >&2
+      usage >&2
+      exit 2
+      ;;
+  esac
+  shift
+done
+
+mkdir -p "${OUTPUT_DIR}"
+if [[ -z "${RELEASE_RECORD_PATH}" ]]; then
+  RELEASE_RECORD_PATH="${OUTPUT_DIR}/omega-v${OMEGA_RC_VERSION}-macos-arm64.release.json"
+fi
+
+sha256_file() {
+  local path="$1"
+  if [[ ! -f "${path}" ]]; then
+    echo ""
+    return 0
+  fi
+  shasum -a 256 "${path}" | awk '{print $1}'
+}
+
+require_clean_checkout() {
+  if [[ -n "$(git status --porcelain)" ]]; then
+    echo "error: working tree is dirty; refuse to build an Omega RC candidate from an unrecorded tree." >&2
+    git status --short >&2
+    exit 1
+  fi
+}
+
+require_arm64_host_or_target() {
+  if [[ "${TARGET_TRIPLE}" != "aarch64-apple-darwin" ]]; then
+    echo "error: this RC command only produces macos-arm64 artifacts (got ${TARGET_TRIPLE})." >&2
+    exit 1
+  fi
+}
+
+find_openagents_signing_identity() {
+  local identities
+  identities="$(security find-identity -v -p codesigning 2>/dev/null || true)"
+  if ! grep -Fq "${OMEGA_SIGNING_IDENTITY}" <<<"${identities}"; then
+    echo "error: required OpenAgents signing identity is missing:" >&2
+    echo "  ${OMEGA_SIGNING_IDENTITY}" >&2
+    echo "Team ID ${OMEGA_TEAM_ID} must be available in the login keychain before an RC package can be signed." >&2
+    echo "Available codesigning identities:" >&2
+    echo "${identities:-  (none)}" >&2
+    exit 1
+  fi
+}
+
+validate_release_record_schema() {
+  local path="$1"
+  python3 - "${path}" "${OMEGA_RELEASE_RECORD_SCHEMA_VERSION}" <<'PY'
+import json
+import sys
+
+path, expected_schema = sys.argv[1], int(sys.argv[2])
+with open(path, encoding="utf-8") as handle:
+    record = json.load(handle)
+
+required = [
+    "schema_version",
+    "product",
+    "channel",
+    "version",
+    "artifact_name",
+    "volume_name",
+    "bundle_identifier",
+    "team_id",
+    "signing_identity",
+    "source",
+    "toolchains",
+    "digests",
+    "notarization",
+    "legal",
+    "publication",
+]
+missing = [key for key in required if key not in record]
+if missing:
+    raise SystemExit(f"release-record missing keys: {', '.join(missing)}")
+
+if record["schema_version"] != expected_schema:
+    raise SystemExit(
+        f"schema_version {record['schema_version']} != expected {expected_schema}"
+    )
+if record["product"] != "Omega":
+    raise SystemExit("product must be Omega")
+if record["channel"] != "rc":
+    raise SystemExit("channel must be rc")
+if record["publication"].get("prerelease") is not True:
+    raise SystemExit("publication.prerelease must be true")
+if record["publication"].get("latest") is not False:
+    raise SystemExit("publication.latest must be false")
+if record["legal"].get("commercial_terms_attached") is not False:
+    raise SystemExit("legal.commercial_terms_attached must be false")
+if "commit" not in record["source"]:
+    raise SystemExit("source.commit is required")
+digests = record["digests"]
+for key in ("cargo_lock_sha256", "icon_family_manifest_sha256"):
+    if key not in digests or not isinstance(digests[key], str) or not digests[key]:
+        raise SystemExit(f"digests.{key} must be a non-empty string")
+if "package_sha256" not in digests:
+    raise SystemExit("digests.package_sha256 is required (null when absent)")
+print(f"release-record schema ok: {path}")
+PY
+}
+
+collect_icon_digests_json() {
+  python3 - <<'PY'
+import json
+from pathlib import Path
+
+manifest_path = Path("crates/zed/resources/icon_family/manifest.json")
+manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+outputs = {
+    relative: {"sha256": record["sha256"], "format": record["format"]}
+    for relative, record in manifest.get("outputs", {}).items()
+}
+print(json.dumps({
+    "manifest_sha256": __import__("hashlib").sha256(manifest_path.read_bytes()).hexdigest(),
+    "pinned_png_sha256": manifest["pinned_source"]["png_sha256"],
+    "pinned_icns_sha256": manifest["pinned_source"]["icns_sha256"],
+    "outputs": outputs,
+}))
+PY
+}
+
+write_release_record() {
+  local package_path="$1"
+  local notarization_status="$2"
+  local notarization_attempted="$3"
+  local notarization_stapled="$4"
+  local package_digest
+  package_digest="$(sha256_file "${package_path}")"
+  if [[ -z "${package_digest}" ]]; then
+    package_digest="null"
+  else
+    package_digest="\"${package_digest}\""
+  fi
+
+  local commit upstream_commit rustc_version host_triple cargo_lock_digest icon_json
+  commit="$(git rev-parse HEAD)"
+  upstream_commit="$(git rev-parse upstream/main 2>/dev/null || true)"
+  if [[ -z "${upstream_commit}" ]]; then
+    upstream_commit="$(git merge-base HEAD upstream/main 2>/dev/null || true)"
+  fi
+  rustc_version="$(rustc --version)"
+  host_triple="$(rustc -vV | awk '/^host:/{print $2}')"
+  cargo_lock_digest="$(sha256_file Cargo.lock)"
+  icon_json="$(collect_icon_digests_json)"
+
+  OMEGA_RC_RECORD_OUT="${RELEASE_RECORD_PATH}" \
+  OMEGA_RC_SCHEMA_VERSION="${OMEGA_RELEASE_RECORD_SCHEMA_VERSION}" \
+  OMEGA_RC_VERSION_VALUE="${OMEGA_RC_VERSION}" \
+  OMEGA_RC_ARTIFACT_NAME="${OMEGA_ARTIFACT_NAME}" \
+  OMEGA_RC_VOLUME_NAME="${OMEGA_VOLUME_NAME}" \
+  OMEGA_RC_BUNDLE_ID="${OMEGA_BUNDLE_ID}" \
+  OMEGA_RC_TEAM_ID="${OMEGA_TEAM_ID}" \
+  OMEGA_RC_SIGNING_IDENTITY="${OMEGA_SIGNING_IDENTITY}" \
+  OMEGA_RC_COMMIT="${commit}" \
+  OMEGA_RC_UPSTREAM_COMMIT="${upstream_commit}" \
+  OMEGA_RC_RUSTC="${rustc_version}" \
+  OMEGA_RC_HOST="${host_triple}" \
+  OMEGA_RC_CARGO_LOCK_DIGEST="${cargo_lock_digest}" \
+  OMEGA_RC_ICON_JSON="${icon_json}" \
+  OMEGA_RC_PACKAGE_DIGEST="${package_digest}" \
+  OMEGA_RC_NOTARIZATION_STATUS="${notarization_status}" \
+  OMEGA_RC_NOTARIZATION_ATTEMPTED="${notarization_attempted}" \
+  OMEGA_RC_NOTARIZATION_STAPLED="${notarization_stapled}" \
+  OMEGA_RC_PACKAGE_PATH="${package_path}" \
+  python3 <<'PY'
+import json
+import os
+from pathlib import Path
+
+icons = json.loads(os.environ["OMEGA_RC_ICON_JSON"])
+upstream = os.environ.get("OMEGA_RC_UPSTREAM_COMMIT") or None
+package_digest = os.environ["OMEGA_RC_PACKAGE_DIGEST"]
+package_sha256 = None if package_digest == "null" else package_digest
+package_path = os.environ["OMEGA_RC_PACKAGE_PATH"]
+version = os.environ["OMEGA_RC_VERSION_VALUE"]
+
+record = {
+    "schema_version": int(os.environ["OMEGA_RC_SCHEMA_VERSION"]),
+    "product": "Omega",
+    "channel": "rc",
+    "version": version,
+    "artifact_name": os.environ["OMEGA_RC_ARTIFACT_NAME"],
+    "volume_name": os.environ["OMEGA_RC_VOLUME_NAME"],
+    "bundle_identifier": os.environ["OMEGA_RC_BUNDLE_ID"],
+    "team_id": os.environ["OMEGA_RC_TEAM_ID"],
+    "signing_identity": os.environ["OMEGA_RC_SIGNING_IDENTITY"],
+    "source": {
+        "commit": os.environ["OMEGA_RC_COMMIT"],
+        "upstream_commit": upstream,
+        "dirty": False,
+        "repository": "https://github.com/OpenAgentsInc/omega",
+    },
+    "toolchains": {
+        "rustc": os.environ["OMEGA_RC_RUSTC"],
+        "host": os.environ["OMEGA_RC_HOST"],
+        "target": "aarch64-apple-darwin",
+    },
+    "digests": {
+        "cargo_lock_sha256": os.environ["OMEGA_RC_CARGO_LOCK_DIGEST"],
+        "icon_family_manifest_sha256": icons["manifest_sha256"],
+        "pinned_png_sha256": icons["pinned_png_sha256"],
+        "pinned_icns_sha256": icons["pinned_icns_sha256"],
+        "icon_outputs": icons["outputs"],
+        "package_sha256": package_sha256,
+    },
+    "notarization": {
+        "attempted": os.environ["OMEGA_RC_NOTARIZATION_ATTEMPTED"] == "true",
+        "stapled": os.environ["OMEGA_RC_NOTARIZATION_STAPLED"] == "true",
+        "status": os.environ["OMEGA_RC_NOTARIZATION_STATUS"],
+    },
+    "legal": {
+        "commercial_terms_attached": False,
+        "notices": ["LICENSE-GPL", "LICENSE-APACHE", "assets/licenses.md"],
+    },
+    "publication": {
+        "repository": "OpenAgentsInc/omega",
+        "prerelease": True,
+        "latest": False,
+        "tag": f"v{version}",
+    },
+    "package_path": package_path if Path(package_path).is_file() else None,
+    "owner_blockers": [
+        "Omega-owned Developer ID provisioning profile for com.openagents.omega.rc (current preview profile is Zed team MQ55VZLNZQ)",
+        "Owner notarization key material when stapled Gatekeeper distribution is required",
+        "Human publication of the GitHub prerelease (never latest)",
+    ],
+}
+
+out_path = Path(os.environ["OMEGA_RC_RECORD_OUT"])
+out_path.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
+print(f"wrote release record: {out_path}")
+PY
+
+  validate_release_record_schema "${RELEASE_RECORD_PATH}"
+}
+
+restore_channel_and_version() {
+  if [[ -f "${_OMEGA_RC_CHANNEL_BACKUP_FILE:-}" ]]; then
+    cp "${_OMEGA_RC_CHANNEL_BACKUP_FILE}" crates/zed/RELEASE_CHANNEL
+    rm -f "${_OMEGA_RC_CHANNEL_BACKUP_FILE}"
+  fi
+  if [[ -f "${_OMEGA_RC_CARGO_BACKUP_FILE:-}" ]]; then
+    cp "${_OMEGA_RC_CARGO_BACKUP_FILE}" crates/zed/Cargo.toml
+    rm -f "${_OMEGA_RC_CARGO_BACKUP_FILE}"
+  fi
+}
+
+set_channel_and_version() {
+  _OMEGA_RC_CHANNEL_BACKUP_FILE="$(mktemp)"
+  _OMEGA_RC_CARGO_BACKUP_FILE="$(mktemp)"
+  cp crates/zed/RELEASE_CHANNEL "${_OMEGA_RC_CHANNEL_BACKUP_FILE}"
+  cp crates/zed/Cargo.toml "${_OMEGA_RC_CARGO_BACKUP_FILE}"
+
+  printf '%s\n' "${OMEGA_RC_CHANNEL}" > crates/zed/RELEASE_CHANNEL
+  python3 - <<PY
+import re
+from pathlib import Path
+cargo = Path("crates/zed/Cargo.toml")
+text = cargo.read_text(encoding="utf-8")
+text2, count = re.subn(
+    r'(?m)^version = "[^"]+"',
+    'version = "${OMEGA_RC_SEMVER}"',
+    text,
+    count=1,
+)
+if count != 1:
+    raise SystemExit("failed to set crates/zed/Cargo.toml version")
+cargo.write_text(text2, encoding="utf-8")
+PY
+  export ZED_RELEASE_CHANNEL="${OMEGA_RC_CHANNEL}"
+  export ZED_APP_VERSION="${OMEGA_RC_SEMVER}"
+  export RELEASE_CHANNEL="${OMEGA_RC_CHANNEL}"
+}
+
+maybe_import_certificate() {
+  if [[ -z "${MACOS_CERTIFICATE:-}" || -z "${MACOS_CERTIFICATE_PASSWORD:-}" ]]; then
+    return 0
+  fi
+  echo "Importing MACOS_CERTIFICATE into a temporary keychain..."
+  security create-keychain -p "${MACOS_CERTIFICATE_PASSWORD}" omega-rc.keychain || true
+  security default-keychain -s omega-rc.keychain
+  security unlock-keychain -p "${MACOS_CERTIFICATE_PASSWORD}" omega-rc.keychain
+  security set-keychain-settings omega-rc.keychain
+  echo "${MACOS_CERTIFICATE}" | base64 --decode > /tmp/omega-rc-certificate.p12
+  security import /tmp/omega-rc-certificate.p12 -k omega-rc.keychain -P "${MACOS_CERTIFICATE_PASSWORD}" -T /usr/bin/codesign
+  rm -f /tmp/omega-rc-certificate.p12
+  security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "${MACOS_CERTIFICATE_PASSWORD}" omega-rc.keychain
+  _OMEGA_RC_KEYCHAIN_CREATED=1
+}
+
+cleanup() {
+  restore_channel_and_version || true
+  if [[ "${_OMEGA_RC_KEYCHAIN_CREATED:-0}" == "1" ]]; then
+    security default-keychain -s login.keychain || true
+    security delete-keychain omega-rc.keychain || true
+  fi
+}
+
+trap cleanup EXIT
+
+require_arm64_host_or_target
+require_clean_checkout
+
+DMG_PATH="${OUTPUT_DIR}/${OMEGA_ARTIFACT_NAME}"
+
+if [[ "${DRY_RUN}" == "true" ]]; then
+  echo "Omega RC dry-run"
+  echo "  version:            ${OMEGA_RC_VERSION}"
+  echo "  channel file value: ${OMEGA_RC_CHANNEL} (maps to ${OMEGA_RC_DISPLAY_CHANNEL})"
+  echo "  bundle id:          ${OMEGA_BUNDLE_ID}"
+  echo "  volume:             ${OMEGA_VOLUME_NAME}"
+  echo "  artifact:           ${OMEGA_ARTIFACT_NAME}"
+  echo "  team:               ${OMEGA_TEAM_ID}"
+  echo "  signing identity:   ${OMEGA_SIGNING_IDENTITY}"
+  find_openagents_signing_identity
+  write_release_record "${DMG_PATH}" "not_attempted" "false" "false"
+  echo "dry-run complete; no compile, codesign, or notarization was performed."
+  exit 0
+fi
+
+find_openagents_signing_identity
+maybe_import_certificate
+find_openagents_signing_identity
+
+if [[ "${SKIP_BUILD}" == "true" ]]; then
+  if [[ ! -f "${DMG_PATH}" ]]; then
+    echo "error: --skip-build requires existing package at ${DMG_PATH}" >&2
+    exit 1
+  fi
+  write_release_record "${DMG_PATH}" "not_attempted" "false" "false"
+  exit 0
+fi
+
+set_channel_and_version
+
+echo "Preparing Omega RC ${OMEGA_RC_VERSION} (channel=${OMEGA_RC_CHANNEL})"
+script/generate-licenses
+
+rustup target add "${TARGET_TRIPLE}"
+
+cargo_bundle_version="$(cargo -q bundle --help 2>&1 | head -n 1 || echo "")"
+if [[ "${cargo_bundle_version}" != "cargo-bundle v0.6.1-zed" ]]; then
+  cargo install cargo-bundle --git https://github.com/zed-industries/cargo-bundle.git --branch zed-deploy
+fi
+
+export CXXFLAGS="-stdlib=libc++"
+export ZED_BUNDLE=true
+
+echo "Compiling omega binaries for ${TARGET_TRIPLE}"
+cargo build --release --package zed --package cli --target "${TARGET_TRIPLE}"
+cargo build --release --package remote_server --target "${TARGET_TRIPLE}"
+
+echo "Creating application bundle"
+pushd crates/zed >/dev/null
+cp Cargo.toml Cargo.toml.backup
+sed \
+  -i.backup \
+  "s/package.metadata.bundle-${OMEGA_RC_CHANNEL}/package.metadata.bundle/" \
+  Cargo.toml
+app_path="$(cargo bundle --release --target "${TARGET_TRIPLE}" --select-workspace-root | xargs)"
+mv Cargo.toml.backup Cargo.toml
+rm -f Cargo.toml.backup
+popd >/dev/null
+
+document_icon_source="crates/zed/resources/Document.icns"
+document_icon_target="${app_path}/Contents/Resources/Document.icns"
+if [[ -f "${document_icon_source}" ]]; then
+  mkdir -p "$(dirname "${document_icon_target}")"
+  cp "${document_icon_source}" "${document_icon_target}"
+fi
+
+# Do not embed the inherited Zed preview provisioning profile (team MQ55VZLNZQ).
+rm -f "${app_path}/Contents/embedded.provisionprofile"
+
+cp "target/${TARGET_TRIPLE}/release/omega" "${app_path}/Contents/MacOS/omega"
+cp "target/${TARGET_TRIPLE}/release/cli" "${app_path}/Contents/MacOS/cli"
+
+# Strip associated-domains entitlement: it requires an Omega-owned profile.
+entitlements_path="${OUTPUT_DIR}/omega-rc.entitlements"
+sed '/com.apple.developer.associated-domains/,+1d' \
+  crates/zed/resources/zed.entitlements > "${entitlements_path}"
+
+echo "Code signing with ${OMEGA_SIGNING_IDENTITY}"
+/usr/bin/codesign --deep --force --timestamp --options runtime \
+  --sign "${OMEGA_SIGNING_IDENTITY}" "${app_path}/Contents/MacOS/cli" -v
+/usr/bin/codesign --deep --force --timestamp --options runtime \
+  --entitlements "${entitlements_path}" \
+  --sign "${OMEGA_SIGNING_IDENTITY}" "${app_path}/Contents/MacOS/omega" -v
+/usr/bin/codesign --force --timestamp --options runtime \
+  --entitlements "${entitlements_path}" \
+  --sign "${OMEGA_SIGNING_IDENTITY}" "${app_path}" -v
+
+dmg_source_directory="${OUTPUT_DIR}/dmg-src"
+rm -rf "${dmg_source_directory}"
+mkdir -p "${dmg_source_directory}"
+mv "${app_path}" "${dmg_source_directory}/"
+ln -s /Applications "${dmg_source_directory}/Applications"
+cp LICENSE-GPL LICENSE-APACHE "${dmg_source_directory}/"
+if [[ -f assets/licenses.md ]]; then
+  cp assets/licenses.md "${dmg_source_directory}/"
+fi
+
+echo "Creating DMG ${DMG_PATH}"
+rm -f "${DMG_PATH}"
+hdiutil create -volname "${OMEGA_VOLUME_NAME}" -srcfolder "${dmg_source_directory}" -ov -format UDZO "${DMG_PATH}"
+rm -f "${dmg_source_directory}/Applications"
+
+/usr/bin/codesign --deep --force --timestamp --options runtime \
+  --sign "${OMEGA_SIGNING_IDENTITY}" "${DMG_PATH}" -v
+
+notarization_status="not_attempted"
+notarization_attempted="false"
+notarization_stapled="false"
+
+if [[ -n "${APPLE_NOTARIZATION_KEY:-}" && -n "${APPLE_NOTARIZATION_KEY_ID:-}" && -n "${APPLE_NOTARIZATION_ISSUER_ID:-}" ]]; then
+  notarization_attempted="true"
+  echo "Submitting DMG for notarization (owner secrets present)..."
+  notarization_key_file="$(mktemp)"
+  echo "${APPLE_NOTARIZATION_KEY}" > "${notarization_key_file}"
+  xcode_bin_dir_path="$(xcode-select -p)/usr/bin"
+  if "${xcode_bin_dir_path}/notarytool" submit --wait \
+    --key "${notarization_key_file}" \
+    --key-id "${APPLE_NOTARIZATION_KEY_ID}" \
+    --issuer "${APPLE_NOTARIZATION_ISSUER_ID}" \
+    "${DMG_PATH}"; then
+    "${xcode_bin_dir_path}/stapler" staple "${DMG_PATH}"
+    notarization_status="submitted_and_stapled"
+    notarization_stapled="true"
+  else
+    notarization_status="submit_failed"
+    echo "warning: notarization submit failed; DMG remains signed but unstapled." >&2
+  fi
+  rm -f "${notarization_key_file}"
+else
+  echo "Notarization secrets absent; leaving DMG signed but not notarized."
+  echo "Release record will set notarization.status=not_attempted."
+fi
+
+write_release_record "${DMG_PATH}" "${notarization_status}" "${notarization_attempted}" "${notarization_stapled}"
+
+echo "Omega RC package ready:"
+echo "  ${DMG_PATH}"
+echo "  ${RELEASE_RECORD_PATH}"
+if [[ "${notarization_stapled}" != "true" ]]; then
+  echo "Note: notarization was not completed in this run."
+fi

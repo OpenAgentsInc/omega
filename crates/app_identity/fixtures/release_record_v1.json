@@ -1,0 +1,51 @@
+{
+  "schema_version": 1,
+  "product": "Omega",
+  "channel": "rc",
+  "version": "0.2.0-rc1",
+  "artifact_name": "Omega-v0.2.0-rc1-macos-arm64.dmg",
+  "volume_name": "Omega RC",
+  "bundle_identifier": "com.openagents.omega.rc",
+  "team_id": "HQWSG26L43",
+  "signing_identity": "Developer ID Application: OpenAgents, Inc. (HQWSG26L43)",
+  "source": {
+    "commit": "0000000000000000000000000000000000000000",
+    "upstream_commit": null,
+    "dirty": false,
+    "repository": "https://github.com/OpenAgentsInc/omega"
+  },
+  "toolchains": {
+    "rustc": "rustc 1.0.0 (fixture)",
+    "host": "aarch64-apple-darwin",
+    "target": "aarch64-apple-darwin"
+  },
+  "digests": {
+    "cargo_lock_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "icon_family_manifest_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "pinned_png_sha256": "4dc74a8507669f77118a82791a8bf6e85773e1d31a4b16816b46bc2066e452d8",
+    "pinned_icns_sha256": "779a545acbf626c7e319d0dacf106e2e69eb0caf2d506dabe14c343a1925563f",
+    "icon_outputs": {},
+    "package_sha256": null
+  },
+  "notarization": {
+    "attempted": false,
+    "stapled": false,
+    "status": "not_attempted"
+  },
+  "legal": {
+    "commercial_terms_attached": false,
+    "notices": ["LICENSE-GPL", "LICENSE-APACHE", "assets/licenses.md"]
+  },
+  "publication": {
+    "repository": "OpenAgentsInc/omega",
+    "prerelease": true,
+    "latest": false,
+    "tag": "v0.2.0-rc1"
+  },
+  "package_path": null,
+  "owner_blockers": [
+    "Omega-owned Developer ID provisioning profile for com.openagents.omega.rc",
+    "Owner notarization key material when stapled Gatekeeper distribution is required",
+    "Human publication of the GitHub prerelease (never latest)"
+  ]
+}

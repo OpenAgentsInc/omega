@@ -218,6 +218,7 @@
 
 - [Developing Zed](./development.md)
   - [Omega application identity](./development/omega-application-identity.md)
+  - [Omega RC release](./development/omega-rc-release.md)
   - [macOS](./development/macos.md)
   - [Linux](./development/linux.md)
   - [Windows](./development/windows.md)
