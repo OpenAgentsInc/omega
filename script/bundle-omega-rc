@@ -26,10 +26,11 @@ readonly OMEGA_RELEASE_RECORD_SCHEMA_VERSION=1
 readonly OMEGA_BUILD_LOCK_SNAPSHOT_NAME="Cargo.lock.omega-v${OMEGA_RC_VERSION}"
 readonly OMEGA_SOURCE_VERIFIER_PATH="script/verify-omega-identity"
 readonly OMEGA_IDENTITY_BOUNDARY_LIST="BUZZ_PRIVATE_KEY,identity.key,get_nsec"
-readonly OMEGA_EFFECTD_RELEASE_TAG="omega-effectd-v0.1.0-rc.1"
+readonly OMEGA_EFFECTD_RELEASE_TAG="omega-effectd-v0.1.0-rc.2"
 readonly OMEGA_EFFECTD_ASSET_NAME="omega-effectd-v0.1.0-macos-arm64.tar.gz"
-readonly OMEGA_EFFECTD_ASSET_SHA256="52fb8333ee65b944ba47b2ec00abc77b3826aa7f9a4cacc3ca6f7d37e139ffa5"
-readonly OMEGA_EFFECTD_SOURCE_COMMIT="be342ea7525ac50fbf836978dcd1ba6714345f42"
+readonly OMEGA_EFFECTD_ASSET_SHA256="f9b4bb93216d4a09dea97a3a94ab1679e1a8d9c13c68a93affd5818d08554cd8"
+readonly OMEGA_EFFECTD_SOURCE_COMMIT="c164bc25c42dab369d645d77c99f86b083323540"
+readonly OMEGA_EFFECTD_SOURCE_TREE="26378837c60dbcd4253918cb1a07ce8c36f0c5a8"
 readonly OMEGA_EFFECTD_DOWNLOAD_URL="https://github.com/OpenAgentsInc/openagents/releases/download/${OMEGA_EFFECTD_RELEASE_TAG}/${OMEGA_EFFECTD_ASSET_NAME}"
 
 DRY_RUN=false
@@ -45,7 +46,7 @@ CLI_BINARY_DIGEST=""
 SOURCE_VERIFIER_DIGEST=""
 SOURCE_VERIFIER_PASSED=false
 PACKAGED_BOUNDARY_SCAN_PASSED=false
-OMEGA_EFFECTD_ARCHIVE_PATH="${ROOT}/target/omega-effectd-cache/${OMEGA_EFFECTD_ASSET_NAME}"
+OMEGA_EFFECTD_ARCHIVE_PATH="${ROOT}/target/omega-effectd-cache/${OMEGA_EFFECTD_RELEASE_TAG}/${OMEGA_EFFECTD_ASSET_NAME}"
 OMEGA_EFFECTD_MANIFEST_SHA256=""
 OMEGA_EFFECTD_WRAPPER_SHA256=""
 OMEGA_EFFECTD_BUNDLE_SHA256=""
@@ -141,7 +142,7 @@ prepare_omega_effectd_archive() {
   fi
 
   local component_json
-  component_json="$(python3 - "${OMEGA_EFFECTD_ARCHIVE_PATH}" "${OMEGA_EFFECTD_SOURCE_COMMIT}" <<'PY'
+  component_json="$(python3 - "${OMEGA_EFFECTD_ARCHIVE_PATH}" "${OMEGA_EFFECTD_SOURCE_COMMIT}" "${OMEGA_EFFECTD_SOURCE_TREE}" <<'PY'
 import hashlib
 import json
 import pathlib
@@ -150,6 +151,7 @@ import tarfile
 
 archive_path = pathlib.Path(sys.argv[1])
 expected_source_commit = sys.argv[2]
+expected_source_tree = sys.argv[3]
 expected_files = {
     "omega-effectd/bin/omega-effectd",
     "omega-effectd/component-manifest.json",
@@ -200,6 +202,8 @@ with tarfile.open(archive_path, "r:gz") as archive:
             raise SystemExit(f"omega-effectd manifest {key} does not match the pin")
     if manifest.get("source", {}).get("commit") != expected_source_commit:
         raise SystemExit("omega-effectd manifest source commit does not match the pin")
+    if manifest.get("source", {}).get("tree") != expected_source_tree:
+        raise SystemExit("omega-effectd manifest source tree does not match the pin")
 
     for relative, expected_digest in manifest.get("files", {}).items():
         name = f"omega-effectd/{relative}"
@@ -393,10 +397,11 @@ expected_effectd = {
     "service_version": "0.1.0",
     "protocol": "openagents.omega.effectd.v1",
     "platform": "darwin-arm64",
-    "release_tag": "omega-effectd-v0.1.0-rc.1",
+    "release_tag": "omega-effectd-v0.1.0-rc.2",
     "asset_name": "omega-effectd-v0.1.0-macos-arm64.tar.gz",
-    "archive_sha256": "52fb8333ee65b944ba47b2ec00abc77b3826aa7f9a4cacc3ca6f7d37e139ffa5",
-    "source_commit": "be342ea7525ac50fbf836978dcd1ba6714345f42",
+    "archive_sha256": "f9b4bb93216d4a09dea97a3a94ab1679e1a8d9c13c68a93affd5818d08554cd8",
+    "source_commit": "c164bc25c42dab369d645d77c99f86b083323540",
+    "source_tree": "26378837c60dbcd4253918cb1a07ce8c36f0c5a8",
 }
 for key, expected in expected_effectd.items():
     if effectd.get(key) != expected:
@@ -526,6 +531,7 @@ write_release_record() {
   OMEGA_RC_EFFECTD_ASSET_NAME="${OMEGA_EFFECTD_ASSET_NAME}" \
   OMEGA_RC_EFFECTD_ARCHIVE_DIGEST="${OMEGA_EFFECTD_ASSET_SHA256}" \
   OMEGA_RC_EFFECTD_SOURCE_COMMIT="${OMEGA_EFFECTD_SOURCE_COMMIT}" \
+  OMEGA_RC_EFFECTD_SOURCE_TREE="${OMEGA_EFFECTD_SOURCE_TREE}" \
   OMEGA_RC_EFFECTD_MANIFEST_DIGEST="${OMEGA_EFFECTD_MANIFEST_SHA256}" \
   OMEGA_RC_EFFECTD_WRAPPER_DIGEST="${OMEGA_EFFECTD_WRAPPER_SHA256}" \
   OMEGA_RC_EFFECTD_BUNDLE_DIGEST="${OMEGA_EFFECTD_BUNDLE_SHA256}" \
@@ -609,6 +615,7 @@ record = {
             "asset_name": os.environ["OMEGA_RC_EFFECTD_ASSET_NAME"],
             "archive_sha256": os.environ["OMEGA_RC_EFFECTD_ARCHIVE_DIGEST"],
             "source_commit": os.environ["OMEGA_RC_EFFECTD_SOURCE_COMMIT"],
+            "source_tree": os.environ["OMEGA_RC_EFFECTD_SOURCE_TREE"],
             "manifest_sha256": os.environ["OMEGA_RC_EFFECTD_MANIFEST_DIGEST"],
             "wrapper_sha256": os.environ["OMEGA_RC_EFFECTD_WRAPPER_DIGEST"],
             "bundle_sha256": os.environ["OMEGA_RC_EFFECTD_BUNDLE_DIGEST"],
