@@ -1,7 +1,6 @@
 use std::sync::Arc;
 
 use ai_onboarding::{AgentPanelOnboardingCard, PlanDefinitions};
-use client::zed_urls;
 use gpui::{AnyElement, App, IntoElement, RenderOnce, Window};
 use ui::{Divider, Tooltip, prelude::*};
 
@@ -33,13 +32,10 @@ impl RenderOnce for EndTrialUpsell {
             )
             .child(PlanDefinitions.pro_plan())
             .child(
-                Button::new("cta-button", "Upgrade to Zed Pro")
+                Button::new("cta-button", "Hosted plans unavailable")
                     .full_width()
                     .style(ButtonStyle::Tinted(ui::TintColor::Accent))
-                    .on_click(move |_, _window, cx| {
-                        telemetry::event!("Upgrade To Pro Clicked", state = "end-of-trial");
-                        cx.open_url(&zed_urls::upgrade_to_zed_pro_url(cx))
-                    }),
+                    .disabled(true),
             );
 
         let free_section = v_flex()
@@ -65,9 +61,9 @@ impl RenderOnce for EndTrialUpsell {
             .child(PlanDefinitions.free_plan());
 
         AgentPanelOnboardingCard::new()
-            .child(Headline::new("Your Zed Pro Trial has expired"))
+            .child(Headline::new("Hosted Omega AI plans are not available"))
             .child(
-                Label::new("You've been automatically reset to the Free plan.")
+                Label::new("This Omega build does not include hosted AI plans or trials.")
                     .color(Color::Muted)
                     .mb_2(),
             )

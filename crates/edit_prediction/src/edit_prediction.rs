@@ -3452,7 +3452,7 @@ fn merge_anchor_ranges(
 
 #[derive(Error, Debug)]
 #[error(
-    "You must update to Zed version {minimum_version} or higher to continue using edit predictions."
+    "You must update to Omega version {minimum_version} or higher to continue using edit predictions."
 )]
 pub struct ZedUpdateRequiredError {
     minimum_version: Version,

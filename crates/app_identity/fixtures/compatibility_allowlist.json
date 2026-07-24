@@ -1,0 +1,133 @@
+{
+  "version": 1,
+  "owner": "OpenAgents",
+  "policy": "Every remaining intentional Zed identifier in Omega must appear here with owner, disposition, and expiry. Public product claims are not allowed as approved_compatibility.",
+  "allowed_dispositions": [
+    "approved_compatibility",
+    "required_attribution",
+    "source_only",
+    "blocked"
+  ],
+  "entries": [
+    {
+      "match": "ZED_* environment variables",
+      "path": null,
+      "reason": "Inherited runtime overrides such as ZED_RELEASE_CHANNEL remain until Omega-owned env names replace them.",
+      "owner": "OpenAgents",
+      "disposition": "approved_compatibility",
+      "expiry": "until-omega-env-rename"
+    },
+    {
+      "match": ".zed project folders",
+      "path": null,
+      "reason": "Project-local .zed directories remain for settings and extension compatibility with upstream projects.",
+      "owner": "OpenAgents",
+      "disposition": "approved_compatibility",
+      "expiry": "until-omega-project-dir"
+    },
+    {
+      "match": "crates named zed / zed_actions / zed_*",
+      "path": "crates/zed",
+      "reason": "Internal crate and action namespaces stay as fork compatibility seams; they are not user-facing product copy.",
+      "owner": "OpenAgents",
+      "disposition": "approved_compatibility",
+      "expiry": "none"
+    },
+    {
+      "match": "Plan::Zed*",
+      "path": "crates/cloud_api_types",
+      "reason": "Upstream cloud plan enum variants remain for protocol compatibility while hosted plans stay disabled.",
+      "owner": "OpenAgents",
+      "disposition": "approved_compatibility",
+      "expiry": "until-owned-omega-plans"
+    },
+    {
+      "match": "ZedAiOnboarding",
+      "path": "crates/ai_onboarding/src/ai_onboarding.rs",
+      "reason": "Internal type name retained for API compatibility; rendered copy now states hosted plans are unavailable in Omega.",
+      "owner": "OpenAgents",
+      "disposition": "approved_compatibility",
+      "expiry": "until-ai-onboarding-rename"
+    },
+    {
+      "match": "InstallingZedModal",
+      "path": "crates/zed/src/zed/move_to_applications.rs",
+      "reason": "Internal modal type name; user-visible install copy uses Omega.",
+      "owner": "OpenAgents",
+      "disposition": "approved_compatibility",
+      "expiry": "until-installer-rename"
+    },
+    {
+      "match": "ZedUpdateRequiredError",
+      "path": "crates/edit_prediction/src/edit_prediction.rs",
+      "reason": "Internal error type name; user-visible message uses Omega.",
+      "owner": "OpenAgents",
+      "disposition": "approved_compatibility",
+      "expiry": "until-edit-prediction-rename"
+    },
+    {
+      "match": "Zed-Auto-Updater-Dialog-Class",
+      "path": "crates/auto_update_helper/src/dialog.rs",
+      "reason": "Windows window-class name retained for installer/helper process compatibility.",
+      "owner": "OpenAgents",
+      "disposition": "approved_compatibility",
+      "expiry": "until-updater-rename"
+    },
+    {
+      "match": "https://zed.dev/docs",
+      "path": "crates/extensions_ui/src/extensions_ui.rs",
+      "reason": "Feature upsell deep-links still point at upstream documentation until Omega docs exist for the same topics.",
+      "owner": "OpenAgents",
+      "disposition": "required_attribution",
+      "expiry": "until-omega-docs"
+    },
+    {
+      "match": "Zed Keybind Context",
+      "path": "crates/settings_ui/src/settings_ui.rs",
+      "reason": "Internal keymap context filter label, not a product claim in settings chrome.",
+      "owner": "OpenAgents",
+      "disposition": "source_only",
+      "expiry": "none"
+    },
+    {
+      "match": "IconName::ZedAgent / VectorName::Zed*",
+      "path": "crates/ui",
+      "reason": "Inherited asset enum identifiers remain until OpenAgents icon/vector names fully replace them.",
+      "owner": "OpenAgents",
+      "disposition": "source_only",
+      "expiry": "until-asset-rename"
+    },
+    {
+      "match": "Welcome to Zed",
+      "path": null,
+      "reason": "Forbidden public product claim; must not appear in reachable Omega UI.",
+      "owner": "OpenAgents",
+      "disposition": "blocked",
+      "expiry": "none"
+    },
+    {
+      "match": "Updating Zed",
+      "path": null,
+      "reason": "Forbidden public product claim; must not appear in reachable Omega UI.",
+      "owner": "OpenAgents",
+      "disposition": "blocked",
+      "expiry": "none"
+    },
+    {
+      "match": "About Zed",
+      "path": null,
+      "reason": "Forbidden public product claim; must not appear in reachable Omega UI.",
+      "owner": "OpenAgents",
+      "disposition": "blocked",
+      "expiry": "none"
+    },
+    {
+      "match": "Move Zed to Applications",
+      "path": null,
+      "reason": "Forbidden public product claim; must not appear in reachable Omega UI.",
+      "owner": "OpenAgents",
+      "disposition": "blocked",
+      "expiry": "none"
+    }
+  ]
+}

@@ -7,7 +7,7 @@ use gpui::{Action, Entity, Global, Render, SharedString, TaskExt};
 use ui::{ButtonLike, Tooltip, prelude::*};
 use util::ResultExt;
 
-/// Prompts the user to try newly released Zed's features
+/// Prompts the user to try newly released Omega features
 pub struct OnboardingBanner {
     dismissed: bool,
     source: String,

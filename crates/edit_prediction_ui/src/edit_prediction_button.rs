@@ -1223,34 +1223,27 @@ impl EditPredictionButton {
                             },
                             |_window, cx| cx.open_url(&zed_urls::account_url(cx)),
                         )
-                        .entry("Upgrade to Zed Pro or contact us.", None, |_window, cx| {
-                            telemetry::event!(
-                                "Edit Prediction Menu Action",
-                                action = "upsell_clicked",
-                                reason = "account_age",
-                            );
-                            cx.open_url(&zed_urls::account_url(cx))
-                        })
+                        .entry(
+                            "Hosted edit predictions are unavailable in this Omega build.",
+                            None,
+                            |_window, _cx| {},
+                        )
                         .separator();
                 } else if self.user_store.read(cx).has_overdue_invoices() {
                     menu = menu
                         .custom_entry(
                             |_window, _cx| {
-                                Label::new("You have an outstanding invoice")
+                                Label::new("Hosted billing is unavailable in Omega")
                                     .size(LabelSize::Small)
                                     .color(Color::Warning)
                                     .into_any_element()
                             },
-                            |_window, cx| {
-                                cx.open_url(&zed_urls::account_url(cx))
-                            },
+                            |_window, _cx| {},
                         )
                         .entry(
-                            "Check your payment status or contact us at billing-support@zed.dev to continue using this feature.",
+                            "This Omega build does not use Zed billing or hosted prediction plans.",
                             None,
-                            |_window, cx| {
-                                cx.open_url(&zed_urls::account_url(cx))
-                            },
+                            |_window, _cx| {},
                         )
                         .separator();
                 }

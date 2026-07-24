@@ -116,6 +116,8 @@ pub struct InvalidAppChannel;
 #[cfg(test)]
 mod icon_family;
 #[cfg(test)]
+mod public_branding;
+#[cfg(test)]
 mod service_isolation;
 #[cfg(test)]
 mod shell_branding;
