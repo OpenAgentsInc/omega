@@ -31,6 +31,7 @@ use crate::draft::{
     DEFAULT_DONE_CONDITION, DEFAULT_TURN_CAP, FULL_AUTO_ACTIVE_LIMIT, FULL_AUTO_WORKSPACE_REF,
     FullAutoLauncherDraft, validate_launcher_draft,
 };
+use crate::provider_roster::{ProviderAccountRow, parse_provider_accounts};
 
 const PANEL_KEY: &str = "FullAutoPanel";
 const ACTIVE_STATES: &[&str] = &["running", "pausing", "paused", "retrying", "stalled"];
@@ -100,6 +101,8 @@ pub struct FullAutoPanel {
     active_run: Option<RunDetail>,
     active_run_ref: Option<String>,
     capacity_lanes: Vec<CapacityLane>,
+    provider_accounts: Vec<ProviderAccountRow>,
+    provider_roster_detail: SharedString,
     attention_dedup_keys: HashMap<String, String>,
     attention_refresh_in_flight: bool,
     status: SharedString,
@@ -178,6 +181,8 @@ impl FullAutoPanel {
             active_run: None,
             active_run_ref: None,
             capacity_lanes: Vec::new(),
+            provider_accounts: Vec::new(),
+            provider_roster_detail: "Provider account roster has not been reported yet.".into(),
             attention_dedup_keys: HashMap::new(),
             attention_refresh_in_flight: false,
             status: "Full Auto is a run, not a chat option.".into(),
@@ -343,7 +348,18 @@ impl FullAutoPanel {
                     }
                 }
                 if let Some(value) = capacity {
-                    this.capacity_lanes = parse_capacity_lanes(value);
+                    this.capacity_lanes = parse_capacity_lanes(value.clone());
+                    this.provider_accounts = parse_provider_accounts(&value);
+                    this.provider_roster_detail = if this.provider_accounts.is_empty() {
+                        "No provider accounts were reported. A capacity lane is not an account."
+                            .into()
+                    } else {
+                        format!(
+                            "{} connected provider account(s).",
+                            this.provider_accounts.len()
+                        )
+                        .into()
+                    };
                 }
                 if let Some(value) = detail.0 {
                     if let Ok(mut parsed) = parse_detail(value) {
@@ -771,6 +787,41 @@ impl Render for FullAutoPanel {
                                     this.connect_openagents(cx)
                                 }))
                             }),
+                    )
+                    .child(Label::new("Provider accounts").size(LabelSize::Large))
+                    .child(
+                        Label::new(self.provider_roster_detail.clone())
+                            .color(Color::Muted)
+                            .size(LabelSize::Small),
+                    )
+                    .children(self.provider_accounts.iter().enumerate().map(|(index, account)| {
+                        v_flex()
+                            .id(("full-auto-provider-account", index))
+                            .gap_0p5()
+                            .border_1()
+                            .border_color(cx.theme().colors().border)
+                            .rounded_md()
+                            .p_2()
+                            .child(Label::new(format!("{} · {}", account.provider, account.label)))
+                            .child(
+                                Label::new(format!(
+                                    "{} · quota {} · lane {}",
+                                    account.readiness, account.quota, account.lane
+                                ))
+                                .color(Color::Muted),
+                            )
+                            .child(
+                                Label::new(format!("Account ref: {}", account.account_ref))
+                                    .color(Color::Muted)
+                                    .size(LabelSize::Small),
+                            )
+                    }))
+                    .child(
+                        Label::new(
+                            "Connect or reauthenticate provider accounts through Omega’s native Agent authentication flow. Credentials stay on this device; Omega never copies the default Codex home.",
+                        )
+                        .color(Color::Muted)
+                        .size(LabelSize::Small),
                     )
                     .map(|this| match self.mode {
                         SurfaceMode::Launcher => this

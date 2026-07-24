@@ -578,6 +578,10 @@ for await (const line of rl) {
         { lane: "codex-local", state: "available", activeRuns: 0, reason: "ready and idle" },
         { lane: "claude-local", state: "available", activeRuns: 0, reason: "ready and idle" },
       ],
+      accounts: [
+        { accountRef: "account.codex.fixture", provider: "openai", label: "ChatGPT fixture", state: "ready", quotaState: "available", lane: "codex-local" },
+        { accountRef: "account.claude.fixture", provider: "anthropic", label: "Claude fixture", state: "ready", quotaState: "available", lane: "claude-local" },
+      ],
       nonOverridableGuardrails: [
         "workspace_binding",
         "own_capacity_only",

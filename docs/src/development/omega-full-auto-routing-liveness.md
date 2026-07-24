@@ -12,6 +12,16 @@ Omega's Full Auto panel and `omega_effectd` supervisor now consume FA-04
 protocol methods:
 
 - `get_capacity` — per-lane capacity ledger and non-overridable guardrail list
+
+## Provider account roster
+
+The Full Auto panel treats provider accounts and capacity lanes as distinct
+records. When `get_capacity` includes bounded public-safe `accounts`, Omega
+shows each account's provider, device-local label, readiness, quota state, and
+lane mapping. An absent account list renders as unavailable rather than
+inventing one account per lane. Provider connection and reauthentication stay
+in Omega's native Agent authentication flow; the roster never reads, copies, or
+prints credentials from a Codex home.
 - `decide_attention` — redacted stall/retry attention decision
 - `get_run` stall cause + recovery action rendered in the run monitor
 
