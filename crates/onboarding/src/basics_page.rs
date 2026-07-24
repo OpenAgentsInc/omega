@@ -27,10 +27,10 @@ use crate::{
     theme_preview::{ThemePreviewStyle, ThemePreviewTile},
 };
 
-const LIGHT_THEMES: [&str; 3] = ["One Light", "Ayu Light", "Gruvbox Light"];
-const DARK_THEMES: [&str; 3] = ["One Dark", "Ayu Dark", "Gruvbox Dark"];
+const LIGHT_THEMES: [&str; 3] = ["Aiur Light", "Ayu Light", "Gruvbox Light"];
+const DARK_THEMES: [&str; 3] = ["Aiur Dark", "Ayu Dark", "Gruvbox Dark"];
 const FAMILY_NAMES: [SharedString; 3] = [
-    SharedString::new_static("One"),
+    SharedString::new_static("Aiur"),
     SharedString::new_static("Ayu"),
     SharedString::new_static("Gruvbox"),
 ];
@@ -732,15 +732,19 @@ mod tests {
 
     #[test]
     fn omega_onboarding_preserves_theme_families() {
-        assert_eq!(LIGHT_THEMES, ["One Light", "Ayu Light", "Gruvbox Light"]);
-        assert_eq!(DARK_THEMES, ["One Dark", "Ayu Dark", "Gruvbox Dark"]);
+        assert_eq!(LIGHT_THEMES, ["Aiur Light", "Ayu Light", "Gruvbox Light"]);
+        assert_eq!(DARK_THEMES, ["Aiur Dark", "Ayu Dark", "Gruvbox Dark"]);
         assert_eq!(
             FAMILY_NAMES.map(|name| name.to_string()),
-            ["One", "Ayu", "Gruvbox"]
+            ["Aiur", "Ayu", "Gruvbox"]
         );
         assert_eq!(
             get_theme_family_themes("Ayu Dark"),
             Some(("Ayu Light", "Ayu Dark"))
+        );
+        assert_eq!(
+            get_theme_family_themes("Aiur Dark"),
+            Some(("Aiur Light", "Aiur Dark"))
         );
     }
 
