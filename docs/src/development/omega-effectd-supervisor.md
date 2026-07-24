@@ -59,6 +59,9 @@ The Omega RC packager downloads the immutable runtime release, verifies its
 archive and component manifest, installs the fixed Node runtime at the
 component path above, signs the nested Node executable before the application,
 and records the source and packaged component digests in the release record.
+The nested runtime receives only the two V8 execution entitlements required by
+hardened Node (`allow-jit` and `allow-unsigned-executable-memory`); it does not
+inherit Omega's device, personal-data, automation, or filesystem entitlements.
 Installed proof launches both the mounted and installed copies through framed
 `initialize` and `health` requests.
 

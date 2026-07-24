@@ -889,10 +889,16 @@ verify_packaged_identity_boundaries "${app_path}"
 entitlements_path="${OUTPUT_DIR}/omega-rc.entitlements"
 sed '/com.apple.developer.associated-domains/,+1d' \
   crates/zed/resources/zed.entitlements > "${entitlements_path}"
+effectd_node_entitlements_path="${OUTPUT_DIR}/omega-effectd-node.entitlements"
+plutil -create xml1 "${effectd_node_entitlements_path}"
+plutil -insert 'com\.apple\.security\.cs\.allow-jit' -bool true \
+  "${effectd_node_entitlements_path}"
+plutil -insert 'com\.apple\.security\.cs\.allow-unsigned-executable-memory' -bool true \
+  "${effectd_node_entitlements_path}"
 
 echo "Code signing with ${OMEGA_SIGNING_IDENTITY}"
 /usr/bin/codesign --force --timestamp --options runtime \
-  --entitlements "${entitlements_path}" \
+  --entitlements "${effectd_node_entitlements_path}" \
   --sign "${OMEGA_SIGNING_IDENTITY}" \
   "${app_path}/Contents/Resources/omega-effectd/runtime/bin/node" -v
 OMEGA_EFFECTD_PACKAGED_NODE_SHA256="$(sha256_file "${app_path}/Contents/Resources/omega-effectd/runtime/bin/node")"

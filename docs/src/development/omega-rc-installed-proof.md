@@ -150,7 +150,9 @@ The objective component gates also validate the pinned `omega-effectd`
 release manifest and packaged digests, verify the nested Node signature, and
 launch both the mounted and installed component copies through framed
 `initialize` and `health` requests. A present file without a running health
-response is not a component pass.
+response is not a component pass. The manifest binds the pristine release Node
+digest, while the release record separately binds the post-signing Node bytes;
+proof also requires the signed runtime's exact minimal two-entitlement set.
 
 ### Installed-candidate bindings
 

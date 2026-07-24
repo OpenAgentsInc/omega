@@ -350,15 +350,54 @@ def validate_effectd_component(
     for key, digest in observed.items():
         if effectd.get(key) != digest:
             raise ProofError(f"{label} omega-effectd {key} differs from the release record")
+    validate_effectd_file_digests(component, manifest, effectd, label)
+
+    verify_signature(node_path, output_dir, f"{label}-effectd-node")
+    validate_effectd_node_entitlements(node_path, output_dir, label)
+    health_receipt = probe_effectd_initialize_health(wrapper_path)
+    (output_dir / f"omega-effectd-health-{label}.json").write_text(
+        json.dumps(health_receipt, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+
+
+def validate_effectd_file_digests(
+    component: Path, manifest: dict[str, Any], effectd: dict[str, Any], label: str
+) -> None:
+    source_node_digest = manifest.get("node", {}).get("binarySha256")
+    if source_node_digest != effectd.get("source_node_sha256"):
+        raise ProofError(f"{label} omega-effectd source Node digest differs from the pin")
     for relative, expected_digest in manifest.get("files", {}).items():
+        if relative == "runtime/bin/node":
+            if expected_digest != source_node_digest:
+                raise ProofError(f"{label} omega-effectd manifest Node digests disagree")
+            continue
         path = component / relative
         if not path.is_file() or sha256_file(path) != expected_digest:
             raise ProofError(f"{label} omega-effectd manifest file differs: {relative}")
 
-    verify_signature(node_path, output_dir, f"{label}-effectd-node")
-    health_receipt = probe_effectd_initialize_health(wrapper_path)
-    (output_dir / f"omega-effectd-health-{label}.json").write_text(
-        json.dumps(health_receipt, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+
+def validate_effectd_node_entitlements(
+    node_path: Path, output_dir: Path, label: str
+) -> None:
+    details = run(
+        ["codesign", "-d", "--entitlements", "-", "--xml", str(node_path)],
+        description=f"{label} omega-effectd Node entitlement inspection",
+    )
+    xml_start = details.find("<?xml")
+    if xml_start < 0:
+        raise ProofError(f"{label} omega-effectd Node entitlements are unreadable")
+    try:
+        entitlements = plistlib.loads(details[xml_start:].encode("utf-8"))
+    except plistlib.InvalidFileException as error:
+        raise ProofError(f"{label} omega-effectd Node entitlements are invalid") from error
+    expected = {
+        "com.apple.security.cs.allow-jit": True,
+        "com.apple.security.cs.allow-unsigned-executable-memory": True,
+    }
+    if entitlements != expected:
+        raise ProofError(f"{label} omega-effectd Node entitlements differ from the minimal set")
+    (output_dir / f"entitlements-{label}-effectd-node.plist").write_bytes(
+        plistlib.dumps(entitlements, sort_keys=True)
     )
 
 
@@ -831,6 +870,45 @@ def self_test() -> None:
         (installed / "Contents/Resources/brand.txt").write_text("Zed", encoding="utf-8")
         if bundle_manifest(packaged) == bundle_manifest(installed):
             raise ProofError("self-test accepted a tampered installed resource")
+
+        component = root / "effectd"
+        (component / "bin").mkdir(parents=True)
+        (component / "runtime/bin").mkdir(parents=True)
+        wrapper = component / "bin/omega-effectd"
+        signed_node = component / "runtime/bin/node"
+        wrapper.write_bytes(b"verified wrapper")
+        signed_node.write_bytes(b"source node plus a Developer ID signature")
+        source_node_digest = hashlib.sha256(b"pristine source node").hexdigest()
+        manifest = {
+            "node": {"binarySha256": source_node_digest},
+            "files": {
+                "bin/omega-effectd": sha256_file(wrapper),
+                "runtime/bin/node": source_node_digest,
+            },
+        }
+        effectd = {
+            "source_node_sha256": source_node_digest,
+            "packaged_node_sha256": sha256_file(signed_node),
+        }
+        validate_effectd_file_digests(component, manifest, effectd, "self-test")
+        wrapper.write_bytes(b"tampered wrapper")
+        try:
+            validate_effectd_file_digests(component, manifest, effectd, "self-test")
+        except ProofError:
+            pass
+        else:
+            raise ProofError("self-test accepted a tampered non-Node component file")
+        wrapper.write_bytes(b"verified wrapper")
+        mismatched_effectd = dict(effectd)
+        mismatched_effectd["source_node_sha256"] = "0" * 64
+        try:
+            validate_effectd_file_digests(
+                component, manifest, mismatched_effectd, "self-test"
+            )
+        except ProofError:
+            pass
+        else:
+            raise ProofError("self-test accepted a mismatched source Node pin")
 
         manual = {
             "schema": "openagents.omega.installed-brand-evidence.v1",
