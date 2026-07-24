@@ -18,7 +18,17 @@ protocol methods:
 A missing host thread settles to a typed stall with `stop_only`. Capacity
 lanes show on the launcher and run monitor. GPUI stays presentation-only.
 
+The panel checks attention only for typed `retrying` and `stalled` snapshots.
+It passes the previous service dedup key back to `decide_attention`, records
+denied decisions so a disabled notification preference cannot create a poll
+storm, and suppresses overlapping checks. An allowed decision produces an
+Omega workspace notification and requests window attention. Visible copy is
+selected from an exact state allowlist and is built locally from fixed strings;
+the service-provided run title/body, objective, paths, prompts, transcript,
+credentials, dedup key, and raw errors never enter the notification.
+
 ## Verification
 
 - `cargo test -p full_auto_ui -p omega_effectd --lib`
+- `./script/clippy -p full_auto_ui -p omega_effectd`
 - `cargo check -p zed -p agent_ui -p full_auto_ui`

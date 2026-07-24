@@ -18,9 +18,9 @@ pub use protocol::{
     ProtocolErrorCode, RunSnapshot, SERVICE_VERSION,
 };
 pub use supervisor::{
-    MAX_FRAME_BYTES, OmegaEffectdCommand, OmegaEffectdHostFuture, OmegaEffectdHostHandler,
-    OmegaEffectdSupervisor, OmegaEffectdSupervisorOptions, SupervisorError, default_options,
-    fixture_command, resolve_effectd_command,
+    AttentionDecision, MAX_FRAME_BYTES, OmegaEffectdCommand, OmegaEffectdHostFuture,
+    OmegaEffectdHostHandler, OmegaEffectdSupervisor, OmegaEffectdSupervisorOptions,
+    SupervisorError, default_options, fixture_command, resolve_effectd_command,
 };
 
 pub type SharedOmegaEffectdSupervisor = Rc<AsyncMutex<OmegaEffectdSupervisor>>;
@@ -544,6 +544,60 @@ mod tests {
             assert!(!disk.contains("Fixture Agent Computer"));
 
             supervisor.stop().await.expect("supervisor stop");
+        });
+    }
+
+    #[test]
+    fn attention_decisions_are_typed_and_deduplicated() {
+        smol::block_on(async {
+            let root = tempdir().expect("tempdir");
+            let runs_path = root.path().join("full-auto").join("runs.json");
+            std::fs::create_dir_all(
+                runs_path
+                    .parent()
+                    .expect("runs path should have a parent directory"),
+            )
+            .expect("create runs directory");
+            std::fs::write(
+                &runs_path,
+                serde_json::to_string_pretty(&json!({
+                    "schema": "openagents.desktop.full_auto_run_registry.v1",
+                    "runs": [{
+                        "runRef": "run.full-auto.attention",
+                        "threadRef": null,
+                        "title": "SECRET_OBJECTIVE /Users/owner/private",
+                        "state": "stalled",
+                        "stallCause": "dispatch_overdue",
+                        "updatedAt": "2026-07-24T00:00:00.000Z"
+                    }]
+                }))
+                .expect("encode fixture runs"),
+            )
+            .expect("write fixture runs");
+
+            let mut supervisor = OmegaEffectdSupervisor::new(OmegaEffectdSupervisorOptions {
+                data_root: root.path().to_path_buf(),
+                command: fixture_command(&fixture_path()),
+                initial_generation: 1,
+                request_timeout: Duration::from_secs(5),
+            });
+            supervisor.start().await.expect("start");
+
+            let decision = supervisor
+                .decide_attention("run.full-auto.attention", true, None)
+                .await
+                .expect("attention decision")
+                .expect("stalled run should produce a decision");
+            assert!(decision.notify);
+            assert_eq!(decision.title, "Full Auto stalled");
+            assert!(decision.body.contains("SECRET_OBJECTIVE"));
+
+            let duplicate = supervisor
+                .decide_attention("run.full-auto.attention", true, Some(&decision.dedup_key))
+                .await
+                .expect("deduplicated attention decision");
+            assert!(duplicate.is_none());
+            supervisor.stop().await.expect("stop");
         });
     }
 }

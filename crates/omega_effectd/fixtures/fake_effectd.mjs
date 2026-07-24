@@ -478,10 +478,15 @@ for await (const line of rl) {
       respond(request.id, generation, true, { attention: null })
       continue
     }
+    const dedupKey = `${run.runRef}:${state}:${run.stallCause ?? "none"}`
+    if (request.params?.previousDedupKey === dedupKey) {
+      respond(request.id, generation, true, { attention: null })
+      continue
+    }
     respond(request.id, generation, true, {
       attention: {
         notify: request.params?.permissionGranted === true,
-        dedupKey: `${run.runRef}:${state}:${run.stallCause ?? "none"}`,
+        dedupKey,
         title: `Full Auto ${state}`,
         body: `${run.title} needs attention (${state}).`,
       },

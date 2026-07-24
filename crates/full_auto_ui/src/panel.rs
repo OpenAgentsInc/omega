@@ -2,21 +2,25 @@
 //!
 //! Mutations go through `omega_effectd`. There is no ordinary composer here.
 
-use std::time::Duration;
+use std::{collections::HashMap, time::Duration};
 
+use agent_settings::AgentSettings;
 use anyhow::{Result, anyhow};
 use editor::Editor;
 use gpui::{
-    Action, App, AsyncWindowContext, Context, Entity, EventEmitter, FocusHandle, Focusable,
-    InteractiveElement, IntoElement, ParentElement, Render, SharedString, Styled, Task, WeakEntity,
-    Window, div, px,
+    Action, AnyWindowHandle, App, AsyncWindowContext, Context, Entity, EventEmitter, FocusHandle,
+    Focusable, InteractiveElement, IntoElement, ParentElement, Render, SharedString, Styled, Task,
+    WeakEntity, Window, div, px,
 };
-use omega_effectd::{SharedOmegaEffectdSupervisor, shared_supervisor};
+use omega_effectd::{AttentionDecision, SharedOmegaEffectdSupervisor, shared_supervisor};
 use serde_json::{Value, json};
+use settings::{NotifyWhenAgentWaiting, Settings as _};
 use ui::{Button, ButtonStyle, IconButton, IconName, Label, LabelSize, Tooltip, prelude::*};
+use util::ResultExt as _;
 use workspace::{
     Workspace,
     dock::{DockPosition, Panel, PanelEvent},
+    notifications::{NotificationId, simple_message_notification::MessageNotification},
 };
 use zed_actions::full_auto_panel::{OpenLauncher, ToggleFocus};
 
@@ -68,6 +72,12 @@ struct CapacityLane {
     active_runs: u32,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FullAutoAttentionNotification {
+    title: &'static str,
+    body: &'static str,
+}
+
 enum SurfaceMode {
     Launcher,
     Run,
@@ -75,6 +85,7 @@ enum SurfaceMode {
 
 pub struct FullAutoPanel {
     workspace: WeakEntity<Workspace>,
+    window: AnyWindowHandle,
     focus_handle: FocusHandle,
     mode: SurfaceMode,
     draft: FullAutoLauncherDraft,
@@ -86,6 +97,8 @@ pub struct FullAutoPanel {
     active_run: Option<RunDetail>,
     active_run_ref: Option<String>,
     capacity_lanes: Vec<CapacityLane>,
+    attention_dedup_keys: HashMap<String, String>,
+    attention_refresh_in_flight: bool,
     status: SharedString,
     supervisor: Option<SharedOmegaEffectdSupervisor>,
     _refresh: Option<Task<()>>,
@@ -148,6 +161,7 @@ impl FullAutoPanel {
 
         let mut panel = Self {
             workspace,
+            window: window.window_handle(),
             focus_handle: cx.focus_handle(),
             mode: SurfaceMode::Launcher,
             draft: FullAutoLauncherDraft::default(),
@@ -159,6 +173,8 @@ impl FullAutoPanel {
             active_run: None,
             active_run_ref: None,
             capacity_lanes: Vec::new(),
+            attention_dedup_keys: HashMap::new(),
+            attention_refresh_in_flight: false,
             status: "Full Auto is a run, not a chat option.".into(),
             supervisor: None,
             _refresh: None,
@@ -237,10 +253,41 @@ impl FullAutoPanel {
             return;
         };
         let active = self.active_run_ref.clone();
+        let previous_attention_keys = self.attention_dedup_keys.clone();
+        let permission_granted = AgentSettings::get_global(cx).notify_when_agent_waiting
+            != NotifyWhenAgentWaiting::Never;
+        let should_refresh_attention = !self.attention_refresh_in_flight;
+        if should_refresh_attention {
+            self.attention_refresh_in_flight = true;
+        }
         cx.spawn(async move |this, cx| {
             let listed = {
                 let mut guard = supervisor.lock().await;
                 guard.list_runs().await
+            };
+            let attention = if should_refresh_attention && let Ok(runs) = &listed {
+                let mut outcomes = Vec::new();
+                for run in runs
+                    .iter()
+                    .filter(|run| should_decide_attention(&run.state))
+                {
+                    let outcome = {
+                        let mut guard = supervisor.lock().await;
+                        guard
+                            .decide_attention(
+                                &run.run_ref,
+                                permission_granted,
+                                previous_attention_keys
+                                    .get(&run.run_ref)
+                                    .map(String::as_str),
+                            )
+                            .await
+                    };
+                    outcomes.push((run.run_ref.clone(), outcome));
+                }
+                outcomes
+            } else {
+                Vec::new()
             };
             let capacity = {
                 let mut guard = supervisor.lock().await;
@@ -255,6 +302,9 @@ impl FullAutoPanel {
                 (None, None)
             };
             this.update(cx, |this, cx| {
+                if should_refresh_attention {
+                    this.attention_refresh_in_flight = false;
+                }
                 if let Ok(runs) = listed {
                     this.runs = runs
                         .into_iter()
@@ -264,6 +314,26 @@ impl FullAutoPanel {
                             state: run.state,
                         })
                         .collect();
+                    this.attention_dedup_keys
+                        .retain(|run_ref, _| this.runs.iter().any(|run| &run.run_ref == run_ref));
+                }
+                for (run_ref, outcome) in attention {
+                    match outcome {
+                        Ok(Some(decision)) => {
+                            this.attention_dedup_keys
+                                .insert(run_ref, decision.dedup_key.clone());
+                            if let Some(notification) =
+                                notification_from_attention_decision(&decision)
+                            {
+                                this.show_attention_notification(notification, cx);
+                            }
+                        }
+                        Ok(None) => {}
+                        Err(_) => {
+                            this.status =
+                                "Full Auto attention status is temporarily unavailable.".into();
+                        }
+                    }
                 }
                 if let Some(value) = capacity {
                     this.capacity_lanes = parse_capacity_lanes(value);
@@ -285,6 +355,31 @@ impl FullAutoPanel {
             .ok();
         })
         .detach();
+    }
+
+    fn show_attention_notification(
+        &self,
+        notification: FullAutoAttentionNotification,
+        cx: &mut Context<Self>,
+    ) {
+        self.workspace
+            .update(cx, |workspace, cx| {
+                workspace.show_notification(
+                    NotificationId::unique::<FullAutoAttentionNotification>(),
+                    cx,
+                    |cx| {
+                        cx.new(|cx| {
+                            MessageNotification::new(notification.body, cx)
+                                .with_title(notification.title)
+                                .content_icon(IconName::Warning, Color::Warning)
+                                .show_suppress_button(false)
+                        })
+                    },
+                );
+            })
+            .log_err();
+        cx.update_window(self.window, |_, window, _| window.request_attention())
+            .log_err();
     }
 
     fn start_run(&mut self, cx: &mut Context<Self>) {
@@ -415,6 +510,29 @@ impl FullAutoPanel {
         self.mode = SurfaceMode::Run;
         self.refresh_runs(cx);
         cx.notify();
+    }
+}
+
+fn should_decide_attention(state: &str) -> bool {
+    matches!(state, "retrying" | "stalled")
+}
+
+fn notification_from_attention_decision(
+    decision: &AttentionDecision,
+) -> Option<FullAutoAttentionNotification> {
+    if !decision.notify {
+        return None;
+    }
+    match decision.title.as_str() {
+        "Full Auto stalled" => Some(FullAutoAttentionNotification {
+            title: "Full Auto stalled",
+            body: "A Full Auto run stalled and needs your attention.",
+        }),
+        "Full Auto retrying" => Some(FullAutoAttentionNotification {
+            title: "Full Auto retrying",
+            body: "A Full Auto run is retrying after an interruption.",
+        }),
+        _ => None,
     }
 }
 
@@ -908,5 +1026,71 @@ impl Panel for FullAutoPanel {
 
     fn activation_priority(&self) -> u32 {
         8
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn attention_notifications_use_only_allowlisted_content() {
+        let decision = AttentionDecision {
+            notify: true,
+            dedup_key: "run.secret:stalled:/Users/owner/private".into(),
+            title: "Full Auto stalled".into(),
+            body: "SECRET_OBJECTIVE /Users/owner/private auth.json bearer-token".into(),
+        };
+
+        let notification = notification_from_attention_decision(&decision)
+            .expect("known typed attention state should notify");
+        assert_eq!(notification.title, "Full Auto stalled");
+        assert_eq!(
+            notification.body,
+            "A Full Auto run stalled and needs your attention."
+        );
+        let rendered = format!("{} {}", notification.title, notification.body);
+        for secret in [
+            "SECRET_OBJECTIVE",
+            "/Users/owner/private",
+            "auth.json",
+            "bearer-token",
+            &decision.body,
+            &decision.dedup_key,
+        ] {
+            assert!(!rendered.contains(secret));
+        }
+    }
+
+    #[test]
+    fn routine_or_untrusted_attention_outcomes_do_not_notify() {
+        for state in [
+            "draft",
+            "running",
+            "pausing",
+            "paused",
+            "completed",
+            "failed",
+            "stopped",
+            "cap_reached",
+        ] {
+            assert!(!should_decide_attention(state), "routine state {state}");
+        }
+
+        let denied = AttentionDecision {
+            notify: false,
+            dedup_key: "run.x:stalled:none".into(),
+            title: "Full Auto stalled".into(),
+            body: "private run title".into(),
+        };
+        assert!(notification_from_attention_decision(&denied).is_none());
+
+        let untrusted = AttentionDecision {
+            notify: true,
+            dedup_key: "run.x:stalled:none".into(),
+            title: "Full Auto stalled: /private/path".into(),
+            body: "raw provider error".into(),
+        };
+        assert!(notification_from_attention_decision(&untrusted).is_none());
     }
 }

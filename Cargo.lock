@@ -7127,6 +7127,7 @@ checksum = "a06f77d526c1a601b7c4cdd98f54b5eaabffc14d5f2f0296febdc7f357c6d3ba"
 name = "full_auto_ui"
 version = "0.1.0"
 dependencies = [
+ "agent_settings",
  "anyhow",
  "editor",
  "futures 0.3.32",
@@ -7135,6 +7136,7 @@ dependencies = [
  "project",
  "serde",
  "serde_json",
+ "settings",
  "smol",
  "tempfile",
  "theme",

@@ -17,6 +17,7 @@ use std::time::Duration;
 use anyhow::{Context as _, Result, anyhow, bail};
 use futures::io::{AsyncBufReadExt as _, BufReader};
 use futures::{AsyncWriteExt as _, StreamExt as _};
+use serde::Deserialize;
 use serde_json::{Value, json};
 use smol::process::ChildStdin;
 use util::ResultExt as _;
@@ -53,6 +54,15 @@ pub struct OmegaEffectdSupervisorOptions {
     /// Initial generation. Each successful `restart` increments by one.
     pub initial_generation: u64,
     pub request_timeout: Duration,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AttentionDecision {
+    pub notify: bool,
+    pub dedup_key: String,
+    pub title: String,
+    pub body: String,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -216,18 +226,21 @@ impl OmegaEffectdSupervisor {
         &mut self,
         run_ref: &str,
         permission_granted: bool,
-    ) -> Result<Value, SupervisorError> {
+        previous_dedup_key: Option<&str>,
+    ) -> Result<Option<AttentionDecision>, SupervisorError> {
         let result = self
             .request(
                 "decide_attention",
                 Some(json!({
                     "runRef": run_ref,
                     "permissionGranted": permission_granted,
+                    "previousDedupKey": previous_dedup_key,
                 })),
                 self.generation(),
             )
             .await?;
-        Ok(result.get("attention").cloned().unwrap_or(Value::Null))
+        let attention = result.get("attention").cloned().unwrap_or(Value::Null);
+        Ok(serde_json::from_value(attention).context("decode attention decision")?)
     }
 
     pub async fn get_report(&mut self, run_ref: &str) -> Result<Value, SupervisorError> {
