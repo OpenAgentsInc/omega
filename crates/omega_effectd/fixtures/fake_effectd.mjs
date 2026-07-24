@@ -125,6 +125,11 @@ for await (const line of rl) {
         "retry",
         "get_capacity",
         "decide_attention",
+        "get_report",
+        "get_receipt",
+        "apply_control_intent",
+        "get_sync_status",
+        "publish_projection",
       ],
       dataRoot,
       activeRunLimit: 8,
@@ -273,6 +278,100 @@ for await (const line of rl) {
         title: `Full Auto ${state}`,
         body: `${run.title} needs attention (${state}).`,
       },
+    })
+    continue
+  }
+  if (request.method === "get_report") {
+    const run = loadRuns().find((row) => row.runRef === request.params?.runRef)
+    if (!run) {
+      respond(request.id, generation, false, undefined, {
+        code: "run_not_found",
+        message: "No Full Auto run exists for that runRef.",
+      })
+      continue
+    }
+    respond(request.id, generation, true, {
+      report: {
+        schema: "openagents.desktop.full_auto_run_report.v1",
+        runRef: run.runRef,
+        title: run.title,
+        objective: run.objective,
+        doneCondition: run.doneCondition,
+        state: run.state,
+        turns: run.turns ?? [],
+      },
+    })
+    continue
+  }
+  if (request.method === "get_receipt") {
+    const run = loadRuns().find((row) => row.runRef === request.params?.runRef)
+    if (!run) {
+      respond(request.id, generation, false, undefined, {
+        code: "run_not_found",
+        message: "No Full Auto run exists for that runRef.",
+      })
+      continue
+    }
+    respond(request.id, generation, true, {
+      receipt: {
+        schema: "openagents.desktop.full_auto_run_receipt.v1",
+        runRef: run.runRef,
+        objectiveDigest: "fixture-objective-digest",
+        doneConditionDigest: "fixture-done-digest",
+        objectiveRevisionCount: 1,
+        turnCount: (run.turns ?? []).length,
+        state: run.state,
+      },
+    })
+    continue
+  }
+  if (request.method === "apply_control_intent") {
+    const params = request.params ?? {}
+    if (!params.intentId || !params.runRef || !["pause", "resume", "stop"].includes(params.action)) {
+      respond(request.id, generation, false, undefined, {
+        code: "invalid_request",
+        message: "apply_control_intent requires intentId, runRef, and action pause|resume|stop.",
+      })
+      continue
+    }
+    const runs = loadRuns()
+    const index = runs.findIndex((row) => row.runRef === params.runRef)
+    if (index < 0) {
+      respond(request.id, generation, true, {
+        outcome: {
+          intentId: params.intentId,
+          status: "rejected",
+          rejectionReason: "run_not_found",
+        },
+      })
+      continue
+    }
+    const nextState =
+      params.action === "pause" ? "paused" : params.action === "resume" ? "running" : "stopped"
+    runs[index] = { ...runs[index], state: nextState, updatedAt: new Date().toISOString() }
+    saveRuns(runs)
+    respond(request.id, generation, true, {
+      outcome: {
+        intentId: params.intentId,
+        status: "applied",
+        resultLifecycleState: nextState,
+      },
+    })
+    continue
+  }
+  if (request.method === "get_sync_status") {
+    respond(request.id, generation, true, {
+      available: false,
+      publishBlocksDispatch: false,
+      reason: "omega_khala_sync_session_unavailable",
+    })
+    continue
+  }
+  if (request.method === "publish_projection") {
+    respond(request.id, generation, true, {
+      ok: false,
+      status: "sync_unavailable",
+      reason: "omega_khala_sync_session_unavailable",
     })
     continue
   }

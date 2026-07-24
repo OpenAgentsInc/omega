@@ -54,6 +54,7 @@ struct RunDetail {
     failed_attempts: u32,
     stall_cause: Option<String>,
     recovery_action: String,
+    objective_digest: Option<String>,
     turns: Vec<(String, String, String)>,
 }
 
@@ -253,9 +254,11 @@ impl FullAutoPanel {
             };
             let detail = if let Some(run_ref) = active {
                 let mut guard = supervisor.inner.lock().await;
-                guard.get_run(&run_ref).await.ok()
+                let run = guard.get_run(&run_ref).await.ok();
+                let receipt = guard.get_receipt(&run_ref).await.ok();
+                (run, receipt)
             } else {
-                None
+                (None, None)
             };
             this.update(cx, |this, cx| {
                 if let Ok(runs) = listed {
@@ -271,8 +274,14 @@ impl FullAutoPanel {
                 if let Some(value) = capacity {
                     this.capacity_lanes = parse_capacity_lanes(value);
                 }
-                if let Some(value) = detail {
-                    if let Ok(parsed) = parse_detail(value) {
+                if let Some(value) = detail.0 {
+                    if let Ok(mut parsed) = parse_detail(value) {
+                        if let Some(receipt) = detail.1 {
+                            parsed.objective_digest = receipt
+                                .get("objectiveDigest")
+                                .and_then(|v| v.as_str())
+                                .map(str::to_string);
+                        }
                         this.active_run = Some(parsed);
                         this.mode = SurfaceMode::Run;
                     }
@@ -433,6 +442,7 @@ fn parse_detail(value: Value) -> Result<RunDetail> {
             .and_then(|v| v.as_str())
             .unwrap_or("none")
             .to_string(),
+        objective_digest: None,
         turns: value
             .get("turns")
             .and_then(|v| v.as_array())
@@ -695,6 +705,12 @@ impl Render for FullAutoPanel {
                                     )
                                 })
                                 .child(Label::new(run.objective.clone()))
+                                .when_some(run.objective_digest.clone(), |this, digest| {
+                                    this.child(
+                                        Label::new(format!("Receipt objective digest: {digest}"))
+                                            .color(Color::Muted),
+                                    )
+                                })
                                 .child(
                                     Label::new(format!("Done when: {}", run.done_condition))
                                         .color(Color::Muted),

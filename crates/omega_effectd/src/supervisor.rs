@@ -170,6 +170,71 @@ impl OmegaEffectdSupervisor {
             .unwrap_or(Value::Null))
     }
 
+    pub async fn get_report(&mut self, run_ref: &str) -> Result<Value, SupervisorError> {
+        let result = self
+            .request(
+                "get_report",
+                Some(json!({ "runRef": run_ref })),
+                self.generation(),
+            )
+            .await?;
+        Ok(result
+            .get("report")
+            .cloned()
+            .ok_or_else(|| anyhow!("get_report missing report"))?)
+    }
+
+    pub async fn get_receipt(&mut self, run_ref: &str) -> Result<Value, SupervisorError> {
+        let result = self
+            .request(
+                "get_receipt",
+                Some(json!({ "runRef": run_ref })),
+                self.generation(),
+            )
+            .await?;
+        Ok(result
+            .get("receipt")
+            .cloned()
+            .ok_or_else(|| anyhow!("get_receipt missing receipt"))?)
+    }
+
+    pub async fn apply_control_intent(
+        &mut self,
+        intent_id: &str,
+        run_ref: &str,
+        action: &str,
+    ) -> Result<Value, SupervisorError> {
+        let result = self
+            .request(
+                "apply_control_intent",
+                Some(json!({
+                    "intentId": intent_id,
+                    "runRef": run_ref,
+                    "action": action,
+                })),
+                self.generation(),
+            )
+            .await?;
+        Ok(result
+            .get("outcome")
+            .cloned()
+            .ok_or_else(|| anyhow!("apply_control_intent missing outcome"))?)
+    }
+
+    pub async fn get_sync_status(&mut self) -> Result<Value, SupervisorError> {
+        self.request("get_sync_status", None, self.generation())
+            .await
+    }
+
+    pub async fn publish_projection(&mut self, run_ref: &str) -> Result<Value, SupervisorError> {
+        self.request(
+            "publish_projection",
+            Some(json!({ "runRef": run_ref })),
+            self.generation(),
+        )
+        .await
+    }
+
     async fn mutate_run(&mut self, method: &str, run_ref: &str) -> Result<Value, SupervisorError> {
         let result = self
             .request(
