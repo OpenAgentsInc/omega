@@ -97,12 +97,14 @@ cargo test -p app_identity release_record -- --nocapture
 
 ## Owner blockers
 
-These remain outside the script's local contract:
+The release record derives these from the work that actually completed. A
+dry-run retains the Developer ID signing blocker, and an unstapled candidate
+retains the notarization blocker. A signed, stapled candidate must not carry
+either stale blocker.
 
-- An Omega-owned provisioning profile for `com.openagents.omega.rc`. The
-  inherited preview profile still belongs to Zed team `MQ55VZLNZQ`.
-- Notarization API credentials when a stapled Gatekeeper-ready DMG is required.
-- Human confirmation of the GitHub prerelease upload.
+Human confirmation of the GitHub prerelease upload always remains external to
+the bundler and therefore remains in `owner_blockers` until publication is
+proved separately.
 
 ## Legal packaging
 

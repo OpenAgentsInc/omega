@@ -386,6 +386,23 @@ execution = record["execution"]
 if not isinstance(execution.get("dry_run"), bool):
     raise SystemExit("execution.dry_run must be a boolean")
 
+owner_blockers = record.get("owner_blockers")
+if not isinstance(owner_blockers, list) or not all(
+    isinstance(blocker, str) and blocker for blocker in owner_blockers
+):
+    raise SystemExit("owner_blockers must be a list of non-empty strings")
+notarization = record["notarization"]
+if notarization.get("stapled") is True and any(
+    "notarization" in blocker.lower() for blocker in owner_blockers
+):
+    raise SystemExit("stapled releases must not retain a notarization blocker")
+if execution["dry_run"] is False and any(
+    "developer id" in blocker.lower() for blocker in owner_blockers
+):
+    raise SystemExit("built releases must not retain a Developer ID blocker")
+if not any("publication" in blocker.lower() for blocker in owner_blockers):
+    raise SystemExit("release record must retain the external publication blocker")
+
 build_lock = record["build_inputs"].get("cargo_lock_snapshot", {})
 for key in ("name", "sha256"):
     if key not in build_lock:
@@ -563,6 +580,19 @@ build_lock_digest = os.environ.get("OMEGA_RC_BUILD_LOCK_SNAPSHOT_DIGEST") or Non
 omega_binary_digest = os.environ.get("OMEGA_RC_OMEGA_BINARY_DIGEST") or None
 cli_binary_digest = os.environ.get("OMEGA_RC_CLI_BINARY_DIGEST") or None
 dry_run = os.environ["OMEGA_RC_DRY_RUN"] == "true"
+notarization_attempted = os.environ["OMEGA_RC_NOTARIZATION_ATTEMPTED"] == "true"
+notarization_stapled = os.environ["OMEGA_RC_NOTARIZATION_STAPLED"] == "true"
+
+owner_blockers = []
+if dry_run:
+    owner_blockers.append(
+        "Developer ID signing must complete before this dry-run record can become a release candidate"
+    )
+if not notarization_stapled:
+    owner_blockers.append(
+        "Owner notarization must complete and staple the candidate before distribution"
+    )
+owner_blockers.append("Human publication of the GitHub prerelease (never latest)")
 
 record = {
     "schema_version": int(os.environ["OMEGA_RC_SCHEMA_VERSION"]),
@@ -637,8 +667,8 @@ record = {
         },
     },
     "notarization": {
-        "attempted": os.environ["OMEGA_RC_NOTARIZATION_ATTEMPTED"] == "true",
-        "stapled": os.environ["OMEGA_RC_NOTARIZATION_STAPLED"] == "true",
+        "attempted": notarization_attempted,
+        "stapled": notarization_stapled,
         "status": os.environ["OMEGA_RC_NOTARIZATION_STATUS"],
     },
     "legal": {
@@ -652,11 +682,7 @@ record = {
         "tag": f"v{version}",
     },
     "package_path": package_path if not dry_run and Path(package_path).is_file() else None,
-    "owner_blockers": [
-        "Omega-owned Developer ID provisioning profile for com.openagents.omega.rc (current preview profile is Zed team MQ55VZLNZQ)",
-        "Owner notarization key material when stapled Gatekeeper distribution is required",
-        "Human publication of the GitHub prerelease (never latest)",
-    ],
+    "owner_blockers": owner_blockers,
 }
 
 out_path = Path(os.environ["OMEGA_RC_RECORD_OUT"])
