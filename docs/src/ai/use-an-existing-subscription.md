@@ -20,7 +20,7 @@ Some subscriptions work as Zed model providers. Others are used through an Exter
 
 ## ChatGPT Plus / Pro {#chatgpt}
 
-ChatGPT Plus and Pro can be used through Zed's ChatGPT Subscription provider. Sign in with OpenAI in Zed; no separate OpenAI API key is required.
+ChatGPT Plus and Pro can be used through Zed's ChatGPT Subscription provider. Sign in with OpenAI in Zed; no separate OpenAI API key is required. If the Codex CLI is already signed in on the same machine, choose **Use Existing Codex Login** in **Settings → AI → LLM Providers**. The app validates the local Codex auth file and copies the subscription session into its own system-keychain entry; token values are never written to settings or logs.
 
 OpenAI API access is separate. If you have OpenAI API credits or API billing, use [Use API Access](./use-api-access.md#openai).
 
