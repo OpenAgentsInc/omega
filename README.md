@@ -1,49 +1,96 @@
-# Zed
+# Omega
 
-[![Zed](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/zed-industries/zed/main/assets/badge/v0.json)](https://zed.dev)
-[![CI](https://github.com/zed-industries/zed/actions/workflows/run_tests.yml/badge.svg)](https://github.com/zed-industries/zed/actions/workflows/run_tests.yml)
+**Your last IDE.**
 
-Welcome to Zed, a high-performance, multiplayer code editor from the creators of [Atom](https://github.com/atom/atom) and [Tree-sitter](https://github.com/tree-sitter/tree-sitter).
+Omega is the primary OpenAgents desktop client and integrated development
+environment. It brings people, agents, conversations, code, reviews, decisions,
+approvals, and execution into one native workspace.
 
----
+Omega is in the bootstrap phase. This repository is a tracked fork of
+[Zed](https://github.com/zed-industries/zed), and much of the current
+application still has upstream branding and behavior. Omega is not ready for
+general use yet.
 
-### Installation
+## Product direction
 
-On macOS, Linux, and Windows you can [download Zed directly](https://zed.dev/download) or install Zed via your local package manager ([macOS](https://zed.dev/docs/installation#macos)/[Linux](https://zed.dev/docs/linux#installing-via-a-package-manager)/[Windows](https://zed.dev/docs/windows#package-managers)).
+Omega is an IDE and a workroom for human and agent teams.
 
-Other platforms are not yet available:
+- Work stays attached to durable projects, threads, files, runs, and evidence.
+- Agents have explicit identities, permissions, and signed actions.
+- Existing agents can join through ACP or another supported adapter without
+  losing their configuration.
+- Native workroom panes connect conversations and decisions to the editor,
+  terminal, Git, reviews, tasks, and remote environments.
+- Nostr provides an optional signed interoperability layer for identity,
+  social context, discovery, and ecosystem-wide coordination.
+- Local-first and self-hosted operation remain first-class deployment choices.
 
-- Web ([tracking discussion](https://github.com/zed-industries/zed/discussions/26195))
+The goal is not to add a chat panel to an editor. The goal is one place where a
+team can understand work, delegate it, review it, approve it, and ship it.
 
-### Developing Zed
+The accepted implementation plan lives in the
+[OpenAgents monorepo](https://github.com/OpenAgentsInc/openagents/blob/main/docs/sol/2026-07-23-omega-zed-primary-surface-accepted-plan.md).
 
-- [Building Zed for macOS](./docs/src/development/macos.md)
-- [Building Zed for Linux](./docs/src/development/linux.md)
-- [Building Zed for Windows](./docs/src/development/windows.md)
+## Architecture
 
-### Contributing
+This repository owns the Omega client:
 
-See [CONTRIBUTING.md](./CONTRIBUTING.md) for ways you can contribute to Zed.
+- the Rust and GPUI application
+- editor, project, terminal, Git, language, task, and remote-development
+  integration
+- native workroom and social surfaces
+- client state, native enforcement, process supervision, packaging, and updates
+- the tracked upstream relationship and Omega-specific patches
 
-Also... we're hiring! Check out our [jobs](https://zed.dev/jobs) page for open roles.
+The
+[OpenAgents monorepo](https://github.com/OpenAgentsInc/openagents)
+owns reusable TypeScript and Effect packages, services, schemas, generated
+clients, and conformance fixtures. Omega consumes released, immutable artifacts
+from that repository. Primary Omega client code does not live there.
 
-### Licensing
+Omega will use Rust for the native application core. A supervised Node 24 and
+Effect service can host product semantics that are shared with other
+OpenAgents clients. The two processes use one generated and versioned local
+protocol.
 
-Zed source code is licensed primarily under GPL-3.0-or-later, with Apache-2.0 components where marked.
+## Build the current application
 
-License information for third party dependencies must be correctly provided for CI to pass.
+The repository pins its Rust toolchain in
+[`rust-toolchain.toml`](./rust-toolchain.toml).
 
-We use [`cargo-about`](https://github.com/EmbarkStudios/cargo-about) to automatically comply with open source licenses. If CI is failing, check the following:
+```sh
+git clone https://github.com/OpenAgentsInc/omega.git
+cd omega
+cargo run --profile release-fast
+```
 
-- Is it showing a `no license specified` error for a crate you've created? If so, add `publish = false` under `[package]` in your crate's Cargo.toml.
-- Is the error `failed to satisfy license requirements` for a dependency? If so, first determine what license the project has and whether this system is sufficient to comply with this license's requirements. If you're unsure, ask a lawyer. Once you've verified that this system is acceptable add the license's SPDX identifier to the `accepted` array in `script/licenses/zed-licenses.toml`.
-- Is `cargo-about` unable to find the license for a dependency? If so, add a clarification field at the end of `script/licenses/zed-licenses.toml`, as specified in the [cargo-about book](https://embarkstudios.github.io/cargo-about/cli/generate/config.html#crate-configuration).
+Platform-specific prerequisites and inherited build details are available for
+[macOS](./docs/src/development/macos.md),
+[Linux](./docs/src/development/linux.md), and
+[Windows](./docs/src/development/windows.md).
 
-## Sponsorship
+During the bootstrap phase, build products and application identifiers can
+still use upstream names.
 
-Zed is developed by **Zed Industries, Inc.**, a for-profit company.
+## Contribute
 
-If you’d like to financially support the project, you can do so via GitHub Sponsors.
-Sponsorships go directly to Zed Industries and are used as general company revenue.
-There are no perks or entitlements associated with sponsorship.
+Read [`AGENTS.md`](./AGENTS.md) before agent-assisted work. The inherited
+[`CONTRIBUTING.md`](./CONTRIBUTING.md) describes the current code-quality,
+testing, and review conventions.
 
+Use [Omega issues](https://github.com/OpenAgentsInc/omega/issues) for
+Omega-specific changes. Send generally useful editor or GPUI fixes upstream
+when they do not depend on the Omega product.
+
+## Upstream and licenses
+
+Omega is derived from Zed and keeps a tracked relationship with
+[`zed-industries/zed`](https://github.com/zed-industries/zed). OpenAgents
+maintains the Omega product and its fork-specific changes. Zed Industries does
+not maintain or endorse Omega.
+
+The source is licensed primarily under
+[GPL-3.0-or-later](./LICENSE-GPL), with
+[Apache-2.0](./LICENSE-APACHE) components where marked. Existing copyright,
+attribution, source-delivery, and third-party license obligations remain in
+effect.
