@@ -644,6 +644,17 @@ for await (const line of rl) {
         doneCondition: run.doneCondition,
         state: run.state,
         turns: run.turns ?? [],
+        evidence: {
+          objectiveRef: `objective.${run.runRef}`,
+          turnRef: `turn.${run.runRef}.latest`,
+          changeRef: `change.${run.runRef}.latest`,
+          projectGeneration: "project.generation.fixture.1",
+          diffSummary: "2 files changed, 18 insertions, 3 deletions",
+          testCommand: "cargo test -p full_auto_ui",
+          testOutcome: "passed",
+          verificationRef: `verification.host.${run.runRef}.latest`,
+          hostExecuted: true,
+        },
       },
     })
     continue
@@ -666,6 +677,13 @@ for await (const line of rl) {
         objectiveRevisionCount: 1,
         turnCount: (run.turns ?? []).length,
         state: run.state,
+        objectiveRef: `objective.${run.runRef}`,
+        turnRef: `turn.${run.runRef}.latest`,
+        changeRef: `change.${run.runRef}.latest`,
+        verificationRef: `verification.host.${run.runRef}.latest`,
+        authorityReceiptRef: `receipt.authority.${run.runRef}.latest`,
+        decisionRef: `decision.authority.${run.runRef}.latest`,
+        allowed: true,
       },
     })
     continue

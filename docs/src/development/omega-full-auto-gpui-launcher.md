@@ -50,6 +50,16 @@ timestamp is absent the pane says the duration is unavailable instead of
 estimating it. The workroom keeps no Full Auto durable state and does not add
 another composer, activity ladder, or receipt inspector.
 
+## Completed work evidence (FA-10)
+
+The run detail renders one ordered, public-safe evidence object using the same
+label/value grammar as the Sarah authority inspector. It links objective,
+turn, change and project generation, bounded diff summary, verification command
+and typed outcome, host-executed verification reference, and authority receipt
+and decision. Report and receipt refs must match at every hop and
+`hostExecuted` must be true. Missing, unsafe, self-reported, or mismatched
+evidence renders as unavailable; it is never presented as successful proof.
+
 ## Verification
 
 - `cargo test -p full_auto_ui -p omega_effectd --lib`

@@ -4,6 +4,7 @@
 //! Durable mutation goes only through supervised `omega_effectd`.
 
 mod draft;
+mod evidence_chain;
 mod panel;
 mod provider_roster;
 
@@ -11,6 +12,7 @@ pub use draft::{
     validate_launcher_draft, FullAutoLauncherDraft, LauncherValidation, DEFAULT_DONE_CONDITION,
     DEFAULT_TURN_CAP, FULL_AUTO_ACTIVE_LIMIT, FULL_AUTO_WORKSPACE_REF,
 };
+pub use evidence_chain::FullAutoEvidenceView;
 pub use panel::{init, FullAutoPanel};
 pub use provider_roster::{parse_provider_accounts, ProviderAccountRow};
 

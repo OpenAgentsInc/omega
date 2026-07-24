@@ -7142,6 +7142,7 @@ dependencies = [
  "theme",
  "ui",
  "util",
+ "workroom_receipts",
  "workspace",
  "zed_actions",
 ]

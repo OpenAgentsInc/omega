@@ -31,6 +31,7 @@ use crate::draft::{
     DEFAULT_DONE_CONDITION, DEFAULT_TURN_CAP, FULL_AUTO_ACTIVE_LIMIT, FULL_AUTO_WORKSPACE_REF,
     FullAutoLauncherDraft, validate_launcher_draft,
 };
+use crate::evidence_chain::FullAutoEvidenceView;
 use crate::provider_roster::{ProviderAccountRow, parse_provider_accounts};
 
 const PANEL_KEY: &str = "FullAutoPanel";
@@ -67,6 +68,8 @@ struct RunDetail {
     objective_digest: Option<String>,
     native_evidence: Option<NativeEvidence>,
     turns: Vec<(String, String, String)>,
+    evidence: Option<FullAutoEvidenceView>,
+    evidence_detail: String,
 }
 
 #[derive(Debug, Clone)]
@@ -308,10 +311,11 @@ impl FullAutoPanel {
             let detail = if let Some(run_ref) = active {
                 let mut guard = supervisor.lock().await;
                 let run = guard.get_run(&run_ref).await.ok();
+                let report = guard.get_report(&run_ref).await.ok();
                 let receipt = guard.get_receipt(&run_ref).await.ok();
-                (run, receipt)
+                (run, report, receipt)
             } else {
-                (None, None)
+                (None, None, None)
             };
             this.update(cx, |this, cx| {
                 if should_refresh_attention {
@@ -363,12 +367,20 @@ impl FullAutoPanel {
                 }
                 if let Some(value) = detail.0 {
                     if let Ok(mut parsed) = parse_detail(value) {
-                        if let Some(receipt) = detail.1 {
+                        if let Some(receipt) = detail.2.as_ref() {
                             parsed.objective_digest = receipt
                                 .get("objectiveDigest")
                                 .and_then(|v| v.as_str())
                                 .map(str::to_string);
                         }
+                        parsed.evidence = detail.1.as_ref().zip(detail.2.as_ref()).and_then(
+                            |(report, receipt)| FullAutoEvidenceView::from_records(report, receipt),
+                        );
+                        parsed.evidence_detail = if parsed.evidence.is_some() {
+                            "Host-verified evidence chain".into()
+                        } else {
+                            "Evidence chain unavailable or cross-links did not verify.".into()
+                        };
                         this.active_run = Some(parsed);
                         this.mode = SurfaceMode::Run;
                     }
@@ -693,6 +705,8 @@ fn parse_detail(value: Value) -> Result<RunDetail> {
                     .collect()
             })
             .unwrap_or_default(),
+        evidence: None,
+        evidence_detail: "Evidence chain has not been loaded.".into(),
     })
 }
 
@@ -1087,6 +1101,21 @@ impl Render for FullAutoPanel {
                                         .child(Label::new(summary))
                                         .child(Label::new(when).color(Color::Muted))
                                 }))
+                                .child(Label::new(run.evidence_detail).color(Color::Muted))
+                                .when_some(run.evidence, |this, evidence| {
+                                    this.child(
+                                        v_flex()
+                                            .id("full-auto-evidence-chain")
+                                            .gap_1()
+                                            .border_1()
+                                            .border_color(cx.theme().colors().border)
+                                            .rounded_md()
+                                            .p_2()
+                                            .children(evidence.fields.into_iter().map(|field| {
+                                                Label::new(field.line()).size(LabelSize::Small)
+                                            })),
+                                    )
+                                })
                         }
                     }),
             )
