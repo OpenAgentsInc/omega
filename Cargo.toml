@@ -145,6 +145,7 @@ members = [
     "crates/notifications",
     "crates/oauth_callback_server",
     "crates/ollama",
+    "crates/omega_identity",
     "crates/onboarding",
     "crates/opencode",
     "crates/open_ai",
@@ -411,6 +412,7 @@ node_runtime = { path = "crates/node_runtime" }
 notifications = { path = "crates/notifications" }
 oauth_callback_server = { path = "crates/oauth_callback_server" }
 ollama = { path = "crates/ollama" }
+omega_identity = { path = "crates/omega_identity" }
 onboarding = { path = "crates/onboarding" }
 opencode = { path = "crates/opencode" }
 open_ai = { path = "crates/open_ai" }
@@ -521,6 +523,7 @@ aho-corasick = "1.1"
 alacritty_terminal = { git = "https://github.com/zed-industries/alacritty", rev = "4c129667ce56611becdc82de6e28218c80e2e88f" }
 any_vec = "0.14"
 anyhow = "1.0.86"
+atomic-write-file = "=0.3.0"
 ashpd = { version = "0.13", default-features = false, features = [
     "async-io",
     "notification",
@@ -664,6 +667,7 @@ jsonschema = "0.37.0"
 jsonwebtoken = "10.0"
 jupyter-protocol = "1.4.0"
 jupyter-websocket-client = "1.1.0"
+keyring = { version = "=3.6.3", default-features = false }
 libc = "0.2"
 libsqlite3-sys = { version = "0.30.1", features = ["bundled"] }
 linkify = "0.10.0"
@@ -681,6 +685,7 @@ nanoid = "0.4"
 nbformat = "1.2.0"
 nix = "0.29"
 notify-rust = "4"
+nostr = { version = "=0.44.4", features = ["nip44"] }
 nucleo = "0.5"
 num-format = "0.4.4"
 objc = "0.2"

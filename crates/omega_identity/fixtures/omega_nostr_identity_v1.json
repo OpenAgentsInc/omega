@@ -1,0 +1,48 @@
+{
+  "source_commit": "acfbb1bb6af54cb29cb152496ff43b8285dcb8cf",
+  "profile": "openagents.omega.nostr_only.v1",
+  "public_identity": {
+    "identity_ref": "omega-test-identity",
+    "public_key_hex": "f86c44a2de95d9149b51c6a29afeabba264c18e2fa7c49de93424a0c56947785",
+    "npub": "npub1lpkyfgk7jhv3fx63c63f4l4thgnycx8zlf7ynh5ngf9qc455w7zs7s8hua",
+    "fingerprint": "daee948a8bf214f3d48ab71cf2b672bee2396252900e9d74296e1e3d7ad1d139"
+  },
+  "fingerprint_display": "DAEE 948A 8BF2 14F3",
+  "manifest": {
+    "schema": "openagents.omega.identity-manifest.v1",
+    "contract_version": 1,
+    "profile": "openagents.omega.nostr_only.v1",
+    "identity": {
+      "identity_ref": "omega-test-identity",
+      "public_key_hex": "f86c44a2de95d9149b51c6a29afeabba264c18e2fa7c49de93424a0c56947785",
+      "npub": "npub1lpkyfgk7jhv3fx63c63f4l4thgnycx8zlf7ynh5ngf9qc455w7zs7s8hua",
+      "fingerprint": "daee948a8bf214f3d48ab71cf2b672bee2396252900e9d74296e1e3d7ad1d139"
+    },
+    "keyring_locator": {
+      "service": "com.openagents.omega.credentials.dev",
+      "account": "omega-sovereign-identity-v1"
+    },
+    "receipt_refs": [
+      "creation-receipt"
+    ]
+  },
+  "manifest_digest": "82ae5e02c2d007de9216e6394070bd976fb1bf321590bd975df652be2a6d9b58",
+  "signing_request": {
+    "request_ref": "signing-vector-1",
+    "identity_ref": "omega-test-identity",
+    "purpose": "nostr_event",
+    "event": {
+      "created_at": 1640839235,
+      "kind": 4,
+      "tags": [
+        [
+          "p",
+          "13adc511de7e1cfcf1c6b7f6365fb5a03442d7bcacf565ea57fa7770912c023d"
+        ]
+      ],
+      "content": "uRuvYr585B80L6rSJiHocw==?iv=oh6LVqdsYYol3JfFnXTbPA=="
+    }
+  },
+  "expected_event_id": "2be17aa3031bdcb006f0fce80c146dea9c1c0268b0af2398bb673365c6444d45",
+  "signature": "a5d9290ef9659083c490b303eb7ee41356d8778ff19f2f91776c8dc4443388a64ffcf336e61af4c25c05ac3ae952d1ced889ed655b67790891222aaa15b99fdd"
+}

@@ -48,3 +48,39 @@ OMEGA_IDENTITY_FIXTURE=ready cargo run --profile release-fast
 These states are presentation fixtures. Identity actions remain disabled until
 secure custody is connected, and the masked import preview contains no private
 key material.
+
+## Native identity provenance
+
+Omega's native identity contract adapts selected patterns from
+[OpenAgentsInc/buzz](https://github.com/OpenAgentsInc/buzz) Desktop v0.4.23 at
+commit `acfbb1bb6af54cb29cb152496ff43b8285dcb8cf`. Buzz is licensed under
+Apache-2.0. Omega changes the patterns to use its release-channel credential
+namespaces and the Nostr-only `openagents.omega.nostr_only.v1` profile.
+
+| Reviewed Buzz source                         | SHA-256                                                            | Adapted boundary                                       |
+| -------------------------------------------- | ------------------------------------------------------------------ | ------------------------------------------------------ |
+| `desktop/src-tauri/src/secret_store.rs`      | `2f1d93a3427bd2852001c81a0ad88afb6a614dec8eba78f23bcd56d630cd1ce8` | Keyring probing, read-back checks, serialized mutation |
+| `desktop/src-tauri/src/app_state_keyring.rs` | `f4f28872a57ea532dcd7d8f8f4a589b736d86b8bd25a81850c3e782defbd2aa7` | Service scoping, replaced by `app_identity` channels   |
+| `desktop/src-tauri/src/app_state.rs`         | `1ee8b09732b1e39afcaf3450ff674880d5d17e434f8900429239a1f05ca33063` | Public recovery states and read-back ordering          |
+| `desktop/src-tauri/src/commands/identity.rs` | `8ea33e58265b9a62a16dd163cdf37c06d9ad574418b1f02fd3ac295b8b2b290c` | Public identity results and admitted signing           |
+| `desktop/src-tauri/src/reset.rs`             | `9a5b5ac615cf7501c74952e03eac774f937c1458ff163cb6c5a02365655aad64` | Restart-safe reset transaction pattern                 |
+
+The contract uses exact reviewed native packages:
+
+| Package             | Version  | Checksum                                                           | License           |
+| ------------------- | -------- | ------------------------------------------------------------------ | ----------------- |
+| `nostr`             | `0.44.4` | `98cf5d15d70d1f8f4059e5f79923ac15891eb691d2843d01191e0585fb064d70` | MIT               |
+| `keyring`           | `3.6.3`  | `eebcc3aff044e5944a8fbaf69eb277d11986064cba30c468730e8b9909fb551c` | MIT OR Apache-2.0 |
+| `atomic-write-file` | `0.3.0`  | `84790c55b5704b0d35130bf16a4ce22a8e70eb0ea773522557524d9a4852663d` | BSD-3-Clause      |
+
+The public contract vector is
+`crates/omega_identity/fixtures/omega_nostr_identity_v1.json`, with SHA-256
+`1e25670b072cdd500bdd65e1c0215b62068cfd26a98284e23a90c781fef0bba6`.
+It freezes public-key, npub, public fingerprint, manifest, and admitted-signing
+behavior without containing a private key.
+
+Omega does not adopt Buzz's startup key generation, `BUZZ_PRIVATE_KEY`
+override, plaintext `identity.key` fallback, renderer-visible `get_nsec`
+command, durable use of ephemeral recovery keys, or Spark/wallet profile
+fields. `atomic-write-file` is restricted to public manifests and completion
+records.

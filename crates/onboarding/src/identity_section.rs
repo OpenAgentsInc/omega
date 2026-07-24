@@ -1,8 +1,8 @@
 use gpui::{App, IntoElement, RenderOnce, Window};
 use ui::prelude::*;
 
-const FIXTURE_NPUB: &str = "npub1az708q3kd9zy6z6f44zav5ygvdwelkzspf6mtusttx47lft2z38sghk0w7";
-const FIXTURE_FINGERPRINT: &str = "A7D3 8E02 3669 444D";
+const FIXTURE_NPUB: &str = "npub1lpkyfgk7jhv3fx63c63f4l4thgnycx8zlf7ynh5ngf9qc455w7zs7s8hua";
+const FIXTURE_FINGERPRINT: &str = "DAEE 948A 8BF2 14F3";
 const MASKED_SECRET: &str = "•••• •••• •••• ••••";
 
 fn wrapping_public_identity(value: &str) -> String {
