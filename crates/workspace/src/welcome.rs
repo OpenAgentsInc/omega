@@ -19,7 +19,8 @@ use settings::{DefaultOpenBehavior, Settings};
 use ui::{ButtonLike, Divider, DividerColor, KeyBinding, Vector, VectorName, prelude::*};
 use util::ResultExt;
 use zed_actions::{
-    Extensions, OpenKeymap, OpenOnboarding, OpenSettings, assistant::ToggleFocus, command_palette,
+    Extensions, OpenEditorOnboarding, OpenKeymap, OpenSettings, assistant::ToggleFocus,
+    command_palette,
 };
 
 #[derive(PartialEq, Clone, Debug, Deserialize, Serialize, JsonSchema, Action)]
@@ -504,7 +505,10 @@ impl Render for WelcomePage {
                                     .full_width()
                                     .label_size(LabelSize::XSmall)
                                     .on_click(|_, window, cx| {
-                                        window.dispatch_action(OpenOnboarding.boxed_clone(), cx);
+                                        window.dispatch_action(
+                                            OpenEditorOnboarding.boxed_clone(),
+                                            cx,
+                                        );
                                     }),
                             ),
                         )

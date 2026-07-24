@@ -196,6 +196,9 @@ pub fn init(cx: &mut App) {
     #[cfg(target_os = "macos")]
     cx.on_action(|_: &ShowAll, cx| cx.unhide_other_apps());
     cx.on_action(quit);
+    cx.on_action(|_: &zed_actions::OpenEditorOnboarding, cx| {
+        cx.dispatch_action(&zed_actions::OpenOnboarding);
+    });
 
     cx.on_action(|_: &RestoreBanner, cx| title_bar::restore_banner(cx));
 

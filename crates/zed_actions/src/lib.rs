@@ -81,6 +81,8 @@ actions!(
         OpenPerformanceProfiler,
         /// Opens the onboarding view.
         OpenOnboarding,
+        /// Opens Editor Onboarding.
+        OpenEditorOnboarding,
         /// Shows the auto-update notification for testing.
         ShowUpdateNotification,
     ]

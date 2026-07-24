@@ -63,9 +63,12 @@ pub use identity_startup::await_identity_ready;
 const IDENTITY_ONBOARDING_COMPLETION_KEY: &str = "omega_identity_onboarding_completion_v1";
 const IDENTITY_ONBOARDING_COMPLETION_SCHEMA: &str =
     "openagents.omega.identity-onboarding-completion.v1";
+const EDITOR_ONBOARDING_COMPLETION_KEY: &str = "omega_editor_onboarding_completion_v1";
+const EDITOR_ONBOARDING_COMPLETION_SCHEMA: &str =
+    "openagents.omega.editor-onboarding-completion.v1";
 
 #[derive(serde::Serialize)]
-struct IdentityOnboardingCompletion<'a> {
+struct OnboardingCompletion<'a> {
     schema: &'static str,
     identity_ref: &'a str,
 }
@@ -104,7 +107,7 @@ pub fn init(cx: &mut App) {
                     if let Some(existing) = existing {
                         workspace.activate_item(&existing, true, true, window, cx);
                     } else {
-                        let settings_page = Onboarding::new_manual(workspace, window, cx);
+                        let settings_page = Onboarding::new_editor_setup(workspace, window, cx);
                         workspace.add_item_to_active_pane(
                             Box::new(settings_page),
                             None,
@@ -204,7 +207,7 @@ pub fn show_onboarding_view(app_state: Arc<AppState>, cx: &mut App) -> Task<anyh
         |workspace, window, cx| {
             {
                 workspace.toggle_dock(DockPosition::Left, window, cx);
-                let onboarding_page = Onboarding::new_bootstrap(workspace, window, cx);
+                let onboarding_page = Onboarding::new_first_run(workspace, window, cx);
                 workspace.add_item_to_center(Box::new(onboarding_page.clone()), window, cx);
 
                 window.focus(&onboarding_page.focus_handle(cx), cx);
@@ -230,22 +233,71 @@ struct Onboarding {
 
 #[derive(Copy, Clone)]
 enum OnboardingMode {
-    Bootstrap(AnyWindowHandle),
-    Manual,
+    FirstRun(AnyWindowHandle),
+    EditorSetup,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum OnboardingJourney {
+    FirstRun,
+    EditorSetup,
+}
+
+impl OnboardingJourney {
+    fn completion_key(self) -> &'static str {
+        match self {
+            Self::FirstRun => IDENTITY_ONBOARDING_COMPLETION_KEY,
+            Self::EditorSetup => EDITOR_ONBOARDING_COMPLETION_KEY,
+        }
+    }
+
+    fn completion_schema(self) -> &'static str {
+        match self {
+            Self::FirstRun => IDENTITY_ONBOARDING_COMPLETION_SCHEMA,
+            Self::EditorSetup => EDITOR_ONBOARDING_COMPLETION_SCHEMA,
+        }
+    }
+
+    fn is_serializable(self) -> bool {
+        self == Self::EditorSetup
+    }
+
+    fn completion<'a>(self, identity_ref: &'a str) -> OnboardingCompletion<'a> {
+        OnboardingCompletion {
+            schema: self.completion_schema(),
+            identity_ref,
+        }
+    }
+
+    fn basics_page_mode(self) -> basics_page::BasicsPageMode {
+        match self {
+            Self::FirstRun => basics_page::BasicsPageMode::FirstRun,
+            Self::EditorSetup => basics_page::BasicsPageMode::EditorSetup,
+        }
+    }
+}
+
+impl OnboardingMode {
+    fn journey(self) -> OnboardingJourney {
+        match self {
+            Self::FirstRun(_) => OnboardingJourney::FirstRun,
+            Self::EditorSetup => OnboardingJourney::EditorSetup,
+        }
+    }
 }
 
 impl Onboarding {
-    fn new_bootstrap(workspace: &Workspace, window: &mut Window, cx: &mut App) -> Entity<Self> {
+    fn new_first_run(workspace: &Workspace, window: &mut Window, cx: &mut App) -> Entity<Self> {
         Self::new(
             workspace,
-            OnboardingMode::Bootstrap(window.window_handle()),
+            OnboardingMode::FirstRun(window.window_handle()),
             window,
             cx,
         )
     }
 
-    fn new_manual(workspace: &Workspace, window: &mut Window, cx: &mut App) -> Entity<Self> {
-        Self::new(workspace, OnboardingMode::Manual, window, cx)
+    fn new_editor_setup(workspace: &Workspace, window: &mut Window, cx: &mut App) -> Entity<Self> {
+        Self::new(workspace, OnboardingMode::EditorSetup, window, cx)
     }
 
     fn new(
@@ -328,23 +380,19 @@ impl Onboarding {
             cx.notify();
             return;
         };
-        let completion = IdentityOnboardingCompletion {
-            schema: IDENTITY_ONBOARDING_COMPLETION_SCHEMA,
-            identity_ref: identity_ref.as_str(),
-        };
+        let completion = self.mode.journey().completion(identity_ref.as_str());
         let Ok(completion) = serde_json::to_string(&completion) else {
             self.finish_error = Some("Could not record identity setup completion.".into());
             cx.notify();
             return;
         };
         let kvp = KeyValueStore::global(cx);
+        let completion_key = self.mode.journey().completion_key();
         self.finish_error = None;
         self.finish_task = Some(cx.spawn(async move |this, cx| {
-            let result = kvp
-                .write_kvp(IDENTITY_ONBOARDING_COMPLETION_KEY.to_string(), completion)
-                .await;
+            let result = kvp.write_kvp(completion_key.to_string(), completion).await;
             if let Err(error) = result {
-                zlog::error!("failed to record identity onboarding completion: {error:#}");
+                zlog::error!("failed to record onboarding completion: {error:#}");
                 this.update(cx, |this, cx| {
                     this.finish_task = None;
                     this.finish_error = Some("Could not finish setup. Please try again.".into());
@@ -358,7 +406,7 @@ impl Onboarding {
                 return;
             };
             match mode {
-                OnboardingMode::Bootstrap(window_handle) => {
+                OnboardingMode::FirstRun(window_handle) => {
                     if let Err(error) = window_handle.update(cx, |_, window, cx| {
                         window.remove_window();
                         telemetry::event!("Finish Setup");
@@ -375,7 +423,7 @@ impl Onboarding {
                         return;
                     }
                 }
-                OnboardingMode::Manual => {
+                OnboardingMode::EditorSetup => {
                     this.update(cx, |this, cx| {
                         this.finish_task = None;
                         telemetry::event!("Finish Setup");
@@ -407,8 +455,13 @@ impl Onboarding {
     }
 
     fn render_page(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        crate::basics_page::render_basics_page(&self.user_store, &self.identity_section, cx)
-            .into_any_element()
+        crate::basics_page::render_basics_page(
+            &self.user_store,
+            &self.identity_section,
+            self.mode.journey().basics_page_mode(),
+            cx,
+        )
+        .into_any_element()
     }
 }
 
@@ -764,7 +817,7 @@ impl workspace::SerializableItem for Onboarding {
         window.spawn(cx, async move |cx| {
             if let Some(_) = db.get_onboarding_page(item_id, workspace_id)? {
                 workspace.update_in(cx, |workspace, window, cx| {
-                    Onboarding::new_manual(workspace, window, cx)
+                    Onboarding::new_editor_setup(workspace, window, cx)
                 })
             } else {
                 Err(anyhow::anyhow!("No onboarding page to deserialize"))
@@ -780,7 +833,7 @@ impl workspace::SerializableItem for Onboarding {
         _window: &mut Window,
         cx: &mut ui::Context<Self>,
     ) -> Option<gpui::Task<gpui::Result<()>>> {
-        if matches!(self.mode, OnboardingMode::Bootstrap(_)) {
+        if !self.mode.journey().is_serializable() {
             return None;
         }
         let workspace_id = workspace.database_id()?;
@@ -794,7 +847,7 @@ impl workspace::SerializableItem for Onboarding {
     }
 
     fn should_serialize(&self, event: &Self::Event) -> bool {
-        matches!(self.mode, OnboardingMode::Manual) && event == &ItemEvent::UpdateTab
+        self.mode.journey().is_serializable() && event == &ItemEvent::UpdateTab
     }
 }
 
@@ -862,5 +915,53 @@ mod persistence {
                 WHERE item_id = ? AND workspace_id = ?
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn first_run_and_editor_setup_have_independent_completion_versions() {
+        let first_run = OnboardingJourney::FirstRun;
+        let editor_setup = OnboardingJourney::EditorSetup;
+
+        assert_eq!(
+            first_run.completion_key(),
+            "omega_identity_onboarding_completion_v1"
+        );
+        assert_eq!(
+            editor_setup.completion_key(),
+            "omega_editor_onboarding_completion_v1"
+        );
+        assert_ne!(first_run.completion_key(), editor_setup.completion_key());
+        assert_ne!(
+            first_run.completion_schema(),
+            editor_setup.completion_schema()
+        );
+
+        let identity_ref = "identity:test";
+        let first_run_record =
+            serde_json::to_value(first_run.completion(identity_ref)).expect("first-run completion");
+        let editor_record =
+            serde_json::to_value(editor_setup.completion(identity_ref)).expect("editor completion");
+        assert_eq!(first_run_record["identity_ref"], identity_ref);
+        assert_eq!(editor_record["identity_ref"], identity_ref);
+        assert_ne!(first_run_record["schema"], editor_record["schema"]);
+    }
+
+    #[test]
+    fn only_editor_setup_is_serializable() {
+        assert!(!OnboardingJourney::FirstRun.is_serializable());
+        assert!(OnboardingJourney::EditorSetup.is_serializable());
+        assert_eq!(
+            OnboardingJourney::FirstRun.basics_page_mode(),
+            basics_page::BasicsPageMode::FirstRun
+        );
+        assert_eq!(
+            OnboardingJourney::EditorSetup.basics_page_mode(),
+            basics_page::BasicsPageMode::EditorSetup
+        );
     }
 }

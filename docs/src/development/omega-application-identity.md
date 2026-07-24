@@ -228,15 +228,24 @@ response sink and wait flag, resumes through its existing dispatch path only
 after the user finishes onboarding. Closing the view does not release callers;
 it permits a later request to reopen the singleton view.
 
-Finish rechecks the live section's durable Ready inspection, writes the
-identity-bound `omega_identity_onboarding_completion_v1` local completion
+Finish rechecks the live section's durable Ready inspection. First Run writes
+the identity-bound `omega_identity_onboarding_completion_v1` local completion
 record, removes the dedicated bootstrap window, and then releases all waiters.
-Manual Editor Onboarding remains in its existing workspace. A bootstrap-window
-open failure is a shared terminal error, so current and future intents fail
-instead of hanging or bypassing identity. Merely opening onboarding writes no
-completion flag. The completion record is presentation history rather than
-identity authority: every new Omega process still performs the
-custody/public-manifest startup inspection.
+A bootstrap-window open failure is a shared terminal error, so current and
+future intents fail instead of hanging or bypassing identity. Merely opening
+onboarding writes no completion flag. The completion record is presentation
+history rather than identity authority: every new Omega process still performs
+the custody/public-manifest startup inspection.
+
+Editor Onboarding is a separately replayable mode available from the Help menu,
+the Welcome page, and the `zed::OpenEditorOnboarding` action. It renders the
+same Theme and Agent Setup implementations as First Run, with a compact
+identity status that retains custody repair, conflict resolution, recovery, and
+recovery-protection actions. Its Finish action also requires durable Ready
+custody, but writes the independent
+`omega_editor_onboarding_completion_v1` record and remains restorable in the
+workspace. Neither completion record gates the other journey or suppresses
+identity inspection and recovery.
 
 ## Native identity provenance
 

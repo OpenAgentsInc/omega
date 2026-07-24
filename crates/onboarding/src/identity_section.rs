@@ -27,6 +27,13 @@ use crate::{
 
 const IDENTITY_TAB_SLOTS: isize = 12;
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum IdentitySectionPresentation {
+    #[default]
+    Full,
+    Compact,
+}
+
 trait IdentityBackend: Send + Sync {
     fn inspect(&self) -> Result<IdentityInspection, CustodyError>;
     fn create(&self, receipt_ref: ReceiptRef) -> Result<IdentityInspection, CustodyError>;
@@ -256,6 +263,7 @@ impl fmt::Debug for RecoverySession {
 pub(crate) struct IdentitySection {
     backend: Arc<dyn IdentityBackend>,
     controller: IdentityControllerState,
+    presentation: IdentitySectionPresentation,
     first_tab_index: isize,
     operation_task: Option<Task<()>>,
     profile_task: Option<Task<()>>,
@@ -319,6 +327,7 @@ impl IdentitySection {
         let section = cx.new(|_| Self {
             backend,
             controller: IdentityControllerState::default(),
+            presentation: IdentitySectionPresentation::default(),
             first_tab_index,
             operation_task: None,
             profile_task: None,
@@ -1049,6 +1058,41 @@ impl IdentitySection {
             .and_then(|inspection| inspection.custody.identity.as_ref())
     }
 
+    fn public_identities(&self) -> Vec<PublicIdentity> {
+        self.controller
+            .durable()
+            .map(|inspection| {
+                inspection
+                    .conflict
+                    .as_ref()
+                    .map(|conflict| conflict.identities.clone())
+                    .filter(|identities| !identities.is_empty())
+                    .unwrap_or_else(|| inspection.custody.identity.clone().into_iter().collect())
+            })
+            .unwrap_or_default()
+    }
+
+    fn compact_recovery_protection(&self) -> Option<(&'static str, Color)> {
+        self.controller
+            .durable()
+            .and_then(Self::compact_recovery_protection_for)
+    }
+
+    fn compact_recovery_protection_for(
+        inspection: &IdentityInspection,
+    ) -> Option<(&'static str, Color)> {
+        if inspection.custody.state != CustodyState::Ready {
+            return None;
+        }
+        Some(match inspection.recovery_protection.state {
+            RecoveryProtectionState::Protected => ("Recovery protected", Color::Success),
+            RecoveryProtectionState::Needed => ("Recovery protection needed", Color::Warning),
+            RecoveryProtectionState::NotApplicable => {
+                ("Recovery protection unavailable", Color::Muted)
+            }
+        })
+    }
+
     fn durable_presentation(inspection: &IdentityInspection) -> IdentityPresentation {
         match inspection.custody.state {
             CustodyState::ResetFailed => IdentityPresentation {
@@ -1455,22 +1499,32 @@ fn wrapping_public_identity(value: &str) -> String {
     display
 }
 
-impl Render for IdentitySection {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+impl IdentitySection {
+    fn render_actions(&self, actions: Vec<IdentityAction>, cx: &mut Context<Self>) -> AnyElement {
+        h_flex()
+            .gap_2()
+            .flex_wrap()
+            .children(actions.into_iter().enumerate().map(|(index, action)| {
+                Button::new(format!("omega-identity-{}", action.id()), action.label())
+                    .style(if action.primary() {
+                        ButtonStyle::Filled
+                    } else {
+                        ButtonStyle::OutlinedGhost
+                    })
+                    .size(ButtonSize::Medium)
+                    .tab_index(self.first_tab_index + index as isize)
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.handle_action(action, window, cx);
+                    }))
+            }))
+            .into_any_element()
+    }
+
+    fn render_full(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let presentation = self.presentation();
-        let public_identities = self
-            .controller
-            .durable()
-            .map(|inspection| {
-                inspection
-                    .conflict
-                    .as_ref()
-                    .map(|conflict| conflict.identities.clone())
-                    .filter(|identities| !identities.is_empty())
-                    .unwrap_or_else(|| inspection.custody.identity.clone().into_iter().collect())
-            })
-            .unwrap_or_default();
+        let public_identities = self.public_identities();
         let error_message = self.error_message();
+        let actions = presentation.actions;
 
         v_flex()
             .min_w_0()
@@ -1550,30 +1604,8 @@ impl Render for IdentitySection {
                                 ),
                         )
                     })
-                    .when(!presentation.actions.is_empty(), |this| {
-                        this.child(
-                            h_flex()
-                                .gap_2()
-                                .flex_wrap()
-                                .children(presentation.actions.into_iter().enumerate().map(
-                                    |(index, action)| {
-                                        Button::new(
-                                            format!("omega-identity-{}", action.id()),
-                                            action.label(),
-                                        )
-                                        .style(if action.primary() {
-                                            ButtonStyle::Filled
-                                        } else {
-                                            ButtonStyle::OutlinedGhost
-                                        })
-                                        .size(ButtonSize::Medium)
-                                        .tab_index(self.first_tab_index + index as isize)
-                                        .on_click(cx.listener(move |this, _, window, cx| {
-                                            this.handle_action(action, window, cx);
-                                        }))
-                                    },
-                                )),
-                        )
+                    .when(!actions.is_empty(), |this| {
+                        this.child(self.render_actions(actions, cx))
                     })
                     .when(self.recovery_mode.is_some(), |this| {
                         this.child(self.render_recovery_controls(cx))
@@ -1582,14 +1614,101 @@ impl Render for IdentitySection {
                         this.child(self.render_local_profile(cx))
                     }),
             )
+            .into_any_element()
+    }
+
+    fn render_compact(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let presentation = self.presentation();
+        let public_identities = self.public_identities();
+        let error_message = self.error_message();
+        let recovery_protection = self.compact_recovery_protection();
+        let actions = presentation.actions;
+
+        v_flex()
+            .min_w_0()
+            .gap_2()
+            .child(
+                h_flex()
+                    .min_w_0()
+                    .gap_2()
+                    .child(
+                        Icon::new(presentation.icon)
+                            .size(IconSize::Small)
+                            .color(presentation.color),
+                    )
+                    .child(Label::new(presentation.title)),
+            )
+            .child(
+                Label::new(presentation.description)
+                    .color(Color::Muted)
+                    .size(LabelSize::Small),
+            )
+            .children(
+                public_identities
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, identity)| {
+                        Label::new(format!(
+                            "{} {}",
+                            if index == 0 {
+                                "Fingerprint"
+                            } else {
+                                "Conflicting fingerprint"
+                            },
+                            identity.fingerprint().display()
+                        ))
+                        .color(Color::Muted)
+                        .size(LabelSize::XSmall)
+                    }),
+            )
+            .when_some(recovery_protection, |this, (label, color)| {
+                this.child(Label::new(label).color(color).size(LabelSize::XSmall))
+            })
+            .when_some(error_message, |this, message| {
+                this.child(
+                    h_flex()
+                        .gap_2()
+                        .child(
+                            Icon::new(IconName::Warning)
+                                .size(IconSize::Small)
+                                .color(Color::Error),
+                        )
+                        .child(
+                            Label::new(message)
+                                .color(Color::Error)
+                                .size(LabelSize::Small),
+                        ),
+                )
+            })
+            .when(!actions.is_empty(), |this| {
+                this.child(self.render_actions(actions, cx))
+            })
+            .when(self.recovery_mode.is_some(), |this| {
+                this.child(self.render_recovery_controls(cx))
+            })
+            .into_any_element()
+    }
+}
+
+impl Render for IdentitySection {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        match self.presentation {
+            IdentitySectionPresentation::Full => self.render_full(cx),
+            IdentitySectionPresentation::Compact => self.render_compact(cx),
+        }
     }
 }
 
 pub(crate) fn render_identity_section(
     tab_index: &mut isize,
     section: &Entity<IdentitySection>,
+    presentation: IdentitySectionPresentation,
+    cx: &mut App,
 ) -> impl IntoElement {
     *tab_index += IDENTITY_TAB_SLOTS;
+    section.update(cx, |section, _| {
+        section.presentation = presentation;
+    });
     section.clone()
 }
 
@@ -1624,6 +1743,18 @@ mod tests {
     #[test]
     fn identity_reserves_focus_before_theme() {
         assert!(IDENTITY_TAB_SLOTS >= 10);
+    }
+
+    #[test]
+    fn identity_presentations_default_to_full_first_run_content() {
+        assert_eq!(
+            IdentitySectionPresentation::default(),
+            IdentitySectionPresentation::Full
+        );
+        assert_ne!(
+            IdentitySectionPresentation::Full,
+            IdentitySectionPresentation::Compact
+        );
     }
 
     #[test]
@@ -1694,6 +1825,35 @@ mod tests {
         let presentation = IdentitySection::durable_presentation(&inspection);
         assert!(presentation.description.contains("encrypted recovery"));
         assert_eq!(presentation.actions, vec![IdentityAction::Protect]);
+    }
+
+    #[test]
+    fn compact_ready_identity_keeps_recovery_protection_action_reachable() {
+        let mut inspection = inspection(CustodyState::Ready);
+        inspection.recovery_protection = RecoveryProtectionStatus {
+            state: RecoveryProtectionState::Protected,
+            record: None,
+        };
+        let presentation = IdentitySection::durable_presentation(&inspection);
+        assert_eq!(presentation.title, "Identity ready");
+        assert_eq!(presentation.actions, vec![IdentityAction::Protect]);
+        assert_eq!(
+            IdentitySection::compact_recovery_protection_for(&inspection).map(|(label, _)| label),
+            Some("Recovery protected")
+        );
+    }
+
+    #[test]
+    fn compact_conflicts_keep_their_resolution_actions_reachable() {
+        let mut inspection = inspection(CustodyState::Conflict);
+        inspection.conflict = Some(CustodyConflict {
+            reason: CustodyConflictReason::PublicManifestCustodyMismatch,
+            identities: Vec::new(),
+        });
+        assert_eq!(
+            IdentitySection::durable_presentation(&inspection).actions,
+            vec![IdentityAction::Recover]
+        );
     }
 
     #[test]
