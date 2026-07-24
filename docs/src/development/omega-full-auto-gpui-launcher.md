@@ -20,6 +20,14 @@ Omega ships a dedicated Full Auto dock panel.
 - Run view: pause / resume / stop / retry, mission text, turn list
 - No ordinary composer on this surface
 - Mutations call supervised `omega_effectd` only
+- Full Auto and Agent Computer share one application-scoped supervisor and
+  Omega data root.
+- A missing packaged component disables Start with an unavailable message;
+  production never falls back to `fake_effectd.mjs`.
+- The supervisor can exchange generation-fenced reverse-host frames, but the
+  seven real workspace/thread/provider authority adapters remain intentionally
+  unavailable. A packaged service therefore refuses run admission rather than
+  fabricating host success.
 
 Crate: `crates/full_auto_ui`. Supervisor helpers: `start_run`, `get_run`,
 `pause_run`, `resume_run`, `stop_run`, `retry_run`.

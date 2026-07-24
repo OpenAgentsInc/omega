@@ -5,23 +5,41 @@
 //! It must never become a second durable run authority (GPUI must not rewrite
 //! runs after restart).
 
+use std::ffi::OsStr;
+use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::process::Stdio;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use anyhow::{anyhow, bail, Context as _, Result};
+use anyhow::{Context as _, Result, anyhow, bail};
 use futures::io::{AsyncBufReadExt as _, BufReader};
 use futures::{AsyncWriteExt as _, StreamExt as _};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use smol::process::ChildStdin;
+use util::ResultExt as _;
 use util::process::Child;
 use util::redact::redact_command;
 
 use crate::protocol::{
-    request_frame, HealthResult, InitializeResult, ProtocolErrorCode, ResponseFrame, RunSnapshot,
-    PROTOCOL_SCHEMA,
+    HealthResult, HostMethod, HostRequestFrame, HostResponseError, HostResponseErrorCode,
+    HostResponseFrame, InitializeResult, PROTOCOL_SCHEMA, ProtocolErrorCode, ResponseFrame,
+    RunSnapshot, request_frame,
 };
+
+pub const MAX_FRAME_BYTES: usize = 64 * 1024;
+const SHUTDOWN_GRACE_PERIOD: Duration = Duration::from_secs(2);
+const AGENT_COMPUTER_TURN_TIMEOUT: Duration = Duration::from_secs(180);
+const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(180);
+const DEFAULT_HOST_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+const MAX_HOST_ERROR_MESSAGE_BYTES: usize = 1024;
+
+pub type OmegaEffectdHostFuture =
+    Pin<Box<dyn Future<Output = std::result::Result<Value, HostResponseError>> + Send + 'static>>;
+pub type OmegaEffectdHostHandler =
+    Arc<dyn Fn(HostRequestFrame) -> OmegaEffectdHostFuture + Send + Sync + 'static>;
 
 #[derive(Debug, Clone)]
 pub struct OmegaEffectdCommand {
@@ -57,7 +75,9 @@ pub struct OmegaEffectdSupervisor {
     next_request_id: AtomicU64,
     child: Option<Child>,
     stdin: Option<ChildStdin>,
-    stdout_lines: Option<futures::io::Lines<BufReader<smol::process::ChildStdout>>>,
+    stdout: Option<BufReader<smol::process::ChildStdout>>,
+    host_handler: Option<OmegaEffectdHostHandler>,
+    host_request_timeout: Duration,
 }
 
 impl OmegaEffectdSupervisor {
@@ -69,8 +89,18 @@ impl OmegaEffectdSupervisor {
             next_request_id: AtomicU64::new(1),
             child: None,
             stdin: None,
-            stdout_lines: None,
+            stdout: None,
+            host_handler: None,
+            host_request_timeout: DEFAULT_HOST_REQUEST_TIMEOUT,
         }
+    }
+
+    pub fn set_host_handler(&mut self, handler: OmegaEffectdHostHandler) {
+        self.host_handler = Some(handler);
+    }
+
+    pub fn set_host_request_timeout(&mut self, timeout: Duration) {
+        self.host_request_timeout = timeout;
     }
 
     pub fn generation(&self) -> u64 {
@@ -88,9 +118,20 @@ impl OmegaEffectdSupervisor {
         self.spawn_child().await?;
         let generation = self.generation();
         let result = self
-            .request("initialize", Some(json!({ "generation": generation })), generation)
+            .request(
+                "initialize",
+                Some(json!({ "generation": generation })),
+                generation,
+            )
             .await?;
         serde_json::from_value(result).context("decode initialize result")
+    }
+
+    pub async fn ensure_started(&mut self) -> Result<()> {
+        if self.child.is_none() {
+            self.start().await?;
+        }
+        Ok(())
     }
 
     pub async fn health(&mut self) -> Result<HealthResult, SupervisorError> {
@@ -122,7 +163,9 @@ impl OmegaEffectdSupervisor {
     }
 
     pub async fn start_run(&mut self, params: Value) -> Result<Value, SupervisorError> {
-        let result = self.request("start", Some(params), self.generation()).await?;
+        let result = self
+            .request("start", Some(params), self.generation())
+            .await?;
         Ok(result
             .get("run")
             .cloned()
@@ -164,10 +207,7 @@ impl OmegaEffectdSupervisor {
                 self.generation(),
             )
             .await?;
-        Ok(result
-            .get("attention")
-            .cloned()
-            .unwrap_or(Value::Null))
+        Ok(result.get("attention").cloned().unwrap_or(Value::Null))
     }
 
     pub async fn get_report(&mut self, run_ref: &str) -> Result<Value, SupervisorError> {
@@ -243,10 +283,7 @@ impl OmegaEffectdSupervisor {
                 self.generation(),
             )
             .await?;
-        Ok(result
-            .get("binding")
-            .cloned()
-            .unwrap_or(Value::Null))
+        Ok(result.get("binding").cloned().unwrap_or(Value::Null))
     }
 
     pub async fn assess_native_boundary(
@@ -271,7 +308,11 @@ impl OmegaEffectdSupervisor {
         params: Value,
     ) -> Result<Value, SupervisorError> {
         let result = self
-            .request("start_agent_computer_session", Some(params), self.generation())
+            .request(
+                "start_agent_computer_session",
+                Some(params),
+                self.generation(),
+            )
             .await?;
         Ok(result
             .get("session")
@@ -304,8 +345,13 @@ impl OmegaEffectdSupervisor {
         &mut self,
         params: Value,
     ) -> Result<Value, SupervisorError> {
-        self.request("run_agent_computer_turn", Some(params), self.generation())
-            .await
+        self.request_with_timeout(
+            "run_agent_computer_turn",
+            Some(params),
+            self.generation(),
+            AGENT_COMPUTER_TURN_TIMEOUT,
+        )
+        .await
     }
 
     pub async fn get_agent_computer_session(
@@ -319,10 +365,7 @@ impl OmegaEffectdSupervisor {
                 self.generation(),
             )
             .await?;
-        Ok(result
-            .get("session")
-            .cloned()
-            .unwrap_or(Value::Null))
+        Ok(result.get("session").cloned().unwrap_or(Value::Null))
     }
 
     pub async fn list_agent_computer_sessions(&mut self) -> Result<Value, SupervisorError> {
@@ -354,14 +397,33 @@ impl OmegaEffectdSupervisor {
     pub async fn stop(&mut self) -> Result<()> {
         if let Some(mut child) = self.child.take() {
             self.stdin.take();
-            self.stdout_lines.take();
+            self.stdout.take();
             #[cfg(unix)]
             {
-                let _ = unsafe { libc::kill(child.id() as i32, libc::SIGTERM) };
-                smol::Timer::after(Duration::from_millis(150)).await;
+                let signal_result = unsafe { libc::kill(child.id() as i32, libc::SIGTERM) };
+                if signal_result != 0 {
+                    let error = std::io::Error::last_os_error();
+                    if error.raw_os_error() != Some(libc::ESRCH) {
+                        return Err(error).context("terminate omega-effectd");
+                    }
+                }
             }
-            let _ = child.kill();
-            let _ = child.status().await;
+
+            #[cfg(unix)]
+            let exited = smol::future::or(async { child.status().await.map(|_| true) }, async {
+                runtime_delay(SHUTDOWN_GRACE_PERIOD).await;
+                Ok(false)
+            })
+            .await
+            .context("wait for omega-effectd shutdown")?;
+
+            #[cfg(not(unix))]
+            let exited = false;
+
+            if !exited {
+                child.kill().context("kill unresponsive omega-effectd")?;
+                child.status().await.context("reap killed omega-effectd")?;
+            }
         }
         Ok(())
     }
@@ -397,8 +459,12 @@ impl OmegaEffectdSupervisor {
             smol::spawn(async move {
                 let mut lines = BufReader::new(stderr).lines();
                 while let Some(line) = lines.next().await {
-                    if let Ok(line) = line {
-                        let _ = redact_command(&line);
+                    match line {
+                        Ok(line) => eprintln!("omega-effectd: {}", redact_command(&line)),
+                        Err(error) => {
+                            eprintln!("omega-effectd stderr read failed: {error}");
+                            break;
+                        }
                     }
                 }
             })
@@ -406,7 +472,7 @@ impl OmegaEffectdSupervisor {
         }
 
         self.stdin = Some(stdin);
-        self.stdout_lines = Some(BufReader::new(stdout).lines());
+        self.stdout = Some(BufReader::new(stdout));
         self.child = Some(child);
         Ok(())
     }
@@ -417,10 +483,29 @@ impl OmegaEffectdSupervisor {
         params: Option<Value>,
         generation: u64,
     ) -> Result<Value, SupervisorError> {
-        let id = self.next_request_id.fetch_add(1, Ordering::SeqCst).to_string();
+        self.request_with_timeout(method, params, generation, self.options.request_timeout)
+            .await
+    }
+
+    async fn request_with_timeout(
+        &mut self,
+        method: &str,
+        params: Option<Value>,
+        generation: u64,
+        timeout: Duration,
+    ) -> Result<Value, SupervisorError> {
+        let id = self
+            .next_request_id
+            .fetch_add(1, Ordering::SeqCst)
+            .to_string();
         let frame = request_frame(id.clone(), generation, method, params);
         let line =
             serde_json::to_string(&frame).map_err(|error| SupervisorError::Anyhow(error.into()))?;
+        if line.len() > MAX_FRAME_BYTES {
+            return Err(SupervisorError::Anyhow(anyhow!(
+                "omega-effectd request frame exceeds {MAX_FRAME_BYTES} bytes"
+            )));
+        }
         let stdin = self
             .stdin
             .as_mut()
@@ -434,36 +519,64 @@ impl OmegaEffectdSupervisor {
             .await
             .map_err(|error| SupervisorError::Anyhow(error.into()))?;
 
-        let timeout = self.options.request_timeout;
-        let response = smol::future::or(
+        let response_result = smol::future::or(
             async {
                 loop {
-                    let line = self
-                        .stdout_lines
-                        .as_mut()
-                        .ok_or_else(|| anyhow!("omega-effectd stdout missing"))?
-                        .next()
-                        .await
-                        .ok_or_else(|| anyhow!("omega-effectd closed stdout"))?
-                        .map_err(|error| anyhow!(error))?;
-                    let response: ResponseFrame = serde_json::from_str(&line)
-                        .with_context(|| format!("decode response line: {line}"))?;
-                    if response.schema != PROTOCOL_SCHEMA || response.kind != "response" {
-                        continue;
+                    let line = read_bounded_line(
+                        self.stdout
+                            .as_mut()
+                            .ok_or_else(|| anyhow!("omega-effectd stdout missing"))?,
+                    )
+                    .await?
+                    .ok_or_else(|| anyhow!("omega-effectd closed stdout"))?;
+                    let frame: Value = serde_json::from_str(&line)
+                        .context("decode omega-effectd protocol frame")?;
+                    match frame.get("kind").and_then(Value::as_str) {
+                        Some("host_request") => {
+                            let request: HostRequestFrame = serde_json::from_value(frame)
+                                .context("decode omega-effectd host request")?;
+                            self.respond_to_host_request(request, generation).await?;
+                            continue;
+                        }
+                        Some("event") => continue,
+                        Some("response") => {}
+                        _ => bail!("omega-effectd emitted an invalid frame kind"),
+                    }
+                    let response: ResponseFrame = serde_json::from_value(frame)
+                        .context("decode omega-effectd response frame")?;
+                    if response.schema != PROTOCOL_SCHEMA {
+                        bail!("omega-effectd response used an invalid schema");
                     }
                     if response.id != id {
                         continue;
+                    }
+                    if response.generation != generation {
+                        bail!(
+                            "omega-effectd response used stale generation {}; expected {generation}",
+                            response.generation
+                        );
                     }
                     return Ok::<ResponseFrame, anyhow::Error>(response);
                 }
             },
             async {
-                smol::Timer::after(timeout).await;
+                runtime_delay(timeout).await;
                 Err(anyhow!("omega-effectd request timed out after {timeout:?}"))
             },
         )
-        .await
-        .map_err(SupervisorError::Anyhow)?;
+        .await;
+
+        let response = match response_result {
+            Ok(response) => response,
+            Err(error) => {
+                if let Err(stop_error) = self.stop().await {
+                    return Err(SupervisorError::Anyhow(error.context(format!(
+                        "omega-effectd request failed; child teardown also failed: {stop_error:#}"
+                    ))));
+                }
+                return Err(SupervisorError::Anyhow(error));
+            }
+        };
 
         if !response.ok {
             let error = response.error.unwrap_or(crate::protocol::ProtocolError {
@@ -482,14 +595,192 @@ impl OmegaEffectdSupervisor {
             .result
             .ok_or_else(|| SupervisorError::Anyhow(anyhow!("ok response missing result")))
     }
+
+    async fn respond_to_host_request(
+        &mut self,
+        request: HostRequestFrame,
+        expected_generation: u64,
+    ) -> Result<()> {
+        if request.schema != PROTOCOL_SCHEMA || request.kind != "host_request" {
+            bail!("omega-effectd emitted an invalid host request envelope");
+        }
+        if request.id.is_empty() || request.id.len() > 180 {
+            bail!("omega-effectd emitted an invalid host request id");
+        }
+
+        let response = if request.generation != expected_generation
+            || request.generation != self.generation()
+        {
+            HostResponseFrame::failure(
+                &request,
+                HostResponseError {
+                    code: HostResponseErrorCode::StaleGeneration,
+                    message: format!(
+                        "Host request generation {} does not match active generation {}.",
+                        request.generation,
+                        self.generation()
+                    ),
+                },
+            )
+        } else if request.method == HostMethod::Unsupported {
+            HostResponseFrame::failure(
+                &request,
+                HostResponseError {
+                    code: HostResponseErrorCode::Unsupported,
+                    message: "The requested Omega host method is unsupported.".to_string(),
+                },
+            )
+        } else if let Some(handler) = self.host_handler.clone() {
+            let host_request_timeout = self.host_request_timeout;
+            let result = smol::future::or(handler(request.clone()), async move {
+                runtime_delay(host_request_timeout).await;
+                Err(HostResponseError::unavailable(format!(
+                    "Omega host authority timed out after {host_request_timeout:?}."
+                )))
+            })
+            .await;
+            match result {
+                Ok(result) => HostResponseFrame::success(&request, result),
+                Err(mut error) => {
+                    error.message = truncate_utf8(
+                        &redact_command(&error.message),
+                        MAX_HOST_ERROR_MESSAGE_BYTES,
+                    );
+                    HostResponseFrame::failure(&request, error)
+                }
+            }
+        } else {
+            HostResponseFrame::failure(
+                &request,
+                HostResponseError::unavailable(format!(
+                    "Omega host authority for {:?} is unavailable.",
+                    request.method
+                )),
+            )
+        };
+        self.write_frame(&response).await
+    }
+
+    async fn write_frame(&mut self, frame: &impl serde::Serialize) -> Result<()> {
+        let line = serde_json::to_string(frame).context("encode omega-effectd host response")?;
+        if line.len() > MAX_FRAME_BYTES {
+            bail!("omega-effectd host response frame exceeds {MAX_FRAME_BYTES} bytes");
+        }
+        let stdin = self
+            .stdin
+            .as_mut()
+            .ok_or_else(|| anyhow!("omega-effectd stdin missing"))?;
+        stdin.write_all(line.as_bytes()).await?;
+        stdin.write_all(b"\n").await?;
+        stdin.flush().await?;
+        Ok(())
+    }
 }
 
 impl Drop for OmegaEffectdSupervisor {
     fn drop(&mut self) {
         if let Some(mut child) = self.child.take() {
-            let _ = child.kill();
+            child.kill().log_err();
         }
     }
+}
+
+#[allow(clippy::disallowed_methods)]
+async fn runtime_delay(duration: Duration) {
+    // The supervisor is also used without a GPUI application context by protocol clients and tests.
+    smol::Timer::after(duration).await;
+}
+
+fn truncate_utf8(message: &str, max_bytes: usize) -> String {
+    if message.len() <= max_bytes {
+        return message.to_string();
+    }
+    let mut boundary = max_bytes;
+    while !message.is_char_boundary(boundary) {
+        boundary -= 1;
+    }
+    message[..boundary].to_string()
+}
+
+async fn read_bounded_line(
+    reader: &mut BufReader<smol::process::ChildStdout>,
+) -> Result<Option<String>> {
+    let mut frame = Vec::new();
+    loop {
+        let (consumed, found_newline) = {
+            let available = reader.fill_buf().await?;
+            if available.is_empty() {
+                if frame.is_empty() {
+                    return Ok(None);
+                }
+                bail!("omega-effectd closed stdout with an incomplete frame");
+            }
+            let consumed = available
+                .iter()
+                .position(|byte| *byte == b'\n')
+                .map_or(available.len(), |index| index + 1);
+            let payload_length = if available.get(consumed.saturating_sub(1)) == Some(&b'\n') {
+                consumed - 1
+            } else {
+                consumed
+            };
+            if frame.len() + payload_length > MAX_FRAME_BYTES {
+                bail!("omega-effectd response frame exceeds {MAX_FRAME_BYTES} bytes");
+            }
+            frame.extend_from_slice(&available[..payload_length]);
+            (consumed, payload_length < consumed)
+        };
+        reader.consume_unpin(consumed);
+        if found_newline {
+            if frame.last() == Some(&b'\r') {
+                frame.pop();
+            }
+            return String::from_utf8(frame)
+                .context("omega-effectd response frame was not UTF-8")
+                .map(Some);
+        }
+    }
+}
+
+pub fn resolve_effectd_command(
+    override_program: Option<&OsStr>,
+    app_executable: &Path,
+) -> Result<OmegaEffectdCommand> {
+    if let Some(program) = override_program.filter(|value| !value.is_empty()) {
+        let program = PathBuf::from(program);
+        if !program.is_file() {
+            bail!(
+                "OPENAGENTS_OMEGA_EFFECTD_BIN does not name a packaged executable: {}",
+                program.display()
+            );
+        }
+        return Ok(OmegaEffectdCommand {
+            program,
+            args: Vec::new(),
+        });
+    }
+
+    let executable_dir = app_executable
+        .parent()
+        .ok_or_else(|| anyhow!("Omega executable has no parent directory"))?;
+    let bundled_program = if executable_dir.file_name() == Some(OsStr::new("MacOS")) {
+        executable_dir
+            .parent()
+            .ok_or_else(|| anyhow!("Omega macOS bundle has no Contents directory"))?
+            .join("Resources/omega-effectd/bin/omega-effectd")
+    } else {
+        executable_dir.join("omega-effectd/bin/omega-effectd")
+    };
+    if !bundled_program.is_file() {
+        bail!(
+            "packaged omega-effectd component is unavailable at {}",
+            bundled_program.display()
+        );
+    }
+    Ok(OmegaEffectdCommand {
+        program: bundled_program,
+        args: Vec::new(),
+    })
 }
 
 /// Shared test helper: fixture command that speaks the framed protocol.
@@ -537,6 +828,6 @@ pub fn default_options(
         data_root,
         command,
         initial_generation: 1,
-        request_timeout: Duration::from_secs(5),
+        request_timeout: DEFAULT_REQUEST_TIMEOUT,
     }
 }

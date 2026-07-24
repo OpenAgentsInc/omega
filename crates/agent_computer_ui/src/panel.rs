@@ -1,36 +1,24 @@
 //! Bounded Agent Computer panel — start one cloud turn and show outcome.
 
-use std::path::PathBuf;
-use std::sync::Arc;
-use std::time::Duration;
-
 use anyhow::Result;
 use editor::Editor;
 use gpui::{
-    div, px, App, AsyncWindowContext, Context, Entity, EventEmitter, FocusHandle, Focusable,
+    App, AsyncWindowContext, Context, Entity, EventEmitter, FocusHandle, Focusable,
     InteractiveElement, IntoElement, ParentElement, Render, SharedString, Styled, Task, WeakEntity,
-    Window,
+    Window, div, px,
 };
-use omega_effectd::{
-    fixture_command, OmegaEffectdCommand, OmegaEffectdSupervisor, OmegaEffectdSupervisorOptions,
-};
+use omega_effectd::{SharedOmegaEffectdSupervisor, shared_supervisor};
 use serde_json::json;
-use smol::lock::Mutex as AsyncMutex;
-use ui::{prelude::*, Button, ButtonStyle, Label, LabelSize};
+use ui::{Button, ButtonStyle, Label, LabelSize, prelude::*};
 use workspace::{
-    dock::{DockPosition, Panel, PanelEvent},
     Workspace,
+    dock::{DockPosition, Panel, PanelEvent},
 };
 use zed_actions::agent_computer::{OpenPanel, StartTurn};
 
 use crate::{DEFAULT_CONTROL_PLANE_BASE_URL, DEFAULT_REPO_REF};
 
 const PANEL_KEY: &str = "AgentComputerPanel";
-
-#[derive(Clone)]
-struct SupervisorHandle {
-    inner: Arc<AsyncMutex<OmegaEffectdSupervisor>>,
-}
 
 #[derive(Clone, Debug)]
 struct TurnOutcome {
@@ -48,7 +36,7 @@ pub struct AgentComputerPanel {
     status: SharedString,
     outcome: Option<TurnOutcome>,
     submitting: bool,
-    supervisor: Option<SupervisorHandle>,
+    supervisor: Option<SharedOmegaEffectdSupervisor>,
 }
 
 pub fn init(cx: &mut App) {
@@ -113,24 +101,12 @@ impl AgentComputerPanel {
         if self.supervisor.is_some() {
             return;
         }
-        let data_root = std::env::var_os("OPENAGENTS_OMEGA_EFFECTD_DATA_ROOT")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| {
-                std::env::var_os("HOME")
-                    .map(|home| PathBuf::from(home).join(".local/share/omega/agent-computer"))
-                    .unwrap_or_else(|| std::env::temp_dir().join("omega-agent-computer"))
-            });
-        self.supervisor = Some(SupervisorHandle {
-            inner: Arc::new(AsyncMutex::new(OmegaEffectdSupervisor::new(
-                OmegaEffectdSupervisorOptions {
-                    data_root,
-                    command: effectd_command(),
-                    initial_generation: 1,
-                    // Cloud turns can take longer than Full Auto control RPCs.
-                    request_timeout: Duration::from_secs(180),
-                },
-            ))),
-        });
+        match shared_supervisor(cx) {
+            Ok(supervisor) => self.supervisor = Some(supervisor),
+            Err(error) => {
+                self.status = format!("omega-effectd unavailable ({error}).").into();
+            }
+        }
         cx.notify();
     }
 
@@ -176,16 +152,18 @@ impl AgentComputerPanel {
 
         cx.spawn(async move |this, cx| {
             let result = {
-                let mut guard = supervisor.inner.lock().await;
-                let _ = guard.start().await;
-                guard
-                    .run_agent_computer_turn(json!({
-                        "bearerToken": bearer,
-                        "controlPlaneBaseUrl": control_plane,
-                        "repoRef": repo_ref,
-                        "objective": objective,
-                    }))
-                    .await
+                let mut guard = supervisor.lock().await;
+                match guard.ensure_started().await {
+                    Ok(()) => guard
+                        .run_agent_computer_turn(json!({
+                            "bearerToken": bearer,
+                            "controlPlaneBaseUrl": control_plane,
+                            "repoRef": repo_ref,
+                            "objective": objective,
+                        }))
+                        .await,
+                    Err(error) => Err(omega_effectd::SupervisorError::Anyhow(error)),
+                }
             };
             this.update(cx, |panel, cx| {
                 panel.submitting = false;
@@ -232,38 +210,6 @@ impl AgentComputerPanel {
         })
         .detach();
     }
-}
-
-fn effectd_command() -> OmegaEffectdCommand {
-    if let Ok(bin) = std::env::var("OPENAGENTS_OMEGA_EFFECTD_BIN") {
-        return OmegaEffectdCommand {
-            program: PathBuf::from(bin),
-            args: Vec::new(),
-        };
-    }
-    let candidates = [
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../../openagents/packages/omega-effectd/src/bin/omega-effectd.ts"),
-        PathBuf::from(
-            "/Users/christopherdavid/work/openagents/packages/omega-effectd/src/bin/omega-effectd.ts",
-        ),
-    ];
-    for candidate in candidates {
-        if candidate.exists() {
-            return OmegaEffectdCommand {
-                program: PathBuf::from("node"),
-                args: vec![
-                    "--import".into(),
-                    "tsx".into(),
-                    candidate.display().to_string(),
-                ],
-            };
-        }
-    }
-    fixture_command(
-        &PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../omega_effectd/fixtures/fake_effectd.mjs"),
-    )
 }
 
 impl EventEmitter<PanelEvent> for AgentComputerPanel {}
@@ -316,7 +262,7 @@ impl Panel for AgentComputerPanel {
 
 impl Render for AgentComputerPanel {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let can_start = !self.submitting;
+        let can_start = !self.submitting && self.supervisor.is_some();
         v_flex()
             .id("agent-computer-panel")
             .size_full()
@@ -325,8 +271,10 @@ impl Render for AgentComputerPanel {
             .p_3()
             .child(Label::new("Agent Computer").size(LabelSize::Large))
             .child(
-                Label::new("Starts one openagents_cloud turn through omega-effectd. Not Full Auto.")
-                    .color(Color::Muted),
+                Label::new(
+                    "Starts one openagents_cloud turn through omega-effectd. Not Full Auto.",
+                )
+                .color(Color::Muted),
             )
             .child(Label::new(self.status.clone()).color(Color::Muted))
             .child(Label::new("Objective"))
@@ -347,29 +295,30 @@ impl Render for AgentComputerPanel {
                     .child(self.repo_editor.clone()),
             )
             .child(
-                Button::new("agent-computer-start", if self.submitting {
-                    "Starting…"
-                } else {
-                    "Start cloud turn"
-                })
+                Button::new(
+                    "agent-computer-start",
+                    if self.submitting {
+                        "Starting…"
+                    } else {
+                        "Start cloud turn"
+                    },
+                )
                 .style(ButtonStyle::Filled)
                 .disabled(!can_start)
                 .on_click(cx.listener(|this, _, _, cx| this.start_turn(cx))),
             )
             .when_some(self.outcome.clone(), |this, outcome| {
-                this.child(
-                    Label::new(format!(
-                        "session={} · state={} · finish={}{}",
-                        outcome.session_ref,
-                        outcome.state,
-                        outcome.finish_reason,
-                        outcome
-                            .artifact_ref
-                            .as_ref()
-                            .map(|artifact| format!(" · artifact={artifact}"))
-                            .unwrap_or_default()
-                    )),
-                )
+                this.child(Label::new(format!(
+                    "session={} · state={} · finish={}{}",
+                    outcome.session_ref,
+                    outcome.state,
+                    outcome.finish_reason,
+                    outcome
+                        .artifact_ref
+                        .as_ref()
+                        .map(|artifact| format!(" · artifact={artifact}"))
+                        .unwrap_or_default()
+                )))
             })
     }
 }

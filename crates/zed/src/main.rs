@@ -588,6 +588,7 @@ fn main() {
         zed::move_to_applications::init(cx);
         project::Project::init(&client, cx);
         debugger_ui::init(cx);
+        omega_effectd::init(cx);
         full_auto_ui::init(cx);
         agent_computer_ui::init(cx);
         debugger_tools::init(cx);

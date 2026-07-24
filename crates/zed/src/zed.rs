@@ -5901,6 +5901,7 @@ mod tests {
             );
             project::debugger::dap_store::DapStore::init(&app_state.client.clone().into(), cx);
             debugger_ui::init(cx);
+            omega_effectd::init(cx);
             full_auto_ui::init(cx);
             agent_computer_ui::init(cx);
             initialize_workspace(app_state.clone(), cx);

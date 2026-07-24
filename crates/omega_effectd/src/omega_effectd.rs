@@ -6,18 +6,68 @@
 mod protocol;
 mod supervisor;
 
+use std::sync::Arc;
+
+use anyhow::{Result, anyhow};
+use gpui::{App, Global};
+use smol::lock::Mutex as AsyncMutex;
+
 pub use protocol::{
-    HealthResult, InitializeResult, ProtocolError, ProtocolErrorCode, RunSnapshot, PROTOCOL_SCHEMA,
-    PROTOCOL_VERSION, SERVICE_VERSION,
+    HealthResult, HostMethod, HostRequestFrame, HostResponseError, HostResponseErrorCode,
+    HostResponseFrame, InitializeResult, PROTOCOL_SCHEMA, PROTOCOL_VERSION, ProtocolError,
+    ProtocolErrorCode, RunSnapshot, SERVICE_VERSION,
 };
 pub use supervisor::{
-    default_options, fixture_command, OmegaEffectdCommand, OmegaEffectdSupervisor,
-    OmegaEffectdSupervisorOptions, SupervisorError,
+    MAX_FRAME_BYTES, OmegaEffectdCommand, OmegaEffectdHostFuture, OmegaEffectdHostHandler,
+    OmegaEffectdSupervisor, OmegaEffectdSupervisorOptions, SupervisorError, default_options,
+    fixture_command, resolve_effectd_command,
 };
+
+pub type SharedOmegaEffectdSupervisor = Arc<AsyncMutex<OmegaEffectdSupervisor>>;
+
+enum OmegaEffectdRuntime {
+    Available(SharedOmegaEffectdSupervisor),
+    Unavailable(Arc<str>),
+}
+
+impl Global for OmegaEffectdRuntime {}
+
+pub fn init(cx: &mut App) {
+    if cx.has_global::<OmegaEffectdRuntime>() {
+        return;
+    }
+
+    let runtime = match std::env::current_exe()
+        .map_err(anyhow::Error::from)
+        .and_then(|executable| {
+            resolve_effectd_command(
+                std::env::var_os("OPENAGENTS_OMEGA_EFFECTD_BIN").as_deref(),
+                &executable,
+            )
+        }) {
+        Ok(command) => {
+            OmegaEffectdRuntime::Available(Arc::new(AsyncMutex::new(OmegaEffectdSupervisor::new(
+                default_options(paths::data_dir().join("openagents"), command),
+            ))))
+        }
+        Err(error) => OmegaEffectdRuntime::Unavailable(error.to_string().into()),
+    };
+    cx.set_global(runtime);
+}
+
+pub fn shared_supervisor(cx: &App) -> Result<SharedOmegaEffectdSupervisor> {
+    match cx.try_global::<OmegaEffectdRuntime>() {
+        Some(OmegaEffectdRuntime::Available(supervisor)) => Ok(supervisor.clone()),
+        Some(OmegaEffectdRuntime::Unavailable(message)) => Err(anyhow!(message.to_string())),
+        None => Err(anyhow!("omega-effectd runtime was not initialized")),
+    }
+}
 
 #[cfg(test)]
 mod tests {
+    use std::ffi::OsStr;
     use std::path::PathBuf;
+    use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
     use serde_json::json;
@@ -27,6 +77,225 @@ mod tests {
 
     fn fixture_path() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/fake_effectd.mjs")
+    }
+
+    #[test]
+    fn missing_packaged_component_fails_closed_without_fixture_fallback() {
+        let root = tempdir().expect("tempdir");
+        let executable = root.path().join("Omega.app/Contents/MacOS/omega");
+        std::fs::create_dir_all(executable.parent().expect("executable parent"))
+            .expect("create app executable directory");
+
+        let error = resolve_effectd_command(None, &executable).expect_err("component is absent");
+        let message = error.to_string();
+        assert!(message.contains("packaged omega-effectd component is unavailable"));
+        assert!(!message.contains("fake_effectd"));
+        assert!(!message.contains("openagents/packages"));
+    }
+
+    #[test]
+    fn resolver_accepts_only_explicit_or_packaged_component_paths() {
+        let root = tempdir().expect("tempdir");
+        let executable = root.path().join("Omega.app/Contents/MacOS/omega");
+        let component = root
+            .path()
+            .join("Omega.app/Contents/Resources/omega-effectd/bin/omega-effectd");
+        std::fs::create_dir_all(component.parent().expect("component parent"))
+            .expect("create component directory");
+        std::fs::write(&component, "#!/bin/sh\n").expect("write component");
+
+        let packaged = resolve_effectd_command(None, &executable).expect("packaged component");
+        assert_eq!(packaged.program, component);
+        assert!(packaged.args.is_empty());
+
+        let explicit = root.path().join("explicit-effectd");
+        std::fs::write(&explicit, "#!/bin/sh\n").expect("write explicit component");
+        let overridden = resolve_effectd_command(Some(explicit.as_os_str()), &executable)
+            .expect("explicit component");
+        assert_eq!(overridden.program, explicit);
+
+        let missing = root.path().join("missing-effectd");
+        assert!(
+            resolve_effectd_command(Some(OsStr::new(&missing)), &executable).is_err(),
+            "an explicit missing component must not fall back"
+        );
+    }
+
+    #[test]
+    fn oversized_response_frame_fails_closed_and_stops_child() {
+        smol::block_on(async {
+            let root = tempdir().expect("tempdir");
+            let mut command = fixture_command(&fixture_path());
+            command.args.push("--oversized-health-response".into());
+            let mut supervisor = OmegaEffectdSupervisor::new(OmegaEffectdSupervisorOptions {
+                data_root: root.path().to_path_buf(),
+                command,
+                initial_generation: 1,
+                request_timeout: Duration::from_secs(5),
+            });
+
+            supervisor.start().await.expect("start");
+            let error = supervisor.health().await.expect_err("oversized frame");
+            assert!(error.to_string().contains("response frame exceeds"));
+            let stopped = supervisor.health().await.expect_err("child was torn down");
+            assert!(stopped.to_string().contains("not started"));
+        });
+    }
+
+    #[test]
+    fn host_requests_are_multiplexed_with_matching_generation() {
+        smol::block_on(async {
+            let root = tempdir().expect("tempdir");
+            let mut command = fixture_command(&fixture_path());
+            command.args.push("--host-request-health".into());
+            let mut supervisor = OmegaEffectdSupervisor::new(OmegaEffectdSupervisorOptions {
+                data_root: root.path().to_path_buf(),
+                command,
+                initial_generation: 7,
+                request_timeout: Duration::from_secs(5),
+            });
+            let observed = Arc::new(Mutex::new(None));
+            supervisor.set_host_handler(Arc::new({
+                let observed = observed.clone();
+                move |request| {
+                    let observed = observed.clone();
+                    Box::pin(async move {
+                        *observed.lock().expect("observed request lock") = Some(request.clone());
+                        Ok(json!({ "workspaceRef": "workspace.omega.supervised" }))
+                    })
+                }
+            }));
+
+            supervisor.start().await.expect("start");
+            supervisor.health().await.expect("health");
+            let request = observed
+                .lock()
+                .expect("observed request lock")
+                .clone()
+                .expect("host request");
+            assert_eq!(request.generation, 7);
+            assert_eq!(request.method, HostMethod::ResolveWorkspace);
+        });
+    }
+
+    #[test]
+    fn missing_host_authority_returns_typed_unavailable_response() {
+        smol::block_on(async {
+            let root = tempdir().expect("tempdir");
+            let mut command = fixture_command(&fixture_path());
+            command
+                .args
+                .push("--unavailable-host-request-health".into());
+            let mut supervisor = OmegaEffectdSupervisor::new(OmegaEffectdSupervisorOptions {
+                data_root: root.path().to_path_buf(),
+                command,
+                initial_generation: 1,
+                request_timeout: Duration::from_secs(5),
+            });
+
+            supervisor.start().await.expect("start");
+            supervisor
+                .health()
+                .await
+                .expect("typed unavailable response");
+        });
+    }
+
+    #[test]
+    fn host_authority_timeout_returns_unavailable_without_parking_request() {
+        smol::block_on(async {
+            let root = tempdir().expect("tempdir");
+            let mut command = fixture_command(&fixture_path());
+            command
+                .args
+                .push("--unavailable-host-request-health".into());
+            let mut supervisor = OmegaEffectdSupervisor::new(OmegaEffectdSupervisorOptions {
+                data_root: root.path().to_path_buf(),
+                command,
+                initial_generation: 1,
+                request_timeout: Duration::from_secs(5),
+            });
+            supervisor.set_host_request_timeout(Duration::from_millis(10));
+            supervisor.set_host_handler(Arc::new(|_| {
+                Box::pin(futures::future::pending::<
+                    std::result::Result<serde_json::Value, HostResponseError>,
+                >())
+            }));
+
+            supervisor.start().await.expect("start");
+            supervisor.health().await.expect("host timeout response");
+        });
+    }
+
+    #[test]
+    fn stale_host_request_gets_generation_matched_rejection() {
+        smol::block_on(async {
+            let root = tempdir().expect("tempdir");
+            let mut command = fixture_command(&fixture_path());
+            command.args.push("--stale-host-request-health".into());
+            let mut supervisor = OmegaEffectdSupervisor::new(OmegaEffectdSupervisorOptions {
+                data_root: root.path().to_path_buf(),
+                command,
+                initial_generation: 2,
+                request_timeout: Duration::from_secs(5),
+            });
+
+            supervisor.start().await.expect("start");
+            supervisor.health().await.expect("stale host rejection");
+        });
+    }
+
+    #[test]
+    fn stale_service_response_fails_closed_and_stops_child() {
+        smol::block_on(async {
+            let root = tempdir().expect("tempdir");
+            let mut command = fixture_command(&fixture_path());
+            command.args.push("--stale-health-response".into());
+            let mut supervisor = OmegaEffectdSupervisor::new(OmegaEffectdSupervisorOptions {
+                data_root: root.path().to_path_buf(),
+                command,
+                initial_generation: 2,
+                request_timeout: Duration::from_secs(5),
+            });
+
+            supervisor.start().await.expect("start");
+            let error = supervisor
+                .health()
+                .await
+                .expect_err("stale service response");
+            assert!(error.to_string().contains("stale generation"));
+            assert!(supervisor.health().await.is_err(), "child must be stopped");
+        });
+    }
+
+    #[test]
+    fn oversized_host_response_fails_closed_and_stops_child() {
+        smol::block_on(async {
+            let root = tempdir().expect("tempdir");
+            let mut command = fixture_command(&fixture_path());
+            command.args.push("--host-request-health".into());
+            let mut supervisor = OmegaEffectdSupervisor::new(OmegaEffectdSupervisorOptions {
+                data_root: root.path().to_path_buf(),
+                command,
+                initial_generation: 1,
+                request_timeout: Duration::from_secs(5),
+            });
+            supervisor.set_host_handler(Arc::new(|_| {
+                Box::pin(async {
+                    Ok(json!({
+                        "workspaceRef": "x".repeat(MAX_FRAME_BYTES),
+                    }))
+                })
+            }));
+
+            supervisor.start().await.expect("start");
+            let error = supervisor
+                .health()
+                .await
+                .expect_err("oversized host response");
+            assert!(error.to_string().contains("host response frame exceeds"));
+            assert!(supervisor.health().await.is_err(), "child must be stopped");
+        });
     }
 
     #[test]
@@ -150,7 +419,10 @@ mod tests {
             );
 
             supervisor.restart().await.expect("restart");
-            let after = supervisor.get_run(&run_ref).await.expect("get after restart");
+            let after = supervisor
+                .get_run(&run_ref)
+                .await
+                .expect("get after restart");
             assert_eq!(
                 after.get("runRef").and_then(|v| v.as_str()),
                 Some(run_ref.as_str())
@@ -247,10 +519,9 @@ mod tests {
                 "agent computer session must survive restart: {listed}"
             );
 
-            let disk = std::fs::read_to_string(
-                root.path().join("agent-computer").join("sessions.json"),
-            )
-            .expect("sessions disk");
+            let disk =
+                std::fs::read_to_string(root.path().join("agent-computer").join("sessions.json"))
+                    .expect("sessions disk");
             assert!(!disk.contains("secret-fixture-token"));
             assert!(!disk.contains("Fixture Agent Computer"));
 

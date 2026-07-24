@@ -2,32 +2,27 @@
 //!
 //! Mutations go through `omega_effectd`. There is no ordinary composer here.
 
-use std::path::PathBuf;
-use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use editor::Editor;
 use gpui::{
-    div, px, Action, App, AsyncWindowContext, Context, Entity, EventEmitter, FocusHandle, Focusable,
+    Action, App, AsyncWindowContext, Context, Entity, EventEmitter, FocusHandle, Focusable,
     InteractiveElement, IntoElement, ParentElement, Render, SharedString, Styled, Task, WeakEntity,
-    Window,
+    Window, div, px,
 };
-use omega_effectd::{
-    fixture_command, OmegaEffectdCommand, OmegaEffectdSupervisor, OmegaEffectdSupervisorOptions,
-};
-use serde_json::{json, Value};
-use smol::lock::Mutex as AsyncMutex;
-use ui::{prelude::*, Button, ButtonStyle, IconButton, IconName, Label, LabelSize, Tooltip};
+use omega_effectd::{SharedOmegaEffectdSupervisor, shared_supervisor};
+use serde_json::{Value, json};
+use ui::{Button, ButtonStyle, IconButton, IconName, Label, LabelSize, Tooltip, prelude::*};
 use workspace::{
-    dock::{DockPosition, Panel, PanelEvent},
     Workspace,
+    dock::{DockPosition, Panel, PanelEvent},
 };
 use zed_actions::full_auto_panel::{OpenLauncher, ToggleFocus};
 
 use crate::draft::{
-    validate_launcher_draft, FullAutoLauncherDraft, DEFAULT_DONE_CONDITION, DEFAULT_TURN_CAP,
-    FULL_AUTO_ACTIVE_LIMIT, FULL_AUTO_WORKSPACE_REF,
+    DEFAULT_DONE_CONDITION, DEFAULT_TURN_CAP, FULL_AUTO_ACTIVE_LIMIT, FULL_AUTO_WORKSPACE_REF,
+    FullAutoLauncherDraft, validate_launcher_draft,
 };
 
 const PANEL_KEY: &str = "FullAutoPanel";
@@ -78,11 +73,6 @@ enum SurfaceMode {
     Run,
 }
 
-#[derive(Clone)]
-struct SupervisorHandle {
-    inner: Arc<AsyncMutex<OmegaEffectdSupervisor>>,
-}
-
 pub struct FullAutoPanel {
     workspace: WeakEntity<Workspace>,
     focus_handle: FocusHandle,
@@ -97,7 +87,7 @@ pub struct FullAutoPanel {
     active_run_ref: Option<String>,
     capacity_lanes: Vec<CapacityLane>,
     status: SharedString,
-    supervisor: Option<SupervisorHandle>,
+    supervisor: Option<SharedOmegaEffectdSupervisor>,
     _refresh: Option<Task<()>>,
 }
 
@@ -201,29 +191,21 @@ impl FullAutoPanel {
         if self.supervisor.is_some() {
             return;
         }
-        let data_root = std::env::var_os("OPENAGENTS_OMEGA_EFFECTD_DATA_ROOT")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| {
-                std::env::var_os("HOME")
-                    .map(|home| PathBuf::from(home).join(".local/share/omega/full-auto"))
-                    .unwrap_or_else(|| std::env::temp_dir().join("omega-full-auto"))
-            });
-        let handle = SupervisorHandle {
-            inner: Arc::new(AsyncMutex::new(OmegaEffectdSupervisor::new(
-                OmegaEffectdSupervisorOptions {
-                    data_root,
-                    command: effectd_command(),
-                    initial_generation: 1,
-                    request_timeout: Duration::from_secs(8),
-                },
-            ))),
+        let handle = match shared_supervisor(cx) {
+            Ok(handle) => handle,
+            Err(error) => {
+                self.status = format!("omega-effectd unavailable ({error}).").into();
+                self.draft.error = Some(error.to_string());
+                cx.notify();
+                return;
+            }
         };
-        let start_handle = handle.inner.clone();
+        let start_handle = handle.clone();
         self.supervisor = Some(handle);
         cx.spawn(async move |this, cx| {
             let started = {
                 let mut guard = start_handle.lock().await;
-                guard.start().await
+                guard.ensure_started().await
             };
             this.update(cx, |this, cx| {
                 this.status = match started {
@@ -239,9 +221,10 @@ impl FullAutoPanel {
     }
 
     fn schedule_refresh(&mut self, cx: &mut Context<Self>) {
+        let executor = cx.background_executor().clone();
         self._refresh = Some(cx.spawn(async move |this, cx| {
             loop {
-                smol::Timer::after(Duration::from_secs(3)).await;
+                executor.timer(Duration::from_secs(3)).await;
                 if this.update(cx, |this, cx| this.refresh_runs(cx)).is_err() {
                     break;
                 }
@@ -256,15 +239,15 @@ impl FullAutoPanel {
         let active = self.active_run_ref.clone();
         cx.spawn(async move |this, cx| {
             let listed = {
-                let mut guard = supervisor.inner.lock().await;
+                let mut guard = supervisor.lock().await;
                 guard.list_runs().await
             };
             let capacity = {
-                let mut guard = supervisor.inner.lock().await;
+                let mut guard = supervisor.lock().await;
                 guard.get_capacity().await.ok()
             };
             let detail = if let Some(run_ref) = active {
-                let mut guard = supervisor.inner.lock().await;
+                let mut guard = supervisor.lock().await;
                 let run = guard.get_run(&run_ref).await.ok();
                 let receipt = guard.get_receipt(&run_ref).await.ok();
                 (run, receipt)
@@ -325,7 +308,11 @@ impl FullAutoPanel {
             .map(|workspace| {
                 let project = workspace.read(cx).project().clone();
                 let project_id = project.entity_id().as_u64();
-                let worktree_id = project.read(cx).worktrees(cx).next().map(|wt| wt.read(cx).id());
+                let worktree_id = project
+                    .read(cx)
+                    .worktrees(cx)
+                    .next()
+                    .map(|wt| wt.read(cx).id());
                 (
                     format!("project.{project_id}"),
                     worktree_id
@@ -336,8 +323,7 @@ impl FullAutoPanel {
             .unwrap_or_else(|| ("project.missing".into(), "worktree.missing".into()));
         if project_ref.ends_with("missing") || worktree_ref.ends_with("missing") {
             self.draft.submitting = false;
-            self.draft.error =
-                Some("Open a project worktree before starting Full Auto.".into());
+            self.draft.error = Some("Open a project worktree before starting Full Auto.".into());
             cx.notify();
             return;
         }
@@ -354,7 +340,7 @@ impl FullAutoPanel {
         cx.notify();
         cx.spawn(async move |this, cx| {
             let started = {
-                let mut guard = supervisor.inner.lock().await;
+                let mut guard = supervisor.lock().await;
                 guard.start_run(params).await
             };
             this.update(cx, |this, cx| {
@@ -388,7 +374,7 @@ impl FullAutoPanel {
         };
         cx.spawn(async move |this, cx| {
             let result = {
-                let mut guard = supervisor.inner.lock().await;
+                let mut guard = supervisor.lock().await;
                 match method {
                     "pause" => guard.pause_run(&run_ref).await,
                     "resume" => guard.resume_run(&run_ref).await,
@@ -526,38 +512,6 @@ fn parse_capacity_lanes(value: Value) -> Vec<CapacityLane> {
         .unwrap_or_default()
 }
 
-fn effectd_command() -> OmegaEffectdCommand {
-    if let Ok(bin) = std::env::var("OPENAGENTS_OMEGA_EFFECTD_BIN") {
-        return OmegaEffectdCommand {
-            program: PathBuf::from(bin),
-            args: Vec::new(),
-        };
-    }
-    let candidates = [
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../../openagents/packages/omega-effectd/src/bin/omega-effectd.ts"),
-        PathBuf::from(
-            "/Users/christopherdavid/work/openagents/packages/omega-effectd/src/bin/omega-effectd.ts",
-        ),
-    ];
-    for candidate in candidates {
-        if candidate.exists() {
-            return OmegaEffectdCommand {
-                program: PathBuf::from("node"),
-                args: vec![
-                    "--import".into(),
-                    "tsx".into(),
-                    candidate.display().to_string(),
-                ],
-            };
-        }
-    }
-    fixture_command(
-        &PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../omega_effectd/fixtures/fake_effectd.mjs"),
-    )
-}
-
 impl EventEmitter<PanelEvent> for FullAutoPanel {}
 
 impl Focusable for FullAutoPanel {
@@ -570,7 +524,9 @@ impl Render for FullAutoPanel {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let can_start = {
             self.sync_draft_from_editors(cx);
-            validate_launcher_draft(&self.draft).ok && !self.draft.submitting
+            validate_launcher_draft(&self.draft).ok
+                && !self.draft.submitting
+                && self.supervisor.is_some()
         };
         let active_count = self
             .runs

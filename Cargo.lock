@@ -12535,7 +12535,9 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "futures 0.3.32",
+ "gpui",
  "libc",
+ "paths",
  "serde",
  "serde_json",
  "smol",
@@ -23628,6 +23630,7 @@ dependencies = [
  "miniprofiler_ui",
  "node_runtime",
  "notifications",
+ "omega_effectd",
  "onboarding",
  "outline",
  "outline_panel",

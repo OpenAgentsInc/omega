@@ -15,6 +15,9 @@ pub enum ProtocolErrorCode {
     InvalidRequest,
     NotRunning,
     RunNotFound,
+    HostUnavailable,
+    HostTimeout,
+    FrameTooLarge,
     Internal,
 }
 
@@ -46,6 +49,94 @@ pub struct ResponseFrame {
     pub result: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<ProtocolError>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum HostMethod {
+    ResolveWorkspace,
+    CreateThread,
+    LaneReadiness,
+    DispatchTurn,
+    RefreshEvidence,
+    InterruptTurn,
+    AppendSystemNote,
+    #[serde(other)]
+    Unsupported,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HostRequestFrame {
+    pub schema: String,
+    pub kind: String,
+    pub id: String,
+    pub generation: u64,
+    pub method: HostMethod,
+    pub params: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum HostResponseErrorCode {
+    StaleGeneration,
+    InvalidRequest,
+    Unsupported,
+    Unavailable,
+    Internal,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HostResponseError {
+    pub code: HostResponseErrorCode,
+    pub message: String,
+}
+
+impl HostResponseError {
+    pub fn unavailable(message: impl Into<String>) -> Self {
+        Self {
+            code: HostResponseErrorCode::Unavailable,
+            message: message.into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HostResponseFrame {
+    pub schema: String,
+    pub kind: String,
+    pub id: String,
+    pub generation: u64,
+    pub ok: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<HostResponseError>,
+}
+
+impl HostResponseFrame {
+    pub fn success(request: &HostRequestFrame, result: Value) -> Self {
+        Self {
+            schema: PROTOCOL_SCHEMA.to_string(),
+            kind: "host_response".to_string(),
+            id: request.id.clone(),
+            generation: request.generation,
+            ok: true,
+            result: Some(result),
+            error: None,
+        }
+    }
+
+    pub fn failure(request: &HostRequestFrame, error: HostResponseError) -> Self {
+        Self {
+            schema: PROTOCOL_SCHEMA.to_string(),
+            kind: "host_response".to_string(),
+            id: request.id.clone(),
+            generation: request.generation,
+            ok: false,
+            result: None,
+            error: Some(error),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -81,7 +172,12 @@ pub struct HealthResult {
     pub active_run_count: u32,
 }
 
-pub fn request_frame(id: impl Into<String>, generation: u64, method: impl Into<String>, params: Option<Value>) -> RequestFrame {
+pub fn request_frame(
+    id: impl Into<String>,
+    generation: u64,
+    method: impl Into<String>,
+    params: Option<Value>,
+) -> RequestFrame {
     RequestFrame {
         schema: PROTOCOL_SCHEMA.to_string(),
         kind: "request".to_string(),

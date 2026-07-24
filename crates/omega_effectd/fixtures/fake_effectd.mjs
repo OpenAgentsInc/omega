@@ -8,6 +8,11 @@ import { mkdirSync, readFileSync, writeFileSync, existsSync } from "node:fs"
 import path from "node:path"
 
 const schema = "openagents.omega.effectd.v1"
+const oversizedHealthResponse = process.argv.includes("--oversized-health-response")
+const hostRequestHealth = process.argv.includes("--host-request-health")
+const unavailableHostRequestHealth = process.argv.includes("--unavailable-host-request-health")
+const staleHostRequestHealth = process.argv.includes("--stale-host-request-health")
+const staleHealthResponse = process.argv.includes("--stale-health-response")
 const dataRoot = process.env.OPENAGENTS_OMEGA_EFFECTD_DATA_ROOT
 if (!dataRoot) {
   console.error("OPENAGENTS_OMEGA_EFFECTD_DATA_ROOT is required")
@@ -22,6 +27,7 @@ mkdirSync(path.join(dataRoot, "agent-computer"), { recursive: true, mode: 0o700 
 
 let generation = 0
 let running = false
+let pendingHostHealth = null
 
 const respond = (id, gen, ok, result, error) => {
   process.stdout.write(
@@ -135,6 +141,16 @@ const listRuns = () =>
     updatedAt: run.updatedAt,
   }))
 
+const healthResult = () => ({
+  ok: true,
+  status: running ? "running" : "stopped",
+  generation,
+  dataRoot,
+  activeRunCount: listRuns().filter((run) =>
+    ["running", "pausing", "paused", "retrying", "stalled"].includes(run.state),
+  ).length,
+})
+
 const detail = (run) => {
   const binding = loadBindings().find((row) => row.runRef === run.runRef) ?? null
   return {
@@ -188,6 +204,26 @@ for await (const line of rl) {
     })
     continue
   }
+  if (request.kind === "host_response" && pendingHostHealth !== null) {
+    const pending = pendingHostHealth
+    pendingHostHealth = null
+    const expectedError = pending.mode === "stale" ? "stale_generation" : "unavailable"
+    const accepted =
+      request.id === pending.hostId &&
+      request.generation === pending.hostGeneration &&
+      (pending.mode === "success"
+        ? request.ok === true && request.result?.workspaceRef === "workspace.omega.supervised"
+        : request.ok === false && request.error?.code === expectedError)
+    if (!accepted) {
+      respond(pending.request.id, generation, false, undefined, {
+        code: "invalid_request",
+        message: "Host response did not match the fixture contract.",
+      })
+      continue
+    }
+    respond(pending.request.id, generation, true, healthResult())
+    continue
+  }
   if (request.method === "initialize") {
     generation = request.params?.generation ?? 1
     running = true
@@ -233,15 +269,34 @@ for await (const line of rl) {
     continue
   }
   if (request.method === "health") {
-    respond(request.id, generation, true, {
-      ok: true,
-      status: running ? "running" : "stopped",
-      generation,
-      dataRoot,
-      activeRunCount: listRuns().filter((run) =>
-        ["running", "pausing", "paused", "retrying", "stalled"].includes(run.state),
-      ).length,
-    })
+    if (oversizedHealthResponse) {
+      respond(request.id, generation, true, {
+        padding: "x".repeat(64 * 1024),
+      })
+      continue
+    }
+    if (hostRequestHealth || unavailableHostRequestHealth || staleHostRequestHealth) {
+      const mode = staleHostRequestHealth
+        ? "stale"
+        : unavailableHostRequestHealth
+          ? "unavailable"
+          : "success"
+      const hostGeneration = mode === "stale" ? generation - 1 : generation
+      const hostId = `host.${hostGeneration}.fixture`
+      pendingHostHealth = { request, hostId, hostGeneration, mode }
+      process.stdout.write(
+        `${JSON.stringify({
+          schema,
+          kind: "host_request",
+          id: hostId,
+          generation: hostGeneration,
+          method: "resolve_workspace",
+          params: { expectedWorkspaceRef: "workspace.omega.supervised" },
+        })}\n`,
+      )
+      continue
+    }
+    respond(request.id, staleHealthResponse ? generation - 1 : generation, true, healthResult())
     continue
   }
   if (request.method === "list_runs") {

@@ -9,3 +9,8 @@ Open the Agent menu and choose **Agent Computer**, or dispatch
 `agent_computer::OpenPanel`. Enter a public-safe objective and start one cloud
 turn. Progress and terminal outcome render in the panel. Credentials stay in
 the process environment.
+
+The panel uses the same application-scoped `omega-effectd` supervisor as Full
+Auto. If the packaged service component is absent, Start is disabled and the
+panel reports an honest unavailable state. Test fixtures are never selected by
+the production surface.

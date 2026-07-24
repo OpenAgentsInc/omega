@@ -26,6 +26,22 @@ GPUI is not run authority.
 
 - Rust owns process life, health, restart, and generation fencing.
 - Node owns registries, leases, reconcile, and run-actions mutation.
+- One application-scoped supervisor is shared by Full Auto and Agent Computer.
+- Production resolves only the component installed at
+  `Contents/Resources/omega-effectd/bin/omega-effectd`. An explicit
+  `OPENAGENTS_OMEGA_EFFECTD_BIN` override is available for controlled
+  development runs.
+- A missing component fails closed. Production never searches a sibling
+  OpenAgents checkout and never substitutes the test fixture.
+- Request, response, and reverse-host frames are limited to 64 KiB. A
+  malformed, oversized, timed-out, or prematurely closed response tears down
+  the child before a later request may restart it.
+- While awaiting a service response, the supervisor multiplexes typed
+  `host_request` frames and emits ID- and generation-matched `host_response`
+  frames. Unknown methods, stale generations, missing authorities, authority
+  timeouts, and oversized host results fail closed.
+- Reverse host handlers have a 30-second deadline. The outer request budget is
+  180 seconds because one Full Auto operation can chain several reverse calls.
 - Restart re-reads `{dataRoot}/full-auto/` from disk.
 - Diagnostics are redacted. Objective and transcript stay out of list
   projections.
@@ -34,6 +50,19 @@ GPUI is not run authority.
 ## Verification
 
 - `cargo test -p omega_effectd`
+- `./script/check-licenses`
+
+The Omega RC packager still needs to install the pinned service and fixed
+Node runtime at the component path above. Until then the panels report the
+component as unavailable rather than presenting fixture behavior.
+
+The multiplexing seam is ready for real host adapters, but none are registered
+yet. `resolve_workspace`, `create_thread`, `lane_readiness`, `dispatch_turn`,
+`refresh_evidence`, `interrupt_turn`, and `append_system_note` therefore return
+typed `unavailable` responses. Follow-up work must route those methods through
+the active Workspace, ThreadStore, provider lane admission, live turn,
+evidence, interruption, and owner-visible system-note authorities before Full
+Auto can admit a real run.
 
 ## Next packets
 
