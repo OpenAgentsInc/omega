@@ -224,6 +224,42 @@ Do not close issue #16 until `status` is `complete`.
 11. Remove Omega and confirm Zed data did not change.
 12. Record owner observation and independent verification in the proof record.
 
+## Installed secret-tripwire scan
+
+Issue #8 requires the exact disposable test secret to be absent from installed
+runtime surfaces. Use a disposable identity in an isolated macOS test user;
+never use or extract the owner's real identity secret. Put the canary in a
+mode-0600 file, pass it through a protected file descriptor, and capture the
+clipboard and accessibility tree into private temporary files before scanning.
+
+The scanner never prints the canary or a matching path. Its JSON contains only
+per-surface state, counts, and evidence digests. A match exits 1; an unreadable
+surface or invalid invocation exits 2.
+
+```sh
+OMEGA_PROOF_USER_ROOT="/Users/omega-rc-proof"
+OMEGA_PRIVATE_PROOF_DIR="$(mktemp -d)"
+chmod 700 "$OMEGA_PRIVATE_PROOF_DIR"
+
+script/scan-omega-secret-tripwires \
+  --needle-fd 3 \
+  --surface "logs=$OMEGA_PROOF_USER_ROOT/Library/Logs/omega-rc" \
+  --surface "data=$OMEGA_PROOF_USER_ROOT/Library/Application Support/Omega RC" \
+  --surface "cache=$OMEGA_PROOF_USER_ROOT/Library/Caches/omega-rc" \
+  --surface "state=$OMEGA_PROOF_USER_ROOT/.local/state/omega-rc" \
+  --surface "config=$OMEGA_PROOF_USER_ROOT/.config/omega-rc" \
+  --surface "accessibility=$OMEGA_PRIVATE_PROOF_DIR/accessibility.json" \
+  --surface "clipboard=$OMEGA_PRIVATE_PROOF_DIR/clipboard.bin" \
+  --surface "diagnostics=$OMEGA_PRIVATE_PROOF_DIR/diagnostics" \
+  --surface "crashes=$OMEGA_PROOF_USER_ROOT/Library/Logs/DiagnosticReports" \
+  --output "$OMEGA_PRIVATE_PROOF_DIR/installed-secret-tripwires.json" \
+  3<"$OMEGA_PRIVATE_PROOF_DIR/disposable-canary"
+```
+
+An absent optional crash or diagnostics surface is recorded as `absent`, not
+silently treated as scanned. The independent reviewer must decide whether each
+absence is expected for the exercised journey before admitting the attestation.
+
 ## Pass rule
 
 All acceptance criteria in issue #16 must be true for the exact candidate.
