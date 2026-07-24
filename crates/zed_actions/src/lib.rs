@@ -79,12 +79,20 @@ actions!(
         OpenTelemetryLog,
         /// Opens the performance profiler.
         OpenPerformanceProfiler,
-        /// Opens the onboarding view.
-        OpenOnboarding,
-        /// Opens Editor Onboarding.
-        OpenEditorOnboarding,
         /// Shows the auto-update notification for testing.
         ShowUpdateNotification,
+    ]
+);
+
+actions!(
+    omega,
+    [
+        /// Opens the onboarding view.
+        #[action(deprecated_aliases = ["zed::OpenOnboarding"])]
+        OpenOnboarding,
+        /// Opens Editor Onboarding.
+        #[action(deprecated_aliases = ["zed::OpenEditorOnboarding"])]
+        OpenEditorOnboarding,
     ]
 );
 
@@ -990,4 +998,16 @@ pub mod git_panel {
             ToggleFocus,
         ]
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{OpenEditorOnboarding, OpenOnboarding};
+    use gpui::Action;
+
+    #[test]
+    fn onboarding_actions_use_omega_product_namespace() {
+        assert_eq!(OpenOnboarding.name(), "omega::OpenOnboarding");
+        assert_eq!(OpenEditorOnboarding.name(), "omega::OpenEditorOnboarding");
+    }
 }
