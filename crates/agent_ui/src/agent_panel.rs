@@ -32,6 +32,8 @@ use zed_actions::{
         FocusAgent, ManageSkills, OpenGlobalAgentsMdRules, OpenProjectAgentsMdRules, Toggle,
         ToggleFocus,
     },
+    full_auto_panel::OpenLauncher,
+    agent_computer::OpenPanel as OpenAgentComputerPanel,
 };
 
 use crate::ExpandMessageEditor;
@@ -5837,6 +5839,29 @@ impl AgentPanel {
                                                 }
                                             });
                                         }
+                                    }
+                                }),
+                        )
+                        .item(
+                            ContextMenuEntry::new("Full Auto")
+                                .icon(IconName::ZedAgent)
+                                .icon_color(Color::Accent)
+                                .handler({
+                                    move |window, cx| {
+                                        window.dispatch_action(Box::new(OpenLauncher), cx);
+                                    }
+                                }),
+                        )
+                        .item(
+                            ContextMenuEntry::new("Agent Computer")
+                                .icon(IconName::ZedAgent)
+                                .icon_color(Color::Accent)
+                                .handler({
+                                    move |window, cx| {
+                                        window.dispatch_action(
+                                            Box::new(OpenAgentComputerPanel),
+                                            cx,
+                                        );
                                     }
                                 }),
                         )

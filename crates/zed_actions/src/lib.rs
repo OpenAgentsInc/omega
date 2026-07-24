@@ -806,6 +806,32 @@ pub mod debug_panel {
     );
 }
 
+pub mod full_auto_panel {
+    use gpui::actions;
+    actions!(
+        full_auto_panel,
+        [
+            /// Toggles focus on the Full Auto panel.
+            ToggleFocus,
+            /// Opens the Full Auto launcher (never a composer toggle).
+            OpenLauncher
+        ]
+    );
+}
+
+pub mod agent_computer {
+    use gpui::actions;
+    actions!(
+        agent_computer,
+        [
+            /// Opens the Agent Computer panel.
+            OpenPanel,
+            /// Starts one Agent Computer cloud turn from the panel.
+            StartTurn
+        ]
+    );
+}
+
 actions!(
     debugger,
     [
