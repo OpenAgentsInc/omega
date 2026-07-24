@@ -593,6 +593,7 @@ fn main() {
         omega_effectd::init_with_host_handler(Some(agent_ui::omega_effectd_host_handler(cx)), cx);
         full_auto_ui::init(cx);
         agent_computer_ui::init(cx);
+        workroom_ui::init(cx);
         debugger_tools::init(cx);
         client::init(&client, cx);
         feature_flags::FeatureFlagStore::init(cx);

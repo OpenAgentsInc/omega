@@ -34,6 +34,7 @@ use zed_actions::{
     },
     full_auto_panel::OpenLauncher,
     agent_computer::OpenPanel as OpenAgentComputerPanel,
+    workroom::OpenPanel as OpenSarahWorkroomPanel,
 };
 
 use crate::ExpandMessageEditor;
@@ -5856,6 +5857,19 @@ impl AgentPanel {
                                     move |window, cx| {
                                         window.dispatch_action(
                                             Box::new(OpenAgentComputerPanel),
+                                            cx,
+                                        );
+                                    }
+                                }),
+                        )
+                        .item(
+                            ContextMenuEntry::new("Sarah")
+                                .icon(IconName::ZedAgent)
+                                .icon_color(Color::Accent)
+                                .handler({
+                                    move |window, cx| {
+                                        window.dispatch_action(
+                                            Box::new(OpenSarahWorkroomPanel),
                                             cx,
                                         );
                                     }

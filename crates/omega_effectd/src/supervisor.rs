@@ -406,19 +406,19 @@ impl OmegaEffectdSupervisor {
             .await
     }
 
-    /// SARAH-NR-06: public-safe session projection (never returns tokens).
+    /// SARAH-NR-06 / OMEGA-SW-03: public-safe session projection (never returns tokens).
     pub async fn sarah_session_status(&mut self) -> Result<Value, SupervisorError> {
         self.request("sarah_session_status", None, self.generation())
             .await
     }
 
-    /// SARAH-NR-06: principal projection and conversation reference.
+    /// SARAH-NR-06 / OMEGA-SW-03: principal projection and conversation reference.
     pub async fn sarah_bootstrap(&mut self) -> Result<Value, SupervisorError> {
         self.request("sarah_bootstrap", None, self.generation())
             .await
     }
 
-    /// SARAH-NR-06: bounded transcript/activity page with cursors and gap state.
+    /// SARAH-NR-06 / OMEGA-SW-03: bounded transcript/activity page with cursors and gap state.
     pub async fn sarah_room_snapshot(
         &mut self,
         params: Option<Value>,
@@ -437,7 +437,7 @@ impl OmegaEffectdSupervisor {
         .await
     }
 
-    /// SARAH-NR-06: publish a cancel_turn control intent (pending until settled).
+    /// SARAH-NR-06 / OMEGA-SW-03: publish a cancel_turn control intent (pending until settled).
     pub async fn sarah_interrupt_turn(
         &mut self,
         turn_ref: &str,

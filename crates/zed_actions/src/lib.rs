@@ -854,6 +854,21 @@ pub mod agent_computer {
     );
 }
 
+pub mod workroom {
+    use gpui::actions;
+    actions!(
+        workroom,
+        [
+            /// Opens the Sarah workroom panel.
+            OpenPanel,
+            /// Focuses the Sarah workroom composer.
+            FocusComposer,
+            /// Sends a typed interrupt intent for the active Sarah turn.
+            InterruptTurn
+        ]
+    );
+}
+
 actions!(
     debugger,
     [
