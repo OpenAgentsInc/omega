@@ -10,3 +10,8 @@ workspace = true
 
 [lib]
 path = "src/app_identity.rs"
+
+[dev-dependencies]
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+sha2.workspace = true

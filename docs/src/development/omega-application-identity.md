@@ -111,3 +111,16 @@ override, plaintext `identity.key` fallback, renderer-visible `get_nsec`
 command, durable use of ephemeral recovery keys, or Spark/wallet profile
 fields. `atomic-write-file` is restricted to public manifests and completion
 records.
+
+## Application icon family
+
+Package icons are derived from the pinned OpenAgents Desktop icon under
+`crates/zed/resources/icon_family/`. Regenerate with
+`script/generate-omega-icon-family`.
+
+Channel badges are deferred. Stable, RC, Nightly, and Dev currently reuse the
+same unbadged OpenAgents icon until OpenAgents approves distinct channel
+artwork.
+
+Digest and dimension checks live in the `app_identity` icon-family tests and
+`crates/zed/resources/icon_family/manifest.json`.

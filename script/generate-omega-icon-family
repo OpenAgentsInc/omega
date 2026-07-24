@@ -1,0 +1,137 @@
+#!/usr/bin/env bash
+# Regenerate Omega package icons from the pinned OpenAgents Desktop sources.
+#
+# Channel badges are deferred: every release channel reuses the unbadged icon
+# until OpenAgents approves distinct channel artwork.
+set -euo pipefail
+
+root="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$root"
+
+python3 - <<'PY'
+from __future__ import annotations
+
+import hashlib
+import json
+import shutil
+from pathlib import Path
+
+from PIL import Image
+
+ROOT = Path("crates/zed/resources")
+SOURCE_PNG = ROOT / "icon_family/source/openagents-icon.png"
+SOURCE_ICNS = ROOT / "icon_family/source/openagents-icon.icns"
+MANIFEST_PATH = ROOT / "icon_family/manifest.json"
+
+PINNED_PNG_SHA256 = "4dc74a8507669f77118a82791a8bf6e85773e1d31a4b16816b46bc2066e452d8"
+PINNED_ICNS_SHA256 = "779a545acbf626c7e319d0dacf106e2e69eb0caf2d506dabe14c343a1925563f"
+PNG_SOURCE_COMMIT = "b9f41580fb2a1d536a67d970e08dec9125612931"
+ICNS_SOURCE_COMMIT = "e3600a5c326fa1e33e5be9d13363ff902ea57f4d"
+
+
+def sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def write_png(path: Path, image: Image.Image) -> dict:
+    image.save(path, format="PNG")
+    width, height = image.size
+    return {
+        "sha256": sha256(path),
+        "pixels": [width, height],
+        "format": "png",
+        "derived_from": "icon_family/source/openagents-icon.png",
+    }
+
+
+png_digest = sha256(SOURCE_PNG)
+icns_digest = sha256(SOURCE_ICNS)
+if png_digest != PINNED_PNG_SHA256:
+    raise SystemExit(f"pinned PNG digest mismatch: {png_digest}")
+if icns_digest != PINNED_ICNS_SHA256:
+    raise SystemExit(f"pinned ICNS digest mismatch: {icns_digest}")
+
+source = Image.open(SOURCE_PNG).convert("RGBA")
+if source.size != (1024, 1024):
+    raise SystemExit(f"pinned PNG must be 1024x1024, got {source.size}")
+
+png_512 = source.resize((512, 512), Image.Resampling.LANCZOS)
+png_1024 = source.copy()
+
+png_outputs = {
+    "app-icon.png": png_512,
+    "app-icon@2x.png": png_1024,
+    "app-icon-dev.png": png_512,
+    "app-icon-dev@2x.png": png_1024,
+    "app-icon-nightly.png": png_512,
+    "app-icon-nightly@2x.png": png_1024,
+    "app-icon-preview.png": png_512,
+    "app-icon-preview@2x.png": png_1024,
+}
+
+manifest = {
+    "channel_badges": "deferred",
+    "channel_badges_note": (
+        "All four channels reuse the unbadged OpenAgents Desktop icon until "
+        "OpenAgents approves channel badges."
+    ),
+    "pinned_source": {
+        "png_path": "icon_family/source/openagents-icon.png",
+        "png_sha256": png_digest,
+        "png_source_commit": PNG_SOURCE_COMMIT,
+        "png_pixels": [1024, 1024],
+        "icns_path": "icon_family/source/openagents-icon.icns",
+        "icns_sha256": icns_digest,
+        "icns_source_commit": ICNS_SOURCE_COMMIT,
+        "upstream_png": "apps/openagents-desktop/resources/openagents-icon.png",
+        "upstream_icns": "apps/openagents-desktop/resources/openagents-icon.icns",
+    },
+    "outputs": {},
+}
+
+for name, image in png_outputs.items():
+    path = ROOT / name
+    manifest["outputs"][name] = write_png(path, image)
+    print(f"wrote {path}")
+
+document_icns = ROOT / "Document.icns"
+shutil.copyfile(SOURCE_ICNS, document_icns)
+manifest["outputs"]["Document.icns"] = {
+    "sha256": sha256(document_icns),
+    "format": "icns",
+    "derived_from": "icon_family/source/openagents-icon.icns",
+    "note": (
+        "Document associations reuse the OpenAgents app icon until a distinct "
+        "document glyph is designed."
+    ),
+}
+print(f"wrote {document_icns}")
+
+ico_sizes = [16, 32, 48, 256]
+ico_images = [source.resize((size, size), Image.Resampling.LANCZOS) for size in ico_sizes]
+windows = ROOT / "windows"
+for name in (
+    "app-icon.ico",
+    "app-icon-dev.ico",
+    "app-icon-nightly.ico",
+    "app-icon-preview.ico",
+):
+    path = windows / name
+    largest = ico_images[-1]
+    largest.save(
+        path,
+        format="ICO",
+        sizes=[(size, size) for size in ico_sizes],
+        append_images=ico_images[:-1],
+    )
+    manifest["outputs"][f"windows/{name}"] = {
+        "sha256": sha256(path),
+        "format": "ico",
+        "sizes": ico_sizes,
+        "derived_from": "icon_family/source/openagents-icon.png",
+    }
+    print(f"wrote {path}")
+
+MANIFEST_PATH.write_text(json.dumps(manifest, indent=2) + "\n")
+print(f"wrote {MANIFEST_PATH}")
+PY

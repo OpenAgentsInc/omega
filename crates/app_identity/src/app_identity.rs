@@ -85,6 +85,9 @@ impl FromStr for AppChannel {
 pub struct InvalidAppChannel;
 
 #[cfg(test)]
+mod icon_family;
+
+#[cfg(test)]
 mod tests {
     use std::collections::HashSet;
 
