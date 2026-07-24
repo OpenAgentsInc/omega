@@ -819,6 +819,19 @@ pub mod full_auto_panel {
     );
 }
 
+pub mod agent_computer {
+    use gpui::actions;
+    actions!(
+        agent_computer,
+        [
+            /// Opens the Agent Computer panel.
+            OpenPanel,
+            /// Starts one Agent Computer cloud turn from the panel.
+            StartTurn
+        ]
+    );
+}
+
 actions!(
     debugger,
     [

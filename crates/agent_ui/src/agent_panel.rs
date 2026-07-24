@@ -33,6 +33,7 @@ use zed_actions::{
         ToggleFocus,
     },
     full_auto_panel::OpenLauncher,
+    agent_computer::OpenPanel as OpenAgentComputerPanel,
 };
 
 use crate::ExpandMessageEditor;
@@ -5848,6 +5849,19 @@ impl AgentPanel {
                                 .handler({
                                     move |window, cx| {
                                         window.dispatch_action(Box::new(OpenLauncher), cx);
+                                    }
+                                }),
+                        )
+                        .item(
+                            ContextMenuEntry::new("Agent Computer")
+                                .icon(IconName::ZedAgent)
+                                .icon_color(Color::Accent)
+                                .handler({
+                                    move |window, cx| {
+                                        window.dispatch_action(
+                                            Box::new(OpenAgentComputerPanel),
+                                            cx,
+                                        );
                                     }
                                 }),
                         )

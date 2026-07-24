@@ -101,6 +101,7 @@ debug_adapter_extension.workspace = true
 debugger_tools.workspace = true
 debugger_ui.workspace = true
 full_auto_ui.workspace = true
+agent_computer_ui.workspace = true
 dev_container.workspace = true
 diagnostics.workspace = true
 editor.workspace = true

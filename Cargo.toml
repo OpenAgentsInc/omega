@@ -148,6 +148,7 @@ members = [
     "crates/omega_identity",
     "crates/omega_effectd",
     "crates/full_auto_ui",
+    "crates/agent_computer_ui",
     "crates/onboarding",
     "crates/opencode",
     "crates/open_ai",
@@ -417,6 +418,7 @@ ollama = { path = "crates/ollama" }
 omega_identity = { path = "crates/omega_identity" }
 omega_effectd = { path = "crates/omega_effectd" }
 full_auto_ui = { path = "crates/full_auto_ui" }
+agent_computer_ui = { path = "crates/agent_computer_ui" }
 onboarding = { path = "crates/onboarding" }
 opencode = { path = "crates/opencode" }
 open_ai = { path = "crates/open_ai" }
