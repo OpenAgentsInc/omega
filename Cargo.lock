@@ -23062,6 +23062,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "workroom_receipts"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "workroom_ui"
 version = "0.1.0"
 dependencies = [
