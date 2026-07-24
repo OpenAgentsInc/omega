@@ -16,6 +16,7 @@ default = []
 
 [dependencies]
 anyhow.workspace = true
+app_identity.workspace = true
 client.workspace = true
 cloud_api_types.workspace = true
 collections.workspace = true
@@ -27,20 +28,29 @@ fuzzy.workspace = true
 gpui.workspace = true
 menu.workspace = true
 notifications.workspace = true
+omega_identity.workspace = true
+paths.workspace = true
 picker.workspace = true
 project.workspace = true
 schemars.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 settings.workspace = true
 telemetry.workspace = true
 theme.workspace = true
 theme_settings.workspace = true
+thiserror.workspace = true
 ui.workspace = true
+ui_input.workspace = true
+unicode-segmentation.workspace = true
 util.workspace = true
+uuid.workspace = true
 vim_mode_setting.workspace = true
 workspace.workspace = true
 zed_actions.workspace = true
 zlog.workspace = true
+zeroize.workspace = true
 
 [dev-dependencies]
 db = {workspace = true, features = ["test-support"]}
+gpui = { workspace = true, features = ["test-support"] }

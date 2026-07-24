@@ -21,7 +21,7 @@ use vim_mode_setting::VimModeSetting;
 
 use crate::{
     ImportCursorSettings, ImportVsCodeSettings, SettingsImportState,
-    identity_section::{IdentityFixtureState, render_identity_section},
+    identity_section::{IdentitySection, render_identity_section},
     theme_preview::{ThemePreviewStyle, ThemePreviewTile},
 };
 
@@ -634,7 +634,7 @@ fn render_ai_section(cx: &mut App) -> impl IntoElement {
 
 pub(crate) fn render_basics_page(
     _user_store: &Entity<UserStore>,
-    identity_state: IdentityFixtureState,
+    identity_section: &Entity<IdentitySection>,
     cx: &mut App,
 ) -> impl IntoElement {
     let mut tab_index = 0;
@@ -642,7 +642,7 @@ pub(crate) fn render_basics_page(
     v_flex()
         .id("basics-page")
         .gap_6()
-        .child(render_identity_section(&mut tab_index, identity_state))
+        .child(render_identity_section(&mut tab_index, identity_section))
         .child(render_theme_section(&mut tab_index, cx))
         .child(render_base_keymap_section(&mut tab_index, cx))
         .child(render_ai_section(cx))

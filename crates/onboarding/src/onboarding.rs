@@ -32,8 +32,11 @@ use zed_actions::OpenOnboarding;
 
 mod base_keymap_picker;
 mod basics_page;
+mod identity_controller;
+mod identity_profile;
 mod identity_section;
 pub mod multibuffer_hint;
+mod secure_input;
 mod theme_preview;
 
 /// Imports settings from Visual Studio Code.
@@ -90,7 +93,7 @@ pub fn init(cx: &mut App) {
                     if let Some(existing) = existing {
                         workspace.activate_item(&existing, true, true, window, cx);
                     } else {
-                        let settings_page = Onboarding::new(workspace, cx);
+                        let settings_page = Onboarding::new(workspace, window, cx);
                         workspace.add_item_to_active_pane(
                             Box::new(settings_page),
                             None,
@@ -190,7 +193,7 @@ pub fn show_onboarding_view(app_state: Arc<AppState>, cx: &mut App) -> Task<anyh
         |workspace, window, cx| {
             {
                 workspace.toggle_dock(DockPosition::Left, window, cx);
-                let onboarding_page = Onboarding::new(workspace, cx);
+                let onboarding_page = Onboarding::new(workspace, window, cx);
                 workspace.add_item_to_center(Box::new(onboarding_page.clone()), window, cx);
 
                 window.focus(&onboarding_page.focus_handle(cx), cx);
@@ -211,12 +214,13 @@ struct Onboarding {
     focus_handle: FocusHandle,
     user_store: Entity<UserStore>,
     scroll_handle: ScrollHandle,
-    identity_state: identity_section::IdentityFixtureState,
+    identity_section: Entity<identity_section::IdentitySection>,
     _settings_subscription: Subscription,
+    _identity_subscription: Subscription,
 }
 
 impl Onboarding {
-    fn new(workspace: &Workspace, cx: &mut App) -> Entity<Self> {
+    fn new(workspace: &Workspace, window: &mut Window, cx: &mut App) -> Entity<Self> {
         let font_family_cache = theme::FontFamilyCache::global(cx);
 
         let installed_agents = cx
@@ -255,6 +259,7 @@ impl Onboarding {
             agents_installed = agents_installed,
         );
 
+        let identity_section = identity_section::IdentitySection::new(0, window, cx);
         cx.new(|cx| {
             cx.spawn(async move |this, cx| {
                 font_family_cache.prefetch(cx).await;
@@ -268,15 +273,20 @@ impl Onboarding {
                 workspace: workspace.weak_handle(),
                 focus_handle: cx.focus_handle(),
                 scroll_handle: ScrollHandle::new(),
-                identity_state: identity_section::fixture_state_for_current_build(),
+                identity_section: identity_section.clone(),
                 user_store: workspace.user_store().clone(),
                 _settings_subscription: cx
                     .observe_global::<SettingsStore>(move |_, cx| cx.notify()),
+                _identity_subscription: cx.observe(&identity_section, |_, _, cx| cx.notify()),
             }
         })
     }
 
-    fn on_finish(_: &Finish, _: &mut Window, cx: &mut App) {
+    fn on_finish(&mut self, _: &Finish, _: &mut Window, cx: &mut Context<Self>) {
+        if !self.identity_section.read(cx).is_ready() {
+            cx.notify();
+            return;
+        }
         telemetry::event!("Finish Setup");
         go_to_welcome_page(cx);
     }
@@ -300,7 +310,7 @@ impl Onboarding {
     }
 
     fn render_page(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        crate::basics_page::render_basics_page(&self.user_store, self.identity_state, cx)
+        crate::basics_page::render_basics_page(&self.user_store, &self.identity_section, cx)
             .into_any_element()
     }
 }
@@ -318,7 +328,7 @@ impl Render for Onboarding {
             .track_focus(&self.focus_handle)
             .size_full()
             .bg(cx.theme().colors().editor_background)
-            .on_action(Self::on_finish)
+            .on_action(cx.listener(Self::on_finish))
             .on_action(cx.listener(Self::handle_sign_in))
             .on_action(Self::handle_open_account)
             .on_action(cx.listener(|_, _: &menu::SelectNext, window, cx| {
@@ -371,6 +381,7 @@ impl Render for Onboarding {
                                             .style(ButtonStyle::Filled)
                                             .size(ButtonSize::Medium)
                                             .width(rems_from_px(200.))
+                                            .disabled(!self.identity_section.read(cx).is_ready())
                                             .key_binding(KeyBinding::for_action_in(
                                                 &Finish,
                                                 &self.focus_handle,
@@ -413,23 +424,33 @@ impl Item for Onboarding {
     }
 
     fn can_split(&self) -> bool {
-        true
+        false
     }
 
     fn clone_on_split(
         &self,
         _workspace_id: Option<WorkspaceId>,
         _: &mut Window,
-        cx: &mut Context<Self>,
+        _: &mut Context<Self>,
     ) -> Task<Option<Entity<Self>>> {
-        Task::ready(Some(cx.new(|cx| Onboarding {
-            workspace: self.workspace.clone(),
-            user_store: self.user_store.clone(),
-            scroll_handle: ScrollHandle::new(),
-            identity_state: self.identity_state,
-            focus_handle: cx.focus_handle(),
-            _settings_subscription: cx.observe_global::<SettingsStore>(move |_, cx| cx.notify()),
-        })))
+        Task::ready(None)
+    }
+
+    fn deactivated(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.identity_section.update(cx, |section, cx| {
+            section.deactivate_and_reinspect(window, cx)
+        });
+    }
+
+    fn workspace_deactivated(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.identity_section.update(cx, |section, cx| {
+            section.deactivate_and_reinspect(window, cx)
+        });
+    }
+
+    fn on_removed(&self, cx: &mut Context<Self>) {
+        self.identity_section
+            .update(cx, |section, cx| section.clear_transient_state(cx));
     }
 
     fn to_item_events(event: &Self::Event, f: &mut dyn FnMut(workspace::item::ItemEvent)) {
@@ -623,7 +644,9 @@ impl workspace::SerializableItem for Onboarding {
         let db = persistence::OnboardingPagesDb::global(cx);
         window.spawn(cx, async move |cx| {
             if let Some(_) = db.get_onboarding_page(item_id, workspace_id)? {
-                workspace.update(cx, |workspace, cx| Onboarding::new(workspace, cx))
+                workspace.update_in(cx, |workspace, window, cx| {
+                    Onboarding::new(workspace, window, cx)
+                })
             } else {
                 Err(anyhow::anyhow!("No onboarding page to deserialize"))
             }

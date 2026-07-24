@@ -14,6 +14,11 @@ use crate::{CandidateRef, RecoveryCandidate};
 pub(crate) const MAX_RECOVERY_ARTIFACT_BYTES: u64 = 4_096;
 static TEMPORARY_ARTIFACT_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+pub(crate) struct RecoveryArtifactWrite {
+    pub byte_length: u64,
+    pub digest: String,
+}
+
 pub(crate) fn discover(path: PathBuf) -> Result<RecoveryCandidate, RecoveryArtifactError> {
     let metadata = secure_metadata(&path)?;
     let path_hash = hex::encode(Sha256::digest(path.to_string_lossy().as_bytes()));
@@ -68,7 +73,7 @@ pub(crate) fn read_encrypted(
 pub(crate) fn write_encrypted(
     path: &Path,
     encrypted_secret: &EncryptedSecretKey,
-) -> Result<u64, RecoveryArtifactError> {
+) -> Result<RecoveryArtifactWrite, RecoveryArtifactError> {
     match fs::symlink_metadata(path) {
         Ok(_) => return Err(RecoveryArtifactError::DestinationExists),
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
@@ -89,6 +94,7 @@ pub(crate) fn write_encrypted(
         .to_bech32()
         .map_err(|_| RecoveryArtifactError::EncryptionFailed)?;
     let byte_length = encoded.len() as u64 + 1;
+    let digest = hex::encode(Sha256::digest([encoded.as_bytes(), b"\n"].concat()));
     if byte_length > MAX_RECOVERY_ARTIFACT_BYTES {
         return Err(RecoveryArtifactError::ArtifactTooLarge);
     }
@@ -116,7 +122,10 @@ pub(crate) fn write_encrypted(
     }
     fs::remove_file(&temporary_path)?;
     validate_metadata(path, &fs::symlink_metadata(path)?)?;
-    Ok(byte_length)
+    Ok(RecoveryArtifactWrite {
+        byte_length,
+        digest,
+    })
 }
 
 fn create_temporary_artifact(

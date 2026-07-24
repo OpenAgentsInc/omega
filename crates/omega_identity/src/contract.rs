@@ -6,6 +6,8 @@ use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
+use crate::RecoveryProtectionStatus;
+
 pub const BUZZ_SOURCE_COMMIT: &str = "acfbb1bb6af54cb29cb152496ff43b8285dcb8cf";
 pub const IDENTITY_CONTRACT_VERSION: u32 = 1;
 pub const FRESH_PROFILE_ID: &str = "openagents.omega.nostr_only.v1";
@@ -470,6 +472,46 @@ pub struct CustodyResult {
     pub state: CustodyState,
     pub identity: Option<PublicIdentity>,
     pub receipt_ref: Option<ReceiptRef>,
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PendingIdentityOperation {
+    Create,
+    Import,
+    ResolveConflict,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PendingIdentityTransaction {
+    pub operation: PendingIdentityOperation,
+    pub receipt_ref: ReceiptRef,
+    pub expected_identity: Option<PublicIdentity>,
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CustodyConflictReason {
+    AmbiguousSecureStore,
+    PublicManifestCustodyMismatch,
+    PendingTransactionMismatch,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CustodyConflict {
+    pub reason: CustodyConflictReason,
+    pub identities: Vec<PublicIdentity>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IdentityInspection {
+    pub custody: CustodyResult,
+    pub pending_transaction: Option<PendingIdentityTransaction>,
+    pub conflict: Option<CustodyConflict>,
+    pub recovery_protection: RecoveryProtectionStatus,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

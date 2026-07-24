@@ -12,9 +12,10 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
-    AdmittedSigningRequest, CompletionRecord, ContractError, CustodyResult, CustodyState,
-    IdentityManifest, IdentityRef, ImportedSecret, KeyringLocator, PublicIdentity,
-    PublicStoreError, ReceiptRef, SigningResult,
+    AdmittedSigningRequest, CompletionRecord, ContractError, CustodyConflict,
+    CustodyConflictReason, CustodyResult, CustodyState, IdentityInspection, IdentityManifest,
+    IdentityRef, ImportedSecret, KeyringLocator, PendingIdentityOperation,
+    PendingIdentityTransaction, PublicIdentity, PublicStoreError, ReceiptRef, SigningResult,
     mutation_lock::{IdentityMutationGuard, MutationLockError},
     public_store::{
         read_completion_record, read_identity_manifest, read_json_document, remove_public_document,
@@ -22,7 +23,8 @@ use crate::{
     },
     recovery::{
         CandidateKind, CandidateRef, PreparedRecovery, RecoveryArtifactReceipt, RecoveryCandidate,
-        RecoveryPassword, RecoveryResolution, SelectedRecovery, reconcile_prepared,
+        RecoveryPassword, RecoveryProtectionRecord, RecoveryProtectionStatus, RecoveryResolution,
+        SelectedRecovery, reconcile_prepared,
     },
     recovery_artifact::{self, RecoveryArtifactError},
     secret::{SecretKeyMaterial, SecretStore, StoreError, SystemKeyringStore},
@@ -59,6 +61,46 @@ impl IdentityService {
         Ok(self.resolve_locked().result)
     }
 
+    pub fn inspect_details(&self) -> Result<IdentityInspection, CustodyError> {
+        let _mutation_guard = IdentityMutationGuard::acquire(&self.locator)?;
+        self.inspect_details_locked()
+    }
+
+    pub fn inspect_for_process_start(&self) -> Result<IdentityInspection, CustodyError> {
+        let _mutation_guard = IdentityMutationGuard::acquire(&self.locator)?;
+        if let Some(marker) = self.read_reset_marker_locked()?
+            && marker.status == ResetStatus::Complete
+        {
+            self.acknowledge_relaunch_locked(marker)?;
+        }
+        self.inspect_details_locked()
+    }
+
+    fn inspect_details_locked(&self) -> Result<IdentityInspection, CustodyError> {
+        if let Some(custody) = self.resume_reset_if_pending_locked() {
+            return Ok(IdentityInspection {
+                recovery_protection: self.recovery_protection_status_locked(&custody)?,
+                custody,
+                pending_transaction: None,
+                conflict: None,
+            });
+        }
+
+        let resolved = self.resolve_locked();
+        let pending_transaction = self
+            .read_transaction_locked()
+            .ok()
+            .flatten()
+            .map(IdentityTransaction::public_facts);
+        let recovery_protection = self.recovery_protection_status_locked(&resolved.result)?;
+        Ok(IdentityInspection {
+            custody: resolved.result,
+            pending_transaction,
+            conflict: resolved.conflict,
+            recovery_protection,
+        })
+    }
+
     pub fn open(&self, expected_identity: &IdentityRef) -> Result<CustodyResult, CustodyError> {
         let _mutation_guard = IdentityMutationGuard::acquire(&self.locator)?;
         self.require_no_reset_locked()?;
@@ -91,6 +133,27 @@ impl IdentityService {
         {
             Some(secret) => secret,
             None => self.generator.generate(),
+        };
+        self.commit_secret_locked(secret, transaction)
+    }
+
+    pub fn resume_incomplete_create(&self) -> Result<CustodyResult, CustodyError> {
+        let _mutation_guard = IdentityMutationGuard::acquire(&self.locator)?;
+        self.require_no_reset_locked()?;
+        let transaction = self
+            .read_transaction_locked()?
+            .ok_or(CustodyError::CustodyDenied(CustodyState::Absent))?;
+        if transaction.operation != TransactionOperation::Create {
+            return Err(CustodyError::CustodyDenied(CustodyState::Incomplete));
+        }
+        let resolved = self.resolve_locked();
+        if resolved.result.state != CustodyState::Incomplete {
+            return Err(CustodyError::CustodyDenied(resolved.result.state));
+        }
+        let secret = match resolved.secret {
+            Some(secret) => secret,
+            None if transaction.expected_identity.is_none() => self.generator.generate(),
+            None => return Err(CustodyError::TransactionIncomplete),
         };
         self.commit_secret_locked(secret, transaction)
     }
@@ -207,6 +270,85 @@ impl IdentityService {
         self.commit_secret_locked(prepared.secret, transaction)
     }
 
+    pub fn resolve_conflict(
+        &self,
+        selected: SelectedRecovery,
+        receipt_ref: ReceiptRef,
+    ) -> Result<CustodyResult, CustodyError> {
+        let prepared = selected.into_prepared();
+        let _mutation_guard = IdentityMutationGuard::acquire(&self.locator)?;
+        self.require_no_reset_locked()?;
+        if let Some(result) =
+            self.ready_idempotent_result_locked(&receipt_ref, Some(prepared.identity()))?
+        {
+            return Ok(result);
+        }
+
+        let transaction = match self.read_transaction_locked()? {
+            Some(transaction) => {
+                if transaction.operation != TransactionOperation::ResolveConflict
+                    || transaction.receipt_ref != receipt_ref
+                    || transaction.candidate_ref.as_ref() != Some(prepared.candidate_ref())
+                    || transaction.expected_identity.as_ref() != Some(prepared.identity())
+                {
+                    return Err(CustodyError::CustodyDenied(CustodyState::Conflict));
+                }
+                transaction
+            }
+            None => {
+                let resolved = self.resolve_locked();
+                let conflict = resolved
+                    .conflict
+                    .ok_or(CustodyError::CustodyDenied(resolved.result.state))?;
+                if conflict.reason == CustodyConflictReason::AmbiguousSecureStore
+                    || !conflict
+                        .identities
+                        .iter()
+                        .any(|identity| identity == prepared.identity())
+                {
+                    return Err(CustodyError::CustodyDenied(CustodyState::Conflict));
+                }
+                let mut transaction = IdentityTransaction::new(
+                    TransactionOperation::ResolveConflict,
+                    receipt_ref,
+                    Some(prepared.candidate_ref().clone()),
+                );
+                transaction.expected_identity = Some(prepared.identity().clone());
+                transaction.conflict_identities = conflict.identities;
+                write_json_document(&self.paths.transaction_path, &transaction)?;
+                transaction
+            }
+        };
+
+        if let Some(stored_secret) = self
+            .store
+            .read(&self.locator)
+            .map_err(custody_error_from_store)?
+        {
+            let stored_identity = stored_secret
+                .public_identity()
+                .map_err(|_| CustodyError::ReadBackMismatch)?;
+            if !transaction
+                .conflict_identities
+                .iter()
+                .any(|identity| identity == &stored_identity)
+            {
+                return Err(CustodyError::CustodyDenied(CustodyState::Conflict));
+            }
+            if &stored_identity != prepared.identity() {
+                self.store
+                    .delete(&self.locator)
+                    .map_err(|_| CustodyError::TransactionIncomplete)?;
+                match self.store.read(&self.locator) {
+                    Ok(None) => {}
+                    Ok(Some(_)) | Err(_) => return Err(CustodyError::TransactionIncomplete),
+                }
+            }
+        }
+
+        self.commit_secret_locked(prepared.secret, transaction)
+    }
+
     pub fn export_recovery_artifact(
         &self,
         expected_identity: &IdentityRef,
@@ -242,11 +384,17 @@ impl IdentityService {
             KeySecurity::Unknown,
         )
         .map_err(|_| CustodyError::RecoveryEncryptionFailed)?;
-        let byte_length = recovery_artifact::write_encrypted(path, &encrypted)?;
+        let artifact_write = recovery_artifact::write_encrypted(path, &encrypted)?;
+        let protection = RecoveryProtectionRecord::new(
+            identity.clone(),
+            artifact_write.digest,
+            artifact_write.byte_length,
+        )?;
+        write_json_document(&self.paths.recovery_protection_path, &protection)?;
         Ok(RecoveryArtifactReceipt::new(
             path.to_path_buf(),
             identity,
-            byte_length,
+            artifact_write.byte_length,
         ))
     }
 
@@ -324,6 +472,13 @@ impl IdentityService {
         let marker = self
             .read_reset_marker_locked()?
             .ok_or(CustodyError::CustodyDenied(CustodyState::Absent))?;
+        self.acknowledge_relaunch_locked(marker)
+    }
+
+    fn acknowledge_relaunch_locked(
+        &self,
+        marker: ResetMarker,
+    ) -> Result<CustodyResult, CustodyError> {
         if marker.status != ResetStatus::Complete
             || self
                 .store
@@ -339,6 +494,11 @@ impl IdentityService {
             || self
                 .paths
                 .transaction_path
+                .try_exists()
+                .map_err(|_| CustodyError::ResetFailed)?
+            || self
+                .paths
+                .recovery_protection_path
                 .try_exists()
                 .map_err(|_| CustodyError::ResetFailed)?
         {
@@ -513,6 +673,7 @@ impl IdentityService {
                 &manifest,
                 self.channel,
             )?;
+            self.remove_mismatched_recovery_protection_locked(&expected_identity)?;
 
             Ok(CustodyResult {
                 state: CustodyState::Ready,
@@ -577,6 +738,60 @@ impl IdentityService {
         Ok(marker)
     }
 
+    fn read_recovery_protection_locked(
+        &self,
+    ) -> Result<Option<RecoveryProtectionRecord>, CustodyError> {
+        let record: Option<RecoveryProtectionRecord> =
+            match read_json_document(&self.paths.recovery_protection_path) {
+                Ok(record) => record,
+                Err(PublicStoreError::Serialization(_)) => {
+                    remove_public_document(&self.paths.recovery_protection_path)?;
+                    return Ok(None);
+                }
+                Err(error) => return Err(error.into()),
+            };
+        if record
+            .as_ref()
+            .is_some_and(|record| record.validate().is_err())
+        {
+            remove_public_document(&self.paths.recovery_protection_path)?;
+            return Ok(None);
+        }
+        Ok(record)
+    }
+
+    fn recovery_protection_status_locked(
+        &self,
+        custody: &CustodyResult,
+    ) -> Result<RecoveryProtectionStatus, CustodyError> {
+        let Some(identity) = custody.identity.as_ref() else {
+            return Ok(RecoveryProtectionStatus::not_applicable());
+        };
+        match self.read_recovery_protection_locked()? {
+            Some(record) if record.identity() == identity => {
+                Ok(RecoveryProtectionStatus::protected(record))
+            }
+            Some(_) => {
+                remove_public_document(&self.paths.recovery_protection_path)?;
+                Ok(RecoveryProtectionStatus::needed())
+            }
+            None => Ok(RecoveryProtectionStatus::needed()),
+        }
+    }
+
+    fn remove_mismatched_recovery_protection_locked(
+        &self,
+        identity: &PublicIdentity,
+    ) -> Result<(), CustodyError> {
+        if self
+            .read_recovery_protection_locked()?
+            .is_some_and(|record| record.identity() != identity)
+        {
+            remove_public_document(&self.paths.recovery_protection_path)?;
+        }
+        Ok(())
+    }
+
     fn resume_reset_if_pending_locked(&self) -> Option<CustodyResult> {
         let marker = match self.read_reset_marker_locked() {
             Ok(Some(marker)) => marker,
@@ -630,6 +845,8 @@ impl IdentityService {
         remove_public_document(&self.paths.manifest_path).map_err(|_| CustodyState::ResetFailed)?;
         remove_public_document(&self.paths.transaction_path)
             .map_err(|_| CustodyState::ResetFailed)?;
+        remove_public_document(&self.paths.recovery_protection_path)
+            .map_err(|_| CustodyState::ResetFailed)?;
         marker.status = ResetStatus::Complete;
         write_json_document(&self.paths.reset_path, &marker).map_err(|_| CustodyState::ResetFailed)
     }
@@ -644,9 +861,10 @@ impl IdentityService {
                 );
             }
             Err(StoreError::Conflict) => {
-                return ResolvedCustody::without_secret(
-                    CustodyState::Conflict,
+                return ResolvedCustody::conflict(
+                    CustodyConflictReason::AmbiguousSecureStore,
                     self.best_effort_manifest_identity(),
+                    None,
                 );
             }
             Err(StoreError::Corrupt | StoreError::Configuration) => {
@@ -678,36 +896,47 @@ impl IdentityService {
                 None => ResolvedCustody::without_secret(CustodyState::Absent, None),
             },
             (Some(manifest), None) => {
-                let state = if transaction.as_ref().is_some_and(|transaction| {
-                    transaction
-                        .expected_identity
-                        .as_ref()
-                        .is_some_and(|identity| identity != manifest.identity())
-                }) {
-                    CustodyState::Conflict
+                if let Some(expected_identity) = transaction
+                    .as_ref()
+                    .and_then(|transaction| transaction.expected_identity.as_ref())
+                    .filter(|identity| *identity != manifest.identity())
+                {
+                    ResolvedCustody::conflict(
+                        CustodyConflictReason::PendingTransactionMismatch,
+                        [manifest.identity().clone(), expected_identity.clone()],
+                        None,
+                    )
                 } else {
-                    CustodyState::Lost
-                };
-                ResolvedCustody::without_secret(state, Some(manifest.identity().clone()))
+                    ResolvedCustody::without_secret(
+                        CustodyState::Lost,
+                        Some(manifest.identity().clone()),
+                    )
+                }
             }
             (None, Some(secret)) => match secret.public_identity() {
-                Ok(identity) => ResolvedCustody {
-                    result: CustodyResult {
-                        state: if transaction.as_ref().is_some_and(|transaction| {
-                            transaction
-                                .expected_identity
-                                .as_ref()
-                                .is_some_and(|expected| expected != &identity)
-                        }) {
-                            CustodyState::Conflict
-                        } else {
-                            CustodyState::Incomplete
-                        },
-                        identity: Some(identity),
-                        receipt_ref: None,
-                    },
-                    secret: Some(secret),
-                },
+                Ok(identity) => {
+                    if let Some(expected_identity) = transaction
+                        .as_ref()
+                        .and_then(|transaction| transaction.expected_identity.as_ref())
+                        .filter(|expected| *expected != &identity)
+                    {
+                        ResolvedCustody::conflict(
+                            CustodyConflictReason::PendingTransactionMismatch,
+                            [identity, expected_identity.clone()],
+                            Some(secret),
+                        )
+                    } else {
+                        ResolvedCustody {
+                            result: CustodyResult {
+                                state: CustodyState::Incomplete,
+                                identity: Some(identity),
+                                receipt_ref: None,
+                            },
+                            secret: Some(secret),
+                            conflict: None,
+                        }
+                    }
+                }
                 Err(_) => ResolvedCustody::without_secret(CustodyState::Incomplete, None),
             },
             (Some(manifest), Some(secret)) => {
@@ -721,33 +950,48 @@ impl IdentityService {
                     }
                 };
                 if &identity != manifest.identity() {
-                    return ResolvedCustody::without_secret(
-                        CustodyState::Conflict,
-                        Some(manifest.identity().clone()),
+                    return ResolvedCustody::conflict(
+                        CustodyConflictReason::PublicManifestCustodyMismatch,
+                        [manifest.identity().clone(), identity],
+                        Some(secret),
                     );
                 }
-                if transaction.as_ref().is_some_and(|transaction| {
-                    transaction.expected_identity.as_ref() != Some(&identity)
-                }) {
-                    return ResolvedCustody::without_secret(CustodyState::Conflict, Some(identity));
+                if let Some(expected_identity) = transaction
+                    .as_ref()
+                    .and_then(|transaction| transaction.expected_identity.as_ref())
+                    .filter(|expected| *expected != &identity)
+                {
+                    return ResolvedCustody::conflict(
+                        CustodyConflictReason::PendingTransactionMismatch,
+                        [identity, expected_identity.clone()],
+                        Some(secret),
+                    );
                 }
 
                 match read_completion_record(&self.paths.completion_path, &manifest, self.channel) {
-                    Ok(Some(completion)) => ResolvedCustody {
-                        result: CustodyResult {
-                            state: CustodyState::Ready,
-                            identity: Some(identity),
-                            receipt_ref: Some(completion.receipt_ref().clone()),
-                        },
-                        secret: Some(secret),
-                    },
-                    Ok(None) | Err(_) => ResolvedCustody {
+                    Ok(Some(completion))
+                        if transaction.as_ref().is_none_or(|transaction| {
+                            completion.receipt_ref() == &transaction.receipt_ref
+                        }) =>
+                    {
+                        ResolvedCustody {
+                            result: CustodyResult {
+                                state: CustodyState::Ready,
+                                identity: Some(identity),
+                                receipt_ref: Some(completion.receipt_ref().clone()),
+                            },
+                            secret: Some(secret),
+                            conflict: None,
+                        }
+                    }
+                    Ok(Some(_)) | Ok(None) | Err(_) => ResolvedCustody {
                         result: CustodyResult {
                             state: CustodyState::Incomplete,
                             identity: Some(identity),
                             receipt_ref: None,
                         },
                         secret: Some(secret),
+                        conflict: None,
                     },
                 }
             }
@@ -767,6 +1011,7 @@ impl IdentityService {
 enum TransactionOperation {
     Create,
     Import,
+    ResolveConflict,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -777,6 +1022,8 @@ struct IdentityTransaction {
     receipt_ref: ReceiptRef,
     candidate_ref: Option<CandidateRef>,
     expected_identity: Option<PublicIdentity>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    conflict_identities: Vec<PublicIdentity>,
 }
 
 impl IdentityTransaction {
@@ -791,19 +1038,49 @@ impl IdentityTransaction {
             receipt_ref,
             candidate_ref,
             expected_identity: None,
+            conflict_identities: Vec::new(),
         }
     }
 
     fn is_valid(&self) -> bool {
         self.schema == IDENTITY_TRANSACTION_SCHEMA
             && matches!(
-                (self.operation, self.candidate_ref.is_some()),
-                (TransactionOperation::Create, false) | (TransactionOperation::Import, true)
+                (
+                    self.operation,
+                    self.candidate_ref.is_some(),
+                    self.conflict_identities.is_empty(),
+                    self.expected_identity.is_some(),
+                ),
+                (TransactionOperation::Create, false, true, _)
+                    | (TransactionOperation::Import, true, true, _)
+                    | (TransactionOperation::ResolveConflict, true, false, true)
             )
             && self
                 .expected_identity
                 .as_ref()
                 .is_none_or(|identity| identity.validate().is_ok())
+            && self
+                .conflict_identities
+                .iter()
+                .all(|identity| identity.validate().is_ok())
+            && (self.operation != TransactionOperation::ResolveConflict
+                || self.expected_identity.as_ref().is_some_and(|expected| {
+                    self.conflict_identities
+                        .iter()
+                        .any(|identity| identity == expected)
+                }))
+    }
+
+    fn public_facts(self) -> PendingIdentityTransaction {
+        PendingIdentityTransaction {
+            operation: match self.operation {
+                TransactionOperation::Create => PendingIdentityOperation::Create,
+                TransactionOperation::Import => PendingIdentityOperation::Import,
+                TransactionOperation::ResolveConflict => PendingIdentityOperation::ResolveConflict,
+            },
+            receipt_ref: self.receipt_ref,
+            expected_identity: self.expected_identity,
+        }
     }
 }
 
@@ -863,6 +1140,7 @@ impl CustodyResult {
 struct ResolvedCustody {
     result: CustodyResult,
     secret: Option<SecretKeyMaterial>,
+    conflict: Option<CustodyConflict>,
 }
 
 impl ResolvedCustody {
@@ -874,6 +1152,25 @@ impl ResolvedCustody {
                 receipt_ref: None,
             },
             secret: None,
+            conflict: None,
+        }
+    }
+
+    fn conflict(
+        reason: CustodyConflictReason,
+        identities: impl IntoIterator<Item = PublicIdentity>,
+        secret: Option<SecretKeyMaterial>,
+    ) -> Self {
+        let mut identities = identities.into_iter().collect::<Vec<_>>();
+        identities.dedup();
+        Self {
+            result: CustodyResult {
+                state: CustodyState::Conflict,
+                identity: identities.first().cloned(),
+                receipt_ref: None,
+            },
+            secret,
+            conflict: Some(CustodyConflict { reason, identities }),
         }
     }
 }
@@ -884,6 +1181,7 @@ struct CustodyPaths {
     completion_path: PathBuf,
     transaction_path: PathBuf,
     reset_path: PathBuf,
+    recovery_protection_path: PathBuf,
 }
 
 impl CustodyPaths {
@@ -893,6 +1191,7 @@ impl CustodyPaths {
             completion_path: root.join("identity.complete.json"),
             transaction_path: root.join("identity.transaction.json"),
             reset_path: root.join("identity.reset.json"),
+            recovery_protection_path: root.join("identity.recovery-protection.json"),
         }
     }
 }
@@ -931,6 +1230,8 @@ pub enum CustodyError {
     RecoveryEncryptionFailed,
     #[error("the recovery password or artifact is invalid")]
     RecoveryDecryptionFailed,
+    #[error("the recovery protection record is invalid")]
+    InvalidRecoveryProtection,
     #[error("identity signing failed")]
     SigningFailed,
     #[error("the identity transaction is incomplete")]
@@ -985,10 +1286,11 @@ mod tests {
     use std::sync::Mutex;
 
     use nostr::{Event, JsonUtil};
+    use sha2::Digest as _;
     use zeroize::Zeroizing;
 
     use super::*;
-    use crate::{SigningPurpose, UnsignedEventTemplate};
+    use crate::{RecoveryProtectionState, SigningPurpose, UnsignedEventTemplate};
 
     struct FakeStore {
         state: Mutex<FakeStoreState>,
@@ -1008,6 +1310,7 @@ mod tests {
         Normal,
         Missing,
         Locked,
+        Conflict,
         Substitute([u8; 32]),
     }
 
@@ -1042,6 +1345,15 @@ mod tests {
             state.secret = None;
             state.read_mode = FakeReadMode::Normal;
         }
+
+        fn replace_secret(&self, bytes: [u8; 32]) {
+            let mut state = self.state.lock().expect("lock fake store");
+            state.secret = Some(
+                SecretKeyMaterial::from_bytes(Zeroizing::new(bytes))
+                    .expect("valid replacement secret"),
+            );
+            state.read_mode = FakeReadMode::Normal;
+        }
     }
 
     impl SecretStore for FakeStore {
@@ -1051,6 +1363,7 @@ mod tests {
                 FakeReadMode::Normal => Ok(state.secret.as_ref().map(SecretKeyMaterial::duplicate)),
                 FakeReadMode::Missing => Ok(None),
                 FakeReadMode::Locked => Err(StoreError::Locked),
+                FakeReadMode::Conflict => Err(StoreError::Conflict),
                 FakeReadMode::Substitute(bytes) => {
                     SecretKeyMaterial::from_bytes(Zeroizing::new(bytes))
                         .map(Some)
@@ -1197,6 +1510,63 @@ mod tests {
     }
 
     #[test]
+    fn committing_a_different_identity_invalidates_stale_recovery_protection() {
+        let temporary_directory = tempfile::tempdir().expect("create temporary directory");
+        let store = FakeStore::empty();
+        let service = service(store, temporary_directory.path().to_path_buf());
+        let stale_identity = SecretKeyMaterial::from_bytes(Zeroizing::new([2; 32]))
+            .expect("valid stale secret")
+            .public_identity()
+            .expect("derive stale identity");
+        let stale_record = RecoveryProtectionRecord::new(stale_identity, "a".repeat(64), 100)
+            .expect("valid stale recovery protection");
+        write_json_document(&service.paths.recovery_protection_path, &stale_record)
+            .expect("write stale recovery protection");
+
+        let created = service
+            .create(receipt())
+            .expect("create different identity");
+        assert_ne!(
+            created.identity.as_ref(),
+            Some(stale_record.identity()),
+            "fixture identities must differ"
+        );
+        assert!(!service.paths.recovery_protection_path.exists());
+        assert_eq!(
+            service
+                .inspect_details()
+                .expect("inspect unprotected new identity")
+                .recovery_protection
+                .state,
+            crate::RecoveryProtectionState::Needed
+        );
+    }
+
+    #[test]
+    fn malformed_recovery_protection_never_blocks_ready_custody() {
+        let temporary_directory = tempfile::tempdir().expect("create temporary directory");
+        let store = FakeStore::empty();
+        let service = service(store, temporary_directory.path().to_path_buf());
+        let created = service.create(receipt()).expect("create identity");
+        std::fs::write(
+            &service.paths.recovery_protection_path,
+            b"not a recovery protection record",
+        )
+        .expect("write malformed recovery protection");
+
+        let inspection = service
+            .inspect_details()
+            .expect("inspect through malformed recovery protection");
+        assert_eq!(inspection.custody, created);
+        assert_eq!(
+            inspection.recovery_protection.state,
+            crate::RecoveryProtectionState::Needed
+        );
+        assert!(inspection.recovery_protection.record.is_none());
+        assert!(!service.paths.recovery_protection_path.exists());
+    }
+
+    #[test]
     fn concurrent_same_create_generates_and_writes_once() {
         let temporary_directory = tempfile::tempdir().expect("create temporary directory");
         let store = FakeStore::empty();
@@ -1251,6 +1621,85 @@ mod tests {
         assert_eq!(resumed.identity, Some(identity));
         assert_eq!(generator_calls.load(std::sync::atomic::Ordering::SeqCst), 0);
         assert!(!service.paths.transaction_path.exists());
+    }
+
+    #[test]
+    fn pending_create_facts_survive_restart_and_resume_the_original_receipt() {
+        let temporary_directory = tempfile::tempdir().expect("create temporary directory");
+        let store = FakeStore::empty();
+        let generator_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let first_service = counting_service(
+            store.clone(),
+            temporary_directory.path().to_path_buf(),
+            generator_calls.clone(),
+        );
+        let pending_receipt =
+            ReceiptRef::new("restart-create-receipt").expect("valid pending receipt");
+        write_json_document(
+            &first_service.paths.transaction_path,
+            &IdentityTransaction::new(TransactionOperation::Create, pending_receipt.clone(), None),
+        )
+        .expect("write pending create");
+
+        let restarted_service = counting_service(
+            store,
+            temporary_directory.path().to_path_buf(),
+            generator_calls.clone(),
+        );
+        let inspection = restarted_service
+            .inspect_details()
+            .expect("inspect pending create after restart");
+        assert_eq!(inspection.custody.state, CustodyState::Incomplete);
+        assert_eq!(
+            inspection.pending_transaction,
+            Some(PendingIdentityTransaction {
+                operation: PendingIdentityOperation::Create,
+                receipt_ref: pending_receipt.clone(),
+                expected_identity: None,
+            })
+        );
+
+        let resumed = restarted_service
+            .resume_incomplete_create()
+            .expect("resume pending create");
+        assert_eq!(resumed.state, CustodyState::Ready);
+        assert_eq!(resumed.receipt_ref, Some(pending_receipt));
+        assert_eq!(generator_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(
+            restarted_service
+                .inspect_details()
+                .expect("inspect completed create")
+                .pending_transaction
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn pending_create_with_known_missing_identity_never_rotates() {
+        let temporary_directory = tempfile::tempdir().expect("create temporary directory");
+        let store = FakeStore::empty();
+        let generator_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let service = counting_service(
+            store,
+            temporary_directory.path().to_path_buf(),
+            generator_calls.clone(),
+        );
+        let expected_identity = SecretKeyMaterial::from_bytes(Zeroizing::new([4; 32]))
+            .expect("valid pending identity secret")
+            .public_identity()
+            .expect("derive pending identity");
+        let mut transaction =
+            IdentityTransaction::new(TransactionOperation::Create, receipt(), None);
+        transaction.expected_identity = Some(expected_identity);
+        write_json_document(&service.paths.transaction_path, &transaction)
+            .expect("write pending transaction");
+
+        assert!(matches!(
+            service.resume_incomplete_create(),
+            Err(CustodyError::TransactionIncomplete)
+        ));
+        assert_eq!(generator_calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert!(service.paths.transaction_path.exists());
     }
 
     #[test]
@@ -1551,6 +2000,217 @@ mod tests {
     }
 
     #[test]
+    fn inspection_distinguishes_keychain_ambiguity_from_identity_mismatch() {
+        let temporary_directory = tempfile::tempdir().expect("create temporary directory");
+        let store = FakeStore::empty();
+        let service = service(store.clone(), temporary_directory.path().to_path_buf());
+        let created = service.create(receipt()).expect("create identity");
+        let manifest_identity = created.identity.expect("created public identity");
+
+        store.set_read_mode(FakeReadMode::Conflict);
+        let ambiguous = service
+            .inspect_details()
+            .expect("inspect ambiguous secure store");
+        assert_eq!(ambiguous.custody.state, CustodyState::Conflict);
+        assert_eq!(
+            ambiguous.conflict,
+            Some(CustodyConflict {
+                reason: CustodyConflictReason::AmbiguousSecureStore,
+                identities: vec![manifest_identity.clone()],
+            })
+        );
+
+        store.set_read_mode(FakeReadMode::Substitute([2; 32]));
+        let mismatch = service
+            .inspect_details()
+            .expect("inspect manifest and custody mismatch");
+        let mismatch = mismatch.conflict.expect("mismatch details");
+        assert_eq!(
+            mismatch.reason,
+            CustodyConflictReason::PublicManifestCustodyMismatch
+        );
+        assert_eq!(mismatch.identities.len(), 2);
+        assert_eq!(mismatch.identities[0], manifest_identity);
+        assert_ne!(mismatch.identities[0], mismatch.identities[1]);
+    }
+
+    #[test]
+    fn owner_selected_recovery_repairs_a_public_manifest_custody_conflict() {
+        let temporary_directory = tempfile::tempdir().expect("create temporary directory");
+        let store = FakeStore::empty();
+        let service = service(store.clone(), temporary_directory.path().to_path_buf());
+        let original = service.create(receipt()).expect("create original identity");
+        let original_identity = original.identity.expect("original public identity");
+        store.replace_secret([2; 32]);
+
+        let conflict = service
+            .inspect_details()
+            .expect("inspect identity conflict")
+            .conflict
+            .expect("public conflict details");
+        assert_eq!(
+            conflict.reason,
+            CustodyConflictReason::PublicManifestCustodyMismatch
+        );
+        let custody_identity = conflict
+            .identities
+            .iter()
+            .find(|identity| *identity != &original_identity)
+            .expect("custody identity")
+            .clone();
+        let resolution_receipt =
+            ReceiptRef::new("conflict-resolution-1").expect("valid resolution receipt");
+        let selected = service
+            .prepare_import(
+                ImportedSecret::new(hex::encode([2; 32])).expect("valid custody import"),
+            )
+            .map(|prepared| select_one(&service, prepared))
+            .expect("prepare selected custody identity");
+
+        let resolved = service
+            .resolve_conflict(selected, resolution_receipt.clone())
+            .expect("resolve identity conflict");
+        assert_eq!(resolved.state, CustodyState::Ready);
+        assert_eq!(resolved.identity, Some(custody_identity.clone()));
+        assert_eq!(resolved.receipt_ref, Some(resolution_receipt.clone()));
+        assert!(
+            service
+                .inspect_details()
+                .expect("inspect repaired identity")
+                .conflict
+                .is_none()
+        );
+
+        let repeated = service
+            .prepare_import(
+                ImportedSecret::new(hex::encode([2; 32])).expect("valid repeated import"),
+            )
+            .map(|prepared| select_one(&service, prepared))
+            .and_then(|selected| service.resolve_conflict(selected, resolution_receipt))
+            .expect("repeat conflict resolution idempotently");
+        assert_eq!(repeated.identity, Some(custody_identity));
+    }
+
+    #[test]
+    fn conflict_resolution_rejects_an_identity_outside_the_inspected_conflict() {
+        let temporary_directory = tempfile::tempdir().expect("create temporary directory");
+        let store = FakeStore::empty();
+        let service = service(store.clone(), temporary_directory.path().to_path_buf());
+        service.create(receipt()).expect("create original identity");
+        store.replace_secret([2; 32]);
+        let unrelated = service
+            .prepare_import(
+                ImportedSecret::new(hex::encode([3; 32])).expect("valid unrelated import"),
+            )
+            .map(|prepared| select_one(&service, prepared))
+            .expect("prepare unrelated identity");
+
+        assert!(matches!(
+            service.resolve_conflict(
+                unrelated,
+                ReceiptRef::new("conflict-resolution-2").expect("valid resolution receipt")
+            ),
+            Err(CustodyError::CustodyDenied(CustodyState::Conflict))
+        ));
+        assert_eq!(
+            service
+                .inspect_details()
+                .expect("conflict remains")
+                .custody
+                .state,
+            CustodyState::Conflict
+        );
+    }
+
+    #[test]
+    fn conflict_resolution_journal_retries_after_verified_delete_failure() {
+        let temporary_directory = tempfile::tempdir().expect("create temporary directory");
+        let store = FakeStore::empty();
+        let service = service(store.clone(), temporary_directory.path().to_path_buf());
+        let original = service.create(receipt()).expect("create original identity");
+        let original_identity = original.identity.expect("original public identity");
+        store.replace_secret([2; 32]);
+        store.set_fail_delete(true);
+        let resolution_receipt =
+            ReceiptRef::new("conflict-resolution-3").expect("valid resolution receipt");
+        let selected = service
+            .prepare_import(
+                ImportedSecret::new(hex::encode([1; 32])).expect("valid original import"),
+            )
+            .map(|prepared| select_one(&service, prepared))
+            .expect("prepare original identity");
+
+        assert!(matches!(
+            service.resolve_conflict(selected, resolution_receipt.clone()),
+            Err(CustodyError::TransactionIncomplete)
+        ));
+        let pending = service
+            .inspect_details()
+            .expect("inspect pending conflict resolution")
+            .pending_transaction
+            .expect("pending conflict transaction");
+        assert_eq!(pending.operation, PendingIdentityOperation::ResolveConflict);
+        assert_eq!(pending.receipt_ref, resolution_receipt);
+
+        store.set_fail_delete(false);
+        let selected = service
+            .prepare_import(ImportedSecret::new(hex::encode([1; 32])).expect("valid retry import"))
+            .map(|prepared| select_one(&service, prepared))
+            .expect("prepare retry identity");
+        let resolved = service
+            .resolve_conflict(selected, pending.receipt_ref)
+            .expect("retry conflict resolution");
+        assert_eq!(resolved.state, CustodyState::Ready);
+        assert_eq!(resolved.identity, Some(original_identity));
+        assert!(!service.paths.transaction_path.exists());
+    }
+
+    #[test]
+    fn conflict_resolution_is_not_ready_until_its_receipt_is_completed() {
+        let temporary_directory = tempfile::tempdir().expect("create temporary directory");
+        let store = FakeStore::empty();
+        let service = service(store, temporary_directory.path().to_path_buf());
+        let created = service.create(receipt()).expect("create identity");
+        let identity = created.identity.expect("created identity");
+        let other_identity = SecretKeyMaterial::from_bytes(Zeroizing::new([2; 32]))
+            .expect("valid other secret")
+            .public_identity()
+            .expect("derive other identity");
+        let pending_receipt =
+            ReceiptRef::new("conflict-resolution-crash").expect("valid pending receipt");
+        let mut transaction = IdentityTransaction::new(
+            TransactionOperation::ResolveConflict,
+            pending_receipt.clone(),
+            Some(
+                CandidateRef::new("advanced-nostr-import".to_string())
+                    .expect("valid candidate reference"),
+            ),
+        );
+        transaction.expected_identity = Some(identity);
+        transaction.conflict_identities = vec![
+            transaction
+                .expected_identity
+                .clone()
+                .expect("expected identity"),
+            other_identity,
+        ];
+        write_json_document(&service.paths.transaction_path, &transaction)
+            .expect("write interrupted conflict transaction");
+
+        let inspection = service
+            .inspect_details()
+            .expect("inspect interrupted conflict resolution");
+        assert_eq!(inspection.custody.state, CustodyState::Incomplete);
+        assert_eq!(
+            inspection
+                .pending_transaction
+                .expect("pending conflict resolution")
+                .receipt_ref,
+            pending_receipt
+        );
+    }
+
+    #[test]
     fn admitted_signing_returns_a_verified_public_event() {
         let temporary_directory = tempfile::tempdir().expect("create temporary directory");
         let store = FakeStore::empty();
@@ -1590,6 +2250,27 @@ mod tests {
             )
             .expect("export recovery artifact");
         let artifact_bytes = std::fs::read(&artifact_path).expect("read recovery artifact");
+        let inspection = source_service
+            .inspect_details()
+            .expect("inspect protected identity");
+        assert_eq!(
+            inspection.recovery_protection.state,
+            crate::RecoveryProtectionState::Protected
+        );
+        let protection = inspection
+            .recovery_protection
+            .record
+            .expect("recovery protection record");
+        assert_eq!(protection.identity(), &identity);
+        assert_eq!(protection.byte_length(), artifact.byte_length());
+        assert_eq!(
+            protection.artifact_digest(),
+            hex::encode(sha2::Sha256::digest(&artifact_bytes))
+        );
+        let protection_document =
+            std::fs::read_to_string(&source_service.paths.recovery_protection_path)
+                .expect("read recovery protection document");
+        assert!(!protection_document.contains(artifact_path.to_string_lossy().as_ref()));
         let secret_hex = hex::encode([1; 32]);
         assert_eq!(artifact.byte_length(), artifact_bytes.len() as u64);
         assert!(artifact_bytes.starts_with(b"ncryptsec1"));
@@ -1680,6 +2361,16 @@ mod tests {
         let service = service(store, temporary_directory.path().to_path_buf());
         let created = service.create(receipt()).expect("create identity");
         let identity = created.identity.expect("created public identity");
+        let artifact_directory = tempfile::tempdir().expect("create artifact directory");
+        service
+            .export_recovery_artifact(
+                identity.identity_ref(),
+                &artifact_directory.path().join("recovery.ncryptsec"),
+                RecoveryPassword::new("reset protection password".to_string())
+                    .expect("valid recovery password"),
+            )
+            .expect("protect identity recovery");
+        assert!(service.paths.recovery_protection_path.exists());
         let wrong_identity = SecretKeyMaterial::from_bytes(Zeroizing::new([2; 32]))
             .expect("valid different secret")
             .public_identity()
@@ -1714,6 +2405,7 @@ mod tests {
                 .state,
             CustodyState::RelaunchRequired
         );
+        assert!(!service.paths.recovery_protection_path.exists());
         assert_eq!(
             service
                 .acknowledge_relaunch()
@@ -1773,6 +2465,150 @@ mod tests {
                 .state,
             CustodyState::Absent
         );
+    }
+
+    #[test]
+    fn process_start_acknowledges_reset_complete_at_entry() {
+        let temporary_directory = tempfile::tempdir().expect("create temporary directory");
+        let data_root = temporary_directory.path().to_path_buf();
+        let store = FakeStore::empty();
+        let initial_service = service(store.clone(), data_root.clone());
+        let created = initial_service.create(receipt()).expect("create identity");
+        let identity = created.identity.expect("created public identity");
+        initial_service
+            .reset(
+                identity.identity_ref(),
+                ReceiptRef::new("process-start-complete").expect("valid reset receipt"),
+            )
+            .expect("record reset intent");
+        assert_eq!(
+            initial_service
+                .inspect()
+                .expect("complete pending reset")
+                .state,
+            CustodyState::RelaunchRequired
+        );
+
+        let restarted_service = service(store, data_root);
+        let inspection = restarted_service
+            .inspect_for_process_start()
+            .expect("inspect completed reset on process start");
+
+        assert_eq!(
+            inspection.custody,
+            CustodyResult::for_state(CustodyState::Absent)
+        );
+        assert_eq!(
+            inspection.recovery_protection.state,
+            RecoveryProtectionState::NotApplicable
+        );
+        assert!(inspection.pending_transaction.is_none());
+        assert!(inspection.conflict.is_none());
+        assert!(!restarted_service.paths.reset_path.exists());
+    }
+
+    #[test]
+    fn process_start_preserves_reset_completed_during_same_call() {
+        let temporary_directory = tempfile::tempdir().expect("create temporary directory");
+        let data_root = temporary_directory.path().to_path_buf();
+        let store = FakeStore::empty();
+        let initial_service = service(store.clone(), data_root.clone());
+        let created = initial_service.create(receipt()).expect("create identity");
+        let identity = created.identity.expect("created public identity");
+        initial_service
+            .reset(
+                identity.identity_ref(),
+                ReceiptRef::new("process-start-pending").expect("valid reset receipt"),
+            )
+            .expect("record reset intent");
+
+        let inspection = initial_service
+            .inspect_for_process_start()
+            .expect("resume pending reset on process start");
+
+        assert_eq!(inspection.custody.state, CustodyState::RelaunchRequired);
+        assert_eq!(
+            initial_service
+                .read_reset_marker_locked()
+                .expect("read reset marker")
+                .expect("completed reset marker")
+                .status,
+            ResetStatus::Complete
+        );
+        assert_eq!(
+            initial_service
+                .inspect_details()
+                .expect("inspect again in same process")
+                .custody
+                .state,
+            CustodyState::RelaunchRequired
+        );
+
+        let restarted_service = service(store, data_root);
+        assert_eq!(
+            restarted_service
+                .inspect_for_process_start()
+                .expect("acknowledge reset on next process start")
+                .custody
+                .state,
+            CustodyState::Absent
+        );
+        assert!(!restarted_service.paths.reset_path.exists());
+    }
+
+    #[test]
+    fn process_start_preserves_failed_reset_resumed_during_same_call() {
+        let temporary_directory = tempfile::tempdir().expect("create temporary directory");
+        let data_root = temporary_directory.path().to_path_buf();
+        let store = FakeStore::empty();
+        let initial_service = service(store.clone(), data_root.clone());
+        let created = initial_service.create(receipt()).expect("create identity");
+        let identity = created.identity.expect("created public identity");
+        initial_service
+            .reset(
+                identity.identity_ref(),
+                ReceiptRef::new("process-start-failed").expect("valid reset receipt"),
+            )
+            .expect("record reset intent");
+        store.set_fail_delete(true);
+        assert_eq!(
+            initial_service.inspect().expect("fail pending reset").state,
+            CustodyState::ResetFailed
+        );
+        assert_eq!(
+            initial_service
+                .read_reset_marker_locked()
+                .expect("read reset marker")
+                .expect("failed reset marker")
+                .status,
+            ResetStatus::Failed
+        );
+
+        store.set_fail_delete(false);
+        let inspection = initial_service
+            .inspect_for_process_start()
+            .expect("resume failed reset on process start");
+
+        assert_eq!(inspection.custody.state, CustodyState::RelaunchRequired);
+        assert_eq!(
+            initial_service
+                .read_reset_marker_locked()
+                .expect("read reset marker")
+                .expect("completed reset marker")
+                .status,
+            ResetStatus::Complete
+        );
+
+        let restarted_service = service(store, data_root);
+        assert_eq!(
+            restarted_service
+                .inspect_for_process_start()
+                .expect("acknowledge reset on next process start")
+                .custody
+                .state,
+            CustodyState::Absent
+        );
+        assert!(!restarted_service.paths.reset_path.exists());
     }
 
     #[test]

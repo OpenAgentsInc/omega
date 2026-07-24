@@ -5,6 +5,8 @@ use zeroize::Zeroizing;
 
 use crate::{PublicIdentity, custody::CustodyError, secret::SecretKeyMaterial};
 
+pub const RECOVERY_PROTECTION_SCHEMA: &str = "openagents.omega.recovery-protection.v1";
+
 #[derive(Clone, PartialEq, Eq, Hash, Serialize)]
 #[serde(transparent)]
 pub struct CandidateRef(String);
@@ -112,10 +114,11 @@ pub struct RecoveryPassword(Zeroizing<String>);
 
 impl RecoveryPassword {
     pub fn new(password: String) -> Result<Self, InvalidRecoveryPassword> {
+        let password = Zeroizing::new(password);
         if password.is_empty() || password.len() > 1_024 {
             return Err(InvalidRecoveryPassword);
         }
-        Ok(Self(Zeroizing::new(password)))
+        Ok(Self(password))
     }
 
     pub(crate) fn as_str(&self) -> &str {
@@ -135,6 +138,97 @@ pub struct InvalidRecoveryPassword;
 impl fmt::Display for InvalidRecoveryPassword {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("recovery password must contain between 1 and 1024 bytes")
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RecoveryProtectionRecord {
+    schema: String,
+    identity: PublicIdentity,
+    artifact_digest: String,
+    byte_length: u64,
+}
+
+impl RecoveryProtectionRecord {
+    pub(crate) fn new(
+        identity: PublicIdentity,
+        artifact_digest: String,
+        byte_length: u64,
+    ) -> Result<Self, CustodyError> {
+        let record = Self {
+            schema: RECOVERY_PROTECTION_SCHEMA.to_string(),
+            identity,
+            artifact_digest,
+            byte_length,
+        };
+        record.validate()?;
+        Ok(record)
+    }
+
+    pub fn validate(&self) -> Result<(), CustodyError> {
+        if self.schema != RECOVERY_PROTECTION_SCHEMA
+            || self.byte_length == 0
+            || self.artifact_digest.len() != 64
+            || !self
+                .artifact_digest
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+            || self.identity.validate().is_err()
+        {
+            return Err(CustodyError::InvalidRecoveryProtection);
+        }
+        Ok(())
+    }
+
+    pub fn identity(&self) -> &PublicIdentity {
+        &self.identity
+    }
+
+    pub fn artifact_digest(&self) -> &str {
+        &self.artifact_digest
+    }
+
+    pub fn byte_length(&self) -> u64 {
+        self.byte_length
+    }
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RecoveryProtectionState {
+    NotApplicable,
+    Needed,
+    Protected,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RecoveryProtectionStatus {
+    pub state: RecoveryProtectionState,
+    pub record: Option<RecoveryProtectionRecord>,
+}
+
+impl RecoveryProtectionStatus {
+    pub(crate) fn not_applicable() -> Self {
+        Self {
+            state: RecoveryProtectionState::NotApplicable,
+            record: None,
+        }
+    }
+
+    pub(crate) fn needed() -> Self {
+        Self {
+            state: RecoveryProtectionState::Needed,
+            record: None,
+        }
+    }
+
+    pub(crate) fn protected(record: RecoveryProtectionRecord) -> Self {
+        Self {
+            state: RecoveryProtectionState::Protected,
+            record: Some(record),
+        }
     }
 }
 

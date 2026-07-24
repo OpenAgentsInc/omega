@@ -77,6 +77,30 @@ The journal records only operation metadata and, after verified secure storage,
 the expected public identity. A returned failure rolls back to `absent` only
 after credential deletion is read back. If rollback cannot be proved, the
 journal remains and replacement creation stays blocked as `incomplete`.
+`inspect_details` exposes the pending operation, original receipt, and optional
+expected public identity without exposing import-candidate or secret material.
+`resume_incomplete_create` consumes the private journal directly. It can
+generate only when the journal has not established an expected identity; a
+known identity whose credential is missing remains blocked instead of rotating.
+
+Detailed inspection also classifies conflicts without treating every conflict
+as an owner-choice screen. An ambiguous operating-system credential result has
+no readable candidate key. A manifest/custody mismatch exposes both derived
+public identities. A pending-transaction mismatch exposes only the conflicting
+public identities from the journal and custody records. Secrets and selected
+paths do not enter the inspection result.
+
+A manifest/custody mismatch can be repaired only through
+`resolve_conflict`. The caller must prepare and explicitly select recovery
+material for one of the public identities reported by the current conflict.
+Omega journals that selected public identity, candidate reference, owner-action
+receipt, and the inspected conflict identities before changing custody. It
+deletes a differing stored key only when its freshly derived public identity is
+one of those journaled conflict identities, then verifies deletion before
+committing the selected key. A crash or failed delete leaves the journal for an
+exact retry. Normal `adopt` remains unable to replace conflict custody, and an
+ambiguous operating-system credential cannot use this path because Omega cannot
+inspect the competing keys.
 
 Reset is marker-first and restart-safe. The initial authorized request writes
 `identity.reset.json` and returns `relaunch-required` without deleting custody.
@@ -84,7 +108,14 @@ Startup or an explicit resume then verifies the expected identity, deletes and
 fresh-reads custody, removes completion, manifest, and transaction records, and
 marks reset complete last. Failure keeps a `reset-failed` marker that blocks
 signing and can be retried. A relaunch acknowledgement clears the final marker
-only after all identity state is proven absent.
+only after all identity state is proven absent. The application boot router
+must call `inspect_for_process_start` exactly once per process. Under one custody
+mutation lock, that inspection acknowledges a reset only when its marker was
+already complete at method entry, proving that completion happened in a prior
+process. A pending or failed marker may be resumed during the call, but its
+result remains `relaunch-required` or `reset-failed` and the marker is preserved
+for a later process to acknowledge. This process-level inspection must not be
+called from individual onboarding view constructors.
 
 ### Encrypted recovery artifacts
 
@@ -115,7 +146,19 @@ ownership and ACL verification requires a future Windows security-descriptor
 review. Expensive NIP-49 KDF work is serialized once per process and must run
 through GPUI's background executor.
 
-Omega zeroizes its password, import, and long-lived secret wrappers. The pinned
+After an encrypted export has been published successfully, Omega atomically
+writes `identity.recovery-protection.json`. This public-safe record is bound to
+the public identity and contains the encrypted artifact's SHA-256 digest and
+byte length, but not its path or password. Detailed inspection reports
+`not-applicable`, `needed`, or `protected` from that durable record. Committing
+a different identity removes a mismatched record, and verified reset removes
+the record before the reset marker becomes complete. A malformed record is
+removed and reported as `needed`; recovery metadata is advisory and cannot
+block otherwise verified ready custody. Genuine storage I/O failures still
+propagate instead of being mistaken for missing protection.
+
+Omega wraps password input in zeroizing storage before validating its length,
+and zeroizes its import and long-lived secret wrappers. The pinned
 NIP-49 implementation creates internal normalized-password, KDF, and decrypted
 temporary buffers that do not all implement `Zeroize`; replacing or patching
 that upstream implementation is required if the assurance target expands to
@@ -137,6 +180,37 @@ reset-failed
 System credential and cross-process lock operations are synchronous. GPUI
 callers must run them on the background executor and propagate
 `CustodyError` to the onboarding UI instead of blocking the foreground thread.
+
+## Onboarding integration
+
+The Omega onboarding identity section renders `IdentityInspection`, not fixture
+flags. Its durable view contains only public custody state, public identity,
+pending operation/receipt facts, typed conflict details, and recovery-protection
+status. Create, inspect, import, recovery KDF, export, and reset operations run
+on GPUI's background executor. The view holds the foreground waiter task and
+accepts a completion only when both its monotonic generation and operation
+phase still match.
+
+Recovery passwords and advanced Nostr imports use a dedicated `SecureInput`
+instead of the editor-backed form field. It preallocates a bounded
+`Zeroizing<String>`, always paints bullets, has no undo history or reveal
+control, consumes copy/cut shortcuts, and transfers ownership before starting
+background work. Cancel, deactivation, workspace deactivation, item removal,
+success, and error clear the secure fields and discard opaque prepared recovery
+candidates. When the platform requests surrounding text for IME, the input
+handler returns only a length-aligned bullet mask rather than the secret.
+
+The onboarding item cannot be split, and its serializer persists only the page
+record. It never serializes a pending secret, password, recovery candidate,
+selected path, or identity task. Theme selection and registry-agent setup are
+the existing implementations and follow the identity section in the same
+screen.
+
+Optional display name and avatar metadata use the identity-bound
+`omega.identity-profile.v1.<identity-ref>` local record. The avatar is copied
+into Omega's local data directory and represented by an opaque
+`local-avatar:` token. This presentation record has no signing, relay, event
+kind, or publication fields and is never a Nostr kind 0 profile.
 
 ## Native identity provenance
 
@@ -172,7 +246,7 @@ Omega does not adopt Buzz's startup key generation, `BUZZ_PRIVATE_KEY`
 override, plaintext `identity.key` fallback, renderer-visible `get_nsec`
 command, durable use of ephemeral recovery keys, or Spark/wallet profile
 fields. `atomic-write-file` is restricted to public manifests and completion
-records.
+records, transaction/reset journals, and recovery-protection records.
 
 ## Application icon family
 
