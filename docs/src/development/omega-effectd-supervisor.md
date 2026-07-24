@@ -59,20 +59,32 @@ component as unavailable rather than presenting fixture behavior.
 Omega registers the reverse-host handler when it creates the shared supervisor.
 The handler stays on GPUI's foreground executor and delegates to the active
 `Workspace`, `AgentPanel`, and `AcpThread` authorities. It resolves exactly one
-open local workspace, creates a native Agent thread, admits the `codex-local`
-lane only when a default model is available, dispatches through
-`AcpThread::send`, projects bounded assistant evidence from real thread entries,
-and interrupts through `AcpThread::cancel`. Unknown lanes, ambiguous
-workspaces, closed threads, concurrent turns, and unavailable profile overrides
-fail closed.
+open local workspace and creates either a native Agent thread for
+`codex-local` or a registered `claude-acp` external-agent thread for
+`claude-local`. Codex admission requires a default model. Claude admission
+requires the registered external agent and, once a Claude thread exists, a
+connected ACP authority. Both lanes dispatch through `AcpThread::send`, project
+bounded assistant evidence from real thread entries, and interrupt through
+`AcpThread::cancel`. Unknown lanes, ambiguous workspaces, closed threads,
+concurrent turns, cross-lane dispatch, and unavailable profile overrides fail
+closed.
 
 The host bridge retains only correlation data between effectd's leased turn
-references and live ACP entry boundaries; it is not a second run engine and
-does not mutate durable Full Auto state. That correlation is currently scoped
-to the app process, so owner-real restart recovery still needs a persisted
-effectd-turn reference on the native Agent thread. `append_system_note` also
-remains typed `unavailable`: `AcpThread` has no owner-visible, non-model system
-entry authority, and Omega does not disguise control notes as user prompts.
+references and ACP entry boundaries; it is not a second run engine and does
+not mutate durable Full Auto state. Omega journals those content-free refs and
+entry indexes under its channel data directory before acknowledging thread or
+turn creation. After a full app-process restart, the bridge reloads the
+journal, reopens the matching Agent thread through `ThreadMetadataStore`, and
+continues evidence refresh against the same entry boundaries.
+
+`append_system_note` remains typed `unavailable`. The current `AcpThread`
+entry model contains user messages, assistant messages, tool calls,
+elicitations, completed plans, and compaction records, but no durable
+owner-visible entry excluded from subsequent model context. Sending a hidden
+command would not create an owner-visible entry; sending a user or assistant
+message would misstate authorship and enter model context. Until ACP gains an
+explicit non-model notice entry, the strongest safe owner-visible path is the
+durable Full Auto run monitor backed by effectd, not a fabricated chat bubble.
 
 ## Next packets
 

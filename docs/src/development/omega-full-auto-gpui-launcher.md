@@ -25,12 +25,16 @@ Omega ships a dedicated Full Auto dock panel.
 - A missing packaged component disables Start with an unavailable message;
   production never falls back to `fake_effectd.mjs`.
 - The supervisor exchanges generation-fenced reverse-host frames with the
-  active Workspace, Agent panel, and ACP thread. Native `codex-local` runs can
-  resolve a workspace, create a thread, check readiness, dispatch, refresh
-  evidence, and interrupt without a parallel GPUI run engine.
-- System notes and restart-stable leased-turn correlation remain unavailable;
-  those paths fail closed instead of writing a fake chat message or claiming
-  evidence that cannot be recovered.
+  active Workspace, Agent panel, and ACP thread. Native `codex-local` and
+  registered `claude-local` runs can resolve a workspace, create the matching
+  Agent thread, check real model/ACP readiness, dispatch, refresh evidence, and
+  interrupt without a parallel GPUI run engine.
+- Leased-turn correlation is journaled before acknowledgement and rebound to
+  the persisted Agent thread after a full Omega process restart.
+- System notes remain typed unavailable because ACP has no durable
+  owner-visible entry that is excluded from model context. Owner-facing run
+  state stays in the effectd-backed Full Auto monitor rather than a fake chat
+  message.
 
 Crate: `crates/full_auto_ui`. Supervisor helpers: `start_run`, `get_run`,
 `pause_run`, `resume_run`, `stop_run`, `retry_run`.

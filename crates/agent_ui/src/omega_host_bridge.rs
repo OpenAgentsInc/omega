@@ -1,4 +1,6 @@
 use std::cell::RefCell;
+use std::io::Write as _;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -9,20 +11,27 @@ use language_model::LanguageModelRegistry;
 use omega_effectd::{
     HostMethod, HostRequestFrame, HostResponseError, HostResponseErrorCode, OmegaEffectdHostHandler,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use workspace::{AppState, Workspace};
 
 use crate::agent_panel::CreateThreadOptions;
-use crate::{Agent, AgentPanel, AgentThreadSource, ConversationView, ThreadId};
+use crate::{
+    Agent, AgentPanel, AgentThreadSource, ConversationView, ThreadId,
+    agent_connection_store::AgentConnectionStatus,
+};
 
 const SUPERVISED_WORKSPACE_REF: &str = "workspace.omega.supervised";
 const CODEX_LOCAL_LANE: &str = "codex-local";
+const CLAUDE_LOCAL_LANE: &str = "claude-local";
+const CLAUDE_AGENT_ID: &str = "claude-acp";
 const THREAD_CONNECT_ATTEMPTS: usize = 100;
 const THREAD_CONNECT_INTERVAL: Duration = Duration::from_millis(100);
 const MAX_ASSISTANT_TEXT_BYTES: usize = 24 * 1024;
 const MAX_EVIDENCE_TURNS: usize = 48;
 const MAX_TOTAL_ASSISTANT_TEXT_BYTES: usize = 6 * 1024;
+const CORRELATION_SCHEMA: &str = "openagents.omega.full_auto_host_correlation.v1";
+const CORRELATION_FILE: &str = "full-auto-host-correlation.json";
 
 #[derive(Clone)]
 struct WorkspaceBinding {
@@ -34,13 +43,16 @@ struct WorkspaceBinding {
 #[derive(Clone)]
 struct HostThread {
     workspace_ref: String,
+    lane: String,
+    operation_ref: String,
     thread_id: ThreadId,
-    conversation: WeakEntity<ConversationView>,
+    conversation: Option<WeakEntity<ConversationView>>,
     turns: Vec<HostTurn>,
     revision: u64,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct HostTurn {
     turn_ref: String,
     lane: String,
@@ -49,16 +61,35 @@ struct HostTurn {
     provider_session_ref: String,
     start_entry_index: usize,
     end_entry_index: Option<usize>,
-    phase: &'static str,
-    disposition: Option<&'static str>,
+    phase: String,
+    disposition: Option<String>,
     created_at: String,
     updated_at: String,
 }
 
-#[derive(Default)]
 struct HostBridgeState {
     workspace: Option<WorkspaceBinding>,
     threads: Vec<HostThread>,
+    correlation_path: PathBuf,
+    load_error: Option<String>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CorrelationJournal {
+    schema: String,
+    threads: Vec<PersistedHostThread>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PersistedHostThread {
+    workspace_ref: String,
+    lane: String,
+    operation_ref: String,
+    thread_ref: String,
+    turns: Vec<HostTurn>,
+    revision: u64,
 }
 
 #[derive(Deserialize)]
@@ -127,7 +158,17 @@ struct AppendSystemNoteParams {
 
 pub fn omega_effectd_host_handler(cx: &App) -> OmegaEffectdHostHandler {
     let async_cx = cx.to_async();
-    let state = Rc::new(RefCell::new(HostBridgeState::default()));
+    let correlation_path = paths::data_dir().join("openagents").join(CORRELATION_FILE);
+    let (threads, load_error) = match load_correlation_journal(&correlation_path) {
+        Ok(threads) => (threads, None),
+        Err(error) => (Vec::new(), Some(error.to_string())),
+    };
+    let state = Rc::new(RefCell::new(HostBridgeState {
+        workspace: None,
+        threads,
+        correlation_path,
+        load_error,
+    }));
     Rc::new(move |request| {
         let async_cx = async_cx.clone();
         let state = state.clone();
@@ -141,7 +182,7 @@ async fn handle_request(
     mut cx: AsyncApp,
 ) -> Result<Value, HostResponseError> {
     match request.method {
-        HostMethod::ResolveWorkspace => resolve_workspace(request.params, &state, &cx),
+        HostMethod::ResolveWorkspace => resolve_workspace(request.params, &state, &mut cx),
         HostMethod::CreateThread => create_thread(request.params, &state, &mut cx),
         HostMethod::LaneReadiness => lane_readiness(request.params, &state, &cx),
         HostMethod::DispatchTurn => dispatch_turn(request.params, &state, &mut cx).await,
@@ -157,8 +198,9 @@ async fn handle_request(
 fn resolve_workspace(
     params: Value,
     state: &Rc<RefCell<HostBridgeState>>,
-    cx: &AsyncApp,
+    cx: &mut AsyncApp,
 ) -> Result<Value, HostResponseError> {
+    require_loaded_journal(state)?;
     let params: ResolveWorkspaceParams = decode_params(params)?;
     if let Some(expected) = params.expected_workspace_ref.as_deref() {
         validate_ref(expected, "expectedWorkspaceRef")?;
@@ -208,6 +250,7 @@ fn resolve_workspace(
         workspace: workspace.downgrade(),
         window: *window,
     });
+    rebind_persisted_threads(&workspace_ref, state, cx)?;
     Ok(json!({ "workspaceRef": workspace_ref }))
 }
 
@@ -222,10 +265,14 @@ fn create_thread(
     if params.title.trim().is_empty() {
         return Err(invalid("title must not be empty."));
     }
-    if params.lane != CODEX_LOCAL_LANE {
-        return Err(unsupported(
-            "Only the codex-local lane is currently supported.",
-        ));
+    let agent = agent_for_lane(&params.lane)?;
+    if let Some(thread_ref) = state.borrow().threads.iter().find_map(|thread| {
+        (thread.workspace_ref == params.workspace_ref
+            && thread.lane == params.lane
+            && thread.operation_ref == params.operation_ref)
+            .then(|| thread.thread_id.to_key_string())
+    }) {
+        return Ok(json!({ "threadRef": thread_ref }));
     }
     let binding = require_workspace(&params.workspace_ref, state)?;
     let workspace = binding
@@ -243,7 +290,7 @@ fn create_thread(
                 panel.create_thread_with_options(
                     CreateThreadOptions {
                         title: Some(params.title.clone().into()),
-                        agent: Some(Agent::NativeAgent),
+                        agent: Some(agent),
                         ..Default::default()
                     },
                     AgentThreadSource::AgentPanel,
@@ -262,11 +309,14 @@ fn create_thread(
     let thread_ref = thread_id.to_key_string();
     state.borrow_mut().threads.push(HostThread {
         workspace_ref: params.workspace_ref,
+        lane: params.lane,
+        operation_ref: params.operation_ref,
         thread_id,
-        conversation: conversation.downgrade(),
+        conversation: Some(conversation.downgrade()),
         turns: Vec::new(),
         revision: 1,
     });
+    persist_state(state)?;
     Ok(json!({ "threadRef": thread_ref }))
 }
 
@@ -280,7 +330,7 @@ fn lane_readiness(
     if let Some(thread_ref) = params.excluding_thread_ref.as_deref() {
         validate_ref(thread_ref, "excludingThreadRef")?;
     }
-    if params.lane != CODEX_LOCAL_LANE {
+    if !is_supported_lane(&params.lane) {
         return Ok(json!({
             "known": false,
             "admitted": false,
@@ -293,12 +343,32 @@ fn lane_readiness(
         .workspace
         .as_ref()
         .is_some_and(|binding| binding.workspace.upgrade().is_some());
-    let model_ready = cx.update(|cx| {
-        LanguageModelRegistry::read_global(cx)
-            .default_model()
-            .is_some()
-    });
+    let lane_thread_exists = state
+        .borrow()
+        .threads
+        .iter()
+        .any(|thread| thread.lane == params.lane);
+    let (authority_ready, authority_state) = if params.lane == CODEX_LOCAL_LANE {
+        let model_ready = cx.update(|cx| {
+            LanguageModelRegistry::read_global(cx)
+                .default_model()
+                .is_some()
+        });
+        (
+            model_ready,
+            if model_ready {
+                "available"
+            } else {
+                "unavailable"
+            },
+        )
+    } else {
+        claude_lane_readiness(state, cx, lane_thread_exists)?
+    };
     let busy = state.borrow().threads.iter().any(|host_thread| {
+        if host_thread.lane != params.lane {
+            return false;
+        }
         if params
             .excluding_thread_ref
             .as_ref()
@@ -306,7 +376,11 @@ fn lane_readiness(
         {
             return false;
         }
-        let Some(conversation) = host_thread.conversation.upgrade() else {
+        let Some(conversation) = host_thread
+            .conversation
+            .as_ref()
+            .and_then(WeakEntity::upgrade)
+        else {
             return false;
         };
         cx.update(|cx| {
@@ -316,12 +390,12 @@ fn lane_readiness(
                 .is_some_and(|thread| thread.read(cx).status() == ThreadStatus::Generating)
         })
     });
-    let admitted = workspace_ready && model_ready;
+    let admitted = workspace_ready && authority_ready;
     Ok(json!({
         "known": true,
         "admitted": admitted,
         "fullAuto": admitted,
-        "state": if admitted && !busy { "available" } else if busy { "busy" } else { "unavailable" },
+        "state": if admitted && !busy { "available" } else if busy { "busy" } else { authority_state },
     }))
 }
 
@@ -344,7 +418,7 @@ async fn dispatch_turn(
         .as_ref()
         .and_then(|profile| profile.lane.clone())
         .unwrap_or_else(|| CODEX_LOCAL_LANE.to_string());
-    if lane != CODEX_LOCAL_LANE {
+    if !is_supported_lane(&lane) {
         return Ok(json!({
             "accepted": false,
             "reason": "unsupported_lane",
@@ -384,9 +458,15 @@ async fn dispatch_turn(
         if host_thread.workspace_ref != params.workspace_ref {
             return Err(unavailable("The thread belongs to a different workspace."));
         }
+        if host_thread.lane != lane {
+            return Err(invalid(
+                "The dispatch lane does not match the Agent thread lane.",
+            ));
+        }
         host_thread
             .conversation
-            .upgrade()
+            .as_ref()
+            .and_then(WeakEntity::upgrade)
             .ok_or_else(|| unavailable("The requested Agent thread was closed."))?
     };
     let thread = wait_for_root_thread(&conversation, cx).await?;
@@ -427,13 +507,14 @@ async fn dispatch_turn(
             provider_session_ref,
             start_entry_index,
             end_entry_index: None,
-            phase: "streaming",
+            phase: "streaming".to_string(),
             disposition: None,
             created_at: now.clone(),
             updated_at: now,
         });
         host_thread.revision += 1;
     }
+    persist_state(state)?;
     let send = thread.update(cx, |thread, cx| {
         thread.send(vec![params.message.into()], cx)
     });
@@ -460,11 +541,11 @@ async fn dispatch_turn(
             {
                 if turn.disposition.is_none() {
                     if result.is_ok() && !had_error {
-                        turn.phase = "completed";
-                        turn.disposition = Some("completed");
+                        turn.phase = "completed".to_string();
+                        turn.disposition = Some("completed".to_string());
                     } else {
-                        turn.phase = "failed";
-                        turn.disposition = Some("failed");
+                        turn.phase = "failed".to_string();
+                        turn.disposition = Some("failed".to_string());
                     }
                     turn.end_entry_index = Some(end_entry_index);
                     turn.updated_at = now;
@@ -478,6 +559,9 @@ async fn dispatch_turn(
             if changed {
                 host_thread.revision += 1;
             }
+        }
+        if let Err(error) = persist_correlation_journal(&state_for_completion.borrow()) {
+            log::error!("failed to persist Omega Full Auto host correlation: {error:#}");
         }
     })
     .detach();
@@ -503,7 +587,7 @@ fn refresh_evidence(
             return Ok(json!({ "present": false, "revision": 0, "live": null, "turns": [] }));
         };
         (
-            thread.conversation.upgrade(),
+            thread.conversation.as_ref().and_then(WeakEntity::upgrade),
             thread.turns.clone(),
             thread.revision,
         )
@@ -552,8 +636,8 @@ fn refresh_evidence(
             .rev()
             .find(|turn| turn.disposition.is_none())
     {
-        turn.phase = "completed";
-        turn.disposition = Some("completed");
+        turn.phase = "completed".to_string();
+        turn.disposition = Some("completed".to_string());
         turn.end_entry_index = Some(entry_count);
         turn.updated_at = Utc::now().to_rfc3339();
         let mut bridge = state.borrow_mut();
@@ -571,13 +655,14 @@ fn refresh_evidence(
             host_thread.revision += 1;
             revision = host_thread.revision;
         }
+        persist_state(state)?;
     }
     let active_turn = turns.iter().rev().find(|turn| turn.disposition.is_none());
     let last_turn = turns.last();
     let live = if let Some(turn) = active_turn {
         json!({ "state": "turn_running", "turnRef": turn.turn_ref })
     } else if let Some(turn) = last_turn {
-        match turn.disposition {
+        match turn.disposition.as_deref() {
             Some("completed") => json!({ "state": "turn_completed", "turnRef": turn.turn_ref }),
             Some("failed") => json!({
                 "state": "blocked",
@@ -665,7 +750,8 @@ async fn interrupt_turn(
         (
             host_thread
                 .conversation
-                .upgrade()
+                .as_ref()
+                .and_then(WeakEntity::upgrade)
                 .ok_or_else(|| unavailable("The requested Agent thread was closed."))?,
             turn_ref,
         )
@@ -696,12 +782,13 @@ async fn interrupt_turn(
             .iter_mut()
             .find(|turn| turn.turn_ref == turn_ref)
     {
-        turn.phase = "interrupted";
-        turn.disposition = Some("owner_interrupted");
+        turn.phase = "interrupted".to_string();
+        turn.disposition = Some("owner_interrupted".to_string());
         turn.end_entry_index = Some(end_entry_index);
         turn.updated_at = Utc::now().to_rfc3339();
         host_thread.revision += 1;
     }
+    persist_state(state)?;
     Ok(json!({ "interrupted": true }))
 }
 
@@ -750,6 +837,226 @@ fn require_workspace(
         return Err(unavailable("The bound workspace was closed."));
     }
     Ok(binding)
+}
+
+fn require_loaded_journal(state: &Rc<RefCell<HostBridgeState>>) -> Result<(), HostResponseError> {
+    if let Some(error) = state.borrow().load_error.as_deref() {
+        Err(internal(format!(
+            "Omega Full Auto host correlation could not be loaded: {error}"
+        )))
+    } else {
+        Ok(())
+    }
+}
+
+fn rebind_persisted_threads(
+    workspace_ref: &str,
+    state: &Rc<RefCell<HostBridgeState>>,
+    cx: &mut AsyncApp,
+) -> Result<(), HostResponseError> {
+    let thread_ids = state
+        .borrow()
+        .threads
+        .iter()
+        .filter(|thread| {
+            thread.workspace_ref == workspace_ref
+                && thread
+                    .conversation
+                    .as_ref()
+                    .and_then(WeakEntity::upgrade)
+                    .is_none()
+        })
+        .map(|thread| (thread.thread_id, thread.lane.clone()))
+        .collect::<Vec<_>>();
+    if thread_ids.is_empty() {
+        return Ok(());
+    }
+
+    let binding = require_workspace(workspace_ref, state)?;
+    let workspace = binding
+        .workspace
+        .upgrade()
+        .ok_or_else(|| unavailable("The bound workspace was closed."))?;
+    let rebound = binding
+        .window
+        .update(cx, |_root, window, cx| {
+            let panel = workspace
+                .read(cx)
+                .panel::<AgentPanel>(cx)
+                .ok_or_else(|| unavailable("The workspace Agent panel is unavailable."))?;
+            let mut rebound = Vec::with_capacity(thread_ids.len());
+            for (thread_id, lane) in thread_ids {
+                let agent = agent_for_lane(&lane)?;
+                let conversation = panel.update(cx, |panel, cx| {
+                    if panel.conversation_view_for_id(&thread_id, cx).is_none() {
+                        panel.load_agent_thread(
+                            agent,
+                            thread_id,
+                            None,
+                            None,
+                            false,
+                            AgentThreadSource::AgentPanel,
+                            window,
+                            cx,
+                        );
+                    }
+                    panel.conversation_view_for_id(&thread_id, cx).cloned()
+                });
+                let conversation = conversation.ok_or_else(|| {
+                    unavailable("The persisted Full Auto Agent thread could not be restored.")
+                })?;
+                rebound.push((thread_id, conversation.downgrade()));
+            }
+            Ok(rebound)
+        })
+        .map_err(|error| unavailable(format!("The workspace window is unavailable: {error}")))??;
+
+    let mut bridge = state.borrow_mut();
+    for (thread_id, conversation) in rebound {
+        if let Some(thread) = bridge
+            .threads
+            .iter_mut()
+            .find(|thread| thread.thread_id == thread_id)
+        {
+            thread.conversation = Some(conversation);
+        }
+    }
+    Ok(())
+}
+
+fn load_correlation_journal(path: &Path) -> anyhow::Result<Vec<HostThread>> {
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error.into()),
+    };
+    let journal: CorrelationJournal = serde_json::from_slice(&bytes)?;
+    anyhow::ensure!(
+        journal.schema == CORRELATION_SCHEMA,
+        "unsupported correlation schema {}",
+        journal.schema
+    );
+    journal
+        .threads
+        .into_iter()
+        .map(|thread| {
+            Ok(HostThread {
+                workspace_ref: thread.workspace_ref,
+                lane: thread.lane,
+                operation_ref: thread.operation_ref,
+                thread_id: ThreadId::from_key_string(&thread.thread_ref)?,
+                conversation: None,
+                turns: thread.turns,
+                revision: thread.revision,
+            })
+        })
+        .collect()
+}
+
+fn persist_state(state: &Rc<RefCell<HostBridgeState>>) -> Result<(), HostResponseError> {
+    persist_correlation_journal(&state.borrow()).map_err(|error| {
+        internal(format!(
+            "Omega Full Auto host correlation could not be persisted: {error:#}"
+        ))
+    })
+}
+
+fn persist_correlation_journal(state: &HostBridgeState) -> anyhow::Result<()> {
+    let journal = CorrelationJournal {
+        schema: CORRELATION_SCHEMA.to_string(),
+        threads: state
+            .threads
+            .iter()
+            .map(|thread| PersistedHostThread {
+                workspace_ref: thread.workspace_ref.clone(),
+                lane: thread.lane.clone(),
+                operation_ref: thread.operation_ref.clone(),
+                thread_ref: thread.thread_id.to_key_string(),
+                turns: thread.turns.clone(),
+                revision: thread.revision,
+            })
+            .collect(),
+    };
+    let parent = state
+        .correlation_path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("correlation path has no parent"))?;
+    std::fs::create_dir_all(parent)?;
+    let temporary_path = state.correlation_path.with_extension("json.tmp");
+    let bytes = serde_json::to_vec_pretty(&journal)?;
+    let mut temporary_file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .open(&temporary_path)?;
+    temporary_file.write_all(&bytes)?;
+    temporary_file.sync_all()?;
+    std::fs::rename(&temporary_path, &state.correlation_path)?;
+    std::fs::File::open(parent)?.sync_all()?;
+    Ok(())
+}
+
+fn agent_for_lane(lane: &str) -> Result<Agent, HostResponseError> {
+    match lane {
+        CODEX_LOCAL_LANE => Ok(Agent::NativeAgent),
+        CLAUDE_LOCAL_LANE => Ok(Agent::Custom {
+            id: CLAUDE_AGENT_ID.into(),
+        }),
+        _ => Err(unsupported(format!("The {lane} lane is not supported."))),
+    }
+}
+
+fn is_supported_lane(lane: &str) -> bool {
+    matches!(lane, CODEX_LOCAL_LANE | CLAUDE_LOCAL_LANE)
+}
+
+fn claude_lane_readiness(
+    state: &Rc<RefCell<HostBridgeState>>,
+    cx: &AsyncApp,
+    lane_thread_exists: bool,
+) -> Result<(bool, &'static str), HostResponseError> {
+    let binding = state
+        .borrow()
+        .workspace
+        .clone()
+        .ok_or_else(|| unavailable("No Omega workspace is bound."))?;
+    let workspace = binding
+        .workspace
+        .upgrade()
+        .ok_or_else(|| unavailable("The bound workspace was closed."))?;
+    let claude_agent = Agent::Custom {
+        id: CLAUDE_AGENT_ID.into(),
+    };
+    let (registered, connection_status) = cx.update(|cx| {
+        let project = workspace.read(cx).project().clone();
+        let registered = project
+            .read(cx)
+            .agent_server_store()
+            .read(cx)
+            .external_agents()
+            .any(|agent_id| agent_id.as_ref() == CLAUDE_AGENT_ID);
+        let connection_status = workspace
+            .read(cx)
+            .panel::<AgentPanel>(cx)
+            .map(|panel| {
+                panel
+                    .read(cx)
+                    .connection_store()
+                    .read(cx)
+                    .connection_status(&claude_agent, cx)
+            })
+            .unwrap_or(AgentConnectionStatus::Disconnected);
+        (registered, connection_status)
+    });
+    if !registered {
+        return Ok((false, "unavailable"));
+    }
+    match connection_status {
+        AgentConnectionStatus::Connected => Ok((true, "available")),
+        AgentConnectionStatus::Connecting => Ok((false, "connecting")),
+        AgentConnectionStatus::Disconnected if !lane_thread_exists => Ok((true, "available")),
+        AgentConnectionStatus::Disconnected => Ok((false, "unavailable")),
+    }
 }
 
 fn decode_params<T: for<'de> Deserialize<'de>>(params: Value) -> Result<T, HostResponseError> {
@@ -820,6 +1127,7 @@ fn internal(message: impl Into<String>) -> HostResponseError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::tempdir;
 
     #[test]
     fn validates_bounded_refs_and_params() {
@@ -850,5 +1158,102 @@ mod tests {
         assert!(assistant_key.len() <= 180);
         assert_ne!(user_key, assistant_key);
         assert_eq!(user_key, message_key(&turn_ref, "user"));
+    }
+
+    #[test]
+    fn correlation_journal_round_trips_without_conversation_entities() {
+        let directory = tempdir().expect("tempdir");
+        let path = directory.path().join(CORRELATION_FILE);
+        let thread_id = ThreadId::new();
+        let state = HostBridgeState {
+            workspace: None,
+            threads: vec![HostThread {
+                workspace_ref: "workspace.omega.supervised".to_string(),
+                lane: CLAUDE_LOCAL_LANE.to_string(),
+                operation_ref: "operation.full-auto.1".to_string(),
+                thread_id,
+                conversation: None,
+                turns: vec![HostTurn {
+                    turn_ref: "turn.full-auto.1".to_string(),
+                    lane: CODEX_LOCAL_LANE.to_string(),
+                    account_ref: Some("account.owner".to_string()),
+                    model: None,
+                    provider_session_ref: "session.native.1".to_string(),
+                    start_entry_index: 4,
+                    end_entry_index: Some(8),
+                    phase: "completed".to_string(),
+                    disposition: Some("completed".to_string()),
+                    created_at: "2026-07-24T12:00:00Z".to_string(),
+                    updated_at: "2026-07-24T12:01:00Z".to_string(),
+                }],
+                revision: 3,
+            }],
+            correlation_path: path.clone(),
+            load_error: None,
+        };
+
+        persist_correlation_journal(&state).expect("persist correlation journal");
+        let restored = load_correlation_journal(&path).expect("load correlation journal");
+
+        assert_eq!(restored.len(), 1);
+        assert_eq!(restored[0].thread_id, thread_id);
+        assert_eq!(restored[0].lane, CLAUDE_LOCAL_LANE);
+        assert_eq!(restored[0].operation_ref, "operation.full-auto.1");
+        assert!(restored[0].conversation.is_none());
+        assert_eq!(restored[0].revision, 3);
+        assert_eq!(restored[0].turns[0].turn_ref, "turn.full-auto.1");
+        assert_eq!(
+            restored[0].turns[0].disposition.as_deref(),
+            Some("completed")
+        );
+    }
+
+    #[test]
+    fn correlation_journal_rejects_unknown_schema_and_invalid_thread_refs() {
+        let directory = tempdir().expect("tempdir");
+        let path = directory.path().join(CORRELATION_FILE);
+        std::fs::write(
+            &path,
+            serde_json::to_vec(&json!({
+                "schema": "openagents.omega.full_auto_host_correlation.v0",
+                "threads": [],
+            }))
+            .expect("serialize fixture"),
+        )
+        .expect("write fixture");
+        assert!(load_correlation_journal(&path).is_err());
+
+        std::fs::write(
+            &path,
+            serde_json::to_vec(&json!({
+                "schema": CORRELATION_SCHEMA,
+                "threads": [{
+                    "workspaceRef": "workspace.omega.supervised",
+                    "lane": "codex-local",
+                    "operationRef": "operation.full-auto.1",
+                    "threadRef": "not-a-uuid",
+                    "turns": [],
+                    "revision": 1,
+                }],
+            }))
+            .expect("serialize fixture"),
+        )
+        .expect("write fixture");
+        assert!(load_correlation_journal(&path).is_err());
+    }
+
+    #[test]
+    fn local_lanes_resolve_to_their_real_agent_authorities() {
+        assert_eq!(
+            agent_for_lane(CODEX_LOCAL_LANE).expect("codex lane"),
+            Agent::NativeAgent
+        );
+        assert_eq!(
+            agent_for_lane(CLAUDE_LOCAL_LANE).expect("claude lane"),
+            Agent::Custom {
+                id: CLAUDE_AGENT_ID.into(),
+            }
+        );
+        assert!(agent_for_lane("claude-cloud").is_err());
     }
 }
