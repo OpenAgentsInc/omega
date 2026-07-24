@@ -863,6 +863,8 @@ pub mod workroom {
             OpenPanel,
             /// Focuses the Sarah workroom composer.
             FocusComposer,
+            /// Sends the composer text as an owner message (pending until confirmed).
+            SendMessage,
             /// Sends a typed interrupt intent for the active Sarah turn.
             InterruptTurn
         ]

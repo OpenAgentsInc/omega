@@ -1,7 +1,12 @@
-//! Sarah workroom dock panel (`OMEGA-SW-03` / `OMEGA-SW-06`).
+//! Sarah workroom dock panel (`OMEGA-SW-03` / `OMEGA-SW-04` / `OMEGA-SW-06`).
 //!
 //! Projection + command entry only. Durable state lives in the record behind
 //! supervised `omega-effectd`. Header text is exactly "Sarah".
+//!
+//! OMEGA-SW-04: interaction states (pending send, running after claim, ordered
+//! tool ladder, answer block + completion, terminal reason, interrupt
+//! pending→applied). Transport is SARAH-NR-06. Honest liveness is the tool
+//! ladder — never fake token streaming.
 //!
 //! OMEGA-SW-06: local unread count + attention marker. Proactive tick turns
 //! share the transcript projection (no new source). Read state is local only.
@@ -20,18 +25,19 @@ use omega_effectd::{
 use serde_json::{Value, json};
 use ui::{Button, ButtonStyle, Label, LabelSize, prelude::*};
 use workspace::{
-    dock::{DockPosition, Panel, PanelEvent},
     Workspace,
+    dock::{DockPosition, Panel, PanelEvent},
 };
-use zed_actions::workroom::{FocusComposer, InterruptTurn, OpenPanel};
+use zed_actions::workroom::{FocusComposer, InterruptTurn, OpenPanel, SendMessage};
 
 use crate::attention::{
-    empty_room_is_honest, AttentionMarker, OMEGA_AUTONOMOUS_TICK_ENABLED,
+    AttentionMarker, OMEGA_AUTONOMOUS_TICK_ENABLED, empty_room_is_honest,
 };
+use crate::interaction::{AnswerState, InteractionEvent, InteractionState, TerminalOutcome};
 use crate::projections::{
-    sources, ActivityProjection, ActivityRow, Freshness, GapState, InterruptIntentState,
-    MessageAck, ProjectionMeta, ReceiptRow, ReceiptsProjection, RoomProjection, RunPhase,
-    RunStateProjection, TranscriptProjection, TranscriptRow, WorkroomProjection,
+    ActivityProjection, ActivityRow, Freshness, GapState, InterruptIntentState, MessageAck,
+    ProjectionMeta, ReceiptRow, ReceiptsProjection, RoomProjection, RunPhase, RunStateProjection,
+    TranscriptProjection, TranscriptRow, WorkroomProjection, sources,
 };
 
 const PANEL_KEY: &str = "SarahWorkroomPanel";
@@ -41,12 +47,15 @@ pub struct SarahWorkroomPanel {
     focus_handle: FocusHandle,
     composer: Entity<Editor>,
     projection: WorkroomProjection,
+    /// OMEGA-SW-04 pure interaction projection (pending/send/ladder/terminal).
+    interaction: InteractionState,
     status: SharedString,
     supervisor: Option<SharedOmegaEffectdSupervisor>,
     binding: Option<OpenAgentsBinding>,
     binding_projection: BindingProjection,
     binding_busy: bool,
     refreshing: bool,
+    sending: bool,
     interrupting: bool,
 }
 
@@ -63,6 +72,12 @@ pub fn init(cx: &mut App) {
             .register_action(|workspace, _: &FocusComposer, window, cx| {
                 if let Some(panel) = workspace.panel::<SarahWorkroomPanel>(cx) {
                     panel.update(cx, |panel, cx| panel.focus_composer(window, cx));
+                }
+                workspace.focus_panel::<SarahWorkroomPanel>(window, cx);
+            })
+            .register_action(|workspace, _: &SendMessage, window, cx| {
+                if let Some(panel) = workspace.panel::<SarahWorkroomPanel>(cx) {
+                    panel.update(cx, |panel, cx| panel.send_message(window, cx));
                 }
                 workspace.focus_panel::<SarahWorkroomPanel>(window, cx);
             })
@@ -105,12 +120,14 @@ impl SarahWorkroomPanel {
             focus_handle: cx.focus_handle(),
             composer,
             projection: WorkroomProjection::honest_unsubscribed(),
+            interaction: InteractionState::new(),
             status: binding_projection.state.status_line().into(),
             supervisor: None,
             binding,
             binding_projection,
             binding_busy: false,
             refreshing: false,
+            sending: false,
             interrupting: false,
         };
         panel.ensure_supervisor(cx);
@@ -278,6 +295,7 @@ impl SarahWorkroomPanel {
                         panel.apply_bootstrap(&boot);
                         panel.apply_snapshot(&snap);
                         panel.status = "Room projection refreshed from omega-effectd.".into();
+                        panel.sync_interaction_status();
                     }
                     (Ok(boot), Err(snap_err)) => {
                         panel.apply_bootstrap(&boot);
@@ -310,23 +328,58 @@ impl SarahWorkroomPanel {
     }
 
     fn apply_bootstrap(&mut self, value: &Value) {
+        // SARAH-NR-06 bootstrap is flat; SW-03 also accepted nested room/principal.
         let room = value.get("room").or_else(|| value.get("principal"));
-        let principal_ref = string_field(room, &["principalRef", "principal_ref", "ref"]);
+        let root = Some(value);
+        let principal_ref = string_field(room, &["principalRef", "principal_ref", "ref"])
+            .or_else(|| string_field(root, &["principalRef", "principal_ref"]));
         let display_name = string_field(room, &["displayName", "display_name", "name"])
+            .or_else(|| string_field(root, &["displayName", "display_name"]))
             .or_else(|| Some("Sarah".into()));
-        let role = string_field(room, &["role"]).or_else(|| Some("principal.sarah".into()));
+        let role = string_field(room, &["role"])
+            .or_else(|| string_field(root, &["role"]))
+            .or_else(|| Some("principal.sarah".into()));
         let thread_ref = string_field(
             value.get("thread").or(room),
             &["threadRef", "thread_ref", "ref", "conversation"],
-        );
+        )
+        .or_else(|| {
+            string_field(
+                root,
+                &[
+                    "conversationRef",
+                    "conversation_ref",
+                    "legacyThreadRef",
+                    "legacy_thread_ref",
+                    "threadRef",
+                ],
+            )
+        });
         let authority_profile = string_field(
             value.get("authority").or(room),
             &["profile", "authorityProfile", "authority_profile"],
-        );
+        )
+        .or_else(|| {
+            string_field(
+                root,
+                &["authorityProfileRef", "authority_profile_ref", "authorityProfile"],
+            )
+        });
         let authority_revision = string_field(
             value.get("authority").or(room),
             &["revision", "authorityRevision", "authority_revision"],
-        );
+        )
+        .or_else(|| {
+            value
+                .get("authorityProfileRevision")
+                .or_else(|| value.get("authority_profile_revision"))
+                .map(|v| match v {
+                    Value::Number(n) => n.to_string(),
+                    Value::String(s) => s.clone(),
+                    _ => String::new(),
+                })
+                .filter(|s| !s.is_empty())
+        });
 
         self.projection.room = RoomProjection {
             meta: ProjectionMeta::fresh(sources::ROOM),
@@ -342,6 +395,16 @@ impl SarahWorkroomPanel {
     }
 
     fn apply_snapshot(&mut self, value: &Value) {
+        // Preserve local pending rows across refresh until record confirms them.
+        let local_pending: Vec<TranscriptRow> = self
+            .projection
+            .transcript
+            .rows
+            .iter()
+            .filter(|row| row.ack == MessageAck::Pending)
+            .cloned()
+            .collect();
+
         // Transcript — ordinary turns only (including proactive tick turns).
         // omega-effectd uses `entries`; older fixtures may use items/messages.
         let mut transcript = TranscriptProjection {
@@ -374,7 +437,7 @@ impl SarahWorkroomPanel {
                 transcript.push_bounded(TranscriptRow {
                     message_ref: string_field(
                         Some(item),
-                        &["messageRef", "eventId", "id", "ref", "cursor"],
+                        &["messageRef", "eventId", "event_id", "id", "ref", "cursor"],
                     )
                     .unwrap_or_else(|| "unknown".into()),
                     role: string_field(Some(item), &["role"]).unwrap_or_else(|| "unknown".into()),
@@ -384,6 +447,16 @@ impl SarahWorkroomPanel {
             }
         } else if value.get("transcript").is_none() {
             transcript.meta = ProjectionMeta::missing(sources::TRANSCRIPT);
+        }
+        // Re-attach unconfirmed local sends so refresh never drops optimistic rows.
+        for pending in local_pending {
+            if !transcript
+                .rows
+                .iter()
+                .any(|row| row.message_ref == pending.message_ref)
+            {
+                transcript.push_bounded(pending);
+            }
         }
         if let Some(gap) = value
             .get("transcript")
@@ -397,7 +470,7 @@ impl SarahWorkroomPanel {
         }
         self.projection.transcript = transcript;
 
-        // Activity
+        // Activity — NR-06 uses `entries` with `entry` kind field.
         let mut activity = ActivityProjection {
             meta: ProjectionMeta::fresh(sources::ACTIVITY),
             rows: Vec::new(),
@@ -414,24 +487,53 @@ impl SarahWorkroomPanel {
             .and_then(|v| v.as_array())
         {
             for item in items {
+                let kind = string_field(Some(item), &["entry", "kind", "type"])
+                    .unwrap_or_else(|| "event".into());
+                let event_ref = string_field(
+                    Some(item),
+                    &["eventRef", "eventId", "event_id", "id", "ref"],
+                )
+                .unwrap_or_else(|| "unknown".into());
+                let summary = string_field(Some(item), &["summary", "text"])
+                    .unwrap_or_else(|| kind.clone());
+                let turn_ref = string_field(Some(item), &["turnRef", "turn_ref", "turn"]);
                 activity.push_bounded(ActivityRow {
-                    event_ref: string_field(
-                        Some(item),
-                        &["eventRef", "eventId", "id", "ref"],
-                    )
-                    .unwrap_or_else(|| "unknown".into()),
-                    kind: string_field(Some(item), &["kind", "type", "entry"])
-                        .unwrap_or_else(|| "event".into()),
-                    summary: string_field(Some(item), &["summary", "text"]).unwrap_or_default(),
-                    turn_ref: string_field(Some(item), &["turnRef", "turn_ref", "turn"]),
+                    event_ref: event_ref.clone(),
+                    kind: kind.clone(),
+                    summary: summary.clone(),
+                    turn_ref: turn_ref.clone(),
                 });
+                // Drive interaction ladder from snapshot activity (ordered).
+                if let Some(event) = InteractionEvent::from_runtime_kind(
+                    &kind,
+                    event_ref,
+                    turn_ref,
+                    summary,
+                    string_field(Some(item), &["toolRef", "tool_ref"]),
+                    string_field(Some(item), &["reason"]),
+                ) {
+                    let _ = self.interaction.apply_event(event);
+                }
             }
         } else if value.get("activity").is_none() {
             activity.meta = ProjectionMeta::missing(sources::ACTIVITY);
         }
+        // Prefer interaction ladder order when it has more recent steps.
+        if !self.interaction.tool_ladder.is_empty() {
+            let mut ladder_activity = ActivityProjection {
+                meta: ProjectionMeta::fresh(sources::ACTIVITY),
+                rows: Vec::new(),
+                cursor: activity.cursor.clone(),
+                truncated: false,
+            };
+            for row in self.interaction.activity_rows() {
+                ladder_activity.push_bounded(row);
+            }
+            activity = ladder_activity;
+        }
         self.projection.activity = activity;
 
-        // Receipts (stub refs only)
+        // Receipts (stub refs only; deep inspector is OMEGA-SW-05).
         let mut receipts = ReceiptsProjection {
             meta: ProjectionMeta::fresh(sources::RECEIPTS),
             rows: Vec::new(),
@@ -467,46 +569,25 @@ impl SarahWorkroomPanel {
         }
         self.projection.receipts = receipts;
 
-        // Run state
+        // Run state — NR-06 uses `state`; legacy used `phase`.
         let run = value.get("runState").or_else(|| value.get("run_state"));
         let phase_str = string_field(run, &["phase", "state", "status"]);
         let phase = phase_str
             .as_deref()
-            .map(|s| {
-                if s.starts_with("turn.") {
-                    RunPhase::from_event_kind(s)
-                } else {
-                    match s {
-                        "queued" => RunPhase::Queued,
-                        "running" => RunPhase::Running,
-                        "interrupted" => RunPhase::Interrupted,
-                        "finished" | "completed" => RunPhase::Finished,
-                        "idle" => RunPhase::Idle,
-                        _ => RunPhase::Unknown,
-                    }
-                }
-            })
+            .map(parse_run_phase)
             .unwrap_or(RunPhase::Unknown);
+        let reason = string_field(run, &["reason", "finishReason", "finish_reason"]);
+        let turn_ref = string_field(run, &["turnRef", "turn_ref"]);
 
-        let mut run_state = RunStateProjection {
-            meta: if run.is_some() {
-                ProjectionMeta::fresh(sources::RUN_STATE)
-            } else {
-                ProjectionMeta::missing(sources::RUN_STATE)
-            },
-            phase,
-            reason: string_field(run, &["reason", "finishReason", "finish_reason"]),
-            turn_ref: string_field(run, &["turnRef", "turn_ref"]),
-            interrupt_intent: self.projection.run_state.interrupt_intent,
-        };
-        // Preserve pending interrupt until terminal event applies it.
-        if run_state.phase == RunPhase::Interrupted
-            && run_state.interrupt_intent == InterruptIntentState::Pending
-        {
-            run_state.interrupt_intent = InterruptIntentState::Applied;
-        }
+        self.interaction
+            .apply_snapshot_run(phase, turn_ref.clone(), reason.clone());
+
+        let mut run_state = self.interaction.run.clone();
         if run.is_none() {
-            run_state.reason = Some("Run state missing from snapshot.".into());
+            run_state.meta = ProjectionMeta::missing(sources::RUN_STATE);
+            if run_state.reason.is_none() {
+                run_state.reason = Some("Run state missing from snapshot.".into());
+            }
         }
         self.projection.run_state = run_state;
         self.projection.connection_detail = Some("Snapshot applied from omega-effectd.".into());
@@ -517,6 +598,180 @@ impl SarahWorkroomPanel {
             "empty room must stay honest when autonomous tick is off"
         );
         self.projection.recompute_attention();
+        self.sync_interaction_status();
+    }
+
+    /// Apply one ordered room/runtime event into interaction + projection.
+    fn apply_interaction_event(&mut self, event: InteractionEvent) {
+        let rows = self.interaction.apply_event(event);
+        for row in rows {
+            self.upsert_transcript_row(row);
+        }
+        // Refresh activity from ordered tool ladder.
+        if !self.interaction.tool_ladder.is_empty() {
+            let mut activity = ActivityProjection {
+                meta: ProjectionMeta::fresh(sources::ACTIVITY),
+                rows: Vec::new(),
+                cursor: self.projection.activity.cursor.clone(),
+                truncated: false,
+            };
+            for row in self.interaction.activity_rows() {
+                activity.push_bounded(row);
+            }
+            self.projection.activity = activity;
+        }
+        self.projection.run_state = self.interaction.run.clone();
+        self.projection.recompute_attention();
+        self.sync_interaction_status();
+    }
+
+    fn upsert_transcript_row(&mut self, row: TranscriptRow) {
+        if let Some(existing) = self
+            .projection
+            .transcript
+            .rows
+            .iter_mut()
+            .find(|r| r.message_ref == row.message_ref)
+        {
+            *existing = row;
+            self.projection.recompute_attention();
+            return;
+        }
+        // Confirm may replace a local pending row by text/local ref.
+        if row.ack == MessageAck::Confirmed {
+            if let Some(idx) = self.projection.transcript.rows.iter().position(|r| {
+                r.ack == MessageAck::Pending && r.role == row.role && r.text == row.text
+            }) {
+                self.projection.transcript.rows[idx] = row;
+                self.projection.recompute_attention();
+                return;
+            }
+        }
+        self.projection.transcript.push_bounded(row);
+        if self.projection.transcript.meta.gap == GapState::Unavailable {
+            self.projection.transcript.meta = ProjectionMeta::fresh(sources::TRANSCRIPT);
+        }
+        self.projection.recompute_attention();
+    }
+
+    fn sync_interaction_status(&mut self) {
+        // Prefer interaction status when a turn is active or pending; keep
+        // attention mark-read messages otherwise.
+        if self.interaction.pending_send_count() > 0
+            || self.interaction.run.phase == RunPhase::Running
+            || self.interaction.run.phase == RunPhase::Queued
+            || self.interaction.terminal.is_terminal()
+            || self.interaction.run.interrupt_intent != InterruptIntentState::None
+            || !self.interaction.tool_ladder.is_empty()
+            || self.interaction.answer != AnswerState::None
+        {
+            let mut status = self.interaction.status_line();
+            if self.interaction.uses_honest_liveness() {
+                status.push_str(" · liveness=tool_ladder");
+            }
+            self.status = status.into();
+        }
+    }
+
+    /// OMEGA-SW-04: send composer text. Local pending until record confirms.
+    fn send_message(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.sending {
+            return;
+        }
+        let text = self.composer.read(cx).text(cx).trim().to_string();
+        if text.is_empty() {
+            self.status = "Message text is required.".into();
+            cx.notify();
+            return;
+        }
+
+        let (local_ref, pending_row) = self.interaction.begin_send(text.clone());
+        self.upsert_transcript_row(pending_row);
+        self.projection.transcript.meta = ProjectionMeta::pending(sources::TRANSCRIPT);
+        self.status = format!("Pending local send {local_ref} until record confirms.").into();
+
+        self.composer.update(cx, |editor, cx| {
+            editor.clear(window, cx);
+        });
+
+        self.ensure_supervisor(cx);
+        let Some(supervisor) = self.supervisor.clone() else {
+            self.interaction.fail_send(&local_ref);
+            self.projection
+                .transcript
+                .rows
+                .retain(|row| row.message_ref != local_ref);
+            self.projection.mark_effectd_unavailable("no supervisor");
+            self.status = "omega-effectd unavailable; local pending send dropped.".into();
+            cx.notify();
+            return;
+        };
+
+        self.sending = true;
+        cx.notify();
+
+        cx.spawn(async move |this, cx| {
+            let result = {
+                let mut guard = supervisor.lock().await;
+                match guard.ensure_started().await {
+                    Ok(()) => guard.sarah_send_message(&text).await,
+                    Err(error) => Err(omega_effectd::SupervisorError::Anyhow(error)),
+                }
+            };
+            this.update(cx, |panel, cx| {
+                panel.sending = false;
+                match result {
+                    Ok(value) => {
+                        let message_ref = string_field(
+                            Some(&value),
+                            &["messageRef", "message_ref", "eventId", "event_id"],
+                        )
+                        .unwrap_or_else(|| local_ref.clone());
+                        let turn_ref =
+                            string_field(Some(&value), &["turnRef", "turn_ref"]);
+                        let status = string_field(Some(&value), &["status"])
+                            .unwrap_or_else(|| "accepted".into());
+                        if let Some(confirmed) = panel.interaction.confirm_send(
+                            &local_ref,
+                            message_ref.clone(),
+                            turn_ref.clone(),
+                        ) {
+                            panel.upsert_transcript_row(confirmed);
+                        } else {
+                            panel.upsert_transcript_row(TranscriptRow {
+                                message_ref: message_ref.clone(),
+                                role: "owner".into(),
+                                text: text.clone(),
+                                ack: MessageAck::Confirmed,
+                            });
+                        }
+                        // Accepted on record — turn runs only after claim event.
+                        panel.projection.run_state = panel.interaction.run.clone();
+                        panel.projection.transcript.meta =
+                            ProjectionMeta::fresh(sources::TRANSCRIPT);
+                        panel.status = format!(
+                            "Message confirmed ({status}) ref={message_ref}; turn claim pending."
+                        )
+                        .into();
+                        panel.sync_interaction_status();
+                    }
+                    Err(error) => {
+                        panel.interaction.fail_send(&local_ref);
+                        panel
+                            .projection
+                            .transcript
+                            .rows
+                            .retain(|row| row.message_ref != local_ref);
+                        panel.projection.recompute_attention();
+                        panel.status =
+                            format!("Send failed ({error}). Pending local row dropped.").into();
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     fn interrupt_turn(&mut self, cx: &mut Context<Self>) {
@@ -524,7 +779,8 @@ impl SarahWorkroomPanel {
             return;
         }
         // Law: pending never renders as applied.
-        self.projection.run_state.mark_interrupt_pending();
+        self.interaction.begin_interrupt();
+        self.projection.run_state = self.interaction.run.clone();
         self.status = "Interrupt intent pending until terminal turn event.".into();
         self.ensure_supervisor(cx);
         let Some(supervisor) = self.supervisor.clone() else {
@@ -534,10 +790,11 @@ impl SarahWorkroomPanel {
             return;
         };
         let turn_ref = self
-            .projection
-            .run_state
+            .interaction
+            .run
             .turn_ref
             .clone()
+            .or_else(|| self.projection.run_state.turn_ref.clone())
             .unwrap_or_else(|| "active".into());
         self.interrupting = true;
         cx.notify();
@@ -560,27 +817,35 @@ impl SarahWorkroomPanel {
                             .or_else(|| value.get("status"))
                             .and_then(|v| v.as_str())
                             .unwrap_or("pending");
-                        if state == "applied" || state == "interrupted" {
-                            // Service may already have settled; still require phase.
-                            if panel.projection.run_state.phase == RunPhase::Interrupted {
-                                panel.projection.run_state.interrupt_intent =
-                                    InterruptIntentState::Applied;
+                        let pending = value
+                            .get("pending")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(true);
+                        if (state == "applied" || state == "interrupted") && !pending {
+                            if panel.interaction.run.phase == RunPhase::Interrupted {
+                                panel.apply_interaction_event(InteractionEvent::TurnInterrupted {
+                                    turn_ref: Some(turn_ref.clone()),
+                                    reason: string_field(Some(&value), &["reason"])
+                                        .unwrap_or_else(|| "owner_interrupt".into()),
+                                });
                             } else {
-                                panel.projection.run_state.interrupt_intent =
-                                    InterruptIntentState::Pending;
+                                panel.interaction.begin_interrupt();
+                                panel.projection.run_state = panel.interaction.run.clone();
                             }
                         } else {
-                            panel.projection.run_state.interrupt_intent =
-                                InterruptIntentState::Pending;
+                            // Stay pending — never upgrade to Applied here.
+                            panel.interaction.begin_interrupt();
+                            panel.projection.run_state = panel.interaction.run.clone();
                         }
-                        panel.status =
-                            format!("Interrupt intent: {state} (not applied until terminal event).")
-                                .into();
+                        panel.status = format!(
+                            "Interrupt intent: {state} (not applied until terminal event)."
+                        )
+                        .into();
                     }
                     Err(error) => {
                         // Keep intent visible as pending/unavailable, not applied.
-                        panel.projection.run_state.interrupt_intent =
-                            InterruptIntentState::Pending;
+                        panel.interaction.begin_interrupt();
+                        panel.projection.run_state = panel.interaction.run.clone();
                         panel.projection.run_state.meta =
                             ProjectionMeta::pending(sources::RUN_STATE);
                         panel.status = format!(
@@ -599,6 +864,26 @@ impl SarahWorkroomPanel {
     /// Test / inspection helper: current in-memory projection (not durable).
     pub fn projection(&self) -> &WorkroomProjection {
         &self.projection
+    }
+
+    /// Test / inspection helper: interaction state (not durable).
+    pub fn interaction(&self) -> &InteractionState {
+        &self.interaction
+    }
+}
+
+fn parse_run_phase(s: &str) -> RunPhase {
+    if s.starts_with("turn.") {
+        return RunPhase::from_event_kind(s);
+    }
+    match s {
+        "queued" => RunPhase::Queued,
+        "running" => RunPhase::Running,
+        "interrupted" => RunPhase::Interrupted,
+        "interrupt_pending" => RunPhase::Running,
+        "finished" | "completed" => RunPhase::Finished,
+        "idle" => RunPhase::Idle,
+        _ => RunPhase::Unknown,
     }
 }
 
@@ -676,6 +961,10 @@ impl Render for SarahWorkroomPanel {
                 p.run_state.phase,
                 RunPhase::Running | RunPhase::Queued | RunPhase::Unknown
             );
+        let can_send = !self.sending;
+        let answer = self.interaction.answer.clone();
+        let terminal = self.interaction.terminal.clone();
+        let honest = self.interaction.uses_honest_liveness();
 
         v_flex()
             .id("sarah-workroom-panel")
@@ -688,6 +977,13 @@ impl Render for SarahWorkroomPanel {
             .child(Label::new(self.status.clone()).color(Color::Muted))
             .when_some(p.connection_detail.clone(), |this, detail| {
                 this.child(Label::new(detail).color(Color::Muted))
+            })
+            .when(honest, |this| {
+                this.child(
+                    Label::new("Liveness: ordered tool ladder (no token stream).")
+                        .color(Color::Muted)
+                        .size(LabelSize::Small),
+                )
             })
             // OMEGA-SW-01: visible binding state (unbound | bound | refused).
             .child(binding_section(&self.binding_projection))
@@ -740,8 +1036,8 @@ impl Render for SarahWorkroomPanel {
                     .overflow_y_scroll()
                     .child(transcript_body(&p.transcript)),
             )
-            // Activity
-            .child(section_header("Activity", &p.activity.meta))
+            // Activity / tool ladder
+            .child(section_header("Activity (tool ladder)", &p.activity.meta))
             .child(
                 v_flex()
                     .id("sarah-workroom-activity")
@@ -753,12 +1049,15 @@ impl Render for SarahWorkroomPanel {
                     .overflow_y_scroll()
                     .child(activity_body(&p.activity)),
             )
+            // Answer block (stream:false — one block, not tokens)
+            .child(Label::new("Answer").color(Color::Muted))
+            .child(answer_body(&answer))
             // Receipts stub
             .child(section_header("Receipts", &p.receipts.meta))
             .child(receipts_body(&p.receipts))
-            // Run state
+            // Run state + terminal outcome
             .child(section_header("Run state", &p.run_state.meta))
-            .child(run_state_body(&p.run_state))
+            .child(run_state_body(&p.run_state, &terminal))
             // Composer (text only)
             .child(Label::new("Composer").color(Color::Muted))
             .child(
@@ -772,6 +1071,17 @@ impl Render for SarahWorkroomPanel {
             .child(
                 h_flex()
                     .gap_2()
+                    .child(
+                        Button::new(
+                            "sarah-workroom-send",
+                            if self.sending { "Sending…" } else { "Send" },
+                        )
+                        .style(ButtonStyle::Filled)
+                        .disabled(!can_send)
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.send_message(window, cx);
+                        })),
+                    )
                     .child(
                         Button::new("sarah-workroom-refresh", "Refresh")
                             .style(ButtonStyle::Subtle)
@@ -796,7 +1106,7 @@ impl Render for SarahWorkroomPanel {
                                 "Interrupt"
                             },
                         )
-                        .style(ButtonStyle::Filled)
+                        .style(ButtonStyle::Subtle)
                         .disabled(
                             !can_interrupt
                                 && p.run_state.interrupt_intent != InterruptIntentState::Pending,
@@ -989,7 +1299,32 @@ fn receipts_body(receipts: &ReceiptsProjection) -> impl IntoElement {
         })
 }
 
-fn run_state_body(run: &RunStateProjection) -> impl IntoElement {
+fn answer_body(answer: &AnswerState) -> impl IntoElement {
+    match answer {
+        AnswerState::None => v_flex().child(
+            Label::new("No answer block yet (stream:false; not a token stream).")
+                .color(Color::Muted),
+        ),
+        AnswerState::Text { text } => v_flex()
+            .gap_0p5()
+            .child(
+                Label::new("state=text (block arrived)")
+                    .color(Color::Muted)
+                    .size(LabelSize::Small),
+            )
+            .child(Label::new(text.clone())),
+        AnswerState::Completed { text } => v_flex()
+            .gap_0p5()
+            .child(
+                Label::new("state=completed")
+                    .color(Color::Muted)
+                    .size(LabelSize::Small),
+            )
+            .child(Label::new(text.clone())),
+    }
+}
+
+fn run_state_body(run: &RunStateProjection, terminal: &TerminalOutcome) -> impl IntoElement {
     v_flex()
         .gap_0p5()
         .child(Label::new(format!(
@@ -1000,9 +1335,22 @@ fn run_state_body(run: &RunStateProjection) -> impl IntoElement {
         .when_some(run.turn_ref.clone(), |this, t| {
             this.child(Label::new(format!("turn={t}")).color(Color::Muted))
         })
-        .when_some(run.reason.clone(), |this, reason| {
-            this.child(Label::new(reason).color(Color::Muted))
-        })
+        .child(Label::new(format!("terminal={}", terminal.label())).color(Color::Muted))
+        .when_some(
+            terminal
+                .reason()
+                .map(|r| r.to_string())
+                .or_else(|| run.reason.clone()),
+            |this, reason| {
+                this.child(
+                    Label::new(format!("reason={reason}")).color(if terminal.is_terminal() {
+                        Color::Warning
+                    } else {
+                        Color::Muted
+                    }),
+                )
+            },
+        )
 }
 
 #[cfg(test)]
@@ -1013,7 +1361,6 @@ mod panel_logic_tests {
 
     #[test]
     fn apply_bootstrap_maps_room_fields() {
-        // Build a minimal panel-like shell without GPUI window: test mapping only.
         let mut projection = WorkroomProjection::honest_unsubscribed();
         let value = json!({
             "room": {
@@ -1028,8 +1375,6 @@ mod panel_logic_tests {
             }
         });
 
-        // Reuse the same field extraction via a throwaway by inlining apply logic path.
-        // We exercise through a local helper matching panel.apply_bootstrap.
         let room = value.get("room");
         projection.room = RoomProjection {
             meta: ProjectionMeta::fresh(sources::ROOM),
@@ -1056,10 +1401,10 @@ mod panel_logic_tests {
     }
 
     #[test]
-    fn open_focus_interrupt_actions_are_registered_names() {
-        // Action types exist and are distinct workroom surface actions.
+    fn open_focus_send_interrupt_actions_are_registered_names() {
         let _open = OpenPanel;
         let _focus = FocusComposer;
+        let _send = SendMessage;
         let _interrupt = InterruptTurn;
         assert_eq!(WorkroomProjection::header(), "Sarah");
         assert_eq!(PANEL_KEY, "SarahWorkroomPanel");
@@ -1078,6 +1423,15 @@ mod panel_logic_tests {
         assert_eq!(run.interrupt_intent, InterruptIntentState::Pending);
         assert_eq!(run.phase, RunPhase::Running);
         assert_ne!(run.interrupt_intent, InterruptIntentState::Applied);
+    }
+
+    #[test]
+    fn parse_run_phase_covers_nr06_and_event_kinds() {
+        assert_eq!(parse_run_phase("running"), RunPhase::Running);
+        assert_eq!(parse_run_phase("interrupt_pending"), RunPhase::Running);
+        assert_eq!(parse_run_phase("turn.started"), RunPhase::Running);
+        assert_eq!(parse_run_phase("turn.finished"), RunPhase::Finished);
+        assert_eq!(parse_run_phase("interrupted"), RunPhase::Interrupted);
     }
 
     #[test]
@@ -1107,8 +1461,6 @@ mod panel_logic_tests {
             "runState": { "state": "idle", "turnRef": null }
         });
 
-        // Exercise the same field paths as SarahWorkroomPanel::apply_snapshot
-        // without constructing a full GPUI panel.
         let mut projection = WorkroomProjection::honest_unsubscribed();
         let mut transcript = TranscriptProjection {
             meta: ProjectionMeta::fresh(sources::TRANSCRIPT),
@@ -1190,5 +1542,61 @@ mod panel_logic_tests {
         assert_eq!(p.attention.unread_count, 0);
         assert!(!p.attention.marker.is_set());
         assert!(p.attention.tick_note.is_some());
+    }
+
+    #[test]
+    fn apply_snapshot_nr06_shape_maps_entries_and_run_state() {
+        let value = json!({
+            "transcript": {
+                "entries": [{
+                    "eventId": "evt1",
+                    "role": "owner",
+                    "text": "hello",
+                    "status": "confirmed"
+                }],
+                "cursor": "cursor.0",
+                "gapState": "none"
+            },
+            "activity": {
+                "entries": [{
+                    "eventId": "act1",
+                    "entry": "tool.call",
+                    "turnRef": "turn.1",
+                    "summary": "capacity"
+                }],
+                "cursor": "cursor.1"
+            },
+            "runState": {
+                "state": "running",
+                "turnRef": "turn.1",
+                "reason": null
+            }
+        });
+
+        let items = value
+            .get("transcript")
+            .and_then(|t| t.get("entries"))
+            .and_then(|v| v.as_array())
+            .expect("entries");
+        assert_eq!(items.len(), 1);
+        assert_eq!(
+            string_field(Some(&items[0]), &["eventId"]).as_deref(),
+            Some("evt1")
+        );
+        let phase = parse_run_phase(
+            string_field(value.get("runState"), &["state"])
+                .as_deref()
+                .unwrap(),
+        );
+        assert_eq!(phase, RunPhase::Running);
+        let entry_kind = string_field(
+            value
+                .get("activity")
+                .and_then(|a| a.get("entries"))
+                .and_then(|v| v.as_array())
+                .and_then(|a| a.first()),
+            &["entry", "kind"],
+        );
+        assert_eq!(entry_kind.as_deref(), Some("tool.call"));
     }
 }

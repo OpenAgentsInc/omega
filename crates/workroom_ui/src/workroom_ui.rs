@@ -1,15 +1,20 @@
-//! Sarah workroom GPUI pane (`OMEGA-SW-03` / `OMEGA-SW-06`).
+//! Sarah workroom GPUI pane (`OMEGA-SW-03` / `OMEGA-SW-04` / `OMEGA-SW-06`).
 //!
-//! Dock panel + Agent menu entry + open / focus-composer / interrupt actions.
-//! Renders the five §7 projections with source, freshness, and gap labels.
-//! GPUI is projection-only: no durable thread, receipt, or turn store here.
-//! Framed requests go to supervised `omega-effectd` only.
+//! Dock panel + Agent menu entry + open / focus-composer / send / interrupt
+//! actions. Renders the five §7 projections with source, freshness, and gap
+//! labels. GPUI is projection-only: no durable thread, receipt, or turn store
+//! here. Framed requests go to supervised `omega-effectd` only.
 //!
-//! OMEGA-SW-06: local unread count + attention marker; proactive tick turns
-//! render as ordinary transcript rows. Read state is local MVP only (NIP-RS
-//! is SARAH-NR-07). Autonomous tick stays default off.
+//! - **OMEGA-SW-04**: interaction states (pending send, tool ladder, answer
+//!   block, terminal reason, interrupt pending→applied). Transport is
+//!   SARAH-NR-06. Honest liveness is the ordered tool ladder — never fake
+//!   token streaming.
+//! - **OMEGA-SW-06**: local unread count + attention marker; proactive tick
+//!   turns render as ordinary transcript rows. Read state is local MVP only
+//!   (NIP-RS is SARAH-NR-07). Autonomous tick stays default off.
 
 mod attention;
+mod interaction;
 mod panel;
 mod projections;
 
@@ -18,6 +23,10 @@ pub use attention::{
     is_attention_role, proactive_turn_as_transcript_row, row_raises_attention,
     tick_off_honest_note, AttentionMarker, LocalReadState, RoomAttention,
     OMEGA_AUTONOMOUS_TICK_ENABLED, SARAH_AUTONOMOUS_TICK_FLAG,
+};
+pub use interaction::{
+    AnswerState, InteractionEvent, InteractionState, LocalPendingSend, TerminalOutcome,
+    ToolLadderEntry, ToolLadderKind,
 };
 pub use panel::{init, SarahWorkroomPanel};
 pub use projections::{
