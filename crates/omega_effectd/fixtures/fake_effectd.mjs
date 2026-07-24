@@ -15,6 +15,7 @@ if (!dataRoot) {
 }
 
 const runsFile = path.join(dataRoot, "full-auto", "runs.json")
+const bindingsFile = path.join(dataRoot, "full-auto", "native-bindings.json")
 mkdirSync(path.join(dataRoot, "full-auto"), { recursive: true, mode: 0o700 })
 
 let generation = 0
@@ -55,6 +56,30 @@ const saveRuns = (runs) => {
   )
 }
 
+const loadBindings = () => {
+  if (!existsSync(bindingsFile)) return []
+  try {
+    const parsed = JSON.parse(readFileSync(bindingsFile, "utf8"))
+    return Array.isArray(parsed.bindings) ? parsed.bindings : []
+  } catch {
+    return []
+  }
+}
+
+const saveBindings = (bindings) => {
+  writeFileSync(
+    bindingsFile,
+    JSON.stringify(
+      {
+        schema: "openagents.omega.full_auto_native_binding.v1",
+        bindings,
+      },
+      null,
+      2,
+    ),
+  )
+}
+
 const listRuns = () =>
   loadRuns().map((run) => ({
     runRef: run.runRef,
@@ -64,24 +89,35 @@ const listRuns = () =>
     updatedAt: run.updatedAt,
   }))
 
-const detail = (run) => ({
-  runRef: run.runRef,
-  threadRef: run.threadRef ?? null,
-  state: run.state,
-  title: run.title,
-  objective: run.objective ?? "",
-  doneCondition: run.doneCondition ?? "",
-  workspaceRef: run.workspaceRef ?? null,
-  lane: run.lane ?? "codex-local",
-  turnCap: run.turnCap ?? 40,
-  successfulAttempts: run.successfulAttempts ?? 0,
-  failedAttempts: run.failedAttempts ?? 0,
-  stallCause: run.stallCause ?? null,
-  recoveryAction: run.recoveryAction ?? "none",
-  terminalReason: run.terminalReason ?? null,
-  updatedAt: run.updatedAt,
-  turns: run.turns ?? [],
-})
+const detail = (run) => {
+  const binding = loadBindings().find((row) => row.runRef === run.runRef) ?? null
+  return {
+    runRef: run.runRef,
+    threadRef: run.threadRef ?? null,
+    state: run.state,
+    title: run.title,
+    objective: run.objective ?? "",
+    doneCondition: run.doneCondition ?? "",
+    workspaceRef: run.workspaceRef ?? null,
+    lane: run.lane ?? "codex-local",
+    turnCap: run.turnCap ?? 40,
+    successfulAttempts: run.successfulAttempts ?? 0,
+    failedAttempts: run.failedAttempts ?? 0,
+    stallCause: run.stallCause ?? null,
+    recoveryAction: run.recoveryAction ?? "none",
+    terminalReason: run.terminalReason ?? null,
+    updatedAt: run.updatedAt,
+    turns: run.turns ?? [],
+    nativeEvidence: binding
+      ? {
+          projectRef: binding.projectRef,
+          worktreeRef: binding.worktreeRef,
+          worktreePathDigest: binding.worktreePathDigest ?? null,
+          gitHead: binding.gitHead ?? null,
+        }
+      : null,
+  }
+}
 
 console.error(
   JSON.stringify({
@@ -130,6 +166,8 @@ for await (const line of rl) {
         "apply_control_intent",
         "get_sync_status",
         "publish_projection",
+        "get_native_binding",
+        "assess_native_boundary",
       ],
       dataRoot,
       activeRunLimit: 8,
@@ -180,6 +218,13 @@ for await (const line of rl) {
       })
       continue
     }
+    if (params.rebaseUnsafe === true) {
+      respond(request.id, generation, false, undefined, {
+        code: "invalid_request",
+        message: "rebase_unsafe: refusing to start Full Auto on a rebase-unsafe worktree.",
+      })
+      continue
+    }
     const now = new Date().toISOString()
     const run = {
       runRef: `run.full-auto.fixture.${Date.now().toString(36)}`,
@@ -202,6 +247,20 @@ for await (const line of rl) {
     const runs = loadRuns()
     runs.push(run)
     saveRuns(runs)
+    if (params.projectRef && params.worktreeRef) {
+      const bindings = loadBindings()
+      bindings.push({
+        runRef: run.runRef,
+        workspaceRef: params.workspaceRef,
+        projectRef: params.projectRef,
+        worktreeRef: params.worktreeRef,
+        worktreePathDigest: params.worktreePathDigest ?? null,
+        gitHead: params.gitHead ?? null,
+        rebaseUnsafe: false,
+        boundAt: now,
+      })
+      saveBindings(bindings)
+    }
     respond(request.id, generation, true, { run: detail(run) })
     continue
   }
@@ -372,6 +431,72 @@ for await (const line of rl) {
       ok: false,
       status: "sync_unavailable",
       reason: "omega_khala_sync_session_unavailable",
+    })
+    continue
+  }
+  if (request.method === "get_native_binding") {
+    const run = loadRuns().find((row) => row.runRef === request.params?.runRef)
+    if (!run) {
+      respond(request.id, generation, false, undefined, {
+        code: "run_not_found",
+        message: "No Full Auto run exists for that runRef.",
+      })
+      continue
+    }
+    const binding = loadBindings().find((row) => row.runRef === run.runRef) ?? null
+    respond(request.id, generation, true, { binding })
+    continue
+  }
+  if (request.method === "assess_native_boundary") {
+    const run = loadRuns().find((row) => row.runRef === request.params?.runRef)
+    if (!run) {
+      respond(request.id, generation, false, undefined, {
+        code: "run_not_found",
+        message: "No Full Auto run exists for that runRef.",
+      })
+      continue
+    }
+    const binding = loadBindings().find((row) => row.runRef === run.runRef) ?? null
+    if (!binding) {
+      respond(request.id, generation, true, {
+        assessment: {
+          ok: false,
+          reason: "missing_binding",
+          message: "No native project/worktree binding exists for this Full Auto run.",
+        },
+      })
+      continue
+    }
+    if (binding.workspaceRef !== run.workspaceRef) {
+      respond(request.id, generation, true, {
+        assessment: {
+          ok: false,
+          reason: "workspace_mismatch",
+          message: "The bound workspace does not match the currently resolved workspace.",
+        },
+      })
+      continue
+    }
+    if (binding.rebaseUnsafe) {
+      respond(request.id, generation, true, {
+        assessment: {
+          ok: false,
+          reason: "rebase_unsafe",
+          message: "The bound worktree is rebase-unsafe; Full Auto refuses to continue.",
+        },
+      })
+      continue
+    }
+    respond(request.id, generation, true, {
+      assessment: {
+        ok: true,
+        evidence: {
+          projectRef: binding.projectRef,
+          worktreeRef: binding.worktreeRef,
+          worktreePathDigest: binding.worktreePathDigest ?? null,
+          gitHead: binding.gitHead ?? null,
+        },
+      },
     })
     continue
   }

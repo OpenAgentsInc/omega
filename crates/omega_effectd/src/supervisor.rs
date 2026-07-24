@@ -235,6 +235,37 @@ impl OmegaEffectdSupervisor {
         .await
     }
 
+    pub async fn get_native_binding(&mut self, run_ref: &str) -> Result<Value, SupervisorError> {
+        let result = self
+            .request(
+                "get_native_binding",
+                Some(json!({ "runRef": run_ref })),
+                self.generation(),
+            )
+            .await?;
+        Ok(result
+            .get("binding")
+            .cloned()
+            .unwrap_or(Value::Null))
+    }
+
+    pub async fn assess_native_boundary(
+        &mut self,
+        run_ref: &str,
+    ) -> Result<Value, SupervisorError> {
+        let result = self
+            .request(
+                "assess_native_boundary",
+                Some(json!({ "runRef": run_ref })),
+                self.generation(),
+            )
+            .await?;
+        Ok(result
+            .get("assessment")
+            .cloned()
+            .ok_or_else(|| anyhow!("assess_native_boundary missing assessment"))?)
+    }
+
     async fn mutate_run(&mut self, method: &str, run_ref: &str) -> Result<Value, SupervisorError> {
         let result = self
             .request(

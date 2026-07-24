@@ -41,6 +41,13 @@ struct RunRow {
 }
 
 #[derive(Debug, Clone)]
+struct NativeEvidence {
+    project_ref: String,
+    worktree_ref: String,
+    git_head: Option<String>,
+}
+
+#[derive(Debug, Clone)]
 struct RunDetail {
     run_ref: String,
     title: String,
@@ -55,6 +62,7 @@ struct RunDetail {
     stall_cause: Option<String>,
     recovery_action: String,
     objective_digest: Option<String>,
+    native_evidence: Option<NativeEvidence>,
     turns: Vec<(String, String, String)>,
 }
 
@@ -76,6 +84,7 @@ struct SupervisorHandle {
 }
 
 pub struct FullAutoPanel {
+    workspace: WeakEntity<Workspace>,
     focus_handle: FocusHandle,
     mode: SurfaceMode,
     draft: FullAutoLauncherDraft,
@@ -114,13 +123,14 @@ impl FullAutoPanel {
         cx: AsyncWindowContext,
     ) -> Task<Result<Entity<Self>>> {
         cx.spawn(async move |cx| {
+            let workspace_for_panel = workspace.clone();
             workspace.update_in(cx, |_workspace, window, cx| {
-                Ok(cx.new(|cx| Self::new(window, cx)))
+                Ok(cx.new(|cx| Self::new(workspace_for_panel, window, cx)))
             })?
         })
     }
 
-    fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+    fn new(workspace: WeakEntity<Workspace>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let objective_editor = cx.new(|cx| {
             let mut editor = Editor::multi_line(window, cx);
             editor.set_placeholder_text(
@@ -147,6 +157,7 @@ impl FullAutoPanel {
         });
 
         let mut panel = Self {
+            workspace,
             focus_handle: cx.focus_handle(),
             mode: SurfaceMode::Launcher,
             draft: FullAutoLauncherDraft::default(),
@@ -308,6 +319,28 @@ impl FullAutoPanel {
         };
         self.draft.submitting = true;
         self.draft.error = None;
+        let (project_ref, worktree_ref) = self
+            .workspace
+            .upgrade()
+            .map(|workspace| {
+                let project = workspace.read(cx).project().clone();
+                let project_id = project.entity_id().as_u64();
+                let worktree_id = project.read(cx).worktrees(cx).next().map(|wt| wt.read(cx).id());
+                (
+                    format!("project.{project_id}"),
+                    worktree_id
+                        .map(|id| format!("worktree.{}", id.to_proto()))
+                        .unwrap_or_else(|| "worktree.missing".into()),
+                )
+            })
+            .unwrap_or_else(|| ("project.missing".into(), "worktree.missing".into()));
+        if project_ref.ends_with("missing") || worktree_ref.ends_with("missing") {
+            self.draft.submitting = false;
+            self.draft.error =
+                Some("Open a project worktree before starting Full Auto.".into());
+            cx.notify();
+            return;
+        }
         let params = json!({
             "workspaceRef": self.draft.workspace_ref,
             "title": validation.title,
@@ -315,6 +348,8 @@ impl FullAutoPanel {
             "doneCondition": validation.done_condition,
             "lane": self.draft.lane,
             "turnCap": validation.turn_cap,
+            "projectRef": project_ref,
+            "worktreeRef": worktree_ref,
         });
         cx.notify();
         cx.spawn(async move |this, cx| {
@@ -443,6 +478,16 @@ fn parse_detail(value: Value) -> Result<RunDetail> {
             .unwrap_or("none")
             .to_string(),
         objective_digest: None,
+        native_evidence: value.get("nativeEvidence").and_then(|evidence| {
+            Some(NativeEvidence {
+                project_ref: evidence.get("projectRef")?.as_str()?.to_string(),
+                worktree_ref: evidence.get("worktreeRef")?.as_str()?.to_string(),
+                git_head: evidence
+                    .get("gitHead")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string),
+            })
+        }),
         turns: value
             .get("turns")
             .and_then(|v| v.as_array())
@@ -686,6 +731,17 @@ impl Render for FullAutoPanel {
                                     ))
                                     .color(Color::Muted),
                                 )
+                                .when_some(run.native_evidence.clone(), |this, evidence| {
+                                    this.child(
+                                        Label::new(format!(
+                                            "Native: {} · {} · git {}",
+                                            evidence.project_ref,
+                                            evidence.worktree_ref,
+                                            evidence.git_head.as_deref().unwrap_or("—")
+                                        ))
+                                        .color(Color::Muted),
+                                    )
+                                })
                                 .when(!self.capacity_lanes.is_empty(), |this| {
                                     this.child(
                                         Label::new(format!(
