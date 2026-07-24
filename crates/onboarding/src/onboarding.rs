@@ -9,7 +9,7 @@ use gpui::{
     SharedString, Subscription, Task, WeakEntity, Window, actions,
 };
 use notifications::status_toast::StatusToast;
-use project::agent_server_store::AllAgentServersSettings;
+use project::{AgentRegistryStore, agent_server_store::AllAgentServersSettings};
 use schemars::JsonSchema;
 use serde::Deserialize;
 use settings::{SettingsStore, VsCodeSettingsSource};
@@ -229,6 +229,7 @@ struct Onboarding {
     finish_error: Option<SharedString>,
     _settings_subscription: Subscription,
     _identity_subscription: Subscription,
+    _agent_registry_subscription: Option<Subscription>,
 }
 
 #[derive(Copy, Clone)]
@@ -333,10 +334,10 @@ impl Onboarding {
                 Some(Plan::ZedFree) | None => "free",
             }
         };
-        let agents_installed = basics_page::FEATURED_AGENT_IDS
+        let agents_installed = basics_page::FEATURED_AGENTS
             .iter()
-            .filter(|id| installed_agents.contains_key(**id))
-            .copied()
+            .filter(|agent| installed_agents.contains_key(agent.id))
+            .map(|agent| agent.id)
             .collect::<Vec<_>>();
         telemetry::event!(
             "Welcome Agent Setup Viewed",
@@ -345,6 +346,7 @@ impl Onboarding {
         );
 
         let identity_section = identity_section::IdentitySection::new(0, window, cx);
+        let agent_registry = AgentRegistryStore::try_global(cx);
         let onboarding = cx.new(|cx| {
             cx.spawn(async move |this, cx| {
                 font_family_cache.prefetch(cx).await;
@@ -366,6 +368,9 @@ impl Onboarding {
                 _settings_subscription: cx
                     .observe_global::<SettingsStore>(move |_, cx| cx.notify()),
                 _identity_subscription: cx.observe(&identity_section, |_, _, cx| cx.notify()),
+                _agent_registry_subscription: agent_registry
+                    .as_ref()
+                    .map(|registry| cx.observe(registry, |_, _, cx| cx.notify())),
             }
         });
         identity_startup::onboarding_opened(cx);

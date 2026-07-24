@@ -4,9 +4,9 @@ use client::{TelemetrySettings, UserStore};
 use collections::HashMap;
 use fs::Fs;
 use gpui::{Action, App, Entity, IntoElement};
+use project::AgentRegistryStore;
 use project::agent_server_store::AllAgentServersSettings;
 use project::project_settings::ProjectSettings;
-use project::{AgentRegistryStore, RegistryAgent};
 use settings::{
     BaseKeymap, CustomAgentServerSettings, Settings, SettingsStore, update_settings_file,
 };
@@ -544,21 +544,43 @@ fn render_import_settings_section(tab_index: &mut isize, cx: &mut App) -> impl I
         .child(h_flex().gap_1().child(vscode).child(cursor))
 }
 
-pub(crate) const FEATURED_AGENT_IDS: &[&str] =
-    &["claude-acp", "codex-acp", "github-copilot-cli", "cursor"];
-const AGENT_SETUP_DESCRIPTION: &str =
-    "Install external agents to start a thread. Codex uses its own login and configuration; Omega never copies its credentials.";
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct FeaturedAgent {
+    pub(crate) id: &'static str,
+    name: &'static str,
+}
+
+pub(crate) const FEATURED_AGENTS: &[FeaturedAgent] = &[
+    FeaturedAgent {
+        id: "claude-acp",
+        name: "Claude",
+    },
+    FeaturedAgent {
+        id: "codex-acp",
+        name: "Codex",
+    },
+    FeaturedAgent {
+        id: "github-copilot-cli",
+        name: "GitHub Copilot",
+    },
+    FeaturedAgent {
+        id: "cursor",
+        name: "Cursor",
+    },
+];
+const AGENT_SETUP_DESCRIPTION: &str = "Install external agents to start a thread. Codex uses its own login and configuration; Omega never copies its credentials.";
 
 fn render_registry_agent_button(
-    agent: &RegistryAgent,
+    agent_id: &'static str,
+    name: SharedString,
+    icon_path: Option<SharedString>,
     installed: bool,
     cx: &mut App,
 ) -> impl IntoElement {
-    let agent_id = agent.id().to_string();
     let element_id = format!("{}-onboarding", agent_id);
 
-    let icon = match agent.icon_path() {
-        Some(icon_path) => Icon::from_external_svg(icon_path.clone()),
+    let icon = match icon_path {
+        Some(icon_path) => Icon::from_external_svg(icon_path),
         None => Icon::new(IconName::Sparkle),
     }
     .size(IconSize::XSmall)
@@ -580,28 +602,27 @@ fn render_registry_agent_button(
 
     AgentSetupButton::new(element_id)
         .icon(icon)
-        .name(agent.name().clone())
+        .name(name)
         .state(state_element)
         .disabled(installed)
         .on_click(move |_, window, cx| {
-            telemetry::event!("Welcome Agent Install Clicked", agent = agent_id.as_str());
+            telemetry::event!("Welcome Agent Install Clicked", agent = agent_id);
             update_settings_file(fs.clone(), cx, {
-                let agent_id = agent_id.clone();
                 move |settings, _| {
                     let agent_servers = settings.agent_servers.get_or_insert_default();
-                    agent_servers.entry(agent_id).or_insert_with(|| {
-                        CustomAgentServerSettings::Registry {
+                    agent_servers
+                        .entry(agent_id.to_string())
+                        .or_insert_with(|| CustomAgentServerSettings::Registry {
                             env: Default::default(),
                             default_mode: None,
                             default_config_options: HashMap::default(),
                             favorite_config_option_values: HashMap::default(),
-                        }
-                    });
+                        });
                 }
             });
             window.dispatch_action(
                 Box::new(zed_actions::agent::SelectAgent {
-                    agent: agent_id.clone(),
+                    agent: agent_id.to_string(),
                 }),
                 cx,
             );
@@ -618,24 +639,31 @@ fn render_ai_section(cx: &mut App) -> impl IntoElement {
         .get::<AllAgentServersSettings>(None)
         .clone();
 
-    let column_count = FEATURED_AGENT_IDS.len() as u16;
+    let column_count = FEATURED_AGENTS.len() as u16;
 
-    let grid = FEATURED_AGENT_IDS.iter().fold(
+    let grid = FEATURED_AGENTS.iter().fold(
         div()
             .w_full()
             .mt_1p5()
             .grid()
             .grid_cols(column_count)
             .gap_2(),
-        |grid, agent_id| {
-            let Some(agent) = registry_agents
+        |grid, featured_agent| {
+            let registry_agent = registry_agents
                 .iter()
-                .find(|a| a.id().as_ref() == *agent_id)
-            else {
-                return grid;
-            };
-            let is_installed = installed_agents.contains_key(*agent_id);
-            grid.child(render_registry_agent_button(agent, is_installed, cx))
+                .find(|agent| agent.id().as_ref() == featured_agent.id);
+            let name = registry_agent
+                .map(|agent| agent.name().clone())
+                .unwrap_or_else(|| featured_agent.name.into());
+            let icon_path = registry_agent.and_then(|agent| agent.icon_path().cloned());
+            let is_installed = installed_agents.contains_key(featured_agent.id);
+            grid.child(render_registry_agent_button(
+                featured_agent.id,
+                name,
+                icon_path,
+                is_installed,
+                cx,
+            ))
         },
     );
 
@@ -710,8 +738,25 @@ mod tests {
     #[test]
     fn omega_onboarding_preserves_featured_registry_agents() {
         assert_eq!(
-            FEATURED_AGENT_IDS,
-            ["claude-acp", "codex-acp", "github-copilot-cli", "cursor"]
+            FEATURED_AGENTS,
+            [
+                FeaturedAgent {
+                    id: "claude-acp",
+                    name: "Claude",
+                },
+                FeaturedAgent {
+                    id: "codex-acp",
+                    name: "Codex",
+                },
+                FeaturedAgent {
+                    id: "github-copilot-cli",
+                    name: "GitHub Copilot",
+                },
+                FeaturedAgent {
+                    id: "cursor",
+                    name: "Cursor",
+                },
+            ]
         );
         assert!(AGENT_SETUP_DESCRIPTION.contains("Codex uses its own login and configuration"));
         assert!(AGENT_SETUP_DESCRIPTION.contains("Omega never copies its credentials"));

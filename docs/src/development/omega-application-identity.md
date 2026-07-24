@@ -258,6 +258,14 @@ custody, but writes the independent
 workspace. Neither completion record gates the other journey or suppresses
 identity inspection and recovery.
 
+Agent Setup renders its four featured choices immediately from checked-in
+display metadata: Claude, Codex, GitHub Copilot, and Cursor. The asynchronous
+ACP registry remains the authority for install metadata; onboarding observes
+that store and replaces fallback names and icons when registry data arrives.
+An empty, slow, or temporarily unavailable registry therefore cannot leave the
+first-run section blank, and the section does not import or copy agent
+credentials.
+
 ## Native identity provenance
 
 Omega's native identity contract adapts selected patterns from
