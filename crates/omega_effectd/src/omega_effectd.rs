@@ -3,6 +3,7 @@
 //! Authority: OpenAgentsInc/omega#21 (`OMEGA-FA-02`).
 //! Durable run truth stays in omega-effectd on disk. GPUI is not run authority.
 
+mod openagents_binding;
 mod openagents_session;
 mod protocol;
 mod sarah_conversation;
@@ -13,6 +14,13 @@ use std::{rc::Rc, sync::Arc};
 use anyhow::{Result, anyhow};
 use gpui::{App, Global};
 use smol::lock::Mutex as AsyncMutex;
+
+pub use openagents_binding::{
+    BINDING_RECORD_SCHEMA, BindingEvent, BindingProjection, BindingState,
+    OPENAGENTS_BINDING_CREDENTIAL_KEY, OPENAGENTS_OMEGA_CLIENT_ID, OWNER_SCOPE_REFUSED_MESSAGE,
+    OpenAgentsBinding, apply_binding_transition, binding_record_path, default_binding_data_root,
+    init_openagents_binding, openagents_binding, try_openagents_binding,
+};
 
 pub use openagents_session::{
     OpenAgentsSession, OpenAgentsSessionPhase, VerifiedOpenAgentsSession, init_openagents_session,
@@ -25,8 +33,8 @@ pub use protocol::{
     ProtocolErrorCode, RunSnapshot, SERVICE_VERSION,
 };
 pub use sarah_conversation::{
-    BindingState, BootstrapResult, ConversationIdentity, GapState, InterruptTurnResult,
-    MockRelayAdapter, RelayTransport, RoomSnapshotResult, RoomStateEvent, SARAH_EVENT_ROOM_EVENT,
+    BootstrapResult, ConversationIdentity, GapState, InterruptTurnResult, MockRelayAdapter,
+    RelayTransport, RoomSnapshotResult, RoomStateEvent, SARAH_EVENT_ROOM_EVENT,
     SARAH_EVENT_ROOM_STATE, SARAH_FRAMED_METHODS, SARAH_METHOD_BOOTSTRAP,
     SARAH_METHOD_INTERRUPT_TURN, SARAH_METHOD_ROOM_SNAPSHOT, SARAH_METHOD_SEND_MESSAGE,
     SARAH_METHOD_SESSION_STATUS, SarahConversationClient, SarahConversationConfig,
@@ -53,6 +61,9 @@ pub fn init(cx: &mut App) {
 }
 
 pub fn init_with_host_handler(handler: Option<OmegaEffectdHostHandler>, cx: &mut App) {
+    // OMEGA-SW-01: binding is independent of effectd packaging availability.
+    init_openagents_binding(cx);
+
     if cx.has_global::<OmegaEffectdRuntime>() {
         return;
     }

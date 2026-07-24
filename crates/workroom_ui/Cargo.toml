@@ -14,10 +14,12 @@ doctest = false
 
 [dependencies]
 anyhow.workspace = true
+app_identity.workspace = true
 editor.workspace = true
 futures.workspace = true
 gpui.workspace = true
 omega_effectd.workspace = true
+omega_identity.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 smol.workspace = true

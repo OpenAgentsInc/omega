@@ -23074,10 +23074,12 @@ name = "workroom_ui"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "app_identity",
  "editor",
  "futures 0.3.32",
  "gpui",
  "omega_effectd",
+ "omega_identity",
  "serde",
  "serde_json",
  "smol",

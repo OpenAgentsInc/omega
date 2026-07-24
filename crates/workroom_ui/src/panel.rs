@@ -13,9 +13,12 @@ use gpui::{
     InteractiveElement, IntoElement, ParentElement, Render, SharedString, Styled, Task, WeakEntity,
     Window, div, px,
 };
-use omega_effectd::{shared_supervisor, SharedOmegaEffectdSupervisor};
-use serde_json::{json, Value};
-use ui::{prelude::*, Button, ButtonStyle, Label, LabelSize};
+use omega_effectd::{
+    BindingProjection, BindingState, OpenAgentsBinding, SharedOmegaEffectdSupervisor,
+    shared_supervisor, try_openagents_binding,
+};
+use serde_json::{Value, json};
+use ui::{Button, ButtonStyle, Label, LabelSize, prelude::*};
 use workspace::{
     dock::{DockPosition, Panel, PanelEvent},
     Workspace,
@@ -40,6 +43,9 @@ pub struct SarahWorkroomPanel {
     projection: WorkroomProjection,
     status: SharedString,
     supervisor: Option<SharedOmegaEffectdSupervisor>,
+    binding: Option<OpenAgentsBinding>,
+    binding_projection: BindingProjection,
+    binding_busy: bool,
     refreshing: bool,
     interrupting: bool,
 }
@@ -89,19 +95,106 @@ impl SarahWorkroomPanel {
             editor.set_placeholder_text("Message Sarah (text only).", window, cx);
             editor
         });
+        let binding = try_openagents_binding(cx);
+        let binding_projection = binding
+            .as_ref()
+            .map(|binding| binding.load_projection())
+            .unwrap_or_else(BindingProjection::unbound);
         let mut panel = Self {
             _workspace: workspace,
             focus_handle: cx.focus_handle(),
             composer,
             projection: WorkroomProjection::honest_unsubscribed(),
-            status: "Sarah workroom subscribes to omega-effectd only.".into(),
+            status: binding_projection.state.status_line().into(),
             supervisor: None,
+            binding,
+            binding_projection,
+            binding_busy: false,
             refreshing: false,
             interrupting: false,
         };
         panel.ensure_supervisor(cx);
         panel.refresh_from_effectd(cx);
         panel
+    }
+
+    fn bind_openagents_account(&mut self, cx: &mut Context<Self>) {
+        if self.binding_busy {
+            return;
+        }
+        let Some(binding) = self.binding.clone() else {
+            self.status = "OpenAgents binding service unavailable.".into();
+            cx.notify();
+            return;
+        };
+        // Relation requires the active Omega Nostr public key from isolated custody.
+        let omega_pubkey = match omega_identity::IdentityService::system(*app_identity::CHANNEL)
+            .inspect()
+            .ok()
+            .and_then(|custody| custody.identity)
+            .map(|identity| identity.public_key_hex().as_str().to_string())
+        {
+            Some(pubkey) if !pubkey.is_empty() => pubkey,
+            _ => {
+                self.status =
+                    "Omega identity is not ready. Create or open an identity before binding."
+                        .into();
+                cx.notify();
+                return;
+            }
+        };
+        self.binding_busy = true;
+        self.status = "Binding OpenAgents account in your browser…".into();
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let projection = binding.bind(&omega_pubkey, cx).await;
+            this.update(cx, |panel, cx| {
+                panel.binding_busy = false;
+                panel.binding_projection = projection.clone();
+                // Visible states only: unbound | bound | refused.
+                // Refused must show the owner-scope message, never a network fault.
+                panel.status = match projection.state {
+                    BindingState::Unbound => "OpenAgents account unbound.".into(),
+                    BindingState::Bound => format!(
+                        "Bound OpenAgents account {} to Omega identity (metering attribution).",
+                        projection
+                            .openagents_account_id
+                            .as_deref()
+                            .unwrap_or("unknown")
+                    )
+                    .into(),
+                    BindingState::Refused => projection
+                        .gate_message
+                        .clone()
+                        .unwrap_or_else(|| BindingState::Refused.status_line().to_string())
+                        .into(),
+                };
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn clear_openagents_binding(&mut self, cx: &mut Context<Self>) {
+        if self.binding_busy {
+            return;
+        }
+        let Some(binding) = self.binding.clone() else {
+            return;
+        };
+        self.binding_busy = true;
+        cx.spawn(async move |this, cx| {
+            let projection = binding.clear(cx).await;
+            this.update(cx, |panel, cx| {
+                panel.binding_busy = false;
+                panel.binding_projection = projection;
+                panel.status = "OpenAgents account unbound.".into();
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     fn focus_composer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -596,6 +689,39 @@ impl Render for SarahWorkroomPanel {
             .when_some(p.connection_detail.clone(), |this, detail| {
                 this.child(Label::new(detail).color(Color::Muted))
             })
+            // OMEGA-SW-01: visible binding state (unbound | bound | refused).
+            .child(binding_section(&self.binding_projection))
+            .child(
+                h_flex()
+                    .gap_2()
+                    .child(
+                        Button::new(
+                            "sarah-workroom-bind",
+                            if self.binding_busy {
+                                "Binding…"
+                            } else {
+                                "Bind OpenAgents account"
+                            },
+                        )
+                        .style(ButtonStyle::Subtle)
+                        .disabled(
+                            self.binding_busy
+                                || self.binding_projection.state == BindingState::Bound,
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| this.bind_openagents_account(cx))),
+                    )
+                    .child(
+                        Button::new("sarah-workroom-unbind", "Clear binding")
+                            .style(ButtonStyle::Subtle)
+                            .disabled(
+                                self.binding_busy
+                                    || self.binding_projection.state == BindingState::Unbound,
+                            )
+                            .on_click(
+                                cx.listener(|this, _, _, cx| this.clear_openagents_binding(cx)),
+                            ),
+                    ),
+            )
             // OMEGA-SW-06: one unread count + one attention marker for the room.
             .child(attention_body(&p.attention))
             // Room
@@ -679,6 +805,26 @@ impl Render for SarahWorkroomPanel {
                     ),
             )
     }
+}
+
+fn binding_section(binding: &BindingProjection) -> impl IntoElement {
+    // Projection is public-safe: never render tokens or credential material.
+    let state_line = format!("binding={}", binding.state.label());
+    let account_line = binding
+        .openagents_account_id
+        .as_ref()
+        .map(|id| format!("account={id}"));
+    let gate = binding.gate_message.clone();
+    v_flex()
+        .gap_0p5()
+        .child(Label::new("OpenAgents binding").color(Color::Muted))
+        .child(Label::new(state_line))
+        .when_some(account_line, |this, line| {
+            this.child(Label::new(line).color(Color::Muted).size(LabelSize::Small))
+        })
+        .when_some(gate, |this, message| {
+            this.child(Label::new(message).color(Color::Warning).size(LabelSize::Small))
+        })
 }
 
 fn attention_body(attention: &crate::attention::RoomAttention) -> impl IntoElement {

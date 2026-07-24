@@ -5934,7 +5934,7 @@ mod tests {
             project::debugger::dap_store::DapStore::init(&app_state.client.clone().into(), cx);
             debugger_ui::init(cx);
             omega_effectd::init_openagents_session(cx);
-            omega_effectd::init_openagents_session(cx);
+            omega_effectd::init_openagents_binding(cx);
             omega_effectd::init_with_host_handler(
                 Some(agent_ui::omega_effectd_host_handler(cx)),
                 cx,

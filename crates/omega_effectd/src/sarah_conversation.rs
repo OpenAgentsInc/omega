@@ -18,6 +18,8 @@ use thiserror::Error;
 
 use crate::protocol::{MAX_FRAME_BYTES, PROTOCOL_SCHEMA};
 
+pub use crate::openagents_binding::BindingState;
+
 /// Framed method names on `openagents.omega.effectd.v1` for the Sarah room.
 pub const SARAH_METHOD_SESSION_STATUS: &str = "sarah_session_status";
 pub const SARAH_METHOD_BOOTSTRAP: &str = "sarah_bootstrap";
@@ -80,14 +82,6 @@ pub struct ConversationIdentity {
     pub account_label: Option<String>,
     /// Binding state for metering attribution (OMEGA-SW-01). Not a session token.
     pub binding_state: BindingState,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum BindingState {
-    Unbound,
-    Bound,
-    Refused,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
