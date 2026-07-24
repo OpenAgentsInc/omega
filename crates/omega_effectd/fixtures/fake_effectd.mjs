@@ -4,7 +4,7 @@
  * Speaks openagents.omega.effectd.v1 on stdin/stdout.
  */
 import { createInterface } from "node:readline"
-import { mkdirSync, readFileSync, existsSync } from "node:fs"
+import { mkdirSync, readFileSync, writeFileSync, existsSync } from "node:fs"
 import path from "node:path"
 
 const schema = "openagents.omega.effectd.v1"
@@ -14,6 +14,7 @@ if (!dataRoot) {
   process.exit(2)
 }
 
+const runsFile = path.join(dataRoot, "full-auto", "runs.json")
 mkdirSync(path.join(dataRoot, "full-auto"), { recursive: true, mode: 0o700 })
 
 let generation = 0
@@ -33,23 +34,54 @@ const respond = (id, gen, ok, result, error) => {
   )
 }
 
-const listRuns = () => {
-  const file = path.join(dataRoot, "full-auto", "runs.json")
-  if (!existsSync(file)) return []
+const loadRuns = () => {
+  if (!existsSync(runsFile)) return []
   try {
-    const parsed = JSON.parse(readFileSync(file, "utf8"))
-    const runs = Array.isArray(parsed.runs) ? parsed.runs : []
-    return runs.map((run) => ({
-      runRef: run.runRef,
-      threadRef: run.threadRef ?? null,
-      state: run.state,
-      title: run.title,
-      updatedAt: run.updatedAt,
-    }))
+    const parsed = JSON.parse(readFileSync(runsFile, "utf8"))
+    return Array.isArray(parsed.runs) ? parsed.runs : []
   } catch {
     return []
   }
 }
+
+const saveRuns = (runs) => {
+  writeFileSync(
+    runsFile,
+    JSON.stringify(
+      { schema: "openagents.desktop.full_auto_run_registry.v1", runs },
+      null,
+      2,
+    ),
+  )
+}
+
+const listRuns = () =>
+  loadRuns().map((run) => ({
+    runRef: run.runRef,
+    threadRef: run.threadRef ?? null,
+    state: run.state,
+    title: run.title,
+    updatedAt: run.updatedAt,
+  }))
+
+const detail = (run) => ({
+  runRef: run.runRef,
+  threadRef: run.threadRef ?? null,
+  state: run.state,
+  title: run.title,
+  objective: run.objective ?? "",
+  doneCondition: run.doneCondition ?? "",
+  workspaceRef: run.workspaceRef ?? null,
+  lane: run.lane ?? "codex-local",
+  turnCap: run.turnCap ?? 40,
+  successfulAttempts: run.successfulAttempts ?? 0,
+  failedAttempts: run.failedAttempts ?? 0,
+  stallCause: run.stallCause ?? null,
+  recoveryAction: run.recoveryAction ?? "none",
+  terminalReason: run.terminalReason ?? null,
+  updatedAt: run.updatedAt,
+  turns: run.turns ?? [],
+})
 
 console.error(
   JSON.stringify({
@@ -82,7 +114,16 @@ for await (const line of rl) {
       protocolVersion: 1,
       serviceVersion: "0.1.0",
       generation,
-      capabilities: ["health", "list_runs", "get_run", "pause", "resume", "stop"],
+      capabilities: [
+        "health",
+        "list_runs",
+        "get_run",
+        "start",
+        "pause",
+        "resume",
+        "stop",
+        "retry",
+      ],
       dataRoot,
       activeRunLimit: 8,
     })
@@ -109,6 +150,79 @@ for await (const line of rl) {
   }
   if (request.method === "list_runs") {
     respond(request.id, generation, true, { runs: listRuns() })
+    continue
+  }
+  if (request.method === "get_run") {
+    const run = loadRuns().find((row) => row.runRef === request.params?.runRef)
+    if (!run) {
+      respond(request.id, generation, false, undefined, {
+        code: "run_not_found",
+        message: "No Full Auto run exists for that runRef.",
+      })
+      continue
+    }
+    respond(request.id, generation, true, { run: detail(run) })
+    continue
+  }
+  if (request.method === "start") {
+    const params = request.params ?? {}
+    if (!params.workspaceRef || !params.title || !params.objective || !params.doneCondition) {
+      respond(request.id, generation, false, undefined, {
+        code: "invalid_request",
+        message: "start requires workspaceRef, title, objective, and doneCondition.",
+      })
+      continue
+    }
+    const now = new Date().toISOString()
+    const run = {
+      runRef: `run.full-auto.fixture.${Date.now().toString(36)}`,
+      threadRef: `thread.omega.${Date.now().toString(36)}`,
+      state: "running",
+      title: params.title,
+      objective: params.objective,
+      doneCondition: params.doneCondition,
+      workspaceRef: params.workspaceRef,
+      lane: params.lane ?? "codex-local",
+      turnCap: params.turnCap ?? 40,
+      successfulAttempts: 0,
+      failedAttempts: 0,
+      stallCause: null,
+      recoveryAction: "none",
+      terminalReason: null,
+      updatedAt: now,
+      turns: [],
+    }
+    const runs = loadRuns()
+    runs.push(run)
+    saveRuns(runs)
+    respond(request.id, generation, true, { run: detail(run) })
+    continue
+  }
+  if (["pause", "resume", "stop", "retry"].includes(request.method)) {
+    const runs = loadRuns()
+    const index = runs.findIndex((row) => row.runRef === request.params?.runRef)
+    if (index < 0) {
+      respond(request.id, generation, false, undefined, {
+        code: "run_not_found",
+        message: "No Full Auto run exists for that runRef.",
+      })
+      continue
+    }
+    const nextState =
+      request.method === "pause"
+        ? "paused"
+        : request.method === "resume"
+          ? "running"
+          : request.method === "stop"
+            ? "stopped"
+            : "retrying"
+    runs[index] = {
+      ...runs[index],
+      state: nextState,
+      updatedAt: new Date().toISOString(),
+    }
+    saveRuns(runs)
+    respond(request.id, generation, true, { run: detail(runs[index]) })
     continue
   }
   respond(request.id, generation, false, undefined, {

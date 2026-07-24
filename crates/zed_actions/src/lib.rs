@@ -806,6 +806,19 @@ pub mod debug_panel {
     );
 }
 
+pub mod full_auto_panel {
+    use gpui::actions;
+    actions!(
+        full_auto_panel,
+        [
+            /// Toggles focus on the Full Auto panel.
+            ToggleFocus,
+            /// Opens the Full Auto launcher (never a composer toggle).
+            OpenLauncher
+        ]
+    );
+}
+
 actions!(
     debugger,
     [

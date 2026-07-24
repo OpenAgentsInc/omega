@@ -12,7 +12,7 @@ is the consumer lock. It does not redefine the run lifecycle.
 - Package README:
   [`packages/omega-effectd/README.md`](https://github.com/OpenAgentsInc/openagents/blob/main/packages/omega-effectd/README.md)
 - Issue: [#20](https://github.com/OpenAgentsInc/omega/issues/20) (`OMEGA-FA-01`)
-- OpenAgents land: `cf5a2085b1b422bc6a41483ea0e43820a331a5a0`
+- OpenAgents land: `f795e357c5e797b1cb74d37e12ea5e9b7c45fd9b`
 
 ## Pin
 
@@ -20,7 +20,7 @@ is the consumer lock. It does not redefine the run lifecycle.
 | --- | --- |
 | Package | `@openagentsinc/omega-effectd` |
 | Version | `0.1.0` |
-| Pack SHA-256 | `4cc1cb2e5d71ff8af6f730248871ee779488a991f21a848880e885331ef31831` |
+| Pack SHA-256 | `20e4e002202b6db640501301f134e0a9f0f8718fe1c1dc38bef4aa5ab2d69ffe` |
 
 ## Consumption rules
 
@@ -38,12 +38,10 @@ or run Full Auto.
 
 ## Next packets
 
-1. [#22](https://github.com/OpenAgentsInc/omega/issues/22) GPUI launcher
-   (FA-02 supervisor: [omega-effectd-supervisor.md](./omega-effectd-supervisor.md))
-2. [#23](https://github.com/OpenAgentsInc/omega/issues/23) routing and
-   liveness
-3. [#24](https://github.com/OpenAgentsInc/omega/issues/24) reports, Sync,
+1. [#23](https://github.com/OpenAgentsInc/omega/issues/23) routing and
+   liveness (FA-03: [omega-full-auto-gpui-launcher.md](./omega-full-auto-gpui-launcher.md))
+2. [#24](https://github.com/OpenAgentsInc/omega/issues/24) reports, Sync,
    mobile
-4. [#25](https://github.com/OpenAgentsInc/omega/issues/25) native project
+3. [#25](https://github.com/OpenAgentsInc/omega/issues/25) native project
    join
-5. [#26](https://github.com/OpenAgentsInc/omega/issues/26) proof
+4. [#26](https://github.com/OpenAgentsInc/omega/issues/26) proof

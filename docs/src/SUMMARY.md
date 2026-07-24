@@ -221,6 +221,7 @@
   - [Omega Full Auto contract freeze](./development/omega-full-auto-contract-freeze.md)
   - [Omega-effectd Full Auto extract pin](./development/omega-effectd-full-auto-extract.md)
   - [Omega-effectd Rust supervisor](./development/omega-effectd-supervisor.md)
+  - [Omega Full Auto GPUI launcher](./development/omega-full-auto-gpui-launcher.md)
   - [Omega RC release](./development/omega-rc-release.md)
   - [Omega RC installed proof](./development/omega-rc-installed-proof.md)
   - [macOS](./development/macos.md)

@@ -38,13 +38,11 @@ A GPUI view, ACP panel, or ordinary chat path becomes Full Auto run authority.
 
 ## Next packets
 
-1. [#22](https://github.com/OpenAgentsInc/omega/issues/22) GPUI launcher
-   (FA-02 supervisor pinned in
-   [omega-effectd-supervisor.md](./omega-effectd-supervisor.md))
-2. [#23](https://github.com/OpenAgentsInc/omega/issues/23) routing and
-   liveness
-3. [#24](https://github.com/OpenAgentsInc/omega/issues/24) reports, Sync,
+1. [#23](https://github.com/OpenAgentsInc/omega/issues/23) routing and
+   liveness (FA-03 GPUI launcher pinned in
+   [omega-full-auto-gpui-launcher.md](./omega-full-auto-gpui-launcher.md))
+2. [#24](https://github.com/OpenAgentsInc/omega/issues/24) reports, Sync,
    mobile
-4. [#25](https://github.com/OpenAgentsInc/omega/issues/25) native project
+3. [#25](https://github.com/OpenAgentsInc/omega/issues/25) native project
    join
-5. [#26](https://github.com/OpenAgentsInc/omega/issues/26) proof
+4. [#26](https://github.com/OpenAgentsInc/omega/issues/26) proof

@@ -7103,6 +7103,27 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a06f77d526c1a601b7c4cdd98f54b5eaabffc14d5f2f0296febdc7f357c6d3ba"
 
 [[package]]
+name = "full_auto_ui"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "editor",
+ "futures 0.3.32",
+ "gpui",
+ "omega_effectd",
+ "project",
+ "serde",
+ "serde_json",
+ "smol",
+ "tempfile",
+ "theme",
+ "ui",
+ "util",
+ "workspace",
+ "zed_actions",
+]
+
+[[package]]
 name = "funty"
 version = "2.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -23548,6 +23569,7 @@ dependencies = [
  "feedback",
  "file_finder",
  "fs",
+ "full_auto_ui",
  "futures 0.3.32",
  "git",
  "git_hosting_providers",

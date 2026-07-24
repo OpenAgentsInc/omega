@@ -107,6 +107,58 @@ impl OmegaEffectdSupervisor {
         Ok(serde_json::from_value(runs).context("decode list_runs")?)
     }
 
+    pub async fn get_run(&mut self, run_ref: &str) -> Result<Value, SupervisorError> {
+        let result = self
+            .request(
+                "get_run",
+                Some(json!({ "runRef": run_ref })),
+                self.generation(),
+            )
+            .await?;
+        Ok(result
+            .get("run")
+            .cloned()
+            .ok_or_else(|| anyhow!("get_run missing run"))?)
+    }
+
+    pub async fn start_run(&mut self, params: Value) -> Result<Value, SupervisorError> {
+        let result = self.request("start", Some(params), self.generation()).await?;
+        Ok(result
+            .get("run")
+            .cloned()
+            .ok_or_else(|| anyhow!("start missing run"))?)
+    }
+
+    pub async fn pause_run(&mut self, run_ref: &str) -> Result<Value, SupervisorError> {
+        self.mutate_run("pause", run_ref).await
+    }
+
+    pub async fn resume_run(&mut self, run_ref: &str) -> Result<Value, SupervisorError> {
+        self.mutate_run("resume", run_ref).await
+    }
+
+    pub async fn stop_run(&mut self, run_ref: &str) -> Result<Value, SupervisorError> {
+        self.mutate_run("stop", run_ref).await
+    }
+
+    pub async fn retry_run(&mut self, run_ref: &str) -> Result<Value, SupervisorError> {
+        self.mutate_run("retry", run_ref).await
+    }
+
+    async fn mutate_run(&mut self, method: &str, run_ref: &str) -> Result<Value, SupervisorError> {
+        let result = self
+            .request(
+                method,
+                Some(json!({ "runRef": run_ref })),
+                self.generation(),
+            )
+            .await?;
+        Ok(result
+            .get("run")
+            .cloned()
+            .ok_or_else(|| anyhow!("{method} missing run"))?)
+    }
+
     pub async fn restart(&mut self) -> Result<InitializeResult> {
         self.stop().await?;
         let next = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
@@ -257,10 +309,39 @@ impl Drop for OmegaEffectdSupervisor {
 
 /// Shared test helper: fixture command that speaks the framed protocol.
 pub fn fixture_command(fixture: &Path) -> OmegaEffectdCommand {
+    let node = [
+        std::env::var_os("NODE")
+            .map(PathBuf::from)
+            .filter(|path| path.exists()),
+        which_node(),
+        Some(PathBuf::from(
+            "/Users/christopherdavid/.nvm/versions/node/v25.8.2/bin/node",
+        ))
+        .filter(|path| path.exists()),
+        Some(PathBuf::from("/opt/homebrew/bin/node")).filter(|path| path.exists()),
+        Some(PathBuf::from("/usr/local/bin/node")).filter(|path| path.exists()),
+    ]
+    .into_iter()
+    .flatten()
+    .next()
+    .unwrap_or_else(|| PathBuf::from("node"));
+
     OmegaEffectdCommand {
-        program: PathBuf::from("node"),
+        program: node,
         args: vec![fixture.display().to_string()],
     }
+}
+
+fn which_node() -> Option<PathBuf> {
+    std::env::var_os("PATH").and_then(|paths| {
+        for dir in std::env::split_paths(&paths) {
+            let candidate = dir.join("node");
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+        None
+    })
 }
 
 pub fn default_options(
