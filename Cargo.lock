@@ -12551,8 +12551,10 @@ dependencies = [
 name = "omega_identity"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "app_identity",
  "atomic-write-file",
+ "clap",
  "hex",
  "keyring",
  "libc",

@@ -11,9 +11,15 @@ workspace = true
 [lib]
 path = "src/omega_identity.rs"
 
+[[bin]]
+name = "omega-identity"
+path = "src/bin/omega_identity.rs"
+
 [dependencies]
+anyhow.workspace = true
 app_identity.workspace = true
 atomic-write-file.workspace = true
+clap = { workspace = true, features = ["derive"] }
 hex.workspace = true
 nostr = { workspace = true, features = ["nip49"] }
 paths.workspace = true

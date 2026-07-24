@@ -53,6 +53,25 @@ impl IdentityService {
         )
     }
 
+    /// Build custody against the standard data root for `channel`.
+    ///
+    /// Unlike [`Self::system`], this does not depend on the compile-time
+    /// `app_identity::CHANNEL` path resolution, so an operator CLI can target
+    /// `rc` while built from a `dev` tree.
+    pub fn for_channel(channel: AppChannel) -> Self {
+        Self::for_channel_data_root(channel, channel_data_root(channel))
+    }
+
+    /// Build custody against an explicit channel data root (parent of `identity/`).
+    pub fn for_channel_data_root(channel: AppChannel, data_root: PathBuf) -> Self {
+        Self::new(
+            channel,
+            CustodyPaths::for_data_root(data_root.join("identity")),
+            Arc::new(SystemKeyringStore),
+            Arc::new(SystemSecretGenerator),
+        )
+    }
+
     pub fn inspect(&self) -> Result<CustodyResult, CustodyError> {
         let _mutation_guard = IdentityMutationGuard::acquire(&self.locator)?;
         if let Some(result) = self.resume_reset_if_pending_locked() {
@@ -1193,6 +1212,40 @@ impl CustodyPaths {
             reset_path: root.join("identity.reset.json"),
             recovery_protection_path: root.join("identity.recovery-protection.json"),
         }
+    }
+}
+
+fn channel_data_root(channel: AppChannel) -> PathBuf {
+    #[cfg(target_os = "macos")]
+    {
+        paths::home_dir()
+            .join("Library/Application Support")
+            .join(channel.display_name())
+    }
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    {
+        let base = std::env::var_os("XDG_DATA_HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| paths::home_dir().join(".local/share"));
+        base.join(channel.storage_slug())
+    }
+    #[cfg(target_os = "windows")]
+    {
+        std::env::var_os("LOCALAPPDATA")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| paths::home_dir().join("AppData").join("Local"))
+            .join(channel.display_name())
+    }
+    #[cfg(not(any(
+        target_os = "macos",
+        target_os = "linux",
+        target_os = "freebsd",
+        target_os = "windows"
+    )))]
+    {
+        paths::home_dir()
+            .join(".config")
+            .join(channel.storage_slug())
     }
 }
 
