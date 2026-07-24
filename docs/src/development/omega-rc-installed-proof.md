@@ -19,13 +19,17 @@ must be installed beside Zed and exercised.
 
 ## Command
 
-After `script/bundle-omega-rc` produces `target/omega-rc/release-record.json` and
-the signed DMG, install the candidate, then:
+After `script/bundle-omega-rc` produces the signed and notarized DMG, generate
+the admitted identity-candidate record, install that exact candidate, collect
+the candidate-bound manual evidence described below, then:
 
 ```sh
 script/prove-omega-rc-install \
-  --release-record target/omega-rc/release-record.json \
-  --app /Applications/Omega.app
+  --release-record target/omega-rc/omega-v0.2.0-rc1-macos-arm64.release.json \
+  --artifact target/omega-rc/Omega-v0.2.0-rc1-macos-arm64.dmg \
+  --app /Applications/Omega.app \
+  --identity-evidence target/omega-identity-evidence/candidate-evidence.json \
+  --manual-evidence target/omega-rc-proof/manual-evidence.json
 ```
 
 Harness validation without an installed candidate:
@@ -135,6 +139,56 @@ crash output.
 Incomplete proofs exit non-zero and write `target/omega-rc-proof/installed-proof.json`
 with blockers. Do not close issue #16 until `status` is `complete` and the
 manual UI checklist in that proof is signed off.
+
+### Installed-candidate bindings
+
+The harness verifies the explicit DMG digest against the release record, checks
+the notarization record and staple, mounts the DMG read-only, verifies the
+package and application signatures, and compares every regular file and
+symlink in the installed application with the application in the DMG. It also
+checks the `omega` and `cli` executable digests against the release record.
+Passing source scans, a similarly signed application, or a matching bundle
+identifier cannot substitute for the exact installed candidate.
+
+The identity evidence must use
+`openagents.omega.identity-candidate-evidence.v1`, bind the same artifact,
+release record, and source commit, and report `candidate_admitted: true` with
+every gate passed. In particular, its manual journey, owner observation, and
+independent verification gates must pass with distinct named attestors.
+
+The manual evidence is a JSON object with schema
+`openagents.omega.installed-brand-evidence.v1`, the exact
+`candidate_digest`, and these exact `checks` keys:
+
+- `clean_profile_side_by_side_zed`
+- `offline_identity_first_start`
+- `editor_open_edit_save_git_terminal`
+- `restart_project_and_layout_restoration`
+- `visible_brand_and_accessibility_labels`
+- `icon_bundle_and_file_association_branding`
+- `shell_installer_and_disk_image_branding`
+- `legal_licenses_and_notices`
+- `network_destinations_against_allowlist`
+- `data_cache_log_browser_update_and_credential_isolation`
+- `disabled_services_and_update_behavior`
+- `uninstall_preserves_zed_data`
+
+Each check is `{"status":"passed","evidence":"<candidate-bound receipt>"}`.
+The object must also contain `owner_observation` and
+`independent_verification` objects with `status`, distinct nonempty `attestor`
+names, `observed_at`, and a candidate-bound `evidence` reference. The harness
+does not generate or infer these attestations.
+
+Incomplete proofs exit non-zero and write
+`target/omega-rc-proof/installed-proof.json` with structured pending or passed
+gates and blockers. `status` can be `complete` only when every automated and
+manual gate passes. Validate tamper and false-green refusal behavior with:
+
+```sh
+script/prove-omega-rc-install --self-test
+```
+
+Do not close issue #16 until `status` is `complete`.
 
 ## Required journey
 

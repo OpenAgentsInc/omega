@@ -1,312 +1,662 @@
-#!/usr/bin/env bash
-#
-# Produce (or refuse) an installed Omega RC proof bundle for issue #16.
-#
-# Without a signed/notarized candidate, this writes an incomplete proof and
-# exits non-zero. Closing #16 requires a completed installed proof.
-set -euo pipefail
+#!/usr/bin/env python3
+"""Produce, or truthfully refuse, an installed Omega RC proof."""
 
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-cd "$ROOT"
+from __future__ import annotations
 
-OMEGA_RC_VERSION="${OMEGA_RC_VERSION:-0.2.0-rc1}"
-OMEGA_RC_ARTIFACT_NAME="${OMEGA_RC_ARTIFACT_NAME:-Omega-v${OMEGA_RC_VERSION}-macos-arm64.dmg}"
-OMEGA_RC_BUNDLE_ID="${OMEGA_RC_BUNDLE_ID:-com.openagents.omega.rc}"
-OMEGA_APP_PATH="${OMEGA_APP_PATH:-/Applications/Omega.app}"
-OUT_DIR="${OMEGA_PROOF_OUT:-${ROOT}/target/omega-rc-proof}"
-RELEASE_RECORD="${OMEGA_RELEASE_RECORD:-${ROOT}/target/omega-rc/release-record.json}"
-PACKAGE_PATH="${OMEGA_PACKAGE_PATH:-${ROOT}/target/omega-rc/${OMEGA_RC_ARTIFACT_NAME}}"
-
-usage() {
-  cat <<'EOF'
-Usage: script/prove-omega-rc-install [--harness-check] [--release-record PATH] [--app PATH]
-
-  --harness-check        Validate proof schema + docs only (no install evidence).
-  --release-record PATH  Release record from script/bundle-omega-rc.
-  --app PATH             Installed Omega.app path (default: /Applications/Omega.app).
-  --out DIR              Proof output directory.
-EOF
-}
-
-MODE="prove"
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-    --harness-check)
-      MODE="harness"
-      shift
-      ;;
-    --release-record)
-      RELEASE_RECORD="$2"
-      shift 2
-      ;;
-    --app)
-      OMEGA_APP_PATH="$2"
-      shift 2
-      ;;
-    --out)
-      OUT_DIR="$2"
-      shift 2
-      ;;
-    -h|--help)
-      usage
-      exit 0
-      ;;
-    *)
-      echo "error: unknown argument: $1" >&2
-      usage >&2
-      exit 2
-      ;;
-  esac
-done
-
-mkdir -p "$OUT_DIR"
-PROOF_JSON="${OUT_DIR}/installed-proof.json"
-NOTES_MD="${OUT_DIR}/NOTES.md"
-
-write_json() {
-  python3 - "$@" <<'PY'
+import argparse
+import hashlib
 import json
-import sys
-
-payload = json.loads(sys.argv[1])
-path = sys.argv[2]
-with open(path, "w", encoding="utf-8") as handle:
-    json.dump(payload, handle, indent=2, sort_keys=True)
-    handle.write("\n")
-print(f"wrote {path}")
-PY
-}
-
-if [[ "$MODE" == "harness" ]]; then
-  test -f "$ROOT/docs/src/development/omega-rc-installed-proof.md"
-  test -x "$ROOT/script/prove-omega-rc-install"
-  if ! grep -q 'omega-rc-installed-proof.md' "$ROOT/docs/src/SUMMARY.md"; then
-    echo "error: docs/src/SUMMARY.md must link omega-rc-installed-proof.md" >&2
-    exit 1
-  fi
-  write_json "$(python3 - <<'PY'
-import json
-print(json.dumps({
-  "schema_version": 1,
-  "status": "harness_ok",
-  "product": "Omega",
-  "version": "0.2.0-rc1",
-  "checks": {
-    "menu_about_omega": "pending",
-    "welcome_omega_branding": "pending",
-    "settings_about_omega": "pending",
-    "dock_icon_openagents_family": "pending",
-    "codesign_team_hqwsg26l43": "pending",
-    "notarization_accepted": "pending",
-    "gatekeeper_assessment_pass": "pending",
-    "no_zed_auth_prompts": "pending",
-    "no_zed_cloud_prompts": "pending",
-  },
-  "blockers": [],
-}))
-PY
-)" "$PROOF_JSON"
-  cat >"$NOTES_MD" <<EOF
-# Omega RC installed proof — harness check
-
-Harness validated. No installed candidate was exercised.
-EOF
-  echo "Harness OK: ${PROOF_JSON}"
-  exit 0
-fi
-
-BLOCKERS=()
-STATUS="incomplete"
-
-if [[ ! -f "$RELEASE_RECORD" ]]; then
-  BLOCKERS+=("missing release-record.json (run script/bundle-omega-rc first)")
-fi
-
-if [[ ! -f "$PACKAGE_PATH" ]]; then
-  BLOCKERS+=("missing signed package artifact at ${PACKAGE_PATH}")
-fi
-
-if [[ ! -d "$OMEGA_APP_PATH" ]]; then
-  BLOCKERS+=("Omega.app not installed at ${OMEGA_APP_PATH}")
-fi
-
-RECORD_JSON="{}"
-if [[ -f "$RELEASE_RECORD" ]]; then
-  RECORD_JSON="$(python3 - "$RELEASE_RECORD" <<'PY'
-import json
-import sys
-from pathlib import Path
-
-record = json.loads(Path(sys.argv[1]).read_text())
-required = [
-    "schema_version",
-    "product",
-    "channel",
-    "version",
-    "artifact_name",
-    "bundle_identifier",
-    "team_id",
-    "signing_identity",
-    "source",
-    "digests",
-    "notarization",
-    "legal",
-    "publication",
-]
-missing = [key for key in required if key not in record]
-errors = []
-if missing:
-    errors.append(f"release record missing keys: {', '.join(missing)}")
-if record.get("product") != "Omega":
-    errors.append("product must be Omega")
-if record.get("channel") != "rc":
-    errors.append("channel must be rc")
-if record.get("bundle_identifier") != "com.openagents.omega.rc":
-    errors.append("bundle_identifier must be com.openagents.omega.rc")
-if record.get("team_id") != "HQWSG26L43":
-    errors.append("team_id must be HQWSG26L43")
-if record.get("legal", {}).get("commercial_terms_attached") is not False:
-    errors.append("commercial_terms_attached must be false")
-publication = record.get("publication", {})
-if publication.get("prerelease") is not True or publication.get("latest") is not False:
-    errors.append("publication must be prerelease=true and latest=false")
-notarization = record.get("notarization", {})
-if notarization.get("attempted") is not True or notarization.get("stapled") is not True:
-    errors.append("notarization must be attempted and stapled for installed proof")
-if record.get("digests", {}).get("package_sha256") in (None, ""):
-    errors.append("digests.package_sha256 required for installed proof")
-print(json.dumps({"record": record, "errors": errors}))
-PY
-)"
-  RECORD_ERRORS="$(python3 -c 'import json,sys; print("\n".join(json.load(sys.stdin)["errors"]))' <<<"$RECORD_JSON")"
-  if [[ -n "$RECORD_ERRORS" ]]; then
-    while IFS= read -r line; do
-      [[ -n "$line" ]] && BLOCKERS+=("$line")
-    done <<<"$RECORD_ERRORS"
-  fi
-fi
-
-CODESIGN_OUT=""
-SPCTL_OUT=""
-INFO_PLIST_CHECKS=""
-if [[ -d "$OMEGA_APP_PATH" ]]; then
-  CODESIGN_OUT="$(codesign -dv --verbose=4 "$OMEGA_APP_PATH" 2>&1 || true)"
-  printf '%s\n' "$CODESIGN_OUT" >"${OUT_DIR}/codesign.txt"
-  if ! grep -q 'TeamIdentifier=HQWSG26L43' <<<"$CODESIGN_OUT"; then
-    BLOCKERS+=("installed app TeamIdentifier is not HQWSG26L43")
-  fi
-  if ! grep -q 'Identifier=com.openagents.omega.rc' <<<"$CODESIGN_OUT"; then
-    BLOCKERS+=("installed app Identifier is not com.openagents.omega.rc")
-  fi
-
-  SPCTL_OUT="$(spctl --assess --type execute --verbose=4 "$OMEGA_APP_PATH" 2>&1 || true)"
-  printf '%s\n' "$SPCTL_OUT" >"${OUT_DIR}/spctl.txt"
-  if ! grep -qi 'accepted' <<<"$SPCTL_OUT"; then
-    BLOCKERS+=("Gatekeeper assessment did not accept installed app")
-  fi
-
-  INFO_PLIST_CHECKS="$(python3 - "$OMEGA_APP_PATH" <<'PY'
+import os
 import plistlib
+import subprocess
 import sys
+import tempfile
 from pathlib import Path
+from typing import Any
 
-info_path = Path(sys.argv[1]) / "Contents" / "Info.plist"
-info = plistlib.loads(info_path.read_bytes())
-checks = {
-    "CFBundleName": info.get("CFBundleName"),
-    "CFBundleDisplayName": info.get("CFBundleDisplayName"),
-    "CFBundleIdentifier": info.get("CFBundleIdentifier"),
-    "CFBundleIconFile": info.get("CFBundleIconFile"),
-}
-errors = []
-if checks["CFBundleName"] != "Omega":
-    errors.append(f"CFBundleName={checks['CFBundleName']!r} (expected Omega)")
-if checks["CFBundleDisplayName"] not in ("Omega", None, "Omega RC"):
-    if checks["CFBundleDisplayName"] and "Omega" not in str(checks["CFBundleDisplayName"]):
-        errors.append(f"CFBundleDisplayName={checks['CFBundleDisplayName']!r}")
-if checks["CFBundleIdentifier"] != "com.openagents.omega.rc":
-    errors.append(f"CFBundleIdentifier={checks['CFBundleIdentifier']!r}")
-print("\n".join(errors))
-PY
-)"
-  if [[ -n "$INFO_PLIST_CHECKS" ]]; then
-    while IFS= read -r line; do
-      [[ -n "$line" ]] && BLOCKERS+=("$line")
-    done <<<"$INFO_PLIST_CHECKS"
-  fi
-fi
 
-if [[ ${#BLOCKERS[@]} -eq 0 ]]; then
-  STATUS="complete"
-fi
+ROOT = Path(__file__).resolve().parent.parent
+DEFAULT_APP = Path("/Applications/Omega.app")
+DEFAULT_OUTPUT = ROOT / "target/omega-rc-proof"
+EXPECTED_PRODUCT = "Omega"
+EXPECTED_VERSION = "0.2.0-rc1"
+EXPECTED_BUNDLE_ID = "com.openagents.omega.rc"
+EXPECTED_TEAM_ID = "HQWSG26L43"
+EXPECTED_SIGNER = "Developer ID Application: OpenAgents, Inc. (HQWSG26L43)"
+MANUAL_CHECKS = (
+    "clean_profile_side_by_side_zed",
+    "offline_identity_first_start",
+    "editor_open_edit_save_git_terminal",
+    "restart_project_and_layout_restoration",
+    "visible_brand_and_accessibility_labels",
+    "icon_bundle_and_file_association_branding",
+    "shell_installer_and_disk_image_branding",
+    "legal_licenses_and_notices",
+    "network_destinations_against_allowlist",
+    "data_cache_log_browser_update_and_credential_isolation",
+    "disabled_services_and_update_behavior",
+    "uninstall_preserves_zed_data",
+)
 
-python3 - "$PROOF_JSON" "$STATUS" "$OMEGA_APP_PATH" "$RELEASE_RECORD" "$PACKAGE_PATH" "${BLOCKERS[@]}" <<'PY'
-import json
-import sys
-from pathlib import Path
 
-path = Path(sys.argv[1])
-status = sys.argv[2]
-app_path = sys.argv[3]
-release_record = sys.argv[4]
-package_path = sys.argv[5]
-blockers = list(sys.argv[6:])
+class ProofError(RuntimeError):
+    pass
 
-payload = {
-    "schema_version": 1,
-    "status": status,
-    "product": "Omega",
-    "version": "0.2.0-rc1",
-    "app_path": app_path,
-    "release_record_path": release_record,
-    "package_path": package_path,
-    "checks": {
-        "menu_about_omega": "manual_pending" if status != "complete" else "manual_required",
-        "welcome_omega_branding": "manual_pending" if status != "complete" else "manual_required",
-        "settings_about_omega": "manual_pending" if status != "complete" else "manual_required",
-        "dock_icon_openagents_family": "manual_pending" if status != "complete" else "manual_required",
-        "codesign_team_hqwsg26l43": "blocked" if status != "complete" else "pass",
-        "notarization_accepted": "blocked" if status != "complete" else "pass",
-        "gatekeeper_assessment_pass": "blocked" if status != "complete" else "pass",
-        "no_zed_auth_prompts": "manual_pending" if status != "complete" else "manual_required",
-        "no_zed_cloud_prompts": "manual_pending" if status != "complete" else "manual_required",
-    },
-    "blockers": blockers,
-}
-path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-print(f"wrote {path}")
-PY
 
-{
-  echo "# Omega RC installed proof"
-  echo
-  echo "- status: \`${STATUS}\`"
-  echo "- app: \`${OMEGA_APP_PATH}\`"
-  echo "- release record: \`${RELEASE_RECORD}\`"
-  echo "- package: \`${PACKAGE_PATH}\`"
-  echo
-  if [[ ${#BLOCKERS[@]} -gt 0 ]]; then
-    echo "## Blockers"
-    echo
-    for blocker in "${BLOCKERS[@]}"; do
-      echo "- ${blocker}"
-    done
-    echo
-  fi
-  echo "## Manual UI checklist (required for complete proof)"
-  echo
-  echo "- About Omega shows Omega branding"
-  echo "- Welcome page shows Omega logo/title"
-  echo "- Settings About shows Omega"
-  echo "- Dock icon is OpenAgents family"
-  echo "- No Zed sign-in / Zed cloud upsells"
-} >"$NOTES_MD"
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
-echo "Proof written: ${PROOF_JSON}"
-if [[ "$STATUS" != "complete" ]]; then
-  echo "Installed proof incomplete (${#BLOCKERS[@]} blocker(s))." >&2
-  exit 1
-fi
 
-echo "Installed proof complete. Attach ${OUT_DIR} when closing issue #16."
-exit 0
+def load_json(path: Path, description: str) -> dict[str, Any]:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise ProofError(f"cannot read {description} {path}: {error}") from error
+    if not isinstance(value, dict):
+        raise ProofError(f"{description} must contain a JSON object")
+    return value
+
+
+def run(command: list[str], *, description: str) -> str:
+    result = subprocess.run(command, capture_output=True, text=True, check=False)
+    output = "\n".join(part for part in (result.stdout, result.stderr) if part).strip()
+    if result.returncode != 0:
+        detail = f": {output}" if output else ""
+        raise ProofError(f"{description} failed{detail}")
+    return output
+
+
+def validate_release_record(record: dict[str, Any], record_path: Path, artifact: Path) -> None:
+    required = {
+        "schema_version",
+        "product",
+        "channel",
+        "version",
+        "bundle_version",
+        "artifact_name",
+        "bundle_identifier",
+        "team_id",
+        "signing_identity",
+        "source",
+        "digests",
+        "notarization",
+        "legal",
+        "publication",
+    }
+    missing = sorted(required.difference(record))
+    if missing:
+        raise ProofError(f"release record missing keys: {', '.join(missing)}")
+    expected = {
+        "schema_version": 1,
+        "product": EXPECTED_PRODUCT,
+        "channel": "rc",
+        "version": EXPECTED_VERSION,
+        "artifact_name": artifact.name,
+        "bundle_identifier": EXPECTED_BUNDLE_ID,
+        "team_id": EXPECTED_TEAM_ID,
+        "signing_identity": EXPECTED_SIGNER,
+        "bundle_version": "0.2.0",
+    }
+    for key, expected_value in expected.items():
+        if record.get(key) != expected_value:
+            raise ProofError(
+                f"release record {key}={record.get(key)!r}, expected {expected_value!r}"
+            )
+    if record.get("source", {}).get("dirty") is not False:
+        raise ProofError("release record must bind a clean source commit")
+    if record.get("legal", {}).get("commercial_terms_attached") is not False:
+        raise ProofError("release record must exclude commercial terms")
+    publication = record.get("publication", {})
+    if publication.get("prerelease") is not True or publication.get("latest") is not False:
+        raise ProofError("release publication must be prerelease=true and latest=false")
+    notarization = record.get("notarization", {})
+    if notarization.get("attempted") is not True or notarization.get("stapled") is not True:
+        raise ProofError("release record notarization must be attempted and stapled")
+    expected_digest = record.get("digests", {}).get("package_sha256")
+    if expected_digest != sha256_file(artifact):
+        raise ProofError("artifact SHA-256 does not match release record")
+    if record_path.resolve() == artifact.resolve():
+        raise ProofError("release record and artifact must be distinct files")
+
+
+def validate_identity_evidence(
+    evidence: dict[str, Any], record: dict[str, Any], record_path: Path, artifact: Path
+) -> tuple[str, str, str]:
+    if evidence.get("schema") != "openagents.omega.identity-candidate-evidence.v1":
+        raise ProofError("identity evidence schema is not supported")
+    if evidence.get("status") != "admitted" or evidence.get("candidate_admitted") is not True:
+        raise ProofError("identity candidate is not admitted")
+    if evidence.get("attestation_errors") not in ({}, None):
+        raise ProofError("identity candidate evidence contains attestation errors")
+    gates = evidence.get("gates")
+    if not isinstance(gates, dict) or not gates:
+        raise ProofError("identity evidence has no required gates")
+    pending = sorted(
+        name
+        for name, gate in gates.items()
+        if not isinstance(gate, dict) or gate.get("status") != "passed"
+    )
+    if pending:
+        raise ProofError(f"identity evidence has gates not passed: {', '.join(pending)}")
+    for required_gate in ("manual_journey", "owner_observation", "independent_verification"):
+        if gates.get(required_gate, {}).get("status") != "passed":
+            raise ProofError(f"identity evidence gate {required_gate} is not passed")
+    owner = gates["owner_observation"].get("attestor")
+    independent = gates["independent_verification"].get("attestor")
+    if (
+        not isinstance(owner, str)
+        or not owner.strip()
+        or not isinstance(independent, str)
+        or not independent.strip()
+        or owner == independent
+    ):
+        raise ProofError("identity owner and independent verifier must be distinct named attestors")
+    digest = evidence.get("candidate_digest", {}).get("value")
+    if (
+        not isinstance(digest, str)
+        or len(digest) != 64
+        or any(character not in "0123456789abcdef" for character in digest)
+    ):
+        raise ProofError("identity evidence candidate digest is invalid")
+    candidate = evidence.get("candidate", {})
+    observed_digest = hashlib.sha256(
+        json.dumps(candidate, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    if digest != observed_digest:
+        raise ProofError("identity candidate digest does not match canonical candidate JSON")
+    candidate_artifact = candidate.get("artifact", {})
+    if candidate_artifact.get("name") != artifact.name:
+        raise ProofError("identity evidence names a different artifact")
+    if candidate_artifact.get("sha256") != sha256_file(artifact):
+        raise ProofError("identity evidence artifact digest does not match explicit artifact")
+    if candidate_artifact.get("release_record_sha256") != sha256_file(record_path):
+        raise ProofError("identity evidence release-record digest does not match")
+    if candidate.get("omega", {}).get("commit") != record.get("source", {}).get("commit"):
+        raise ProofError("identity evidence and release record bind different source commits")
+    return digest, owner, independent
+
+
+def validate_manual_evidence(
+    evidence: dict[str, Any],
+    candidate_digest: str,
+    identity_owner: str,
+    identity_independent: str,
+) -> None:
+    if evidence.get("schema") != "openagents.omega.installed-brand-evidence.v1":
+        raise ProofError("installed brand evidence schema is not supported")
+    if evidence.get("candidate_digest") != candidate_digest:
+        raise ProofError("installed brand evidence binds a different candidate digest")
+    checks = evidence.get("checks")
+    if not isinstance(checks, dict) or set(checks) != set(MANUAL_CHECKS):
+        raise ProofError("installed brand evidence check inventory is incomplete or unexpected")
+    for name in MANUAL_CHECKS:
+        check = checks[name]
+        if (
+            not isinstance(check, dict)
+            or check.get("status") != "passed"
+            or not isinstance(check.get("evidence"), str)
+            or not check["evidence"].strip()
+        ):
+            raise ProofError(f"installed brand evidence check {name} is not passed with evidence")
+    owner = evidence.get("owner_observation")
+    independent = evidence.get("independent_verification")
+    for name, attestation in (
+        ("owner_observation", owner),
+        ("independent_verification", independent),
+    ):
+        if (
+            not isinstance(attestation, dict)
+            or attestation.get("status") != "passed"
+            or not isinstance(attestation.get("attestor"), str)
+            or not attestation["attestor"].strip()
+            or not isinstance(attestation.get("observed_at"), str)
+            or not attestation["observed_at"].strip()
+            or not isinstance(attestation.get("evidence"), str)
+            or not attestation["evidence"].strip()
+        ):
+            raise ProofError(f"installed brand evidence {name} is incomplete")
+    if owner["attestor"] == independent["attestor"]:
+        raise ProofError("installed brand owner and independent verifier must be distinct")
+    if owner["attestor"] != identity_owner:
+        raise ProofError("installed brand owner differs from identity candidate owner")
+    if independent["attestor"] != identity_independent:
+        raise ProofError(
+            "installed brand independent verifier differs from identity candidate verifier"
+        )
+
+
+def bundle_manifest(app: Path) -> dict[str, str]:
+    if not app.is_dir():
+        raise ProofError(f"application bundle is missing: {app}")
+    manifest: dict[str, str] = {}
+    for path in sorted(app.rglob("*")):
+        relative = path.relative_to(app).as_posix()
+        if path.is_symlink():
+            manifest[relative] = f"symlink:{os.readlink(path)}"
+        elif path.is_file():
+            manifest[relative] = f"sha256:{sha256_file(path)}"
+    if not manifest:
+        raise ProofError(f"application bundle is empty: {app}")
+    return manifest
+
+
+def validate_app_metadata(app: Path, record: dict[str, Any]) -> None:
+    info_path = app / "Contents/Info.plist"
+    try:
+        info = plistlib.loads(info_path.read_bytes())
+    except (OSError, plistlib.InvalidFileException) as error:
+        raise ProofError(f"cannot read application Info.plist: {error}") from error
+    if info.get("CFBundleName") != EXPECTED_PRODUCT:
+        raise ProofError("application CFBundleName is not Omega")
+    if info.get("CFBundleIdentifier") != EXPECTED_BUNDLE_ID:
+        raise ProofError("application bundle identifier is not the Omega RC identifier")
+    version = info.get("CFBundleShortVersionString")
+    if version != record.get("bundle_version"):
+        raise ProofError(f"application version {version!r} differs from release record")
+
+
+def validate_binary_digests(app: Path, record: dict[str, Any]) -> None:
+    digests = record.get("digests", {})
+    paths = {
+        "omega_binary_sha256": app / "Contents/MacOS/omega",
+        "cli_binary_sha256": app / "Contents/MacOS/cli",
+    }
+    for key, path in paths.items():
+        if not path.is_file():
+            raise ProofError(f"packaged executable is missing: {path}")
+        if digests.get(key) != sha256_file(path):
+            raise ProofError(f"{path.name} digest differs from release record")
+
+
+def verify_signature(app: Path, output_dir: Path, label: str) -> None:
+    run(
+        ["codesign", "--verify", "--deep", "--strict", "--verbose=2", str(app)],
+        description=f"{label} code-signature verification",
+    )
+    details = run(
+        ["codesign", "-dv", "--verbose=4", str(app)],
+        description=f"{label} code-signature inspection",
+    )
+    (output_dir / f"codesign-{label}.txt").write_text(details + "\n", encoding="utf-8")
+    if f"TeamIdentifier={EXPECTED_TEAM_ID}" not in details:
+        raise ProofError(f"{label} TeamIdentifier is not {EXPECTED_TEAM_ID}")
+    if app.suffix == ".app" and f"Identifier={EXPECTED_BUNDLE_ID}" not in details:
+        raise ProofError(f"{label} Identifier is not {EXPECTED_BUNDLE_ID}")
+
+
+def mounted_application(artifact: Path):
+    class MountedApplication:
+        def __init__(self) -> None:
+            self.temp = tempfile.TemporaryDirectory(prefix="omega-installed-proof-")
+            self.mount = Path(self.temp.name) / "mount"
+            self.mount.mkdir()
+            self.attached = False
+
+        def __enter__(self) -> Path:
+            run(
+                [
+                    "hdiutil",
+                    "attach",
+                    "-readonly",
+                    "-nobrowse",
+                    "-mountpoint",
+                    str(self.mount),
+                    str(artifact),
+                ],
+                description="read-only DMG mount",
+            )
+            self.attached = True
+            try:
+                applications = list(self.mount.glob("*.app"))
+                if len(applications) != 1 or applications[0].name != "Omega.app":
+                    raise ProofError("DMG must contain exactly one top-level Omega.app")
+                return applications[0]
+            except Exception:
+                subprocess.run(
+                    ["hdiutil", "detach", str(self.mount)],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                self.attached = False
+                self.temp.cleanup()
+                raise
+
+        def __exit__(self, exc_type, exc_value, traceback) -> None:
+            if self.attached:
+                result = subprocess.run(
+                    ["hdiutil", "detach", str(self.mount)],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                if result.returncode != 0 and exc_type is None:
+                    raise ProofError("failed to detach proof DMG")
+            self.temp.cleanup()
+
+    return MountedApplication()
+
+
+def pending_checks() -> dict[str, dict[str, str]]:
+    checks = {
+        "artifact_release_binding": {"status": "pending"},
+        "notarization_and_gatekeeper": {"status": "pending"},
+        "packaged_installed_bundle_match": {"status": "pending"},
+        "identity_candidate_admission": {"status": "pending"},
+        "manual_evidence_binding": {"status": "pending"},
+        "owner_observation": {"status": "pending"},
+        "independent_verification": {"status": "pending"},
+    }
+    checks.update({name: {"status": "pending"} for name in MANUAL_CHECKS})
+    return checks
+
+
+def write_proof(
+    output_dir: Path,
+    status: str,
+    checks: dict[str, dict[str, str]],
+    blockers: list[str],
+    paths: dict[str, Path],
+    candidate_digest: str | None,
+) -> None:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    proof = {
+        "schema": "openagents.omega.installed-proof.v2",
+        "schema_version": 2,
+        "status": status,
+        "product": EXPECTED_PRODUCT,
+        "version": EXPECTED_VERSION,
+        "candidate_digest": candidate_digest,
+        "paths": {name: str(path.resolve()) for name, path in paths.items()},
+        "checks": checks,
+        "blockers": blockers,
+    }
+    (output_dir / "installed-proof.json").write_text(
+        json.dumps(proof, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    notes = [
+        "# Omega RC installed proof",
+        "",
+        f"- status: `{status}`",
+        f"- candidate digest: `{candidate_digest or 'pending'}`",
+        "",
+    ]
+    if blockers:
+        notes.extend(["## Blockers", "", *(f"- {blocker}" for blocker in blockers), ""])
+    notes.extend(["## Gate status", ""])
+    notes.extend(f"- {name}: `{check['status']}`" for name, check in checks.items())
+    notes.append("")
+    (output_dir / "NOTES.md").write_text("\n".join(notes), encoding="utf-8")
+
+
+def prove(arguments: argparse.Namespace) -> int:
+    arguments.out.mkdir(parents=True, exist_ok=True)
+    paths = {
+        "release_record": arguments.release_record,
+        "artifact": arguments.artifact,
+        "installed_app": arguments.app,
+        "identity_evidence": arguments.identity_evidence,
+        "manual_evidence": arguments.manual_evidence,
+    }
+    checks = pending_checks()
+    blockers: list[str] = []
+    candidate_digest: str | None = None
+    for name, path in paths.items():
+        expected = path.is_dir() if name == "installed_app" else path.is_file()
+        if not expected:
+            blockers.append(f"missing {name.replace('_', ' ')}: {path}")
+            if name in ("release_record", "artifact"):
+                checks["artifact_release_binding"] = {"status": "blocked"}
+            elif name == "installed_app":
+                checks["packaged_installed_bundle_match"] = {"status": "blocked"}
+            elif name == "identity_evidence":
+                checks["identity_candidate_admission"] = {"status": "blocked"}
+            elif name == "manual_evidence":
+                checks["manual_evidence_binding"] = {"status": "blocked"}
+    if blockers:
+        write_proof(arguments.out, "incomplete", checks, blockers, paths, candidate_digest)
+        return 1
+
+    active_check = "artifact_release_binding"
+    try:
+        record = load_json(arguments.release_record, "release record")
+        validate_release_record(record, arguments.release_record, arguments.artifact)
+        checks["artifact_release_binding"] = {"status": "passed"}
+
+        active_check = "notarization_and_gatekeeper"
+        verify_signature(arguments.artifact, arguments.out, "dmg")
+        run(
+            ["xcrun", "stapler", "validate", str(arguments.artifact)],
+            description="DMG staple validation",
+        )
+
+        active_check = "identity_candidate_admission"
+        evidence = load_json(arguments.identity_evidence, "identity candidate evidence")
+        candidate_digest, identity_owner, identity_independent = validate_identity_evidence(
+            evidence, record, arguments.release_record, arguments.artifact
+        )
+        checks["identity_candidate_admission"] = {"status": "passed"}
+
+        active_check = "manual_evidence_binding"
+        manual = load_json(arguments.manual_evidence, "installed brand evidence")
+        validate_manual_evidence(
+            manual, candidate_digest, identity_owner, identity_independent
+        )
+        checks["manual_evidence_binding"] = {"status": "passed"}
+        for name in MANUAL_CHECKS:
+            checks[name] = {"status": "passed", "evidence": manual["checks"][name]["evidence"]}
+        checks["owner_observation"] = {
+            "status": "passed",
+            "attestor": manual["owner_observation"]["attestor"],
+            "evidence": manual["owner_observation"]["evidence"],
+        }
+        checks["independent_verification"] = {
+            "status": "passed",
+            "attestor": manual["independent_verification"]["attestor"],
+            "evidence": manual["independent_verification"]["evidence"],
+        }
+
+        active_check = "notarization_and_gatekeeper"
+        verify_signature(arguments.app, arguments.out, "installed-app")
+        gatekeeper = run(
+            ["spctl", "--assess", "--type", "execute", "--verbose=4", str(arguments.app)],
+            description="installed app Gatekeeper assessment",
+        )
+        (arguments.out / "spctl-installed-app.txt").write_text(gatekeeper + "\n", encoding="utf-8")
+        checks["notarization_and_gatekeeper"] = {"status": "passed"}
+
+        active_check = "packaged_installed_bundle_match"
+        with mounted_application(arguments.artifact) as packaged_app:
+            verify_signature(packaged_app, arguments.out, "packaged-app")
+            validate_app_metadata(packaged_app, record)
+            validate_binary_digests(packaged_app, record)
+            validate_app_metadata(arguments.app, record)
+            validate_binary_digests(arguments.app, record)
+            if bundle_manifest(packaged_app) != bundle_manifest(arguments.app):
+                raise ProofError("installed Omega.app differs from the signed DMG application tree")
+        checks["packaged_installed_bundle_match"] = {"status": "passed"}
+    except ProofError as error:
+        blockers.append(str(error))
+        checks[active_check] = {"status": "blocked", "reason": str(error)}
+
+    status = "complete" if not blockers and all(
+        check.get("status") == "passed" for check in checks.values()
+    ) else "incomplete"
+    if status != "complete" and not blockers:
+        blockers.append("one or more required gates remain pending")
+    write_proof(arguments.out, status, checks, blockers, paths, candidate_digest)
+    return 0 if status == "complete" else 1
+
+
+def self_test() -> None:
+    with tempfile.TemporaryDirectory(prefix="omega-proof-self-test-") as directory:
+        root = Path(directory)
+        artifact = root / "Omega-v0.2.0-rc1-macos-arm64.dmg"
+        artifact.write_bytes(b"signed candidate bytes")
+        record_path = root / "release.json"
+        record = {
+            "schema_version": 1,
+            "product": EXPECTED_PRODUCT,
+            "channel": "rc",
+            "version": EXPECTED_VERSION,
+            "bundle_version": "0.2.0",
+            "artifact_name": artifact.name,
+            "bundle_identifier": EXPECTED_BUNDLE_ID,
+            "team_id": EXPECTED_TEAM_ID,
+            "signing_identity": EXPECTED_SIGNER,
+            "source": {"commit": "a" * 40, "dirty": False},
+            "digests": {"package_sha256": sha256_file(artifact)},
+            "notarization": {"attempted": True, "stapled": True},
+            "legal": {"commercial_terms_attached": False},
+            "publication": {"prerelease": True, "latest": False},
+        }
+        record_path.write_text(json.dumps(record), encoding="utf-8")
+        validate_release_record(record, record_path, artifact)
+
+        candidate = {
+            "omega": {"commit": "a" * 40},
+            "artifact": {
+                "name": artifact.name,
+                "sha256": sha256_file(artifact),
+                "release_record_sha256": sha256_file(record_path),
+            },
+        }
+        candidate_digest = hashlib.sha256(
+            json.dumps(candidate, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        identity = {
+            "schema": "openagents.omega.identity-candidate-evidence.v1",
+            "status": "admitted",
+            "candidate_admitted": True,
+            "candidate": candidate,
+            "candidate_digest": {"value": candidate_digest},
+            "gates": {
+                "manual_journey": {"status": "passed"},
+                "owner_observation": {"status": "passed", "attestor": "Owner"},
+                "independent_verification": {
+                    "status": "passed",
+                    "attestor": "Reviewer",
+                },
+            },
+        }
+        observed = validate_identity_evidence(identity, record, record_path, artifact)
+        if observed != (candidate_digest, "Owner", "Reviewer"):
+            raise ProofError("self-test identity binding returned unexpected values")
+        identity["candidate_admitted"] = False
+        try:
+            validate_identity_evidence(identity, record, record_path, artifact)
+        except ProofError:
+            pass
+        else:
+            raise ProofError("self-test accepted a non-admitted identity candidate")
+        identity["candidate_admitted"] = True
+
+        tampered = dict(record)
+        tampered["digests"] = {"package_sha256": "0" * 64}
+        try:
+            validate_release_record(tampered, record_path, artifact)
+        except ProofError:
+            pass
+        else:
+            raise ProofError("self-test accepted a tampered artifact digest")
+
+        packaged = root / "packaged.app"
+        installed = root / "installed.app"
+        for app in (packaged, installed):
+            (app / "Contents/Resources").mkdir(parents=True)
+            (app / "Contents/Resources/brand.txt").write_text("Omega", encoding="utf-8")
+        if bundle_manifest(packaged) != bundle_manifest(installed):
+            raise ProofError("self-test equal bundles did not compare equal")
+        (installed / "Contents/Resources/brand.txt").write_text("Zed", encoding="utf-8")
+        if bundle_manifest(packaged) == bundle_manifest(installed):
+            raise ProofError("self-test accepted a tampered installed resource")
+
+        manual = {
+            "schema": "openagents.omega.installed-brand-evidence.v1",
+            "candidate_digest": "b" * 64,
+            "checks": {
+                name: {"status": "passed", "evidence": f"receipt:{name}"}
+                for name in MANUAL_CHECKS
+            },
+            "owner_observation": {
+                "status": "passed",
+                "attestor": "Owner",
+                "observed_at": "2026-07-24T12:00:00Z",
+                "evidence": "receipt:owner",
+            },
+            "independent_verification": {
+                "status": "passed",
+                "attestor": "Reviewer",
+                "observed_at": "2026-07-24T12:01:00Z",
+                "evidence": "receipt:reviewer",
+            },
+        }
+        validate_manual_evidence(manual, "b" * 64, "Owner", "Reviewer")
+        manual["checks"][MANUAL_CHECKS[0]]["status"] = "pending"
+        try:
+            validate_manual_evidence(manual, "b" * 64, "Owner", "Reviewer")
+        except ProofError:
+            pass
+        else:
+            raise ProofError("self-test accepted pending manual evidence")
+
+        checks = pending_checks()
+        checks["artifact_release_binding"] = {"status": "passed"}
+        if all(check.get("status") == "passed" for check in checks.values()):
+            raise ProofError("self-test allowed automated checks to imply complete")
+
+    print("Omega installed-proof harness self-test passed")
+
+
+def parse_arguments() -> argparse.Namespace:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--harness-check", action="store_true")
+    parser.add_argument("--self-test", action="store_true")
+    parser.add_argument("--release-record", type=Path)
+    parser.add_argument("--artifact", type=Path)
+    parser.add_argument("--app", type=Path, default=DEFAULT_APP)
+    parser.add_argument("--identity-evidence", type=Path)
+    parser.add_argument("--manual-evidence", type=Path)
+    parser.add_argument("--out", type=Path, default=DEFAULT_OUTPUT)
+    arguments = parser.parse_args()
+    if arguments.self_test or arguments.harness_check:
+        return arguments
+    missing = [
+        option
+        for option in ("release_record", "artifact", "identity_evidence", "manual_evidence")
+        if getattr(arguments, option) is None
+    ]
+    if missing:
+        options = ", ".join(f"--{name.replace('_', '-')}" for name in missing)
+        parser.error(f"prove mode requires {options}")
+    return arguments
+
+
+def main() -> int:
+    arguments = parse_arguments()
+    try:
+        if arguments.self_test:
+            self_test()
+            return 0
+        if arguments.harness_check:
+            self_test()
+            if not (ROOT / "docs/src/development/omega-rc-installed-proof.md").is_file():
+                raise ProofError("installed-proof documentation is missing")
+            if "omega-rc-installed-proof.md" not in (ROOT / "docs/src/SUMMARY.md").read_text():
+                raise ProofError("documentation summary link is missing")
+            checks = pending_checks()
+            write_proof(arguments.out, "harness_ok", checks, [], {}, None)
+            print(f"Harness OK: {arguments.out / 'installed-proof.json'}")
+            return 0
+        return prove(arguments)
+    except ProofError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
