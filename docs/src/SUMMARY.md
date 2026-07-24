@@ -219,6 +219,7 @@
 - [Developing Zed](./development.md)
   - [Omega application identity](./development/omega-application-identity.md)
   - [Omega Full Auto contract freeze](./development/omega-full-auto-contract-freeze.md)
+  - [Omega Agent Computer contract freeze](./development/omega-agent-computer-contract-freeze.md)
   - [Omega-effectd Full Auto extract pin](./development/omega-effectd-full-auto-extract.md)
   - [Omega-effectd Rust supervisor](./development/omega-effectd-supervisor.md)
   - [Omega Full Auto GPUI launcher](./development/omega-full-auto-gpui-launcher.md)
