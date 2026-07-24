@@ -217,7 +217,10 @@ Do not close issue #16 until `status` is `complete`.
 7. Inspect icons, bundle metadata, file associations, shell integration,
    installer/disk-image text, licenses, and notices.
 8. Capture network destinations from first start through shutdown against
-   `crates/app_identity/fixtures/endpoint_allowlist.json`.
+   `crates/app_identity/fixtures/endpoint_allowlist.json`. Exercise the first
+   configured `codex-acp` start so the capture includes ACP registry, managed
+   Node/npm fallback when applicable, and npm dependency installation. The
+   allowlist is evidence for this review; it is not enforced by the process.
 9. Inspect data, cache, log, browser, update, and credential roots for Omega
    vs Zed separation.
 10. Confirm disabled service / update behavior is honest.

@@ -333,3 +333,32 @@ By default Omega does not contact Zed production hosts.
 - Reviewed hosts live in
   `crates/app_identity/fixtures/endpoint_allowlist.json`
 - Capture journey helper: `script/omega-network-capture-journey`
+
+The endpoint allowlist is an installed-release proof contract, not an in-app
+firewall. Runtime requests do not consult the JSON file. Candidate acceptance
+must capture process network destinations and reject an unreviewed host or any
+host in `normal_start_forbidden_hosts`.
+
+### Native Codex ACP first install
+
+The default `codex-acp` entry resolves through these authorities:
+
+1. `AgentRegistryStore` fetches the ACP index and icons from
+   `cdn.agentclientprotocol.com/registry/v1/`. The current registry entry pins
+   `@agentclientprotocol/codex-acp@1.1.7`.
+2. Omega uses a configured Node/npm pair or a compatible pair on `PATH`. If
+   neither exists, `NodeRuntime` downloads its managed Node distribution,
+   including npm, from `nodejs.org/dist/`.
+3. `LocalRegistryNpxAgent` runs npm with a version ceiling of `1.1.7`. With
+   default npm configuration, package metadata and tarballs for Codex ACP,
+   `@openai/codex`, the current-platform Codex binary package, and transitive
+   dependencies come from `registry.npmjs.org`.
+
+The `omega-effectd` component contains only its private Node executable; it
+does not contain npm and is not the Agent panel's `NodeRuntime`. A machine
+without a configured or system Node/npm pair therefore needs both
+`nodejs.org` and `registry.npmjs.org` for the first Npx ACP start. A user npm
+registry, proxy, or custom Node path can replace those default destinations and
+must be reviewed separately in installed proof. Package metadata for Codex ACP
+1.1.7 currently declares no install scripts, and the resolved dependency graph
+uses npm-registry tarballs rather than a secondary binary download host.

@@ -1,6 +1,7 @@
 {
   "version": 1,
   "owner": "OpenAgents",
+  "enforcement": "release-proof-evidence-only",
   "policy": "Omega release candidates must not contact Zed production hosts on a normal start, editor journey, or shutdown unless an entry below is marked approved and unexpired.",
   "normal_start_forbidden_hosts": [
     "zed.dev",
@@ -37,12 +38,32 @@
     },
     {
       "host": "cdn.agentclientprotocol.com",
-      "purpose": "Public ACP registry used to resolve explicitly configured external agents",
+      "purpose": "Public ACP registry index and icons used to resolve explicitly configured external agents",
       "owner": "OpenAgents",
       "disposition": "approved",
       "expiry": "none",
       "paths": [
         "/registry/v1/"
+      ]
+    },
+    {
+      "host": "nodejs.org",
+      "purpose": "Managed Node.js and npm fallback when no configured or compatible system runtime is available for Npx ACP agents",
+      "owner": "OpenAgents",
+      "disposition": "approved",
+      "expiry": "none",
+      "paths": [
+        "/dist/"
+      ]
+    },
+    {
+      "host": "registry.npmjs.org",
+      "purpose": "npm metadata and tarballs for explicitly configured Npx ACP agents and their dependency graphs",
+      "owner": "OpenAgents",
+      "disposition": "approved",
+      "expiry": "none",
+      "paths": [
+        "/"
       ]
     },
     {

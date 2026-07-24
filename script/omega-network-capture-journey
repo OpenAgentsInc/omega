@@ -22,10 +22,13 @@ echo "  1. Use a clean user profile and offline or monitored network."
 echo "  2. Launch Omega without OMEGA_ALLOW_ZED_SERVICES."
 echo "  3. Open the empty start / welcome surface."
 echo "  4. Open a local project, edit and save one file, open a terminal."
-echo "  5. Quit Omega."
+echo "  5. While online and monitored, start configured codex-acp once."
+echo "  6. Quit Omega."
 echo
 echo "Pass condition:"
 echo "  No request reaches a host in normal_start_forbidden_hosts."
+echo "  Every other observed host has an approved, unexpired entry below."
+echo "  This file is proof evidence; Omega does not enforce it as a firewall."
 echo
 python3 - <<'PY'
 import json

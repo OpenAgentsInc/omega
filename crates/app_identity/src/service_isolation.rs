@@ -4,6 +4,7 @@ use serde::Deserialize;
 struct AllowList {
     version: u32,
     owner: String,
+    enforcement: String,
     normal_start_forbidden_hosts: Vec<String>,
     entries: Vec<AllowListEntry>,
 }
@@ -15,6 +16,8 @@ struct AllowListEntry {
     owner: String,
     disposition: String,
     expiry: String,
+    #[serde(default)]
+    paths: Vec<String>,
     #[serde(default)]
     compatibility_override: Option<String>,
 }
@@ -39,6 +42,7 @@ fn endpoint_allowlist_blocks_zed_hosts_for_normal_start() {
     let allowlist = load_allowlist();
     assert_eq!(allowlist.version, 1);
     assert_eq!(allowlist.owner, "OpenAgents");
+    assert_eq!(allowlist.enforcement, "release-proof-evidence-only");
 
     for host in [
         "zed.dev",
@@ -69,11 +73,22 @@ fn endpoint_allowlist_blocks_zed_hosts_for_normal_start() {
         }
     }
 
-    assert!(allowlist.entries.iter().any(|entry| {
-        entry.host == "cdn.agentclientprotocol.com"
-            && entry.purpose.contains("ACP registry")
-            && entry.disposition == "approved"
-    }));
+    for (host, required_path, purpose) in [
+        (
+            "cdn.agentclientprotocol.com",
+            "/registry/v1/",
+            "ACP registry",
+        ),
+        ("nodejs.org", "/dist/", "Node.js and npm"),
+        ("registry.npmjs.org", "/", "npm metadata and tarballs"),
+    ] {
+        assert!(allowlist.entries.iter().any(|entry| {
+            entry.host == host
+                && entry.purpose.contains(purpose)
+                && entry.disposition == "approved"
+                && entry.paths.iter().any(|path| path == required_path)
+        }));
+    }
 }
 
 #[test]
