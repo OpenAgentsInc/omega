@@ -614,7 +614,11 @@ def validate_generated_record(
             "authority": PINNED_SIGNING_IDENTITY,
             "team_id": PINNED_TEAM_ID,
         }
-        if signing.get("dmg") != expected or signing.get("application") != expected:
+        if (
+            signing.get("dmg") != expected
+            or signing.get("application") != expected
+            or signing.get("identity_proof_driver") != expected
+        ):
             raise EvidenceError(
                 "public candidate evidence requires exact pinned verified signing facts"
             )
@@ -840,20 +844,25 @@ def write_record(path: Path, record: dict[str, Any]) -> None:
 
 def create_self_test_dmg(
     directory: Path, version: str, source_commit: str
-) -> tuple[Path, str, str]:
+) -> tuple[Path, str, str, str]:
     source = directory / "dmg-source"
     executable_directory = source / "Omega.app/Contents/MacOS"
     executable_directory.mkdir(parents=True)
     omega_path = executable_directory / "omega"
     cli_path = executable_directory / "cli"
+    identity_proof_path = executable_directory / "omega-identity-proof"
     omega_path.write_bytes(
         f"omega evidence self-test executable\nZED_COMMIT_SHA={source_commit}\n".encode(
             "ascii"
         )
     )
     cli_path.write_bytes(b"omega cli evidence self-test executable\n")
+    identity_proof_path.write_bytes(
+        b"omega identity proof evidence self-test executable\n"
+    )
     omega_path.chmod(0o755)
     cli_path.chmod(0o755)
+    identity_proof_path.chmod(0o755)
     info = {
         "CFBundleName": "Omega",
         "CFBundleDisplayName": "Omega",
@@ -885,7 +894,12 @@ def create_self_test_dmg(
     if result.returncode != 0:
         detail = result.stderr.strip() or result.stdout.strip()
         raise EvidenceError(f"could not create self-test DMG: {detail}")
-    return artifact_path, sha256_file(omega_path), sha256_file(cli_path)
+    return (
+        artifact_path,
+        sha256_file(omega_path),
+        sha256_file(cli_path),
+        sha256_file(identity_proof_path),
+    )
 
 
 def self_test() -> None:
@@ -895,7 +909,7 @@ def self_test() -> None:
         temp = Path(directory)
         version = "evidence-self-test"
         source_commit = git("rev-parse", "HEAD")
-        artifact_path, omega_digest, cli_digest = create_self_test_dmg(
+        artifact_path, omega_digest, cli_digest, identity_proof_digest = create_self_test_dmg(
             temp, version, source_commit
         )
         lock_snapshot = temp / "Cargo.lock.snapshot"
@@ -918,6 +932,13 @@ def self_test() -> None:
                 "cli_binary_sha256": cli_digest,
             }
         )
+        release_record.setdefault("components", {})["identity_proof_driver"] = {
+            "path": "Contents/MacOS/omega-identity-proof",
+            "binary_sha256": identity_proof_digest,
+            "protocol": "openagents.omega.identity-proof.v1",
+            "keyring_service": "com.openagents.omega.identity-proof.v1",
+            "keyring_account": "disposable-proof-only",
+        }
         release_record["build_inputs"] = {
             "cargo_lock_snapshot": {
                 "name": lock_snapshot.name,
@@ -1099,6 +1120,11 @@ def self_test() -> None:
                 "team_id": PINNED_TEAM_ID,
             },
             "application": {
+                "verified": True,
+                "authority": PINNED_SIGNING_IDENTITY,
+                "team_id": PINNED_TEAM_ID,
+            },
+            "identity_proof_driver": {
                 "verified": True,
                 "authority": PINNED_SIGNING_IDENTITY,
                 "team_id": PINNED_TEAM_ID,
