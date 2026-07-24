@@ -40,6 +40,16 @@ Omega ships a dedicated Full Auto dock panel.
 Crate: `crates/full_auto_ui`. Supervisor helpers: `start_run`, `get_run`,
 `pause_run`, `resume_run`, `handoff_run`, `stop_run`, `retry_run`.
 
+## Sarah workroom projection (FA-08)
+
+The owner-private Sarah workroom projects the service-backed run list in the
+same pane as the conversation. Each row shows the objective, assigned lane,
+state, latest recorded turn, and terminal reason. Its unattended timer is
+derived from the run record's `startedAt` or `createdAt` value; when that
+timestamp is absent the pane says the duration is unavailable instead of
+estimating it. The workroom keeps no Full Auto durable state and does not add
+another composer, activity ladder, or receipt inspector.
+
 ## Verification
 
 - `cargo test -p full_auto_ui -p omega_effectd --lib`

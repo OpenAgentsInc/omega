@@ -20,6 +20,7 @@
 
 mod attention;
 mod community;
+mod full_auto;
 mod interaction;
 mod panel;
 mod projections;
@@ -40,6 +41,7 @@ pub use community::{
     MAX_WORK_UNIT_ROWS, OWNER_PRIVATE_ROOM_HEADER, UNTRUSTED_CONTENT_BOUNDARY,
     V1_NO_PAY_FIRST_RUN_COPY, V1_NO_PAY_ROOM_DESCRIPTION,
 };
+pub use full_auto::WorkroomFullAutoRun;
 pub use interaction::{
     AnswerState, InteractionEvent, InteractionState, LocalPendingSend, TerminalOutcome,
     ToolLadderEntry, ToolLadderKind,

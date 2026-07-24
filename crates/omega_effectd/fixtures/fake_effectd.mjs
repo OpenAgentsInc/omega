@@ -291,6 +291,7 @@ const detail = (run) => {
     stallCause: run.stallCause ?? null,
     recoveryAction: run.recoveryAction ?? "none",
     terminalReason: run.terminalReason ?? null,
+    startedAt: run.startedAt ?? run.createdAt ?? null,
     updatedAt: run.updatedAt,
     turns: run.turns ?? [],
     nativeEvidence: binding

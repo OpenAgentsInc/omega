@@ -17,6 +17,8 @@
 //! Membership, work units, and experience rank are community-only projections.
 //! Two-room rule: rooms never share membership or history.
 
+use std::time::Duration;
+
 use anyhow::Result;
 use editor::Editor;
 use gpui::{
@@ -36,14 +38,12 @@ use workspace::{
 };
 use zed_actions::workroom::{FocusComposer, InterruptTurn, OpenPanel, SendMessage};
 
-use crate::attention::{
-    AttentionMarker, OMEGA_AUTONOMOUS_TICK_ENABLED, empty_room_is_honest,
-};
+use crate::attention::{AttentionMarker, OMEGA_AUTONOMOUS_TICK_ENABLED, empty_room_is_honest};
 use crate::community::{
-    CommunityRoomProjection, RoomKind, COMMUNITY_ROOM_HEADER, COMMUNITY_ROOM_SUBTITLE,
-    EXPERIENCE_LABEL, OWNER_PRIVATE_ROOM_HEADER, V1_NO_PAY_FIRST_RUN_COPY,
-    V1_NO_PAY_ROOM_DESCRIPTION,
+    COMMUNITY_ROOM_HEADER, COMMUNITY_ROOM_SUBTITLE, CommunityRoomProjection, EXPERIENCE_LABEL,
+    OWNER_PRIVATE_ROOM_HEADER, RoomKind, V1_NO_PAY_FIRST_RUN_COPY, V1_NO_PAY_ROOM_DESCRIPTION,
 };
+use crate::full_auto::WorkroomFullAutoRun;
 use crate::interaction::{AnswerState, InteractionEvent, InteractionState, TerminalOutcome};
 use crate::projections::{
     ActivityProjection, ActivityRow, Freshness, GapState, InterruptIntentState, MessageAck,
@@ -72,6 +72,9 @@ pub struct SarahWorkroomPanel {
     refreshing: bool,
     sending: bool,
     interrupting: bool,
+    full_auto_runs: Vec<WorkroomFullAutoRun>,
+    full_auto_detail: Option<String>,
+    _refresh: Option<Task<()>>,
 }
 
 pub fn init(cx: &mut App) {
@@ -146,10 +149,29 @@ impl SarahWorkroomPanel {
             refreshing: false,
             sending: false,
             interrupting: false,
+            full_auto_runs: Vec::new(),
+            full_auto_detail: Some("Full Auto records have not been refreshed yet.".into()),
+            _refresh: None,
         };
         panel.ensure_supervisor(cx);
         panel.refresh_from_effectd(cx);
+        panel.schedule_refresh(cx);
         panel
+    }
+
+    fn schedule_refresh(&mut self, cx: &mut Context<Self>) {
+        let executor = cx.background_executor().clone();
+        self._refresh = Some(cx.spawn(async move |this, cx| {
+            loop {
+                executor.timer(Duration::from_secs(3)).await;
+                if this
+                    .update(cx, |panel, cx| panel.refresh_from_effectd(cx))
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        }));
     }
 
     fn bind_openagents_account(&mut self, cx: &mut Context<Self>) {
@@ -305,8 +327,50 @@ impl SarahWorkroomPanel {
                 Err(error) => Err(error.clone()),
             };
 
+            let full_auto = {
+                let mut guard = supervisor.lock().await;
+                match guard.list_runs().await {
+                    Ok(rows) => {
+                        let mut details = Vec::new();
+                        let mut detail_error = None;
+                        for row in rows {
+                            match guard.get_run(&row.run_ref).await {
+                                Ok(value) => details.push(value),
+                                Err(error) => {
+                                    detail_error = Some(error.to_string());
+                                    break;
+                                }
+                            }
+                        }
+                        if let Some(error) = detail_error {
+                            Err(error)
+                        } else {
+                            Ok(details)
+                        }
+                    }
+                    Err(error) => Err(error.to_string()),
+                }
+            };
+
             this.update(cx, |panel, cx| {
                 panel.refreshing = false;
+                match full_auto {
+                    Ok(values) => {
+                        panel.full_auto_runs = values
+                            .iter()
+                            .filter_map(|value| WorkroomFullAutoRun::from_value(value, chrono::Utc::now()))
+                            .collect();
+                        panel.full_auto_detail = if panel.full_auto_runs.is_empty() {
+                            Some("No Full Auto run records.".into())
+                        } else {
+                            None
+                        };
+                    }
+                    Err(error) => {
+                        panel.full_auto_runs.clear();
+                        panel.full_auto_detail = Some(format!("Full Auto records unavailable: {error}"));
+                    }
+                }
                 match (bootstrap, snapshot) {
                     (Ok(boot), Ok(snap)) => {
                         panel.apply_bootstrap(&boot);
@@ -379,7 +443,11 @@ impl SarahWorkroomPanel {
         .or_else(|| {
             string_field(
                 root,
-                &["authorityProfileRef", "authority_profile_ref", "authorityProfile"],
+                &[
+                    "authorityProfileRef",
+                    "authority_profile_ref",
+                    "authorityProfile",
+                ],
             )
         });
         let authority_revision = string_field(
@@ -511,8 +579,8 @@ impl SarahWorkroomPanel {
                     &["eventRef", "eventId", "event_id", "id", "ref"],
                 )
                 .unwrap_or_else(|| "unknown".into());
-                let summary = string_field(Some(item), &["summary", "text"])
-                    .unwrap_or_else(|| kind.clone());
+                let summary =
+                    string_field(Some(item), &["summary", "text"]).unwrap_or_else(|| kind.clone());
                 let turn_ref = string_field(Some(item), &["turnRef", "turn_ref", "turn"]);
                 activity.push_bounded(ActivityRow {
                     event_ref: event_ref.clone(),
@@ -581,8 +649,7 @@ impl SarahWorkroomPanel {
             }
         } else if value.get("receipts").is_none() {
             receipts.meta = ProjectionMeta::missing(sources::RECEIPTS);
-            receipts.detail =
-                Some("No receipt page in snapshot. Source labeled missing.".into());
+            receipts.detail = Some("No receipt page in snapshot. Source labeled missing.".into());
         }
         self.projection.receipts = receipts;
 
@@ -744,8 +811,7 @@ impl SarahWorkroomPanel {
                             &["messageRef", "message_ref", "eventId", "event_id"],
                         )
                         .unwrap_or_else(|| local_ref.clone());
-                        let turn_ref =
-                            string_field(Some(&value), &["turnRef", "turn_ref"]);
+                        let turn_ref = string_field(Some(&value), &["turnRef", "turn_ref"]);
                         let status = string_field(Some(&value), &["status"])
                             .unwrap_or_else(|| "accepted".into());
                         if let Some(confirmed) = panel.interaction.confirm_send(
@@ -915,11 +981,11 @@ impl SarahWorkroomPanel {
         // Distinct identities when both known.
         if let (Some(thread), Some(group)) = (
             self.projection.room.thread_ref.as_deref(),
-            self.community
-                .room
+            self.community.room.group_ref.as_deref().or(self
+                .community
+                .membership
                 .group_ref
-                .as_deref()
-                .or(self.community.membership.group_ref.as_deref()),
+                .as_deref()),
         ) {
             if thread == group {
                 return false;
@@ -1188,6 +1254,11 @@ impl Render for SarahWorkroomPanel {
                     .child(receipts_body(&p.receipts))
                     .child(section_header("Run state", &p.run_state.meta))
                     .child(run_state_body(&p.run_state, &terminal))
+                    .child(Label::new("Full Auto work").color(Color::Muted))
+                    .child(full_auto_body(
+                        &self.full_auto_runs,
+                        self.full_auto_detail.as_deref(),
+                    ))
             })
             // --- Community room (SARAH-CW-08) — same pane, separate history ---
             .when(showing_community, |this| {
@@ -1203,7 +1274,10 @@ impl Render for SarahWorkroomPanel {
                         &community.experience.meta,
                     ))
                     .child(experience_body(&community.experience))
-                    .child(section_header("Group transcript", &community.transcript.meta))
+                    .child(section_header(
+                        "Group transcript",
+                        &community.transcript.meta,
+                    ))
                     .child(
                         v_flex()
                             .id("community-workroom-transcript")
@@ -1282,6 +1356,37 @@ impl Render for SarahWorkroomPanel {
     }
 }
 
+fn full_auto_body(runs: &[WorkroomFullAutoRun], detail: Option<&str>) -> impl IntoElement {
+    v_flex()
+        .id("sarah-workroom-full-auto")
+        .gap_1()
+        .border_1()
+        .rounded_md()
+        .p_2()
+        .when_some(detail.map(str::to_string), |this, detail| {
+            this.child(Label::new(detail).color(Color::Muted))
+        })
+        .children(runs.iter().map(|run| {
+            v_flex()
+                .gap_0p5()
+                .child(Label::new(format!(
+                    "{} · {} · {}",
+                    run.objective, run.lane, run.state
+                )))
+                .child(
+                    Label::new(format!("Unattended: {}", run.exact_unattended_duration))
+                        .color(Color::Muted)
+                        .size(LabelSize::Small),
+                )
+                .when_some(run.latest_turn.clone(), |this, turn| {
+                    this.child(Label::new(format!("Live: {turn}")).color(Color::Accent))
+                })
+                .when_some(run.terminal_reason.clone(), |this, reason| {
+                    this.child(Label::new(format!("Outcome: {reason}")).color(Color::Warning))
+                })
+        }))
+}
+
 fn community_room_body(community: &CommunityRoomProjection) -> impl IntoElement {
     let room = &community.room;
     v_flex()
@@ -1305,7 +1410,11 @@ fn community_room_body(community: &CommunityRoomProjection) -> impl IntoElement 
                 .size(LabelSize::Small),
         )
         .when_some(room.detail.clone(), |this, detail| {
-            this.child(Label::new(detail).color(Color::Warning).size(LabelSize::Small))
+            this.child(
+                Label::new(detail)
+                    .color(Color::Warning)
+                    .size(LabelSize::Small),
+            )
         })
 }
 
@@ -1442,7 +1551,11 @@ fn binding_section(binding: &BindingProjection) -> impl IntoElement {
             this.child(Label::new(line).color(Color::Muted).size(LabelSize::Small))
         })
         .when_some(gate, |this, message| {
-            this.child(Label::new(message).color(Color::Warning).size(LabelSize::Small))
+            this.child(
+                Label::new(message)
+                    .color(Color::Warning)
+                    .size(LabelSize::Small),
+            )
         })
 }
 
@@ -1458,19 +1571,16 @@ fn attention_body(attention: &crate::attention::RoomAttention) -> impl IntoEleme
         .gap_0p5()
         .child(Label::new(attention.summary_line()).color(marker_color))
         .when_some(tick_note, |this, note| {
-            this.child(
-                Label::new(note)
-                    .color(Color::Muted)
-                    .size(LabelSize::Small),
-            )
+            this.child(Label::new(note).color(Color::Muted).size(LabelSize::Small))
         })
 }
 
 fn section_header(title: &'static str, meta: &ProjectionMeta) -> impl IntoElement {
-    v_flex()
-        .gap_0p5()
-        .child(Label::new(title))
-        .child(Label::new(meta.summary_line()).color(Color::Muted).size(LabelSize::Small))
+    v_flex().gap_0p5().child(Label::new(title)).child(
+        Label::new(meta.summary_line())
+            .color(Color::Muted)
+            .size(LabelSize::Small),
+    )
 }
 
 fn room_body(room: &RoomProjection) -> impl IntoElement {
@@ -1502,9 +1612,7 @@ fn room_body(room: &RoomProjection) -> impl IntoElement {
             )
         })
         .when(
-            room.display_name.is_none()
-                && room.principal_ref.is_none()
-                && room.detail.is_none(),
+            room.display_name.is_none() && room.principal_ref.is_none() && room.detail.is_none(),
             |this| this.child(Label::new("No room fields.").color(Color::Muted)),
         )
 }
@@ -1651,13 +1759,13 @@ fn run_state_body(run: &RunStateProjection, terminal: &TerminalOutcome) -> impl 
                 .map(|r| r.to_string())
                 .or_else(|| run.reason.clone()),
             |this, reason| {
-                this.child(
-                    Label::new(format!("reason={reason}")).color(if terminal.is_terminal() {
+                this.child(Label::new(format!("reason={reason}")).color(
+                    if terminal.is_terminal() {
                         Color::Warning
                     } else {
                         Color::Muted
-                    }),
-                )
+                    },
+                ))
             },
         )
 }
@@ -1727,9 +1835,11 @@ mod panel_logic_tests {
         assert!(COMMUNITY_ROOM_SUBTITLE.contains("separate"));
         assert!(V1_NO_PAY_ROOM_DESCRIPTION.contains("experience"));
         assert!(V1_NO_PAY_ROOM_DESCRIPTION.contains("not money"));
-        assert!(!V1_NO_PAY_ROOM_DESCRIPTION
-            .to_ascii_lowercase()
-            .contains("earnings"));
+        assert!(
+            !V1_NO_PAY_ROOM_DESCRIPTION
+                .to_ascii_lowercase()
+                .contains("earnings")
+        );
         assert!(V1_NO_PAY_FIRST_RUN_COPY.contains("does not pay"));
         assert_eq!(EXPERIENCE_LABEL, "experience");
         let community = CommunityRoomProjection::honest_unsubscribed();
@@ -1752,11 +1862,7 @@ mod panel_logic_tests {
             ack: MessageAck::Confirmed,
         });
         community.room.group_ref = Some("group.community.1".into());
-        community.push_untrusted_message(
-            "community.1".into(),
-            "member".into(),
-            "hello".into(),
-        );
+        community.push_untrusted_message("community.1".into(), "member".into(), "hello".into());
         let owner_refs: std::collections::BTreeSet<&str> = projection
             .transcript
             .rows
@@ -1884,10 +1990,7 @@ mod panel_logic_tests {
         assert_eq!(projection.transcript.rows[1].ack, MessageAck::Confirmed);
         // Proactive update raises the same attention path as a Q&A answer.
         assert_eq!(projection.attention.unread_count, 1);
-        assert_eq!(
-            projection.attention.marker,
-            AttentionMarker::NeedsAttention
-        );
+        assert_eq!(projection.attention.marker, AttentionMarker::NeedsAttention);
         assert!(empty_room_is_honest(
             &projection.transcript,
             OMEGA_AUTONOMOUS_TICK_ENABLED
