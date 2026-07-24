@@ -15,6 +15,10 @@ path = "src/omega_identity.rs"
 name = "omega-identity"
 path = "src/bin/omega_identity.rs"
 
+[[bin]]
+name = "omega-identity-proof"
+path = "src/bin/omega_identity_proof.rs"
+
 [dependencies]
 anyhow.workspace = true
 app_identity.workspace = true

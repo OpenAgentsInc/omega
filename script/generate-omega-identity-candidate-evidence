@@ -328,6 +328,21 @@ def inspect_packaged_app(
     expected_cli_digest = require_sha256(
         digests.get("cli_binary_sha256"), "digests.cli_binary_sha256"
     )
+    identity_proof_component = release_record.get("components", {}).get(
+        "identity_proof_driver", {}
+    )
+    if identity_proof_component.get("path") != "Contents/MacOS/omega-identity-proof":
+        raise EvidenceError("identity proof driver path is invalid")
+    if identity_proof_component.get("protocol") != "openagents.omega.identity-proof.v1":
+        raise EvidenceError("identity proof driver protocol is invalid")
+    if identity_proof_component.get("keyring_service") != "com.openagents.omega.identity-proof.v1":
+        raise EvidenceError("identity proof driver Keychain service is invalid")
+    if identity_proof_component.get("keyring_account") != "disposable-proof-only":
+        raise EvidenceError("identity proof driver Keychain account is invalid")
+    expected_identity_proof_digest = require_sha256(
+        identity_proof_component.get("binary_sha256"),
+        "components.identity_proof_driver.binary_sha256",
+    )
     expected_product = release_record.get("product")
     expected_bundle_identifier = release_record.get("bundle_identifier")
     expected_bundle_version = release_record.get(
@@ -379,7 +394,8 @@ def inspect_packaged_app(
         info_path = application / "Contents/Info.plist"
         omega_path = application / "Contents/MacOS/omega"
         cli_path = application / "Contents/MacOS/cli"
-        for required_path in (info_path, omega_path, cli_path):
+        identity_proof_path = application / "Contents/MacOS/omega-identity-proof"
+        for required_path in (info_path, omega_path, cli_path, identity_proof_path):
             if not required_path.is_file() or required_path.is_symlink():
                 raise EvidenceError(
                     f"packaged app is missing a regular {required_path.relative_to(application)}"
@@ -411,10 +427,23 @@ def inspect_packaged_app(
 
         omega_digest = sha256_file(omega_path)
         cli_digest = sha256_file(cli_path)
+        identity_proof_digest = sha256_file(identity_proof_path)
         if omega_digest != expected_omega_digest:
             raise EvidenceError("embedded omega binary digest differs from release record")
         if cli_digest != expected_cli_digest:
             raise EvidenceError("embedded cli binary digest differs from release record")
+        if identity_proof_digest != expected_identity_proof_digest:
+            raise EvidenceError("embedded identity proof driver digest differs from release record")
+        identity_proof_signing = (
+            verify_codesign(identity_proof_path, release_record, "omega-identity-proof")
+            if verify_signatures
+            else {
+                "verified": False,
+                "authority": None,
+                "team_id": None,
+                "internal_self_test_bypass": True,
+            }
+        )
         source_commit = release_record.get("source", {}).get("commit")
         if not isinstance(source_commit, str) or len(source_commit) != 40:
             raise EvidenceError("release record source commit is invalid")
@@ -430,10 +459,12 @@ def inspect_packaged_app(
             "bundle_build_version": bundle_build_version,
             "omega_binary_sha256": omega_digest,
             "cli_binary_sha256": cli_digest,
+            "identity_proof_binary_sha256": identity_proof_digest,
             "source_commit_marker": source_commit,
             "signing": {
                 "dmg": dmg_signing,
                 "application": application_signing,
+                "identity_proof_driver": identity_proof_signing,
             },
             "fresh_boundary_scan": observed_scan,
         }

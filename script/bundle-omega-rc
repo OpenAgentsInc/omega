@@ -44,6 +44,7 @@ BUILD_LOCK_SNAPSHOT_NAME=""
 BUILD_LOCK_SNAPSHOT_DIGEST=""
 OMEGA_BINARY_DIGEST=""
 CLI_BINARY_DIGEST=""
+IDENTITY_PROOF_BINARY_DIGEST=""
 SOURCE_VERIFIER_DIGEST=""
 SOURCE_VERIFIER_PASSED=false
 PACKAGED_BOUNDARY_SCAN_PASSED=false
@@ -435,6 +436,19 @@ for key in ("wrapper_sha256", "bundle_sha256", "source_node_sha256"):
 if effectd.get("packaged_node_sha256") is not None and not valid_sha256(effectd["packaged_node_sha256"]):
     raise SystemExit("components.omega_effectd.packaged_node_sha256 must be null or a SHA-256 digest")
 
+identity_proof = record["components"].get("identity_proof_driver", {})
+expected_identity_proof = {
+    "path": "Contents/MacOS/omega-identity-proof",
+    "protocol": "openagents.omega.identity-proof.v1",
+    "keyring_service": "com.openagents.omega.identity-proof.v1",
+    "keyring_account": "disposable-proof-only",
+}
+for key, expected in expected_identity_proof.items():
+    if identity_proof.get(key) != expected:
+        raise SystemExit(f"components.identity_proof_driver.{key} is invalid")
+if identity_proof.get("binary_sha256") is not None and not valid_sha256(identity_proof["binary_sha256"]):
+    raise SystemExit("components.identity_proof_driver.binary_sha256 must be null or a SHA-256 digest")
+
 boundaries = record["identity_boundaries"]
 source_verifier = boundaries.get("source_verifier", {})
 if source_verifier.get("path") != "script/verify-omega-identity":
@@ -463,6 +477,8 @@ if execution["dry_run"]:
         raise SystemExit("dry-run packaged boundary scan must be false")
     if effectd.get("packaged_node_sha256") is not None:
         raise SystemExit("dry-run must not claim a signed packaged omega-effectd Node digest")
+    if identity_proof.get("binary_sha256") is not None:
+        raise SystemExit("dry-run must not claim an identity proof driver digest")
 else:
     for key in ("name", "sha256"):
         if not isinstance(build_lock.get(key), str) or not build_lock[key]:
@@ -480,6 +496,8 @@ else:
         raise SystemExit("built package boundary scan must pass")
     if not valid_sha256(effectd.get("packaged_node_sha256")):
         raise SystemExit("built package must bind the signed omega-effectd Node digest")
+    if not valid_sha256(identity_proof.get("binary_sha256")):
+        raise SystemExit("built package must bind the signed identity proof driver digest")
 print(f"release-record schema ok: {path}")
 PY
 }
@@ -563,6 +581,7 @@ write_release_record() {
   OMEGA_RC_PACKAGE_DIGEST="${package_digest}" \
   OMEGA_RC_OMEGA_BINARY_DIGEST="${OMEGA_BINARY_DIGEST}" \
   OMEGA_RC_CLI_BINARY_DIGEST="${CLI_BINARY_DIGEST}" \
+  OMEGA_RC_IDENTITY_PROOF_BINARY_DIGEST="${IDENTITY_PROOF_BINARY_DIGEST}" \
   OMEGA_RC_EFFECTD_RELEASE_TAG="${OMEGA_EFFECTD_RELEASE_TAG}" \
   OMEGA_RC_EFFECTD_ASSET_NAME="${OMEGA_EFFECTD_ASSET_NAME}" \
   OMEGA_RC_EFFECTD_ARCHIVE_DIGEST="${OMEGA_EFFECTD_ASSET_SHA256}" \
@@ -598,6 +617,7 @@ build_lock_name = os.environ.get("OMEGA_RC_BUILD_LOCK_SNAPSHOT_NAME") or None
 build_lock_digest = os.environ.get("OMEGA_RC_BUILD_LOCK_SNAPSHOT_DIGEST") or None
 omega_binary_digest = os.environ.get("OMEGA_RC_OMEGA_BINARY_DIGEST") or None
 cli_binary_digest = os.environ.get("OMEGA_RC_CLI_BINARY_DIGEST") or None
+identity_proof_binary_digest = os.environ.get("OMEGA_RC_IDENTITY_PROOF_BINARY_DIGEST") or None
 dry_run = os.environ["OMEGA_RC_DRY_RUN"] == "true"
 notarization_attempted = os.environ["OMEGA_RC_NOTARIZATION_ATTEMPTED"] == "true"
 notarization_stapled = os.environ["OMEGA_RC_NOTARIZATION_STAPLED"] == "true"
@@ -672,7 +692,14 @@ record = {
             "packaged_node_sha256": (
                 os.environ.get("OMEGA_RC_EFFECTD_PACKAGED_NODE_DIGEST") or None
             ),
-        }
+        },
+        "identity_proof_driver": {
+            "path": "Contents/MacOS/omega-identity-proof",
+            "binary_sha256": identity_proof_binary_digest,
+            "protocol": "openagents.omega.identity-proof.v1",
+            "keyring_service": "com.openagents.omega.identity-proof.v1",
+            "keyring_account": "disposable-proof-only",
+        },
     },
     "identity_boundaries": {
         "source_verifier": {
@@ -903,7 +930,7 @@ export ZED_BUNDLE=true
 export ZED_COMMIT_SHA="$(git rev-parse HEAD)"
 
 echo "Compiling omega binaries for ${TARGET_TRIPLE}"
-cargo build --locked --release --package zed --package cli --target "${TARGET_TRIPLE}"
+cargo build --locked --release --package zed --package cli --package omega_identity --target "${TARGET_TRIPLE}"
 cargo build --locked --release --package remote_server --target "${TARGET_TRIPLE}"
 
 echo "Creating application bundle"
@@ -934,6 +961,7 @@ rm -f "${app_path}/Contents/embedded.provisionprofile"
 
 cp "target/${TARGET_TRIPLE}/release/omega" "${app_path}/Contents/MacOS/omega"
 cp "target/${TARGET_TRIPLE}/release/cli" "${app_path}/Contents/MacOS/cli"
+cp "target/${TARGET_TRIPLE}/release/omega-identity-proof" "${app_path}/Contents/MacOS/omega-identity-proof"
 stage_omega_effectd_component "${app_path}"
 verify_packaged_identity_boundaries "${app_path}"
 
@@ -957,6 +985,8 @@ OMEGA_EFFECTD_PACKAGED_NODE_SHA256="$(sha256_file "${app_path}/Contents/Resource
 /usr/bin/codesign --deep --force --timestamp --options runtime \
   --sign "${OMEGA_SIGNING_IDENTITY}" "${app_path}/Contents/MacOS/cli" -v
 /usr/bin/codesign --deep --force --timestamp --options runtime \
+  --sign "${OMEGA_SIGNING_IDENTITY}" "${app_path}/Contents/MacOS/omega-identity-proof" -v
+/usr/bin/codesign --deep --force --timestamp --options runtime \
   --entitlements "${entitlements_path}" \
   --sign "${OMEGA_SIGNING_IDENTITY}" "${app_path}/Contents/MacOS/omega" -v
 /usr/bin/codesign --force --timestamp --options runtime \
@@ -964,7 +994,8 @@ OMEGA_EFFECTD_PACKAGED_NODE_SHA256="$(sha256_file "${app_path}/Contents/Resource
   --sign "${OMEGA_SIGNING_IDENTITY}" "${app_path}" -v
 OMEGA_BINARY_DIGEST="$(sha256_file "${app_path}/Contents/MacOS/omega")"
 CLI_BINARY_DIGEST="$(sha256_file "${app_path}/Contents/MacOS/cli")"
-if [[ -z "${OMEGA_BINARY_DIGEST}" || -z "${CLI_BINARY_DIGEST}" ]]; then
+IDENTITY_PROOF_BINARY_DIGEST="$(sha256_file "${app_path}/Contents/MacOS/omega-identity-proof")"
+if [[ -z "${OMEGA_BINARY_DIGEST}" || -z "${CLI_BINARY_DIGEST}" || -z "${IDENTITY_PROOF_BINARY_DIGEST}" ]]; then
   echo "error: signed Omega binary digests are unavailable." >&2
   exit 1
 fi

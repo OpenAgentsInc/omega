@@ -9,7 +9,7 @@ use atomic_write_file::AtomicWriteFile;
 use serde::de::DeserializeOwned;
 use thiserror::Error;
 
-use crate::{CompletionRecord, ContractError, IdentityManifest};
+use crate::{CompletionRecord, ContractError, IdentityManifest, KeyringLocator};
 
 #[derive(Debug, Error)]
 pub enum PublicStoreError {
@@ -30,6 +30,15 @@ pub fn write_identity_manifest(
     write_public_document(path.as_ref(), manifest)
 }
 
+pub(crate) fn write_identity_manifest_for_locator(
+    path: impl AsRef<Path>,
+    manifest: &IdentityManifest,
+    locator: &KeyringLocator,
+) -> Result<(), PublicStoreError> {
+    manifest.validate_for_locator(locator)?;
+    write_public_document(path.as_ref(), manifest)
+}
+
 pub fn write_completion_record(
     path: impl AsRef<Path>,
     record: &CompletionRecord,
@@ -37,6 +46,16 @@ pub fn write_completion_record(
     channel: AppChannel,
 ) -> Result<(), PublicStoreError> {
     record.validate_against(manifest, channel)?;
+    write_public_document(path.as_ref(), record)
+}
+
+pub(crate) fn write_completion_record_for_locator(
+    path: impl AsRef<Path>,
+    record: &CompletionRecord,
+    manifest: &IdentityManifest,
+    locator: &KeyringLocator,
+) -> Result<(), PublicStoreError> {
+    record.validate_against_locator(manifest, locator)?;
     write_public_document(path.as_ref(), record)
 }
 
@@ -52,6 +71,18 @@ pub fn read_identity_manifest(
     Ok(Some(manifest))
 }
 
+pub(crate) fn read_identity_manifest_for_locator(
+    path: impl AsRef<Path>,
+    locator: &KeyringLocator,
+) -> Result<Option<IdentityManifest>, PublicStoreError> {
+    let Some(bytes) = read_public_document(path.as_ref())? else {
+        return Ok(None);
+    };
+    let manifest: IdentityManifest = serde_json::from_slice(&bytes)?;
+    manifest.validate_for_locator(locator)?;
+    Ok(Some(manifest))
+}
+
 pub fn read_completion_record(
     path: impl AsRef<Path>,
     manifest: &IdentityManifest,
@@ -62,6 +93,19 @@ pub fn read_completion_record(
     };
     let record: CompletionRecord = serde_json::from_slice(&bytes)?;
     record.validate_against(manifest, channel)?;
+    Ok(Some(record))
+}
+
+pub(crate) fn read_completion_record_for_locator(
+    path: impl AsRef<Path>,
+    manifest: &IdentityManifest,
+    locator: &KeyringLocator,
+) -> Result<Option<CompletionRecord>, PublicStoreError> {
+    let Some(bytes) = read_public_document(path.as_ref())? else {
+        return Ok(None);
+    };
+    let record: CompletionRecord = serde_json::from_slice(&bytes)?;
+    record.validate_against_locator(manifest, locator)?;
     Ok(Some(record))
 }
 

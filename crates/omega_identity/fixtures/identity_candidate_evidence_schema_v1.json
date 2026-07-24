@@ -120,6 +120,7 @@
                 "bundle_build_version",
                 "omega_binary_sha256",
                 "cli_binary_sha256",
+                "identity_proof_binary_sha256",
                 "source_commit_marker",
                 "signing",
                 "fresh_boundary_scan"
@@ -135,18 +136,25 @@
                 "cli_binary_sha256": {
                   "$ref": "#/$defs/sha256"
                 },
+                "identity_proof_binary_sha256": {
+                  "$ref": "#/$defs/sha256"
+                },
                 "signing": {
                   "type": "object",
                   "additionalProperties": false,
                   "required": [
                     "dmg",
-                    "application"
+                    "application",
+                    "identity_proof_driver"
                   ],
                   "properties": {
                     "dmg": {
                       "$ref": "#/$defs/codeSigning"
                     },
                     "application": {
+                      "$ref": "#/$defs/codeSigning"
+                    },
+                    "identity_proof_driver": {
                       "$ref": "#/$defs/codeSigning"
                     }
                   }

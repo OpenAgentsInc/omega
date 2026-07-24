@@ -286,6 +286,13 @@ impl KeyringLocator {
     pub fn account(&self) -> &str {
         &self.account
     }
+
+    pub(crate) fn proof(service: &'static str, account: &'static str) -> Self {
+        Self {
+            service: service.to_string(),
+            account: account.to_string(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -316,6 +323,13 @@ impl IdentityManifest {
     }
 
     pub fn validate(&self, channel: AppChannel) -> Result<(), ContractError> {
+        self.validate_for_locator(&KeyringLocator::for_channel(channel))
+    }
+
+    pub(crate) fn validate_for_locator(
+        &self,
+        expected_locator: &KeyringLocator,
+    ) -> Result<(), ContractError> {
         if self.schema != PUBLIC_MANIFEST_SCHEMA
             || self.contract_version != IDENTITY_CONTRACT_VERSION
             || self.profile != FRESH_PROFILE_ID
@@ -326,7 +340,7 @@ impl IdentityManifest {
         for receipt_ref in &self.receipt_refs {
             validate_reference("receipt_ref", receipt_ref.as_str())?;
         }
-        if self.keyring_locator != KeyringLocator::for_channel(channel) {
+        if &self.keyring_locator != expected_locator {
             return Err(ContractError::WrongKeyringLocator);
         }
         Ok(())
@@ -380,6 +394,23 @@ impl CompletionRecord {
         Ok(record)
     }
 
+    pub(crate) fn new_for_locator(
+        manifest: &IdentityManifest,
+        receipt_ref: ReceiptRef,
+        locator: &KeyringLocator,
+    ) -> Result<Self, ContractError> {
+        let record = Self {
+            schema: COMPLETION_RECORD_SCHEMA.to_string(),
+            contract_version: IDENTITY_CONTRACT_VERSION,
+            identity_ref: manifest.identity.identity_ref.clone(),
+            public_key_hex: manifest.identity.public_key_hex.clone(),
+            manifest_digest: manifest.digest()?,
+            receipt_ref,
+        };
+        record.validate_against_locator(manifest, locator)?;
+        Ok(record)
+    }
+
     pub fn validate(&self) -> Result<(), ContractError> {
         if self.schema != COMPLETION_RECORD_SCHEMA
             || self.contract_version != IDENTITY_CONTRACT_VERSION
@@ -410,6 +441,22 @@ impl CompletionRecord {
         channel: AppChannel,
     ) -> Result<(), ContractError> {
         manifest.validate(channel)?;
+        self.validate_against_valid_manifest(manifest)
+    }
+
+    pub(crate) fn validate_against_locator(
+        &self,
+        manifest: &IdentityManifest,
+        locator: &KeyringLocator,
+    ) -> Result<(), ContractError> {
+        manifest.validate_for_locator(locator)?;
+        self.validate_against_valid_manifest(manifest)
+    }
+
+    fn validate_against_valid_manifest(
+        &self,
+        manifest: &IdentityManifest,
+    ) -> Result<(), ContractError> {
         self.validate()?;
         if self.identity_ref != manifest.identity.identity_ref
             || self.public_key_hex != manifest.identity.public_key_hex

@@ -18,8 +18,13 @@ use crate::{
     PendingIdentityTransaction, PublicIdentity, PublicStoreError, ReceiptRef, SigningResult,
     mutation_lock::{IdentityMutationGuard, MutationLockError},
     public_store::{
-        read_completion_record, read_identity_manifest, read_json_document, remove_public_document,
-        write_completion_record, write_identity_manifest, write_json_document,
+        read_completion_record, read_completion_record_for_locator, read_identity_manifest,
+        read_identity_manifest_for_locator, read_json_document, remove_public_document,
+        write_completion_record, write_completion_record_for_locator, write_identity_manifest,
+        write_identity_manifest_for_locator, write_json_document,
+    },
+    proof::{
+        IDENTITY_PROOF_KEYRING_ACCOUNT, IDENTITY_PROOF_KEYRING_SERVICE, ProofCrashBoundary,
     },
     recovery::{
         CandidateKind, CandidateRef, PreparedRecovery, RecoveryArtifactReceipt, RecoveryCandidate,
@@ -41,6 +46,7 @@ pub struct IdentityService {
     paths: CustodyPaths,
     store: Arc<dyn SecretStore>,
     generator: Arc<dyn SecretGenerator>,
+    proof_crash_boundary: Option<ProofCrashBoundary>,
 }
 
 impl IdentityService {
@@ -70,6 +76,23 @@ impl IdentityService {
             Arc::new(SystemKeyringStore),
             Arc::new(SystemSecretGenerator),
         )
+    }
+
+    pub(crate) fn for_disposable_proof(
+        proof_root: PathBuf,
+        crash_boundary: Option<ProofCrashBoundary>,
+    ) -> Self {
+        Self {
+            channel: AppChannel::Rc,
+            locator: KeyringLocator::proof(
+                IDENTITY_PROOF_KEYRING_SERVICE,
+                IDENTITY_PROOF_KEYRING_ACCOUNT,
+            ),
+            paths: CustodyPaths::for_data_root(proof_root.join("identity")),
+            store: Arc::new(SystemKeyringStore),
+            generator: Arc::new(SystemSecretGenerator),
+            proof_crash_boundary: crash_boundary,
+        }
     }
 
     pub fn inspect(&self) -> Result<CustodyResult, CustodyError> {
@@ -477,6 +500,7 @@ impl IdentityService {
 
         let marker = ResetMarker::pending(expected_identity.clone(), authorization_ref);
         write_json_document(&self.paths.reset_path, &marker)?;
+        self.trigger_proof_crash(ProofCrashBoundary::AfterResetMarker);
         Ok(marker.result())
     }
 
@@ -504,7 +528,7 @@ impl IdentityService {
                 .read(&self.locator)
                 .map_err(custody_error_from_store)?
                 .is_some()
-            || read_identity_manifest(&self.paths.manifest_path, self.channel)?.is_some()
+            || self.read_manifest_locked()?.is_some()
             || self
                 .paths
                 .completion_path
@@ -524,6 +548,7 @@ impl IdentityService {
             return Err(CustodyError::ResetFailed);
         }
         remove_public_document(&self.paths.reset_path)?;
+        self.trigger_proof_crash(ProofCrashBoundary::AfterRelaunchAcknowledge);
         Ok(CustodyResult {
             state: CustodyState::Absent,
             identity: None,
@@ -543,6 +568,7 @@ impl IdentityService {
             paths,
             store,
             generator,
+            proof_crash_boundary: None,
         }
     }
 
@@ -661,6 +687,7 @@ impl IdentityService {
                     self.store
                         .write(&self.locator, &secret)
                         .map_err(custody_error_from_store)?;
+                    self.trigger_proof_crash(ProofCrashBoundary::AfterSecretWrite);
                 }
             }
 
@@ -675,6 +702,7 @@ impl IdentityService {
             if read_back_identity != expected_identity {
                 return Err(CustodyError::ReadBackMismatch);
             }
+            self.trigger_proof_crash(ProofCrashBoundary::AfterSecretReadBack);
 
             transaction.expected_identity = Some(expected_identity.clone());
             write_json_document(&self.paths.transaction_path, &transaction)?;
@@ -683,15 +711,18 @@ impl IdentityService {
                 self.locator.clone(),
                 vec![transaction.receipt_ref.clone()],
             );
-            write_identity_manifest(&self.paths.manifest_path, &manifest, self.channel)?;
-            let completion =
-                CompletionRecord::new(&manifest, transaction.receipt_ref.clone(), self.channel)?;
-            write_completion_record(
-                &self.paths.completion_path,
-                &completion,
-                &manifest,
-                self.channel,
-            )?;
+            self.write_manifest_locked(&manifest)?;
+            self.trigger_proof_crash(ProofCrashBoundary::AfterManifestCommit);
+            let completion = if self.is_disposable_proof() {
+                CompletionRecord::new_for_locator(
+                    &manifest,
+                    transaction.receipt_ref.clone(),
+                    &self.locator,
+                )?
+            } else {
+                CompletionRecord::new(&manifest, transaction.receipt_ref.clone(), self.channel)?
+            };
+            self.write_completion_locked(&completion, &manifest)?;
             self.remove_mismatched_recovery_protection_locked(&expected_identity)?;
 
             Ok(CustodyResult {
@@ -867,7 +898,78 @@ impl IdentityService {
         remove_public_document(&self.paths.recovery_protection_path)
             .map_err(|_| CustodyState::ResetFailed)?;
         marker.status = ResetStatus::Complete;
-        write_json_document(&self.paths.reset_path, &marker).map_err(|_| CustodyState::ResetFailed)
+        write_json_document(&self.paths.reset_path, &marker).map_err(|_| CustodyState::ResetFailed)?;
+        self.trigger_proof_crash(ProofCrashBoundary::AfterResetCommit);
+        Ok(())
+    }
+
+    fn is_disposable_proof(&self) -> bool {
+        self.locator.service() == IDENTITY_PROOF_KEYRING_SERVICE
+            && self.locator.account() == IDENTITY_PROOF_KEYRING_ACCOUNT
+    }
+
+    fn read_manifest_locked(&self) -> Result<Option<IdentityManifest>, PublicStoreError> {
+        if self.is_disposable_proof() {
+            read_identity_manifest_for_locator(&self.paths.manifest_path, &self.locator)
+        } else {
+            read_identity_manifest(&self.paths.manifest_path, self.channel)
+        }
+    }
+
+    fn read_completion_locked(
+        &self,
+        manifest: &IdentityManifest,
+    ) -> Result<Option<CompletionRecord>, PublicStoreError> {
+        if self.is_disposable_proof() {
+            read_completion_record_for_locator(
+                &self.paths.completion_path,
+                manifest,
+                &self.locator,
+            )
+        } else {
+            read_completion_record(&self.paths.completion_path, manifest, self.channel)
+        }
+    }
+
+    fn write_manifest_locked(&self, manifest: &IdentityManifest) -> Result<(), PublicStoreError> {
+        if self.is_disposable_proof() {
+            write_identity_manifest_for_locator(&self.paths.manifest_path, manifest, &self.locator)
+        } else {
+            write_identity_manifest(&self.paths.manifest_path, manifest, self.channel)
+        }
+    }
+
+    fn write_completion_locked(
+        &self,
+        completion: &CompletionRecord,
+        manifest: &IdentityManifest,
+    ) -> Result<(), PublicStoreError> {
+        if self.is_disposable_proof() {
+            write_completion_record_for_locator(
+                &self.paths.completion_path,
+                completion,
+                manifest,
+                &self.locator,
+            )
+        } else {
+            write_completion_record(
+                &self.paths.completion_path,
+                completion,
+                manifest,
+                self.channel,
+            )
+        }
+    }
+
+    fn trigger_proof_crash(&self, boundary: ProofCrashBoundary) {
+        if !self.is_disposable_proof() || self.proof_crash_boundary != Some(boundary) {
+            return;
+        }
+        #[cfg(unix)]
+        unsafe {
+            libc::kill(libc::getpid(), libc::SIGKILL);
+        }
+        std::process::abort();
     }
 
     fn resolve_locked(&self) -> ResolvedCustody {
@@ -899,7 +1001,7 @@ impl IdentityService {
                 return ResolvedCustody::without_secret(CustodyState::Incomplete, None);
             }
         };
-        let manifest = match read_identity_manifest(&self.paths.manifest_path, self.channel) {
+        let manifest = match self.read_manifest_locked() {
             Ok(manifest) => manifest,
             Err(_) => {
                 return ResolvedCustody::without_secret(CustodyState::Incomplete, None);
@@ -987,7 +1089,7 @@ impl IdentityService {
                     );
                 }
 
-                match read_completion_record(&self.paths.completion_path, &manifest, self.channel) {
+                match self.read_completion_locked(&manifest) {
                     Ok(Some(completion))
                         if transaction.as_ref().is_none_or(|transaction| {
                             completion.receipt_ref() == &transaction.receipt_ref
@@ -1018,7 +1120,7 @@ impl IdentityService {
     }
 
     fn best_effort_manifest_identity(&self) -> Option<PublicIdentity> {
-        read_identity_manifest(&self.paths.manifest_path, self.channel)
+        self.read_manifest_locked()
             .ok()
             .flatten()
             .map(|manifest| manifest.identity().clone())
