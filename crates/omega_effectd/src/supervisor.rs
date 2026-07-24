@@ -179,6 +179,27 @@ impl OmegaEffectdSupervisor {
         self.mutate_run("resume", run_ref).await
     }
 
+    pub async fn handoff_run(
+        &mut self,
+        run_ref: &str,
+        target_lane_ref: &str,
+    ) -> Result<Value, SupervisorError> {
+        let result = self
+            .request(
+                "handoff",
+                Some(json!({
+                    "runRef": run_ref,
+                    "targetLaneRef": target_lane_ref,
+                })),
+                self.generation(),
+            )
+            .await?;
+        Ok(result
+            .get("run")
+            .cloned()
+            .ok_or_else(|| anyhow!("handoff missing run"))?)
+    }
+
     pub async fn stop_run(&mut self, run_ref: &str) -> Result<Value, SupervisorError> {
         self.mutate_run("stop", run_ref).await
     }

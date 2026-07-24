@@ -402,6 +402,14 @@ mod tests {
 
             let paused = supervisor.pause_run(&run_ref).await.expect("pause");
             assert_eq!(paused.get("state").and_then(|v| v.as_str()), Some("paused"));
+            let handed_off = supervisor
+                .handoff_run(&run_ref, "claude-local")
+                .await
+                .expect("handoff");
+            assert_eq!(
+                handed_off.get("lane").and_then(|v| v.as_str()),
+                Some("claude-local")
+            );
             let resumed = supervisor.resume_run(&run_ref).await.expect("resume");
             assert_eq!(
                 resumed.get("state").and_then(|v| v.as_str()),

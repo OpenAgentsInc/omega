@@ -378,6 +378,8 @@ impl FullAutoPanel {
                 match method {
                     "pause" => guard.pause_run(&run_ref).await,
                     "resume" => guard.resume_run(&run_ref).await,
+                    "handoff-claude" => guard.handoff_run(&run_ref, "claude-local").await,
+                    "handoff-codex" => guard.handoff_run(&run_ref, "codex-local").await,
                     "stop" => guard.stop_run(&run_ref).await,
                     "retry" => guard.retry_run(&run_ref).await,
                     _ => Err(omega_effectd::SupervisorError::Anyhow(anyhow!(
@@ -386,9 +388,18 @@ impl FullAutoPanel {
                 }
             };
             this.update(cx, |this, cx| {
-                if let Ok(value) = result {
-                    if let Ok(detail) = parse_detail(value) {
-                        this.active_run = Some(detail);
+                match result {
+                    Ok(value) => match parse_detail(value) {
+                        Ok(detail) => {
+                            this.status = "Full Auto run updated.".into();
+                            this.active_run = Some(detail);
+                        }
+                        Err(error) => {
+                            this.status = format!("Full Auto response was invalid: {error}").into();
+                        }
+                    },
+                    Err(error) => {
+                        this.status = format!("Full Auto action failed: {error}").into();
                     }
                 }
                 this.refresh_runs(cx);
@@ -662,6 +673,16 @@ impl Render for FullAutoPanel {
                             };
                             let can_pause = run.state == "running";
                             let can_resume = run.state == "paused";
+                            let handoff_target = match run.lane.as_deref() {
+                                Some("codex-local") if can_resume => Some((
+                                    "Handoff to Claude",
+                                    "handoff-claude",
+                                )),
+                                Some("claude-local") if can_resume => {
+                                    Some(("Handoff to Codex", "handoff-codex"))
+                                }
+                                _ => None,
+                            };
                             let can_retry =
                                 run.state == "stalled" && run.recovery_action == "retry_now";
                             let terminal = ["completed", "failed", "stopped", "cap_reached"]
@@ -746,6 +767,14 @@ impl Render for FullAutoPanel {
                                                         this.mutate_active("resume", cx)
                                                     }),
                                                 ),
+                                            )
+                                        })
+                                        .when_some(handoff_target, |row, (label, method)| {
+                                            row.child(
+                                                Button::new("full-auto-handoff", label)
+                                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                                        this.mutate_active(method, cx)
+                                                    })),
                                             )
                                         })
                                         .when(can_retry, |row| {

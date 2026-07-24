@@ -239,6 +239,7 @@ for await (const line of rl) {
         "start",
         "pause",
         "resume",
+        "handoff",
         "stop",
         "retry",
         "get_capacity",
@@ -395,6 +396,47 @@ for await (const line of rl) {
     }
     saveRuns(runs)
     respond(request.id, generation, true, { run: detail(runs[index]) })
+    continue
+  }
+  if (request.method === "handoff") {
+    const runs = loadRuns()
+    const index = runs.findIndex((row) => row.runRef === request.params?.runRef)
+    if (index < 0) {
+      respond(request.id, generation, false, undefined, {
+        code: "run_not_found",
+        message: "No Full Auto run exists for that runRef.",
+      })
+      continue
+    }
+    if (runs[index].state !== "paused") {
+      respond(request.id, generation, false, undefined, {
+        code: "invalid_request",
+        message: "A provider handoff is legal only while paused.",
+      })
+      continue
+    }
+    const targetLaneRef = request.params?.targetLaneRef
+    if (!["codex-local", "claude-local"].includes(targetLaneRef)) {
+      respond(request.id, generation, false, undefined, {
+        code: "invalid_request",
+        message: "That provider lane is not registered.",
+      })
+      continue
+    }
+    runs[index] = {
+      ...runs[index],
+      lane: targetLaneRef,
+      updatedAt: new Date().toISOString(),
+    }
+    saveRuns(runs)
+    respond(request.id, generation, true, {
+      run: detail(runs[index]),
+      transition: {
+        from: targetLaneRef === "claude-local" ? "codex-local" : "claude-local",
+        to: targetLaneRef,
+        disposition: "complete_within_bounds",
+      },
+    })
     continue
   }
   if (request.method === "get_capacity") {
