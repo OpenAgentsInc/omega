@@ -547,7 +547,7 @@ fn render_import_settings_section(tab_index: &mut isize, cx: &mut App) -> impl I
 pub(crate) const FEATURED_AGENT_IDS: &[&str] =
     &["claude-acp", "codex-acp", "github-copilot-cli", "cursor"];
 const AGENT_SETUP_DESCRIPTION: &str =
-    "Install external agents to start a thread. Codex uses your existing Codex login; Omega never copies it.";
+    "Install external agents to start a thread. Codex uses its own login and configuration; Omega never copies its credentials.";
 
 fn render_registry_agent_button(
     agent: &RegistryAgent,
@@ -713,7 +713,7 @@ mod tests {
             FEATURED_AGENT_IDS,
             ["claude-acp", "codex-acp", "github-copilot-cli", "cursor"]
         );
-        assert!(AGENT_SETUP_DESCRIPTION.contains("existing Codex login"));
-        assert!(AGENT_SETUP_DESCRIPTION.contains("never copies"));
+        assert!(AGENT_SETUP_DESCRIPTION.contains("Codex uses its own login and configuration"));
+        assert!(AGENT_SETUP_DESCRIPTION.contains("Omega never copies its credentials"));
     }
 }
