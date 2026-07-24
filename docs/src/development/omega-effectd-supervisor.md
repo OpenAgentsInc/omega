@@ -21,6 +21,9 @@ GPUI is not run authority.
 | Pack SHA-256 | `4cc1cb2e5d71ff8af6f730248871ee779488a991f21a848880e885331ef31831` |
 | Protocol | `openagents.omega.effectd.v1` |
 | Omega crate | `crates/omega_effectd` |
+| Runtime release | `omega-effectd-v0.1.0-rc.1` |
+| macOS arm64 archive SHA-256 | `52fb8333ee65b944ba47b2ec00abc77b3826aa7f9a4cacc3ca6f7d37e139ffa5` |
+| Runtime source commit | `be342ea7525ac50fbf836978dcd1ba6714345f42` |
 
 ## Supervisor laws
 
@@ -52,9 +55,12 @@ GPUI is not run authority.
 - `cargo test -p omega_effectd`
 - `./script/check-licenses`
 
-The Omega RC packager still needs to install the pinned service and fixed
-Node runtime at the component path above. Until then the panels report the
-component as unavailable rather than presenting fixture behavior.
+The Omega RC packager downloads the immutable runtime release, verifies its
+archive and component manifest, installs the fixed Node runtime at the
+component path above, signs the nested Node executable before the application,
+and records the source and packaged component digests in the release record.
+Installed proof launches both the mounted and installed copies through framed
+`initialize` and `health` requests.
 
 Omega registers the reverse-host handler when it creates the shared supervisor.
 The handler stays on GPUI's foreground executor and delegates to the active

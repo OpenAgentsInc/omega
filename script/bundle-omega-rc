@@ -26,6 +26,11 @@ readonly OMEGA_RELEASE_RECORD_SCHEMA_VERSION=1
 readonly OMEGA_BUILD_LOCK_SNAPSHOT_NAME="Cargo.lock.omega-v${OMEGA_RC_VERSION}"
 readonly OMEGA_SOURCE_VERIFIER_PATH="script/verify-omega-identity"
 readonly OMEGA_IDENTITY_BOUNDARY_LIST="BUZZ_PRIVATE_KEY,identity.key,get_nsec"
+readonly OMEGA_EFFECTD_RELEASE_TAG="omega-effectd-v0.1.0-rc.1"
+readonly OMEGA_EFFECTD_ASSET_NAME="omega-effectd-v0.1.0-macos-arm64.tar.gz"
+readonly OMEGA_EFFECTD_ASSET_SHA256="52fb8333ee65b944ba47b2ec00abc77b3826aa7f9a4cacc3ca6f7d37e139ffa5"
+readonly OMEGA_EFFECTD_SOURCE_COMMIT="be342ea7525ac50fbf836978dcd1ba6714345f42"
+readonly OMEGA_EFFECTD_DOWNLOAD_URL="https://github.com/OpenAgentsInc/openagents/releases/download/${OMEGA_EFFECTD_RELEASE_TAG}/${OMEGA_EFFECTD_ASSET_NAME}"
 
 DRY_RUN=false
 SKIP_BUILD=false
@@ -40,6 +45,12 @@ CLI_BINARY_DIGEST=""
 SOURCE_VERIFIER_DIGEST=""
 SOURCE_VERIFIER_PASSED=false
 PACKAGED_BOUNDARY_SCAN_PASSED=false
+OMEGA_EFFECTD_ARCHIVE_PATH="${ROOT}/target/omega-effectd-cache/${OMEGA_EFFECTD_ASSET_NAME}"
+OMEGA_EFFECTD_MANIFEST_SHA256=""
+OMEGA_EFFECTD_WRAPPER_SHA256=""
+OMEGA_EFFECTD_BUNDLE_SHA256=""
+OMEGA_EFFECTD_SOURCE_NODE_SHA256=""
+OMEGA_EFFECTD_PACKAGED_NODE_SHA256=""
 
 usage() {
   cat <<EOF
@@ -109,6 +120,140 @@ sha256_file() {
     return 0
   fi
   shasum -a 256 "${path}" | awk '{print $1}'
+}
+
+prepare_omega_effectd_archive() {
+  mkdir -p "$(dirname "${OMEGA_EFFECTD_ARCHIVE_PATH}")"
+  if [[ ! -f "${OMEGA_EFFECTD_ARCHIVE_PATH}" ]]; then
+    local download_path="${OMEGA_EFFECTD_ARCHIVE_PATH}.download"
+    curl --fail --location --silent --show-error \
+      "${OMEGA_EFFECTD_DOWNLOAD_URL}" --output "${download_path}"
+    mv "${download_path}" "${OMEGA_EFFECTD_ARCHIVE_PATH}"
+  fi
+
+  local archive_digest
+  archive_digest="$(sha256_file "${OMEGA_EFFECTD_ARCHIVE_PATH}")"
+  if [[ "${archive_digest}" != "${OMEGA_EFFECTD_ASSET_SHA256}" ]]; then
+    echo "error: cached omega-effectd archive digest does not match the pinned release asset." >&2
+    echo "  expected: ${OMEGA_EFFECTD_ASSET_SHA256}" >&2
+    echo "  observed: ${archive_digest}" >&2
+    exit 1
+  fi
+
+  local component_json
+  component_json="$(python3 - "${OMEGA_EFFECTD_ARCHIVE_PATH}" "${OMEGA_EFFECTD_SOURCE_COMMIT}" <<'PY'
+import hashlib
+import json
+import pathlib
+import sys
+import tarfile
+
+archive_path = pathlib.Path(sys.argv[1])
+expected_source_commit = sys.argv[2]
+expected_files = {
+    "omega-effectd/bin/omega-effectd",
+    "omega-effectd/component-manifest.json",
+    "omega-effectd/dist/omega-effectd.mjs",
+    "omega-effectd/licenses/Node-LICENSE.txt",
+    "omega-effectd/licenses/OpenAgents-Apache-2.0.txt",
+    "omega-effectd/licenses/THIRD_PARTY_LICENSES.txt",
+    "omega-effectd/licenses/THIRD_PARTY_NOTICES.json",
+    "omega-effectd/runtime/bin/node",
+}
+
+with tarfile.open(archive_path, "r:gz") as archive:
+    members = archive.getmembers()
+    names = [member.name for member in members]
+    if len(names) != len(set(names)):
+        raise SystemExit("omega-effectd archive contains duplicate paths")
+    for member in members:
+        path = pathlib.PurePosixPath(member.name)
+        if path.is_absolute() or ".." in path.parts:
+            raise SystemExit(f"omega-effectd archive contains unsafe path: {member.name}")
+        if not (member.isdir() or member.isfile()):
+            raise SystemExit(f"omega-effectd archive contains unsupported entry: {member.name}")
+    regular_files = {member.name for member in members if member.isfile()}
+    if regular_files != expected_files:
+        missing = sorted(expected_files - regular_files)
+        unexpected = sorted(regular_files - expected_files)
+        raise SystemExit(
+            f"omega-effectd archive inventory mismatch; missing={missing}, unexpected={unexpected}"
+        )
+
+    def bytes_for(name: str) -> bytes:
+        extracted = archive.extractfile(name)
+        if extracted is None:
+            raise SystemExit(f"omega-effectd archive entry is unreadable: {name}")
+        return extracted.read()
+
+    manifest_bytes = bytes_for("omega-effectd/component-manifest.json")
+    manifest = json.loads(manifest_bytes)
+    expected_manifest = {
+        "schema": "openagents.omega.effectd.component.v1",
+        "package": "@openagentsinc/omega-effectd",
+        "serviceVersion": "0.1.0",
+        "protocol": "openagents.omega.effectd.v1",
+        "platform": "darwin-arm64",
+    }
+    for key, expected in expected_manifest.items():
+        if manifest.get(key) != expected:
+            raise SystemExit(f"omega-effectd manifest {key} does not match the pin")
+    if manifest.get("source", {}).get("commit") != expected_source_commit:
+        raise SystemExit("omega-effectd manifest source commit does not match the pin")
+
+    for relative, expected_digest in manifest.get("files", {}).items():
+        name = f"omega-effectd/{relative}"
+        if name not in regular_files:
+            raise SystemExit(f"omega-effectd manifest names missing file: {relative}")
+        observed = hashlib.sha256(bytes_for(name)).hexdigest()
+        if observed != expected_digest:
+            raise SystemExit(f"omega-effectd manifest digest mismatch: {relative}")
+
+    node_bytes = bytes_for("omega-effectd/runtime/bin/node")
+    source_node_digest = hashlib.sha256(node_bytes).hexdigest()
+    if source_node_digest != manifest.get("node", {}).get("binarySha256"):
+        raise SystemExit("omega-effectd Node binary digest does not match the manifest")
+    if manifest.get("node", {}).get("version") != "24.13.1":
+        raise SystemExit("omega-effectd Node version does not match the pin")
+
+    print(json.dumps({
+        "manifest_sha256": hashlib.sha256(manifest_bytes).hexdigest(),
+        "wrapper_sha256": hashlib.sha256(bytes_for("omega-effectd/bin/omega-effectd")).hexdigest(),
+        "bundle_sha256": hashlib.sha256(bytes_for("omega-effectd/dist/omega-effectd.mjs")).hexdigest(),
+        "source_node_sha256": source_node_digest,
+    }))
+PY
+)"
+
+  OMEGA_EFFECTD_MANIFEST_SHA256="$(jq -r '.manifest_sha256' <<<"${component_json}")"
+  OMEGA_EFFECTD_WRAPPER_SHA256="$(jq -r '.wrapper_sha256' <<<"${component_json}")"
+  OMEGA_EFFECTD_BUNDLE_SHA256="$(jq -r '.bundle_sha256' <<<"${component_json}")"
+  OMEGA_EFFECTD_SOURCE_NODE_SHA256="$(jq -r '.source_node_sha256' <<<"${component_json}")"
+}
+
+stage_omega_effectd_component() {
+  local app_path="$1"
+  local staging_directory
+  staging_directory="$(mktemp -d)"
+  tar -xzf "${OMEGA_EFFECTD_ARCHIVE_PATH}" -C "${staging_directory}"
+  local component_source="${staging_directory}/omega-effectd"
+  local component_target="${app_path}/Contents/Resources/omega-effectd"
+  if [[ ! -x "${component_source}/bin/omega-effectd" || ! -x "${component_source}/runtime/bin/node" ]]; then
+    echo "error: omega-effectd archive executables are not executable." >&2
+    rm -rf "${staging_directory}"
+    exit 1
+  fi
+  rm -rf "${component_target}"
+  ditto "${component_source}" "${component_target}"
+  rm -rf "${staging_directory}"
+
+  if [[ "$(sha256_file "${component_target}/component-manifest.json")" != "${OMEGA_EFFECTD_MANIFEST_SHA256}" || \
+        "$(sha256_file "${component_target}/bin/omega-effectd")" != "${OMEGA_EFFECTD_WRAPPER_SHA256}" || \
+        "$(sha256_file "${component_target}/dist/omega-effectd.mjs")" != "${OMEGA_EFFECTD_BUNDLE_SHA256}" || \
+        "$(sha256_file "${component_target}/runtime/bin/node")" != "${OMEGA_EFFECTD_SOURCE_NODE_SHA256}" ]]; then
+    echo "error: staged omega-effectd component differs from the verified release archive." >&2
+    exit 1
+  fi
 }
 
 require_clean_checkout() {
@@ -194,6 +339,7 @@ required = [
     "toolchains",
     "execution",
     "build_inputs",
+    "components",
     "digests",
     "identity_boundaries",
     "notarization",
@@ -241,6 +387,26 @@ for key in ("name", "sha256"):
     if key not in build_lock:
         raise SystemExit(f"build_inputs.cargo_lock_snapshot.{key} is required")
 
+effectd = record["components"].get("omega_effectd", {})
+expected_effectd = {
+    "package": "@openagentsinc/omega-effectd",
+    "service_version": "0.1.0",
+    "protocol": "openagents.omega.effectd.v1",
+    "platform": "darwin-arm64",
+    "release_tag": "omega-effectd-v0.1.0-rc.1",
+    "asset_name": "omega-effectd-v0.1.0-macos-arm64.tar.gz",
+    "archive_sha256": "52fb8333ee65b944ba47b2ec00abc77b3826aa7f9a4cacc3ca6f7d37e139ffa5",
+    "source_commit": "be342ea7525ac50fbf836978dcd1ba6714345f42",
+}
+for key, expected in expected_effectd.items():
+    if effectd.get(key) != expected:
+        raise SystemExit(f"components.omega_effectd.{key} does not match the pin")
+for key in ("manifest_sha256", "wrapper_sha256", "bundle_sha256", "source_node_sha256"):
+    if not valid_sha256(effectd.get(key)):
+        raise SystemExit(f"components.omega_effectd.{key} must be a SHA-256 digest")
+if effectd.get("packaged_node_sha256") is not None and not valid_sha256(effectd["packaged_node_sha256"]):
+    raise SystemExit("components.omega_effectd.packaged_node_sha256 must be null or a SHA-256 digest")
+
 boundaries = record["identity_boundaries"]
 source_verifier = boundaries.get("source_verifier", {})
 if source_verifier.get("path") != "script/verify-omega-identity":
@@ -267,6 +433,8 @@ if execution["dry_run"]:
         raise SystemExit("dry-run must not claim package or binary digests")
     if packaged_scan.get("passed") is not False:
         raise SystemExit("dry-run packaged boundary scan must be false")
+    if effectd.get("packaged_node_sha256") is not None:
+        raise SystemExit("dry-run must not claim a signed packaged omega-effectd Node digest")
 else:
     for key in ("name", "sha256"):
         if not isinstance(build_lock.get(key), str) or not build_lock[key]:
@@ -282,6 +450,8 @@ else:
             raise SystemExit(f"digests.{key} must be a SHA-256 digest")
     if packaged_scan.get("passed") is not True:
         raise SystemExit("built package boundary scan must pass")
+    if not valid_sha256(effectd.get("packaged_node_sha256")):
+        raise SystemExit("built package must bind the signed omega-effectd Node digest")
 print(f"release-record schema ok: {path}")
 PY
 }
@@ -352,6 +522,15 @@ write_release_record() {
   OMEGA_RC_PACKAGE_DIGEST="${package_digest}" \
   OMEGA_RC_OMEGA_BINARY_DIGEST="${OMEGA_BINARY_DIGEST}" \
   OMEGA_RC_CLI_BINARY_DIGEST="${CLI_BINARY_DIGEST}" \
+  OMEGA_RC_EFFECTD_RELEASE_TAG="${OMEGA_EFFECTD_RELEASE_TAG}" \
+  OMEGA_RC_EFFECTD_ASSET_NAME="${OMEGA_EFFECTD_ASSET_NAME}" \
+  OMEGA_RC_EFFECTD_ARCHIVE_DIGEST="${OMEGA_EFFECTD_ASSET_SHA256}" \
+  OMEGA_RC_EFFECTD_SOURCE_COMMIT="${OMEGA_EFFECTD_SOURCE_COMMIT}" \
+  OMEGA_RC_EFFECTD_MANIFEST_DIGEST="${OMEGA_EFFECTD_MANIFEST_SHA256}" \
+  OMEGA_RC_EFFECTD_WRAPPER_DIGEST="${OMEGA_EFFECTD_WRAPPER_SHA256}" \
+  OMEGA_RC_EFFECTD_BUNDLE_DIGEST="${OMEGA_EFFECTD_BUNDLE_SHA256}" \
+  OMEGA_RC_EFFECTD_SOURCE_NODE_DIGEST="${OMEGA_EFFECTD_SOURCE_NODE_SHA256}" \
+  OMEGA_RC_EFFECTD_PACKAGED_NODE_DIGEST="${OMEGA_EFFECTD_PACKAGED_NODE_SHA256}" \
   OMEGA_RC_SOURCE_VERIFIER_PATH="${OMEGA_SOURCE_VERIFIER_PATH}" \
   OMEGA_RC_SOURCE_VERIFIER_DIGEST="${SOURCE_VERIFIER_DIGEST}" \
   OMEGA_RC_SOURCE_VERIFIER_PASSED="${SOURCE_VERIFIER_PASSED}" \
@@ -419,6 +598,25 @@ record = {
         "package_sha256": package_sha256,
         "omega_binary_sha256": omega_binary_digest,
         "cli_binary_sha256": cli_binary_digest,
+    },
+    "components": {
+        "omega_effectd": {
+            "package": "@openagentsinc/omega-effectd",
+            "service_version": "0.1.0",
+            "protocol": "openagents.omega.effectd.v1",
+            "platform": "darwin-arm64",
+            "release_tag": os.environ["OMEGA_RC_EFFECTD_RELEASE_TAG"],
+            "asset_name": os.environ["OMEGA_RC_EFFECTD_ASSET_NAME"],
+            "archive_sha256": os.environ["OMEGA_RC_EFFECTD_ARCHIVE_DIGEST"],
+            "source_commit": os.environ["OMEGA_RC_EFFECTD_SOURCE_COMMIT"],
+            "manifest_sha256": os.environ["OMEGA_RC_EFFECTD_MANIFEST_DIGEST"],
+            "wrapper_sha256": os.environ["OMEGA_RC_EFFECTD_WRAPPER_DIGEST"],
+            "bundle_sha256": os.environ["OMEGA_RC_EFFECTD_BUNDLE_DIGEST"],
+            "source_node_sha256": os.environ["OMEGA_RC_EFFECTD_SOURCE_NODE_DIGEST"],
+            "packaged_node_sha256": (
+                os.environ.get("OMEGA_RC_EFFECTD_PACKAGED_NODE_DIGEST") or None
+            ),
+        }
     },
     "identity_boundaries": {
         "source_verifier": {
@@ -594,6 +792,7 @@ trap cleanup EXIT
 require_arm64_host_or_target
 require_clean_checkout
 verify_source_identity_boundaries
+prepare_omega_effectd_archive
 
 DMG_PATH="${OUTPUT_DIR}/${OMEGA_ARTIFACT_NAME}"
 
@@ -683,6 +882,7 @@ rm -f "${app_path}/Contents/embedded.provisionprofile"
 
 cp "target/${TARGET_TRIPLE}/release/omega" "${app_path}/Contents/MacOS/omega"
 cp "target/${TARGET_TRIPLE}/release/cli" "${app_path}/Contents/MacOS/cli"
+stage_omega_effectd_component "${app_path}"
 verify_packaged_identity_boundaries "${app_path}"
 
 # Strip associated-domains entitlement: it requires an Omega-owned profile.
@@ -691,6 +891,11 @@ sed '/com.apple.developer.associated-domains/,+1d' \
   crates/zed/resources/zed.entitlements > "${entitlements_path}"
 
 echo "Code signing with ${OMEGA_SIGNING_IDENTITY}"
+/usr/bin/codesign --force --timestamp --options runtime \
+  --entitlements "${entitlements_path}" \
+  --sign "${OMEGA_SIGNING_IDENTITY}" \
+  "${app_path}/Contents/Resources/omega-effectd/runtime/bin/node" -v
+OMEGA_EFFECTD_PACKAGED_NODE_SHA256="$(sha256_file "${app_path}/Contents/Resources/omega-effectd/runtime/bin/node")"
 /usr/bin/codesign --deep --force --timestamp --options runtime \
   --sign "${OMEGA_SIGNING_IDENTITY}" "${app_path}/Contents/MacOS/cli" -v
 /usr/bin/codesign --deep --force --timestamp --options runtime \

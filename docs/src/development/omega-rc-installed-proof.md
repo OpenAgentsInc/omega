@@ -146,6 +146,12 @@ comparison when identity admission or manual evidence is missing. Those
 objective passes do not imply acceptance: the proof remains `incomplete`, and
 the missing identity and human gates remain blocked or pending.
 
+The objective component gates also validate the pinned `omega-effectd`
+release manifest and packaged digests, verify the nested Node signature, and
+launch both the mounted and installed component copies through framed
+`initialize` and `health` requests. A present file without a running health
+response is not a component pass.
+
 ### Installed-candidate bindings
 
 The harness verifies the explicit DMG digest against the release record, checks

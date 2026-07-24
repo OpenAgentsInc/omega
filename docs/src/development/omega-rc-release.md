@@ -73,6 +73,8 @@ The JSON release record binds at least:
 - signing identity and team id
 - notarization attempted / stapled / status
 - `publication.prerelease = true` and `publication.latest = false`
+- pinned `omega-effectd` release, archive, manifest, source, wrapper, bundle,
+  source Node, and signed packaged Node digests
 
 Validate schema after any hand edit:
 

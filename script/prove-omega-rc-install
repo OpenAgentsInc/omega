@@ -8,9 +8,11 @@ import hashlib
 import json
 import os
 import plistlib
+import selectors
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 from typing import Any
 
@@ -23,6 +25,8 @@ EXPECTED_VERSION = "0.2.0-rc1"
 EXPECTED_BUNDLE_ID = "com.openagents.omega.rc"
 EXPECTED_TEAM_ID = "HQWSG26L43"
 EXPECTED_SIGNER = "Developer ID Application: OpenAgents, Inc. (HQWSG26L43)"
+EXPECTED_EFFECTD_ARCHIVE_SHA256 = "52fb8333ee65b944ba47b2ec00abc77b3826aa7f9a4cacc3ca6f7d37e139ffa5"
+EXPECTED_EFFECTD_SOURCE_COMMIT = "be342ea7525ac50fbf836978dcd1ba6714345f42"
 MANUAL_CHECKS = (
     "clean_profile_side_by_side_zed",
     "offline_identity_first_start",
@@ -83,6 +87,7 @@ def validate_release_record(record: dict[str, Any], record_path: Path, artifact:
         "signing_identity",
         "source",
         "digests",
+        "components",
         "notarization",
         "legal",
         "publication",
@@ -119,6 +124,34 @@ def validate_release_record(record: dict[str, Any], record_path: Path, artifact:
     expected_digest = record.get("digests", {}).get("package_sha256")
     if expected_digest != sha256_file(artifact):
         raise ProofError("artifact SHA-256 does not match release record")
+    effectd = record.get("components", {}).get("omega_effectd", {})
+    expected_effectd = {
+        "package": "@openagentsinc/omega-effectd",
+        "service_version": "0.1.0",
+        "protocol": "openagents.omega.effectd.v1",
+        "platform": "darwin-arm64",
+        "release_tag": "omega-effectd-v0.1.0-rc.1",
+        "asset_name": "omega-effectd-v0.1.0-macos-arm64.tar.gz",
+        "archive_sha256": EXPECTED_EFFECTD_ARCHIVE_SHA256,
+        "source_commit": EXPECTED_EFFECTD_SOURCE_COMMIT,
+    }
+    for key, expected_value in expected_effectd.items():
+        if effectd.get(key) != expected_value:
+            raise ProofError(f"omega-effectd release record {key} differs from the pin")
+    for key in (
+        "manifest_sha256",
+        "wrapper_sha256",
+        "bundle_sha256",
+        "source_node_sha256",
+        "packaged_node_sha256",
+    ):
+        value = effectd.get(key)
+        if (
+            not isinstance(value, str)
+            or len(value) != 64
+            or any(character not in "0123456789abcdef" for character in value)
+        ):
+            raise ProofError(f"omega-effectd release record {key} is not a SHA-256 digest")
     if record_path.resolve() == artifact.resolve():
         raise ProofError("release record and artifact must be distinct files")
 
@@ -279,6 +312,152 @@ def validate_binary_digests(app: Path, record: dict[str, Any]) -> None:
             raise ProofError(f"{path.name} digest differs from release record")
 
 
+def validate_effectd_component(
+    app: Path, record: dict[str, Any], output_dir: Path, label: str
+) -> None:
+    component = app / "Contents/Resources/omega-effectd"
+    manifest_path = component / "component-manifest.json"
+    wrapper_path = component / "bin/omega-effectd"
+    bundle_path = component / "dist/omega-effectd.mjs"
+    node_path = component / "runtime/bin/node"
+    for path in (manifest_path, wrapper_path, bundle_path, node_path):
+        if not path.is_file():
+            raise ProofError(f"{label} omega-effectd file is missing: {path}")
+    if not os.access(wrapper_path, os.X_OK) or not os.access(node_path, os.X_OK):
+        raise ProofError(f"{label} omega-effectd executables are not executable")
+
+    manifest = load_json(manifest_path, f"{label} omega-effectd manifest")
+    expected_manifest = {
+        "schema": "openagents.omega.effectd.component.v1",
+        "package": "@openagentsinc/omega-effectd",
+        "serviceVersion": "0.1.0",
+        "protocol": "openagents.omega.effectd.v1",
+        "platform": "darwin-arm64",
+    }
+    for key, expected_value in expected_manifest.items():
+        if manifest.get(key) != expected_value:
+            raise ProofError(f"{label} omega-effectd manifest {key} differs from the pin")
+    if manifest.get("source", {}).get("commit") != EXPECTED_EFFECTD_SOURCE_COMMIT:
+        raise ProofError(f"{label} omega-effectd source commit differs from the pin")
+
+    effectd = record["components"]["omega_effectd"]
+    observed = {
+        "manifest_sha256": sha256_file(manifest_path),
+        "wrapper_sha256": sha256_file(wrapper_path),
+        "bundle_sha256": sha256_file(bundle_path),
+        "packaged_node_sha256": sha256_file(node_path),
+    }
+    for key, digest in observed.items():
+        if effectd.get(key) != digest:
+            raise ProofError(f"{label} omega-effectd {key} differs from the release record")
+    for relative, expected_digest in manifest.get("files", {}).items():
+        path = component / relative
+        if not path.is_file() or sha256_file(path) != expected_digest:
+            raise ProofError(f"{label} omega-effectd manifest file differs: {relative}")
+
+    verify_signature(node_path, output_dir, f"{label}-effectd-node")
+    health_receipt = probe_effectd_initialize_health(wrapper_path)
+    (output_dir / f"omega-effectd-health-{label}.json").write_text(
+        json.dumps(health_receipt, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+
+
+def probe_effectd_initialize_health(program: Path) -> dict[str, Any]:
+    with tempfile.TemporaryDirectory(prefix="omega-effectd-proof-data-") as data_root:
+        environment = os.environ.copy()
+        environment["OPENAGENTS_OMEGA_EFFECTD_DATA_ROOT"] = data_root
+        process = subprocess.Popen(
+            [str(program)],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=environment,
+        )
+        if process.stdin is None or process.stdout is None:
+            process.kill()
+            raise ProofError("omega-effectd proof process did not expose stdio")
+        selector = selectors.DefaultSelector()
+        selector.register(process.stdout, selectors.EVENT_READ)
+
+        def exchange(identifier: str, method: str, params: dict[str, Any] | None) -> dict[str, Any]:
+            request = {
+                "schema": "openagents.omega.effectd.v1",
+                "kind": "request",
+                "id": identifier,
+                "generation": 1,
+                "method": method,
+            }
+            if params is not None:
+                request["params"] = params
+            process.stdin.write(json.dumps(request, separators=(",", ":")) + "\n")
+            process.stdin.flush()
+            deadline = time.monotonic() + 30
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0 or not selector.select(remaining):
+                    raise ProofError(f"omega-effectd {method} response timed out")
+                line = process.stdout.readline()
+                if not line:
+                    raise ProofError(f"omega-effectd closed stdout during {method}")
+                response = json.loads(line)
+                if response.get("kind") == "response" and response.get("id") == identifier:
+                    break
+            if (
+                response.get("schema") != "openagents.omega.effectd.v1"
+                or response.get("generation") != 1
+                or response.get("ok") is not True
+                or not isinstance(response.get("result"), dict)
+            ):
+                raise ProofError(f"omega-effectd {method} returned an invalid response")
+            return response["result"]
+
+        try:
+            initialized = exchange("proof-initialize", "initialize", {"generation": 1})
+            health = exchange("proof-health", "health", None)
+        except (OSError, json.JSONDecodeError) as error:
+            raise ProofError(f"omega-effectd initialize/health probe failed: {error}") from error
+        finally:
+            selector.close()
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=5)
+
+        if (
+            initialized.get("schema") != "openagents.omega.effectd.v1"
+            or initialized.get("protocolVersion") != 1
+            or initialized.get("serviceVersion") != "0.1.0"
+            or initialized.get("generation") != 1
+            or "health" not in initialized.get("capabilities", [])
+        ):
+            raise ProofError("omega-effectd initialize result differs from the pinned contract")
+        if (
+            health.get("ok") is not True
+            or health.get("status") != "running"
+            or health.get("generation") != 1
+            or not isinstance(health.get("activeRunCount"), int)
+        ):
+            raise ProofError("omega-effectd health result is not running")
+        return {
+            "schema": "openagents.omega.effectd.proof.v1",
+            "initialize": {
+                "protocolVersion": initialized["protocolVersion"],
+                "serviceVersion": initialized["serviceVersion"],
+                "generation": initialized["generation"],
+                "capabilities": initialized["capabilities"],
+            },
+            "health": {
+                "ok": health["ok"],
+                "status": health["status"],
+                "generation": health["generation"],
+                "activeRunCount": health["activeRunCount"],
+            },
+        }
+
+
 def verify_signature(app: Path, output_dir: Path, label: str) -> None:
     run(
         ["codesign", "--verify", "--deep", "--strict", "--verbose=2", str(app)],
@@ -353,6 +532,8 @@ def pending_checks() -> dict[str, dict[str, str]]:
         "artifact_release_binding": {"status": "pending"},
         "notarization_and_gatekeeper": {"status": "pending"},
         "packaged_installed_bundle_match": {"status": "pending"},
+        "packaged_effectd_initialize_health": {"status": "pending"},
+        "installed_effectd_initialize_health": {"status": "pending"},
         "identity_candidate_admission": {"status": "pending"},
         "manual_evidence_binding": {"status": "pending"},
         "owner_observation": {"status": "pending"},
@@ -477,6 +658,27 @@ def prove(arguments: argparse.Namespace) -> int:
         blockers.append(str(error))
         checks["packaged_installed_bundle_match"] = {"status": "blocked", "reason": str(error)}
 
+    try:
+        with mounted_application(arguments.artifact) as packaged_app:
+            validate_effectd_component(packaged_app, record, arguments.out, "packaged-app")
+        checks["packaged_effectd_initialize_health"] = {"status": "passed"}
+    except ProofError as error:
+        blockers.append(str(error))
+        checks["packaged_effectd_initialize_health"] = {
+            "status": "blocked",
+            "reason": str(error),
+        }
+
+    try:
+        validate_effectd_component(arguments.app, record, arguments.out, "installed-app")
+        checks["installed_effectd_initialize_health"] = {"status": "passed"}
+    except ProofError as error:
+        blockers.append(str(error))
+        checks["installed_effectd_initialize_health"] = {
+            "status": "blocked",
+            "reason": str(error),
+        }
+
     identity_owner: str | None = None
     identity_independent: str | None = None
     if arguments.identity_evidence.is_file():
@@ -548,6 +750,23 @@ def self_test() -> None:
             "signing_identity": EXPECTED_SIGNER,
             "source": {"commit": "a" * 40, "dirty": False},
             "digests": {"package_sha256": sha256_file(artifact)},
+            "components": {
+                "omega_effectd": {
+                    "package": "@openagentsinc/omega-effectd",
+                    "service_version": "0.1.0",
+                    "protocol": "openagents.omega.effectd.v1",
+                    "platform": "darwin-arm64",
+                    "release_tag": "omega-effectd-v0.1.0-rc.1",
+                    "asset_name": "omega-effectd-v0.1.0-macos-arm64.tar.gz",
+                    "archive_sha256": EXPECTED_EFFECTD_ARCHIVE_SHA256,
+                    "source_commit": EXPECTED_EFFECTD_SOURCE_COMMIT,
+                    "manifest_sha256": "c" * 64,
+                    "wrapper_sha256": "d" * 64,
+                    "bundle_sha256": "e" * 64,
+                    "source_node_sha256": "f" * 64,
+                    "packaged_node_sha256": "1" * 64,
+                }
+            },
             "notarization": {"attempted": True, "stapled": True},
             "legal": {"commercial_terms_attached": False},
             "publication": {"prerelease": True, "latest": False},
