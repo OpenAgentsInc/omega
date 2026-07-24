@@ -54,6 +54,7 @@ OMEGA_EFFECTD_WRAPPER_SHA256=""
 OMEGA_EFFECTD_BUNDLE_SHA256=""
 OMEGA_EFFECTD_SOURCE_NODE_SHA256=""
 OMEGA_EFFECTD_PACKAGED_NODE_SHA256=""
+PACKAGED_BINDINGS_JSON=""
 
 usage() {
   cat <<EOF
@@ -376,6 +377,14 @@ if record["publication"].get("latest") is not False:
     raise SystemExit("publication.latest must be false")
 if record["legal"].get("commercial_terms_attached") is not False:
     raise SystemExit("legal.commercial_terms_attached must be false")
+legal_notices = record["legal"].get("notices")
+if not isinstance(legal_notices, dict) or not legal_notices:
+    raise SystemExit("legal.notices must bind packaged paths to SHA-256 digests")
+if not all(
+    isinstance(name, str) and name and valid_sha256(digest)
+    for name, digest in legal_notices.items()
+):
+    raise SystemExit("every legal notice must have a path and SHA-256 digest")
 if "commit" not in record["source"]:
     raise SystemExit("source.commit is required")
 digests = record["digests"]
@@ -387,6 +396,14 @@ if "package_sha256" not in digests:
 for key in ("omega_binary_sha256", "cli_binary_sha256"):
     if key not in digests:
         raise SystemExit(f"digests.{key} is required (null when absent)")
+packaged_icons = digests.get("packaged_icon_outputs")
+if not isinstance(packaged_icons, dict) or set(packaged_icons) != {
+    "Contents/Resources/openagents-icon.icns",
+    "Contents/Resources/Document.icns",
+}:
+    raise SystemExit("digests.packaged_icon_outputs has the wrong inventory")
+if not all(valid_sha256(digest) for digest in packaged_icons.values()):
+    raise SystemExit("every packaged icon output must have a SHA-256 digest")
 
 execution = record["execution"]
 if not isinstance(execution.get("dry_run"), bool):
@@ -480,6 +497,8 @@ if execution["dry_run"]:
     if identity_proof.get("binary_sha256") is not None:
         raise SystemExit("dry-run must not claim an identity proof driver digest")
 else:
+    if set(legal_notices) != {"LICENSE-GPL", "LICENSE-APACHE", "licenses.md"}:
+        raise SystemExit("built release legal notice inventory is incomplete")
     for key in ("name", "sha256"):
         if not isinstance(build_lock.get(key), str) or not build_lock[key]:
             raise SystemExit(f"build_inputs.cargo_lock_snapshot.{key} must be non-empty")
@@ -522,6 +541,83 @@ print(json.dumps({
 PY
 }
 
+collect_source_packaged_bindings_json() {
+  python3 - <<'PY'
+import hashlib
+import json
+from pathlib import Path
+
+legal = {}
+for source, packaged in (
+    (Path("LICENSE-GPL"), "LICENSE-GPL"),
+    (Path("LICENSE-APACHE"), "LICENSE-APACHE"),
+    (Path("assets/licenses.md"), "licenses.md"),
+):
+    if source.is_file():
+        legal[packaged] = hashlib.sha256(source.read_bytes()).hexdigest()
+
+icons = {}
+for source, packaged in (
+    (
+        Path("crates/zed/resources/icon_family/source/openagents-icon.icns"),
+        "Contents/Resources/openagents-icon.icns",
+    ),
+    (
+        Path("crates/zed/resources/Document.icns"),
+        "Contents/Resources/Document.icns",
+    ),
+):
+    if not source.is_file():
+        raise SystemExit(f"missing packaged icon source: {source}")
+    icons[packaged] = hashlib.sha256(source.read_bytes()).hexdigest()
+
+print(json.dumps({"legal_notices": legal, "icon_outputs": icons}, sort_keys=True))
+PY
+}
+
+collect_staged_packaged_bindings_json() {
+  local staged_root="$1"
+  python3 - "${staged_root}" <<'PY'
+import hashlib
+import json
+import plistlib
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+app = root / "Omega.app"
+if not app.is_dir():
+    raise SystemExit(f"staged Omega app is missing: {app}")
+
+legal = {}
+for name in ("LICENSE-GPL", "LICENSE-APACHE", "licenses.md"):
+    path = root / name
+    if path.is_file():
+        legal[name] = hashlib.sha256(path.read_bytes()).hexdigest()
+if set(legal) != {"LICENSE-GPL", "LICENSE-APACHE", "licenses.md"}:
+    raise SystemExit("staged package legal notice inventory is incomplete")
+
+info = plistlib.loads((app / "Contents/Info.plist").read_bytes())
+icon_name = info.get("CFBundleIconFile")
+if not isinstance(icon_name, str) or not icon_name:
+    raise SystemExit("staged Omega Info.plist has no CFBundleIconFile")
+if not icon_name.endswith(".icns"):
+    icon_name += ".icns"
+icon_paths = [
+    Path("Contents/Resources") / icon_name,
+    Path("Contents/Resources/Document.icns"),
+]
+icons = {}
+for relative in icon_paths:
+    path = app / relative
+    if not path.is_file():
+        raise SystemExit(f"staged packaged icon is missing: {relative}")
+    icons[relative.as_posix()] = hashlib.sha256(path.read_bytes()).hexdigest()
+
+print(json.dumps({"legal_notices": legal, "icon_outputs": icons}, sort_keys=True))
+PY
+}
+
 write_release_record() {
   local package_path="$1"
   local notarization_status="$2"
@@ -537,7 +633,7 @@ write_release_record() {
     package_digest="null"
   fi
 
-  local commit upstream_commit upstream_remote rustc_version host_triple cargo_lock_digest icon_json
+  local commit upstream_commit upstream_remote rustc_version host_triple cargo_lock_digest icon_json packaged_bindings_json
   commit="$(git rev-parse HEAD)"
   # The upstream Zed remote is named `zed`. `upstream` is the retired name and
   # is accepted only until every checkout has been renamed. This value is
@@ -560,6 +656,7 @@ write_release_record() {
   host_triple="$(rustc -vV | awk '/^host:/{print $2}')"
   cargo_lock_digest="$(sha256_file Cargo.lock)"
   icon_json="$(collect_icon_digests_json)"
+  packaged_bindings_json="${PACKAGED_BINDINGS_JSON:-$(collect_source_packaged_bindings_json)}"
 
   OMEGA_RC_RECORD_OUT="${RELEASE_RECORD_PATH}" \
   OMEGA_RC_SCHEMA_VERSION="${OMEGA_RELEASE_RECORD_SCHEMA_VERSION}" \
@@ -578,6 +675,7 @@ write_release_record() {
   OMEGA_RC_BUILD_LOCK_SNAPSHOT_NAME="${BUILD_LOCK_SNAPSHOT_NAME:-}" \
   OMEGA_RC_BUILD_LOCK_SNAPSHOT_DIGEST="${BUILD_LOCK_SNAPSHOT_DIGEST}" \
   OMEGA_RC_ICON_JSON="${icon_json}" \
+  OMEGA_RC_PACKAGED_BINDINGS_JSON="${packaged_bindings_json}" \
   OMEGA_RC_PACKAGE_DIGEST="${package_digest}" \
   OMEGA_RC_OMEGA_BINARY_DIGEST="${OMEGA_BINARY_DIGEST}" \
   OMEGA_RC_CLI_BINARY_DIGEST="${CLI_BINARY_DIGEST}" \
@@ -608,6 +706,7 @@ import os
 from pathlib import Path
 
 icons = json.loads(os.environ["OMEGA_RC_ICON_JSON"])
+packaged_bindings = json.loads(os.environ["OMEGA_RC_PACKAGED_BINDINGS_JSON"])
 upstream = os.environ.get("OMEGA_RC_UPSTREAM_COMMIT") or None
 package_digest = os.environ["OMEGA_RC_PACKAGE_DIGEST"]
 package_sha256 = None if package_digest == "null" else package_digest
@@ -670,6 +769,7 @@ record = {
         "pinned_png_sha256": icons["pinned_png_sha256"],
         "pinned_icns_sha256": icons["pinned_icns_sha256"],
         "icon_outputs": icons["outputs"],
+        "packaged_icon_outputs": packaged_bindings["icon_outputs"],
         "package_sha256": package_sha256,
         "omega_binary_sha256": omega_binary_digest,
         "cli_binary_sha256": cli_binary_digest,
@@ -719,7 +819,7 @@ record = {
     },
     "legal": {
         "commercial_terms_attached": False,
-        "notices": ["LICENSE-GPL", "LICENSE-APACHE", "assets/licenses.md"],
+        "notices": packaged_bindings["legal_notices"],
     },
     "publication": {
         "repository": "OpenAgentsInc/omega",
@@ -1009,6 +1109,7 @@ cp LICENSE-GPL LICENSE-APACHE "${dmg_source_directory}/"
 if [[ -f assets/licenses.md ]]; then
   cp assets/licenses.md "${dmg_source_directory}/"
 fi
+PACKAGED_BINDINGS_JSON="$(collect_staged_packaged_bindings_json "${dmg_source_directory}")"
 
 echo "Creating DMG ${DMG_PATH}"
 rm -f "${DMG_PATH}"

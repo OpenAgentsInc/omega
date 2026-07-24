@@ -38,6 +38,7 @@
         "identity_contract",
         "public_vector",
         "reviewed_source",
+        "assurance_spec_admission",
         "packages",
         "build_cargo_lock",
         "artifact",
@@ -69,6 +70,42 @@
             "repository",
             "commit"
           ]
+        },
+        "assurance_spec_admission": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "assurance_spec_id",
+            "assurance_revision",
+            "admitted_document_sha256",
+            "admitted_proposal_sha256",
+            "admission_receipt_ref",
+            "admission_receipt_sha256",
+            "product_spec_sha256"
+          ],
+          "properties": {
+            "assurance_spec_id": {
+              "const": "assurance.omega.identity.first.onboarding"
+            },
+            "assurance_revision": {
+              "const": 2
+            },
+            "admitted_document_sha256": {
+              "$ref": "#/$defs/sha256"
+            },
+            "admitted_proposal_sha256": {
+              "$ref": "#/$defs/sha256"
+            },
+            "admission_receipt_ref": {
+              "const": "authority.decision.2d660f7602ee99ac6c4a7a2fe906ba0f"
+            },
+            "admission_receipt_sha256": {
+              "$ref": "#/$defs/sha256"
+            },
+            "product_spec_sha256": {
+              "$ref": "#/$defs/sha256"
+            }
+          }
         },
         "packages": {
           "type": "array",

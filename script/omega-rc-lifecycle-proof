@@ -1,0 +1,462 @@
+#!/usr/bin/env python3
+"""Collect Omega/Zed lifecycle evidence and perform narrowly confirmed RC moves."""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import plistlib
+import re
+import shutil
+import stat
+import subprocess
+import tempfile
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+
+EXPECTED_APP = Path("/Applications/Omega.app")
+EXPECTED_BUNDLE_ID = "com.openagents.omega.rc"
+EXPECTED_KEYCHAIN = {
+    "service": "com.openagents.omega.credentials.rc",
+    "account": "omega-sovereign-identity-v1",
+    "secret_read": False,
+}
+SCHEMA = "openagents.omega.rc-lifecycle-proof.v1"
+
+
+class LifecycleError(RuntimeError):
+    pass
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def validate_candidate_digest(value: str) -> str:
+    if re.fullmatch(r"[0-9a-f]{64}", value) is None:
+        raise LifecycleError("candidate digest must be 64 lowercase hexadecimal characters")
+    return value
+
+
+def roots() -> dict[str, dict[str, Path]]:
+    user_root = Path.home()
+    library = user_root / "Library"
+    omega = {
+        "application": EXPECTED_APP,
+        "data": library / "Application Support/Omega RC",
+        "config": user_root / ".config/omega-rc",
+        "state": user_root / ".local/state/omega-rc",
+        "cache": library / "Caches/omega-rc",
+        "logs": library / "Logs/omega-rc",
+        "http_storage": library / "HTTPStorages/com.openagents.omega.rc",
+        "preferences": library / "Preferences/com.openagents.omega.rc.plist",
+        "saved_state": library / "Saved Application State/com.openagents.omega.rc.savedState",
+    }
+    zed = {
+        "application_stable": Path("/Applications/Zed.app"),
+        "application_preview": Path("/Applications/Zed Preview.app"),
+        "application_nightly": Path("/Applications/Zed Nightly.app"),
+        "application_dev": Path("/Applications/Zed Dev.app"),
+        "data": library / "Application Support/Zed",
+        "config": user_root / ".config/zed",
+        "logs": library / "Logs/Zed",
+        "cache_stable": library / "Caches/dev.zed.Zed",
+        "cache_preview": library / "Caches/dev.zed.Zed-Preview",
+        "cache_nightly": library / "Caches/dev.zed.Zed-Nightly",
+        "cache_dev": library / "Caches/dev.zed.Zed-Dev",
+        "http_storage_stable": library / "HTTPStorages/dev.zed.Zed",
+        "http_storage_preview": library / "HTTPStorages/dev.zed.Zed-Preview",
+        "preferences_stable": library / "Preferences/dev.zed.Zed.plist",
+        "preferences_preview": library / "Preferences/dev.zed.Zed-Preview.plist",
+        "saved_state_stable": library / "Saved Application State/dev.zed.Zed.savedState",
+        "saved_state_preview": library / "Saved Application State/dev.zed.Zed-Preview.savedState",
+        "remote_server": user_root / ".zed_server",
+    }
+    return {"omega": omega, "zed": zed}
+
+
+def path_digest(path: Path) -> str:
+    return hashlib.sha256(os.fsencode(path.resolve(strict=False))).hexdigest()
+
+
+def manifest_root(path: Path) -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "path_digest": path_digest(path),
+        "status": "absent",
+        "files": 0,
+        "directories": 0,
+        "symlinks": 0,
+        "bytes": 0,
+        "manifest_sha256": hashlib.sha256(b"absent").hexdigest(),
+    }
+    if not path.exists() and not path.is_symlink():
+        return result
+
+    digest = hashlib.sha256()
+    errors: list[str] = []
+
+    def record(candidate: Path, relative: str) -> None:
+        try:
+            metadata = candidate.lstat()
+            mode = stat.S_IMODE(metadata.st_mode)
+            digest.update(relative.encode("utf-8", errors="surrogateescape"))
+            digest.update(str(mode).encode())
+            if stat.S_ISLNK(metadata.st_mode):
+                result["symlinks"] += 1
+                digest.update(b"symlink:")
+                digest.update(os.fsencode(os.readlink(candidate)))
+            elif stat.S_ISREG(metadata.st_mode):
+                result["files"] += 1
+                result["bytes"] += metadata.st_size
+                digest.update(b"file:")
+                digest.update(sha256_file(candidate).encode())
+            elif stat.S_ISDIR(metadata.st_mode):
+                result["directories"] += 1
+                digest.update(b"directory")
+            else:
+                digest.update(b"other")
+        except OSError as error:
+            errors.append(type(error).__name__)
+
+    if path.is_symlink() or path.is_file():
+        record(path, ".")
+    else:
+        record(path, ".")
+        for directory, directory_names, file_names in os.walk(path, followlinks=False):
+            directory_path = Path(directory)
+            for name in sorted(directory_names + file_names, key=os.fsencode):
+                candidate = directory_path / name
+                record(candidate, candidate.relative_to(path).as_posix())
+    result["manifest_sha256"] = digest.hexdigest()
+    result["status"] = "blocked" if errors else "captured"
+    if errors:
+        result["error_count"] = len(errors)
+        result["error_types"] = sorted(set(errors))
+    return result
+
+
+def build_snapshot(candidate_digest: str) -> dict[str, Any]:
+    inventory = roots()
+    return {
+        "schema": SCHEMA,
+        "kind": "snapshot",
+        "candidate_digest": validate_candidate_digest(candidate_digest),
+        "captured_at": datetime.now(timezone.utc).isoformat(),
+        "user": {"uid": os.getuid()},
+        "keychain_locator": EXPECTED_KEYCHAIN,
+        "roots": {
+            scope: {name: manifest_root(path) for name, path in paths.items()}
+            for scope, paths in inventory.items()
+        },
+    }
+
+
+def write_new_json(path: Path, value: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("x", encoding="utf-8") as handle:
+        json.dump(value, handle, indent=2, sort_keys=True)
+        handle.write("\n")
+
+
+def read_json(path: Path) -> dict[str, Any]:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise LifecycleError(f"cannot read proof JSON {path}: {error}") from error
+    if not isinstance(value, dict):
+        raise LifecycleError(f"proof JSON is not an object: {path}")
+    return value
+
+
+def validate_exact_app(path: Path, *, must_exist: bool) -> None:
+    if path != EXPECTED_APP:
+        raise LifecycleError(f"app path must be exactly {EXPECTED_APP}")
+    if not path.exists():
+        if must_exist:
+            raise LifecycleError(f"Omega RC app is missing: {path}")
+        return
+    if path.is_symlink() or not path.is_dir():
+        raise LifecycleError("Omega RC app must be a real application directory")
+    try:
+        info = plistlib.loads((path / "Contents/Info.plist").read_bytes())
+    except (OSError, plistlib.InvalidFileException) as error:
+        raise LifecycleError(f"cannot inspect Omega RC application: {error}") from error
+    if info.get("CFBundleIdentifier") != EXPECTED_BUNDLE_ID:
+        raise LifecycleError("refusing application with a non-Omega RC bundle identifier")
+
+
+def validate_holding_directory(path: Path) -> None:
+    if not path.is_absolute() or path in (Path("/"), Path.home(), Path("/Applications")):
+        raise LifecycleError("holding directory must be an explicit narrow absolute path")
+    for owned in roots()["omega"].values():
+        if path == owned or owned in path.parents or path in owned.parents:
+            raise LifecycleError("holding directory must be outside every Omega-owned root")
+    if path.is_symlink():
+        raise LifecycleError("holding directory must not be a symlink")
+
+
+def snapshot_command(arguments: argparse.Namespace) -> int:
+    write_new_json(arguments.output, build_snapshot(arguments.candidate_digest))
+    print(f"wrote lifecycle snapshot: {arguments.output}")
+    return 0
+
+
+def compare_command(arguments: argparse.Namespace) -> int:
+    before = read_json(arguments.before)
+    after = read_json(arguments.after)
+    digest = validate_candidate_digest(arguments.candidate_digest)
+    for label, value in (("before", before), ("after", after)):
+        if value.get("schema") != SCHEMA or value.get("kind") != "snapshot":
+            raise LifecycleError(f"{label} input is not a lifecycle snapshot")
+        if value.get("candidate_digest") != digest:
+            raise LifecycleError(f"{label} snapshot binds a different candidate")
+    before_scope = before.get("roots", {}).get(arguments.scope)
+    after_scope = after.get("roots", {}).get(arguments.scope)
+    if not isinstance(before_scope, dict) or not isinstance(after_scope, dict):
+        raise LifecycleError(f"snapshot has no {arguments.scope} scope")
+    changed = sorted(
+        name
+        for name in set(before_scope) | set(after_scope)
+        if before_scope.get(name) != after_scope.get(name)
+    )
+    report = {
+        "schema": SCHEMA,
+        "kind": "comparison",
+        "candidate_digest": digest,
+        "scope": arguments.scope,
+        "before_snapshot_sha256": sha256_file(arguments.before),
+        "after_snapshot_sha256": sha256_file(arguments.after),
+        "status": "passed" if not changed else "changed",
+        "changed_roots": changed,
+    }
+    write_new_json(arguments.output, report)
+    print(f"wrote lifecycle comparison: {arguments.output}")
+    return 0 if not changed else 1
+
+
+def remove_app_command(arguments: argparse.Namespace) -> int:
+    if arguments.confirm != "REMOVE-OMEGA-RC-APP":
+        raise LifecycleError("refusing app removal without --confirm REMOVE-OMEGA-RC-APP")
+    validate_exact_app(arguments.app, must_exist=True)
+    validate_holding_directory(arguments.holding_dir)
+    arguments.holding_dir.mkdir(parents=True, mode=0o700, exist_ok=False)
+    held_app = arguments.holding_dir / "Omega.app"
+    if os.stat(arguments.app.parent).st_dev != os.stat(arguments.holding_dir).st_dev:
+        raise LifecycleError("holding directory must be on the same filesystem as /Applications")
+    os.replace(arguments.app, held_app)
+    receipt = {
+        "schema": SCHEMA,
+        "kind": "app_removal",
+        "candidate_digest": validate_candidate_digest(arguments.candidate_digest),
+        "performed_at": datetime.now(timezone.utc).isoformat(),
+        "source_path": str(EXPECTED_APP),
+        "holding_path": str(held_app),
+        "recoverable": True,
+        "zed_targets_touched": False,
+    }
+    write_new_json(arguments.output, receipt)
+    print(f"moved Omega RC app to recoverable holding path: {held_app}")
+    return 0
+
+
+def run(command: list[str], description: str) -> str:
+    result = subprocess.run(command, capture_output=True, text=True, check=False)
+    if result.returncode != 0:
+        detail = "\n".join(part for part in (result.stdout, result.stderr) if part).strip()
+        raise LifecycleError(f"{description} failed" + (f": {detail}" if detail else ""))
+    return result.stdout
+
+
+def reinstall_command(arguments: argparse.Namespace) -> int:
+    if arguments.confirm != "REINSTALL-OMEGA-RC-APP":
+        raise LifecycleError("refusing reinstall without --confirm REINSTALL-OMEGA-RC-APP")
+    validate_exact_app(arguments.app, must_exist=False)
+    if arguments.app.exists():
+        raise LifecycleError("refusing to overwrite an existing Omega.app")
+    record = read_json(arguments.release_record)
+    if record.get("bundle_identifier") != EXPECTED_BUNDLE_ID:
+        raise LifecycleError("release record is not for Omega RC")
+    expected_digest = record.get("digests", {}).get("package_sha256")
+    if expected_digest != sha256_file(arguments.artifact):
+        raise LifecycleError("artifact digest differs from the release record")
+    mount_root = Path(tempfile.mkdtemp(prefix="omega-rc-lifecycle-mount-"))
+    mounted = False
+    temporary_app = arguments.app.parent / f".Omega.app.install-{os.getpid()}"
+    try:
+        run(
+            [
+                "hdiutil",
+                "attach",
+                "-readonly",
+                "-nobrowse",
+                "-mountpoint",
+                str(mount_root),
+                str(arguments.artifact),
+            ],
+            "read-only DMG mount",
+        )
+        mounted = True
+        packaged_app = mount_root / "Omega.app"
+        validate_exact_bundle_identifier(packaged_app)
+        run(["ditto", str(packaged_app), str(temporary_app)], "copy exact packaged app")
+        validate_exact_bundle_identifier(temporary_app)
+        os.replace(temporary_app, arguments.app)
+    finally:
+        if temporary_app.exists():
+            shutil.rmtree(temporary_app)
+        if mounted:
+            run(["hdiutil", "detach", str(mount_root)], "DMG detach")
+        mount_root.rmdir()
+    receipt = {
+        "schema": SCHEMA,
+        "kind": "app_reinstall",
+        "candidate_digest": validate_candidate_digest(arguments.candidate_digest),
+        "performed_at": datetime.now(timezone.utc).isoformat(),
+        "artifact_sha256": expected_digest,
+        "release_record_sha256": sha256_file(arguments.release_record),
+        "installed_path": str(arguments.app),
+        "zed_targets_touched": False,
+    }
+    write_new_json(arguments.output, receipt)
+    print(f"reinstalled exact Omega RC app: {arguments.app}")
+    return 0
+
+
+def validate_exact_bundle_identifier(app: Path) -> None:
+    if app.is_symlink() or not app.is_dir():
+        raise LifecycleError(f"application bundle is missing or unsafe: {app}")
+    try:
+        info = plistlib.loads((app / "Contents/Info.plist").read_bytes())
+    except (OSError, plistlib.InvalidFileException) as error:
+        raise LifecycleError(f"cannot inspect application bundle: {error}") from error
+    if info.get("CFBundleIdentifier") != EXPECTED_BUNDLE_ID:
+        raise LifecycleError("application bundle identifier is not Omega RC")
+
+
+def cleanup_data_command(arguments: argparse.Namespace) -> int:
+    if arguments.confirm != "MOVE-OMEGA-RC-DATA-TO-HOLDING":
+        raise LifecycleError(
+            "refusing cleanup without --confirm MOVE-OMEGA-RC-DATA-TO-HOLDING"
+        )
+    validate_holding_directory(arguments.holding_dir)
+    arguments.holding_dir.mkdir(parents=True, mode=0o700, exist_ok=False)
+    moved: list[str] = []
+    for name, source in roots()["omega"].items():
+        if name == "application" or (not source.exists() and not source.is_symlink()):
+            continue
+        if source.is_symlink():
+            raise LifecycleError(f"refusing symlinked Omega data root: {name}")
+        target = arguments.holding_dir / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if os.stat(source.parent).st_dev != os.stat(arguments.holding_dir).st_dev:
+            raise LifecycleError(f"holding directory is not on the same filesystem as {name}")
+        os.replace(source, target)
+        moved.append(name)
+    receipt = {
+        "schema": SCHEMA,
+        "kind": "data_cleanup",
+        "candidate_digest": validate_candidate_digest(arguments.candidate_digest),
+        "performed_at": datetime.now(timezone.utc).isoformat(),
+        "moved_omega_roots": moved,
+        "holding_directory": str(arguments.holding_dir),
+        "recoverable": True,
+        "keychain_touched": False,
+        "zed_targets_touched": False,
+    }
+    write_new_json(arguments.output, receipt)
+    print(f"moved {len(moved)} Omega data roots to recoverable holding")
+    return 0
+
+
+def self_test_command(_arguments: argparse.Namespace) -> int:
+    digest = "a" * 64
+    with tempfile.TemporaryDirectory(prefix="omega-lifecycle-self-test-") as directory:
+        test_root = Path(directory)
+        sample = test_root / "sample"
+        sample.mkdir()
+        (sample / "public.txt").write_text("public evidence", encoding="utf-8")
+        os.symlink("public.txt", sample / "link")
+        first = manifest_root(sample)
+        if first["status"] != "captured" or first["files"] != 1 or first["symlinks"] != 1:
+            raise LifecycleError("self-test manifest did not capture files and symlinks")
+        (sample / "public.txt").write_text("changed evidence", encoding="utf-8")
+        second = manifest_root(sample)
+        if first["manifest_sha256"] == second["manifest_sha256"]:
+            raise LifecycleError("self-test manifest did not detect changed content")
+        if validate_candidate_digest(digest) != digest:
+            raise LifecycleError("self-test candidate digest validation failed")
+        try:
+            validate_holding_directory(Path.home())
+        except LifecycleError:
+            pass
+        else:
+            raise LifecycleError("self-test accepted the home directory as a holding path")
+    print("Omega RC lifecycle proof helper self-test passed")
+    return 0
+
+
+def parse_arguments() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    self_test = subparsers.add_parser("self-test")
+    self_test.set_defaults(handler=self_test_command)
+
+    snapshot = subparsers.add_parser("snapshot")
+    snapshot.add_argument("--candidate-digest", required=True)
+    snapshot.add_argument("--output", type=Path, required=True)
+    snapshot.set_defaults(handler=snapshot_command)
+
+    compare = subparsers.add_parser("compare")
+    compare.add_argument("--candidate-digest", required=True)
+    compare.add_argument("--before", type=Path, required=True)
+    compare.add_argument("--after", type=Path, required=True)
+    compare.add_argument("--scope", choices=("omega", "zed"), required=True)
+    compare.add_argument("--output", type=Path, required=True)
+    compare.set_defaults(handler=compare_command)
+
+    remove_app = subparsers.add_parser("remove-app")
+    remove_app.add_argument("--candidate-digest", required=True)
+    remove_app.add_argument("--app", type=Path, default=EXPECTED_APP)
+    remove_app.add_argument("--holding-dir", type=Path, required=True)
+    remove_app.add_argument("--confirm", required=True)
+    remove_app.add_argument("--output", type=Path, required=True)
+    remove_app.set_defaults(handler=remove_app_command)
+
+    reinstall = subparsers.add_parser("reinstall")
+    reinstall.add_argument("--candidate-digest", required=True)
+    reinstall.add_argument("--artifact", type=Path, required=True)
+    reinstall.add_argument("--release-record", type=Path, required=True)
+    reinstall.add_argument("--app", type=Path, default=EXPECTED_APP)
+    reinstall.add_argument("--confirm", required=True)
+    reinstall.add_argument("--output", type=Path, required=True)
+    reinstall.set_defaults(handler=reinstall_command)
+
+    cleanup = subparsers.add_parser("cleanup-data")
+    cleanup.add_argument("--candidate-digest", required=True)
+    cleanup.add_argument("--holding-dir", type=Path, required=True)
+    cleanup.add_argument("--confirm", required=True)
+    cleanup.add_argument("--output", type=Path, required=True)
+    cleanup.set_defaults(handler=cleanup_data_command)
+    return parser.parse_args()
+
+
+def main() -> int:
+    arguments = parse_arguments()
+    try:
+        return arguments.handler(arguments)
+    except LifecycleError as error:
+        print(f"error: {error}", file=os.sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

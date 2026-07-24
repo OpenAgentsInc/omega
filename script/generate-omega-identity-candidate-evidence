@@ -29,6 +29,15 @@ PINNED_SIGNING_IDENTITY = (
     "Developer ID Application: OpenAgents, Inc. (HQWSG26L43)"
 )
 PINNED_TEAM_ID = "HQWSG26L43"
+ASSURANCE_SPEC_ADMISSION = {
+    "assurance_spec_id": "assurance.omega.identity.first.onboarding",
+    "assurance_revision": 2,
+    "admitted_document_sha256": "84dfc9daa7b3f6f92b1895b78854835ce58530c2b81f220f6ca3b62c799f72b1",
+    "admitted_proposal_sha256": "86a0b414be71df319c1fbf705eae5b7c1cc7d8405caa67478b11ab84baa0f6cd",
+    "admission_receipt_ref": "authority.decision.2d660f7602ee99ac6c4a7a2fe906ba0f",
+    "admission_receipt_sha256": "4336ef7443cba679f2aac0176761b8a8e3ed7e2b3e93cefc25c66948e80f2f96",
+    "product_spec_sha256": "fdbf66ee5c9c89a357be14d19aa21197313ab39b2c95bdc330743bda37a91c12",
+}
 EXPECTED_PACKAGES = {
     "atomic-write-file": {
         "version": "0.3.0",
@@ -767,6 +776,7 @@ def build_record(
             "repository": "https://github.com/OpenAgentsInc/buzz",
             "commit": buzz_commit,
         },
+        "assurance_spec_admission": ASSURANCE_SPEC_ADMISSION,
         "packages": [
             {
                 "name": name,

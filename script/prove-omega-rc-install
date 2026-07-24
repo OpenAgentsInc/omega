@@ -5,14 +5,17 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import ipaddress
 import json
 import os
 import plistlib
+import re
 import selectors
 import subprocess
 import sys
 import tempfile
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 from xml.parsers.expat import ExpatError
@@ -26,6 +29,32 @@ EXPECTED_VERSION = "0.2.0-rc1"
 EXPECTED_BUNDLE_ID = "com.openagents.omega.rc"
 EXPECTED_TEAM_ID = "HQWSG26L43"
 EXPECTED_SIGNER = "Developer ID Application: OpenAgents, Inc. (HQWSG26L43)"
+IDENTITY_EVIDENCE_SCHEMA = (
+    ROOT / "crates/omega_identity/fixtures/identity_candidate_evidence_schema_v1.json"
+)
+ENDPOINT_ALLOWLIST = ROOT / "crates/app_identity/fixtures/endpoint_allowlist.json"
+EXPECTED_IDENTITY_GATES = (
+    "assurance_spec_admission",
+    "custody_scenarios",
+    "recovery_scenarios",
+    "forged_request_rejection",
+    "stale_task_fencing",
+    "installed_secret_tripwires",
+    "manual_journey",
+    "owner_observation",
+    "independent_verification",
+    "accessibility",
+    "install_lifecycle",
+)
+EXPECTED_ASSURANCE_BINDING = {
+    "assurance_spec_id": "assurance.omega.identity.first.onboarding",
+    "assurance_revision": 2,
+    "admitted_document_sha256": "84dfc9daa7b3f6f92b1895b78854835ce58530c2b81f220f6ca3b62c799f72b1",
+    "admitted_proposal_sha256": "86a0b414be71df319c1fbf705eae5b7c1cc7d8405caa67478b11ab84baa0f6cd",
+    "admission_receipt_ref": "authority.decision.2d660f7602ee99ac6c4a7a2fe906ba0f",
+    "admission_receipt_sha256": "4336ef7443cba679f2aac0176761b8a8e3ed7e2b3e93cefc25c66948e80f2f96",
+    "product_spec_sha256": "fdbf66ee5c9c89a357be14d19aa21197313ab39b2c95bdc330743bda37a91c12",
+}
 EXPECTED_EFFECTD_ARCHIVE_SHA256 = "b55f703229ff9299923a84b0843f9c926fbd75b08e787f5d6e79744fd114c836"
 EXPECTED_EFFECTD_MANIFEST_SHA256 = "13f0e094c5d120426f4ede3afedd24f04abec71e29abcd7700c0fd2e36037953"
 EXPECTED_EFFECTD_SOURCE_COMMIT = "5bb31ac857b917b14c6455a7df268825cfbf773f"
@@ -58,14 +87,141 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    value: dict[str, Any] = {}
+    for key, item in pairs:
+        if key in value:
+            raise ProofError(f"duplicate JSON key: {key}")
+        value[key] = item
+    return value
+
+
 def load_json(path: Path, description: str) -> dict[str, Any]:
     try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as error:
+        value = json.loads(
+            path.read_text(encoding="utf-8"), object_pairs_hook=reject_duplicate_keys
+        )
+    except (OSError, json.JSONDecodeError, ProofError) as error:
         raise ProofError(f"cannot read {description} {path}: {error}") from error
     if not isinstance(value, dict):
         raise ProofError(f"{description} must contain a JSON object")
     return value
+
+
+def schema_type_matches(value: Any, expected: str) -> bool:
+    return {
+        "object": isinstance(value, dict),
+        "array": isinstance(value, list),
+        "string": isinstance(value, str),
+        "boolean": isinstance(value, bool),
+        "null": value is None,
+        "integer": isinstance(value, int) and not isinstance(value, bool),
+        "number": isinstance(value, (int, float)) and not isinstance(value, bool),
+    }.get(expected, False)
+
+
+def resolve_schema_ref(root_schema: dict[str, Any], reference: str) -> dict[str, Any]:
+    if not reference.startswith("#/"):
+        raise ProofError(f"identity schema uses unsupported reference: {reference}")
+    node: Any = root_schema
+    for component in reference[2:].split("/"):
+        component = component.replace("~1", "/").replace("~0", "~")
+        if not isinstance(node, dict) or component not in node:
+            raise ProofError(f"identity schema reference is unresolved: {reference}")
+        node = node[component]
+    if not isinstance(node, dict):
+        raise ProofError(f"identity schema reference is not an object: {reference}")
+    return node
+
+
+def validate_json_schema(
+    value: Any,
+    schema: dict[str, Any],
+    root_schema: dict[str, Any],
+    location: str = "$",
+) -> None:
+    if "$ref" in schema:
+        validate_json_schema(
+            value, resolve_schema_ref(root_schema, schema["$ref"]), root_schema, location
+        )
+        return
+    if "const" in schema and value != schema["const"]:
+        raise ProofError(f"{location} differs from the identity evidence schema constant")
+    if "enum" in schema and value not in schema["enum"]:
+        raise ProofError(f"{location} is not an allowed identity evidence schema value")
+    expected_type = schema.get("type")
+    if isinstance(expected_type, str) and not schema_type_matches(value, expected_type):
+        raise ProofError(f"{location} must have JSON type {expected_type}")
+    if isinstance(value, str):
+        if len(value) < schema.get("minLength", 0):
+            raise ProofError(f"{location} is shorter than the identity evidence schema permits")
+        pattern = schema.get("pattern")
+        if isinstance(pattern, str) and re.fullmatch(pattern, value) is None:
+            raise ProofError(f"{location} does not match the identity evidence schema")
+        if schema.get("format") == "date-time":
+            try:
+                parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            except ValueError as error:
+                raise ProofError(f"{location} is not an ISO-8601 date-time") from error
+            if parsed.tzinfo is None:
+                raise ProofError(f"{location} date-time must include a timezone")
+    if isinstance(value, list):
+        if len(value) < schema.get("minItems", 0) or len(value) > schema.get(
+            "maxItems", len(value)
+        ):
+            raise ProofError(f"{location} has an invalid item count")
+        item_schema = schema.get("items")
+        if isinstance(item_schema, dict):
+            for index, item in enumerate(value):
+                validate_json_schema(item, item_schema, root_schema, f"{location}[{index}]")
+    if isinstance(value, dict):
+        if len(value) < schema.get("minProperties", 0) or len(value) > schema.get(
+            "maxProperties", len(value)
+        ):
+            raise ProofError(f"{location} has an invalid property count")
+        required = schema.get("required", [])
+        missing = [name for name in required if name not in value]
+        if missing:
+            raise ProofError(f"{location} is missing schema properties: {', '.join(missing)}")
+        properties = schema.get("properties", {})
+        additional = schema.get("additionalProperties", True)
+        for name, item in value.items():
+            if name in properties:
+                validate_json_schema(item, properties[name], root_schema, f"{location}.{name}")
+            elif additional is False:
+                raise ProofError(f"{location} contains unknown schema property: {name}")
+            elif isinstance(additional, dict):
+                validate_json_schema(item, additional, root_schema, f"{location}.{name}")
+        property_names = schema.get("propertyNames")
+        if isinstance(property_names, dict):
+            for name in value:
+                validate_json_schema(name, property_names, root_schema, f"{location}.<name>")
+    if "oneOf" in schema:
+        matches = 0
+        for candidate_schema in schema["oneOf"]:
+            try:
+                validate_json_schema(value, candidate_schema, root_schema, location)
+                matches += 1
+            except ProofError:
+                pass
+        if matches != 1:
+            raise ProofError(f"{location} must match exactly one identity schema branch")
+    for nested_schema in schema.get("allOf", []):
+        condition = nested_schema.get("if")
+        branch = "then"
+        if isinstance(condition, dict):
+            try:
+                validate_json_schema(value, condition, root_schema, location)
+            except ProofError:
+                branch = "else"
+        selected = nested_schema.get(branch)
+        if isinstance(selected, dict):
+            validate_json_schema(value, selected, root_schema, location)
+
+
+def validate_identity_evidence_schema(evidence: dict[str, Any]) -> None:
+    schema = load_json(IDENTITY_EVIDENCE_SCHEMA, "identity evidence schema")
+    validate_json_schema(evidence, schema, schema)
 
 
 def run(command: list[str], *, description: str) -> str:
@@ -118,6 +274,26 @@ def validate_release_record(record: dict[str, Any], record_path: Path, artifact:
         raise ProofError("release record must bind a clean source commit")
     if record.get("legal", {}).get("commercial_terms_attached") is not False:
         raise ProofError("release record must exclude commercial terms")
+    notices = record.get("legal", {}).get("notices")
+    if not isinstance(notices, dict) or set(notices) != {
+        "LICENSE-GPL",
+        "LICENSE-APACHE",
+        "licenses.md",
+    }:
+        raise ProofError("release record legal notice digest inventory is incomplete")
+    packaged_icons = record.get("digests", {}).get("packaged_icon_outputs")
+    if not isinstance(packaged_icons, dict) or set(packaged_icons) != {
+        "Contents/Resources/openagents-icon.icns",
+        "Contents/Resources/Document.icns",
+    }:
+        raise ProofError("release record packaged icon digest inventory is incomplete")
+    for label, bindings in (("legal notice", notices), ("packaged icon", packaged_icons)):
+        if not all(
+            isinstance(value, str)
+            and re.fullmatch(r"[0-9a-f]{64}", value) is not None
+            for value in bindings.values()
+        ):
+            raise ProofError(f"release record {label} digest is invalid")
     publication = record.get("publication", {})
     if publication.get("prerelease") is not True or publication.get("latest") is not False:
         raise ProofError("release publication must be prerelease=true and latest=false")
@@ -156,6 +332,21 @@ def validate_release_record(record: dict[str, Any], record_path: Path, artifact:
             or any(character not in "0123456789abcdef" for character in value)
         ):
             raise ProofError(f"omega-effectd release record {key} is not a SHA-256 digest")
+    identity_proof = record.get("components", {}).get("identity_proof_driver", {})
+    expected_identity_proof = {
+        "path": "Contents/MacOS/omega-identity-proof",
+        "protocol": "openagents.omega.identity-proof.v1",
+        "keyring_service": "com.openagents.omega.identity-proof.v1",
+        "keyring_account": "disposable-proof-only",
+    }
+    for key, expected_value in expected_identity_proof.items():
+        if identity_proof.get(key) != expected_value:
+            raise ProofError(f"identity proof driver release record {key} differs from the pin")
+    identity_proof_digest = identity_proof.get("binary_sha256")
+    if not isinstance(identity_proof_digest, str) or re.fullmatch(
+        r"[0-9a-f]{64}", identity_proof_digest
+    ) is None:
+        raise ProofError("identity proof driver release record digest is invalid")
     if record_path.resolve() == artifact.resolve():
         raise ProofError("release record and artifact must be distinct files")
 
@@ -163,8 +354,7 @@ def validate_release_record(record: dict[str, Any], record_path: Path, artifact:
 def validate_identity_evidence_binding(
     evidence: dict[str, Any], record: dict[str, Any], record_path: Path, artifact: Path
 ) -> str:
-    if evidence.get("schema") != "openagents.omega.identity-candidate-evidence.v1":
-        raise ProofError("identity evidence schema is not supported")
+    validate_identity_evidence_schema(evidence)
     digest = evidence.get("candidate_digest", {}).get("value")
     if (
         not isinstance(digest, str)
@@ -187,6 +377,10 @@ def validate_identity_evidence_binding(
         raise ProofError("identity evidence release-record digest does not match")
     if candidate.get("omega", {}).get("commit") != record.get("source", {}).get("commit"):
         raise ProofError("identity evidence and release record bind different source commits")
+    if candidate.get("assurance_spec_admission") != EXPECTED_ASSURANCE_BINDING:
+        raise ProofError(
+            "identity evidence does not bind the admitted AssuranceSpec proposal and receipt"
+        )
     return digest
 
 
@@ -199,8 +393,19 @@ def validate_identity_evidence(
     if evidence.get("attestation_errors") not in ({}, None):
         raise ProofError("identity candidate evidence contains attestation errors")
     gates = evidence.get("gates")
-    if not isinstance(gates, dict) or not gates:
-        raise ProofError("identity evidence has no required gates")
+    if not isinstance(gates, dict) or set(gates) != set(EXPECTED_IDENTITY_GATES):
+        observed = set(gates) if isinstance(gates, dict) else set()
+        missing = sorted(set(EXPECTED_IDENTITY_GATES).difference(observed))
+        unknown = sorted(observed.difference(EXPECTED_IDENTITY_GATES))
+        detail = []
+        if missing:
+            detail.append(f"missing={','.join(missing)}")
+        if unknown:
+            detail.append(f"unknown={','.join(unknown)}")
+        raise ProofError(
+            "identity evidence gate inventory is not exact"
+            + (f": {'; '.join(detail)}" if detail else "")
+        )
     pending = sorted(
         name
         for name, gate in gates.items()
@@ -273,6 +478,56 @@ def validate_manual_evidence(
         )
 
 
+def validate_network_evidence(path: Path, candidate_digest: str) -> None:
+    evidence = load_json(path, "network capture evidence")
+    if evidence.get("schema") != "openagents.omega.network-capture.v1":
+        raise ProofError("network capture evidence schema is not supported")
+    if evidence.get("candidate_digest") != candidate_digest:
+        raise ProofError("network capture evidence binds a different candidate")
+    if evidence.get("status") != "passed" or evidence.get("blocked_reasons") != []:
+        raise ProofError("network capture evidence is blocked")
+    if evidence.get("journey") != "online_first_codex":
+        raise ProofError("network capture did not exercise online first-Codex setup")
+    allowlist = load_json(ENDPOINT_ALLOWLIST, "endpoint allowlist")
+    binding = evidence.get("allowlist", {})
+    if binding.get("sha256") != sha256_file(ENDPOINT_ALLOWLIST):
+        raise ProofError("network capture evidence binds a different endpoint allowlist")
+    if binding.get("enforcement") != allowlist.get("enforcement"):
+        raise ProofError("network capture enforcement mode differs from the allowlist")
+    processes = evidence.get("processes")
+    if not isinstance(processes, list) or not any(
+        isinstance(process, dict) and process.get("command_basename") == "omega"
+        for process in processes
+    ):
+        raise ProofError("network capture has no Omega process ancestry")
+    destinations = evidence.get("destinations")
+    if not isinstance(destinations, list) or not destinations:
+        raise ProofError("network capture has no observed destinations")
+    approved_hosts = {
+        entry.get("host")
+        for entry in allowlist.get("entries", [])
+        if entry.get("disposition") == "approved"
+    }
+    forbidden_hosts = allowlist.get("normal_start_forbidden_hosts", [])
+    for destination in destinations:
+        host = destination.get("host") if isinstance(destination, dict) else None
+        if not isinstance(host, str) or not host:
+            raise ProofError("network capture contains an invalid destination")
+        try:
+            ipaddress.ip_address(host)
+        except ValueError:
+            pass
+        else:
+            raise ProofError("network capture contains an unresolved IP destination")
+        if any(host == item or host.endswith(f".{item}") for item in forbidden_hosts):
+            raise ProofError(f"network capture reached forbidden host: {host}")
+        if not any(host == item or host.endswith(f".{item}") for item in approved_hosts):
+            raise ProofError(f"network capture reached an unreviewed host: {host}")
+    for field in ("forbidden_hosts_detected", "unreviewed_hosts", "unresolved_destinations"):
+        if evidence.get(field) != []:
+            raise ProofError(f"network capture {field} must be empty")
+
+
 def bundle_manifest(app: Path) -> dict[str, str]:
     if not app.is_dir():
         raise ProofError(f"application bundle is missing: {app}")
@@ -305,15 +560,36 @@ def validate_app_metadata(app: Path, record: dict[str, Any]) -> None:
 
 def validate_binary_digests(app: Path, record: dict[str, Any]) -> None:
     digests = record.get("digests", {})
-    paths = {
-        "omega_binary_sha256": app / "Contents/MacOS/omega",
-        "cli_binary_sha256": app / "Contents/MacOS/cli",
-    }
-    for key, path in paths.items():
+    paths = (
+        ("omega_binary_sha256", app / "Contents/MacOS/omega", digests),
+        ("cli_binary_sha256", app / "Contents/MacOS/cli", digests),
+        (
+            "binary_sha256",
+            app / "Contents/MacOS/omega-identity-proof",
+            record.get("components", {}).get("identity_proof_driver", {}),
+        ),
+    )
+    for key, path, bindings in paths:
         if not path.is_file():
             raise ProofError(f"packaged executable is missing: {path}")
-        if digests.get(key) != sha256_file(path):
+        if bindings.get(key) != sha256_file(path):
             raise ProofError(f"{path.name} digest differs from release record")
+
+
+def validate_packaged_legal_and_icons(
+    packaged_app: Path, installed_app: Path, record: dict[str, Any]
+) -> None:
+    for relative, expected_digest in record["legal"]["notices"].items():
+        notice = packaged_app.parent / relative
+        if not notice.is_file() or sha256_file(notice) != expected_digest:
+            raise ProofError(f"packaged legal notice differs from release record: {relative}")
+    for relative, expected_digest in record["digests"]["packaged_icon_outputs"].items():
+        packaged_icon = packaged_app / relative
+        installed_icon = installed_app / relative
+        if not packaged_icon.is_file() or sha256_file(packaged_icon) != expected_digest:
+            raise ProofError(f"packaged icon differs from release record: {relative}")
+        if not installed_icon.is_file() or sha256_file(installed_icon) != expected_digest:
+            raise ProofError(f"installed icon differs from release record: {relative}")
 
 
 def validate_effectd_component(
@@ -587,10 +863,12 @@ def pending_checks() -> dict[str, dict[str, str]]:
         "artifact_release_binding": {"status": "pending"},
         "notarization_and_gatekeeper": {"status": "pending"},
         "packaged_installed_bundle_match": {"status": "pending"},
+        "packaged_legal_and_icon_binding": {"status": "pending"},
         "packaged_effectd_initialize_health": {"status": "pending"},
         "installed_effectd_initialize_health": {"status": "pending"},
         "identity_candidate_admission": {"status": "pending"},
         "manual_evidence_binding": {"status": "pending"},
+        "network_capture_binding": {"status": "pending"},
         "owner_observation": {"status": "pending"},
         "independent_verification": {"status": "pending"},
     }
@@ -644,6 +922,7 @@ def prove(arguments: argparse.Namespace) -> int:
         "installed_app": arguments.app,
         "identity_evidence": arguments.identity_evidence,
         "manual_evidence": arguments.manual_evidence,
+        "network_evidence": arguments.network_evidence,
     }
     checks = pending_checks()
     blockers: list[str] = []
@@ -660,6 +939,8 @@ def prove(arguments: argparse.Namespace) -> int:
                 checks["identity_candidate_admission"] = {"status": "blocked"}
             elif name == "manual_evidence":
                 checks["manual_evidence_binding"] = {"status": "blocked"}
+            elif name == "network_evidence":
+                checks["network_capture_binding"] = {"status": "blocked"}
     core_paths = ("release_record", "artifact", "installed_app")
     if any(
         not (
@@ -706,12 +987,33 @@ def prove(arguments: argparse.Namespace) -> int:
             validate_binary_digests(packaged_app, record)
             validate_app_metadata(arguments.app, record)
             validate_binary_digests(arguments.app, record)
+            verify_signature(
+                packaged_app / "Contents/MacOS/omega-identity-proof",
+                arguments.out,
+                "packaged-identity-proof-driver",
+            )
+            verify_signature(
+                arguments.app / "Contents/MacOS/omega-identity-proof",
+                arguments.out,
+                "installed-identity-proof-driver",
+            )
             if bundle_manifest(packaged_app) != bundle_manifest(arguments.app):
                 raise ProofError("installed Omega.app differs from the signed DMG application tree")
         checks["packaged_installed_bundle_match"] = {"status": "passed"}
     except ProofError as error:
         blockers.append(str(error))
         checks["packaged_installed_bundle_match"] = {"status": "blocked", "reason": str(error)}
+
+    try:
+        with mounted_application(arguments.artifact) as packaged_app:
+            validate_packaged_legal_and_icons(packaged_app, arguments.app, record)
+        checks["packaged_legal_and_icon_binding"] = {"status": "passed"}
+    except ProofError as error:
+        blockers.append(str(error))
+        checks["packaged_legal_and_icon_binding"] = {
+            "status": "blocked",
+            "reason": str(error),
+        }
 
     try:
         with mounted_application(arguments.artifact) as packaged_app:
@@ -778,6 +1080,17 @@ def prove(arguments: argparse.Namespace) -> int:
             blockers.append(str(error))
             checks["manual_evidence_binding"] = {"status": "blocked", "reason": str(error)}
 
+    if arguments.network_evidence.is_file() and candidate_digest:
+        try:
+            validate_network_evidence(arguments.network_evidence, candidate_digest)
+            checks["network_capture_binding"] = {"status": "passed"}
+        except ProofError as error:
+            blockers.append(str(error))
+            checks["network_capture_binding"] = {
+                "status": "blocked",
+                "reason": str(error),
+            }
+
     status = "complete" if not blockers and all(
         check.get("status") == "passed" for check in checks.values()
     ) else "incomplete"
@@ -804,8 +1117,21 @@ def self_test() -> None:
             "team_id": EXPECTED_TEAM_ID,
             "signing_identity": EXPECTED_SIGNER,
             "source": {"commit": "a" * 40, "dirty": False},
-            "digests": {"package_sha256": sha256_file(artifact)},
+            "digests": {
+                "package_sha256": sha256_file(artifact),
+                "packaged_icon_outputs": {
+                    "Contents/Resources/openagents-icon.icns": "a" * 64,
+                    "Contents/Resources/Document.icns": "b" * 64,
+                },
+            },
             "components": {
+                "identity_proof_driver": {
+                    "path": "Contents/MacOS/omega-identity-proof",
+                    "protocol": "openagents.omega.identity-proof.v1",
+                    "keyring_service": "com.openagents.omega.identity-proof.v1",
+                    "keyring_account": "disposable-proof-only",
+                    "binary_sha256": "2" * 64,
+                },
                 "omega_effectd": {
                     "package": "@openagentsinc/omega-effectd",
                     "service_version": "0.1.0",
@@ -824,18 +1150,91 @@ def self_test() -> None:
                 }
             },
             "notarization": {"attempted": True, "stapled": True},
-            "legal": {"commercial_terms_attached": False},
+            "legal": {
+                "commercial_terms_attached": False,
+                "notices": {
+                    "LICENSE-GPL": "c" * 64,
+                    "LICENSE-APACHE": "d" * 64,
+                    "licenses.md": "e" * 64,
+                },
+            },
             "publication": {"prerelease": True, "latest": False},
         }
         record_path.write_text(json.dumps(record), encoding="utf-8")
         validate_release_record(record, record_path, artifact)
 
         candidate = {
-            "omega": {"commit": "a" * 40},
+            "omega": {
+                "repository": "https://github.com/OpenAgentsInc/omega",
+                "commit": "a" * 40,
+                "dirty": False,
+            },
+            "identity_contract": {
+                "version": 1,
+                "source_path": "crates/omega_identity/src/contract.rs",
+                "source_sha256": "3" * 64,
+            },
+            "public_vector": {
+                "version": 1,
+                "path": "crates/omega_identity/fixtures/omega_nostr_identity_v1.json",
+                "sha256": "4" * 64,
+            },
+            "reviewed_source": {
+                "repository": "https://github.com/OpenAgentsInc/buzz",
+                "commit": "b" * 40,
+            },
+            "assurance_spec_admission": EXPECTED_ASSURANCE_BINDING,
+            "packages": [
+                {"name": name, "version": "1.0.0", "cargo_checksum": "5" * 64}
+                for name in ("atomic-write-file", "keyring", "nostr")
+            ],
+            "build_cargo_lock": {
+                "name": "Cargo.lock.omega-v0.2.0-rc1",
+                "sha256": "6" * 64,
+            },
             "artifact": {
                 "name": artifact.name,
+                "version": EXPECTED_VERSION,
                 "sha256": sha256_file(artifact),
                 "release_record_sha256": sha256_file(record_path),
+                "packaged_app": {
+                    "application_name": "Omega",
+                    "bundle_identifier": EXPECTED_BUNDLE_ID,
+                    "bundle_version": "0.2.0",
+                    "bundle_build_version": "20260724",
+                    "omega_binary_sha256": "7" * 64,
+                    "cli_binary_sha256": "8" * 64,
+                    "identity_proof_binary_sha256": "2" * 64,
+                    "source_commit_marker": "a" * 40,
+                    "signing": {
+                        name: {
+                            "verified": True,
+                            "authority": EXPECTED_SIGNER,
+                            "team_id": EXPECTED_TEAM_ID,
+                        }
+                        for name in ("dmg", "application", "identity_proof_driver")
+                    },
+                    "fresh_boundary_scan": {
+                        "status": "passed",
+                        "forbidden_literals": ["BUZZ_PRIVATE_KEY", "identity.key", "get_nsec"],
+                        "matches": {},
+                        "scope": "self-test",
+                    },
+                },
+            },
+            "automated_tripwires": {
+                "verifier_path": "script/verify-omega-identity",
+                "verifier_script_sha256": "9" * 64,
+                "source_verification": "passed",
+                "packaged_boundary_scan": "passed",
+                "packaged_forbidden_literals": ["BUZZ_PRIVATE_KEY", "identity.key", "get_nsec"],
+                "fresh_mounted_app_scan": {
+                    "status": "passed",
+                    "forbidden_literals": ["BUZZ_PRIVATE_KEY", "identity.key", "get_nsec"],
+                    "matches": {},
+                    "scope": "self-test",
+                },
+                "scope": "self-test",
             },
         }
         candidate_digest = hashlib.sha256(
@@ -843,18 +1242,26 @@ def self_test() -> None:
         ).hexdigest()
         identity = {
             "schema": "openagents.omega.identity-candidate-evidence.v1",
+            "schema_version": 1,
             "status": "admitted",
             "candidate_admitted": True,
             "candidate": candidate,
-            "candidate_digest": {"value": candidate_digest},
-            "gates": {
-                "manual_journey": {"status": "passed"},
-                "owner_observation": {"status": "passed", "attestor": "Owner"},
-                "independent_verification": {
-                    "status": "passed",
-                    "attestor": "Reviewer",
-                },
+            "candidate_digest": {
+                "algorithm": "sha256",
+                "canonicalization": "self-test canonical JSON",
+                "value": candidate_digest,
             },
+            "gates": {
+                name: {
+                    "status": "passed",
+                    "attestor": "Reviewer" if name == "independent_verification" else "Owner",
+                    "observed_at": "2026-07-24T12:00:00Z",
+                    "evidence": {f"self-test evidence for {name}": "sha256:" + "2" * 64},
+                    "required_evidence": [f"self-test evidence for {name}"],
+                }
+                for name in EXPECTED_IDENTITY_GATES
+            },
+            "attestation_errors": {},
         }
         observed = validate_identity_evidence(identity, record, record_path, artifact)
         if observed != (candidate_digest, "Owner", "Reviewer"):
@@ -867,6 +1274,82 @@ def self_test() -> None:
         else:
             raise ProofError("self-test accepted a non-admitted identity candidate")
         identity["candidate_admitted"] = True
+
+        truncated = json.loads(json.dumps(identity))
+        truncated["gates"].pop("custody_scenarios")
+        try:
+            validate_identity_evidence(truncated, record, record_path, artifact)
+        except ProofError:
+            pass
+        else:
+            raise ProofError("self-test accepted truncated identity gate evidence")
+
+        unknown = json.loads(json.dumps(identity))
+        unknown["gates"]["unknown_gate"] = unknown["gates"]["manual_journey"]
+        try:
+            validate_identity_evidence(unknown, record, record_path, artifact)
+        except ProofError:
+            pass
+        else:
+            raise ProofError("self-test accepted an unknown identity gate")
+
+        forged = json.loads(json.dumps(identity))
+        forged["candidate"]["assurance_spec_admission"]["admitted_proposal_sha256"] = "0" * 64
+        forged["candidate_digest"]["value"] = hashlib.sha256(
+            json.dumps(
+                forged["candidate"], sort_keys=True, separators=(",", ":")
+            ).encode("utf-8")
+        ).hexdigest()
+        try:
+            validate_identity_evidence(forged, record, record_path, artifact)
+        except ProofError:
+            pass
+        else:
+            raise ProofError("self-test accepted a forged AssuranceSpec binding")
+
+        duplicate_path = root / "duplicate.json"
+        duplicate_path.write_text('{"schema":1,"schema":1}', encoding="utf-8")
+        try:
+            load_json(duplicate_path, "duplicate self-test")
+        except ProofError:
+            pass
+        else:
+            raise ProofError("self-test accepted a duplicate JSON object key")
+
+        network_path = root / "network.json"
+        network = {
+            "schema": "openagents.omega.network-capture.v1",
+            "candidate_digest": candidate_digest,
+            "allowlist": {
+                "sha256": sha256_file(ENDPOINT_ALLOWLIST),
+                "enforcement": "release-proof-evidence-only",
+            },
+            "journey": "online_first_codex",
+            "status": "passed",
+            "blocked_reasons": [],
+            "processes": [{"pid": 1, "ppid": 0, "command_basename": "omega"}],
+            "destinations": [
+                {
+                    "pid": 1,
+                    "host": "registry.npmjs.org",
+                    "port": 443,
+                    "protocol": "tcp",
+                }
+            ],
+            "forbidden_hosts_detected": [],
+            "unreviewed_hosts": [],
+            "unresolved_destinations": [],
+        }
+        network_path.write_text(json.dumps(network), encoding="utf-8")
+        validate_network_evidence(network_path, candidate_digest)
+        network["destinations"][0]["host"] = "api.zed.dev"
+        network_path.write_text(json.dumps(network), encoding="utf-8")
+        try:
+            validate_network_evidence(network_path, candidate_digest)
+        except ProofError:
+            pass
+        else:
+            raise ProofError("self-test accepted a forbidden network destination")
 
         tampered = dict(record)
         tampered["digests"] = {"package_sha256": "0" * 64}
@@ -985,13 +1468,20 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--app", type=Path, default=DEFAULT_APP)
     parser.add_argument("--identity-evidence", type=Path)
     parser.add_argument("--manual-evidence", type=Path)
+    parser.add_argument("--network-evidence", type=Path)
     parser.add_argument("--out", type=Path, default=DEFAULT_OUTPUT)
     arguments = parser.parse_args()
     if arguments.self_test or arguments.harness_check:
         return arguments
     missing = [
         option
-        for option in ("release_record", "artifact", "identity_evidence", "manual_evidence")
+        for option in (
+            "release_record",
+            "artifact",
+            "identity_evidence",
+            "manual_evidence",
+            "network_evidence",
+        )
         if getattr(arguments, option) is None
     ]
     if missing:

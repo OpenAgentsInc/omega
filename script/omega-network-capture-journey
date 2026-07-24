@@ -1,44 +1,332 @@
-#!/usr/bin/env bash
-# Documented network-capture journey for Omega service isolation.
-#
-# This helper records the expected host policy for a clean first-start through
-# shutdown journey. It does not launch Omega; use it together with a packet
-# capture or process-level network monitor against a clean user profile.
-set -euo pipefail
+#!/usr/bin/env python3
+"""Collect and validate candidate-bound Omega process/network evidence."""
 
-root="$(cd "$(dirname "$0")/.." && pwd)"
-allowlist="$root/crates/app_identity/fixtures/endpoint_allowlist.json"
+from __future__ import annotations
 
-if [[ ! -f "$allowlist" ]]; then
-  echo "missing allow-list: $allowlist" >&2
-  exit 1
-fi
-
-echo "Omega network-capture journey"
-echo "Allow-list: $allowlist"
-echo
-echo "Steps:"
-echo "  1. Use a clean user profile and offline or monitored network."
-echo "  2. Launch Omega without OMEGA_ALLOW_ZED_SERVICES."
-echo "  3. Open the empty start / welcome surface."
-echo "  4. Open a local project, edit and save one file, open a terminal."
-echo "  5. While online and monitored, start configured codex-acp once."
-echo "  6. Quit Omega."
-echo
-echo "Pass condition:"
-echo "  No request reaches a host in normal_start_forbidden_hosts."
-echo "  Every other observed host has an approved, unexpired entry below."
-echo "  This file is proof evidence; Omega does not enforce it as a firewall."
-echo
-python3 - <<'PY'
+import argparse
+import hashlib
+import ipaddress
 import json
+import os
+import re
+import subprocess
+import sys
+import time
+from datetime import datetime, timezone
 from pathlib import Path
-allowlist = json.loads(Path("crates/app_identity/fixtures/endpoint_allowlist.json").read_text())
-print("Forbidden hosts for a normal start:")
-for host in allowlist["normal_start_forbidden_hosts"]:
-    print(f"  - {host}")
-print()
-print("Reviewed allow-list entries:")
-for entry in allowlist["entries"]:
-    print(f"  - {entry['host']}: {entry['disposition']} ({entry['purpose']})")
-PY
+from typing import Any
+
+
+ROOT = Path(__file__).resolve().parent.parent
+ALLOWLIST_PATH = ROOT / "crates/app_identity/fixtures/endpoint_allowlist.json"
+SCHEMA = "openagents.omega.network-capture.v1"
+
+
+class CaptureError(RuntimeError):
+    pass
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def load_json(path: Path, description: str) -> dict[str, Any]:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise CaptureError(f"cannot read {description} {path}: {error}") from error
+    if not isinstance(value, dict):
+        raise CaptureError(f"{description} must be a JSON object")
+    return value
+
+
+def validate_digest(value: str) -> str:
+    if re.fullmatch(r"[0-9a-f]{64}", value) is None:
+        raise CaptureError("candidate digest must be 64 lowercase hexadecimal characters")
+    return value
+
+
+def run(command: list[str]) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(command, capture_output=True, text=True, check=False)
+
+
+def process_table() -> dict[int, tuple[int, str]]:
+    result = run(["ps", "-axo", "pid=,ppid=,comm="])
+    if result.returncode != 0:
+        raise CaptureError("cannot inspect the process table")
+    processes: dict[int, tuple[int, str]] = {}
+    for line in result.stdout.splitlines():
+        fields = line.strip().split(maxsplit=2)
+        if len(fields) != 3:
+            continue
+        try:
+            process_id = int(fields[0])
+            parent_id = int(fields[1])
+        except ValueError:
+            continue
+        processes[process_id] = (parent_id, Path(fields[2]).name)
+    return processes
+
+
+def descendants(root_pid: int, table: dict[int, tuple[int, str]]) -> set[int]:
+    selected = {root_pid}
+    changed = True
+    while changed:
+        changed = False
+        for process_id, (parent_id, _command) in table.items():
+            if parent_id in selected and process_id not in selected:
+                selected.add(process_id)
+                changed = True
+    return selected
+
+
+def parse_remote_endpoint(value: str) -> tuple[str, int] | None:
+    if "->" not in value:
+        return None
+    remote = value.split("->", 1)[1].split(" (", 1)[0]
+    host, separator, port_text = remote.rpartition(":")
+    if not separator or not port_text.isdigit():
+        return None
+    host = host.strip("[]").rstrip(".").lower()
+    if not host:
+        return None
+    return host, int(port_text)
+
+
+def collect_connections(process_id: int) -> tuple[list[tuple[str, int, str]], str | None]:
+    result = run(
+        ["/usr/sbin/lsof", "-a", "-p", str(process_id), "-i", "-P", "-F", "pPnT"]
+    )
+    if result.returncode not in (0, 1):
+        return [], f"lsof_exit_{result.returncode}"
+    protocol = "unknown"
+    connections: list[tuple[str, int, str]] = []
+    for line in result.stdout.splitlines():
+        if line.startswith("P"):
+            protocol = line[1:].lower()
+        elif line.startswith("n"):
+            endpoint = parse_remote_endpoint(line[1:])
+            if endpoint is not None:
+                connections.append((endpoint[0], endpoint[1], protocol))
+    return connections, None
+
+
+def host_matches(host: str, expected: str) -> bool:
+    return host == expected or host.endswith(f".{expected}")
+
+
+def classify_hosts(
+    destinations: list[dict[str, Any]], allowlist: dict[str, Any]
+) -> tuple[list[str], list[str], list[str]]:
+    forbidden_hosts = allowlist.get("normal_start_forbidden_hosts", [])
+    approved_hosts = {
+        entry.get("host")
+        for entry in allowlist.get("entries", [])
+        if entry.get("disposition") == "approved"
+    }
+    forbidden: set[str] = set()
+    unreviewed: set[str] = set()
+    unresolved: set[str] = set()
+    for destination in destinations:
+        host = destination["host"]
+        try:
+            ipaddress.ip_address(host)
+        except ValueError:
+            pass
+        else:
+            unresolved.add(host)
+            continue
+        if any(host_matches(host, expected) for expected in forbidden_hosts):
+            forbidden.add(host)
+        elif not any(host_matches(host, expected) for expected in approved_hosts):
+            unreviewed.add(host)
+    return sorted(forbidden), sorted(unreviewed), sorted(unresolved)
+
+
+def collect(arguments: argparse.Namespace) -> int:
+    candidate_digest = validate_digest(arguments.candidate_digest)
+    allowlist = load_json(ALLOWLIST_PATH, "endpoint allowlist")
+    started_at = datetime.now(timezone.utc)
+    deadline = time.monotonic() + arguments.duration
+    observed_processes: dict[int, dict[str, Any]] = {}
+    observed_destinations: dict[tuple[int, str, int, str], dict[str, Any]] = {}
+    errors: set[str] = set()
+
+    while True:
+        table = process_table()
+        if arguments.pid not in table:
+            errors.add("root_process_not_running")
+        for process_id in descendants(arguments.pid, table):
+            process = table.get(process_id)
+            if process is None:
+                continue
+            parent_id, command = process
+            observed_processes[process_id] = {
+                "pid": process_id,
+                "ppid": parent_id,
+                "command_basename": command,
+            }
+            connections, error = collect_connections(process_id)
+            if error is not None:
+                errors.add(error)
+            for host, port, protocol in connections:
+                key = (process_id, host, port, protocol)
+                observed_destinations[key] = {
+                    "pid": process_id,
+                    "host": host,
+                    "port": port,
+                    "protocol": protocol,
+                }
+        if time.monotonic() >= deadline:
+            break
+        time.sleep(min(arguments.interval, max(0.0, deadline - time.monotonic())))
+
+    processes = sorted(observed_processes.values(), key=lambda item: item["pid"])
+    destinations = sorted(
+        observed_destinations.values(),
+        key=lambda item: (item["host"], item["port"], item["pid"]),
+    )
+    forbidden, unreviewed, unresolved = classify_hosts(destinations, allowlist)
+    blocked_reasons = sorted(errors)
+    if not processes:
+        blocked_reasons.append("no_candidate_process_ancestry_captured")
+    if arguments.journey == "online_first_codex" and not destinations:
+        blocked_reasons.append("no_online_destination_captured")
+    if forbidden:
+        blocked_reasons.append("forbidden_host_observed")
+    if unreviewed:
+        blocked_reasons.append("unreviewed_host_observed")
+    if unresolved:
+        blocked_reasons.append("destination_hostname_unresolved")
+    blocked_reasons = sorted(set(blocked_reasons))
+    report = {
+        "schema": SCHEMA,
+        "candidate_digest": candidate_digest,
+        "allowlist": {
+            "path": "crates/app_identity/fixtures/endpoint_allowlist.json",
+            "sha256": sha256_file(ALLOWLIST_PATH),
+            "enforcement": allowlist.get("enforcement"),
+        },
+        "journey": arguments.journey,
+        "started_at": started_at.isoformat(),
+        "completed_at": datetime.now(timezone.utc).isoformat(),
+        "root_pid": arguments.pid,
+        "collector": {
+            "duration_seconds": arguments.duration,
+            "interval_seconds": arguments.interval,
+            "process_source": "ps",
+            "destination_source": "lsof_with_reverse_dns",
+            "packet_payload_recorded": False,
+        },
+        "status": "passed" if not blocked_reasons else "blocked",
+        "blocked_reasons": blocked_reasons,
+        "processes": processes,
+        "destinations": destinations,
+        "forbidden_hosts_detected": forbidden,
+        "unreviewed_hosts": unreviewed,
+        "unresolved_destinations": unresolved,
+    }
+    arguments.output.parent.mkdir(parents=True, exist_ok=True)
+    with arguments.output.open("x", encoding="utf-8") as handle:
+        json.dump(report, handle, indent=2, sort_keys=True)
+        handle.write("\n")
+    print(f"wrote network capture: {arguments.output} ({report['status']})")
+    return 0 if report["status"] == "passed" else 3
+
+
+def validate_report(path: Path, candidate_digest: str) -> dict[str, Any]:
+    report = load_json(path, "network capture")
+    if report.get("schema") != SCHEMA:
+        raise CaptureError("network capture schema is not supported")
+    if report.get("candidate_digest") != validate_digest(candidate_digest):
+        raise CaptureError("network capture binds a different candidate")
+    allowlist = load_json(ALLOWLIST_PATH, "endpoint allowlist")
+    binding = report.get("allowlist", {})
+    if binding.get("sha256") != sha256_file(ALLOWLIST_PATH):
+        raise CaptureError("network capture binds a different endpoint allowlist")
+    if binding.get("enforcement") != allowlist.get("enforcement"):
+        raise CaptureError("network capture allowlist enforcement mode differs")
+    if report.get("journey") != "online_first_codex":
+        raise CaptureError("installed proof requires the online first-Codex journey")
+    if report.get("status") != "passed" or report.get("blocked_reasons") != []:
+        raise CaptureError("network capture is blocked")
+    if not isinstance(report.get("processes"), list) or not report["processes"]:
+        raise CaptureError("network capture has no process ancestry")
+    if not isinstance(report.get("destinations"), list) or not report["destinations"]:
+        raise CaptureError("network capture has no observed destinations")
+    for field in ("forbidden_hosts_detected", "unreviewed_hosts", "unresolved_destinations"):
+        if report.get(field) != []:
+            raise CaptureError(f"network capture {field} is not empty")
+    return report
+
+
+def validate_command(arguments: argparse.Namespace) -> int:
+    validate_report(arguments.input, arguments.candidate_digest)
+    print(f"network capture valid: {arguments.input}")
+    return 0
+
+
+def self_test(_arguments: argparse.Namespace) -> int:
+    allowlist = load_json(ALLOWLIST_PATH, "endpoint allowlist")
+    destinations = [
+        {"host": "registry.npmjs.org"},
+        {"host": "api.zed.dev"},
+        {"host": "203.0.113.1"},
+        {"host": "unexpected.example"},
+    ]
+    forbidden, unreviewed, unresolved = classify_hosts(destinations, allowlist)
+    if forbidden != ["api.zed.dev"]:
+        raise CaptureError("self-test did not identify the forbidden Zed host")
+    if unreviewed != ["unexpected.example"]:
+        raise CaptureError("self-test did not identify the unreviewed host")
+    if unresolved != ["203.0.113.1"]:
+        raise CaptureError("self-test did not block an unresolved IP destination")
+    if parse_remote_endpoint("localhost:123->registry.npmjs.org:443 (ESTABLISHED)") != (
+        "registry.npmjs.org",
+        443,
+    ):
+        raise CaptureError("self-test endpoint parsing failed")
+    print("Omega network capture self-test passed")
+    return 0
+
+
+def parse_arguments() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    subparsers = parser.add_subparsers(dest="command", required=True)
+    capture = subparsers.add_parser("capture")
+    capture.add_argument("--candidate-digest", required=True)
+    capture.add_argument("--pid", type=int, required=True)
+    capture.add_argument(
+        "--journey", choices=("offline_first_start", "online_first_codex"), required=True
+    )
+    capture.add_argument("--duration", type=float, default=30.0)
+    capture.add_argument("--interval", type=float, default=0.5)
+    capture.add_argument("--output", type=Path, required=True)
+    capture.set_defaults(handler=collect)
+    validate = subparsers.add_parser("validate")
+    validate.add_argument("--candidate-digest", required=True)
+    validate.add_argument("--input", type=Path, required=True)
+    validate.set_defaults(handler=validate_command)
+    self_test_parser = subparsers.add_parser("self-test")
+    self_test_parser.set_defaults(handler=self_test)
+    return parser.parse_args()
+
+
+def main() -> int:
+    arguments = parse_arguments()
+    if getattr(arguments, "duration", 1) <= 0 or getattr(arguments, "interval", 1) <= 0:
+        print("error: duration and interval must be positive", file=sys.stderr)
+        return 2
+    try:
+        return arguments.handler(arguments)
+    except CaptureError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
