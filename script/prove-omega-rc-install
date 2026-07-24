@@ -26,9 +26,9 @@ EXPECTED_VERSION = "0.2.0-rc1"
 EXPECTED_BUNDLE_ID = "com.openagents.omega.rc"
 EXPECTED_TEAM_ID = "HQWSG26L43"
 EXPECTED_SIGNER = "Developer ID Application: OpenAgents, Inc. (HQWSG26L43)"
-EXPECTED_EFFECTD_ARCHIVE_SHA256 = "242da72ae741e27524c5782f5b6a38eb6869ed43fbfcb7ba05fe14fb04b737d6"
-EXPECTED_EFFECTD_SOURCE_COMMIT = "db6412190b3de5712d2a0957644af5c76679f697"
-EXPECTED_EFFECTD_SOURCE_TREE = "5958316faa32e327580e30ef7006002cfcae2471"
+EXPECTED_EFFECTD_ARCHIVE_SHA256 = "a1d7662cb1e45a9a22bb71a742189babb55fcfbd5ca687204123d85824bbcb1b"
+EXPECTED_EFFECTD_SOURCE_COMMIT = "5307ec18f9717c8060ff49239ff368150bee40ed"
+EXPECTED_EFFECTD_SOURCE_TREE = "e5314142d2b0da57f3da0085854eeb2bef97c05e"
 MANUAL_CHECKS = (
     "clean_profile_side_by_side_zed",
     "offline_identity_first_start",
@@ -132,7 +132,7 @@ def validate_release_record(record: dict[str, Any], record_path: Path, artifact:
         "service_version": "0.1.0",
         "protocol": "openagents.omega.effectd.v1",
         "platform": "darwin-arm64",
-        "release_tag": "omega-effectd-v0.1.0-rc.4",
+        "release_tag": "omega-effectd-v0.1.0-rc.5",
         "asset_name": "omega-effectd-v0.1.0-macos-arm64.tar.gz",
         "archive_sha256": EXPECTED_EFFECTD_ARCHIVE_SHA256,
         "source_commit": EXPECTED_EFFECTD_SOURCE_COMMIT,
@@ -810,7 +810,7 @@ def self_test() -> None:
                     "service_version": "0.1.0",
                     "protocol": "openagents.omega.effectd.v1",
                     "platform": "darwin-arm64",
-                    "release_tag": "omega-effectd-v0.1.0-rc.4",
+                    "release_tag": "omega-effectd-v0.1.0-rc.5",
                     "asset_name": "omega-effectd-v0.1.0-macos-arm64.tar.gz",
                     "archive_sha256": EXPECTED_EFFECTD_ARCHIVE_SHA256,
                     "source_commit": EXPECTED_EFFECTD_SOURCE_COMMIT,

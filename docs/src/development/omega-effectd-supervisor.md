@@ -21,10 +21,11 @@ GPUI is not run authority.
 | Pack SHA-256 | `4cc1cb2e5d71ff8af6f730248871ee779488a991f21a848880e885331ef31831` |
 | Protocol | `openagents.omega.effectd.v1` |
 | Omega crate | `crates/omega_effectd` |
-| Runtime release | `omega-effectd-v0.1.0-rc.4` |
-| macOS arm64 archive SHA-256 | `242da72ae741e27524c5782f5b6a38eb6869ed43fbfcb7ba05fe14fb04b737d6` |
-| Runtime source commit | `db6412190b3de5712d2a0957644af5c76679f697` |
-| Runtime source tree | `5958316faa32e327580e30ef7006002cfcae2471` |
+| Runtime release | `omega-effectd-v0.1.0-rc.5` |
+| macOS arm64 archive SHA-256 | `a1d7662cb1e45a9a22bb71a742189babb55fcfbd5ca687204123d85824bbcb1b` |
+| Runtime manifest asset SHA-256 | `c6f89764b21c6299eadd57c8353675505535cf8f09059cd022961f9054426b10` |
+| Runtime source commit | `5307ec18f9717c8060ff49239ff368150bee40ed` |
+| Runtime source tree | `e5314142d2b0da57f3da0085854eeb2bef97c05e` |
 
 ## Supervisor laws
 
