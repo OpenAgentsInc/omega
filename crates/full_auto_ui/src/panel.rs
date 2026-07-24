@@ -878,6 +878,6 @@ impl Panel for FullAutoPanel {
     }
 
     fn activation_priority(&self) -> u32 {
-        6
+        8
     }
 }

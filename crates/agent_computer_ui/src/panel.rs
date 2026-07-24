@@ -256,7 +256,7 @@ impl Panel for AgentComputerPanel {
     }
 
     fn activation_priority(&self) -> u32 {
-        7
+        9
     }
 }
 
