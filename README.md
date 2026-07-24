@@ -21,8 +21,10 @@ Omega is an IDE and a workroom for human and agent teams.
   losing their configuration.
 - Native workroom panes connect conversations and decisions to the editor,
   terminal, Git, reviews, tasks, and remote environments.
-- Nostr provides an optional signed interoperability layer for identity,
-  social context, discovery, and ecosystem-wide coordination.
+- Nostr is Omega's portable signed-coordination substrate for people and
+  agents: identity, discovery, social context, approvals, delegated actions,
+  project and run receipts, and ecosystem-wide coordination. Network
+  publication remains explicit and optional.
 - Local-first and self-hosted operation remain first-class deployment choices.
 
 The goal is not to add a chat panel to an editor. The goal is one place where a
