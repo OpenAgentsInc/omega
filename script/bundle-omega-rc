@@ -513,11 +513,24 @@ write_release_record() {
     package_digest="null"
   fi
 
-  local commit upstream_commit rustc_version host_triple cargo_lock_digest icon_json
+  local commit upstream_commit upstream_remote rustc_version host_triple cargo_lock_digest icon_json
   commit="$(git rev-parse HEAD)"
-  upstream_commit="$(git rev-parse upstream/main 2>/dev/null || true)"
+  # The upstream Zed remote is named `zed`. `upstream` is the retired name and
+  # is accepted only until every checkout has been renamed. This value is
+  # release provenance, so an absent remote must fail loudly rather than
+  # silently record a null upstream commit.
+  for upstream_remote in zed upstream; do
+    upstream_commit="$(git rev-parse "${upstream_remote}/main" 2>/dev/null || true)"
+    if [[ -z "${upstream_commit}" ]]; then
+      upstream_commit="$(git merge-base HEAD "${upstream_remote}/main" 2>/dev/null || true)"
+    fi
+    [[ -n "${upstream_commit}" ]] && break
+  done
   if [[ -z "${upstream_commit}" ]]; then
-    upstream_commit="$(git merge-base HEAD upstream/main 2>/dev/null || true)"
+    echo "error: no upstream Zed remote found (tried zed/main and upstream/main)." >&2
+    echo "       add it with: git remote add zed https://github.com/zed-industries/zed.git" >&2
+    echo "       then: git remote set-url --push zed DISABLED && git fetch zed main" >&2
+    exit 1
   fi
   rustc_version="$(rustc --version)"
   host_triple="$(rustc -vV | awk '/^host:/{print $2}')"
