@@ -117,6 +117,17 @@ result remains `relaunch-required` or `reset-failed` and the marker is preserved
 for a later process to acknowledge. This process-level inspection must not be
 called from individual onboarding view constructors.
 
+Ready-state onboarding UI exposes Protect, not Reset. Use the operator CLI for
+an authorized wipe of channel custody:
+
+```sh
+cargo run -p omega_identity --bin omega-identity -- --channel rc status
+cargo run -p omega_identity --bin omega-identity -- --channel rc wipe --yes
+```
+
+`status`, `reset --yes`, `resume`, `acknowledge`, and `wipe --yes` cover the
+typed marker-first path. Pass `--data-root` only when targeting a non-standard
+channel data directory.
 ### Encrypted recovery artifacts
 
 Version 1 recovery artifacts are standard NIP-49 `ncryptsec` tokens produced by
