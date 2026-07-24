@@ -10,7 +10,7 @@ Developers and human-agent teams who need to understand, delegate, review, appro
 
 ## Product Purpose
 
-Omega is the primary OpenAgents desktop client: an IDE and durable workroom connecting people, agents, conversations, code, reviews, decisions, approvals, and execution. Nostr is a native signed-coordination substrate—not merely an onboarding identity or wallet feature—so identities, delegations, approvals, project activity, and run evidence can remain portable and independently verifiable. Success means identity and authority are explicit, work remains attached to durable evidence, and existing agents can join without losing their own configuration or authentication boundaries.
+Omega is the primary OpenAgents desktop client: an IDE and durable workroom connecting people, agents, conversations, code, reviews, decisions, approvals, and execution. Success means identity and authority are explicit, work remains attached to durable evidence, and existing agents can join without losing their own configuration or authentication boundaries.
 
 ## Brand Personality
 
@@ -27,7 +27,6 @@ Sovereign, capable, and direct. Omega should feel like a trustworthy native tool
 ## Design Principles
 
 - Establish portable identity before asking the user to configure the editor.
-- Treat Buzz's custody patterns as a safety baseline, then integrate Nostr more deeply across people, agents, projects, signed actions, approvals, and durable receipts.
 - Preserve familiar editor controls and the selected Zed theme structure while Omega-specific surfaces mature.
 - Keep authority boundaries explicit: external agents own their runtime, authentication, billing, and configuration.
 - Prefer real setup actions over tutorials; onboarding should create durable state users immediately keep using.

@@ -294,22 +294,6 @@ command, durable use of ephemeral recovery keys, or Spark/wallet profile
 fields. `atomic-write-file` is restricted to public manifests and completion
 records, transaction/reset journals, and recovery-protection records.
 
-## Nostr integration direction
-
-Buzz is the reviewed custody and recovery baseline, not Omega's product ceiling.
-Omega treats Nostr as a native signed-coordination substrate across the
-workroom. The identity created here is intended to support portable identities
-for people and agents, explicit delegation and revocation, signed approvals and
-actions, verifiable project and Full Auto receipts, discovery and social
-context, and optional remote or self-hosted signing.
-
-Those integrations must preserve the boundary established by onboarding:
-private keys stay behind an isolated signer, network publication is explicit,
-wallet authority remains separate, and public project or agent events never
-silently widen signing authority. New event kinds, relay policies, delegation
-schemes, and remote-signing transports require their own versioned contracts
-and evidence before they can consume this identity.
-
 ## Application icon family
 
 Package icons are derived from the pinned OpenAgents Desktop icon under
