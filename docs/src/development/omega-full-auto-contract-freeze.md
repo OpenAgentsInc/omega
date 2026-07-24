@@ -38,14 +38,14 @@ A GPUI view, ACP panel, or ordinary chat path becomes Full Auto run authority.
 
 ## Next packets
 
-1. [#20](https://github.com/OpenAgentsInc/omega/issues/20) extract
-   `omega-effectd`
-2. [#21](https://github.com/OpenAgentsInc/omega/issues/21) Rust supervisor
-3. [#22](https://github.com/OpenAgentsInc/omega/issues/22) GPUI launcher
-4. [#23](https://github.com/OpenAgentsInc/omega/issues/23) routing and
+1. [#21](https://github.com/OpenAgentsInc/omega/issues/21) Rust supervisor
+   (FA-01 extract pinned in
+   [omega-effectd-full-auto-extract.md](./omega-effectd-full-auto-extract.md))
+2. [#22](https://github.com/OpenAgentsInc/omega/issues/22) GPUI launcher
+3. [#23](https://github.com/OpenAgentsInc/omega/issues/23) routing and
    liveness
-5. [#24](https://github.com/OpenAgentsInc/omega/issues/24) reports, Sync,
+4. [#24](https://github.com/OpenAgentsInc/omega/issues/24) reports, Sync,
    mobile
-6. [#25](https://github.com/OpenAgentsInc/omega/issues/25) native project
+5. [#25](https://github.com/OpenAgentsInc/omega/issues/25) native project
    join
-7. [#26](https://github.com/OpenAgentsInc/omega/issues/26) proof
+6. [#26](https://github.com/OpenAgentsInc/omega/issues/26) proof
