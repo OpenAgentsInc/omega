@@ -163,6 +163,41 @@ observations or attestations. Test its refusal logic with:
 script/generate-omega-full-auto-candidate-evidence --self-test
 ```
 
+### Disposable installed identity proof matrix
+
+After installing the exact signed candidate, exercise its packaged
+`omega-identity-proof` driver without launching Omega:
+
+```sh
+script/run-omega-identity-proof-matrix \
+  --release-record "$PWD/target/omega-rc/omega-v0.2.0-rc2-macos-arm64.release.json" \
+  --artifact "$PWD/target/omega-rc/Omega-v0.2.0-rc2-macos-arm64.dmg" \
+  --candidate-evidence "$PWD/target/omega-identity-evidence/candidate-evidence.json" \
+  --output "$PWD/target/omega-identity-proof/matrix-evidence.json"
+```
+
+The runner accepts only `/Applications/Omega.app` and the packaged driver
+whose digest is jointly bound by the release record and candidate evidence. It
+also requires the installed driver to pass strict code-signature verification.
+Its temporary roots are internally created with the proof-only prefix, and the
+driver itself fixes the Keychain locator to
+`com.openagents.omega.identity-proof.v1` / `disposable-proof-only`.
+
+The matrix covers creation and read-back, process restart, signing,
+same-receipt double creation, distinct-receipt rejection, concurrent creation
+and process start, forged and stale requests, reset and relaunch, and every
+exposed crash checkpoint. It resets the disposable entry between cases and
+fails if final cleanup cannot be proved. Evidence contains candidate and
+component digests, case states, and hashes of public driver outcomes; it does
+not retain identities, secrets, command output, temporary paths, or error
+details from the driver.
+
+Run the deterministic harness checks without touching Keychain:
+
+```sh
+script/run-omega-identity-proof-matrix --self-test
+```
+
 Before packaging, run the static supply-chain and secret-boundary gate:
 
 ```sh

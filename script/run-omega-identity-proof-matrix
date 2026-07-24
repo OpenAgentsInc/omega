@@ -1,0 +1,653 @@
+#!/usr/bin/env python3
+
+from __future__ import annotations
+
+import argparse
+import concurrent.futures
+import hashlib
+import json
+import plistlib
+import re
+import subprocess
+import sys
+import tempfile
+import threading
+from pathlib import Path
+from typing import Any
+
+
+SCHEMA = "openagents.omega.identity-proof-matrix.v1"
+PROTOCOL = "openagents.omega.identity-proof.v1"
+SERVICE = "com.openagents.omega.identity-proof.v1"
+ACCOUNT = "disposable-proof-only"
+BUNDLE_IDENTIFIER = "com.openagents.omega"
+SHA256 = re.compile(r"^[0-9a-f]{64}$")
+
+
+class ProofError(Exception):
+    pass
+
+
+def digest_bytes(value: bytes) -> str:
+    return hashlib.sha256(value).hexdigest()
+
+
+def digest_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def canonical_digest(value: Any) -> str:
+    return digest_bytes(
+        json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
+    )
+
+
+def load_object(path: Path, label: str) -> dict[str, Any]:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise ProofError(f"{label}_invalid") from error
+    if not isinstance(value, dict):
+        raise ProofError(f"{label}_invalid")
+    return value
+
+
+def require_digest(value: Any, label: str) -> str:
+    if not isinstance(value, str) or SHA256.fullmatch(value) is None:
+        raise ProofError(f"{label}_invalid")
+    return value
+
+
+def require_object(value: Any, label: str) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise ProofError(f"{label}_invalid")
+    return value
+
+
+def validate_candidate(
+    app: Path, release_path: Path, artifact: Path, evidence_path: Path
+) -> tuple[Path, dict[str, str]]:
+    if sys.platform != "darwin":
+        raise ProofError("macos_required")
+    if app != Path("/Applications/Omega.app") or app.is_symlink() or not app.is_dir():
+        raise ProofError("installed_app_not_exact")
+    for path, label in (
+        (release_path, "release_record"),
+        (artifact, "artifact"),
+        (evidence_path, "candidate_evidence"),
+    ):
+        if not path.is_absolute() or path.is_symlink() or not path.is_file():
+            raise ProofError(f"{label}_not_regular")
+
+    release = load_object(release_path, "release_record")
+    evidence = load_object(evidence_path, "candidate_evidence")
+    if evidence.get("schema") != "openagents.omega.identity-candidate-evidence.v1":
+        raise ProofError("candidate_evidence_schema_invalid")
+    candidate = evidence.get("candidate")
+    if not isinstance(candidate, dict):
+        raise ProofError("candidate_missing")
+    candidate_digest = require_digest(
+        require_object(evidence.get("candidate_digest"), "candidate_digest").get("value"),
+        "candidate_digest",
+    )
+    if canonical_digest(candidate) != candidate_digest:
+        raise ProofError("candidate_digest_mismatch")
+
+    release_digest = digest_file(release_path)
+    artifact_digest = digest_file(artifact)
+    release_artifact_digest = require_digest(
+        require_object(release.get("digests"), "release_digests").get("package_sha256"),
+        "package_digest",
+    )
+    if release_artifact_digest != artifact_digest:
+        raise ProofError("artifact_digest_mismatch")
+    candidate_artifact = require_object(candidate.get("artifact"), "candidate_artifact")
+    if (
+        candidate_artifact.get("sha256") != artifact_digest
+        or candidate_artifact.get("release_record_sha256") != release_digest
+        or candidate_artifact.get("name") != release.get("artifact_name")
+        or artifact.name != release.get("artifact_name")
+    ):
+        raise ProofError("candidate_artifact_binding_mismatch")
+
+    info_path = app / "Contents/Info.plist"
+    driver = app / "Contents/MacOS/omega-identity-proof"
+    if driver.is_symlink() or not driver.is_file() or info_path.is_symlink():
+        raise ProofError("installed_driver_not_regular")
+    try:
+        info = plistlib.loads(info_path.read_bytes())
+    except (OSError, plistlib.InvalidFileException) as error:
+        raise ProofError("installed_info_invalid") from error
+    if info.get("CFBundleIdentifier") != BUNDLE_IDENTIFIER:
+        raise ProofError("installed_bundle_identifier_invalid")
+
+    components = require_object(release.get("components"), "release_components")
+    component = require_object(
+        components.get("identity_proof_driver"), "identity_proof_component"
+    )
+    expected_driver_digest = require_digest(
+        component.get("binary_sha256"), "identity_proof_binary_digest"
+    )
+    if component != {
+        "path": "Contents/MacOS/omega-identity-proof",
+        "binary_sha256": expected_driver_digest,
+        "protocol": PROTOCOL,
+        "keyring_service": SERVICE,
+        "keyring_account": ACCOUNT,
+    }:
+        raise ProofError("identity_proof_component_invalid")
+    driver_digest = digest_file(driver)
+    packaged = require_object(
+        candidate_artifact.get("packaged_app"), "candidate_packaged_app"
+    )
+    if (
+        driver_digest != expected_driver_digest
+        or packaged.get("identity_proof_binary_sha256") != driver_digest
+    ):
+        raise ProofError("installed_driver_digest_mismatch")
+    signature = subprocess.run(
+        ["codesign", "--verify", "--strict", "--verbose=2", str(driver)],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    if signature.returncode != 0:
+        raise ProofError("installed_driver_signature_invalid")
+    return driver, {
+        "candidate_digest": candidate_digest,
+        "artifact_sha256": artifact_digest,
+        "release_record_sha256": release_digest,
+        "identity_proof_binary_sha256": driver_digest,
+    }
+
+
+class Driver:
+    def __init__(self, binary: Path):
+        self.binary = binary
+
+    def invoke(
+        self, root: Path, command: list[str], expected_crash: bool = False
+    ) -> dict[str, Any]:
+        process = subprocess.run(
+            [str(self.binary), "--root", str(root), *command],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if expected_crash:
+            if process.returncode not in (-9, 137):
+                raise ProofError("expected_crash_not_observed")
+            return {"crash": "observed"}
+        if process.returncode != 0:
+            raise ProofError("driver_command_rejected")
+        try:
+            outcome = json.loads(process.stdout)
+        except json.JSONDecodeError as error:
+            raise ProofError("driver_output_invalid") from error
+        if not isinstance(outcome, dict) or outcome.get("protocol") != PROTOCOL:
+            raise ProofError("driver_protocol_invalid")
+        return outcome
+
+    def rejected(self, root: Path, command: list[str]) -> str:
+        process = subprocess.run(
+            [str(self.binary), "--root", str(root), *command],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if process.returncode == 0:
+            raise ProofError("expected_rejection_not_observed")
+        return "rejected"
+
+
+class FakeDriver:
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.states: dict[str, dict[str, Any]] = {}
+        self.keychain_access = False
+
+    def invoke(
+        self, root: Path, command: list[str], expected_crash: bool = False
+    ) -> dict[str, Any]:
+        with self.lock:
+            key = str(root)
+            name = command[0]
+            if name == "initialize":
+                self.states[key] = {"state": "absent", "identity": None, "receipt": None}
+                return self.outcome(
+                    "initialized",
+                    {
+                        "root": key,
+                        "keyring_service": SERVICE,
+                        "keyring_account": ACCOUNT,
+                    },
+                )
+            state = self.states[key]
+            if name == "safety":
+                return self.outcome(
+                    "safety-checked", {"production_locator_access": "rejected-by-construction"}
+                )
+            if name == "create":
+                receipt = command[command.index("--receipt") + 1]
+                if state["identity"] is None:
+                    state.update(
+                        state="ready",
+                        identity=f"omega-nostr-self-test-{len(self.states):02d}",
+                        receipt=receipt,
+                    )
+                elif state["receipt"] != receipt:
+                    raise ProofError("fake_distinct_create")
+                if expected_crash:
+                    return {"crash": "observed"}
+                return self.custody("create-complete", state)
+            if name == "resume-create":
+                return self.custody("create-resumed", state)
+            if name in ("inspect", "process-start"):
+                return self.custody("inspection" if name == "inspect" else "process-start", state)
+            if name == "sign":
+                return self.outcome("signed", {"event_id": "d" * 64, "signature": "e" * 128})
+            if name == "probe-forged":
+                return self.outcome("forged-request-rejected", {"typed_error": "rejected"})
+            if name == "probe-stale":
+                return self.outcome("stale-request-rejected", {"typed_error": "rejected"})
+            if name == "reset":
+                state["reset_pending"] = True
+                if expected_crash:
+                    return {"crash": "observed"}
+                return self.custody("reset-marked", state, displayed_state="reset-pending")
+            if name == "resume-reset":
+                state.update(state="absent", identity=None, receipt=None, reset_pending=False)
+                if expected_crash:
+                    return {"crash": "observed"}
+                return self.custody("reset-resumed", state)
+            raise ProofError("fake_command_unknown")
+
+    def rejected(self, root: Path, command: list[str]) -> str:
+        with self.lock:
+            state = self.states[str(root)]
+            if command[0] == "create":
+                receipt = command[command.index("--receipt") + 1]
+                if state["receipt"] != receipt:
+                    return "rejected"
+            raise ProofError("fake_expected_rejection_missing")
+
+    @staticmethod
+    def outcome(name: str, facts: Any) -> dict[str, Any]:
+        return {"protocol": PROTOCOL, "outcome": name, "facts": facts}
+
+    def custody(
+        self, name: str, state: dict[str, Any], displayed_state: str | None = None
+    ) -> dict[str, Any]:
+        identity = state["identity"]
+        facts = {
+            "state": displayed_state or state["state"],
+            "identity": None if identity is None else {"identity_ref": identity},
+        }
+        return self.outcome(name, facts)
+
+
+def find_identity(value: Any) -> str:
+    if isinstance(value, dict):
+        direct = value.get("identity_ref")
+        if isinstance(direct, str) and direct:
+            return direct
+        for child in value.values():
+            try:
+                return find_identity(child)
+            except ProofError:
+                pass
+    elif isinstance(value, list):
+        for child in value:
+            try:
+                return find_identity(child)
+            except ProofError:
+                pass
+    raise ProofError("public_identity_missing")
+
+
+def find_state(value: Any) -> str:
+    if isinstance(value, dict):
+        direct = value.get("state")
+        if isinstance(direct, str):
+            return direct
+        for child in value.values():
+            try:
+                return find_state(child)
+            except ProofError:
+                pass
+    elif isinstance(value, list):
+        for child in value:
+            try:
+                return find_state(child)
+            except ProofError:
+                pass
+    raise ProofError("custody_state_missing")
+
+
+class Matrix:
+    def __init__(self, driver: Driver, base: Path):
+        self.driver = driver
+        self.base = base
+        self.counter = 0
+        self.roots: list[Path] = []
+        self.active: tuple[Path, str] | None = None
+        self.results: list[dict[str, str]] = []
+
+    def root(self) -> Path:
+        self.counter += 1
+        root = self.base / f"omega-identity-proof-case-{self.counter:02d}"
+        initialized = self.driver.invoke(root, ["initialize", "--confirm-disposable"])
+        facts = initialized.get("facts", {})
+        if (
+            facts.get("keyring_service") != SERVICE
+            or facts.get("keyring_account") != ACCOUNT
+        ):
+            raise ProofError("disposable_locator_mismatch")
+        self.roots.append(root)
+        return root
+
+    def record(self, name: str, facts: Any) -> None:
+        self.results.append(
+            {"case": name, "status": "passed", "evidence_sha256": canonical_digest(facts)}
+        )
+
+    def create(self, root: Path, receipt: str, crash: str | None = None) -> str:
+        command = ["create", "--receipt", receipt]
+        if crash:
+            command.extend(["--crash-after", crash])
+            self.driver.invoke(root, command, expected_crash=True)
+            created = self.driver.invoke(root, ["resume-create"])
+        else:
+            created = self.driver.invoke(root, command)
+        identity = find_identity(created)
+        self.active = (root, identity)
+        return identity
+
+    def cleanup(self) -> None:
+        if self.active is None:
+            return
+        root, identity = self.active
+        try:
+            reset = self.driver.invoke(
+                root,
+                ["reset", "--identity-ref", identity, "--receipt", "matrix-cleanup"],
+            )
+            if reset.get("outcome") != "reset-marked":
+                raise ProofError("cleanup_reset_not_marked")
+            self.driver.invoke(root, ["resume-reset"])
+            started = self.driver.invoke(root, ["process-start"])
+            if started.get("outcome") != "process-start":
+                raise ProofError("cleanup_relaunch_not_acknowledged")
+        except Exception as error:
+            raise ProofError("disposable_keychain_cleanup_failed") from error
+        finally:
+            self.active = None
+
+    def verify_all_clean(self) -> None:
+        cleanup_error = False
+        for root in self.roots:
+            try:
+                inspected = self.driver.invoke(root, ["inspect"])
+                try:
+                    identity = find_identity(inspected)
+                except ProofError:
+                    identity = None
+                if identity is not None:
+                    self.active = (root, identity)
+                    self.cleanup()
+                final = self.driver.invoke(root, ["process-start"])
+                if find_state(final) != "absent":
+                    cleanup_error = True
+            except ProofError:
+                cleanup_error = True
+        if cleanup_error:
+            raise ProofError("disposable_keychain_cleanup_failed")
+
+    def run(self) -> list[dict[str, str]]:
+        try:
+            root = self.root()
+            safety = self.driver.invoke(root, ["safety"])
+            if safety.get("facts", {}).get("production_locator_access") != "rejected-by-construction":
+                raise ProofError("production_locator_not_rejected")
+            self.record("disposable-namespace-safety", safety)
+
+            identity = self.create(root, "matrix-create")
+            inspected = self.driver.invoke(root, ["inspect"])
+            restarted = self.driver.invoke(root, ["process-start"])
+            signed = self.driver.invoke(
+                root,
+                ["sign", "--identity-ref", identity, "--request", "matrix-sign"],
+            )
+            self.record("create-read-back-restart-sign", [inspected, restarted, signed])
+            repeated = self.driver.invoke(root, ["create", "--receipt", "matrix-create"])
+            if find_identity(repeated) != identity:
+                raise ProofError("double_create_changed_identity")
+            distinct = self.driver.rejected(
+                root, ["create", "--receipt", "matrix-distinct-create"]
+            )
+            self.record("double-create", [repeated, distinct])
+            forged = self.driver.invoke(root, ["probe-forged", "--request", "matrix-forged"])
+            self.record("forged-request-rejection", forged)
+            self.cleanup()
+
+            root = self.root()
+            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+                futures = [
+                    executor.submit(
+                        self.driver.invoke,
+                        root,
+                        ["create", "--receipt", "matrix-concurrent-create"],
+                    )
+                    for _ in range(2)
+                ]
+                concurrent_results = [future.result() for future in futures]
+            identities = {find_identity(result) for result in concurrent_results}
+            if len(identities) != 1:
+                raise ProofError("concurrent_create_changed_identity")
+            current_identity = identities.pop()
+            self.active = (root, current_identity)
+            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+                starts = [
+                    executor.submit(self.driver.invoke, root, ["process-start"])
+                    for _ in range(2)
+                ]
+                start_results = [future.result() for future in starts]
+            self.record("concurrent-create-and-process-start", [concurrent_results, start_results])
+            stale_identity = current_identity
+            self.cleanup()
+
+            root = self.root()
+            current_identity = self.create(root, "matrix-current-after-reset")
+            stale = self.driver.invoke(
+                root,
+                [
+                    "probe-stale",
+                    "--stale-identity-ref",
+                    stale_identity,
+                    "--request",
+                    "matrix-stale",
+                ],
+            )
+            self.record("stale-request-rejection", stale)
+            self.cleanup()
+
+            for crash in ("secret-write", "secret-read-back", "manifest-commit"):
+                root = self.root()
+                self.create(root, f"matrix-crash-{crash}", crash)
+                self.record(f"crash-after-{crash}", {"crash": "observed", "resume": "passed"})
+                self.cleanup()
+
+            root = self.root()
+            identity = self.create(root, "matrix-reset-marker-create")
+            self.driver.invoke(
+                root,
+                [
+                    "reset",
+                    "--identity-ref",
+                    identity,
+                    "--receipt",
+                    "matrix-reset-marker",
+                    "--crash-after",
+                    "reset-marker",
+                ],
+                expected_crash=True,
+            )
+            self.driver.invoke(root, ["resume-reset"])
+            self.driver.invoke(root, ["process-start"])
+            self.active = None
+            self.record("crash-after-reset-marker", {"crash": "observed", "resume": "passed"})
+
+            root = self.root()
+            identity = self.create(root, "matrix-reset-commit-create")
+            self.driver.invoke(
+                root,
+                ["reset", "--identity-ref", identity, "--receipt", "matrix-reset-commit"],
+            )
+            self.driver.invoke(
+                root, ["resume-reset", "--crash-after", "reset-commit"], expected_crash=True
+            )
+            self.driver.invoke(root, ["process-start"])
+            self.active = None
+            self.record("crash-after-reset-commit", {"crash": "observed", "resume": "passed"})
+
+            root = self.root()
+            identity = self.create(root, "matrix-relaunch-create")
+            self.driver.invoke(
+                root,
+                ["reset", "--identity-ref", identity, "--receipt", "matrix-relaunch"],
+            )
+            self.driver.invoke(root, ["resume-reset"])
+            self.driver.invoke(
+                root,
+                ["process-start", "--crash-after", "relaunch-acknowledge"],
+                expected_crash=True,
+            )
+            self.driver.invoke(root, ["process-start"])
+            self.active = None
+            self.record(
+                "crash-after-relaunch-acknowledge",
+                {"crash": "observed", "resume": "passed"},
+            )
+            return self.results
+        finally:
+            self.cleanup()
+            self.verify_all_clean()
+
+
+def run_matrix(driver: Path, bindings: dict[str, str], output: Path) -> None:
+    if not output.is_absolute() or output.is_symlink():
+        raise ProofError("output_path_invalid")
+    output.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="omega-proof-matrix-") as temporary:
+        base = Path(temporary).resolve()
+        results = Matrix(Driver(driver), base).run()
+    record = {
+        "schema": SCHEMA,
+        "status": "passed",
+        "candidate": bindings,
+        "disposable_keychain": {
+            "service": SERVICE,
+            "account": ACCOUNT,
+            "cleanup": "passed",
+            "production_locator_access": "rejected-by-construction",
+        },
+        "cases": results,
+    }
+    record["evidence_sha256"] = canonical_digest(record)
+    output.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    print(json.dumps({"schema": SCHEMA, "status": "passed", "evidence_sha256": record["evidence_sha256"]}))
+
+
+def self_test() -> None:
+    candidate = {"artifact": {"sha256": "a" * 64}, "omega": {"commit": "b" * 40}}
+    digest = canonical_digest(candidate)
+    if canonical_digest(json.loads(json.dumps(candidate))) != digest:
+        raise ProofError("canonical_digest_not_deterministic")
+    public_record = {
+        "schema": SCHEMA,
+        "candidate": {"candidate_digest": digest},
+        "disposable_keychain": {"service": SERVICE, "account": ACCOUNT},
+        "cases": [{"case": "fixture", "status": "passed", "evidence_sha256": "c" * 64}],
+    }
+    encoded = json.dumps(public_record, sort_keys=True)
+    forbidden = ("nsec", "private_key", "/Users/", "/tmp/", "identity.json")
+    if any(value in encoded for value in forbidden):
+        raise ProofError("public_evidence_leak")
+    if require_digest(digest, "candidate_digest") != digest:
+        raise ProofError("digest_validation_failed")
+    try:
+        require_digest("A" * 64, "candidate_digest")
+    except ProofError:
+        pass
+    else:
+        raise ProofError("uppercase_digest_accepted")
+    with tempfile.TemporaryDirectory(prefix="omega-proof-matrix-self-test-") as temporary:
+        fake = FakeDriver()
+        cases = Matrix(fake, Path(temporary).resolve()).run()
+    expected_cases = {
+        "disposable-namespace-safety",
+        "create-read-back-restart-sign",
+        "double-create",
+        "concurrent-create-and-process-start",
+        "forged-request-rejection",
+        "stale-request-rejection",
+        "crash-after-secret-write",
+        "crash-after-secret-read-back",
+        "crash-after-manifest-commit",
+        "crash-after-reset-marker",
+        "crash-after-reset-commit",
+        "crash-after-relaunch-acknowledge",
+    }
+    if {case["case"] for case in cases} != expected_cases:
+        raise ProofError("matrix_case_coverage_incomplete")
+    if fake.keychain_access:
+        raise ProofError("self_test_touched_keychain")
+    print(json.dumps({"schema": SCHEMA, "status": "self-test-passed", "keychain_access": "none"}))
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Run the installed signed Omega disposable identity proof matrix"
+    )
+    parser.add_argument("--self-test", action="store_true")
+    parser.add_argument("--release-record", type=Path)
+    parser.add_argument("--artifact", type=Path)
+    parser.add_argument("--candidate-evidence", type=Path)
+    parser.add_argument("--app", type=Path, default=Path("/Applications/Omega.app"))
+    parser.add_argument(
+        "--output",
+        type=Path,
+        default=Path.cwd() / "target/omega-identity-proof/matrix-evidence.json",
+    )
+    return parser.parse_args()
+
+
+def main() -> int:
+    args = parse_args()
+    try:
+        if args.self_test:
+            self_test()
+            return 0
+        if args.release_record is None or args.artifact is None or args.candidate_evidence is None:
+            raise ProofError("candidate_inputs_required")
+        app = args.app
+        release = args.release_record
+        artifact = args.artifact
+        evidence = args.candidate_evidence
+        output = args.output
+        driver, bindings = validate_candidate(app, release, artifact, evidence)
+        run_matrix(driver, bindings, output)
+        return 0
+    except ProofError as error:
+        print(json.dumps({"schema": SCHEMA, "status": "failed", "reason": str(error)}))
+        return 1
+    except Exception:
+        print(json.dumps({"schema": SCHEMA, "status": "failed", "reason": "unexpected_error"}))
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
