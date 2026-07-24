@@ -17,14 +17,12 @@ use crate::{
     IdentityRef, ImportedSecret, KeyringLocator, PendingIdentityOperation,
     PendingIdentityTransaction, PublicIdentity, PublicStoreError, ReceiptRef, SigningResult,
     mutation_lock::{IdentityMutationGuard, MutationLockError},
+    proof::{IDENTITY_PROOF_KEYRING_ACCOUNT, IDENTITY_PROOF_KEYRING_SERVICE, ProofCrashBoundary},
     public_store::{
         read_completion_record, read_completion_record_for_locator, read_identity_manifest,
         read_identity_manifest_for_locator, read_json_document, remove_public_document,
         write_completion_record, write_completion_record_for_locator, write_identity_manifest,
         write_identity_manifest_for_locator, write_json_document,
-    },
-    proof::{
-        IDENTITY_PROOF_KEYRING_ACCOUNT, IDENTITY_PROOF_KEYRING_SERVICE, ProofCrashBoundary,
     },
     recovery::{
         CandidateKind, CandidateRef, PreparedRecovery, RecoveryArtifactReceipt, RecoveryCandidate,
@@ -898,7 +896,8 @@ impl IdentityService {
         remove_public_document(&self.paths.recovery_protection_path)
             .map_err(|_| CustodyState::ResetFailed)?;
         marker.status = ResetStatus::Complete;
-        write_json_document(&self.paths.reset_path, &marker).map_err(|_| CustodyState::ResetFailed)?;
+        write_json_document(&self.paths.reset_path, &marker)
+            .map_err(|_| CustodyState::ResetFailed)?;
         self.trigger_proof_crash(ProofCrashBoundary::AfterResetCommit);
         Ok(())
     }
@@ -921,11 +920,7 @@ impl IdentityService {
         manifest: &IdentityManifest,
     ) -> Result<Option<CompletionRecord>, PublicStoreError> {
         if self.is_disposable_proof() {
-            read_completion_record_for_locator(
-                &self.paths.completion_path,
-                manifest,
-                &self.locator,
-            )
+            read_completion_record_for_locator(&self.paths.completion_path, manifest, &self.locator)
         } else {
             read_completion_record(&self.paths.completion_path, manifest, self.channel)
         }

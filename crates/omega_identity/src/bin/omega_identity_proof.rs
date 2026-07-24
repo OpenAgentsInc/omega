@@ -3,9 +3,9 @@ use std::{path::PathBuf, process::ExitCode};
 use anyhow::{Context as _, Result, bail};
 use clap::{Parser, Subcommand, ValueEnum};
 use omega_identity::{
-    AdmittedSigningRequest, IdentityProofService, IdentityRef, ProofCrashBoundary, ReceiptRef,
-    SigningPurpose, UnsignedEventTemplate, IDENTITY_PROOF_KEYRING_ACCOUNT,
-    IDENTITY_PROOF_KEYRING_SERVICE, IDENTITY_PROOF_PROTOCOL,
+    AdmittedSigningRequest, IDENTITY_PROOF_KEYRING_ACCOUNT, IDENTITY_PROOF_KEYRING_SERVICE,
+    IDENTITY_PROOF_PROTOCOL, IdentityProofService, IdentityRef, ProofCrashBoundary, ReceiptRef,
+    SigningPurpose, UnsignedEventTemplate,
 };
 use serde::Serialize;
 use serde_json::json;
@@ -153,7 +153,10 @@ fn run() -> Result<()> {
         Command::ProcessStart { .. } => {
             print_outcome("process-start", service.inspect_for_process_start()?)
         }
-        Command::Sign { identity_ref, request } => {
+        Command::Sign {
+            identity_ref,
+            request,
+        } => {
             let signing_request = signing_request(IdentityRef::new(identity_ref)?, request)?;
             print_outcome("signed", service.sign(&signing_request)?)
         }
@@ -161,7 +164,10 @@ fn run() -> Result<()> {
             let forged = IdentityRef::new("omega-nostr-forged-request")?;
             rejected_signing_outcome(&service, forged, request, "forged-request-rejected")
         }
-        Command::ProbeStale { stale_identity_ref, request } => rejected_signing_outcome(
+        Command::ProbeStale {
+            stale_identity_ref,
+            request,
+        } => rejected_signing_outcome(
             &service,
             IdentityRef::new(stale_identity_ref)?,
             request,
@@ -175,9 +181,7 @@ fn run() -> Result<()> {
             "reset-marked",
             service.reset(&IdentityRef::new(identity_ref)?, ReceiptRef::new(receipt)?)?,
         ),
-        Command::ResumeReset { .. } => {
-            print_outcome("reset-resumed", service.resume_reset()?)
-        }
+        Command::ResumeReset { .. } => print_outcome("reset-resumed", service.resume_reset()?),
         Command::Safety => print_outcome(
             "safety-checked",
             json!({

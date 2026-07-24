@@ -12,7 +12,10 @@ use omega_identity::{CustodyState, IdentityRef, IdentityService, ReceiptRef};
 use serde_json::json;
 
 #[derive(Parser, Debug)]
-#[command(name = "omega-identity", about = "Inspect and reset Omega Nostr identity custody")]
+#[command(
+    name = "omega-identity",
+    about = "Inspect and reset Omega Nostr identity custody"
+)]
 struct Args {
     /// Release channel that owns the identity (`dev`, `nightly`, `rc`, `stable`).
     #[arg(long, default_value = "rc")]
@@ -67,8 +70,12 @@ fn main() -> ExitCode {
 
 fn run() -> Result<()> {
     let args = Args::parse();
-    let channel = AppChannel::from_str(&args.channel)
-        .map_err(|_| anyhow::anyhow!("invalid --channel {}; expected dev|nightly|rc|stable", args.channel))?;
+    let channel = AppChannel::from_str(&args.channel).map_err(|_| {
+        anyhow::anyhow!(
+            "invalid --channel {}; expected dev|nightly|rc|stable",
+            args.channel
+        )
+    })?;
     let service = match args.data_root {
         Some(root) => IdentityService::for_channel_data_root(channel, root),
         None => IdentityService::for_channel(channel),

@@ -9,15 +9,15 @@
 mod contract;
 mod custody;
 mod mutation_lock;
-mod public_store;
 mod proof;
+mod public_store;
 mod recovery;
 mod recovery_artifact;
 mod secret;
 
 pub use contract::*;
 pub use custody::*;
-pub use public_store::*;
 pub use proof::*;
+pub use public_store::*;
 pub use recovery::*;
 pub use secret::{ImportedSecret, InvalidImportedSecret};

@@ -1,4 +1,7 @@
-use std::{fs, path::{Component, Path, PathBuf}};
+use std::{
+    fs,
+    path::{Component, Path, PathBuf},
+};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -27,7 +30,9 @@ pub enum ProofCrashBoundary {
 
 #[derive(Debug, Error)]
 pub enum IdentityProofError {
-    #[error("proof root must be an absolute, normalized path whose final component starts with omega-identity-proof-")]
+    #[error(
+        "proof root must be an absolute, normalized path whose final component starts with omega-identity-proof-"
+    )]
     UnsafeRoot,
     #[error("proof root or one of its existing ancestors is a symbolic link")]
     SymbolicLink,
@@ -63,7 +68,8 @@ impl IdentityProofService {
         };
         fs::write(
             root.join(PROOF_SENTINEL),
-            serde_json::to_vec_pretty(&sentinel).map_err(|_| IdentityProofError::MissingSentinel)?,
+            serde_json::to_vec_pretty(&sentinel)
+                .map_err(|_| IdentityProofError::MissingSentinel)?,
         )?;
         Ok(())
     }
@@ -125,11 +131,16 @@ impl IdentityProofService {
 
 fn validate_root_shape(root: &Path) -> Result<(), IdentityProofError> {
     if !root.is_absolute()
-        || root.components().any(|component| matches!(component, Component::CurDir | Component::ParentDir))
+        || root
+            .components()
+            .any(|component| matches!(component, Component::CurDir | Component::ParentDir))
         || !root
             .file_name()
             .and_then(|name| name.to_str())
-            .is_some_and(|name| name.starts_with(IDENTITY_PROOF_ROOT_PREFIX) && name.len() > IDENTITY_PROOF_ROOT_PREFIX.len())
+            .is_some_and(|name| {
+                name.starts_with(IDENTITY_PROOF_ROOT_PREFIX)
+                    && name.len() > IDENTITY_PROOF_ROOT_PREFIX.len()
+            })
     {
         return Err(IdentityProofError::UnsafeRoot);
     }
@@ -158,19 +169,33 @@ mod tests {
 
     #[test]
     fn rejects_production_and_ambiguous_roots() {
-        for root in [Path::new("/tmp/Omega RC"), Path::new("/tmp/omega-identity-proof-"), Path::new("relative/omega-identity-proof-test")] {
-            assert!(matches!(IdentityProofService::initialize(root), Err(IdentityProofError::UnsafeRoot)));
+        for root in [
+            Path::new("/tmp/Omega RC"),
+            Path::new("/tmp/omega-identity-proof-"),
+            Path::new("relative/omega-identity-proof-test"),
+        ] {
+            assert!(matches!(
+                IdentityProofService::initialize(root),
+                Err(IdentityProofError::UnsafeRoot)
+            ));
         }
     }
 
     #[test]
     fn sentinel_is_exact_and_required() {
         let temporary = tempfile::tempdir().expect("temporary directory");
-        let root = temporary.path().join("omega-identity-proof-test");
+        let root = temporary
+            .path()
+            .canonicalize()
+            .expect("canonical temporary directory")
+            .join("omega-identity-proof-test");
         IdentityProofService::initialize(&root).expect("initialize proof root");
         IdentityProofService::open(root.clone(), None).expect("open exact proof root");
         fs::write(root.join(PROOF_SENTINEL), b"{}").expect("replace sentinel");
-        assert!(matches!(IdentityProofService::open(root, None), Err(IdentityProofError::MissingSentinel)));
+        assert!(matches!(
+            IdentityProofService::open(root, None),
+            Err(IdentityProofError::MissingSentinel)
+        ));
     }
 
     #[cfg(unix)]
@@ -178,10 +203,17 @@ mod tests {
     fn rejects_symbolic_link_root() {
         use std::os::unix::fs::symlink;
         let temporary = tempfile::tempdir().expect("temporary directory");
-        let actual = temporary.path().join("omega-identity-proof-actual");
+        let temporary_root = temporary
+            .path()
+            .canonicalize()
+            .expect("canonical temporary directory");
+        let actual = temporary_root.join("omega-identity-proof-actual");
         fs::create_dir(&actual).expect("create actual root");
-        let linked = temporary.path().join("omega-identity-proof-linked");
+        let linked = temporary_root.join("omega-identity-proof-linked");
         symlink(actual, &linked).expect("create symlink");
-        assert!(matches!(IdentityProofService::initialize(&linked), Err(IdentityProofError::SymbolicLink)));
+        assert!(matches!(
+            IdentityProofService::initialize(&linked),
+            Err(IdentityProofError::SymbolicLink)
+        ));
     }
 }
