@@ -1,7 +1,9 @@
-//! Sarah workroom dock panel (`OMEGA-SW-03` / `OMEGA-SW-04` / `OMEGA-SW-06`).
+//! Sarah workroom dock panel (`OMEGA-SW-03` / `OMEGA-SW-04` / `OMEGA-SW-06` /
+//! `SARAH-CW-08`).
 //!
 //! Projection + command entry only. Durable state lives in the record behind
-//! supervised `omega-effectd`. Header text is exactly "Sarah".
+//! supervised `omega-effectd`. Owner-private conversation header is "Sarah".
+//! Community room header is "Community" — same dock pane, never a second pane.
 //!
 //! OMEGA-SW-04: interaction states (pending send, running after claim, ordered
 //! tool ladder, answer block + completion, terminal reason, interrupt
@@ -10,6 +12,10 @@
 //!
 //! OMEGA-SW-06: local unread count + attention marker. Proactive tick turns
 //! share the transcript projection (no new source). Read state is local only.
+//!
+//! SARAH-CW-08: switch between owner-private and community rooms in this pane.
+//! Membership, work units, and experience rank are community-only projections.
+//! Two-room rule: rooms never share membership or history.
 
 use anyhow::Result;
 use editor::Editor;
@@ -33,6 +39,11 @@ use zed_actions::workroom::{FocusComposer, InterruptTurn, OpenPanel, SendMessage
 use crate::attention::{
     AttentionMarker, OMEGA_AUTONOMOUS_TICK_ENABLED, empty_room_is_honest,
 };
+use crate::community::{
+    CommunityRoomProjection, RoomKind, COMMUNITY_ROOM_HEADER, COMMUNITY_ROOM_SUBTITLE,
+    EXPERIENCE_LABEL, OWNER_PRIVATE_ROOM_HEADER, V1_NO_PAY_FIRST_RUN_COPY,
+    V1_NO_PAY_ROOM_DESCRIPTION,
+};
 use crate::interaction::{AnswerState, InteractionEvent, InteractionState, TerminalOutcome};
 use crate::projections::{
     ActivityProjection, ActivityRow, Freshness, GapState, InterruptIntentState, MessageAck,
@@ -47,6 +58,10 @@ pub struct SarahWorkroomPanel {
     focus_handle: FocusHandle,
     composer: Entity<Editor>,
     projection: WorkroomProjection,
+    /// SARAH-CW-08: community room projections (isolated from owner-private).
+    community: CommunityRoomProjection,
+    /// SARAH-CW-08: which room this single pane is showing.
+    active_room: RoomKind,
     /// OMEGA-SW-04 pure interaction projection (pending/send/ladder/terminal).
     interaction: InteractionState,
     status: SharedString,
@@ -120,6 +135,8 @@ impl SarahWorkroomPanel {
             focus_handle: cx.focus_handle(),
             composer,
             projection: WorkroomProjection::honest_unsubscribed(),
+            community: CommunityRoomProjection::honest_unsubscribed(),
+            active_room: RoomKind::OwnerPrivate,
             interaction: InteractionState::new(),
             status: binding_projection.state.status_line().into(),
             supervisor: None,
@@ -866,6 +883,65 @@ impl SarahWorkroomPanel {
         &self.projection
     }
 
+    /// Test / inspection helper: community room projection (not durable).
+    pub fn community(&self) -> &CommunityRoomProjection {
+        &self.community
+    }
+
+    /// Test / inspection helper: active room kind.
+    pub fn active_room(&self) -> RoomKind {
+        self.active_room
+    }
+
+    /// SARAH-CW-08: switch rooms inside the same pane (not a second dock panel).
+    pub fn select_room(&mut self, kind: RoomKind, cx: &mut Context<Self>) {
+        self.active_room = kind;
+        self.status = match kind {
+            RoomKind::OwnerPrivate => "Showing owner-private Sarah room.".into(),
+            RoomKind::Community => {
+                "Showing community room (separate membership and history).".into()
+            }
+        };
+        // Composer stays one instance; community publish is not wired in this skeleton.
+        if kind.is_community() {
+            // Placeholder reminds the operator which room is active.
+            // Full community compose is a later packet; do not invent a second Editor.
+        }
+        cx.notify();
+    }
+
+    /// Two-room isolation check for tests and honest UI guards.
+    pub fn rooms_are_isolated(&self) -> bool {
+        // Distinct identities when both known.
+        if let (Some(thread), Some(group)) = (
+            self.projection.room.thread_ref.as_deref(),
+            self.community
+                .room
+                .group_ref
+                .as_deref()
+                .or(self.community.membership.group_ref.as_deref()),
+        ) {
+            if thread == group {
+                return false;
+            }
+        }
+        let owner_refs: std::collections::BTreeSet<&str> = self
+            .projection
+            .transcript
+            .rows
+            .iter()
+            .map(|r| r.message_ref.as_str())
+            .collect();
+        let community_refs: std::collections::BTreeSet<&str> = self
+            .community
+            .transcript
+            .rows
+            .iter()
+            .map(|r| r.message_ref.as_str())
+            .collect();
+        owner_refs.is_disjoint(&community_refs)
+    }
+
     /// Test / inspection helper: interaction state (not durable).
     pub fn interaction(&self) -> &InteractionState {
         &self.interaction
@@ -956,15 +1032,21 @@ impl Panel for SarahWorkroomPanel {
 impl Render for SarahWorkroomPanel {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = &self.projection;
-        let can_interrupt = !self.interrupting
+        let community = &self.community;
+        let active = self.active_room;
+        let showing_community = active.is_community();
+        let can_interrupt = !showing_community
+            && !self.interrupting
             && matches!(
                 p.run_state.phase,
                 RunPhase::Running | RunPhase::Queued | RunPhase::Unknown
             );
-        let can_send = !self.sending;
+        // One composer for the pane; community publish is not wired in CW-08 skeleton.
+        let can_send = !showing_community && !self.sending;
         let answer = self.interaction.answer.clone();
         let terminal = self.interaction.terminal.clone();
         let honest = self.interaction.uses_honest_liveness();
+        let header = active.header();
 
         v_flex()
             .id("sarah-workroom-panel")
@@ -972,15 +1054,68 @@ impl Render for SarahWorkroomPanel {
             .track_focus(&self.focus_handle)
             .gap_2()
             .p_3()
-            // Law: header says only "Sarah".
-            .child(Label::new(WorkroomProjection::header()).size(LabelSize::Large))
-            .child(Label::new(self.status.clone()).color(Color::Muted))
-            .when_some(p.connection_detail.clone(), |this, detail| {
-                this.child(Label::new(detail).color(Color::Muted))
-            })
-            .when(honest, |this| {
+            // Active room header must be unmistakable (Sarah vs Community).
+            .child(Label::new(header).size(LabelSize::Large))
+            .when(showing_community, |this| {
                 this.child(
-                    Label::new("Liveness: ordered tool ladder (no token stream).")
+                    Label::new(COMMUNITY_ROOM_SUBTITLE)
+                        .color(Color::Accent)
+                        .size(LabelSize::Small),
+                )
+            })
+            .child(Label::new(self.status.clone()).color(Color::Muted))
+            // SARAH-CW-08: room switcher — same pane, two rooms.
+            .child(
+                h_flex()
+                    .gap_2()
+                    .child(
+                        Button::new("workroom-room-owner-private", OWNER_PRIVATE_ROOM_HEADER)
+                            .style(if showing_community {
+                                ButtonStyle::Subtle
+                            } else {
+                                ButtonStyle::Filled
+                            })
+                            .disabled(!showing_community)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.select_room(RoomKind::OwnerPrivate, cx);
+                            })),
+                    )
+                    .child(
+                        Button::new("workroom-room-community", COMMUNITY_ROOM_HEADER)
+                            .style(if showing_community {
+                                ButtonStyle::Filled
+                            } else {
+                                ButtonStyle::Subtle
+                            })
+                            .disabled(showing_community)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.select_room(RoomKind::Community, cx);
+                            })),
+                    ),
+            )
+            .when(!showing_community, |this| {
+                this.when_some(p.connection_detail.clone(), |this, detail| {
+                    this.child(Label::new(detail).color(Color::Muted))
+                })
+                .when(honest, |this| {
+                    this.child(
+                        Label::new("Liveness: ordered tool ladder (no token stream).")
+                            .color(Color::Muted)
+                            .size(LabelSize::Small),
+                    )
+                })
+            })
+            .when(showing_community, |this| {
+                this.when_some(community.connection_detail.clone(), |this, detail| {
+                    this.child(Label::new(detail).color(Color::Muted))
+                })
+                .child(
+                    Label::new(V1_NO_PAY_ROOM_DESCRIPTION)
+                        .color(Color::Warning)
+                        .size(LabelSize::Small),
+                )
+                .child(
+                    Label::new(V1_NO_PAY_FIRST_RUN_COPY)
                         .color(Color::Muted)
                         .size(LabelSize::Small),
                 )
@@ -1018,48 +1153,78 @@ impl Render for SarahWorkroomPanel {
                             ),
                     ),
             )
-            // OMEGA-SW-06: one unread count + one attention marker for the room.
-            .child(attention_body(&p.attention))
-            // Room
-            .child(section_header("Room", &p.room.meta))
-            .child(room_body(&p.room))
-            // Transcript (capacity-bounded list; proactive ticks are ordinary rows)
-            .child(section_header("Transcript", &p.transcript.meta))
+            // --- Owner-private Sarah room ---
+            .when(!showing_community, |this| {
+                this.child(attention_body(&p.attention))
+                    .child(section_header("Room", &p.room.meta))
+                    .child(room_body(&p.room))
+                    .child(section_header("Transcript", &p.transcript.meta))
+                    .child(
+                        v_flex()
+                            .id("sarah-workroom-transcript")
+                            .border_1()
+                            .border_color(cx.theme().colors().border)
+                            .rounded_md()
+                            .p_2()
+                            .max_h(px(160.))
+                            .overflow_y_scroll()
+                            .child(transcript_body(&p.transcript)),
+                    )
+                    .child(section_header("Activity (tool ladder)", &p.activity.meta))
+                    .child(
+                        v_flex()
+                            .id("sarah-workroom-activity")
+                            .border_1()
+                            .border_color(cx.theme().colors().border)
+                            .rounded_md()
+                            .p_2()
+                            .max_h(px(120.))
+                            .overflow_y_scroll()
+                            .child(activity_body(&p.activity)),
+                    )
+                    .child(Label::new("Answer").color(Color::Muted))
+                    .child(answer_body(&answer))
+                    .child(section_header("Receipts", &p.receipts.meta))
+                    .child(receipts_body(&p.receipts))
+                    .child(section_header("Run state", &p.run_state.meta))
+                    .child(run_state_body(&p.run_state, &terminal))
+            })
+            // --- Community room (SARAH-CW-08) — same pane, separate history ---
+            .when(showing_community, |this| {
+                this.child(section_header("Community group", &community.room.meta))
+                    .child(community_room_body(community))
+                    .child(section_header("Membership", &community.membership.meta))
+                    .child(membership_body(&community.membership))
+                    .child(section_header("Work units", &community.work_units.meta))
+                    .child(work_units_body(&community.work_units))
+                    .child(section_header(
+                        // Never "earnings" — experience only.
+                        "Experience rank",
+                        &community.experience.meta,
+                    ))
+                    .child(experience_body(&community.experience))
+                    .child(section_header("Group transcript", &community.transcript.meta))
+                    .child(
+                        v_flex()
+                            .id("community-workroom-transcript")
+                            .border_1()
+                            .border_color(cx.theme().colors().border)
+                            .rounded_md()
+                            .p_2()
+                            .max_h(px(160.))
+                            .overflow_y_scroll()
+                            .child(transcript_body(&community.transcript)),
+                    )
+            })
+            // One composer for the pane (not a second composer).
             .child(
-                v_flex()
-                    .id("sarah-workroom-transcript")
-                    .border_1()
-                    .border_color(cx.theme().colors().border)
-                    .rounded_md()
-                    .p_2()
-                    .max_h(px(160.))
-                    .overflow_y_scroll()
-                    .child(transcript_body(&p.transcript)),
+                Label::new(if showing_community {
+                    "Composer (community publish not wired — skeleton)"
+                } else {
+                    "Composer"
+                })
+                .color(Color::Muted),
             )
-            // Activity / tool ladder
-            .child(section_header("Activity (tool ladder)", &p.activity.meta))
-            .child(
-                v_flex()
-                    .id("sarah-workroom-activity")
-                    .border_1()
-                    .border_color(cx.theme().colors().border)
-                    .rounded_md()
-                    .p_2()
-                    .max_h(px(120.))
-                    .overflow_y_scroll()
-                    .child(activity_body(&p.activity)),
-            )
-            // Answer block (stream:false — one block, not tokens)
-            .child(Label::new("Answer").color(Color::Muted))
-            .child(answer_body(&answer))
-            // Receipts stub
-            .child(section_header("Receipts", &p.receipts.meta))
-            .child(receipts_body(&p.receipts))
-            // Run state + terminal outcome
-            .child(section_header("Run state", &p.run_state.meta))
-            .child(run_state_body(&p.run_state, &terminal))
-            // Composer (text only)
-            .child(Label::new("Composer").color(Color::Muted))
             .child(
                 div()
                     .border_1()
@@ -1085,13 +1250,13 @@ impl Render for SarahWorkroomPanel {
                     .child(
                         Button::new("sarah-workroom-refresh", "Refresh")
                             .style(ButtonStyle::Subtle)
-                            .disabled(self.refreshing)
+                            .disabled(self.refreshing || showing_community)
                             .on_click(cx.listener(|this, _, _, cx| this.refresh_from_effectd(cx))),
                     )
                     .child(
                         Button::new("sarah-workroom-mark-read", "Mark read")
                             .style(ButtonStyle::Subtle)
-                            .disabled(p.attention.unread_count == 0)
+                            .disabled(showing_community || p.attention.unread_count == 0)
                             .on_click(cx.listener(|this, _, _, cx| this.mark_room_read(cx))),
                     )
                     .child(
@@ -1115,6 +1280,150 @@ impl Render for SarahWorkroomPanel {
                     ),
             )
     }
+}
+
+fn community_room_body(community: &CommunityRoomProjection) -> impl IntoElement {
+    let room = &community.room;
+    v_flex()
+        .gap_0p5()
+        .child(Label::new(format!(
+            "group={}",
+            room.group_ref.as_deref().unwrap_or("(missing)")
+        )))
+        .child(Label::new(format!(
+            "name={}",
+            room.display_name.as_deref().unwrap_or("(missing)")
+        )))
+        .child(
+            Label::new(format!("invitation_only={}", room.invitation_only))
+                .color(Color::Muted)
+                .size(LabelSize::Small),
+        )
+        .child(
+            Label::new(room.description.clone())
+                .color(Color::Muted)
+                .size(LabelSize::Small),
+        )
+        .when_some(room.detail.clone(), |this, detail| {
+            this.child(Label::new(detail).color(Color::Warning).size(LabelSize::Small))
+        })
+}
+
+fn membership_body(membership: &crate::community::MembershipProjection) -> impl IntoElement {
+    if membership.members.is_empty() {
+        return v_flex().child(
+            Label::new(
+                membership
+                    .detail
+                    .clone()
+                    .unwrap_or_else(|| "No members projected.".into()),
+            )
+            .color(Color::Muted)
+            .size(LabelSize::Small),
+        );
+    }
+    let mut col = v_flex().gap_0p5();
+    for member in &membership.members {
+        let agents = member
+            .agents
+            .iter()
+            .map(|a| {
+                format!(
+                    "{ref}{attested}{revoked}",
+                    ref = a.agent_ref,
+                    attested = if a.attested { "·attested" } else { "" },
+                    revoked = if a.revoked { "·revoked" } else { "" },
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        col = col.child(Label::new(format!(
+            "{name} ({mref}) attested={attested} agents=[{agents}]",
+            name = member.display_name.as_deref().unwrap_or("member"),
+            mref = member.member_ref,
+            attested = member.attested,
+            agents = agents,
+        )));
+    }
+    if membership.truncated {
+        col = col.child(Label::new("…roster truncated").color(Color::Muted));
+    }
+    col
+}
+
+fn work_units_body(units: &crate::community::WorkUnitsProjection) -> impl IntoElement {
+    if units.units.is_empty() {
+        return v_flex().child(
+            Label::new(
+                units
+                    .detail
+                    .clone()
+                    .unwrap_or_else(|| "No work units projected.".into()),
+            )
+            .color(Color::Muted)
+            .size(LabelSize::Small),
+        );
+    }
+    let mut col = v_flex().gap_0p5();
+    for unit in &units.units {
+        col = col.child(Label::new(format!(
+            "{title} ({uref}) · {acceptance} · quotes={q}{tier}{reward}",
+            title = unit.title,
+            uref = unit.unit_ref,
+            acceptance = unit.acceptance.label(),
+            q = unit.quotes.len(),
+            tier = unit
+                .tier
+                .map(|t| format!(" · tier={t}"))
+                .unwrap_or_default(),
+            reward = unit
+                .reward_note
+                .as_ref()
+                .map(|n| format!(" · {n}"))
+                .unwrap_or_default(),
+        )));
+    }
+    if units.truncated {
+        col = col.child(Label::new("…work units truncated").color(Color::Muted));
+    }
+    col
+}
+
+fn experience_body(experience: &crate::community::ExperienceRankProjection) -> impl IntoElement {
+    // Structural: label is experience, never earnings.
+    let summary = experience.summary_line();
+    v_flex()
+        .gap_0p5()
+        .child(Label::new(summary))
+        .child(
+            Label::new(format!(
+                "reward_label={label} (not {forbidden})",
+                label = experience.reward_label,
+                forbidden = crate::community::FORBIDDEN_EARNINGS_LABEL,
+            ))
+            .color(Color::Muted)
+            .size(LabelSize::Small),
+        )
+        .when(experience.recent_awards.is_empty(), |this| {
+            this.child(
+                Label::new(
+                    experience
+                        .detail
+                        .clone()
+                        .unwrap_or_else(|| format!("No {EXPERIENCE_LABEL} awards projected.")),
+                )
+                .color(Color::Muted)
+                .size(LabelSize::Small),
+            )
+        })
+        .children(experience.recent_awards.iter().map(|award| {
+            Label::new(format!(
+                "+{pts} {kind} ({aref})",
+                pts = award.points,
+                kind = award.reason_kind,
+                aref = award.award_ref,
+            ))
+        }))
 }
 
 fn binding_section(binding: &BindingProjection) -> impl IntoElement {
@@ -1408,6 +1717,69 @@ mod panel_logic_tests {
         let _interrupt = InterruptTurn;
         assert_eq!(WorkroomProjection::header(), "Sarah");
         assert_eq!(PANEL_KEY, "SarahWorkroomPanel");
+    }
+
+    #[test]
+    fn community_room_headers_and_copy_are_distinct_and_unpaid() {
+        assert_eq!(OWNER_PRIVATE_ROOM_HEADER, "Sarah");
+        assert_eq!(COMMUNITY_ROOM_HEADER, "Community");
+        assert_ne!(OWNER_PRIVATE_ROOM_HEADER, COMMUNITY_ROOM_HEADER);
+        assert!(COMMUNITY_ROOM_SUBTITLE.contains("separate"));
+        assert!(V1_NO_PAY_ROOM_DESCRIPTION.contains("experience"));
+        assert!(V1_NO_PAY_ROOM_DESCRIPTION.contains("not money"));
+        assert!(!V1_NO_PAY_ROOM_DESCRIPTION
+            .to_ascii_lowercase()
+            .contains("earnings"));
+        assert!(V1_NO_PAY_FIRST_RUN_COPY.contains("does not pay"));
+        assert_eq!(EXPERIENCE_LABEL, "experience");
+        let community = CommunityRoomProjection::honest_unsubscribed();
+        assert!(community.is_v1_compliant());
+        assert!(community.membership.is_honest_missing());
+        assert!(community.work_units.is_honest_missing());
+        assert!(community.experience.is_v1_experience_only());
+    }
+
+    #[test]
+    fn two_room_isolation_on_panel_fields() {
+        // Mirrors SarahWorkroomPanel field layout without constructing GPUI.
+        let mut projection = WorkroomProjection::honest_unsubscribed();
+        let mut community = CommunityRoomProjection::honest_unsubscribed();
+        projection.room.thread_ref = Some("thread.sarah.1".into());
+        projection.transcript.push_bounded(TranscriptRow {
+            message_ref: "private.1".into(),
+            role: "owner".into(),
+            text: "secret".into(),
+            ack: MessageAck::Confirmed,
+        });
+        community.room.group_ref = Some("group.community.1".into());
+        community.push_untrusted_message(
+            "community.1".into(),
+            "member".into(),
+            "hello".into(),
+        );
+        let owner_refs: std::collections::BTreeSet<&str> = projection
+            .transcript
+            .rows
+            .iter()
+            .map(|r| r.message_ref.as_str())
+            .collect();
+        let community_refs: std::collections::BTreeSet<&str> = community
+            .transcript
+            .rows
+            .iter()
+            .map(|r| r.message_ref.as_str())
+            .collect();
+        assert!(owner_refs.is_disjoint(&community_refs));
+        assert_ne!(
+            projection.room.thread_ref.as_deref(),
+            community.room.group_ref.as_deref()
+        );
+        // Switch kind only changes active room — both stores remain.
+        let active = RoomKind::Community;
+        assert_eq!(active.header(), COMMUNITY_ROOM_HEADER);
+        assert_eq!(RoomKind::OwnerPrivate.header(), OWNER_PRIVATE_ROOM_HEADER);
+        assert_eq!(projection.transcript.rows.len(), 1);
+        assert_eq!(community.transcript.rows.len(), 1);
     }
 
     #[test]

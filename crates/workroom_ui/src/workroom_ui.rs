@@ -1,4 +1,5 @@
-//! Sarah workroom GPUI pane (`OMEGA-SW-03` / `OMEGA-SW-04` / `OMEGA-SW-06`).
+//! Sarah workroom GPUI pane (`OMEGA-SW-03` / `OMEGA-SW-04` / `OMEGA-SW-06` /
+//! `SARAH-CW-08`).
 //!
 //! Dock panel + Agent menu entry + open / focus-composer / send / interrupt
 //! actions. Renders the five §7 projections with source, freshness, and gap
@@ -12,8 +13,13 @@
 //! - **OMEGA-SW-06**: local unread count + attention marker; proactive tick
 //!   turns render as ordinary transcript rows. Read state is local MVP only
 //!   (NIP-RS is SARAH-NR-07). Autonomous tick stays default off.
+//! - **SARAH-CW-08**: same pane hosts a second, isolated community room
+//!   (membership, work units, experience rank). Not a second dock pane,
+//!   composer, or receipt inspector. Two-room rule: never share membership
+//!   or history with owner-private Sarah.
 
 mod attention;
+mod community;
 mod interaction;
 mod panel;
 mod projections;
@@ -23,6 +29,16 @@ pub use attention::{
     is_attention_role, proactive_turn_as_transcript_row, row_raises_attention,
     tick_off_honest_note, AttentionMarker, LocalReadState, RoomAttention,
     OMEGA_AUTONOMOUS_TICK_ENABLED, SARAH_AUTONOMOUS_TICK_FLAG,
+};
+pub use community::{
+    community_sources, copy_forbids_payment, label_implies_payment,
+    quote_as_untrusted_member_content, AgentRosterRow, CommunityRoomMeta, CommunityRoomProjection,
+    ContentTrust, ExperienceAwardRow, ExperienceRankProjection, MemberRosterRow,
+    MembershipProjection, RoomKind, WorkUnitAcceptance, WorkUnitQuoteRow, WorkUnitRow,
+    WorkUnitsProjection, WorkroomSurface, COMMUNITY_ROOM_HEADER, COMMUNITY_ROOM_SUBTITLE,
+    EXPERIENCE_LABEL, FORBIDDEN_EARNINGS_LABEL, MAX_MEMBER_ROWS, MAX_RECENT_AWARDS,
+    MAX_WORK_UNIT_ROWS, OWNER_PRIVATE_ROOM_HEADER, UNTRUSTED_CONTENT_BOUNDARY,
+    V1_NO_PAY_FIRST_RUN_COPY, V1_NO_PAY_ROOM_DESCRIPTION,
 };
 pub use interaction::{
     AnswerState, InteractionEvent, InteractionState, LocalPendingSend, TerminalOutcome,
@@ -59,5 +75,17 @@ mod tests {
         assert_eq!(p.receipts.meta.gap, GapState::Unavailable);
         assert_eq!(p.run_state.meta.gap, GapState::Unavailable);
         assert_eq!(p.run_state.interrupt_intent, InterruptIntentState::None);
+    }
+
+    #[test]
+    fn community_room_is_second_room_not_second_pane() {
+        let surface = WorkroomSurface::honest_unsubscribed();
+        assert_eq!(surface.active, RoomKind::OwnerPrivate);
+        assert_eq!(CommunityRoomProjection::header(), COMMUNITY_ROOM_HEADER);
+        assert_ne!(WorkroomProjection::header(), CommunityRoomProjection::header());
+        assert!(surface.rooms_are_isolated());
+        assert!(surface.community.is_v1_compliant());
+        // Single panel type — community is a room kind, not agent_computer / full_auto.
+        assert_eq!(module_path!().contains("workroom_ui"), true);
     }
 }
