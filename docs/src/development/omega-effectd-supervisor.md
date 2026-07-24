@@ -21,11 +21,11 @@ GPUI is not run authority.
 | Pack SHA-256 | `4cc1cb2e5d71ff8af6f730248871ee779488a991f21a848880e885331ef31831` |
 | Protocol | `openagents.omega.effectd.v1` |
 | Omega crate | `crates/omega_effectd` |
-| Runtime release | `omega-effectd-v0.1.0-rc.5` |
-| macOS arm64 archive SHA-256 | `a1d7662cb1e45a9a22bb71a742189babb55fcfbd5ca687204123d85824bbcb1b` |
-| Runtime manifest asset SHA-256 | `c6f89764b21c6299eadd57c8353675505535cf8f09059cd022961f9054426b10` |
-| Runtime source commit | `5307ec18f9717c8060ff49239ff368150bee40ed` |
-| Runtime source tree | `e5314142d2b0da57f3da0085854eeb2bef97c05e` |
+| Runtime release | `omega-effectd-v0.1.0-rc.6` |
+| macOS arm64 archive SHA-256 | `b55f703229ff9299923a84b0843f9c926fbd75b08e787f5d6e79744fd114c836` |
+| Runtime manifest asset SHA-256 | `13f0e094c5d120426f4ede3afedd24f04abec71e29abcd7700c0fd2e36037953` |
+| Runtime source commit | `5bb31ac857b917b14c6455a7df268825cfbf773f` |
+| Runtime source tree | `ce9d37bb3a59ae7e2c807e2d524c196af17484ed` |
 
 ## Supervisor laws
 
@@ -71,6 +71,10 @@ inherit Omega's device, personal-data, automation, or filesystem entitlements.
 Installed proof launches both the mounted and installed copies through framed
 `initialize` and `health` requests. The packaged runtime also advertises and
 passes the framed `handoff` contract.
+
+RC.6 projects current run reports into the configured Sync directory, accepts
+authenticated mobile Pause, Resume, and Stop commands with typed outcomes, and
+enforces each run's configured maximum turn count.
 
 Omega registers the reverse-host handler when it creates the shared supervisor.
 The handler stays on GPUI's foreground executor and delegates to the active
