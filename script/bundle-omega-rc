@@ -26,11 +26,11 @@ readonly OMEGA_RELEASE_RECORD_SCHEMA_VERSION=1
 readonly OMEGA_BUILD_LOCK_SNAPSHOT_NAME="Cargo.lock.omega-v${OMEGA_RC_VERSION}"
 readonly OMEGA_SOURCE_VERIFIER_PATH="script/verify-omega-identity"
 readonly OMEGA_IDENTITY_BOUNDARY_LIST="BUZZ_PRIVATE_KEY,identity.key,get_nsec"
-readonly OMEGA_EFFECTD_RELEASE_TAG="omega-effectd-v0.1.0-rc.3"
+readonly OMEGA_EFFECTD_RELEASE_TAG="omega-effectd-v0.1.0-rc.4"
 readonly OMEGA_EFFECTD_ASSET_NAME="omega-effectd-v0.1.0-macos-arm64.tar.gz"
-readonly OMEGA_EFFECTD_ASSET_SHA256="0fb275283686f9de27d326de1c87bbd0ed8ed1360126956658a2c29818d1ea6c"
-readonly OMEGA_EFFECTD_SOURCE_COMMIT="b8057682598d3744f09f6c6daf24823644b1e3ab"
-readonly OMEGA_EFFECTD_SOURCE_TREE="722c22887f43290161373d6c79e48914f5d27548"
+readonly OMEGA_EFFECTD_ASSET_SHA256="242da72ae741e27524c5782f5b6a38eb6869ed43fbfcb7ba05fe14fb04b737d6"
+readonly OMEGA_EFFECTD_SOURCE_COMMIT="db6412190b3de5712d2a0957644af5c76679f697"
+readonly OMEGA_EFFECTD_SOURCE_TREE="5958316faa32e327580e30ef7006002cfcae2471"
 readonly OMEGA_EFFECTD_DOWNLOAD_URL="https://github.com/OpenAgentsInc/openagents/releases/download/${OMEGA_EFFECTD_RELEASE_TAG}/${OMEGA_EFFECTD_ASSET_NAME}"
 
 DRY_RUN=false
@@ -414,11 +414,11 @@ expected_effectd = {
     "service_version": "0.1.0",
     "protocol": "openagents.omega.effectd.v1",
     "platform": "darwin-arm64",
-    "release_tag": "omega-effectd-v0.1.0-rc.3",
+    "release_tag": "omega-effectd-v0.1.0-rc.4",
     "asset_name": "omega-effectd-v0.1.0-macos-arm64.tar.gz",
-    "archive_sha256": "0fb275283686f9de27d326de1c87bbd0ed8ed1360126956658a2c29818d1ea6c",
-    "source_commit": "b8057682598d3744f09f6c6daf24823644b1e3ab",
-    "source_tree": "722c22887f43290161373d6c79e48914f5d27548",
+    "archive_sha256": "242da72ae741e27524c5782f5b6a38eb6869ed43fbfcb7ba05fe14fb04b737d6",
+    "source_commit": "db6412190b3de5712d2a0957644af5c76679f697",
+    "source_tree": "5958316faa32e327580e30ef7006002cfcae2471",
 }
 for key, expected in expected_effectd.items():
     if effectd.get(key) != expected:

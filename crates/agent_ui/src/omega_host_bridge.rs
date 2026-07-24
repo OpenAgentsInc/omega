@@ -7,7 +7,6 @@ use std::time::Duration;
 use acp_thread::{AgentThreadEntry, ThreadStatus};
 use chrono::Utc;
 use gpui::{AnyWindowHandle, App, AsyncApp, Entity, WeakEntity};
-use language_model::LanguageModelRegistry;
 use omega_effectd::{
     HostMethod, HostRequestFrame, HostResponseError, HostResponseErrorCode, OmegaEffectdHostHandler,
 };
@@ -24,6 +23,7 @@ use crate::{
 const SUPERVISED_WORKSPACE_REF: &str = "workspace.omega.supervised";
 const CODEX_LOCAL_LANE: &str = "codex-local";
 const CLAUDE_LOCAL_LANE: &str = "claude-local";
+const CODEX_AGENT_ID: &str = "codex-acp";
 const CLAUDE_AGENT_ID: &str = "claude-acp";
 const THREAD_CONNECT_ATTEMPTS: usize = 100;
 const THREAD_CONNECT_INTERVAL: Duration = Duration::from_millis(100);
@@ -348,22 +348,14 @@ fn lane_readiness(
         .threads
         .iter()
         .any(|thread| thread.lane == params.lane);
-    let (authority_ready, authority_state) = if params.lane == CODEX_LOCAL_LANE {
-        let model_ready = cx.update(|cx| {
-            LanguageModelRegistry::read_global(cx)
-                .default_model()
-                .is_some()
-        });
-        (
-            model_ready,
-            if model_ready {
-                "available"
-            } else {
-                "unavailable"
-            },
-        )
-    } else {
-        claude_lane_readiness(state, cx, lane_thread_exists)?
+    let (authority_ready, authority_state) = match params.lane.as_str() {
+        CODEX_LOCAL_LANE => {
+            external_agent_lane_readiness(state, cx, CODEX_AGENT_ID, lane_thread_exists)?
+        }
+        CLAUDE_LOCAL_LANE => {
+            external_agent_lane_readiness(state, cx, CLAUDE_AGENT_ID, lane_thread_exists)?
+        }
+        _ => return Err(unsupported("The provider lane is not supported.")),
     };
     let busy = state.borrow().threads.iter().any(|host_thread| {
         if host_thread.lane != params.lane {
@@ -998,7 +990,9 @@ fn persist_correlation_journal(state: &HostBridgeState) -> anyhow::Result<()> {
 
 fn agent_for_lane(lane: &str) -> Result<Agent, HostResponseError> {
     match lane {
-        CODEX_LOCAL_LANE => Ok(Agent::NativeAgent),
+        CODEX_LOCAL_LANE => Ok(Agent::Custom {
+            id: CODEX_AGENT_ID.into(),
+        }),
         CLAUDE_LOCAL_LANE => Ok(Agent::Custom {
             id: CLAUDE_AGENT_ID.into(),
         }),
@@ -1010,9 +1004,10 @@ fn is_supported_lane(lane: &str) -> bool {
     matches!(lane, CODEX_LOCAL_LANE | CLAUDE_LOCAL_LANE)
 }
 
-fn claude_lane_readiness(
+fn external_agent_lane_readiness(
     state: &Rc<RefCell<HostBridgeState>>,
     cx: &AsyncApp,
+    agent_id: &'static str,
     lane_thread_exists: bool,
 ) -> Result<(bool, &'static str), HostResponseError> {
     let binding = state
@@ -1024,8 +1019,8 @@ fn claude_lane_readiness(
         .workspace
         .upgrade()
         .ok_or_else(|| unavailable("The bound workspace was closed."))?;
-    let claude_agent = Agent::Custom {
-        id: CLAUDE_AGENT_ID.into(),
+    let agent = Agent::Custom {
+        id: agent_id.into(),
     };
     let (registered, connection_status) = cx.update(|cx| {
         let project = workspace.read(cx).project().clone();
@@ -1034,7 +1029,7 @@ fn claude_lane_readiness(
             .agent_server_store()
             .read(cx)
             .external_agents()
-            .any(|agent_id| agent_id.as_ref() == CLAUDE_AGENT_ID);
+            .any(|registered_agent_id| registered_agent_id.as_ref() == agent_id);
         let connection_status = workspace
             .read(cx)
             .panel::<AgentPanel>(cx)
@@ -1043,19 +1038,31 @@ fn claude_lane_readiness(
                     .read(cx)
                     .connection_store()
                     .read(cx)
-                    .connection_status(&claude_agent, cx)
+                    .connection_status(&agent, cx)
             })
             .unwrap_or(AgentConnectionStatus::Disconnected);
         (registered, connection_status)
     });
+    Ok(external_agent_authority_state(
+        registered,
+        connection_status,
+        lane_thread_exists,
+    ))
+}
+
+fn external_agent_authority_state(
+    registered: bool,
+    connection_status: AgentConnectionStatus,
+    lane_thread_exists: bool,
+) -> (bool, &'static str) {
     if !registered {
-        return Ok((false, "unavailable"));
+        return (false, "unavailable");
     }
     match connection_status {
-        AgentConnectionStatus::Connected => Ok((true, "available")),
-        AgentConnectionStatus::Connecting => Ok((false, "connecting")),
-        AgentConnectionStatus::Disconnected if !lane_thread_exists => Ok((true, "available")),
-        AgentConnectionStatus::Disconnected => Ok((false, "unavailable")),
+        AgentConnectionStatus::Connected => (true, "available"),
+        AgentConnectionStatus::Connecting => (false, "connecting"),
+        AgentConnectionStatus::Disconnected if !lane_thread_exists => (true, "available"),
+        AgentConnectionStatus::Disconnected => (false, "unavailable"),
     }
 }
 
@@ -1246,7 +1253,9 @@ mod tests {
     fn local_lanes_resolve_to_their_real_agent_authorities() {
         assert_eq!(
             agent_for_lane(CODEX_LOCAL_LANE).expect("codex lane"),
-            Agent::NativeAgent
+            Agent::Custom {
+                id: CODEX_AGENT_ID.into(),
+            }
         );
         assert_eq!(
             agent_for_lane(CLAUDE_LOCAL_LANE).expect("claude lane"),
@@ -1255,5 +1264,29 @@ mod tests {
             }
         );
         assert!(agent_for_lane("claude-cloud").is_err());
+    }
+
+    #[test]
+    fn external_agent_readiness_requires_registration_and_tracks_connection() {
+        assert_eq!(
+            external_agent_authority_state(false, AgentConnectionStatus::Disconnected, false,),
+            (false, "unavailable")
+        );
+        assert_eq!(
+            external_agent_authority_state(true, AgentConnectionStatus::Disconnected, false,),
+            (true, "available")
+        );
+        assert_eq!(
+            external_agent_authority_state(true, AgentConnectionStatus::Connecting, true),
+            (false, "connecting")
+        );
+        assert_eq!(
+            external_agent_authority_state(true, AgentConnectionStatus::Connected, true),
+            (true, "available")
+        );
+        assert_eq!(
+            external_agent_authority_state(true, AgentConnectionStatus::Disconnected, true),
+            (false, "unavailable")
+        );
     }
 }

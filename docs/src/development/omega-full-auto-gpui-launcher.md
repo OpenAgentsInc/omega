@@ -26,9 +26,9 @@ Omega ships a dedicated Full Auto dock panel.
 - A missing packaged component disables Start with an unavailable message;
   production never falls back to `fake_effectd.mjs`.
 - The supervisor exchanges generation-fenced reverse-host frames with the
-  active Workspace, Agent panel, and ACP thread. Native `codex-local` and
-  registered `claude-local` runs can resolve a workspace, create the matching
-  Agent thread, check real model/ACP readiness, dispatch, refresh evidence, and
+  active Workspace, Agent panel, and ACP thread. Registered `codex-acp` and
+  `claude-acp` runs can resolve a workspace, create the matching Agent thread,
+  check ACP registration/connection readiness, dispatch, refresh evidence, and
   interrupt without a parallel GPUI run engine.
 - Leased-turn correlation is journaled before acknowledgement and rebound to
   the persisted Agent thread after a full Omega process restart.

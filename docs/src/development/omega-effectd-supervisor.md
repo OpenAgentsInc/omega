@@ -21,10 +21,10 @@ GPUI is not run authority.
 | Pack SHA-256 | `4cc1cb2e5d71ff8af6f730248871ee779488a991f21a848880e885331ef31831` |
 | Protocol | `openagents.omega.effectd.v1` |
 | Omega crate | `crates/omega_effectd` |
-| Runtime release | `omega-effectd-v0.1.0-rc.3` |
-| macOS arm64 archive SHA-256 | `0fb275283686f9de27d326de1c87bbd0ed8ed1360126956658a2c29818d1ea6c` |
-| Runtime source commit | `b8057682598d3744f09f6c6daf24823644b1e3ab` |
-| Runtime source tree | `722c22887f43290161373d6c79e48914f5d27548` |
+| Runtime release | `omega-effectd-v0.1.0-rc.4` |
+| macOS arm64 archive SHA-256 | `242da72ae741e27524c5782f5b6a38eb6869ed43fbfcb7ba05fe14fb04b737d6` |
+| Runtime source commit | `db6412190b3de5712d2a0957644af5c76679f697` |
+| Runtime source tree | `5958316faa32e327580e30ef7006002cfcae2471` |
 
 ## Supervisor laws
 
@@ -74,11 +74,12 @@ passes the framed `handoff` contract.
 Omega registers the reverse-host handler when it creates the shared supervisor.
 The handler stays on GPUI's foreground executor and delegates to the active
 `Workspace`, `AgentPanel`, and `AcpThread` authorities. It resolves exactly one
-open local workspace and creates either a native Agent thread for
-`codex-local` or a registered `claude-acp` external-agent thread for
-`claude-local`. Codex admission requires a default model. Claude admission
-requires the registered external agent and, once a Claude thread exists, a
-connected ACP authority. Both lanes dispatch through `AcpThread::send`, project
+open local workspace and creates registered `codex-acp` and `claude-acp`
+external-agent threads for `codex-local` and `claude-local`, respectively.
+Omega registers Codex ACP in its default agent-server settings. Lane admission
+requires the matching registered external agent and, once a lane thread
+exists, a connected ACP authority. It never infers Codex readiness from a Zed
+hosted-model default. Both lanes dispatch through `AcpThread::send`, project
 bounded assistant evidence from real thread entries, and interrupt through
 `AcpThread::cancel`. Unknown lanes, ambiguous workspaces, closed threads,
 concurrent turns, cross-lane dispatch, and unavailable profile overrides fail
