@@ -220,6 +220,7 @@
   - [Omega application identity](./development/omega-application-identity.md)
   - [Omega Full Auto contract freeze](./development/omega-full-auto-contract-freeze.md)
   - [Omega Agent Computer contract freeze](./development/omega-agent-computer-contract-freeze.md)
+  - [HE-02 harness-environment release](./development/he02-harness-environment-release.md)
   - [Omega Agent Computer runner](./development/omega-agent-computer-runner.md)
   - [Omega Agent Computer launch surface](./development/omega-agent-computer-launch-surface.md)
   - [Omega-effectd Full Auto extract pin](./development/omega-effectd-full-auto-extract.md)
