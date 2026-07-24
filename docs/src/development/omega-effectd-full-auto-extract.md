@@ -20,7 +20,7 @@ is the consumer lock. It does not redefine the run lifecycle.
 | --- | --- |
 | Package | `@openagentsinc/omega-effectd` |
 | Version | `0.1.0` |
-| Pack SHA-256 | `20e4e002202b6db640501301f134e0a9f0f8718fe1c1dc38bef4aa5ab2d69ffe` |
+| Pack SHA-256 | `d4d8ea7035c37d9d03ef6b90ce129a71118f55280d6af08a2a4cee5d3aa5d93b` |
 
 ## Consumption rules
 

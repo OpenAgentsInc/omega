@@ -145,6 +145,31 @@ impl OmegaEffectdSupervisor {
         self.mutate_run("retry", run_ref).await
     }
 
+    pub async fn get_capacity(&mut self) -> Result<Value, SupervisorError> {
+        self.request("get_capacity", None, self.generation()).await
+    }
+
+    pub async fn decide_attention(
+        &mut self,
+        run_ref: &str,
+        permission_granted: bool,
+    ) -> Result<Value, SupervisorError> {
+        let result = self
+            .request(
+                "decide_attention",
+                Some(json!({
+                    "runRef": run_ref,
+                    "permissionGranted": permission_granted,
+                })),
+                self.generation(),
+            )
+            .await?;
+        Ok(result
+            .get("attention")
+            .cloned()
+            .unwrap_or(Value::Null))
+    }
+
     async fn mutate_run(&mut self, method: &str, run_ref: &str) -> Result<Value, SupervisorError> {
         let result = self
             .request(

@@ -52,8 +52,16 @@ struct RunDetail {
     turn_cap: u32,
     successful_attempts: u32,
     failed_attempts: u32,
+    stall_cause: Option<String>,
     recovery_action: String,
     turns: Vec<(String, String, String)>,
+}
+
+#[derive(Debug, Clone)]
+struct CapacityLane {
+    lane: String,
+    state: String,
+    active_runs: u32,
 }
 
 enum SurfaceMode {
@@ -77,6 +85,7 @@ pub struct FullAutoPanel {
     runs: Vec<RunRow>,
     active_run: Option<RunDetail>,
     active_run_ref: Option<String>,
+    capacity_lanes: Vec<CapacityLane>,
     status: SharedString,
     supervisor: Option<SupervisorHandle>,
     _refresh: Option<Task<()>>,
@@ -147,6 +156,7 @@ impl FullAutoPanel {
             runs: Vec::new(),
             active_run: None,
             active_run_ref: None,
+            capacity_lanes: Vec::new(),
             status: "Full Auto is a run, not a chat option.".into(),
             supervisor: None,
             _refresh: None,
@@ -237,6 +247,10 @@ impl FullAutoPanel {
                 let mut guard = supervisor.inner.lock().await;
                 guard.list_runs().await
             };
+            let capacity = {
+                let mut guard = supervisor.inner.lock().await;
+                guard.get_capacity().await.ok()
+            };
             let detail = if let Some(run_ref) = active {
                 let mut guard = supervisor.inner.lock().await;
                 guard.get_run(&run_ref).await.ok()
@@ -253,6 +267,9 @@ impl FullAutoPanel {
                             state: run.state,
                         })
                         .collect();
+                }
+                if let Some(value) = capacity {
+                    this.capacity_lanes = parse_capacity_lanes(value);
                 }
                 if let Some(value) = detail {
                     if let Ok(parsed) = parse_detail(value) {
@@ -407,6 +424,10 @@ fn parse_detail(value: Value) -> Result<RunDetail> {
             .get("failedAttempts")
             .and_then(|v| v.as_u64())
             .unwrap_or(0) as u32,
+        stall_cause: value
+            .get("stallCause")
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
         recovery_action: value
             .get("recoveryAction")
             .and_then(|v| v.as_str())
@@ -429,6 +450,25 @@ fn parse_detail(value: Value) -> Result<RunDetail> {
             })
             .unwrap_or_default(),
     })
+}
+
+fn parse_capacity_lanes(value: Value) -> Vec<CapacityLane> {
+    value
+        .get("lanes")
+        .and_then(|v| v.as_array())
+        .map(|lanes| {
+            lanes
+                .iter()
+                .filter_map(|lane| {
+                    Some(CapacityLane {
+                        lane: lane.get("lane")?.as_str()?.to_string(),
+                        state: lane.get("state")?.as_str()?.to_string(),
+                        active_runs: lane.get("activeRuns")?.as_u64()? as u32,
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn effectd_command() -> OmegaEffectdCommand {
@@ -522,6 +562,24 @@ impl Render for FullAutoPanel {
                                     .child(Label::new("Codex → Claude").color(Color::Muted))
                                     .child(Label::new(format!("{DEFAULT_TURN_CAP} turns")).color(Color::Muted)),
                             )
+                            .when(!self.capacity_lanes.is_empty(), |this| {
+                                this.child(
+                                    Label::new(format!(
+                                        "Capacity: {}",
+                                        self.capacity_lanes
+                                            .iter()
+                                            .map(|lane| {
+                                                format!(
+                                                    "{}={}({})",
+                                                    lane.lane, lane.state, lane.active_runs
+                                                )
+                                            })
+                                            .collect::<Vec<_>>()
+                                            .join(" · ")
+                                    ))
+                                    .color(Color::Muted),
+                                )
+                            })
                             .child(
                                 Button::new("full-auto-advanced-toggle", if self.draft.advanced_open {
                                     "Hide Advanced"
@@ -599,6 +657,15 @@ impl Render for FullAutoPanel {
                                 .contains(&run.state.as_str());
                             this.child(Label::new(run.title.clone()).size(LabelSize::Large))
                                 .child(Label::new(format!("State: {}", run.state)).color(Color::Accent))
+                                .when_some(run.stall_cause.clone(), |this, cause| {
+                                    this.child(
+                                        Label::new(format!(
+                                            "Stall: {cause} · recovery: {}",
+                                            run.recovery_action
+                                        ))
+                                        .color(Color::Warning),
+                                    )
+                                })
                                 .child(
                                     Label::new(format!(
                                         "Workspace: {} · Provider: {} · Cap: {}/{}",
@@ -609,6 +676,24 @@ impl Render for FullAutoPanel {
                                     ))
                                     .color(Color::Muted),
                                 )
+                                .when(!self.capacity_lanes.is_empty(), |this| {
+                                    this.child(
+                                        Label::new(format!(
+                                            "Capacity: {}",
+                                            self.capacity_lanes
+                                                .iter()
+                                                .map(|lane| {
+                                                    format!(
+                                                        "{}={}({})",
+                                                        lane.lane, lane.state, lane.active_runs
+                                                    )
+                                                })
+                                                .collect::<Vec<_>>()
+                                                .join(" · ")
+                                        ))
+                                        .color(Color::Muted),
+                                    )
+                                })
                                 .child(Label::new(run.objective.clone()))
                                 .child(
                                     Label::new(format!("Done when: {}", run.done_condition))

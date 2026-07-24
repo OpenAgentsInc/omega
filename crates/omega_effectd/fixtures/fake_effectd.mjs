@@ -123,6 +123,8 @@ for await (const line of rl) {
         "resume",
         "stop",
         "retry",
+        "get_capacity",
+        "decide_attention",
       ],
       dataRoot,
       activeRunLimit: 8,
@@ -223,6 +225,55 @@ for await (const line of rl) {
     }
     saveRuns(runs)
     respond(request.id, generation, true, { run: detail(runs[index]) })
+    continue
+  }
+  if (request.method === "get_capacity") {
+    respond(request.id, generation, true, {
+      activeRunLimit: 8,
+      activeRunCount: listRuns().filter((run) =>
+        ["running", "pausing", "paused", "retrying", "stalled"].includes(run.state),
+      ).length,
+      lanes: [
+        { lane: "codex-local", state: "available", activeRuns: 0, reason: "ready and idle" },
+        { lane: "claude-local", state: "available", activeRuns: 0, reason: "ready and idle" },
+      ],
+      nonOverridableGuardrails: [
+        "workspace_binding",
+        "own_capacity_only",
+        "no_rate_limit_reset_triggering",
+      ],
+      ownerConfigurableGuardrails: [
+        "maxWallClockMs",
+        "maxTurns",
+        "maxPerTurnFailures",
+        "tokenBudgetRef",
+      ],
+      enabledThreadsNeverEvicted: true,
+    })
+    continue
+  }
+  if (request.method === "decide_attention") {
+    const run = loadRuns().find((row) => row.runRef === request.params?.runRef)
+    if (!run) {
+      respond(request.id, generation, false, undefined, {
+        code: "run_not_found",
+        message: "No Full Auto run exists for that runRef.",
+      })
+      continue
+    }
+    const state = run.state
+    if (state !== "stalled" && state !== "retrying") {
+      respond(request.id, generation, true, { attention: null })
+      continue
+    }
+    respond(request.id, generation, true, {
+      attention: {
+        notify: request.params?.permissionGranted === true,
+        dedupKey: `${run.runRef}:${state}:${run.stallCause ?? "none"}`,
+        title: `Full Auto ${state}`,
+        body: `${run.title} needs attention (${state}).`,
+      },
+    })
     continue
   }
   respond(request.id, generation, false, undefined, {

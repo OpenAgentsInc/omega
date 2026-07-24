@@ -222,6 +222,7 @@
   - [Omega-effectd Full Auto extract pin](./development/omega-effectd-full-auto-extract.md)
   - [Omega-effectd Rust supervisor](./development/omega-effectd-supervisor.md)
   - [Omega Full Auto GPUI launcher](./development/omega-full-auto-gpui-launcher.md)
+  - [Omega Full Auto routing and liveness](./development/omega-full-auto-routing-liveness.md)
   - [Omega RC release](./development/omega-rc-release.md)
   - [Omega RC installed proof](./development/omega-rc-installed-proof.md)
   - [macOS](./development/macos.md)

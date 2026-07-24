@@ -5,7 +5,7 @@
 - Omega issue: [#22](https://github.com/OpenAgentsInc/omega/issues/22)
 - Depends on: FA-00 freeze, FA-01 extract, FA-02 supervisor
 - Protocol pin: OpenAgents pack SHA-256
-  `20e4e002202b6db640501301f134e0a9f0f8718fe1c1dc38bef4aa5ab2d69ffe`
+  `d4d8ea7035c37d9d03ef6b90ce129a71118f55280d6af08a2a4cee5d3aa5d93b`
 - OpenAgents land: `f795e357c5`
 
 ## Result
