@@ -343,17 +343,22 @@ fn lane_readiness(
         .workspace
         .as_ref()
         .is_some_and(|binding| binding.workspace.upgrade().is_some());
-    let lane_thread_exists = state
-        .borrow()
-        .threads
-        .iter()
-        .any(|thread| thread.lane == params.lane);
+    let dispatch_thread_exists =
+        params
+            .excluding_thread_ref
+            .as_ref()
+            .is_some_and(|excluding_thread_ref| {
+                state.borrow().threads.iter().any(|thread| {
+                    thread.lane == params.lane
+                        && thread.thread_id.to_key_string() == *excluding_thread_ref
+                })
+            });
     let (authority_ready, authority_state) = match params.lane.as_str() {
         CODEX_LOCAL_LANE => {
-            external_agent_lane_readiness(state, cx, CODEX_AGENT_ID, lane_thread_exists)?
+            external_agent_lane_readiness(state, cx, CODEX_AGENT_ID, dispatch_thread_exists)?
         }
         CLAUDE_LOCAL_LANE => {
-            external_agent_lane_readiness(state, cx, CLAUDE_AGENT_ID, lane_thread_exists)?
+            external_agent_lane_readiness(state, cx, CLAUDE_AGENT_ID, dispatch_thread_exists)?
         }
         _ => return Err(unsupported("The provider lane is not supported.")),
     };
@@ -1008,7 +1013,7 @@ fn external_agent_lane_readiness(
     state: &Rc<RefCell<HostBridgeState>>,
     cx: &AsyncApp,
     agent_id: &'static str,
-    lane_thread_exists: bool,
+    dispatch_thread_exists: bool,
 ) -> Result<(bool, &'static str), HostResponseError> {
     let binding = state
         .borrow()
@@ -1046,23 +1051,25 @@ fn external_agent_lane_readiness(
     Ok(external_agent_authority_state(
         registered,
         connection_status,
-        lane_thread_exists,
+        dispatch_thread_exists,
     ))
 }
 
 fn external_agent_authority_state(
     registered: bool,
     connection_status: AgentConnectionStatus,
-    lane_thread_exists: bool,
+    dispatch_thread_exists: bool,
 ) -> (bool, &'static str) {
     if !registered {
         return (false, "unavailable");
     }
     match connection_status {
         AgentConnectionStatus::Connected => (true, "available"),
+        // Dispatch waits for this exact retained thread's root ACP session, so
+        // treating its bootstrap as unavailable would strand the run at zero turns.
+        AgentConnectionStatus::Connecting if dispatch_thread_exists => (true, "available"),
         AgentConnectionStatus::Connecting => (false, "connecting"),
-        AgentConnectionStatus::Disconnected if !lane_thread_exists => (true, "available"),
-        AgentConnectionStatus::Disconnected => (false, "unavailable"),
+        AgentConnectionStatus::Disconnected => (true, "available"),
     }
 }
 
@@ -1267,7 +1274,7 @@ mod tests {
     }
 
     #[test]
-    fn external_agent_readiness_requires_registration_and_tracks_connection() {
+    fn external_agent_readiness_allows_dispatch_to_bootstrap_its_connection() {
         assert_eq!(
             external_agent_authority_state(false, AgentConnectionStatus::Disconnected, false,),
             (false, "unavailable")
@@ -1278,6 +1285,10 @@ mod tests {
         );
         assert_eq!(
             external_agent_authority_state(true, AgentConnectionStatus::Connecting, true),
+            (true, "available")
+        );
+        assert_eq!(
+            external_agent_authority_state(true, AgentConnectionStatus::Connecting, false),
             (false, "connecting")
         );
         assert_eq!(
@@ -1286,7 +1297,7 @@ mod tests {
         );
         assert_eq!(
             external_agent_authority_state(true, AgentConnectionStatus::Disconnected, true),
-            (false, "unavailable")
+            (true, "available")
         );
     }
 }

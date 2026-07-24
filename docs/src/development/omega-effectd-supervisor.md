@@ -77,9 +77,11 @@ The handler stays on GPUI's foreground executor and delegates to the active
 open local workspace and creates registered `codex-acp` and `claude-acp`
 external-agent threads for `codex-local` and `claude-local`, respectively.
 Omega registers Codex ACP in its default agent-server settings. Lane admission
-requires the matching registered external agent and, once a lane thread
-exists, a connected ACP authority. It never infers Codex readiness from a Zed
-hosted-model default. Omega keeps local and registry ACP infrastructure enabled
+requires the matching registered external agent. A first dispatch may proceed
+while its exact retained ACP thread is connecting because the dispatch
+authority waits for that thread's root session; unrelated connecting threads
+remain unavailable. It never infers Codex readiness from a Zed hosted-model
+default. Omega keeps local and registry ACP infrastructure enabled
 while separately gating Zed account, cloud-model, telemetry, update, and
 extension services. Both lanes dispatch through `AcpThread::send`, project
 bounded assistant evidence from real thread entries, and interrupt through
