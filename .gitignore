@@ -42,6 +42,8 @@ crates/docs_preprocessor/actions.json
 
 # Don't commit any secrets to the repo.
 .env
+.env.local
+.env.*.local
 .env.secret.toml
 
 # `nix build` output
