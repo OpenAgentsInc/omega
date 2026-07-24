@@ -19,7 +19,6 @@ use open_ai::{ReasoningEffort, responses::stream_response};
 use rand::RngCore as _;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use ui::{ConfiguredApiCard, prelude::*};
@@ -33,7 +32,7 @@ const PROVIDER_NAME: LanguageModelProviderName =
     LanguageModelProviderName::new("ChatGPT Subscription");
 
 const SUBSCRIPTION_DESCRIPTION: &str =
-    "Sign in with your ChatGPT Plus or Pro subscription to use OpenAI models in the native agent.";
+    "Sign in with your ChatGPT Plus or Pro subscription to use OpenAI models in Zed's agent.";
 
 const CODEX_BASE_URL: &str = "https://chatgpt.com/backend-api/codex";
 const OPENAI_TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
@@ -42,7 +41,6 @@ const CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 
 const CREDENTIALS_KEY: &str = "https://chatgpt.com/backend-api/codex";
 const TOKEN_REFRESH_BUFFER_MS: u64 = 5 * 60 * 1000;
-const MAX_CODEX_AUTH_FILE_BYTES: u64 = 256 * 1024;
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 struct CodexCredentials {
@@ -51,21 +49,6 @@ struct CodexCredentials {
     expires_at_ms: u64,
     account_id: Option<String>,
     email: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct CodexCliAuth {
-    tokens: CodexCliTokens,
-}
-
-#[derive(Deserialize)]
-struct CodexCliTokens {
-    access_token: String,
-    refresh_token: String,
-    #[serde(default)]
-    account_id: Option<String>,
-    #[serde(default)]
-    id_token: Option<String>,
 }
 
 impl CodexCredentials {
@@ -1005,141 +988,6 @@ fn now_ms() -> u64 {
         })
 }
 
-fn codex_cli_auth_path() -> PathBuf {
-    std::env::var_os("CODEX_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| paths::home_dir().join(".codex"))
-        .join("auth.json")
-}
-
-fn jwt_expiry_ms(jwt: &str) -> Result<u64> {
-    let payload = jwt
-        .split('.')
-        .nth(1)
-        .context("Codex access token is not a JWT")?;
-    let payload = URL_SAFE_NO_PAD
-        .decode(payload)
-        .context("Codex access token has an invalid JWT payload")?;
-    let claims: serde_json::Value =
-        serde_json::from_slice(&payload).context("Codex access token has invalid JWT claims")?;
-    let expires_at_seconds = claims
-        .get("exp")
-        .and_then(serde_json::Value::as_u64)
-        .context("Codex access token has no expiration")?;
-    expires_at_seconds
-        .checked_mul(1000)
-        .context("Codex access token expiration is out of range")
-}
-
-fn read_codex_cli_credentials(path: &Path) -> Result<CodexCredentials> {
-    let metadata = std::fs::symlink_metadata(path)
-        .with_context(|| format!("Could not inspect {}", path.display()))?;
-    anyhow::ensure!(metadata.is_file(), "Codex auth path is not a regular file");
-    anyhow::ensure!(
-        metadata.len() <= MAX_CODEX_AUTH_FILE_BYTES,
-        "Codex auth file is unexpectedly large"
-    );
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        anyhow::ensure!(
-            metadata.permissions().mode() & 0o077 == 0,
-            "Codex auth file is readable by other users"
-        );
-    }
-
-    let bytes =
-        std::fs::read(path).with_context(|| format!("Could not read {}", path.display()))?;
-    parse_codex_cli_credentials(&bytes)
-}
-
-fn parse_codex_cli_credentials(bytes: &[u8]) -> Result<CodexCredentials> {
-    let auth: CodexCliAuth =
-        serde_json::from_slice(bytes).context("Codex auth file has an invalid format")?;
-    anyhow::ensure!(
-        !auth.tokens.access_token.is_empty() && !auth.tokens.refresh_token.is_empty(),
-        "Codex auth file is missing subscription tokens"
-    );
-
-    let expires_at_ms = jwt_expiry_ms(&auth.tokens.access_token)?;
-    let claims = extract_jwt_claims(
-        auth.tokens
-            .id_token
-            .as_deref()
-            .unwrap_or(auth.tokens.access_token.as_str()),
-    );
-    let account_id = auth
-        .tokens
-        .account_id
-        .filter(|account_id| !account_id.is_empty())
-        .or(claims.account_id);
-
-    Ok(CodexCredentials {
-        access_token: auth.tokens.access_token,
-        refresh_token: auth.tokens.refresh_token,
-        expires_at_ms,
-        account_id,
-        email: claims.email,
-    })
-}
-
-fn do_import_codex_login(state: &Entity<State>, cx: &mut App) {
-    if state.read(cx).is_signing_in() {
-        return;
-    }
-
-    let weak_state = state.downgrade();
-    let auth_path = codex_cli_auth_path();
-    let read_task = cx.background_spawn(async move { read_codex_cli_credentials(&auth_path) });
-    let task = cx.spawn(async move |cx| {
-        let result = async {
-            let credentials = read_task.await?;
-            let credentials_provider =
-                weak_state.read_with(&*cx, |state, _| state.credentials_provider.clone())?;
-            let json = serde_json::to_vec(&credentials)?;
-            credentials_provider
-                .write_credentials(CREDENTIALS_KEY, "Bearer", &json, &*cx)
-                .await?;
-            anyhow::Ok(credentials)
-        }
-        .await;
-
-        match result {
-            Ok(credentials) => {
-                weak_state
-                    .update(cx, |state, cx| {
-                        state.credentials = Some(credentials);
-                        state.sign_in_task = None;
-                        state.last_auth_error = None;
-                        cx.notify();
-                    })
-                    .log_err();
-            }
-            Err(error) => {
-                log::warn!("Could not import the existing Codex login: {error:#}");
-                weak_state
-                    .update(cx, |state, cx| {
-                        state.sign_in_task = None;
-                        state.last_auth_error = Some(
-                            "Could not use the existing Codex login. Run `codex login`, then try again."
-                                .into(),
-                        );
-                        cx.notify();
-                    })
-                    .log_err();
-            }
-        }
-        anyhow::Ok(())
-    });
-
-    state.update(cx, |state, cx| {
-        state.sign_in_task = Some(task);
-        state.last_auth_error = None;
-        cx.notify();
-    });
-}
-
 fn do_sign_in(state: &Entity<State>, http_client: &Arc<dyn HttpClient>, cx: &mut App) {
     if state.read(cx).is_signing_in() {
         return;
@@ -1268,12 +1116,11 @@ impl Render for ConfigurationView {
 
         let last_auth_error = state.last_auth_error.clone();
         let provider_state = self.state.clone();
-        let import_state = self.state.clone();
         let http_client = self.http_client.clone();
 
         let is_signing_in = state.is_signing_in();
         let button_label = if is_signing_in {
-            "Working…"
+            "Signing in…"
         } else {
             "Sign In"
         };
@@ -1292,16 +1139,6 @@ impl Render for ConfigurationView {
                     .disabled(is_signing_in)
                     .on_click(move |_, _window, cx| {
                         do_sign_in(&provider_state, &http_client, cx);
-                    }),
-            )
-            .child(
-                Button::new("import-codex-login", "Use Existing Codex Login")
-                    .when(!self.compact, |this| this.full_width())
-                    .style(ButtonStyle::Outlined)
-                    .size(ButtonSize::Medium)
-                    .disabled(is_signing_in)
-                    .on_click(move |_, _window, cx| {
-                        do_import_codex_login(&import_state, cx);
                     }),
             )
             .when_some(last_auth_error, |this, error| {
@@ -1402,62 +1239,6 @@ mod tests {
             "expires_in": 3600
         })
         .to_string()
-    }
-
-    fn test_jwt(claims: serde_json::Value) -> String {
-        format!(
-            "header.{}.signature",
-            URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims).expect("serialize claims"))
-        )
-    }
-
-    #[test]
-    fn imports_codex_cli_credentials_without_reauthenticating() {
-        let access_token = test_jwt(serde_json::json!({
-            "exp": 1_893_456_000_u64,
-            "https://api.openai.com/auth": {
-                "chatgpt_account_id": "account-from-token"
-            }
-        }));
-        let id_token = test_jwt(serde_json::json!({
-            "email": "owner@example.com"
-        }));
-        let auth = serde_json::json!({
-            "auth_mode": "chatgpt",
-            "tokens": {
-                "access_token": access_token,
-                "refresh_token": "refresh-token",
-                "account_id": "account-from-file",
-                "id_token": id_token
-            }
-        });
-
-        let credentials = parse_codex_cli_credentials(
-            &serde_json::to_vec(&auth).expect("serialize auth fixture"),
-        )
-        .expect("parse Codex CLI credentials");
-
-        assert_eq!(credentials.refresh_token, "refresh-token");
-        assert_eq!(credentials.expires_at_ms, 1_893_456_000_000);
-        assert_eq!(credentials.account_id.as_deref(), Some("account-from-file"));
-        assert_eq!(credentials.email.as_deref(), Some("owner@example.com"));
-    }
-
-    #[test]
-    fn rejects_incomplete_codex_cli_credentials() {
-        let auth = serde_json::json!({
-            "tokens": {
-                "access_token": test_jwt(serde_json::json!({ "exp": 1_893_456_000_u64 })),
-                "refresh_token": ""
-            }
-        });
-
-        let error = parse_codex_cli_credentials(
-            &serde_json::to_vec(&auth).expect("serialize auth fixture"),
-        )
-        .expect_err("missing refresh token should fail");
-
-        assert!(error.to_string().contains("missing subscription tokens"));
     }
 
     #[gpui::test]
