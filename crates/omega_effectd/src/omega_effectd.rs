@@ -83,4 +83,91 @@ mod tests {
             supervisor.stop().await.expect("stop");
         });
     }
+
+    #[test]
+    fn fa07_control_matrix_and_native_join_survive_restart() {
+        smol::block_on(async {
+            let root = tempdir().unwrap();
+            let mut supervisor = OmegaEffectdSupervisor::new(OmegaEffectdSupervisorOptions {
+                data_root: root.path().to_path_buf(),
+                command: fixture_command(&fixture_path()),
+                initial_generation: 1,
+                request_timeout: Duration::from_secs(5),
+            });
+
+            supervisor.start().await.expect("start");
+            let started = supervisor
+                .start_run(json!({
+                    "workspaceRef": "workspace.omega.supervised",
+                    "title": "FA-07 control matrix",
+                    "objective": "Prove pause resume stop and native join.",
+                    "doneCondition": "Controls complete.",
+                    "turnCap": 8,
+                    "projectRef": "project.fa07",
+                    "worktreeRef": "worktree.fa07",
+                    "gitHead": "deadbeef"
+                }))
+                .await
+                .expect("start_run");
+            let run_ref = started
+                .get("runRef")
+                .and_then(|v| v.as_str())
+                .expect("runRef")
+                .to_string();
+            assert_eq!(
+                started
+                    .pointer("/nativeEvidence/projectRef")
+                    .and_then(|v| v.as_str()),
+                Some("project.fa07")
+            );
+
+            let paused = supervisor.pause_run(&run_ref).await.expect("pause");
+            assert_eq!(paused.get("state").and_then(|v| v.as_str()), Some("paused"));
+            let resumed = supervisor.resume_run(&run_ref).await.expect("resume");
+            assert_eq!(
+                resumed.get("state").and_then(|v| v.as_str()),
+                Some("running")
+            );
+
+            let binding = supervisor
+                .get_native_binding(&run_ref)
+                .await
+                .expect("binding");
+            assert_eq!(
+                binding.get("projectRef").and_then(|v| v.as_str()),
+                Some("project.fa07")
+            );
+            let assessment = supervisor
+                .assess_native_boundary(&run_ref)
+                .await
+                .expect("assessment");
+            assert_eq!(assessment.get("ok").and_then(|v| v.as_bool()), Some(true));
+
+            let sync = supervisor.get_sync_status().await.expect("sync");
+            assert_eq!(
+                sync.get("publishBlocksDispatch").and_then(|v| v.as_bool()),
+                Some(false)
+            );
+
+            supervisor.restart().await.expect("restart");
+            let after = supervisor.get_run(&run_ref).await.expect("get after restart");
+            assert_eq!(
+                after.get("runRef").and_then(|v| v.as_str()),
+                Some(run_ref.as_str())
+            );
+            assert_eq!(
+                after
+                    .pointer("/nativeEvidence/worktreeRef")
+                    .and_then(|v| v.as_str()),
+                Some("worktree.fa07")
+            );
+
+            let stopped = supervisor.stop_run(&run_ref).await.expect("stop");
+            assert_eq!(
+                stopped.get("state").and_then(|v| v.as_str()),
+                Some("stopped")
+            );
+            supervisor.stop().await.expect("supervisor stop");
+        });
+    }
 }
