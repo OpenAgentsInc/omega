@@ -6,7 +6,7 @@
 mod protocol;
 mod supervisor;
 
-use std::sync::Arc;
+use std::{rc::Rc, sync::Arc};
 
 use anyhow::{Result, anyhow};
 use gpui::{App, Global};
@@ -23,7 +23,7 @@ pub use supervisor::{
     fixture_command, resolve_effectd_command,
 };
 
-pub type SharedOmegaEffectdSupervisor = Arc<AsyncMutex<OmegaEffectdSupervisor>>;
+pub type SharedOmegaEffectdSupervisor = Rc<AsyncMutex<OmegaEffectdSupervisor>>;
 
 enum OmegaEffectdRuntime {
     Available(SharedOmegaEffectdSupervisor),
@@ -33,6 +33,10 @@ enum OmegaEffectdRuntime {
 impl Global for OmegaEffectdRuntime {}
 
 pub fn init(cx: &mut App) {
+    init_with_host_handler(None, cx);
+}
+
+pub fn init_with_host_handler(handler: Option<OmegaEffectdHostHandler>, cx: &mut App) {
     if cx.has_global::<OmegaEffectdRuntime>() {
         return;
     }
@@ -46,9 +50,14 @@ pub fn init(cx: &mut App) {
             )
         }) {
         Ok(command) => {
-            OmegaEffectdRuntime::Available(Arc::new(AsyncMutex::new(OmegaEffectdSupervisor::new(
-                default_options(paths::data_dir().join("openagents"), command),
-            ))))
+            let mut supervisor = OmegaEffectdSupervisor::new(default_options(
+                paths::data_dir().join("openagents"),
+                command,
+            ));
+            if let Some(handler) = handler {
+                supervisor.set_host_handler(handler);
+            }
+            OmegaEffectdRuntime::Available(Rc::new(AsyncMutex::new(supervisor)))
         }
         Err(error) => OmegaEffectdRuntime::Unavailable(error.to_string().into()),
     };
@@ -67,6 +76,7 @@ pub fn shared_supervisor(cx: &App) -> Result<SharedOmegaEffectdSupervisor> {
 mod tests {
     use std::ffi::OsStr;
     use std::path::PathBuf;
+    use std::rc::Rc;
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
@@ -155,7 +165,7 @@ mod tests {
                 request_timeout: Duration::from_secs(5),
             });
             let observed = Arc::new(Mutex::new(None));
-            supervisor.set_host_handler(Arc::new({
+            supervisor.set_host_handler(Rc::new({
                 let observed = observed.clone();
                 move |request| {
                     let observed = observed.clone();
@@ -216,7 +226,7 @@ mod tests {
                 request_timeout: Duration::from_secs(5),
             });
             supervisor.set_host_request_timeout(Duration::from_millis(10));
-            supervisor.set_host_handler(Arc::new(|_| {
+            supervisor.set_host_handler(Rc::new(|_| {
                 Box::pin(futures::future::pending::<
                     std::result::Result<serde_json::Value, HostResponseError>,
                 >())
@@ -280,7 +290,7 @@ mod tests {
                 initial_generation: 1,
                 request_timeout: Duration::from_secs(5),
             });
-            supervisor.set_host_handler(Arc::new(|_| {
+            supervisor.set_host_handler(Rc::new(|_| {
                 Box::pin(async {
                     Ok(json!({
                         "workspaceRef": "x".repeat(MAX_FRAME_BYTES),

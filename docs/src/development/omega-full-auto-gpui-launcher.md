@@ -24,10 +24,13 @@ Omega ships a dedicated Full Auto dock panel.
   Omega data root.
 - A missing packaged component disables Start with an unavailable message;
   production never falls back to `fake_effectd.mjs`.
-- The supervisor can exchange generation-fenced reverse-host frames, but the
-  seven real workspace/thread/provider authority adapters remain intentionally
-  unavailable. A packaged service therefore refuses run admission rather than
-  fabricating host success.
+- The supervisor exchanges generation-fenced reverse-host frames with the
+  active Workspace, Agent panel, and ACP thread. Native `codex-local` runs can
+  resolve a workspace, create a thread, check readiness, dispatch, refresh
+  evidence, and interrupt without a parallel GPUI run engine.
+- System notes and restart-stable leased-turn correlation remain unavailable;
+  those paths fail closed instead of writing a fake chat message or claiming
+  evidence that cannot be recovered.
 
 Crate: `crates/full_auto_ui`. Supervisor helpers: `start_run`, `get_run`,
 `pause_run`, `resume_run`, `stop_run`, `retry_run`.

@@ -543,6 +543,7 @@ dependencies = [
  "multi_buffer",
  "node_runtime",
  "notifications",
+ "omega_effectd",
  "ordered-float 2.10.1",
  "parking_lot",
  "paths",

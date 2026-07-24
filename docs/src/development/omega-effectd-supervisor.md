@@ -56,13 +56,23 @@ The Omega RC packager still needs to install the pinned service and fixed
 Node runtime at the component path above. Until then the panels report the
 component as unavailable rather than presenting fixture behavior.
 
-The multiplexing seam is ready for real host adapters, but none are registered
-yet. `resolve_workspace`, `create_thread`, `lane_readiness`, `dispatch_turn`,
-`refresh_evidence`, `interrupt_turn`, and `append_system_note` therefore return
-typed `unavailable` responses. Follow-up work must route those methods through
-the active Workspace, ThreadStore, provider lane admission, live turn,
-evidence, interruption, and owner-visible system-note authorities before Full
-Auto can admit a real run.
+Omega registers the reverse-host handler when it creates the shared supervisor.
+The handler stays on GPUI's foreground executor and delegates to the active
+`Workspace`, `AgentPanel`, and `AcpThread` authorities. It resolves exactly one
+open local workspace, creates a native Agent thread, admits the `codex-local`
+lane only when a default model is available, dispatches through
+`AcpThread::send`, projects bounded assistant evidence from real thread entries,
+and interrupts through `AcpThread::cancel`. Unknown lanes, ambiguous
+workspaces, closed threads, concurrent turns, and unavailable profile overrides
+fail closed.
+
+The host bridge retains only correlation data between effectd's leased turn
+references and live ACP entry boundaries; it is not a second run engine and
+does not mutate durable Full Auto state. That correlation is currently scoped
+to the app process, so owner-real restart recovery still needs a persisted
+effectd-turn reference on the native Agent thread. `append_system_note` also
+remains typed `unavailable`: `AcpThread` has no owner-visible, non-model system
+entry authority, and Omega does not disguise control notes as user prompts.
 
 ## Next packets
 

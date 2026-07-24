@@ -10,7 +10,7 @@ use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::process::Stdio;
-use std::sync::Arc;
+use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
@@ -37,9 +37,8 @@ const DEFAULT_HOST_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_HOST_ERROR_MESSAGE_BYTES: usize = 1024;
 
 pub type OmegaEffectdHostFuture =
-    Pin<Box<dyn Future<Output = std::result::Result<Value, HostResponseError>> + Send + 'static>>;
-pub type OmegaEffectdHostHandler =
-    Arc<dyn Fn(HostRequestFrame) -> OmegaEffectdHostFuture + Send + Sync + 'static>;
+    Pin<Box<dyn Future<Output = std::result::Result<Value, HostResponseError>> + 'static>>;
+pub type OmegaEffectdHostHandler = Rc<dyn Fn(HostRequestFrame) -> OmegaEffectdHostFuture + 'static>;
 
 #[derive(Debug, Clone)]
 pub struct OmegaEffectdCommand {
