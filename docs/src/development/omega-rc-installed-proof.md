@@ -334,6 +334,9 @@ Do not close issue #16 until `status` is `complete`.
    configured `codex-acp` start so the capture includes ACP registry, managed
    Node/npm fallback when applicable, and npm dependency installation. The
    allowlist is evidence for this review; it is not enforced by the process.
+   The collector records the contemporaneous DNS answers used to classify an
+   approved hostname when `lsof` exposes only its IP address. Loopback traffic
+   is retained in the receipt but is not classified as an external host.
 9. Inspect data, cache, log, browser, update, and credential roots for Omega
    vs Zed separation.
 10. Confirm disabled service / update behavior is honest.

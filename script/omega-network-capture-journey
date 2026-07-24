@@ -9,6 +9,7 @@ import ipaddress
 import json
 import os
 import re
+import socket
 import subprocess
 import sys
 import time
@@ -20,6 +21,7 @@ from typing import Any
 ROOT = Path(__file__).resolve().parent.parent
 ALLOWLIST_PATH = ROOT / "crates/app_identity/fixtures/endpoint_allowlist.json"
 SCHEMA = "openagents.omega.network-capture.v1"
+LOCAL_HOSTS = {"localhost", "localhost.localdomain"}
 
 
 class CaptureError(RuntimeError):
@@ -119,8 +121,27 @@ def host_matches(host: str, expected: str) -> bool:
     return host == expected or host.endswith(f".{expected}")
 
 
+def resolve_approved_hosts(allowlist: dict[str, Any]) -> dict[str, list[str]]:
+    resolutions: dict[str, list[str]] = {}
+    for entry in allowlist.get("entries", []):
+        host = entry.get("host")
+        if entry.get("disposition") != "approved" or not isinstance(host, str):
+            continue
+        try:
+            addresses = {
+                result[4][0]
+                for result in socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)
+            }
+        except socket.gaierror:
+            addresses = set()
+        resolutions[host] = sorted(addresses)
+    return resolutions
+
+
 def classify_hosts(
-    destinations: list[dict[str, Any]], allowlist: dict[str, Any]
+    destinations: list[dict[str, Any]],
+    allowlist: dict[str, Any],
+    approved_host_resolutions: dict[str, list[str]],
 ) -> tuple[list[str], list[str], list[str]]:
     forbidden_hosts = allowlist.get("normal_start_forbidden_hosts", [])
     approved_hosts = {
@@ -131,13 +152,22 @@ def classify_hosts(
     forbidden: set[str] = set()
     unreviewed: set[str] = set()
     unresolved: set[str] = set()
+    approved_addresses = {
+        address
+        for addresses in approved_host_resolutions.values()
+        for address in addresses
+    }
     for destination in destinations:
         host = destination["host"]
+        if host in LOCAL_HOSTS:
+            continue
         try:
-            ipaddress.ip_address(host)
+            address = ipaddress.ip_address(host)
         except ValueError:
             pass
         else:
+            if address.is_loopback or host in approved_addresses:
+                continue
             unresolved.add(host)
             continue
         if any(host_matches(host, expected) for expected in forbidden_hosts):
@@ -150,6 +180,7 @@ def classify_hosts(
 def collect(arguments: argparse.Namespace) -> int:
     candidate_digest = validate_digest(arguments.candidate_digest)
     allowlist = load_json(ALLOWLIST_PATH, "endpoint allowlist")
+    approved_host_resolutions = resolve_approved_hosts(allowlist)
     started_at = datetime.now(timezone.utc)
     deadline = time.monotonic() + arguments.duration
     observed_processes: dict[int, dict[str, Any]] = {}
@@ -190,7 +221,9 @@ def collect(arguments: argparse.Namespace) -> int:
         observed_destinations.values(),
         key=lambda item: (item["host"], item["port"], item["pid"]),
     )
-    forbidden, unreviewed, unresolved = classify_hosts(destinations, allowlist)
+    forbidden, unreviewed, unresolved = classify_hosts(
+        destinations, allowlist, approved_host_resolutions
+    )
     blocked_reasons = sorted(errors)
     if not processes:
         blocked_reasons.append("no_candidate_process_ancestry_captured")
@@ -211,6 +244,7 @@ def collect(arguments: argparse.Namespace) -> int:
             "sha256": sha256_file(ALLOWLIST_PATH),
             "enforcement": allowlist.get("enforcement"),
         },
+        "approved_host_resolutions": approved_host_resolutions,
         "journey": arguments.journey,
         "started_at": started_at.isoformat(),
         "completed_at": datetime.now(timezone.utc).isoformat(),
@@ -250,6 +284,28 @@ def validate_report(path: Path, candidate_digest: str) -> dict[str, Any]:
         raise CaptureError("network capture binds a different endpoint allowlist")
     if binding.get("enforcement") != allowlist.get("enforcement"):
         raise CaptureError("network capture allowlist enforcement mode differs")
+    approved_hosts = {
+        entry.get("host")
+        for entry in allowlist.get("entries", [])
+        if entry.get("disposition") == "approved"
+    }
+    approved_host_resolutions = report.get("approved_host_resolutions")
+    if not isinstance(approved_host_resolutions, dict):
+        raise CaptureError("network capture has no approved-host DNS evidence")
+    for host, addresses in approved_host_resolutions.items():
+        if host not in approved_hosts or not isinstance(addresses, list):
+            raise CaptureError("network capture has invalid approved-host DNS evidence")
+        for address in addresses:
+            try:
+                parsed_address = ipaddress.ip_address(address)
+            except ValueError as error:
+                raise CaptureError(
+                    "network capture has invalid approved-host DNS evidence"
+                ) from error
+            if not parsed_address.is_global:
+                raise CaptureError(
+                    "network capture approved-host DNS evidence is not global"
+                )
     if report.get("journey") != "online_first_codex":
         raise CaptureError("installed proof requires the online first-Codex journey")
     if report.get("status") != "passed" or report.get("blocked_reasons") != []:
@@ -258,6 +314,15 @@ def validate_report(path: Path, candidate_digest: str) -> dict[str, Any]:
         raise CaptureError("network capture has no process ancestry")
     if not isinstance(report.get("destinations"), list) or not report["destinations"]:
         raise CaptureError("network capture has no observed destinations")
+    forbidden, unreviewed, unresolved = classify_hosts(
+        report["destinations"], allowlist, approved_host_resolutions
+    )
+    if (
+        report.get("forbidden_hosts_detected") != forbidden
+        or report.get("unreviewed_hosts") != unreviewed
+        or report.get("unresolved_destinations") != unresolved
+    ):
+        raise CaptureError("network capture destination classification is inconsistent")
     for field in ("forbidden_hosts_detected", "unreviewed_hosts", "unresolved_destinations"):
         if report.get(field) != []:
             raise CaptureError(f"network capture {field} is not empty")
@@ -276,9 +341,16 @@ def self_test(_arguments: argparse.Namespace) -> int:
         {"host": "registry.npmjs.org"},
         {"host": "api.zed.dev"},
         {"host": "203.0.113.1"},
+        {"host": "127.0.0.1"},
+        {"host": "localhost"},
+        {"host": "2001:db8::2"},
         {"host": "unexpected.example"},
     ]
-    forbidden, unreviewed, unresolved = classify_hosts(destinations, allowlist)
+    forbidden, unreviewed, unresolved = classify_hosts(
+        destinations,
+        allowlist,
+        {"cdn.agentclientprotocol.com": ["2001:db8::2"]},
+    )
     if forbidden != ["api.zed.dev"]:
         raise CaptureError("self-test did not identify the forbidden Zed host")
     if unreviewed != ["unexpected.example"]:
