@@ -140,6 +140,12 @@ Incomplete proofs exit non-zero and write `target/omega-rc-proof/installed-proof
 with blockers. Do not close issue #16 until `status` is `complete` and the
 manual UI checklist in that proof is signed off.
 
+The harness still runs and records the artifact/release binding,
+notarization/Gatekeeper assessment, and exact packaged-versus-installed bundle
+comparison when identity admission or manual evidence is missing. Those
+objective passes do not imply acceptance: the proof remains `incomplete`, and
+the missing identity and human gates remain blocked or pending.
+
 ### Installed-candidate bindings
 
 The harness verifies the explicit DMG digest against the release record, checks

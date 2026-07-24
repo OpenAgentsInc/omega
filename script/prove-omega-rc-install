@@ -123,11 +123,40 @@ def validate_release_record(record: dict[str, Any], record_path: Path, artifact:
         raise ProofError("release record and artifact must be distinct files")
 
 
+def validate_identity_evidence_binding(
+    evidence: dict[str, Any], record: dict[str, Any], record_path: Path, artifact: Path
+) -> str:
+    if evidence.get("schema") != "openagents.omega.identity-candidate-evidence.v1":
+        raise ProofError("identity evidence schema is not supported")
+    digest = evidence.get("candidate_digest", {}).get("value")
+    if (
+        not isinstance(digest, str)
+        or len(digest) != 64
+        or any(character not in "0123456789abcdef" for character in digest)
+    ):
+        raise ProofError("identity evidence candidate digest is invalid")
+    candidate = evidence.get("candidate", {})
+    observed_digest = hashlib.sha256(
+        json.dumps(candidate, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    if digest != observed_digest:
+        raise ProofError("identity candidate digest does not match canonical candidate JSON")
+    candidate_artifact = candidate.get("artifact", {})
+    if candidate_artifact.get("name") != artifact.name:
+        raise ProofError("identity evidence names a different artifact")
+    if candidate_artifact.get("sha256") != sha256_file(artifact):
+        raise ProofError("identity evidence artifact digest does not match explicit artifact")
+    if candidate_artifact.get("release_record_sha256") != sha256_file(record_path):
+        raise ProofError("identity evidence release-record digest does not match")
+    if candidate.get("omega", {}).get("commit") != record.get("source", {}).get("commit"):
+        raise ProofError("identity evidence and release record bind different source commits")
+    return digest
+
+
 def validate_identity_evidence(
     evidence: dict[str, Any], record: dict[str, Any], record_path: Path, artifact: Path
 ) -> tuple[str, str, str]:
-    if evidence.get("schema") != "openagents.omega.identity-candidate-evidence.v1":
-        raise ProofError("identity evidence schema is not supported")
+    digest = validate_identity_evidence_binding(evidence, record, record_path, artifact)
     if evidence.get("status") != "admitted" or evidence.get("candidate_admitted") is not True:
         raise ProofError("identity candidate is not admitted")
     if evidence.get("attestation_errors") not in ({}, None):
@@ -155,28 +184,6 @@ def validate_identity_evidence(
         or owner == independent
     ):
         raise ProofError("identity owner and independent verifier must be distinct named attestors")
-    digest = evidence.get("candidate_digest", {}).get("value")
-    if (
-        not isinstance(digest, str)
-        or len(digest) != 64
-        or any(character not in "0123456789abcdef" for character in digest)
-    ):
-        raise ProofError("identity evidence candidate digest is invalid")
-    candidate = evidence.get("candidate", {})
-    observed_digest = hashlib.sha256(
-        json.dumps(candidate, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    ).hexdigest()
-    if digest != observed_digest:
-        raise ProofError("identity candidate digest does not match canonical candidate JSON")
-    candidate_artifact = candidate.get("artifact", {})
-    if candidate_artifact.get("name") != artifact.name:
-        raise ProofError("identity evidence names a different artifact")
-    if candidate_artifact.get("sha256") != sha256_file(artifact):
-        raise ProofError("identity evidence artifact digest does not match explicit artifact")
-    if candidate_artifact.get("release_record_sha256") != sha256_file(record_path):
-        raise ProofError("identity evidence release-record digest does not match")
-    if candidate.get("omega", {}).get("commit") != record.get("source", {}).get("commit"):
-        raise ProofError("identity evidence and release record bind different source commits")
     return digest, owner, independent
 
 
@@ -417,50 +424,34 @@ def prove(arguments: argparse.Namespace) -> int:
                 checks["identity_candidate_admission"] = {"status": "blocked"}
             elif name == "manual_evidence":
                 checks["manual_evidence_binding"] = {"status": "blocked"}
-    if blockers:
+    core_paths = ("release_record", "artifact", "installed_app")
+    if any(
+        not (
+            paths[name].is_dir()
+            if name == "installed_app"
+            else paths[name].is_file()
+        )
+        for name in core_paths
+    ):
         write_proof(arguments.out, "incomplete", checks, blockers, paths, candidate_digest)
         return 1
 
-    active_check = "artifact_release_binding"
     try:
         record = load_json(arguments.release_record, "release record")
         validate_release_record(record, arguments.release_record, arguments.artifact)
         checks["artifact_release_binding"] = {"status": "passed"}
+    except ProofError as error:
+        blockers.append(str(error))
+        checks["artifact_release_binding"] = {"status": "blocked", "reason": str(error)}
+        write_proof(arguments.out, "incomplete", checks, blockers, paths, candidate_digest)
+        return 1
 
-        active_check = "notarization_and_gatekeeper"
+    try:
         verify_signature(arguments.artifact, arguments.out, "dmg")
         run(
             ["xcrun", "stapler", "validate", str(arguments.artifact)],
             description="DMG staple validation",
         )
-
-        active_check = "identity_candidate_admission"
-        evidence = load_json(arguments.identity_evidence, "identity candidate evidence")
-        candidate_digest, identity_owner, identity_independent = validate_identity_evidence(
-            evidence, record, arguments.release_record, arguments.artifact
-        )
-        checks["identity_candidate_admission"] = {"status": "passed"}
-
-        active_check = "manual_evidence_binding"
-        manual = load_json(arguments.manual_evidence, "installed brand evidence")
-        validate_manual_evidence(
-            manual, candidate_digest, identity_owner, identity_independent
-        )
-        checks["manual_evidence_binding"] = {"status": "passed"}
-        for name in MANUAL_CHECKS:
-            checks[name] = {"status": "passed", "evidence": manual["checks"][name]["evidence"]}
-        checks["owner_observation"] = {
-            "status": "passed",
-            "attestor": manual["owner_observation"]["attestor"],
-            "evidence": manual["owner_observation"]["evidence"],
-        }
-        checks["independent_verification"] = {
-            "status": "passed",
-            "attestor": manual["independent_verification"]["attestor"],
-            "evidence": manual["independent_verification"]["evidence"],
-        }
-
-        active_check = "notarization_and_gatekeeper"
         verify_signature(arguments.app, arguments.out, "installed-app")
         gatekeeper = run(
             ["spctl", "--assess", "--type", "execute", "--verbose=4", str(arguments.app)],
@@ -468,8 +459,11 @@ def prove(arguments: argparse.Namespace) -> int:
         )
         (arguments.out / "spctl-installed-app.txt").write_text(gatekeeper + "\n", encoding="utf-8")
         checks["notarization_and_gatekeeper"] = {"status": "passed"}
+    except ProofError as error:
+        blockers.append(str(error))
+        checks["notarization_and_gatekeeper"] = {"status": "blocked", "reason": str(error)}
 
-        active_check = "packaged_installed_bundle_match"
+    try:
         with mounted_application(arguments.artifact) as packaged_app:
             verify_signature(packaged_app, arguments.out, "packaged-app")
             validate_app_metadata(packaged_app, record)
@@ -481,7 +475,51 @@ def prove(arguments: argparse.Namespace) -> int:
         checks["packaged_installed_bundle_match"] = {"status": "passed"}
     except ProofError as error:
         blockers.append(str(error))
-        checks[active_check] = {"status": "blocked", "reason": str(error)}
+        checks["packaged_installed_bundle_match"] = {"status": "blocked", "reason": str(error)}
+
+    identity_owner: str | None = None
+    identity_independent: str | None = None
+    if arguments.identity_evidence.is_file():
+        try:
+            evidence = load_json(arguments.identity_evidence, "identity candidate evidence")
+            candidate_digest = validate_identity_evidence_binding(
+                evidence, record, arguments.release_record, arguments.artifact
+            )
+            _, identity_owner, identity_independent = validate_identity_evidence(
+                evidence, record, arguments.release_record, arguments.artifact
+            )
+            checks["identity_candidate_admission"] = {"status": "passed"}
+        except ProofError as error:
+            blockers.append(str(error))
+            checks["identity_candidate_admission"] = {"status": "blocked", "reason": str(error)}
+
+    if (
+        arguments.manual_evidence.is_file()
+        and identity_owner
+        and identity_independent
+        and candidate_digest
+    ):
+        try:
+            manual = load_json(arguments.manual_evidence, "installed brand evidence")
+            validate_manual_evidence(
+                manual, candidate_digest, identity_owner, identity_independent
+            )
+            checks["manual_evidence_binding"] = {"status": "passed"}
+            for name in MANUAL_CHECKS:
+                checks[name] = {"status": "passed", "evidence": manual["checks"][name]["evidence"]}
+            checks["owner_observation"] = {
+                "status": "passed",
+                "attestor": manual["owner_observation"]["attestor"],
+                "evidence": manual["owner_observation"]["evidence"],
+            }
+            checks["independent_verification"] = {
+                "status": "passed",
+                "attestor": manual["independent_verification"]["attestor"],
+                "evidence": manual["independent_verification"]["evidence"],
+            }
+        except ProofError as error:
+            blockers.append(str(error))
+            checks["manual_evidence_binding"] = {"status": "blocked", "reason": str(error)}
 
     status = "complete" if not blockers and all(
         check.get("status") == "passed" for check in checks.values()
