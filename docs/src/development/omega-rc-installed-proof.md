@@ -3,7 +3,8 @@
 This is the owned proof protocol for identity issue
 [#8](https://github.com/OpenAgentsInc/omega/issues/8) / OMEGA-OID-09 and brand
 issue [#16](https://github.com/OpenAgentsInc/omega/issues/16) /
-OMEGA-BRAND-06.
+OMEGA-BRAND-06, and Full Auto issue
+[#26](https://github.com/OpenAgentsInc/omega/issues/26) / OMEGA-FA-07.
 
 Unit tests and source scans are **not** sufficient. The exact signed candidate
 must be installed beside Zed and exercised.
@@ -29,7 +30,10 @@ script/prove-omega-rc-install \
   --artifact target/omega-rc/Omega-v0.2.0-rc2-macos-arm64.dmg \
   --app /Applications/Omega.app \
   --identity-evidence target/omega-identity-evidence/candidate-evidence.json \
-  --manual-evidence target/omega-rc-proof/manual-evidence.json
+  --full-auto-evidence target/omega-full-auto-evidence/candidate-evidence.json \
+  --manual-evidence target/omega-rc-proof/manual-evidence.json \
+  --network-evidence target/omega-rc-proof/network-evidence.json \
+  --lifecycle-evidence target/omega-rc-proof/lifecycle/manifest.json
 ```
 
 Harness validation without an installed candidate:
@@ -120,6 +124,45 @@ Validate the deterministic generator without claiming candidate evidence:
 script/generate-omega-identity-candidate-evidence --self-test
 ```
 
+### Full Auto assurance evidence
+
+The admitted Omega Full Auto AssuranceSpec is revision 5. Its design-admission
+receipt does not prove an installed candidate. Collect a separate packet with
+schema `openagents.omega.full-auto-observations.v1`, then bind it to the exact
+identity candidate, Omega commit, DMG, release record, embedded
+`omega-effectd`, admitted AssuranceSpec proposal/document/receipt, and
+ProductSpec:
+
+```sh
+script/generate-omega-full-auto-candidate-evidence \
+  --release-record target/omega-rc/omega-v0.2.0-rc2-macos-arm64.release.json \
+  --artifact target/omega-rc/Omega-v0.2.0-rc2-macos-arm64.dmg \
+  --identity-evidence target/omega-identity-evidence/candidate-evidence.json \
+  --observations target/omega-full-auto-evidence/observations.json \
+  --output target/omega-full-auto-evidence/candidate-evidence.json
+```
+
+The observation packet contains exactly the eight
+`AO-OMEGA-FA-AC-01-01` through `AO-OMEGA-FA-AC-08-01` obligations and these
+ten issue gates: incident replay, owner-real multi-turn, restart
+reconciliation, control matrix, visible cross-provider handoff, offline and
+Sync gap behavior, mobile typed outcomes, ordinary-chat separation,
+redaction, and exact-candidate independent review. Each observation carries a
+timestamp, evidence tier, and one or more evidence references. All eight
+obligations and every live issue gate require `installed_candidate`; source
+tests cannot satisfy them.
+
+The owner attestation uses `openagents.owner`. The distinct verifier uses
+`openagents.assurance_reviewer`. Both repeat the candidate, artifact,
+release-record, and Omega commit bindings. The generator rejects missing or
+unknown gates, duplicate JSON keys, source-only installed evidence, stale or
+forged bindings, role substitution, and owner self-review. It never creates
+observations or attestations. Test its refusal logic with:
+
+```sh
+script/generate-omega-full-auto-candidate-evidence --self-test
+```
+
 Before packaging, run the static supply-chain and secret-boundary gate:
 
 ```sh
@@ -192,6 +235,41 @@ The object must also contain `owner_observation` and
 `independent_verification` objects with `status`, distinct nonempty `attestor`
 names, `observed_at`, and a candidate-bound `evidence` reference. The harness
 does not generate or infer these attestations.
+
+### Lifecycle evidence
+
+Lifecycle proof is a set of machine-readable receipts, not a free-form note.
+Capture before, after-removal, and after-reinstall snapshots with
+`script/omega-rc-lifecycle-proof snapshot`. Use its `remove-app` command with
+literal confirmation `REMOVE-OMEGA-RC-APP` and a narrow recoverable holding
+directory. Reinstall the exact release-record-bound DMG with its `reinstall`
+command and literal confirmation `REINSTALL-OMEGA-RC-APP`.
+
+Run `compare` for Zed before versus after removal, Zed before versus after
+reinstall, and Omega before versus after reinstall. Create `manifest.json`
+with schema `openagents.omega.installed-lifecycle-evidence.v1`, status
+`passed`, the candidate/artifact/release-record digests, and exactly these
+receipt references:
+
+- `before_snapshot`
+- `after_removal_snapshot`
+- `after_reinstall_snapshot`
+- `zed_after_removal_comparison`
+- `zed_after_reinstall_comparison`
+- `omega_after_reinstall_comparison`
+- `app_removal`
+- `app_reinstall`
+
+Each reference is
+`{"path":"relative/receipt.json","sha256":"<digest>"}`. The installed
+prover reloads and hashes every non-symlink receipt, verifies each
+comparison's snapshot hashes and empty change set, and requires both removal
+and reinstall to state that no Zed target was touched. The reinstall receipt
+must bind the same DMG and release record. Validate the lifecycle helper with:
+
+```sh
+script/omega-rc-lifecycle-proof self-test
+```
 
 Incomplete proofs exit non-zero and write
 `target/omega-rc-proof/installed-proof.json` with structured pending or passed

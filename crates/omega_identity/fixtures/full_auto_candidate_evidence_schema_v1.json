@@ -1,0 +1,228 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://openagents.com/schemas/omega/full-auto-candidate-evidence-v1.json",
+  "title": "Omega Full Auto candidate evidence v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "schema_version",
+    "status",
+    "candidate_verified",
+    "candidate",
+    "obligations",
+    "issue_matrix",
+    "owner_observation",
+    "independent_verification"
+  ],
+  "properties": {
+    "schema": { "const": "openagents.omega.full-auto-candidate-evidence.v1" },
+    "schema_version": { "const": 1 },
+    "status": { "const": "verified" },
+    "candidate_verified": { "const": true },
+    "candidate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "candidate_digest",
+        "omega",
+        "artifact",
+        "omega_effectd",
+        "assurance_spec_admission"
+      ],
+      "properties": {
+        "candidate_digest": { "$ref": "#/$defs/sha256" },
+        "omega": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["repository", "commit", "dirty"],
+          "properties": {
+            "repository": { "const": "https://github.com/OpenAgentsInc/omega" },
+            "commit": { "$ref": "#/$defs/git_commit" },
+            "dirty": { "const": false }
+          }
+        },
+        "artifact": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["name", "sha256", "release_record_sha256"],
+          "properties": {
+            "name": { "type": "string", "minLength": 1 },
+            "sha256": { "$ref": "#/$defs/sha256" },
+            "release_record_sha256": { "$ref": "#/$defs/sha256" }
+          }
+        },
+        "omega_effectd": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "release_tag",
+            "archive_sha256",
+            "manifest_sha256",
+            "source_commit",
+            "source_tree",
+            "wrapper_sha256",
+            "bundle_sha256",
+            "source_node_sha256",
+            "packaged_node_sha256"
+          ],
+          "properties": {
+            "release_tag": { "type": "string", "minLength": 1 },
+            "archive_sha256": { "$ref": "#/$defs/sha256" },
+            "manifest_sha256": { "$ref": "#/$defs/sha256" },
+            "source_commit": { "$ref": "#/$defs/git_commit" },
+            "source_tree": { "$ref": "#/$defs/git_commit" },
+            "wrapper_sha256": { "$ref": "#/$defs/sha256" },
+            "bundle_sha256": { "$ref": "#/$defs/sha256" },
+            "source_node_sha256": { "$ref": "#/$defs/sha256" },
+            "packaged_node_sha256": { "$ref": "#/$defs/sha256" }
+          }
+        },
+        "assurance_spec_admission": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "assurance_spec_id",
+            "assurance_revision",
+            "admitted_document_sha256",
+            "admitted_proposal_sha256",
+            "admission_receipt_ref",
+            "admission_receipt_sha256",
+            "product_spec_sha256"
+          ],
+          "properties": {
+            "assurance_spec_id": { "const": "assurance.omega.full.auto.host" },
+            "assurance_revision": { "const": 5 },
+            "admitted_document_sha256": { "const": "a612e2fe875c30b5346e81bc0b897312e5a12690fe0e2e1b56d2fa35ea10b7ee" },
+            "admitted_proposal_sha256": { "const": "b5b84098e820d0dd146b368f224ef7a10b107bf5b383ea2b6740c6d64b6bfc5f" },
+            "admission_receipt_ref": { "const": "authority.decision.1954518244492185756509b3cfec6e3e" },
+            "admission_receipt_sha256": { "const": "9e58770c258833904396f294e0824a1235bbb6181e5843066703be69cfc387a2" },
+            "product_spec_sha256": { "const": "09f8c2c2c14df6f5272737e26b85dbe3f20704ce66345a9377353710a8d6dddc" }
+          }
+        }
+      }
+    },
+    "obligations": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "AO-OMEGA-FA-AC-01-01",
+        "AO-OMEGA-FA-AC-02-01",
+        "AO-OMEGA-FA-AC-03-01",
+        "AO-OMEGA-FA-AC-04-01",
+        "AO-OMEGA-FA-AC-05-01",
+        "AO-OMEGA-FA-AC-06-01",
+        "AO-OMEGA-FA-AC-07-01",
+        "AO-OMEGA-FA-AC-08-01"
+      ],
+      "properties": {
+        "AO-OMEGA-FA-AC-01-01": { "$ref": "#/$defs/installed_observation" },
+        "AO-OMEGA-FA-AC-02-01": { "$ref": "#/$defs/installed_observation" },
+        "AO-OMEGA-FA-AC-03-01": { "$ref": "#/$defs/installed_observation" },
+        "AO-OMEGA-FA-AC-04-01": { "$ref": "#/$defs/installed_observation" },
+        "AO-OMEGA-FA-AC-05-01": { "$ref": "#/$defs/installed_observation" },
+        "AO-OMEGA-FA-AC-06-01": { "$ref": "#/$defs/installed_observation" },
+        "AO-OMEGA-FA-AC-07-01": { "$ref": "#/$defs/installed_observation" },
+        "AO-OMEGA-FA-AC-08-01": { "$ref": "#/$defs/installed_observation" }
+      }
+    },
+    "issue_matrix": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "incident_replay",
+        "owner_real_multi_turn",
+        "restart_reconciliation",
+        "control_matrix",
+        "visible_cross_provider_handoff",
+        "offline_and_sync_gap",
+        "mobile_control_outcomes",
+        "ordinary_chat_separation",
+        "redaction",
+        "independent_exact_candidate_review"
+      ],
+      "properties": {
+        "incident_replay": { "$ref": "#/$defs/observation" },
+        "owner_real_multi_turn": { "$ref": "#/$defs/installed_observation" },
+        "restart_reconciliation": { "$ref": "#/$defs/installed_observation" },
+        "control_matrix": { "$ref": "#/$defs/installed_observation" },
+        "visible_cross_provider_handoff": { "$ref": "#/$defs/installed_observation" },
+        "offline_and_sync_gap": { "$ref": "#/$defs/installed_observation" },
+        "mobile_control_outcomes": { "$ref": "#/$defs/installed_observation" },
+        "ordinary_chat_separation": { "$ref": "#/$defs/installed_observation" },
+        "redaction": { "$ref": "#/$defs/installed_observation" },
+        "independent_exact_candidate_review": { "$ref": "#/$defs/installed_observation" }
+      }
+    },
+    "owner_observation": { "$ref": "#/$defs/owner_attestation" },
+    "independent_verification": { "$ref": "#/$defs/reviewer_attestation" }
+  },
+  "$defs": {
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "git_commit": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "refs": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "observation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "evidence_tier", "observed_at", "evidence_refs"],
+      "properties": {
+        "status": { "const": "passed" },
+        "evidence_tier": { "enum": ["source", "installed_candidate"] },
+        "observed_at": { "type": "string", "format": "date-time" },
+        "evidence_refs": { "$ref": "#/$defs/refs" }
+      }
+    },
+    "installed_observation": {
+      "allOf": [
+        { "$ref": "#/$defs/observation" },
+        {
+          "type": "object",
+          "properties": { "evidence_tier": { "const": "installed_candidate" } }
+        }
+      ]
+    },
+    "attestation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "actor",
+        "role",
+        "observed_at",
+        "evidence_refs",
+        "candidate_digest",
+        "artifact_sha256",
+        "release_record_sha256",
+        "omega_commit"
+      ],
+      "properties": {
+        "status": { "const": "passed" },
+        "actor": { "type": "string", "minLength": 1 },
+        "role": { "type": "string", "minLength": 1 },
+        "observed_at": { "type": "string", "format": "date-time" },
+        "evidence_refs": { "$ref": "#/$defs/refs" },
+        "candidate_digest": { "$ref": "#/$defs/sha256" },
+        "artifact_sha256": { "$ref": "#/$defs/sha256" },
+        "release_record_sha256": { "$ref": "#/$defs/sha256" },
+        "omega_commit": { "$ref": "#/$defs/git_commit" }
+      }
+    },
+    "owner_attestation": {
+      "allOf": [
+        { "$ref": "#/$defs/attestation" },
+        { "properties": { "role": { "const": "openagents.owner" } } }
+      ]
+    },
+    "reviewer_attestation": {
+      "allOf": [
+        { "$ref": "#/$defs/attestation" },
+        { "properties": { "role": { "const": "openagents.assurance_reviewer" } } }
+      ]
+    }
+  }
+}

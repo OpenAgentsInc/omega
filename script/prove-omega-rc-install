@@ -32,6 +32,10 @@ EXPECTED_SIGNER = "Developer ID Application: OpenAgents, Inc. (HQWSG26L43)"
 IDENTITY_EVIDENCE_SCHEMA = (
     ROOT / "crates/omega_identity/fixtures/identity_candidate_evidence_schema_v1.json"
 )
+FULL_AUTO_EVIDENCE_SCHEMA = (
+    ROOT
+    / "crates/omega_identity/fixtures/full_auto_candidate_evidence_schema_v1.json"
+)
 ENDPOINT_ALLOWLIST = ROOT / "crates/app_identity/fixtures/endpoint_allowlist.json"
 EXPECTED_IDENTITY_GATES = (
     "assurance_spec_admission",
@@ -55,6 +59,40 @@ EXPECTED_ASSURANCE_BINDING = {
     "admission_receipt_sha256": "4336ef7443cba679f2aac0176761b8a8e3ed7e2b3e93cefc25c66948e80f2f96",
     "product_spec_sha256": "fdbf66ee5c9c89a357be14d19aa21197313ab39b2c95bdc330743bda37a91c12",
 }
+EXPECTED_FULL_AUTO_ASSURANCE_BINDING = {
+    "assurance_spec_id": "assurance.omega.full.auto.host",
+    "assurance_revision": 5,
+    "admitted_document_sha256": "a612e2fe875c30b5346e81bc0b897312e5a12690fe0e2e1b56d2fa35ea10b7ee",
+    "admitted_proposal_sha256": "b5b84098e820d0dd146b368f224ef7a10b107bf5b383ea2b6740c6d64b6bfc5f",
+    "admission_receipt_ref": "authority.decision.1954518244492185756509b3cfec6e3e",
+    "admission_receipt_sha256": "9e58770c258833904396f294e0824a1235bbb6181e5843066703be69cfc387a2",
+    "product_spec_sha256": "09f8c2c2c14df6f5272737e26b85dbe3f20704ce66345a9377353710a8d6dddc",
+}
+EXPECTED_FULL_AUTO_OBLIGATIONS = tuple(
+    f"AO-OMEGA-FA-AC-{number:02d}-01" for number in range(1, 9)
+)
+EXPECTED_FULL_AUTO_GATES = (
+    "incident_replay",
+    "owner_real_multi_turn",
+    "restart_reconciliation",
+    "control_matrix",
+    "visible_cross_provider_handoff",
+    "offline_and_sync_gap",
+    "mobile_control_outcomes",
+    "ordinary_chat_separation",
+    "redaction",
+    "independent_exact_candidate_review",
+)
+EXPECTED_LIFECYCLE_RECEIPTS = (
+    "before_snapshot",
+    "after_removal_snapshot",
+    "after_reinstall_snapshot",
+    "zed_after_removal_comparison",
+    "zed_after_reinstall_comparison",
+    "omega_after_reinstall_comparison",
+    "app_removal",
+    "app_reinstall",
+)
 EXPECTED_EFFECTD_ARCHIVE_SHA256 = "b55f703229ff9299923a84b0843f9c926fbd75b08e787f5d6e79744fd114c836"
 EXPECTED_EFFECTD_MANIFEST_SHA256 = "13f0e094c5d120426f4ede3afedd24f04abec71e29abcd7700c0fd2e36037953"
 EXPECTED_EFFECTD_SOURCE_COMMIT = "5bb31ac857b917b14c6455a7df268825cfbf773f"
@@ -208,12 +246,14 @@ def validate_json_schema(
             raise ProofError(f"{location} must match exactly one identity schema branch")
     for nested_schema in schema.get("allOf", []):
         condition = nested_schema.get("if")
+        if condition is None:
+            validate_json_schema(value, nested_schema, root_schema, location)
+            continue
         branch = "then"
-        if isinstance(condition, dict):
-            try:
-                validate_json_schema(value, condition, root_schema, location)
-            except ProofError:
-                branch = "else"
+        try:
+            validate_json_schema(value, condition, root_schema, location)
+        except ProofError:
+            branch = "else"
         selected = nested_schema.get(branch)
         if isinstance(selected, dict):
             validate_json_schema(value, selected, root_schema, location)
@@ -221,6 +261,11 @@ def validate_json_schema(
 
 def validate_identity_evidence_schema(evidence: dict[str, Any]) -> None:
     schema = load_json(IDENTITY_EVIDENCE_SCHEMA, "identity evidence schema")
+    validate_json_schema(evidence, schema, schema)
+
+
+def validate_full_auto_evidence_schema(evidence: dict[str, Any]) -> None:
+    schema = load_json(FULL_AUTO_EVIDENCE_SCHEMA, "Full Auto evidence schema")
     validate_json_schema(evidence, schema, schema)
 
 
@@ -530,6 +575,205 @@ def validate_network_evidence(path: Path, candidate_digest: str) -> None:
     for field in ("forbidden_hosts_detected", "unreviewed_hosts", "unresolved_destinations"):
         if evidence.get(field) != []:
             raise ProofError(f"network capture {field} must be empty")
+
+
+def validate_full_auto_evidence(
+    evidence: dict[str, Any],
+    record: dict[str, Any],
+    record_path: Path,
+    artifact: Path,
+    candidate_digest: str,
+    identity_owner: str,
+) -> tuple[str, str]:
+    validate_full_auto_evidence_schema(evidence)
+    if evidence.get("status") != "verified" or evidence.get("candidate_verified") is not True:
+        raise ProofError("Full Auto candidate evidence is not verified")
+    candidate = evidence.get("candidate", {})
+    if candidate.get("candidate_digest") != candidate_digest:
+        raise ProofError("Full Auto evidence binds a different candidate digest")
+    omega = candidate.get("omega", {})
+    if (
+        omega.get("commit") != record.get("source", {}).get("commit")
+        or omega.get("dirty") is not False
+    ):
+        raise ProofError("Full Auto evidence binds a different Omega source")
+    candidate_artifact = candidate.get("artifact", {})
+    if (
+        candidate_artifact.get("name") != artifact.name
+        or candidate_artifact.get("sha256") != sha256_file(artifact)
+        or candidate_artifact.get("release_record_sha256") != sha256_file(record_path)
+    ):
+        raise ProofError("Full Auto evidence binds a different artifact or release record")
+    if candidate.get("assurance_spec_admission") != EXPECTED_FULL_AUTO_ASSURANCE_BINDING:
+        raise ProofError("Full Auto evidence does not bind the admitted revision 5 design")
+    effectd = candidate.get("omega_effectd", {})
+    release_effectd = record.get("components", {}).get("omega_effectd", {})
+    expected_effectd_keys = {
+        "release_tag",
+        "archive_sha256",
+        "manifest_sha256",
+        "source_commit",
+        "source_tree",
+        "wrapper_sha256",
+        "bundle_sha256",
+        "source_node_sha256",
+        "packaged_node_sha256",
+    }
+    if set(effectd) != expected_effectd_keys or any(
+        effectd.get(key) != release_effectd.get(key) for key in expected_effectd_keys
+    ):
+        raise ProofError("Full Auto evidence binds a different omega-effectd component")
+    obligations = evidence.get("obligations")
+    if not isinstance(obligations, dict) or set(obligations) != set(
+        EXPECTED_FULL_AUTO_OBLIGATIONS
+    ):
+        raise ProofError("Full Auto evidence obligation inventory is not exact")
+    gates = evidence.get("issue_matrix")
+    if not isinstance(gates, dict) or set(gates) != set(EXPECTED_FULL_AUTO_GATES):
+        raise ProofError("Full Auto evidence issue-matrix inventory is not exact")
+    for name, observation in {**obligations, **gates}.items():
+        if (
+            not isinstance(observation, dict)
+            or observation.get("status") != "passed"
+            or not isinstance(observation.get("evidence_refs"), list)
+            or not observation["evidence_refs"]
+        ):
+            raise ProofError(f"Full Auto evidence {name} is not passed with evidence")
+    owner = evidence.get("owner_observation", {})
+    independent = evidence.get("independent_verification", {})
+    bindings = {
+        "candidate_digest": candidate_digest,
+        "artifact_sha256": sha256_file(artifact),
+        "release_record_sha256": sha256_file(record_path),
+        "omega_commit": record.get("source", {}).get("commit"),
+    }
+    for label, attestation, role in (
+        ("owner observation", owner, "openagents.owner"),
+        ("independent verification", independent, "openagents.assurance_reviewer"),
+    ):
+        if (
+            not isinstance(attestation, dict)
+            or attestation.get("status") != "passed"
+            or attestation.get("role") != role
+            or not isinstance(attestation.get("actor"), str)
+            or not attestation["actor"].strip()
+            or any(attestation.get(key) != value for key, value in bindings.items())
+        ):
+            raise ProofError(f"Full Auto {label} is incomplete or candidate-mismatched")
+    if owner["actor"] != identity_owner:
+        raise ProofError("Full Auto owner differs from the admitted identity candidate owner")
+    if owner["actor"] == independent["actor"]:
+        raise ProofError("Full Auto owner and independent verifier must be distinct")
+    return owner["actor"], independent["actor"]
+
+
+def load_bound_lifecycle_receipt(
+    manifest_path: Path,
+    reference: Any,
+    label: str,
+    candidate_digest: str,
+) -> tuple[dict[str, Any], str]:
+    if not isinstance(reference, dict) or set(reference) != {"path", "sha256"}:
+        raise ProofError(f"lifecycle receipt reference {label} is not exact")
+    relative = reference.get("path")
+    expected_digest = reference.get("sha256")
+    if (
+        not isinstance(relative, str)
+        or not relative
+        or Path(relative).is_absolute()
+        or ".." in Path(relative).parts
+        or not isinstance(expected_digest, str)
+        or re.fullmatch(r"[0-9a-f]{64}", expected_digest) is None
+    ):
+        raise ProofError(f"lifecycle receipt reference {label} is invalid")
+    receipt_path = manifest_path.parent / relative
+    if receipt_path.is_symlink() or not receipt_path.is_file():
+        raise ProofError(f"lifecycle receipt {label} is missing or unsafe")
+    observed_digest = sha256_file(receipt_path)
+    if observed_digest != expected_digest:
+        raise ProofError(f"lifecycle receipt {label} digest differs from its manifest")
+    receipt = load_json(receipt_path, f"lifecycle receipt {label}")
+    if (
+        receipt.get("schema") != "openagents.omega.rc-lifecycle-proof.v1"
+        or receipt.get("candidate_digest") != candidate_digest
+    ):
+        raise ProofError(f"lifecycle receipt {label} binds a different candidate")
+    return receipt, observed_digest
+
+
+def validate_lifecycle_evidence(
+    path: Path,
+    candidate_digest: str,
+    record_path: Path,
+    artifact: Path,
+) -> None:
+    evidence = load_json(path, "installed lifecycle evidence")
+    if set(evidence) != {
+        "schema",
+        "status",
+        "candidate_digest",
+        "artifact_sha256",
+        "release_record_sha256",
+        "receipts",
+    }:
+        raise ProofError("installed lifecycle evidence keys are not exact")
+    if (
+        evidence.get("schema") != "openagents.omega.installed-lifecycle-evidence.v1"
+        or evidence.get("status") != "passed"
+        or evidence.get("candidate_digest") != candidate_digest
+        or evidence.get("artifact_sha256") != sha256_file(artifact)
+        or evidence.get("release_record_sha256") != sha256_file(record_path)
+    ):
+        raise ProofError("installed lifecycle evidence is incomplete or candidate-mismatched")
+    references = evidence.get("receipts")
+    if not isinstance(references, dict) or set(references) != set(
+        EXPECTED_LIFECYCLE_RECEIPTS
+    ):
+        raise ProofError("installed lifecycle receipt inventory is not exact")
+    loaded = {
+        name: load_bound_lifecycle_receipt(path, reference, name, candidate_digest)
+        for name, reference in references.items()
+    }
+    for name in ("before_snapshot", "after_removal_snapshot", "after_reinstall_snapshot"):
+        if loaded[name][0].get("kind") != "snapshot":
+            raise ProofError(f"lifecycle {name} is not a snapshot")
+    comparisons = {
+        "zed_after_removal_comparison": ("zed", "before_snapshot", "after_removal_snapshot"),
+        "zed_after_reinstall_comparison": ("zed", "before_snapshot", "after_reinstall_snapshot"),
+        "omega_after_reinstall_comparison": (
+            "omega",
+            "before_snapshot",
+            "after_reinstall_snapshot",
+        ),
+    }
+    for name, (scope, before_name, after_name) in comparisons.items():
+        receipt = loaded[name][0]
+        if (
+            receipt.get("kind") != "comparison"
+            or receipt.get("scope") != scope
+            or receipt.get("status") != "passed"
+            or receipt.get("changed_roots") != []
+            or receipt.get("before_snapshot_sha256") != loaded[before_name][1]
+            or receipt.get("after_snapshot_sha256") != loaded[after_name][1]
+        ):
+            raise ProofError(f"lifecycle comparison {name} is not a passing bound comparison")
+    removal = loaded["app_removal"][0]
+    if (
+        removal.get("kind") != "app_removal"
+        or removal.get("source_path") != str(DEFAULT_APP)
+        or removal.get("recoverable") is not True
+        or removal.get("zed_targets_touched") is not False
+    ):
+        raise ProofError("lifecycle app removal receipt is not safe and recoverable")
+    reinstall = loaded["app_reinstall"][0]
+    if (
+        reinstall.get("kind") != "app_reinstall"
+        or reinstall.get("installed_path") != str(DEFAULT_APP)
+        or reinstall.get("artifact_sha256") != sha256_file(artifact)
+        or reinstall.get("release_record_sha256") != sha256_file(record_path)
+        or reinstall.get("zed_targets_touched") is not False
+    ):
+        raise ProofError("lifecycle app reinstall receipt binds a different candidate")
 
 
 def bundle_manifest(app: Path) -> dict[str, str]:
@@ -871,8 +1115,10 @@ def pending_checks() -> dict[str, dict[str, str]]:
         "packaged_effectd_initialize_health": {"status": "pending"},
         "installed_effectd_initialize_health": {"status": "pending"},
         "identity_candidate_admission": {"status": "pending"},
+        "full_auto_candidate_assurance": {"status": "pending"},
         "manual_evidence_binding": {"status": "pending"},
         "network_capture_binding": {"status": "pending"},
+        "install_lifecycle_binding": {"status": "pending"},
         "owner_observation": {"status": "pending"},
         "independent_verification": {"status": "pending"},
     }
@@ -925,8 +1171,10 @@ def prove(arguments: argparse.Namespace) -> int:
         "artifact": arguments.artifact,
         "installed_app": arguments.app,
         "identity_evidence": arguments.identity_evidence,
+        "full_auto_evidence": arguments.full_auto_evidence,
         "manual_evidence": arguments.manual_evidence,
         "network_evidence": arguments.network_evidence,
+        "lifecycle_evidence": arguments.lifecycle_evidence,
     }
     checks = pending_checks()
     blockers: list[str] = []
@@ -941,10 +1189,14 @@ def prove(arguments: argparse.Namespace) -> int:
                 checks["packaged_installed_bundle_match"] = {"status": "blocked"}
             elif name == "identity_evidence":
                 checks["identity_candidate_admission"] = {"status": "blocked"}
+            elif name == "full_auto_evidence":
+                checks["full_auto_candidate_assurance"] = {"status": "blocked"}
             elif name == "manual_evidence":
                 checks["manual_evidence_binding"] = {"status": "blocked"}
             elif name == "network_evidence":
                 checks["network_capture_binding"] = {"status": "blocked"}
+            elif name == "lifecycle_evidence":
+                checks["install_lifecycle_binding"] = {"status": "blocked"}
     core_paths = ("release_record", "artifact", "installed_app")
     if any(
         not (
@@ -1091,6 +1343,45 @@ def prove(arguments: argparse.Namespace) -> int:
         except ProofError as error:
             blockers.append(str(error))
             checks["network_capture_binding"] = {
+                "status": "blocked",
+                "reason": str(error),
+            }
+
+    if arguments.lifecycle_evidence.is_file() and candidate_digest:
+        try:
+            validate_lifecycle_evidence(
+                arguments.lifecycle_evidence,
+                candidate_digest,
+                arguments.release_record,
+                arguments.artifact,
+            )
+            checks["install_lifecycle_binding"] = {"status": "passed"}
+        except ProofError as error:
+            blockers.append(str(error))
+            checks["install_lifecycle_binding"] = {
+                "status": "blocked",
+                "reason": str(error),
+            }
+
+    if arguments.full_auto_evidence.is_file() and candidate_digest and identity_owner:
+        try:
+            full_auto = load_json(arguments.full_auto_evidence, "Full Auto candidate evidence")
+            full_auto_owner, full_auto_independent = validate_full_auto_evidence(
+                full_auto,
+                record,
+                arguments.release_record,
+                arguments.artifact,
+                candidate_digest,
+                identity_owner,
+            )
+            checks["full_auto_candidate_assurance"] = {
+                "status": "passed",
+                "owner": full_auto_owner,
+                "independent": full_auto_independent,
+            }
+        except ProofError as error:
+            blockers.append(str(error))
+            checks["full_auto_candidate_assurance"] = {
                 "status": "blocked",
                 "reason": str(error),
             }
@@ -1275,6 +1566,94 @@ def self_test() -> None:
         observed = validate_identity_evidence(identity, record, record_path, artifact)
         if observed != (candidate_digest, "Owner", "Reviewer"):
             raise ProofError("self-test identity binding returned unexpected values")
+
+        full_auto_observation = {
+            "status": "passed",
+            "evidence_tier": "installed_candidate",
+            "observed_at": "2026-07-24T12:02:00Z",
+            "evidence_refs": ["sha256:" + "3" * 64],
+        }
+        full_auto_binding = {
+            "candidate_digest": candidate_digest,
+            "artifact_sha256": sha256_file(artifact),
+            "release_record_sha256": sha256_file(record_path),
+            "omega_commit": "a" * 40,
+        }
+        full_auto_attestation = {
+            "status": "passed",
+            "actor": "Owner",
+            "role": "openagents.owner",
+            "observed_at": "2026-07-24T12:03:00Z",
+            "evidence_refs": ["sha256:" + "4" * 64],
+            **full_auto_binding,
+        }
+        effectd_binding_keys = (
+            "release_tag",
+            "archive_sha256",
+            "manifest_sha256",
+            "source_commit",
+            "source_tree",
+            "wrapper_sha256",
+            "bundle_sha256",
+            "source_node_sha256",
+            "packaged_node_sha256",
+        )
+        full_auto = {
+            "schema": "openagents.omega.full-auto-candidate-evidence.v1",
+            "schema_version": 1,
+            "status": "verified",
+            "candidate_verified": True,
+            "candidate": {
+                "candidate_digest": candidate_digest,
+                "omega": {
+                    "repository": "https://github.com/OpenAgentsInc/omega",
+                    "commit": "a" * 40,
+                    "dirty": False,
+                },
+                "artifact": {
+                    "name": artifact.name,
+                    "sha256": sha256_file(artifact),
+                    "release_record_sha256": sha256_file(record_path),
+                },
+                "omega_effectd": {
+                    key: record["components"]["omega_effectd"][key]
+                    for key in effectd_binding_keys
+                },
+                "assurance_spec_admission": EXPECTED_FULL_AUTO_ASSURANCE_BINDING,
+            },
+            "obligations": {
+                key: dict(full_auto_observation)
+                for key in EXPECTED_FULL_AUTO_OBLIGATIONS
+            },
+            "issue_matrix": {
+                key: dict(full_auto_observation) for key in EXPECTED_FULL_AUTO_GATES
+            },
+            "owner_observation": full_auto_attestation,
+            "independent_verification": {
+                **full_auto_attestation,
+                "actor": "Euler",
+                "role": "openagents.assurance_reviewer",
+            },
+        }
+        if validate_full_auto_evidence(
+            full_auto, record, record_path, artifact, candidate_digest, "Owner"
+        ) != ("Owner", "Euler"):
+            raise ProofError("self-test Full Auto binding returned unexpected actors")
+        mismatched_full_auto = json.loads(json.dumps(full_auto))
+        mismatched_full_auto["independent_verification"]["candidate_digest"] = "0" * 64
+        try:
+            validate_full_auto_evidence(
+                mismatched_full_auto,
+                record,
+                record_path,
+                artifact,
+                candidate_digest,
+                "Owner",
+            )
+        except ProofError:
+            pass
+        else:
+            raise ProofError("self-test accepted mismatched Full Auto assurance")
         identity["candidate_admitted"] = False
         try:
             validate_identity_evidence(identity, record, record_path, artifact)
@@ -1359,6 +1738,109 @@ def self_test() -> None:
             pass
         else:
             raise ProofError("self-test accepted a forbidden network destination")
+
+        lifecycle_root = root / "lifecycle"
+        lifecycle_root.mkdir()
+        snapshots: dict[str, Path] = {}
+        for name in (
+            "before_snapshot",
+            "after_removal_snapshot",
+            "after_reinstall_snapshot",
+        ):
+            snapshot_path = lifecycle_root / f"{name}.json"
+            snapshot_path.write_text(
+                json.dumps(
+                    {
+                        "schema": "openagents.omega.rc-lifecycle-proof.v1",
+                        "kind": "snapshot",
+                        "candidate_digest": candidate_digest,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            snapshots[name] = snapshot_path
+        lifecycle_values = {
+            "zed_after_removal_comparison": {
+                "kind": "comparison",
+                "scope": "zed",
+                "status": "passed",
+                "changed_roots": [],
+                "before_snapshot_sha256": sha256_file(snapshots["before_snapshot"]),
+                "after_snapshot_sha256": sha256_file(snapshots["after_removal_snapshot"]),
+            },
+            "zed_after_reinstall_comparison": {
+                "kind": "comparison",
+                "scope": "zed",
+                "status": "passed",
+                "changed_roots": [],
+                "before_snapshot_sha256": sha256_file(snapshots["before_snapshot"]),
+                "after_snapshot_sha256": sha256_file(snapshots["after_reinstall_snapshot"]),
+            },
+            "omega_after_reinstall_comparison": {
+                "kind": "comparison",
+                "scope": "omega",
+                "status": "passed",
+                "changed_roots": [],
+                "before_snapshot_sha256": sha256_file(snapshots["before_snapshot"]),
+                "after_snapshot_sha256": sha256_file(snapshots["after_reinstall_snapshot"]),
+            },
+            "app_removal": {
+                "kind": "app_removal",
+                "source_path": str(DEFAULT_APP),
+                "recoverable": True,
+                "zed_targets_touched": False,
+            },
+            "app_reinstall": {
+                "kind": "app_reinstall",
+                "installed_path": str(DEFAULT_APP),
+                "artifact_sha256": sha256_file(artifact),
+                "release_record_sha256": sha256_file(record_path),
+                "zed_targets_touched": False,
+            },
+        }
+        lifecycle_paths = dict(snapshots)
+        for name, value in lifecycle_values.items():
+            receipt_path = lifecycle_root / f"{name}.json"
+            receipt_path.write_text(
+                json.dumps(
+                    {
+                        "schema": "openagents.omega.rc-lifecycle-proof.v1",
+                        "candidate_digest": candidate_digest,
+                        **value,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            lifecycle_paths[name] = receipt_path
+        lifecycle_manifest = lifecycle_root / "manifest.json"
+        lifecycle = {
+            "schema": "openagents.omega.installed-lifecycle-evidence.v1",
+            "status": "passed",
+            "candidate_digest": candidate_digest,
+            "artifact_sha256": sha256_file(artifact),
+            "release_record_sha256": sha256_file(record_path),
+            "receipts": {
+                name: {
+                    "path": receipt_path.name,
+                    "sha256": sha256_file(receipt_path),
+                }
+                for name, receipt_path in lifecycle_paths.items()
+            },
+        }
+        lifecycle_manifest.write_text(json.dumps(lifecycle), encoding="utf-8")
+        validate_lifecycle_evidence(
+            lifecycle_manifest, candidate_digest, record_path, artifact
+        )
+        lifecycle["receipts"]["app_reinstall"]["sha256"] = "0" * 64
+        lifecycle_manifest.write_text(json.dumps(lifecycle), encoding="utf-8")
+        try:
+            validate_lifecycle_evidence(
+                lifecycle_manifest, candidate_digest, record_path, artifact
+            )
+        except ProofError:
+            pass
+        else:
+            raise ProofError("self-test accepted a forged lifecycle receipt")
 
         tampered = dict(record)
         tampered["digests"] = {"package_sha256": "0" * 64}
@@ -1486,8 +1968,10 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--artifact", type=Path)
     parser.add_argument("--app", type=Path, default=DEFAULT_APP)
     parser.add_argument("--identity-evidence", type=Path)
+    parser.add_argument("--full-auto-evidence", type=Path)
     parser.add_argument("--manual-evidence", type=Path)
     parser.add_argument("--network-evidence", type=Path)
+    parser.add_argument("--lifecycle-evidence", type=Path)
     parser.add_argument("--out", type=Path, default=DEFAULT_OUTPUT)
     arguments = parser.parse_args()
     if arguments.self_test or arguments.harness_check:
@@ -1498,8 +1982,10 @@ def parse_arguments() -> argparse.Namespace:
             "release_record",
             "artifact",
             "identity_evidence",
+            "full_auto_evidence",
             "manual_evidence",
             "network_evidence",
+            "lifecycle_evidence",
         )
         if getattr(arguments, option) is None
     ]

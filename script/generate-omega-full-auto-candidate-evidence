@@ -1,0 +1,525 @@
+#!/usr/bin/env python3
+"""Generate candidate-bound Omega Full Auto assurance evidence without inventing observations."""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import re
+import sys
+import tempfile
+from datetime import datetime
+from pathlib import Path
+from typing import Any
+
+
+ROOT = Path(__file__).resolve().parent.parent
+SCHEMA_PATH = (
+    ROOT
+    / "crates/omega_identity/fixtures/full_auto_candidate_evidence_schema_v1.json"
+)
+SCHEMA = "openagents.omega.full-auto-candidate-evidence.v1"
+OBSERVATION_SCHEMA = "openagents.omega.full-auto-observations.v1"
+ASSURANCE_BINDING = {
+    "assurance_spec_id": "assurance.omega.full.auto.host",
+    "assurance_revision": 5,
+    "admitted_document_sha256": "a612e2fe875c30b5346e81bc0b897312e5a12690fe0e2e1b56d2fa35ea10b7ee",
+    "admitted_proposal_sha256": "b5b84098e820d0dd146b368f224ef7a10b107bf5b383ea2b6740c6d64b6bfc5f",
+    "admission_receipt_ref": "authority.decision.1954518244492185756509b3cfec6e3e",
+    "admission_receipt_sha256": "9e58770c258833904396f294e0824a1235bbb6181e5843066703be69cfc387a2",
+    "product_spec_sha256": "09f8c2c2c14df6f5272737e26b85dbe3f20704ce66345a9377353710a8d6dddc",
+}
+OBLIGATIONS = tuple(f"AO-OMEGA-FA-AC-{number:02d}-01" for number in range(1, 9))
+ISSUE_GATES = (
+    "incident_replay",
+    "owner_real_multi_turn",
+    "restart_reconciliation",
+    "control_matrix",
+    "visible_cross_provider_handoff",
+    "offline_and_sync_gap",
+    "mobile_control_outcomes",
+    "ordinary_chat_separation",
+    "redaction",
+    "independent_exact_candidate_review",
+)
+INSTALLED_ONLY_GATES = {
+    "owner_real_multi_turn",
+    "restart_reconciliation",
+    "control_matrix",
+    "visible_cross_provider_handoff",
+    "offline_and_sync_gap",
+    "mobile_control_outcomes",
+    "ordinary_chat_separation",
+    "redaction",
+    "independent_exact_candidate_review",
+}
+ATTESTATION_KEYS = {
+    "status",
+    "actor",
+    "role",
+    "observed_at",
+    "evidence_refs",
+    "candidate_digest",
+    "artifact_sha256",
+    "release_record_sha256",
+    "omega_commit",
+}
+OBSERVATION_KEYS = {
+    "status",
+    "evidence_tier",
+    "observed_at",
+    "evidence_refs",
+}
+
+
+class EvidenceError(RuntimeError):
+    pass
+
+
+def reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise EvidenceError(f"duplicate JSON key: {key}")
+        result[key] = value
+    return result
+
+
+def load_json(path: Path, description: str) -> dict[str, Any]:
+    try:
+        value = json.loads(
+            path.read_text(encoding="utf-8"), object_pairs_hook=reject_duplicate_keys
+        )
+    except (OSError, json.JSONDecodeError, EvidenceError) as error:
+        raise EvidenceError(f"cannot read {description} {path}: {error}") from error
+    if not isinstance(value, dict):
+        raise EvidenceError(f"{description} must be a JSON object")
+    return value
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def require_exact_keys(value: dict[str, Any], expected: set[str], label: str) -> None:
+    observed = set(value)
+    if observed != expected:
+        missing = sorted(expected - observed)
+        unknown = sorted(observed - expected)
+        details = []
+        if missing:
+            details.append(f"missing={','.join(missing)}")
+        if unknown:
+            details.append(f"unknown={','.join(unknown)}")
+        raise EvidenceError(f"{label} keys are not exact: {'; '.join(details)}")
+
+
+def require_digest(value: Any, label: str) -> str:
+    if not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{64}", value) is None:
+        raise EvidenceError(f"{label} must be a lowercase SHA-256 digest")
+    return value
+
+
+def require_time(value: Any, label: str) -> str:
+    if not isinstance(value, str):
+        raise EvidenceError(f"{label} must be an ISO-8601 timestamp")
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as error:
+        raise EvidenceError(f"{label} must be an ISO-8601 timestamp") from error
+    if parsed.tzinfo is None:
+        raise EvidenceError(f"{label} must include a timezone")
+    return value
+
+
+def require_refs(value: Any, label: str) -> list[str]:
+    if (
+        not isinstance(value, list)
+        or not value
+        or any(not isinstance(item, str) or not item.strip() for item in value)
+        or len(set(value)) != len(value)
+    ):
+        raise EvidenceError(f"{label} must contain distinct nonempty evidence references")
+    return value
+
+
+def candidate_bindings(
+    release_record: dict[str, Any], release_path: Path, artifact: Path, identity: dict[str, Any]
+) -> dict[str, Any]:
+    if not artifact.is_file():
+        raise EvidenceError(f"candidate artifact is missing: {artifact}")
+    artifact_digest = sha256_file(artifact)
+    if release_record.get("digests", {}).get("package_sha256") != artifact_digest:
+        raise EvidenceError("artifact digest differs from the release record")
+    source = release_record.get("source")
+    if not isinstance(source, dict) or source.get("dirty") is not False:
+        raise EvidenceError("release record does not bind a clean Omega source")
+    omega_commit = source.get("commit")
+    if not isinstance(omega_commit, str) or re.fullmatch(r"[0-9a-f]{40}", omega_commit) is None:
+        raise EvidenceError("release record Omega commit is invalid")
+    identity_candidate = identity.get("candidate")
+    candidate_digest = identity.get("candidate_digest", {}).get("value")
+    if not isinstance(identity_candidate, dict):
+        raise EvidenceError("identity evidence has no candidate object")
+    require_digest(candidate_digest, "identity candidate digest")
+    observed_candidate_digest = hashlib.sha256(
+        json.dumps(identity_candidate, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    if candidate_digest != observed_candidate_digest:
+        raise EvidenceError("identity candidate digest does not match canonical candidate JSON")
+    identity_artifact = identity_candidate.get("artifact", {})
+    if (
+        identity_candidate.get("omega", {}).get("commit") != omega_commit
+        or identity_artifact.get("name") != artifact.name
+        or identity_artifact.get("sha256") != artifact_digest
+        or identity_artifact.get("release_record_sha256") != sha256_file(release_path)
+    ):
+        raise EvidenceError("identity evidence binds a different Omega candidate")
+    effectd = release_record.get("components", {}).get("omega_effectd")
+    if not isinstance(effectd, dict):
+        raise EvidenceError("release record has no omega-effectd component binding")
+    effectd_keys = (
+        "release_tag",
+        "archive_sha256",
+        "manifest_sha256",
+        "source_commit",
+        "source_tree",
+        "wrapper_sha256",
+        "bundle_sha256",
+        "source_node_sha256",
+        "packaged_node_sha256",
+    )
+    for key in effectd_keys[1:]:
+        length = 40 if key in ("source_commit", "source_tree") else 64
+        value = effectd.get(key)
+        if not isinstance(value, str) or re.fullmatch(rf"[0-9a-f]{{{length}}}", value) is None:
+            raise EvidenceError(f"omega-effectd {key} binding is invalid")
+    if not isinstance(effectd.get("release_tag"), str) or not effectd["release_tag"]:
+        raise EvidenceError("omega-effectd release tag binding is invalid")
+    return {
+        "candidate_digest": candidate_digest,
+        "artifact_name": artifact.name,
+        "artifact_sha256": artifact_digest,
+        "release_record_sha256": sha256_file(release_path),
+        "omega_commit": omega_commit,
+        "omega_effectd": {key: effectd[key] for key in effectd_keys},
+    }
+
+
+def validate_observation(
+    observation: Any, label: str, *, installed_required: bool
+) -> dict[str, Any]:
+    if not isinstance(observation, dict):
+        raise EvidenceError(f"{label} must be an object")
+    require_exact_keys(observation, OBSERVATION_KEYS, label)
+    if observation["status"] != "passed":
+        raise EvidenceError(f"{label} is not passed")
+    allowed_tiers = {"source", "installed_candidate"}
+    if observation["evidence_tier"] not in allowed_tiers:
+        raise EvidenceError(f"{label} has an unsupported evidence tier")
+    if installed_required and observation["evidence_tier"] != "installed_candidate":
+        raise EvidenceError(f"{label} requires installed-candidate evidence")
+    require_time(observation["observed_at"], f"{label}.observed_at")
+    require_refs(observation["evidence_refs"], f"{label}.evidence_refs")
+    return observation
+
+
+def validate_attestation(
+    value: Any,
+    label: str,
+    expected_role: str,
+    bindings: dict[str, Any],
+) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise EvidenceError(f"{label} must be an object")
+    require_exact_keys(value, ATTESTATION_KEYS, label)
+    if value["status"] != "passed" or value["role"] != expected_role:
+        raise EvidenceError(f"{label} has the wrong status or authority role")
+    if not isinstance(value["actor"], str) or not value["actor"].strip():
+        raise EvidenceError(f"{label} requires a named actor")
+    require_time(value["observed_at"], f"{label}.observed_at")
+    require_refs(value["evidence_refs"], f"{label}.evidence_refs")
+    for key in (
+        "candidate_digest",
+        "artifact_sha256",
+        "release_record_sha256",
+        "omega_commit",
+    ):
+        if value[key] != bindings[key]:
+            raise EvidenceError(f"{label} binds a different {key}")
+    return value
+
+
+def build_evidence(
+    observations: dict[str, Any], bindings: dict[str, Any]
+) -> dict[str, Any]:
+    require_exact_keys(
+        observations,
+        {
+            "schema",
+            "candidate_digest",
+            "artifact_sha256",
+            "release_record_sha256",
+            "omega_commit",
+            "obligations",
+            "issue_matrix",
+            "owner_observation",
+            "independent_verification",
+        },
+        "observation packet",
+    )
+    if observations["schema"] != OBSERVATION_SCHEMA:
+        raise EvidenceError("observation packet schema is not supported")
+    for key in (
+        "candidate_digest",
+        "artifact_sha256",
+        "release_record_sha256",
+        "omega_commit",
+    ):
+        if observations[key] != bindings[key]:
+            raise EvidenceError(f"observation packet binds a different {key}")
+
+    obligations = observations["obligations"]
+    issue_matrix = observations["issue_matrix"]
+    if not isinstance(obligations, dict) or set(obligations) != set(OBLIGATIONS):
+        raise EvidenceError("observation obligation inventory is not exact")
+    if not isinstance(issue_matrix, dict) or set(issue_matrix) != set(ISSUE_GATES):
+        raise EvidenceError("observation issue-matrix inventory is not exact")
+    validated_obligations = {
+        key: validate_observation(value, f"obligations.{key}", installed_required=True)
+        for key, value in obligations.items()
+    }
+    validated_matrix = {
+        key: validate_observation(
+            value,
+            f"issue_matrix.{key}",
+            installed_required=key in INSTALLED_ONLY_GATES,
+        )
+        for key, value in issue_matrix.items()
+    }
+    owner = validate_attestation(
+        observations["owner_observation"],
+        "owner_observation",
+        "openagents.owner",
+        bindings,
+    )
+    independent = validate_attestation(
+        observations["independent_verification"],
+        "independent_verification",
+        "openagents.assurance_reviewer",
+        bindings,
+    )
+    if owner["actor"] == independent["actor"]:
+        raise EvidenceError("owner and independent verifier must be distinct actors")
+
+    return {
+        "schema": SCHEMA,
+        "schema_version": 1,
+        "status": "verified",
+        "candidate_verified": True,
+        "candidate": {
+            "candidate_digest": bindings["candidate_digest"],
+            "omega": {
+                "repository": "https://github.com/OpenAgentsInc/omega",
+                "commit": bindings["omega_commit"],
+                "dirty": False,
+            },
+            "artifact": {
+                "name": bindings["artifact_name"],
+                "sha256": bindings["artifact_sha256"],
+                "release_record_sha256": bindings["release_record_sha256"],
+            },
+            "omega_effectd": bindings["omega_effectd"],
+            "assurance_spec_admission": ASSURANCE_BINDING,
+        },
+        "obligations": validated_obligations,
+        "issue_matrix": validated_matrix,
+        "owner_observation": owner,
+        "independent_verification": independent,
+    }
+
+
+def write_evidence(path: Path, evidence: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.tmp")
+    try:
+        with temporary.open("x", encoding="utf-8") as handle:
+            json.dump(evidence, handle, indent=2, sort_keys=True)
+            handle.write("\n")
+        temporary.replace(path)
+    except OSError as error:
+        temporary.unlink(missing_ok=True)
+        raise EvidenceError(f"cannot write evidence {path}: {error}") from error
+
+
+def self_test() -> None:
+    bindings = {
+        "candidate_digest": "a" * 64,
+        "artifact_name": "Omega.dmg",
+        "artifact_sha256": "b" * 64,
+        "release_record_sha256": "c" * 64,
+        "omega_commit": "d" * 40,
+        "omega_effectd": {
+            "release_tag": "omega-effectd-v0.1.0-rc.test",
+            "archive_sha256": "1" * 64,
+            "manifest_sha256": "2" * 64,
+            "source_commit": "3" * 40,
+            "source_tree": "4" * 40,
+            "wrapper_sha256": "5" * 64,
+            "bundle_sha256": "6" * 64,
+            "source_node_sha256": "7" * 64,
+            "packaged_node_sha256": "8" * 64,
+        },
+    }
+    observation = {
+        "status": "passed",
+        "evidence_tier": "installed_candidate",
+        "observed_at": "2026-07-24T12:00:00Z",
+        "evidence_refs": ["sha256:" + "9" * 64],
+    }
+    attestation = {
+        "status": "passed",
+        "actor": "Owner",
+        "role": "openagents.owner",
+        "observed_at": "2026-07-24T12:01:00Z",
+        "evidence_refs": ["sha256:" + "a" * 64],
+        **{key: bindings[key] for key in (
+            "candidate_digest", "artifact_sha256", "release_record_sha256", "omega_commit"
+        )},
+    }
+    packet = {
+        "schema": OBSERVATION_SCHEMA,
+        **{key: bindings[key] for key in (
+            "candidate_digest", "artifact_sha256", "release_record_sha256", "omega_commit"
+        )},
+        "obligations": {key: dict(observation) for key in OBLIGATIONS},
+        "issue_matrix": {key: dict(observation) for key in ISSUE_GATES},
+        "owner_observation": attestation,
+        "independent_verification": {
+            **attestation,
+            "actor": "Euler",
+            "role": "openagents.assurance_reviewer",
+        },
+    }
+    evidence = build_evidence(packet, bindings)
+    if evidence["status"] != "verified":
+        raise EvidenceError("self-test did not build verified evidence")
+    packet["issue_matrix"]["owner_real_multi_turn"]["evidence_tier"] = "source"
+    try:
+        build_evidence(packet, bindings)
+    except EvidenceError:
+        pass
+    else:
+        raise EvidenceError("self-test accepted source-only owner evidence")
+    packet["issue_matrix"]["owner_real_multi_turn"]["evidence_tier"] = "installed_candidate"
+    packet["independent_verification"]["candidate_digest"] = "0" * 64
+    try:
+        build_evidence(packet, bindings)
+    except EvidenceError:
+        pass
+    else:
+        raise EvidenceError("self-test accepted a mismatched independent attestation")
+    with tempfile.TemporaryDirectory(prefix="omega-fa-evidence-self-test-") as directory:
+        test_root = Path(directory)
+        artifact = test_root / "Omega.dmg"
+        artifact.write_bytes(b"candidate")
+        release_path = test_root / "release.json"
+        release = {
+            "source": {"commit": "d" * 40, "dirty": False},
+            "digests": {"package_sha256": sha256_file(artifact)},
+            "components": {"omega_effectd": bindings["omega_effectd"]},
+        }
+        release_path.write_text(json.dumps(release), encoding="utf-8")
+        identity_candidate = {
+            "omega": {"commit": "d" * 40},
+            "artifact": {
+                "name": artifact.name,
+                "sha256": sha256_file(artifact),
+                "release_record_sha256": sha256_file(release_path),
+            },
+        }
+        identity = {
+            "candidate": identity_candidate,
+            "candidate_digest": {
+                "value": hashlib.sha256(
+                    json.dumps(
+                        identity_candidate, sort_keys=True, separators=(",", ":")
+                    ).encode()
+                ).hexdigest()
+            },
+        }
+        observed_bindings = candidate_bindings(
+            release, release_path, artifact, identity
+        )
+        if observed_bindings["omega_effectd"]["source_tree"] != "4" * 40:
+            raise EvidenceError("self-test did not preserve the source-tree binding")
+
+        duplicate = test_root / "duplicate.json"
+        duplicate.write_text('{"schema":1,"schema":1}', encoding="utf-8")
+        try:
+            load_json(duplicate, "duplicate fixture")
+        except EvidenceError:
+            pass
+        else:
+            raise EvidenceError("self-test accepted a duplicate JSON key")
+    if not SCHEMA_PATH.is_file():
+        raise EvidenceError("Full Auto candidate evidence schema is missing")
+    print("Omega Full Auto candidate evidence self-test passed")
+
+
+def parse_arguments() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--self-test", action="store_true")
+    parser.add_argument("--release-record", type=Path)
+    parser.add_argument("--artifact", type=Path)
+    parser.add_argument("--identity-evidence", type=Path)
+    parser.add_argument("--observations", type=Path)
+    parser.add_argument(
+        "--output",
+        type=Path,
+        default=ROOT / "target/omega-full-auto-evidence/candidate-evidence.json",
+    )
+    arguments = parser.parse_args()
+    if arguments.self_test:
+        return arguments
+    missing = [
+        name
+        for name in ("release_record", "artifact", "identity_evidence", "observations")
+        if getattr(arguments, name) is None
+    ]
+    if missing:
+        parser.error(
+            "generate mode requires "
+            + ", ".join(f"--{name.replace('_', '-')}" for name in missing)
+        )
+    return arguments
+
+
+def main() -> int:
+    arguments = parse_arguments()
+    try:
+        if arguments.self_test:
+            self_test()
+            return 0
+        release_record = load_json(arguments.release_record, "release record")
+        identity = load_json(arguments.identity_evidence, "identity candidate evidence")
+        observations = load_json(arguments.observations, "Full Auto observations")
+        bindings = candidate_bindings(
+            release_record, arguments.release_record, arguments.artifact, identity
+        )
+        evidence = build_evidence(observations, bindings)
+        write_evidence(arguments.output, evidence)
+        print(f"wrote verified Full Auto candidate evidence: {arguments.output}")
+        return 0
+    except EvidenceError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
