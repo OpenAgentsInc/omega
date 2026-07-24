@@ -20,8 +20,8 @@ struct AllowListEntry {
 }
 
 fn load_allowlist() -> AllowList {
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("fixtures/endpoint_allowlist.json");
+    let path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/endpoint_allowlist.json");
     let text = std::fs::read_to_string(&path)
         .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
     serde_json::from_str(&text).unwrap_or_else(|error| panic!("parse allowlist: {error}"))
@@ -68,25 +68,35 @@ fn endpoint_allowlist_blocks_zed_hosts_for_normal_start() {
             );
         }
     }
+
+    assert!(allowlist.entries.iter().any(|entry| {
+        entry.host == "cdn.agentclientprotocol.com"
+            && entry.purpose.contains("ACP registry")
+            && entry.disposition == "approved"
+    }));
 }
 
 #[test]
-fn default_settings_do_not_point_at_zed_production() {
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../assets/settings/default.json");
+fn default_settings_enable_registry_acp_without_enabling_zed_production() {
+    let path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/settings/default.json");
     let text = std::fs::read_to_string(&path)
         .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
+    let settings: serde_json::Value = settings_json::parse_json_with_comments(&text)
+        .unwrap_or_else(|error| panic!("parse {}: {error}", path.display()));
 
-    assert!(text.contains("\"server_url\": \"https://services.openagents.invalid\""));
-    assert!(text.contains("\"diagnostics\": false"));
-    assert!(text.contains("\"metrics\": false"));
-    assert!(text.contains("\"auto_update\": false"));
-    assert!(text.contains("\"disable_ai\": true"));
-    assert!(text.contains("\"provider\": \"none\""));
-    assert!(text.contains("\"auto_install_extensions\": {}"));
-    assert!(!text.contains("\"server_url\": \"https://zed.dev\""));
-    assert!(
-        text.contains("\"provider\": \"ollama\""),
-        "default agent model should not use the Zed cloud provider"
+    assert_eq!(settings["disable_ai"], false);
+    assert_eq!(settings["agent_servers"]["codex-acp"]["type"], "registry");
+    assert_eq!(
+        settings["server_url"],
+        "https://services.openagents.invalid"
     );
+    assert_eq!(settings["telemetry"]["diagnostics"], false);
+    assert_eq!(settings["telemetry"]["metrics"], false);
+    assert_eq!(settings["auto_update"], false);
+    assert_eq!(settings["edit_predictions"]["provider"], "none");
+    assert_eq!(settings["auto_install_extensions"], serde_json::json!({}));
+    assert!(!text.contains("\"server_url\": \"https://zed.dev\""));
+    assert_eq!(settings["agent"]["default_model"]["provider"], "ollama");
+    assert!(!super::zed_production_services_enabled());
 }

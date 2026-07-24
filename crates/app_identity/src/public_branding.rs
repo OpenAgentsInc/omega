@@ -49,7 +49,10 @@ fn compatibility_allowlist_has_required_fields() {
     assert!(!allowlist.entries.is_empty());
 
     for entry in &allowlist.entries {
-        assert!(!entry.match_text.is_empty(), "entry match must be non-empty");
+        assert!(
+            !entry.match_text.is_empty(),
+            "entry match must be non-empty"
+        );
         assert!(!entry.reason.is_empty(), "entry reason must be non-empty");
         assert_eq!(entry.owner, "OpenAgents");
         assert!(!entry.expiry.is_empty(), "entry expiry must be non-empty");
@@ -131,18 +134,19 @@ fn high_risk_public_files_forbid_zed_product_phrases() {
 }
 
 #[test]
-fn omega_unavailable_ai_copy_is_honest() {
+fn omega_hosted_ai_and_external_agent_copy_is_honest() {
     let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let ai_onboarding = std::fs::read_to_string(
-        workspace_root.join("crates/ai_onboarding/src/ai_onboarding.rs"),
-    )
-    .expect("read ai_onboarding");
+    let ai_onboarding =
+        std::fs::read_to_string(workspace_root.join("crates/ai_onboarding/src/ai_onboarding.rs"))
+            .expect("read ai_onboarding");
     assert!(ai_onboarding.contains("not available in Omega"));
     assert!(!ai_onboarding.contains("Welcome to Zed AI"));
     assert!(!ai_onboarding.contains("Try Zed Pro for Free"));
 
-    let basics = std::fs::read_to_string(workspace_root.join("crates/onboarding/src/basics_page.rs"))
-        .expect("read basics_page");
-    assert!(basics.contains("not available in Omega"));
+    let basics =
+        std::fs::read_to_string(workspace_root.join("crates/onboarding/src/basics_page.rs"))
+            .expect("read basics_page");
+    assert!(basics.contains("Install external agents to start a thread"));
+    assert!(basics.contains("Codex uses its own login and configuration"));
     assert!(!basics.contains(".name(\"Zed Agent\")"));
 }

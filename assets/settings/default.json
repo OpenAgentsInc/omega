@@ -1557,8 +1557,9 @@
   },
   // Whether to disable all AI features in Omega.
   //
-  // Default: true until Omega owns hosted AI services.
-  "disable_ai": true,
+  // Local and registry ACP agents remain enabled. Hosted Zed services are
+  // isolated independently by Omega's service gates and provider defaults.
+  "disable_ai": false,
   // Automatically update Omega. Disabled until an owned update feed exists.
   "auto_update": false,
   // How to render LSP `textDocument/documentColor` colors in the editor.

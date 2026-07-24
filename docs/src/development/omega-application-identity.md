@@ -321,10 +321,15 @@ By default Omega does not contact Zed production hosts.
 
 - `server_url` defaults to `https://services.openagents.invalid`
 - Telemetry diagnostics/metrics and auto-update are off
-- Hosted Zed AI, agent panel, edit predictions, and extension auto-install are
-  off
+- Local and registry ACP agents are on; Omega defaults `codex-acp` to the
+  public ACP registry so the agent panel and Full Auto can use the existing
+  Codex ACP authentication path
+- Hosted Zed AI remains unavailable, edit predictions use provider `none`, and
+  extension auto-install is off
 - Account auth, extension registry fetches, remote-server downloads, and the
   Zed cloud model provider stay gated unless `OMEGA_ALLOW_ZED_SERVICES=1`
+- The reviewed public ACP registry endpoint is independent of Zed production
+  and is listed explicitly in the endpoint allowlist
 - Reviewed hosts live in
   `crates/app_identity/fixtures/endpoint_allowlist.json`
 - Capture journey helper: `script/omega-network-capture-journey`

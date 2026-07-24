@@ -36,6 +36,16 @@
       ]
     },
     {
+      "host": "cdn.agentclientprotocol.com",
+      "purpose": "Public ACP registry used to resolve explicitly configured external agents",
+      "owner": "OpenAgents",
+      "disposition": "approved",
+      "expiry": "none",
+      "paths": [
+        "/registry/v1/"
+      ]
+    },
+    {
       "host": "zed.dev",
       "purpose": "Inherited Zed production app server",
       "owner": "OpenAgents",
