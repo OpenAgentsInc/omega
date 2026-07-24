@@ -55,6 +55,7 @@ pub struct ResponseFrame {
 #[serde(rename_all = "snake_case")]
 pub enum HostMethod {
     ResolveWorkspace,
+    ResolveSyncSession,
     CreateThread,
     LaneReadiness,
     DispatchTurn,

@@ -3,6 +3,7 @@
 //! Authority: OpenAgentsInc/omega#21 (`OMEGA-FA-02`).
 //! Durable run truth stays in omega-effectd on disk. GPUI is not run authority.
 
+mod openagents_session;
 mod protocol;
 mod supervisor;
 
@@ -11,6 +12,11 @@ use std::{rc::Rc, sync::Arc};
 use anyhow::{Result, anyhow};
 use gpui::{App, Global};
 use smol::lock::Mutex as AsyncMutex;
+
+pub use openagents_session::{
+    OpenAgentsSession, OpenAgentsSessionPhase, VerifiedOpenAgentsSession, init_openagents_session,
+    openagents_session,
+};
 
 pub use protocol::{
     HealthResult, HostMethod, HostRequestFrame, HostResponseError, HostResponseErrorCode,

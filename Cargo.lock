@@ -12538,16 +12538,23 @@ name = "omega_effectd"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
+ "credentials_provider",
  "futures 0.3.32",
  "gpui",
+ "http_client",
  "libc",
  "paths",
+ "rand 0.9.4",
  "serde",
  "serde_json",
+ "sha2",
  "smol",
  "tempfile",
  "thiserror 2.0.17",
+ "url",
  "util",
+ "zed_credentials_provider",
 ]
 
 [[package]]

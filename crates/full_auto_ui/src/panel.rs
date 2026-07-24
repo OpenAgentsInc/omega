@@ -12,7 +12,10 @@ use gpui::{
     Focusable, InteractiveElement, IntoElement, ParentElement, Render, SharedString, Styled, Task,
     WeakEntity, Window, div, px,
 };
-use omega_effectd::{AttentionDecision, SharedOmegaEffectdSupervisor, shared_supervisor};
+use omega_effectd::{
+    AttentionDecision, OpenAgentsSession, OpenAgentsSessionPhase, SharedOmegaEffectdSupervisor,
+    openagents_session, shared_supervisor,
+};
 use serde_json::{Value, json};
 use settings::{NotifyWhenAgentWaiting, Settings as _};
 use ui::{Button, ButtonStyle, IconButton, IconName, Label, LabelSize, Tooltip, prelude::*};
@@ -100,6 +103,8 @@ pub struct FullAutoPanel {
     attention_dedup_keys: HashMap<String, String>,
     attention_refresh_in_flight: bool,
     status: SharedString,
+    openagents_session: OpenAgentsSession,
+    account_busy: bool,
     supervisor: Option<SharedOmegaEffectdSupervisor>,
     _refresh: Option<Task<()>>,
 }
@@ -176,6 +181,8 @@ impl FullAutoPanel {
             attention_dedup_keys: HashMap::new(),
             attention_refresh_in_flight: false,
             status: "Full Auto is a run, not a chat option.".into(),
+            openagents_session: openagents_session(cx),
+            account_busy: false,
             supervisor: None,
             _refresh: None,
         };
@@ -511,6 +518,57 @@ impl FullAutoPanel {
         self.refresh_runs(cx);
         cx.notify();
     }
+
+    fn connect_openagents(&mut self, cx: &mut Context<Self>) {
+        if self.account_busy {
+            return;
+        }
+        self.account_busy = true;
+        self.status = "Opening OpenAgents authorization in your browser…".into();
+        let session = self.openagents_session.clone();
+        cx.spawn(async move |this, cx| {
+            let phase = session.connect(cx).await;
+            this.update(cx, |this, cx| {
+                this.account_busy = false;
+                this.status = match phase {
+                    OpenAgentsSessionPhase::Ready => "OpenAgents Sync account connected.".into(),
+                    OpenAgentsSessionPhase::SignedOut => {
+                        "OpenAgents authorization was cancelled.".into()
+                    }
+                    _ => "OpenAgents account could not be verified. Reconnect to try again.".into(),
+                };
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn disconnect_openagents(&mut self, cx: &mut Context<Self>) {
+        if self.account_busy {
+            return;
+        }
+        self.account_busy = true;
+        self.status = "Revoking OpenAgents account credentials…".into();
+        let session = self.openagents_session.clone();
+        cx.spawn(async move |this, cx| {
+            let phase = session.disconnect(cx).await;
+            this.update(cx, |this, cx| {
+                this.account_busy = false;
+                this.status = match phase {
+                    OpenAgentsSessionPhase::SignedOut => {
+                        "OpenAgents Sync account disconnected.".into()
+                    }
+                    _ => "OpenAgents could not prove both credentials were revoked. The local keychain record was retained.".into(),
+                };
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+        cx.notify();
+    }
 }
 
 fn should_decide_attention(state: &str) -> bool {
@@ -663,6 +721,8 @@ impl Render for FullAutoPanel {
             .filter(|run| ACTIVE_STATES.contains(&run.state.as_str()))
             .count()
             .min(FULL_AUTO_ACTIVE_LIMIT);
+        let account_phase = self.openagents_session.phase();
+        let account_connected = account_phase == OpenAgentsSessionPhase::Ready;
 
         h_flex()
             .id("full-auto-panel")
@@ -675,6 +735,43 @@ impl Render for FullAutoPanel {
                     .gap_2()
                     .p_3()
                     .child(Label::new(self.status.clone()).color(Color::Muted))
+                    .child(
+                        h_flex()
+                            .justify_between()
+                            .child(
+                                v_flex()
+                                    .child(Label::new("OpenAgents Sync"))
+                                    .child(
+                                        Label::new(account_phase.label()).color(if account_connected {
+                                            Color::Success
+                                        } else {
+                                            Color::Muted
+                                        }),
+                                    ),
+                            )
+                            .child(if account_connected {
+                                Button::new("full-auto-openagents-disconnect", "Disconnect")
+                                    .style(ButtonStyle::Subtle)
+                                    .disabled(self.account_busy)
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.disconnect_openagents(cx)
+                                    }))
+                            } else {
+                                Button::new(
+                                    "full-auto-openagents-connect",
+                                    if account_phase == OpenAgentsSessionPhase::SignedOut {
+                                        "Connect"
+                                    } else {
+                                        "Reconnect"
+                                    },
+                                )
+                                .style(ButtonStyle::Subtle)
+                                .disabled(self.account_busy)
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.connect_openagents(cx)
+                                }))
+                            }),
+                    )
                     .map(|this| match self.mode {
                         SurfaceMode::Launcher => this
                             .child(Label::new("Full Auto").size(LabelSize::Large))

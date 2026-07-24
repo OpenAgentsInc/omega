@@ -8,7 +8,8 @@ use acp_thread::{AgentThreadEntry, ThreadStatus};
 use chrono::Utc;
 use gpui::{AnyWindowHandle, App, AsyncApp, Entity, WeakEntity};
 use omega_effectd::{
-    HostMethod, HostRequestFrame, HostResponseError, HostResponseErrorCode, OmegaEffectdHostHandler,
+    HostMethod, HostRequestFrame, HostResponseError, HostResponseErrorCode,
+    OmegaEffectdHostHandler, OpenAgentsSession, VerifiedOpenAgentsSession,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -99,6 +100,10 @@ struct ResolveWorkspaceParams {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ResolveSyncSessionParams {}
+
+#[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct CreateThreadParams {
     title: String,
@@ -158,6 +163,7 @@ struct AppendSystemNoteParams {
 
 pub fn omega_effectd_host_handler(cx: &App) -> OmegaEffectdHostHandler {
     let async_cx = cx.to_async();
+    let openagents_session = omega_effectd::openagents_session(cx);
     let correlation_path = paths::data_dir().join("openagents").join(CORRELATION_FILE);
     let (threads, load_error) = match load_correlation_journal(&correlation_path) {
         Ok(threads) => (threads, None),
@@ -172,17 +178,22 @@ pub fn omega_effectd_host_handler(cx: &App) -> OmegaEffectdHostHandler {
     Rc::new(move |request| {
         let async_cx = async_cx.clone();
         let state = state.clone();
-        Box::pin(async move { handle_request(request, state, async_cx).await })
+        let openagents_session = openagents_session.clone();
+        Box::pin(async move { handle_request(request, state, openagents_session, async_cx).await })
     })
 }
 
 async fn handle_request(
     request: HostRequestFrame,
     state: Rc<RefCell<HostBridgeState>>,
+    openagents_session: OpenAgentsSession,
     mut cx: AsyncApp,
 ) -> Result<Value, HostResponseError> {
     match request.method {
         HostMethod::ResolveWorkspace => resolve_workspace(request.params, &state, &mut cx),
+        HostMethod::ResolveSyncSession => {
+            resolve_sync_session(request.params, &openagents_session, &mut cx).await
+        }
         HostMethod::CreateThread => create_thread(request.params, &state, &mut cx),
         HostMethod::LaneReadiness => lane_readiness(request.params, &state, &cx),
         HostMethod::DispatchTurn => dispatch_turn(request.params, &state, &mut cx).await,
@@ -192,6 +203,26 @@ async fn handle_request(
         HostMethod::InterruptTurn => interrupt_turn(request.params, &state, &mut cx).await,
         HostMethod::AppendSystemNote => append_system_note(request.params),
         HostMethod::Unsupported => Err(unsupported("Unknown Omega host method.")),
+    }
+}
+
+async fn resolve_sync_session(
+    params: Value,
+    session: &OpenAgentsSession,
+    cx: &mut AsyncApp,
+) -> Result<Value, HostResponseError> {
+    let _: ResolveSyncSessionParams = decode_params(params)?;
+    Ok(sync_session_result(session.resolve_verified(cx).await))
+}
+
+fn sync_session_result(session: Option<VerifiedOpenAgentsSession>) -> Value {
+    match session {
+        Some(session) => json!({
+            "available": true,
+            "baseUrl": session.base_url,
+            "accessToken": session.access_token,
+        }),
+        None => json!({ "available": false }),
     }
 }
 
@@ -1169,6 +1200,24 @@ mod tests {
         assert!(validate_ref(&"x".repeat(181), "turnRef").is_err());
         assert!(decode_params::<ResolveWorkspaceParams>(json!({})).is_ok());
         assert!(decode_params::<ResolveWorkspaceParams>(json!({ "extra": true })).is_err());
+        assert!(decode_params::<ResolveSyncSessionParams>(json!({})).is_ok());
+        assert!(decode_params::<ResolveSyncSessionParams>(json!({ "token": "no" })).is_err());
+    }
+
+    #[test]
+    fn sync_session_host_result_is_unavailable_or_runtime_only_verified_material() {
+        assert_eq!(sync_session_result(None), json!({ "available": false }));
+        assert_eq!(
+            sync_session_result(Some(VerifiedOpenAgentsSession {
+                base_url: "https://openagents.com".to_string(),
+                access_token: "runtime-only-fixture".to_string(),
+            })),
+            json!({
+                "available": true,
+                "baseUrl": "https://openagents.com",
+                "accessToken": "runtime-only-fixture",
+            })
+        );
     }
 
     #[test]

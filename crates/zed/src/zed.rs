@@ -21,16 +21,16 @@ use anyhow::Context as _;
 pub use app_menus::*;
 use assets::Assets;
 
+use agent_computer_ui::AgentComputerPanel;
 use breadcrumbs::Breadcrumbs;
 use client::zed_urls;
 use collections::VecDeque;
 use debugger_ui::debugger_panel::DebugPanel;
-use full_auto_ui::FullAutoPanel;
-use agent_computer_ui::AgentComputerPanel;
 use editor::{Editor, MultiBuffer};
 use extension_host::ExtensionStore;
 use feature_flags::{FeatureFlagAppExt as _, PanicFeatureFlag};
 use fs::Fs;
+use full_auto_ui::FullAutoPanel;
 use futures::FutureExt as _;
 use futures::{StreamExt, channel::mpsc, select_biased};
 use git_ui::branch_diff::BranchDiffToolbar;
@@ -5930,6 +5930,8 @@ mod tests {
             );
             project::debugger::dap_store::DapStore::init(&app_state.client.clone().into(), cx);
             debugger_ui::init(cx);
+            omega_effectd::init_openagents_session(cx);
+            omega_effectd::init_openagents_session(cx);
             omega_effectd::init_with_host_handler(
                 Some(agent_ui::omega_effectd_host_handler(cx)),
                 cx,

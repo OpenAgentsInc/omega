@@ -54,6 +54,10 @@ GPUI is not run authority.
   dispatch on the new lane.
 - Diagnostics are redacted. Objective and transcript stay out of list
   projections.
+- `resolve_sync_session` accepts empty params and returns only unavailable or a
+  currently server-verified OpenAgents session. The access token crosses this
+  host seam in memory only; effectd must never persist, log, diagnose, or
+  project it.
 - Do not let a GPUI entity rewrite a durable run after restart.
 
 ## Verification

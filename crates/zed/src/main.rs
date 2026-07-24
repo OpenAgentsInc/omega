@@ -588,6 +588,8 @@ fn main() {
         zed::move_to_applications::init(cx);
         project::Project::init(&client, cx);
         debugger_ui::init(cx);
+        omega_effectd::init_openagents_session(cx);
+        omega_effectd::init_openagents_session(cx);
         omega_effectd::init_with_host_handler(Some(agent_ui::omega_effectd_host_handler(cx)), cx);
         full_auto_ui::init(cx);
         agent_computer_ui::init(cx);
