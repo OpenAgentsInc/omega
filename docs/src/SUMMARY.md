@@ -218,6 +218,7 @@
 
 - [Developing Zed](./development.md)
   - [Omega application identity](./development/omega-application-identity.md)
+  - [Omega Full Auto contract freeze](./development/omega-full-auto-contract-freeze.md)
   - [Omega RC release](./development/omega-rc-release.md)
   - [Omega RC installed proof](./development/omega-rc-installed-proof.md)
   - [macOS](./development/macos.md)
