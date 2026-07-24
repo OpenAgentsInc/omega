@@ -14,6 +14,8 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use settings::{SettingsStore, VsCodeSettingsSource};
 use std::sync::Arc;
+#[cfg(not(debug_assertions))]
+use std::any::TypeId;
 use ui::{
     Divider, KeyBinding, ParentElement as _, StatefulInteractiveElement, Vector, VectorName,
     WithScrollbar as _, prelude::*, rems_from_px,
@@ -28,7 +30,7 @@ use workspace::{
     notifications::NotifyResultExt as _,
     open_new, register_serializable_item, with_active_or_new_workspace,
 };
-use zed_actions::OpenOnboarding;
+use zed_actions::{OpenEditorOnboarding, OpenOnboarding, dev::ResetOnboarding};
 
 mod base_keymap_picker;
 mod basics_page;
@@ -67,6 +69,13 @@ const EDITOR_ONBOARDING_COMPLETION_KEY: &str = "omega_editor_onboarding_completi
 const EDITOR_ONBOARDING_COMPLETION_SCHEMA: &str =
     "openagents.omega.editor-onboarding-completion.v1";
 
+fn onboarding_completion_keys() -> &'static [&'static str] {
+    &[
+        IDENTITY_ONBOARDING_COMPLETION_KEY,
+        EDITOR_ONBOARDING_COMPLETION_KEY,
+    ]
+}
+
 #[derive(serde::Serialize)]
 struct OnboardingCompletion<'a> {
     schema: &'static str,
@@ -94,32 +103,12 @@ pub fn init(cx: &mut App) {
     })
     .detach();
 
-    cx.on_action(|_: &OpenOnboarding, cx| {
-        with_active_or_new_workspace(cx, |workspace, window, cx| {
-            workspace
-                .with_local_workspace(window, cx, |workspace, window, cx| {
-                    let existing = workspace
-                        .active_pane()
-                        .read(cx)
-                        .items()
-                        .find_map(|item| item.downcast::<Onboarding>());
-
-                    if let Some(existing) = existing {
-                        workspace.activate_item(&existing, true, true, window, cx);
-                    } else {
-                        let settings_page = Onboarding::new_editor_setup(workspace, window, cx);
-                        workspace.add_item_to_active_pane(
-                            Box::new(settings_page),
-                            None,
-                            true,
-                            window,
-                            cx,
-                        )
-                    }
-                })
-                .detach();
-        });
-    });
+    // Handle OpenOnboarding and OpenEditorOnboarding with the same body.
+    // Do not forward one action to the other via App::dispatch_action: that
+    // nests a window update while the first action is still dispatching and
+    // fails silently (Help → Editor Onboarding / Welcome Return to Onboarding).
+    cx.on_action(|_: &OpenOnboarding, cx| open_editor_onboarding(cx));
+    cx.on_action(|_: &OpenEditorOnboarding, cx| open_editor_onboarding(cx));
 
     cx.on_action(|_: &ShowWelcome, cx| {
         with_active_or_new_workspace(cx, |workspace, window, cx| {
@@ -145,9 +134,24 @@ pub fn init(cx: &mut App) {
                         )
                     }
                 })
-                .detach();
+                .detach_and_log_err(cx);
         });
     });
+
+    #[cfg(debug_assertions)]
+    cx.on_action(|_: &ResetOnboarding, cx| {
+        reset_onboarding_completion_records(cx);
+    });
+    #[cfg(not(debug_assertions))]
+    {
+        cx.on_action(|_: &ResetOnboarding, cx| {
+            zlog::warn!("dev::ResetOnboarding is only available in debug builds");
+            let _ = cx;
+        });
+        command_palette_hooks::CommandPaletteFilter::update_global(cx, |filter, _cx| {
+            filter.hide_action_types(&[TypeId::of::<ResetOnboarding>()]);
+        });
+    }
 
     cx.observe_new(|workspace: &mut Workspace, _window, _cx| {
         workspace.register_action(|_workspace, action: &ImportVsCodeSettings, window, cx| {
@@ -196,6 +200,66 @@ pub fn init(cx: &mut App) {
 
     register_serializable_item::<Onboarding>(cx);
     register_serializable_item::<WelcomePage>(cx);
+}
+
+fn open_editor_onboarding(cx: &mut App) {
+    with_active_or_new_workspace(cx, |workspace, window, cx| {
+        workspace
+            .with_local_workspace(window, cx, |workspace, window, cx| {
+                let existing = workspace
+                    .active_pane()
+                    .read(cx)
+                    .items()
+                    .find_map(|item| item.downcast::<Onboarding>());
+
+                if let Some(existing) = existing {
+                    workspace.activate_item(&existing, true, true, window, cx);
+                } else {
+                    let settings_page = Onboarding::new_editor_setup(workspace, window, cx);
+                    workspace.add_item_to_active_pane(
+                        Box::new(settings_page),
+                        None,
+                        true,
+                        window,
+                        cx,
+                    )
+                }
+            })
+            .detach_and_log_err(cx);
+    });
+}
+
+fn reset_onboarding_completion_records(cx: &mut App) {
+    let kvp = KeyValueStore::global(cx);
+    let keys = onboarding_completion_keys()
+        .iter()
+        .map(|key| (*key).to_string())
+        .collect::<Vec<_>>();
+    cx.spawn(async move |cx| {
+        for key in keys {
+            if let Err(error) = kvp.delete_kvp(key.clone()).await {
+                zlog::error!("failed to clear onboarding completion `{key}`: {error:#}");
+            }
+        }
+        let _ = cx.update(|cx| {
+            with_active_or_new_workspace(cx, |workspace, _, cx| {
+                let toast = StatusToast::new(
+                    "Cleared onboarding completion records. Reopen via Help → Editor Onboarding or the command palette (cmd-shift-p / ctrl-shift-p, not the file picker).",
+                    cx,
+                    |this, _| {
+                        this.icon(
+                            Icon::new(IconName::Check)
+                                .size(IconSize::Small)
+                                .color(Color::Success),
+                        )
+                        .dismiss_button(true)
+                    },
+                );
+                workspace.toggle_status_toast(toast, cx);
+            });
+        });
+    })
+    .detach();
 }
 
 pub fn show_onboarding_view(app_state: Arc<AppState>, cx: &mut App) -> Task<anyhow::Result<()>> {
@@ -968,5 +1032,20 @@ mod tests {
             OnboardingJourney::EditorSetup.basics_page_mode(),
             basics_page::BasicsPageMode::EditorSetup
         );
+    }
+
+    #[test]
+    fn reset_onboarding_clears_both_completion_keys() {
+        let keys = onboarding_completion_keys();
+        assert_eq!(
+            keys,
+            &[
+                "omega_identity_onboarding_completion_v1",
+                "omega_editor_onboarding_completion_v1",
+            ]
+        );
+        assert_eq!(OpenOnboarding.name(), "omega::OpenOnboarding");
+        assert_eq!(OpenEditorOnboarding.name(), "omega::OpenEditorOnboarding");
+        assert_eq!(ResetOnboarding.name(), "dev::ResetOnboarding");
     }
 }

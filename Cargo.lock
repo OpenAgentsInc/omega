@@ -12579,6 +12579,7 @@ dependencies = [
  "client",
  "cloud_api_types",
  "collections",
+ "command_palette_hooks",
  "component",
  "db",
  "documented",

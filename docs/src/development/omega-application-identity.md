@@ -249,14 +249,21 @@ history rather than identity authority: every new Omega process still performs
 the custody/public-manifest startup inspection.
 
 Editor Onboarding is a separately replayable mode available from the Help menu,
-the Welcome page, and the `zed::OpenEditorOnboarding` action. It renders the
+the Welcome page, and the `omega::OpenEditorOnboarding` action (also
+`omega::OpenOnboarding`). Prefer the command palette
+(`cmd-shift-p` on macOS / `ctrl-shift-p` on Windows and Linux) over the file
+picker (`cmd-p` / `ctrl-p`). In debug builds, `dev::ResetOnboarding` clears the
+identity and editor completion records so reopen can be retested without wiping
+the whole profile. It renders the
 same Theme and Agent Setup implementations as First Run, with a compact
 identity status that retains custody repair, conflict resolution, recovery, and
 recovery-protection actions. Its Finish action also requires durable Ready
 custody, but writes the independent
 `omega_editor_onboarding_completion_v1` record and remains restorable in the
 workspace. Neither completion record gates the other journey or suppresses
-identity inspection and recovery.
+identity inspection and recovery. Completion records also do not block Help →
+Editor Onboarding or Welcome → Return to Onboarding; those actions reopen the
+Editor Setup view directly.
 
 Agent Setup renders its four featured choices immediately from checked-in
 display metadata: Claude, Codex, GitHub Copilot, and Cursor. The asynchronous

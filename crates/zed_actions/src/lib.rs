@@ -87,10 +87,19 @@ actions!(
 actions!(
     omega,
     [
-        /// Opens the onboarding view.
+        /// Opens Editor Onboarding (theme, keymap, identity).
+        ///
+        /// Prefer the command palette (`cmd-shift-p` on macOS /
+        /// `ctrl-shift-p` elsewhere), not the file picker (`cmd-p` /
+        /// `ctrl-p`). Also available from Help → Editor Onboarding and
+        /// Welcome → Return to Onboarding.
         #[action(deprecated_aliases = ["zed::OpenOnboarding"])]
         OpenOnboarding,
-        /// Opens Editor Onboarding.
+        /// Opens Editor Onboarding (same journey as OpenOnboarding).
+        ///
+        /// Prefer the command palette (`cmd-shift-p` on macOS /
+        /// `ctrl-shift-p` elsewhere), not the file picker (`cmd-p` /
+        /// `ctrl-p`).
         #[action(deprecated_aliases = ["zed::OpenEditorOnboarding"])]
         OpenEditorOnboarding,
     ]
@@ -258,7 +267,12 @@ pub mod dev {
         dev,
         [
             /// Toggles the developer inspector for debugging UI elements.
-            ToggleInspector
+            ToggleInspector,
+            /// Clears Omega onboarding completion records (debug builds).
+            ///
+            /// Use the command palette (`cmd-shift-p` on macOS / `ctrl-shift-p`
+            /// elsewhere), not the file picker (`cmd-p` / `ctrl-p`).
+            ResetOnboarding,
         ]
     );
 }
@@ -1002,12 +1016,13 @@ pub mod git_panel {
 
 #[cfg(test)]
 mod tests {
-    use super::{OpenEditorOnboarding, OpenOnboarding};
+    use super::{OpenEditorOnboarding, OpenOnboarding, dev::ResetOnboarding};
     use gpui::Action;
 
     #[test]
     fn onboarding_actions_use_omega_product_namespace() {
         assert_eq!(OpenOnboarding.name(), "omega::OpenOnboarding");
         assert_eq!(OpenEditorOnboarding.name(), "omega::OpenEditorOnboarding");
+        assert_eq!(ResetOnboarding.name(), "dev::ResetOnboarding");
     }
 }

@@ -499,18 +499,28 @@ impl Render for WelcomePage {
                     })
                     .when(!self.fallback_to_recent_projects, |this| {
                         this.child(
-                            v_flex().gap_4().child(Divider::horizontal()).child(
-                                Button::new("welcome-exit", "Return to Onboarding")
-                                    .tab_index(next_tab_index as isize)
-                                    .full_width()
-                                    .label_size(LabelSize::XSmall)
-                                    .on_click(|_, window, cx| {
-                                        window.dispatch_action(
-                                            OpenEditorOnboarding.boxed_clone(),
-                                            cx,
-                                        );
-                                    }),
-                            ),
+                            v_flex()
+                                .gap_2()
+                                .child(Divider::horizontal())
+                                .child(
+                                    Button::new("welcome-exit", "Return to Onboarding")
+                                        .tab_index(next_tab_index as isize)
+                                        .full_width()
+                                        .label_size(LabelSize::XSmall)
+                                        .on_click(|_, window, cx| {
+                                            window.dispatch_action(
+                                                OpenEditorOnboarding.boxed_clone(),
+                                                cx,
+                                            );
+                                        }),
+                                )
+                                .child(
+                                    Label::new(
+                                        "Or open the command palette (cmd-shift-p / ctrl-shift-p, not cmd-p / ctrl-p) and run Editor Onboarding.",
+                                    )
+                                    .size(LabelSize::XSmall)
+                                    .color(Color::Muted),
+                                ),
                         )
                     }),
             )
