@@ -12490,6 +12490,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "omega_effectd"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "futures 0.3.32",
+ "libc",
+ "serde",
+ "serde_json",
+ "smol",
+ "tempfile",
+ "thiserror 2.0.17",
+ "util",
+]
+
+[[package]]
 name = "omega_identity"
 version = "0.1.0"
 dependencies = [

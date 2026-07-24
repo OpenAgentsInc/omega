@@ -146,6 +146,7 @@ members = [
     "crates/oauth_callback_server",
     "crates/ollama",
     "crates/omega_identity",
+    "crates/omega_effectd",
     "crates/onboarding",
     "crates/opencode",
     "crates/open_ai",
@@ -413,6 +414,7 @@ notifications = { path = "crates/notifications" }
 oauth_callback_server = { path = "crates/oauth_callback_server" }
 ollama = { path = "crates/ollama" }
 omega_identity = { path = "crates/omega_identity" }
+omega_effectd = { path = "crates/omega_effectd" }
 onboarding = { path = "crates/onboarding" }
 opencode = { path = "crates/opencode" }
 open_ai = { path = "crates/open_ai" }
