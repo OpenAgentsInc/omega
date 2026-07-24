@@ -1,0 +1,63 @@
+{
+  "version": 1,
+  "owner": "OpenAgents",
+  "policy": "Omega release candidates must not contact Zed production hosts on a normal start, editor journey, or shutdown unless an entry below is marked approved and unexpired.",
+  "normal_start_forbidden_hosts": [
+    "zed.dev",
+    "www.zed.dev",
+    "api.zed.dev",
+    "api-staging.zed.dev",
+    "cloud.zed.dev",
+    "collab.zed.dev",
+    "staging.zed.dev",
+    "staging-collab.zed.dev",
+    "status.zed.dev",
+    "merch.zed.dev"
+  ],
+  "entries": [
+    {
+      "host": "github.com",
+      "purpose": "Owned Omega repository, docs, and issue tracker Help destinations",
+      "owner": "OpenAgents",
+      "disposition": "approved",
+      "expiry": "none",
+      "paths": [
+        "/OpenAgentsInc/omega"
+      ]
+    },
+    {
+      "host": "services.openagents.invalid",
+      "purpose": "Non-routable placeholder server_url while Zed production services stay disabled",
+      "owner": "OpenAgents",
+      "disposition": "approved",
+      "expiry": "until-owned-omega-service",
+      "paths": [
+        "/"
+      ]
+    },
+    {
+      "host": "zed.dev",
+      "purpose": "Inherited Zed production app server",
+      "owner": "OpenAgents",
+      "disposition": "blocked-by-default",
+      "expiry": "none",
+      "compatibility_override": "OMEGA_ALLOW_ZED_SERVICES=1"
+    },
+    {
+      "host": "api.zed.dev",
+      "purpose": "Inherited Zed extension registry and telemetry API",
+      "owner": "OpenAgents",
+      "disposition": "blocked-by-default",
+      "expiry": "none",
+      "compatibility_override": "OMEGA_ALLOW_ZED_SERVICES=1"
+    },
+    {
+      "host": "cloud.zed.dev",
+      "purpose": "Inherited Zed cloud models, updates, and remote-server assets",
+      "owner": "OpenAgents",
+      "disposition": "blocked-by-default",
+      "expiry": "none",
+      "compatibility_override": "OMEGA_ALLOW_ZED_SERVICES=1"
+    }
+  ]
+}

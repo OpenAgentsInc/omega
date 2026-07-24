@@ -124,3 +124,17 @@ artwork.
 
 Digest and dimension checks live in the `app_identity` icon-family tests and
 `crates/zed/resources/icon_family/manifest.json`.
+
+## Zed production service isolation
+
+By default Omega does not contact Zed production hosts.
+
+- `server_url` defaults to `https://services.openagents.invalid`
+- Telemetry diagnostics/metrics and auto-update are off
+- Hosted Zed AI, agent panel, edit predictions, and extension auto-install are
+  off
+- Account auth, extension registry fetches, remote-server downloads, and the
+  Zed cloud model provider stay gated unless `OMEGA_ALLOW_ZED_SERVICES=1`
+- Reviewed hosts live in
+  `crates/app_identity/fixtures/endpoint_allowlist.json`
+- Capture journey helper: `script/omega-network-capture-journey`

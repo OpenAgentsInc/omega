@@ -17,6 +17,7 @@ test-support = []
 
 [dependencies]
 anyhow.workspace = true
+app_identity.workspace = true
 async-compression.workspace = true
 async-tar.workspace = true
 async-trait.workspace = true

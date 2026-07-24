@@ -14,6 +14,7 @@ doctest = false
 
 [dependencies]
 anyhow.workspace = true
+app_identity.workspace = true
 client.workspace = true
 db.workspace = true
 futures-lite.workspace = true

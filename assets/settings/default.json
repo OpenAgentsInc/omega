@@ -1054,9 +1054,9 @@
     // in the prompt when generating git commit messages.
     "commit_message_include_project_rules": true,
     // Whether the agent is enabled.
-    "enabled": true,
+    "enabled": false,
     // Whether to show the agent panel button in the status bar.
-    "button": true,
+    "button": false,
     // Where to dock the agent panel. Can be 'left', 'right' or 'bottom'.
     "dock": "left",
     // Whether the agent panel should use flexible (proportional) sizing.
@@ -1078,11 +1078,10 @@
     "max_content_width": 850,
     // The default model to use when creating new threads.
     "default_model": {
-      // The provider to use.
-      "provider": "zed.dev",
-      // The model to use.
-      "model": "claude-sonnet-4",
-      // Whether thinking is enabled.
+      // No hosted Omega model is registered yet. Local providers can be chosen
+      // after AI features are re-enabled.
+      "provider": "ollama",
+      "model": "llama3.1",
       "enable_thinking": false,
     },
     // Additional parameters for language model requests. When making a request to a model, parameters will be taken
@@ -1546,23 +1545,22 @@
   //
   // Default: true
   "word_diff_enabled": true,
-  // Control what info is collected by Zed.
+  // Control what info is collected by Omega.
   "telemetry": {
     // Send debug info like crash reports.
-    "diagnostics": true,
-    // Send anonymized usage data like what languages you're using Zed with.
-    "metrics": true,
+    "diagnostics": false,
+    // Send anonymized usage data like what languages you're using.
+    "metrics": false,
     // Allow sending requests to Anthropic models that cannot be offered with
     // Zero Data Retention
     "anthropic_retention": false,
   },
-  // Whether to disable all AI features in Zed.
+  // Whether to disable all AI features in Omega.
   //
-  // Default: false
-  "disable_ai": false,
-  // Automatically update Zed. This setting may be ignored on Linux if
-  // installed through a package manager.
-  "auto_update": true,
+  // Default: true until Omega owns hosted AI services.
+  "disable_ai": true,
+  // Automatically update Omega. Disabled until an owned update feed exists.
+  "auto_update": false,
   // How to render LSP `textDocument/documentColor` colors in the editor.
   //
   // Possible values:
@@ -1747,7 +1745,7 @@
   "load_direnv": "direct",
   "edit_predictions": {
     // Which edit prediction provider to use.
-    "provider": "zed",
+    "provider": "none",
     // A list of globs representing files that edit predictions should be disabled for.
     // There's a sensible default list of globs already included.
     // Any addition to this list will be merged with the default list.
@@ -2140,9 +2138,7 @@
   //
   // If you don't want any of these extensions, add this field to your settings
   // and change the value to `false`.
-  "auto_install_extensions": {
-    "html": true,
-  },
+  "auto_install_extensions": {},
   // The capabilities granted to extensions.
   //
   // This list can be customized to restrict what extensions are able to do.
@@ -2657,9 +2653,10 @@
     // Delay in milliseconds before showing the which-key popup.
     "delay_ms": 1000,
   },
-  // The server to connect to. If the environment variable
-  // ZED_SERVER_URL is set, it will override this setting.
-  "server_url": "https://zed.dev",
+  // The server to connect to. Omega does not use Zed production services.
+  // Inherited account, collab, and cloud clients are gated unless
+  // OMEGA_ALLOW_ZED_SERVICES=1. This host is intentionally non-Zed.
+  "server_url": "https://services.openagents.invalid",
   // Settings overrides to use when using Zed Preview.
   // Mostly useful for developers who are managing multiple instances of Zed.
   "preview": {

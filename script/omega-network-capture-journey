@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+# Documented network-capture journey for Omega service isolation.
+#
+# This helper records the expected host policy for a clean first-start through
+# shutdown journey. It does not launch Omega; use it together with a packet
+# capture or process-level network monitor against a clean user profile.
+set -euo pipefail
+
+root="$(cd "$(dirname "$0")/.." && pwd)"
+allowlist="$root/crates/app_identity/fixtures/endpoint_allowlist.json"
+
+if [[ ! -f "$allowlist" ]]; then
+  echo "missing allow-list: $allowlist" >&2
+  exit 1
+fi
+
+echo "Omega network-capture journey"
+echo "Allow-list: $allowlist"
+echo
+echo "Steps:"
+echo "  1. Use a clean user profile and offline or monitored network."
+echo "  2. Launch Omega without OMEGA_ALLOW_ZED_SERVICES."
+echo "  3. Open the empty start / welcome surface."
+echo "  4. Open a local project, edit and save one file, open a terminal."
+echo "  5. Quit Omega."
+echo
+echo "Pass condition:"
+echo "  No request reaches a host in normal_start_forbidden_hosts."
+echo
+python3 - <<'PY'
+import json
+from pathlib import Path
+allowlist = json.loads(Path("crates/app_identity/fixtures/endpoint_allowlist.json").read_text())
+print("Forbidden hosts for a normal start:")
+for host in allowlist["normal_start_forbidden_hosts"]:
+    print(f"  - {host}")
+print()
+print("Reviewed allow-list entries:")
+for entry in allowlist["entries"]:
+    print(f"  - {entry['host']}: {entry['disposition']} ({entry['purpose']})")
+PY

@@ -13,6 +13,7 @@ path = "src/language_models.rs"
 
 [dependencies]
 ai_onboarding.workspace = true
+app_identity.workspace = true
 async-lock.workspace = true
 anthropic = { workspace = true, features = ["schemars"] }
 anyhow.workspace = true

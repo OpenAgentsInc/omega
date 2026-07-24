@@ -729,6 +729,10 @@ impl ExtensionStore {
         query: &[(&str, &str)],
         cx: &mut Context<ExtensionStore>,
     ) -> Task<Result<Vec<ExtensionMetadata>>> {
+        if !app_identity::zed_production_services_enabled() {
+            return Task::ready(Ok(Vec::new()));
+        }
+
         let url = self.http_client.build_zed_api_url(path, query);
         let http_client = self.http_client.clone();
         cx.spawn(async move |_, _| {

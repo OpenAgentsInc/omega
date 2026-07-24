@@ -2,6 +2,18 @@ use std::{env, str::FromStr, sync::LazyLock};
 
 pub const BINARY_NAME: &str = "omega";
 
+/// When false, Omega must not contact Zed production hosts on a normal start.
+///
+/// Set `OMEGA_ALLOW_ZED_SERVICES=1` only for explicitly approved compatibility
+/// experiments. Release candidates keep this disabled.
+pub const ZED_PRODUCTION_SERVICES_ENABLED: bool = false;
+
+/// Returns whether inherited Zed production services may be contacted.
+pub fn zed_production_services_enabled() -> bool {
+    ZED_PRODUCTION_SERVICES_ENABLED
+        || std::env::var("OMEGA_ALLOW_ZED_SERVICES").as_deref() == Ok("1")
+}
+
 /// Public product name shown in the Omega shell.
 pub const PRODUCT_NAME: &str = "Omega";
 /// Publisher shown beside Omega product surfaces.
@@ -103,6 +115,8 @@ pub struct InvalidAppChannel;
 
 #[cfg(test)]
 mod icon_family;
+#[cfg(test)]
+mod service_isolation;
 #[cfg(test)]
 mod shell_branding;
 
