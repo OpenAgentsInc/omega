@@ -30,7 +30,7 @@ use crate::protocol::{
     RunSnapshot, request_frame,
 };
 
-pub const MAX_FRAME_BYTES: usize = 64 * 1024;
+pub use crate::protocol::MAX_FRAME_BYTES;
 const SHUTDOWN_GRACE_PERIOD: Duration = Duration::from_secs(2);
 const AGENT_COMPUTER_TURN_TIMEOUT: Duration = Duration::from_secs(180);
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(180);
@@ -404,6 +404,50 @@ impl OmegaEffectdSupervisor {
     pub async fn list_agent_computer_sessions(&mut self) -> Result<Value, SupervisorError> {
         self.request("list_agent_computer_sessions", None, self.generation())
             .await
+    }
+
+    /// SARAH-NR-06: public-safe session projection (never returns tokens).
+    pub async fn sarah_session_status(&mut self) -> Result<Value, SupervisorError> {
+        self.request("sarah_session_status", None, self.generation())
+            .await
+    }
+
+    /// SARAH-NR-06: principal projection and conversation reference.
+    pub async fn sarah_bootstrap(&mut self) -> Result<Value, SupervisorError> {
+        self.request("sarah_bootstrap", None, self.generation())
+            .await
+    }
+
+    /// SARAH-NR-06: bounded transcript/activity page with cursors and gap state.
+    pub async fn sarah_room_snapshot(
+        &mut self,
+        params: Option<Value>,
+    ) -> Result<Value, SupervisorError> {
+        self.request("sarah_room_snapshot", params, self.generation())
+            .await
+    }
+
+    /// SARAH-NR-06: publish an owner message onto the Nostr conversation.
+    pub async fn sarah_send_message(&mut self, text: &str) -> Result<Value, SupervisorError> {
+        self.request(
+            "sarah_send_message",
+            Some(json!({ "text": text })),
+            self.generation(),
+        )
+        .await
+    }
+
+    /// SARAH-NR-06: publish a cancel_turn control intent (pending until settled).
+    pub async fn sarah_interrupt_turn(
+        &mut self,
+        turn_ref: &str,
+    ) -> Result<Value, SupervisorError> {
+        self.request(
+            "sarah_interrupt_turn",
+            Some(json!({ "turnRef": turn_ref })),
+            self.generation(),
+        )
+        .await
     }
 
     async fn mutate_run(&mut self, method: &str, run_ref: &str) -> Result<Value, SupervisorError> {

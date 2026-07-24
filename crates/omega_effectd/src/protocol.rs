@@ -6,6 +6,8 @@ use serde_json::Value;
 pub const PROTOCOL_SCHEMA: &str = "openagents.omega.effectd.v1";
 pub const PROTOCOL_VERSION: u32 = 1;
 pub const SERVICE_VERSION: &str = "0.1.0";
+/// Newline-framed JSON frames must stay under this byte budget (spec §8).
+pub const MAX_FRAME_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]

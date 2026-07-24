@@ -112,6 +112,129 @@ const saveAgentComputerSessions = (sessions) => {
   )
 }
 
+// SARAH-NR-06 mock conversation store (in-memory; no Khala Sync).
+const SARAH_CONVERSATION_DIGEST = "aaaaaaaaaaaaaaaaaaaaaaaa"
+const SARAH_CONVERSATION_REF = `sarah.${SARAH_CONVERSATION_DIGEST}`
+const SARAH_LEGACY_THREAD_REF = `thread.sarah.${SARAH_CONVERSATION_DIGEST}`
+const sarahStore = {
+  messages: [],
+  messageSeq: 0,
+  runState: "idle",
+  activeTurnRef: null,
+}
+
+const sarahRoomState = () => ({
+  method: "sarah_room_state",
+  connection: "connected",
+  freshness: "fresh",
+  gapState: "none",
+  connectedRelays: ["mock://local"],
+  lastAcknowledgedEventId: sarahStore.messages.at(-1)?.eventId ?? null,
+  lastAcknowledgedCursor:
+    sarahStore.messages.length > 0
+      ? `cursor.${sarahStore.messages.length - 1}`
+      : null,
+  authenticated: true,
+  transport: "mock_relay",
+})
+
+const sarahSessionStatus = () => ({
+  signedIn: true,
+  accountLabel: "owner@example.com",
+  bindingState: "bound",
+  ownerPublicKeyHex: "b".repeat(64),
+  bindingExpiresAt: null,
+  transport: "mock_relay",
+})
+
+const sarahBootstrap = () => ({
+  principalRef: "principal.sarah",
+  displayName: "Sarah",
+  role: "owner_orchestrator",
+  conversationRef: SARAH_CONVERSATION_REF,
+  legacyThreadRef: SARAH_LEGACY_THREAD_REF,
+  ownerPublicKeyHex: "b".repeat(64),
+  sarahPublicKeyHex: "c".repeat(64),
+  authorityProfileRef: "docs/authority/SARAH_AUTHORITY.md",
+  authorityProfileRevision: 7,
+  roomState: sarahRoomState(),
+})
+
+const sarahSendMessage = (text) => {
+  sarahStore.messageSeq += 1
+  const turnRef = `turn.${sarahStore.messageSeq}`
+  const messageRef = `msg.${sarahStore.messageSeq}`
+  const eventId = `evt.msg.${sarahStore.messageSeq}`
+  const cursor = `cursor.${sarahStore.messages.length}`
+  sarahStore.activeTurnRef = turnRef
+  sarahStore.runState = "running"
+  sarahStore.messages.push({
+    eventId,
+    cursor,
+    role: "owner",
+    kind: "text",
+    text: String(text).slice(0, 512),
+    createdAt: new Date().toISOString(),
+    status: "accepted",
+    turnRef,
+  })
+  return {
+    accepted: true,
+    messageRef,
+    turnRef,
+    eventId,
+    cursor,
+    status: "accepted",
+  }
+}
+
+const sarahRoomSnapshot = (params) => {
+  const limit = Math.min(Math.max(Number(params.limit) || 32, 1), 64)
+  const entries = sarahStore.messages.slice(-limit).map((row) => ({
+    eventId: row.eventId,
+    cursor: row.cursor,
+    role: row.role,
+    kind: row.kind,
+    text: row.text,
+    createdAt: row.createdAt,
+    status: row.status,
+  }))
+  const cursor =
+    entries.at(-1)?.cursor ?? params.cursor ?? "cursor.start"
+  return {
+    conversationRef: SARAH_CONVERSATION_REF,
+    transcript: {
+      entries,
+      cursor,
+      nextCursor: null,
+      gapState: "none",
+    },
+    activity: {
+      entries: [],
+      cursor,
+      nextCursor: null,
+      gapState: "none",
+    },
+    runState: {
+      state: sarahStore.runState,
+      turnRef: sarahStore.activeTurnRef,
+      reason: null,
+    },
+    roomState: sarahRoomState(),
+  }
+}
+
+const sarahInterruptTurn = (turnRef) => {
+  sarahStore.runState = "interrupt_pending"
+  return {
+    accepted: true,
+    turnRef,
+    intentRef: `intent.interrupt.${sarahStore.messageSeq + 1}`,
+    status: "pending",
+    pending: true,
+  }
+}
+
 const projectAgentComputerSession = (params, state = "queued") => {
   const startedAt = new Date().toISOString()
   return {
@@ -256,6 +379,11 @@ for await (const line of rl) {
         "run_agent_computer_turn",
         "get_agent_computer_session",
         "list_agent_computer_sessions",
+        "sarah_session_status",
+        "sarah_bootstrap",
+        "sarah_room_snapshot",
+        "sarah_send_message",
+        "sarah_interrupt_turn",
       ],
       dataRoot,
       activeRunLimit: 8,
@@ -731,6 +859,50 @@ for await (const line of rl) {
   }
   if (request.method === "list_agent_computer_sessions") {
     respond(request.id, generation, true, { sessions: loadAgentComputerSessions() })
+    continue
+  }
+  // SARAH-NR-06: Nostr conversation methods (mock transport; no Khala Sync).
+  if (request.method === "sarah_session_status") {
+    respond(request.id, generation, true, sarahSessionStatus())
+    continue
+  }
+  if (request.method === "sarah_bootstrap") {
+    respond(request.id, generation, true, sarahBootstrap())
+    continue
+  }
+  if (request.method === "sarah_room_snapshot") {
+    respond(request.id, generation, true, sarahRoomSnapshot(request.params ?? {}))
+    continue
+  }
+  if (request.method === "sarah_send_message") {
+    const text = request.params?.text
+    if (typeof text !== "string" || text.trim().length === 0) {
+      respond(request.id, generation, false, undefined, {
+        code: "invalid_request",
+        message: "sarah_send_message requires text.",
+      })
+      continue
+    }
+    if (/bearer\s|sk-|authorization:/i.test(text)) {
+      respond(request.id, generation, false, undefined, {
+        code: "invalid_request",
+        message: "message must not carry raw credentials.",
+      })
+      continue
+    }
+    respond(request.id, generation, true, sarahSendMessage(text))
+    continue
+  }
+  if (request.method === "sarah_interrupt_turn") {
+    const turnRef = request.params?.turnRef
+    if (typeof turnRef !== "string" || turnRef.trim().length === 0) {
+      respond(request.id, generation, false, undefined, {
+        code: "invalid_request",
+        message: "sarah_interrupt_turn requires turnRef.",
+      })
+      continue
+    }
+    respond(request.id, generation, true, sarahInterruptTurn(turnRef))
     continue
   }
   respond(request.id, generation, false, undefined, {

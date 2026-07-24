@@ -19,6 +19,7 @@ credentials_provider.workspace = true
 futures.workspace = true
 gpui.workspace = true
 http_client.workspace = true
+nostr.workspace = true
 paths.workspace = true
 rand.workspace = true
 serde.workspace = true

@@ -12544,6 +12544,7 @@ dependencies = [
  "gpui",
  "http_client",
  "libc",
+ "nostr",
  "paths",
  "rand 0.9.4",
  "serde",

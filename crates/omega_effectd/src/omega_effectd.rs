@@ -5,6 +5,7 @@
 
 mod openagents_session;
 mod protocol;
+mod sarah_conversation;
 mod supervisor;
 
 use std::{rc::Rc, sync::Arc};
@@ -22,6 +23,15 @@ pub use protocol::{
     HealthResult, HostMethod, HostRequestFrame, HostResponseError, HostResponseErrorCode,
     HostResponseFrame, InitializeResult, PROTOCOL_SCHEMA, PROTOCOL_VERSION, ProtocolError,
     ProtocolErrorCode, RunSnapshot, SERVICE_VERSION,
+};
+pub use sarah_conversation::{
+    BindingState, BootstrapResult, ConversationIdentity, GapState, InterruptTurnResult,
+    MockRelayAdapter, RelayTransport, RoomSnapshotResult, RoomStateEvent, SARAH_EVENT_ROOM_EVENT,
+    SARAH_EVENT_ROOM_STATE, SARAH_FRAMED_METHODS, SARAH_METHOD_BOOTSTRAP,
+    SARAH_METHOD_INTERRUPT_TURN, SARAH_METHOD_ROOM_SNAPSHOT, SARAH_METHOD_SEND_MESSAGE,
+    SARAH_METHOD_SESSION_STATUS, SarahConversationClient, SarahConversationConfig,
+    SarahConversationError, SendMessageResult, SessionStatusResult, SigningIdentity,
+    asserts_no_khala_sync_client,
 };
 pub use supervisor::{
     AttentionDecision, MAX_FRAME_BYTES, OmegaEffectdCommand, OmegaEffectdHostFuture,
@@ -550,6 +560,88 @@ mod tests {
             assert!(!disk.contains("Fixture Agent Computer"));
 
             supervisor.stop().await.expect("supervisor stop");
+        });
+    }
+
+    #[test]
+    fn sarah_nr06_conversation_methods_via_fixture() {
+        smol::block_on(async {
+            let root = tempdir().expect("tempdir");
+            let mut supervisor = OmegaEffectdSupervisor::new(OmegaEffectdSupervisorOptions {
+                data_root: root.path().to_path_buf(),
+                command: fixture_command(&fixture_path()),
+                initial_generation: 1,
+                request_timeout: Duration::from_secs(5),
+            });
+            supervisor.start().await.expect("start");
+
+            let status = supervisor
+                .sarah_session_status()
+                .await
+                .expect("session status");
+            assert_eq!(status.get("signedIn").and_then(|v| v.as_bool()), Some(true));
+            let encoded = status.to_string();
+            assert!(!encoded.contains("token"));
+            assert!(!encoded.contains("bearer"));
+
+            let boot = supervisor.sarah_bootstrap().await.expect("bootstrap");
+            assert_eq!(
+                boot.get("principalRef").and_then(|v| v.as_str()),
+                Some("principal.sarah")
+            );
+            let conversation_ref = boot
+                .get("conversationRef")
+                .and_then(|v| v.as_str())
+                .expect("conversationRef")
+                .to_string();
+            assert!(conversation_ref.starts_with("sarah."));
+
+            let sent = supervisor
+                .sarah_send_message("hello from fixture")
+                .await
+                .expect("send");
+            assert_eq!(sent.get("accepted").and_then(|v| v.as_bool()), Some(true));
+            let turn_ref = sent
+                .get("turnRef")
+                .and_then(|v| v.as_str())
+                .expect("turnRef")
+                .to_string();
+
+            let snap = supervisor
+                .sarah_room_snapshot(Some(json!({ "limit": 10 })))
+                .await
+                .expect("snapshot");
+            assert_eq!(
+                snap.get("conversationRef").and_then(|v| v.as_str()),
+                Some(conversation_ref.as_str())
+            );
+            assert!(
+                snap.pointer("/transcript/gapState")
+                    .and_then(|v| v.as_str())
+                    .is_some()
+            );
+            assert!(
+                snap.pointer("/transcript/cursor")
+                    .and_then(|v| v.as_str())
+                    .is_some()
+            );
+
+            let interrupt = supervisor
+                .sarah_interrupt_turn(&turn_ref)
+                .await
+                .expect("interrupt");
+            assert_eq!(
+                interrupt.get("pending").and_then(|v| v.as_bool()),
+                Some(true)
+            );
+            assert_eq!(
+                interrupt.get("status").and_then(|v| v.as_str()),
+                Some("pending")
+            );
+
+            // OMEGA-SW-02 cut: no Khala Sync client on this lane.
+            assert!(asserts_no_khala_sync_client());
+            supervisor.stop().await.expect("stop");
         });
     }
 
