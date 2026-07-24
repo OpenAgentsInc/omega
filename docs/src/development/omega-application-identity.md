@@ -65,12 +65,74 @@ manifest and completion record. A mismatch, missing read-back, malformed public
 record, locked provider, or lost credential leaves custody non-ready and denies
 signing.
 
-The public API accepts a zeroizing import wrapper but has no secret-return
-operation. Signing accepts only a validated `AdmittedSigningRequest` bound to
-the active identity and returns the signed public Nostr event. Reset requires
-the expected identity, verifies that credential deletion is visible through a
-fresh read, removes only the public identity documents, and requires a
-relaunch.
+The public API accepts zeroizing import and recovery-password wrappers but has
+no secret-return operation. Signing accepts only a validated
+`AdmittedSigningRequest` bound to the active identity and returns the signed
+public Nostr event.
+
+Create and import use `identity.transaction.json` as a public-safe journal keyed
+by the action receipt. A repeated action resumes the exact transaction; it
+never invokes the generator when the journaled secure value already exists.
+The journal records only operation metadata and, after verified secure storage,
+the expected public identity. A returned failure rolls back to `absent` only
+after credential deletion is read back. If rollback cannot be proved, the
+journal remains and replacement creation stays blocked as `incomplete`.
+
+Reset is marker-first and restart-safe. The initial authorized request writes
+`identity.reset.json` and returns `relaunch-required` without deleting custody.
+Startup or an explicit resume then verifies the expected identity, deletes and
+fresh-reads custody, removes completion, manifest, and transaction records, and
+marks reset complete last. Failure keeps a `reset-failed` marker that blocks
+signing and can be retried. A relaunch acknowledgement clears the final marker
+only after all identity state is proven absent.
+
+### Encrypted recovery artifacts
+
+Version 1 recovery artifacts are standard NIP-49 `ncryptsec` tokens produced by
+`nostr 0.44.4` with its `nip49` feature. The format uses scrypt and
+XChaCha20-Poly1305; Omega exports with work factor `log_n = 16` and imports only
+`16..=18` so an untrusted artifact cannot request an unbounded KDF allocation.
+The file contains one encrypted token and a newline—no manifest, `npub`, path,
+or Omega metadata.
+
+Discovery receives an explicitly selected path and reads metadata only. An
+authorized preparation call performs the bounded read and decryption, derives
+the public identity for preview and conflict resolution, and returns an opaque
+prepared value. Adoption consumes that value through the same journaled custody
+transaction as advanced masked import. Prepared values cannot be adopted
+directly: the caller must name a candidate and receive an opaque
+`SelectedRecovery`. Distinct public identities therefore require an explicit
+owner selection; duplicate artifacts for the same public key collapse to one
+candidate.
+
+Exports write and sync a protected same-directory temporary file, then publish
+it atomically with a no-replace hard link. Unix exports use mode `0600`; Unix
+imports require a current-user, single-link, regular non-symlink file with no
+group or world permissions. Artifacts are limited to 4 KiB and paths are
+redacted from debug output. Windows opens selected inputs without following
+reparse points and uses the same no-replace publication, but parity with Unix
+ownership and ACL verification requires a future Windows security-descriptor
+review. Expensive NIP-49 KDF work is serialized once per process and must run
+through GPUI's background executor.
+
+Omega zeroizes its password, import, and long-lived secret wrappers. The pinned
+NIP-49 implementation creates internal normalized-password, KDF, and decrypted
+temporary buffers that do not all implement `Zeroize`; replacing or patching
+that upstream implementation is required if the assurance target expands to
+provable erasure of every library-internal copy.
+
+Custody resolution follows:
+
+```text
+reset-failed
+  > keychain-locked
+  > relaunch-required
+  > identity-conflict
+  > identity-lost
+  > incomplete transaction
+  > identity absent
+  > ready
+```
 
 System credential and cross-process lock operations are synchronous. GPUI
 callers must run them on the background executor and propagate

@@ -6,6 +6,7 @@ use std::{
 
 use app_identity::AppChannel;
 use atomic_write_file::AtomicWriteFile;
+use serde::de::DeserializeOwned;
 use thiserror::Error;
 
 use crate::{CompletionRecord, ContractError, IdentityManifest};
@@ -62,6 +63,22 @@ pub fn read_completion_record(
     let record: CompletionRecord = serde_json::from_slice(&bytes)?;
     record.validate_against(manifest, channel)?;
     Ok(Some(record))
+}
+
+pub(crate) fn read_json_document<T: DeserializeOwned>(
+    path: &Path,
+) -> Result<Option<T>, PublicStoreError> {
+    let Some(bytes) = read_public_document(path)? else {
+        return Ok(None);
+    };
+    Ok(Some(serde_json::from_slice(&bytes)?))
+}
+
+pub(crate) fn write_json_document(
+    path: &Path,
+    value: &impl serde::Serialize,
+) -> Result<(), PublicStoreError> {
+    write_public_document(path, value)
 }
 
 fn read_public_document(path: &Path) -> Result<Option<Vec<u8>>, PublicStoreError> {

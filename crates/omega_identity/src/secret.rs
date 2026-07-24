@@ -44,6 +44,10 @@ impl SecretKeyMaterial {
         Ok(Self(bytes))
     }
 
+    pub(crate) fn from_secret_key(secret_key: SecretKey) -> Self {
+        Self(Zeroizing::new(secret_key.to_secret_bytes()))
+    }
+
     #[cfg(test)]
     pub(crate) fn duplicate(&self) -> Self {
         Self(Zeroizing::new(*self.0))
