@@ -1,0 +1,415 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+repository_root="${OMEGA_IDENTITY_VERIFY_ROOT:-$(cd "${script_dir}/.." && pwd)}"
+
+python3 - "${repository_root}" <<'PY'
+from __future__ import annotations
+
+import hashlib
+import json
+import re
+import sys
+from pathlib import Path
+from typing import Optional
+
+
+ROOT = Path(sys.argv[1]).resolve()
+BUZZ_SOURCE_COMMIT = "acfbb1bb6af54cb29cb152496ff43b8285dcb8cf"
+PUBLIC_VECTOR_SHA256 = "1e25670b072cdd500bdd65e1c0215b62068cfd26a98284e23a90c781fef0bba6"
+LOCKED_PACKAGES = {
+    "atomic-write-file": (
+        "0.3.0",
+        "84790c55b5704b0d35130bf16a4ce22a8e70eb0ea773522557524d9a4852663d",
+    ),
+    "keyring": (
+        "3.6.3",
+        "eebcc3aff044e5944a8fbaf69eb277d11986064cba30c468730e8b9909fb551c",
+    ),
+    "nostr": (
+        "0.44.4",
+        "98cf5d15d70d1f8f4059e5f79923ac15891eb691d2843d01191e0585fb064d70",
+    ),
+}
+FORBIDDEN_PUBLIC_FIELD_NAMES = {
+    "mnemonic",
+    "nsec",
+    "privatekey",
+    "secret",
+    "secretkey",
+    "seed",
+    "wallet",
+}
+
+failures: list[str] = []
+
+
+def fail(message: str) -> None:
+    failures.append(message)
+
+
+def public_field_is_forbidden(field_name: str) -> bool:
+    normalized = re.sub(r"[^a-z0-9]", "", field_name.lower())
+    return (
+        normalized in FORBIDDEN_PUBLIC_FIELD_NAMES
+        or normalized.startswith("secret")
+        or "privatekey" in normalized
+        or "secretkey" in normalized
+        or normalized.startswith("wallet")
+    )
+
+
+def read_bytes(relative_path: str) -> bytes:
+    path = ROOT / relative_path
+    try:
+        return path.read_bytes()
+    except OSError as error:
+        fail(f"{relative_path}: cannot read required file: {error}")
+        return b""
+
+
+def read_text(relative_path: str) -> str:
+    return read_bytes(relative_path).decode("utf-8", errors="replace")
+
+
+def toml_section(source: str, heading: str) -> str:
+    match = re.search(
+        rf"(?ms)^\[{re.escape(heading)}\]\s*$\n(.*?)(?=^\[|\Z)",
+        source,
+    )
+    return "" if match is None else match.group(1)
+
+
+workspace_manifest = read_text("Cargo.toml")
+workspace_dependencies = toml_section(workspace_manifest, "workspace.dependencies")
+for package_name, (version, _) in LOCKED_PACKAGES.items():
+    expected = f"={version}"
+    dependency_match = re.search(
+        rf'(?m)^{re.escape(package_name)}\s*=\s*(?:"([^"]+)"|\{{[^}}]*\bversion\s*=\s*"([^"]+)"[^}}]*\}})\s*$',
+        workspace_dependencies,
+    )
+    actual = None if dependency_match is None else next(
+        (value for value in dependency_match.groups() if value is not None),
+        None,
+    )
+    if actual != expected:
+        fail(
+            f"Cargo.toml: workspace dependency {package_name!r} must be pinned "
+            f"to {expected!r}, found {actual!r}"
+        )
+
+identity_manifest = read_text("crates/omega_identity/Cargo.toml")
+identity_dependencies = toml_section(identity_manifest, "dependencies")
+for package_name in ("atomic-write-file", "nostr"):
+    inherited = re.search(
+        rf"(?m)^{re.escape(package_name)}\.workspace\s*=\s*true\s*$",
+        identity_dependencies,
+    ) or re.search(
+        rf'(?m)^{re.escape(package_name)}\s*=\s*\{{[^}}]*\bworkspace\s*=\s*true\b[^}}]*\}}\s*$',
+        identity_dependencies,
+    )
+    if not inherited:
+        fail(
+            "crates/omega_identity/Cargo.toml: "
+            f"{package_name!r} must inherit the locked workspace dependency"
+        )
+
+keyring_lines = re.findall(r"(?m)^keyring\s*=\s*(.+)$", identity_manifest)
+if not keyring_lines or any(
+    re.search(r"\bworkspace\s*=\s*true\b", specification) is None
+    for specification in keyring_lines
+):
+    fail(
+        "crates/omega_identity/Cargo.toml: every target-specific keyring dependency "
+        "must inherit the locked workspace dependency"
+    )
+
+lockfile = read_text("Cargo.lock")
+lock_packages = re.findall(
+    r"(?ms)^\[\[package\]\]\s*$\n(.*?)(?=^\[\[package\]\]|\Z)",
+    lockfile,
+)
+for package_name, (version, checksum) in LOCKED_PACKAGES.items():
+    matches = [
+        package_block
+        for package_block in lock_packages
+        if re.search(
+            rf'(?m)^name\s*=\s*"{re.escape(package_name)}"\s*$',
+            package_block,
+        )
+    ]
+    if len(matches) != 1:
+        fail(
+            f"Cargo.lock: expected exactly one {package_name!r} package, "
+            f"found {len(matches)}"
+        )
+        continue
+    package = matches[0]
+    version_match = re.search(r'(?m)^version\s*=\s*"([^"]+)"\s*$', package)
+    actual_version = None if version_match is None else version_match.group(1)
+    if actual_version != version:
+        fail(
+            f"Cargo.lock: {package_name!r} must resolve to {version}, "
+            f"found {actual_version!r}"
+        )
+    checksum_match = re.search(r'(?m)^checksum\s*=\s*"([^"]+)"\s*$', package)
+    actual_checksum = None if checksum_match is None else checksum_match.group(1)
+    if actual_checksum != checksum:
+        fail(
+            f"Cargo.lock: {package_name!r} {version} checksum changed; "
+            "review the supply-chain update before changing this proof"
+        )
+    source_match = re.search(r'(?m)^source\s*=\s*"([^"]+)"\s*$', package)
+    actual_source = None if source_match is None else source_match.group(1)
+    if actual_source != "registry+https://github.com/rust-lang/crates.io-index":
+        fail(f"Cargo.lock: {package_name!r} must resolve from the crates.io registry")
+
+contract_source = read_text("crates/omega_identity/src/contract.rs")
+commit_match = re.search(
+    r'pub const BUZZ_SOURCE_COMMIT:\s*&str\s*=\s*"([0-9a-f]{40})";',
+    contract_source,
+)
+if commit_match is None or commit_match.group(1) != BUZZ_SOURCE_COMMIT:
+    fail(
+        "crates/omega_identity/src/contract.rs: BUZZ_SOURCE_COMMIT must remain "
+        f"pinned to {BUZZ_SOURCE_COMMIT}"
+    )
+
+vector_relative_path = "crates/omega_identity/fixtures/omega_nostr_identity_v1.json"
+vector_bytes = read_bytes(vector_relative_path)
+if vector_bytes:
+    vector_digest = hashlib.sha256(vector_bytes).hexdigest()
+    if vector_digest != PUBLIC_VECTOR_SHA256:
+        fail(
+            f"{vector_relative_path}: public vector SHA-256 changed; "
+            "review and deliberately update the proof"
+        )
+    try:
+        vector = json.loads(vector_bytes)
+    except json.JSONDecodeError as error:
+        fail(f"{vector_relative_path}: invalid JSON: {error}")
+        vector = {}
+    if vector.get("source_commit") != BUZZ_SOURCE_COMMIT:
+        fail(f"{vector_relative_path}: source_commit does not match Buzz provenance")
+
+    def inspect_public_json(value: object, location: str) -> None:
+        if isinstance(value, dict):
+            for key, child in value.items():
+                if public_field_is_forbidden(key):
+                    fail(f"{vector_relative_path}: forbidden public field at {location}.{key}")
+                inspect_public_json(child, f"{location}.{key}")
+        elif isinstance(value, list):
+            for index, child in enumerate(value):
+                inspect_public_json(child, f"{location}[{index}]")
+
+    inspect_public_json(vector, "$")
+
+
+def struct_body(source: str, struct_name: str) -> Optional[str]:
+    declaration = re.search(rf"\bpub struct {re.escape(struct_name)}\s*\{{", source)
+    if declaration is None:
+        return None
+    opening_brace = source.find("{", declaration.start())
+    depth = 0
+    for index in range(opening_brace, len(source)):
+        if source[index] == "{":
+            depth += 1
+        elif source[index] == "}":
+            depth -= 1
+            if depth == 0:
+                return source[opening_brace + 1 : index]
+    return None
+
+
+manifest_body = struct_body(contract_source, "IdentityManifest")
+if manifest_body is None:
+    fail("crates/omega_identity/src/contract.rs: IdentityManifest declaration not found")
+else:
+    for field_name in re.findall(r"(?m)^\s*(?:pub(?:\([^)]*\))?\s+)?([a-zA-Z_]\w*)\s*:", manifest_body):
+        if public_field_is_forbidden(field_name):
+            fail(
+                "crates/omega_identity/src/contract.rs: IdentityManifest has "
+                f"forbidden secret-bearing field {field_name!r}"
+            )
+
+
+def code_only(source: str) -> str:
+    output = list(source)
+    index = 0
+    while index < len(source):
+        if source.startswith("//", index):
+            end = source.find("\n", index)
+            end = len(source) if end == -1 else end
+            output[index:end] = " " * (end - index)
+            index = end
+        elif source.startswith("/*", index):
+            depth = 1
+            cursor = index + 2
+            while cursor < len(source) and depth:
+                if source.startswith("/*", cursor):
+                    depth += 1
+                    cursor += 2
+                elif source.startswith("*/", cursor):
+                    depth -= 1
+                    cursor += 2
+                else:
+                    cursor += 1
+            output[index:cursor] = " " * (cursor - index)
+            index = cursor
+        elif source[index] == '"':
+            cursor = index + 1
+            while cursor < len(source):
+                if source[cursor] == "\\":
+                    cursor += 2
+                elif source[cursor] == '"':
+                    cursor += 1
+                    break
+                else:
+                    cursor += 1
+            output[index:cursor] = " " * (cursor - index)
+            index = cursor
+        elif source[index] == "'":
+            match = re.match(r"'(?:\\.|[^'\\])'", source[index:])
+            if match:
+                cursor = index + len(match.group(0))
+                output[index:cursor] = " " * (cursor - index)
+                index = cursor
+            else:
+                index += 1
+        elif source[index] == "r":
+            match = re.match(r'r(#{0,255})"', source[index:])
+            if not match:
+                index += 1
+                continue
+            hashes = match.group(1)
+            terminator = '"' + hashes
+            cursor = source.find(terminator, index + len(match.group(0)))
+            cursor = len(source) if cursor == -1 else cursor + len(terminator)
+            output[index:cursor] = " " * (cursor - index)
+            index = cursor
+        else:
+            index += 1
+    return "".join(output)
+
+
+def without_test_modules(source: str) -> str:
+    output = list(source)
+    searchable = code_only(source)
+    pattern = re.compile(
+        r"#\s*\[\s*cfg\s*\(\s*test\s*\)\s*\]\s*mod\s+[a-zA-Z_]\w*\s*\{"
+    )
+    cursor = 0
+    while match := pattern.search(searchable, cursor):
+        opening_brace = searchable.find("{", match.start())
+        depth = 0
+        end = len(source)
+        for index in range(opening_brace, len(searchable)):
+            if searchable[index] == "{":
+                depth += 1
+            elif searchable[index] == "}":
+                depth -= 1
+                if depth == 0:
+                    end = index + 1
+                    break
+        output[match.start():end] = " " * (end - match.start())
+        cursor = end
+    return "".join(output)
+
+
+production_sources: list[tuple[Path, str]] = []
+source_roots = (
+    ROOT / "crates/omega_identity/src",
+    ROOT / "crates/onboarding/src",
+    ROOT / "crates/workspace/src",
+    ROOT / "crates/zed/src",
+)
+source_paths: list[Path] = []
+for source_root in source_roots:
+    if source_root.is_dir():
+        source_paths.extend(source_root.rglob("*.rs"))
+    else:
+        fail(f"{source_root.relative_to(ROOT)}: source directory not found")
+for path in source_paths:
+    if path.is_file():
+        relative_parts = path.relative_to(ROOT).parts
+        if "tests" in relative_parts or path.name.endswith("_test.rs"):
+            continue
+        try:
+            source = path.read_text(encoding="utf-8")
+        except OSError as error:
+            fail(f"{path.relative_to(ROOT)}: cannot scan source: {error}")
+            continue
+        production_sources.append((path, without_test_modules(source)))
+    else:
+        fail(f"{path.relative_to(ROOT)}: required source file not found")
+
+for path, source in production_sources:
+    relative_path = path.relative_to(ROOT)
+    source_without_comments = code_only(source)
+    if re.search(r"\bget_nsec\s*\(", source_without_comments):
+        fail(f"{relative_path}: renderer-visible get_nsec API is forbidden")
+
+    comments_removed_but_strings_preserved = source
+    for match in re.finditer(r"//[^\n]*|/\*.*?\*/", source, flags=re.DOTALL):
+        comments_removed_but_strings_preserved = (
+            comments_removed_but_strings_preserved[: match.start()]
+            + " " * (match.end() - match.start())
+            + comments_removed_but_strings_preserved[match.end() :]
+        )
+    for forbidden_literal, reason in (
+        ("BUZZ_PRIVATE_KEY", "environment-secret fallback"),
+        ("identity.key", "plaintext identity-file fallback"),
+    ):
+        if forbidden_literal in comments_removed_but_strings_preserved:
+            fail(f"{relative_path}: forbidden {reason} {forbidden_literal!r}")
+
+secret_source = without_test_modules(read_text("crates/omega_identity/src/secret.rs"))
+if re.search(r"\b(?:serde::)?Serialize\b", code_only(secret_source)):
+    fail(
+        "crates/omega_identity/src/secret.rs: secret custody types must not implement "
+        "or derive serialization"
+    )
+
+renderer_roots = (
+    ROOT / "crates/onboarding/src",
+    ROOT / "crates/workspace/src",
+    ROOT / "crates/zed/src",
+)
+secret_identifier = r"(?:mnemonic|nsec|private_key|secret_key|seed)"
+for path, source in production_sources:
+    if not any(path.is_relative_to(root) for root in renderer_roots):
+        continue
+    renderer_code = code_only(source)
+    serialization_patterns = (
+        rf"(?s)#\s*\[\s*derive\s*\([^\]]*\bSerialize\b[^\]]*\)\s*\]"
+        rf"\s*(?:pub(?:\([^)]*\))?\s+)?struct\s+\w+\s*\{{[^}}]*\b{secret_identifier}\b",
+        rf"\bserde_json::to_(?:string|string_pretty|value|vec)\s*\([^;\n]*\b{secret_identifier}\b",
+    )
+    if any(re.search(pattern, renderer_code) for pattern in serialization_patterns):
+        fail(f"{path.relative_to(ROOT)}: renderer secret serialization is forbidden")
+
+startup_relative_path = "crates/onboarding/src/identity_startup.rs"
+startup_code = code_only(without_test_modules(read_text(startup_relative_path)))
+startup_mint_patterns = (
+    r"\bIdentityService\s*::\s*(?:create|generate|import)\s*\(",
+    r"\b(?:service|backend|identity_service)\s*\.\s*(?:create|generate|import)\s*\(",
+    r"\bSecretKeyMaterial\s*::\s*generate\s*\(",
+)
+if any(re.search(pattern, startup_code) for pattern in startup_mint_patterns):
+    fail(f"{startup_relative_path}: startup identity minting is forbidden")
+if "inspect_for_process_start" not in startup_code:
+    fail(f"{startup_relative_path}: startup must inspect custody without minting an identity")
+
+if failures:
+    print("Omega identity verification failed:", file=sys.stderr)
+    for failure in failures:
+        print(f"  - {failure}", file=sys.stderr)
+    raise SystemExit(1)
+
+print(
+    "Omega identity verification passed: dependency locks, Buzz provenance, "
+    "public vector, and secret-boundary tripwires are intact."
+)
+PY

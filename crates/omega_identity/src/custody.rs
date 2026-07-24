@@ -1310,6 +1310,7 @@ mod tests {
         Normal,
         Missing,
         Locked,
+        Unavailable,
         Conflict,
         Substitute([u8; 32]),
     }
@@ -1363,6 +1364,7 @@ mod tests {
                 FakeReadMode::Normal => Ok(state.secret.as_ref().map(SecretKeyMaterial::duplicate)),
                 FakeReadMode::Missing => Ok(None),
                 FakeReadMode::Locked => Err(StoreError::Locked),
+                FakeReadMode::Unavailable => Err(StoreError::Unavailable),
                 FakeReadMode::Conflict => Err(StoreError::Conflict),
                 FakeReadMode::Substitute(bytes) => {
                     SecretKeyMaterial::from_bytes(Zeroizing::new(bytes))
@@ -1594,6 +1596,96 @@ mod tests {
     }
 
     #[test]
+    fn concurrent_distinct_create_receipts_commit_exactly_one_identity() {
+        let temporary_directory = tempfile::tempdir().expect("create temporary directory");
+        let data_root = temporary_directory.path().to_path_buf();
+        let store = FakeStore::empty();
+        let generator_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let first_service =
+            counting_service(store.clone(), data_root.clone(), generator_calls.clone());
+        let second_service =
+            counting_service(store.clone(), data_root.clone(), generator_calls.clone());
+        let start = Arc::new(std::sync::Barrier::new(3));
+
+        let first = std::thread::spawn({
+            let start = start.clone();
+            move || {
+                start.wait();
+                first_service.create(
+                    ReceiptRef::new("concurrent-owner-action-1")
+                        .expect("valid first concurrent receipt"),
+                )
+            }
+        });
+        let second = std::thread::spawn({
+            let start = start.clone();
+            move || {
+                start.wait();
+                second_service.create(
+                    ReceiptRef::new("concurrent-owner-action-2")
+                        .expect("valid second concurrent receipt"),
+                )
+            }
+        });
+        start.wait();
+
+        let first = first.join().expect("join first create");
+        let second = second.join().expect("join second create");
+        let successes = [&first, &second]
+            .into_iter()
+            .filter(|result| {
+                result
+                    .as_ref()
+                    .is_ok_and(|result| result.state == CustodyState::Ready)
+            })
+            .count();
+        let denials = [&first, &second]
+            .into_iter()
+            .filter(|result| {
+                matches!(
+                    result,
+                    Err(CustodyError::CustodyDenied(CustodyState::Ready))
+                )
+            })
+            .count();
+
+        assert_eq!(successes, 1);
+        assert_eq!(denials, 1);
+        assert_eq!(generator_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(store.state.lock().expect("lock fake store").writes, 1);
+        assert_eq!(
+            service(store, data_root)
+                .inspect()
+                .expect("inspect winning identity")
+                .state,
+            CustodyState::Ready
+        );
+    }
+
+    #[test]
+    fn unavailable_secure_store_blocks_create_before_journaling_or_generation() {
+        let temporary_directory = tempfile::tempdir().expect("create temporary directory");
+        let store = FakeStore::empty();
+        let generator_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let service = counting_service(
+            store.clone(),
+            temporary_directory.path().to_path_buf(),
+            generator_calls.clone(),
+        );
+        store.set_read_mode(FakeReadMode::Unavailable);
+
+        assert!(matches!(
+            service.create(receipt()),
+            Err(CustodyError::CustodyDenied(CustodyState::Locked))
+        ));
+        assert_eq!(generator_calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(store.state.lock().expect("lock fake store").writes, 0);
+        assert!(!service.paths.transaction_path.exists());
+        assert!(!service.paths.manifest_path.exists());
+        assert!(!service.paths.completion_path.exists());
+    }
+
+    #[test]
     fn pending_create_resumes_the_stored_identity_without_generation() {
         let temporary_directory = tempfile::tempdir().expect("create temporary directory");
         let store = FakeStore::empty();
@@ -1671,6 +1763,123 @@ mod tests {
                 .expect("inspect completed create")
                 .pending_transaction
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn restart_after_manifest_commit_resumes_same_identity_and_receipt() {
+        let temporary_directory = tempfile::tempdir().expect("create temporary directory");
+        let data_root = temporary_directory.path().to_path_buf();
+        let store = FakeStore::empty();
+        let generator_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let initial_service =
+            counting_service(store.clone(), data_root.clone(), generator_calls.clone());
+        let pending_receipt =
+            ReceiptRef::new("manifest-commit-crash").expect("valid pending receipt");
+        let secret = SecretKeyMaterial::from_bytes(Zeroizing::new([4; 32]))
+            .expect("valid pending identity secret");
+        let identity = secret
+            .public_identity()
+            .expect("derive pending public identity");
+        store
+            .write(&initial_service.locator, &secret)
+            .expect("write pending identity secret");
+        let mut transaction =
+            IdentityTransaction::new(TransactionOperation::Create, pending_receipt.clone(), None);
+        transaction.expected_identity = Some(identity.clone());
+        write_json_document(&initial_service.paths.transaction_path, &transaction)
+            .expect("write pending transaction");
+        let manifest = IdentityManifest::new(
+            identity.clone(),
+            initial_service.locator.clone(),
+            vec![pending_receipt.clone()],
+        );
+        write_identity_manifest(
+            &initial_service.paths.manifest_path,
+            &manifest,
+            initial_service.channel,
+        )
+        .expect("write committed manifest");
+        assert!(!initial_service.paths.completion_path.exists());
+
+        let restarted_service = counting_service(store, data_root, generator_calls.clone());
+        let inspection = restarted_service
+            .inspect_details()
+            .expect("inspect manifest-only crash state");
+        assert_eq!(inspection.custody.state, CustodyState::Incomplete);
+        assert_eq!(inspection.custody.identity, Some(identity.clone()));
+        assert_eq!(
+            inspection
+                .pending_transaction
+                .expect("pending create facts")
+                .receipt_ref,
+            pending_receipt
+        );
+
+        let resumed = restarted_service
+            .resume_incomplete_create()
+            .expect("resume after manifest commit");
+        assert_eq!(resumed.state, CustodyState::Ready);
+        assert_eq!(resumed.identity, Some(identity));
+        assert_eq!(resumed.receipt_ref, Some(pending_receipt));
+        assert_eq!(generator_calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert!(!restarted_service.paths.transaction_path.exists());
+    }
+
+    #[test]
+    fn restart_after_completion_commit_cleans_matching_create_journal() {
+        let temporary_directory = tempfile::tempdir().expect("create temporary directory");
+        let data_root = temporary_directory.path().to_path_buf();
+        let store = FakeStore::empty();
+        let generator_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let initial_service =
+            counting_service(store.clone(), data_root.clone(), generator_calls.clone());
+        let completed_receipt =
+            ReceiptRef::new("completion-commit-crash").expect("valid completed receipt");
+        let completed = initial_service
+            .create(completed_receipt.clone())
+            .expect("create completed identity");
+        let identity = completed.identity.clone().expect("completed identity");
+        let mut interrupted_transaction = IdentityTransaction::new(
+            TransactionOperation::Create,
+            completed_receipt.clone(),
+            None,
+        );
+        interrupted_transaction.expected_identity = Some(identity.clone());
+        write_json_document(
+            &initial_service.paths.transaction_path,
+            &interrupted_transaction,
+        )
+        .expect("restore journal left at crash boundary");
+        let calls_before_restart = generator_calls.load(std::sync::atomic::Ordering::SeqCst);
+        let writes_before_restart = store.state.lock().expect("lock fake store").writes;
+
+        let restarted_service = counting_service(store.clone(), data_root, generator_calls.clone());
+        let inspection = restarted_service
+            .inspect_details()
+            .expect("inspect completed crash state");
+        assert_eq!(inspection.custody, completed);
+        assert_eq!(
+            inspection
+                .pending_transaction
+                .expect("matching create journal")
+                .receipt_ref,
+            completed_receipt
+        );
+
+        let resumed = restarted_service
+            .create(completed_receipt)
+            .expect("idempotently finalize matching create");
+        assert_eq!(resumed.state, CustodyState::Ready);
+        assert_eq!(resumed.identity, Some(identity));
+        assert!(!restarted_service.paths.transaction_path.exists());
+        assert_eq!(
+            generator_calls.load(std::sync::atomic::Ordering::SeqCst),
+            calls_before_restart
+        );
+        assert_eq!(
+            store.state.lock().expect("lock fake store").writes,
+            writes_before_restart
         );
     }
 

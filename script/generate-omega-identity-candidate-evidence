@@ -1,0 +1,1184 @@
+#!/usr/bin/env python3
+"""Generate candidate-bound Omega identity evidence without self-attestation."""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import plistlib
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+from contextlib import contextmanager
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Iterator
+
+
+ROOT = Path(__file__).resolve().parent.parent
+CONTRACT_PATH = Path("crates/omega_identity/src/contract.rs")
+VECTOR_PATH = Path("crates/omega_identity/fixtures/omega_nostr_identity_v1.json")
+SCHEMA_PATH = Path(
+    "crates/omega_identity/fixtures/identity_candidate_evidence_schema_v1.json"
+)
+VERIFIER_PATH = Path("script/verify-omega-identity")
+PINNED_SIGNING_IDENTITY = (
+    "Developer ID Application: OpenAgents, Inc. (HQWSG26L43)"
+)
+PINNED_TEAM_ID = "HQWSG26L43"
+EXPECTED_PACKAGES = {
+    "atomic-write-file": {
+        "version": "0.3.0",
+        "checksum": "84790c55b5704b0d35130bf16a4ce22a8e70eb0ea773522557524d9a4852663d",
+    },
+    "keyring": {
+        "version": "3.6.3",
+        "checksum": "eebcc3aff044e5944a8fbaf69eb277d11986064cba30c468730e8b9909fb551c",
+    },
+    "nostr": {
+        "version": "0.44.4",
+        "checksum": "98cf5d15d70d1f8f4059e5f79923ac15891eb691d2843d01191e0585fb064d70",
+    },
+}
+GATE_REQUIREMENTS = {
+    "assurance_spec_admission": [
+        "admitted AssuranceSpec identifier and digest",
+        "candidate-bound result for every admitted scenario",
+    ],
+    "custody_scenarios": [
+        "pristine install",
+        "existing identity",
+        "conflict custody",
+        "lost custody",
+        "locked custody",
+        "symlink and weak-permission custody refusal",
+        "keychain unavailable",
+        "corrupt keychain data",
+    ],
+    "recovery_scenarios": [
+        "offline identity creation",
+        "offline encrypted recovery",
+        "corrupt recovery artifact rejection",
+        "wrong recovery password rejection",
+        "restart and rollback identity continuity",
+    ],
+    "forged_request_rejection": [
+        "wrong-identity signing request rejection",
+        "unadmitted purpose and malformed event rejection",
+        "owner-selection proof for conflicting recovery candidates",
+    ],
+    "stale_task_fencing": [
+        "secret-write, read-back, manifest-commit, reset, and relaunch crash points",
+        "double Create and concurrent application starts",
+        "late background completion cannot replace newer durable state",
+        "signer crash before completion",
+    ],
+    "installed_secret_tripwires": [
+        "installed-candidate logs scan",
+        "installed-candidate telemetry scan",
+        "installed-candidate clipboard scan",
+        "installed-candidate UI/accessibility tree scan",
+        "installed-candidate diagnostics scan",
+        "installed-candidate crash-output scan",
+    ],
+    "manual_journey": [
+        "identity-first first run",
+        "Theme and Agent Setup accepted-baseline comparison",
+        "Zed data before/after digest comparison",
+    ],
+    "owner_observation": [
+        "named owner observation bound to candidate_digest",
+    ],
+    "independent_verification": [
+        "named independent verifier record bound to candidate_digest",
+    ],
+    "accessibility": [
+        "keyboard and focus traversal",
+        "screen-reader output",
+        "360-pixel width and larger UI font",
+        "light, dark, high-contrast, and reduced-motion results",
+    ],
+    "install_lifecycle": [
+        "pristine install and side-by-side Zed result",
+        "restart, update, downgrade, and rollback result",
+        "uninstall and reinstall result",
+        "identity continuity and Zed-isolation result",
+    ],
+}
+
+
+class EvidenceError(RuntimeError):
+    pass
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def canonical_digest(value: Any) -> str:
+    canonical = json.dumps(
+        value, ensure_ascii=True, separators=(",", ":"), sort_keys=True
+    ).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
+
+
+def git(*arguments: str) -> str:
+    result = subprocess.run(
+        ["git", *arguments],
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return result.stdout.strip()
+
+
+def require_match(pattern: str, text: str, label: str) -> str:
+    match = re.search(pattern, text, flags=re.MULTILINE)
+    if match is None:
+        raise EvidenceError(f"could not read {label}")
+    return match.group(1)
+
+
+def require_sha256(value: Any, label: str) -> str:
+    if not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{64}", value) is None:
+        raise EvidenceError(f"{label} must be a lowercase SHA-256 digest")
+    return value
+
+
+def cargo_lock_packages(lock_text: str) -> dict[str, dict[str, str]]:
+    packages: dict[str, dict[str, str]] = {}
+    for block in lock_text.split("[[package]]")[1:]:
+        name_match = re.search(r'^name = "([^"]+)"$', block, flags=re.MULTILINE)
+        version_match = re.search(r'^version = "([^"]+)"$', block, flags=re.MULTILINE)
+        checksum_match = re.search(
+            r'^checksum = "([0-9a-f]{64})"$', block, flags=re.MULTILINE
+        )
+        if name_match is None or version_match is None or checksum_match is None:
+            continue
+        name = name_match.group(1)
+        if name in EXPECTED_PACKAGES:
+            if name in packages:
+                raise EvidenceError(
+                    f"Cargo.lock snapshot contains more than one checksummed {name}"
+                )
+            packages[name] = {
+                "version": version_match.group(1),
+                "checksum": checksum_match.group(1),
+            }
+    return packages
+
+
+def run_identity_verifier(verifier_path: Path) -> None:
+    result = subprocess.run(
+        [str(verifier_path)],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        detail = result.stderr.strip() or result.stdout.strip()
+        raise EvidenceError(f"identity verifier failed: {detail}")
+
+
+def verify_codesign(
+    path: Path, release_record: dict[str, Any], artifact_kind: str
+) -> dict[str, Any]:
+    if shutil.which("codesign") is None:
+        raise EvidenceError("codesign is required to validate the macOS candidate")
+    verification = subprocess.run(
+        ["codesign", "--verify", "--deep", "--strict", str(path)],
+        capture_output=True,
+        text=True,
+    )
+    if verification.returncode != 0:
+        detail = verification.stderr.strip() or verification.stdout.strip()
+        raise EvidenceError(f"{artifact_kind} codesign verification failed: {detail}")
+    details = subprocess.run(
+        ["codesign", "-dv", "--verbose=4", str(path)],
+        capture_output=True,
+        text=True,
+    )
+    if details.returncode != 0:
+        detail = details.stderr.strip() or details.stdout.strip()
+        raise EvidenceError(f"{artifact_kind} codesign metadata failed: {detail}")
+    metadata = "\n".join((details.stdout, details.stderr))
+    authorities = re.findall(r"(?m)^Authority=(.+)$", metadata)
+    team_match = re.search(r"(?m)^TeamIdentifier=(.+)$", metadata)
+    team_id = None if team_match is None else team_match.group(1)
+    if PINNED_SIGNING_IDENTITY not in authorities:
+        raise EvidenceError(
+            f"{artifact_kind} signing Authority does not match release record"
+        )
+    if team_id != PINNED_TEAM_ID:
+        raise EvidenceError(
+            f"{artifact_kind} TeamIdentifier does not match release record"
+        )
+    return {
+        "verified": True,
+        "authority": PINNED_SIGNING_IDENTITY,
+        "team_id": team_id,
+    }
+
+
+def file_contains_literal(path: Path, literal: bytes) -> bool:
+    overlap = max(len(literal) - 1, 0)
+    previous = b""
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            combined = previous + chunk
+            if literal in combined:
+                return True
+            previous = combined[-overlap:] if overlap else b""
+    return False
+
+
+def scan_packaged_app(
+    application: Path, forbidden_literals: list[str]
+) -> dict[str, Any]:
+    regular_files = sorted(
+        path
+        for path in application.rglob("*")
+        if path.is_file() and not path.is_symlink()
+    )
+    matches: dict[str, list[str]] = {}
+    for literal in forbidden_literals:
+        encoded = literal.encode("utf-8")
+        matching_paths = [
+            path.relative_to(application).as_posix()
+            for path in regular_files
+            if file_contains_literal(path, encoded)
+        ]
+        if matching_paths:
+            matches[literal] = matching_paths
+    if matches:
+        summary = ", ".join(
+            f"{literal}: {paths}" for literal, paths in sorted(matches.items())
+        )
+        raise EvidenceError(
+            f"fresh mounted-app identity boundary scan found forbidden literals: {summary}"
+        )
+    return {
+        "status": "passed",
+        "forbidden_literals": forbidden_literals,
+        "matches": {},
+        "scope": "all regular, non-symlink files under mounted Omega.app",
+    }
+
+
+@contextmanager
+def mounted_dmg(artifact_path: Path) -> Iterator[Path]:
+    if shutil.which("hdiutil") is None:
+        raise EvidenceError("hdiutil is required to validate the macOS candidate DMG")
+    with tempfile.TemporaryDirectory(prefix="omega-identity-dmg-") as directory:
+        mountpoint = Path(directory)
+        attach = subprocess.run(
+            [
+                "hdiutil",
+                "attach",
+                "-readonly",
+                "-nobrowse",
+                "-mountpoint",
+                str(mountpoint),
+                str(artifact_path),
+            ],
+            capture_output=True,
+            text=True,
+        )
+        if attach.returncode != 0:
+            detail = attach.stderr.strip() or attach.stdout.strip()
+            raise EvidenceError(f"artifact is not a mountable read-only DMG: {detail}")
+        try:
+            yield mountpoint
+        finally:
+            detach = subprocess.run(
+                ["hdiutil", "detach", str(mountpoint)],
+                capture_output=True,
+                text=True,
+            )
+            if detach.returncode != 0:
+                forced_detach = subprocess.run(
+                    ["hdiutil", "detach", "-force", str(mountpoint)],
+                    capture_output=True,
+                    text=True,
+                )
+                if forced_detach.returncode != 0:
+                    detail = forced_detach.stderr.strip() or forced_detach.stdout.strip()
+                    raise EvidenceError(f"could not detach validated DMG: {detail}")
+
+
+def inspect_packaged_app(
+    artifact_path: Path,
+    release_record: dict[str, Any],
+    forbidden_literals: list[str],
+    *,
+    verify_signatures: bool,
+) -> dict[str, Any]:
+    digests = release_record.get("digests", {})
+    expected_omega_digest = require_sha256(
+        digests.get("omega_binary_sha256"), "digests.omega_binary_sha256"
+    )
+    expected_cli_digest = require_sha256(
+        digests.get("cli_binary_sha256"), "digests.cli_binary_sha256"
+    )
+    expected_product = release_record.get("product")
+    expected_bundle_identifier = release_record.get("bundle_identifier")
+    expected_bundle_version = release_record.get(
+        "bundle_version", release_record.get("version")
+    )
+    if not all(
+        isinstance(value, str) and value
+        for value in (
+            expected_product,
+            expected_bundle_identifier,
+            expected_bundle_version,
+        )
+    ):
+        raise EvidenceError(
+            "release record product, bundle_identifier, and bundle version are required"
+        )
+
+    dmg_signing = (
+        verify_codesign(artifact_path, release_record, "DMG")
+        if verify_signatures
+        else {
+            "verified": False,
+            "authority": None,
+            "team_id": None,
+            "internal_self_test_bypass": True,
+        }
+    )
+    with mounted_dmg(artifact_path) as mountpoint:
+        applications = sorted(
+            path
+            for path in mountpoint.rglob("Omega.app")
+            if path.is_dir() and not path.is_symlink()
+        )
+        if len(applications) != 1:
+            raise EvidenceError(
+                f"DMG must contain exactly one Omega.app, found {len(applications)}"
+            )
+        application = applications[0]
+        application_signing = (
+            verify_codesign(application, release_record, "Omega.app")
+            if verify_signatures
+            else {
+                "verified": False,
+                "authority": None,
+                "team_id": None,
+                "internal_self_test_bypass": True,
+            }
+        )
+        info_path = application / "Contents/Info.plist"
+        omega_path = application / "Contents/MacOS/omega"
+        cli_path = application / "Contents/MacOS/cli"
+        for required_path in (info_path, omega_path, cli_path):
+            if not required_path.is_file() or required_path.is_symlink():
+                raise EvidenceError(
+                    f"packaged app is missing a regular {required_path.relative_to(application)}"
+                )
+        try:
+            info = plistlib.loads(info_path.read_bytes())
+        except (OSError, plistlib.InvalidFileException) as error:
+            raise EvidenceError(f"packaged Info.plist is invalid: {error}") from error
+
+        if info.get("CFBundleName") != expected_product:
+            raise EvidenceError(
+                f"Info.plist CFBundleName={info.get('CFBundleName')!r}, "
+                f"expected {expected_product!r}"
+            )
+        if info.get("CFBundleDisplayName") not in (None, expected_product):
+            raise EvidenceError(
+                "Info.plist CFBundleDisplayName contains an unexpected product name"
+            )
+        if info.get("CFBundleIdentifier") != expected_bundle_identifier:
+            raise EvidenceError("Info.plist CFBundleIdentifier differs from release record")
+        if info.get("CFBundleShortVersionString") != expected_bundle_version:
+            raise EvidenceError(
+                "Info.plist CFBundleShortVersionString differs from release record "
+                "bundle version"
+            )
+        bundle_build_version = info.get("CFBundleVersion")
+        if not isinstance(bundle_build_version, str) or not bundle_build_version:
+            raise EvidenceError("Info.plist CFBundleVersion must be a non-empty build version")
+
+        omega_digest = sha256_file(omega_path)
+        cli_digest = sha256_file(cli_path)
+        if omega_digest != expected_omega_digest:
+            raise EvidenceError("embedded omega binary digest differs from release record")
+        if cli_digest != expected_cli_digest:
+            raise EvidenceError("embedded cli binary digest differs from release record")
+        source_commit = release_record.get("source", {}).get("commit")
+        if not isinstance(source_commit, str) or len(source_commit) != 40:
+            raise EvidenceError("release record source commit is invalid")
+        if not file_contains_literal(omega_path, source_commit.encode("ascii")):
+            raise EvidenceError(
+                "embedded omega binary does not contain the release source commit marker"
+            )
+        observed_scan = scan_packaged_app(application, forbidden_literals)
+        return {
+            "application_name": application.name,
+            "bundle_identifier": info["CFBundleIdentifier"],
+            "bundle_version": expected_bundle_version,
+            "bundle_build_version": bundle_build_version,
+            "omega_binary_sha256": omega_digest,
+            "cli_binary_sha256": cli_digest,
+            "source_commit_marker": source_commit,
+            "signing": {
+                "dmg": dmg_signing,
+                "application": application_signing,
+            },
+            "fresh_boundary_scan": observed_scan,
+        }
+
+
+def pending_gate(required_evidence: list[str]) -> dict[str, Any]:
+    return {
+        "status": "pending",
+        "attestor": None,
+        "observed_at": None,
+        "evidence": {},
+        "required_evidence": required_evidence,
+    }
+
+
+def valid_observed_at(value: Any) -> bool:
+    if not isinstance(value, str) or not value:
+        return False
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    return parsed.tzinfo is not None
+
+
+def ingest_attestations(
+    attestations_dir: Path | None, candidate_digest: str
+) -> tuple[dict[str, dict[str, Any]], dict[str, str]]:
+    gates = {
+        name: pending_gate(requirements)
+        for name, requirements in GATE_REQUIREMENTS.items()
+    }
+    errors: dict[str, str] = {}
+    if attestations_dir is None:
+        return gates, errors
+    if not attestations_dir.is_dir():
+        errors["_attestations_dir"] = f"not a directory: {attestations_dir}"
+        return gates, errors
+
+    expected_paths = {attestations_dir / f"{name}.json" for name in gates}
+    unexpected = sorted(
+        path.name
+        for path in attestations_dir.glob("*.json")
+        if path not in expected_paths
+    )
+    if unexpected:
+        errors["_unexpected_files"] = ", ".join(unexpected)
+
+    for gate_name, gate in gates.items():
+        path = attestations_dir / f"{gate_name}.json"
+        if not path.is_file():
+            continue
+        try:
+            attestation = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as error:
+            errors[gate_name] = f"invalid JSON: {error}"
+            continue
+        if not isinstance(attestation, dict):
+            errors[gate_name] = "attestation must be a JSON object"
+            continue
+        if set(attestation) != {
+            "candidate_digest",
+            "attestor",
+            "observed_at",
+            "evidence",
+        }:
+            errors[gate_name] = "attestation has missing or unknown fields"
+            continue
+        if attestation["candidate_digest"] != candidate_digest:
+            errors[gate_name] = "candidate_digest does not match this candidate"
+            continue
+        if (
+            not isinstance(attestation["attestor"], str)
+            or not attestation["attestor"].strip()
+        ):
+            errors[gate_name] = "attestor must be a non-empty string"
+            continue
+        if not valid_observed_at(attestation["observed_at"]):
+            errors[gate_name] = "observed_at must be an ISO-8601 timestamp with timezone"
+            continue
+        evidence = attestation["evidence"]
+        if (
+            not isinstance(evidence, dict)
+            or set(evidence) != set(gate["required_evidence"])
+            or any(
+                not isinstance(reference, str) or not reference.strip()
+                for reference in evidence.values()
+            )
+        ):
+            errors[gate_name] = (
+                "evidence keys must exactly match required_evidence and every value "
+                "must be a non-empty reference or result"
+            )
+            continue
+        gate.update(
+            {
+                "status": "passed",
+                "attestor": attestation["attestor"].strip(),
+                "observed_at": attestation["observed_at"],
+                "evidence": evidence,
+            }
+        )
+    owner = gates["owner_observation"]
+    independent = gates["independent_verification"]
+    if (
+        owner["status"] == "passed"
+        and independent["status"] == "passed"
+        and owner["attestor"] == independent["attestor"]
+    ):
+        errors["independent_verification"] = (
+            "independent verifier must differ from the owner observer"
+        )
+        gates["independent_verification"] = pending_gate(
+            GATE_REQUIREMENTS["independent_verification"]
+        )
+    return gates, errors
+
+
+def validate_generated_record(
+    record: dict[str, Any], *, allow_internal_self_test_bypass: bool = False
+) -> None:
+    if record.get("schema") != "openagents.omega.identity-candidate-evidence.v1":
+        raise EvidenceError("unexpected evidence schema")
+    gates = record.get("gates")
+    if not isinstance(gates, dict) or set(gates) != set(GATE_REQUIREMENTS):
+        raise EvidenceError("generated evidence has the wrong required gate inventory")
+    admitted = all(gate.get("status") == "passed" for gate in gates.values()) and not record.get(
+        "attestation_errors"
+    )
+    if record.get("candidate_admitted") is not admitted:
+        raise EvidenceError("candidate_admitted disagrees with required gates")
+    expected_status = "admitted" if admitted else "pending_required_gates"
+    if record.get("status") != expected_status:
+        raise EvidenceError("candidate status disagrees with required gates")
+    digest = record.get("candidate_digest", {}).get("value")
+    if digest != canonical_digest(record["candidate"]):
+        raise EvidenceError("candidate digest does not match canonical candidate binding")
+    if not allow_internal_self_test_bypass:
+        signing = (
+            record.get("candidate", {})
+            .get("artifact", {})
+            .get("packaged_app", {})
+            .get("signing", {})
+        )
+        expected = {
+            "verified": True,
+            "authority": PINNED_SIGNING_IDENTITY,
+            "team_id": PINNED_TEAM_ID,
+        }
+        if signing.get("dmg") != expected or signing.get("application") != expected:
+            raise EvidenceError(
+                "public candidate evidence requires exact pinned verified signing facts"
+            )
+
+
+def build_record(
+    release_record_path: Path,
+    artifact_path: Path,
+    cargo_lock_snapshot: Path,
+    *,
+    allow_dirty: bool,
+    attestations_dir: Path | None,
+    verify_signatures: bool = True,
+) -> dict[str, Any]:
+    contract_path = ROOT / CONTRACT_PATH
+    vector_path = ROOT / VECTOR_PATH
+    schema_path = ROOT / SCHEMA_PATH
+    verifier_path = ROOT / VERIFIER_PATH
+    for required_path in (
+        release_record_path,
+        artifact_path,
+        cargo_lock_snapshot,
+        contract_path,
+        vector_path,
+        schema_path,
+        verifier_path,
+    ):
+        if not required_path.is_file():
+            raise EvidenceError(f"required file is missing: {required_path}")
+
+    commit = git("rev-parse", "HEAD")
+    dirty = bool(git("status", "--porcelain"))
+    if dirty and not allow_dirty:
+        raise EvidenceError(
+            "working tree is dirty; candidate evidence must bind a clean Omega commit"
+        )
+
+    release_record = json.loads(release_record_path.read_text(encoding="utf-8"))
+    if release_record.get("product") != "Omega":
+        raise EvidenceError("release record product must be Omega")
+    if release_record.get("signing_identity") != PINNED_SIGNING_IDENTITY:
+        raise EvidenceError(
+            "release record signing_identity differs from pinned OpenAgents identity"
+        )
+    if release_record.get("team_id") != PINNED_TEAM_ID:
+        raise EvidenceError("release record team_id differs from pinned OpenAgents team")
+    release_commit = release_record.get("source", {}).get("commit")
+    if release_commit != commit:
+        raise EvidenceError(
+            f"release record commit {release_commit!r} does not match checkout {commit}"
+        )
+
+    artifact_digest = sha256_file(artifact_path)
+    digests = release_record.get("digests", {})
+    if digests.get("package_sha256") != artifact_digest:
+        raise EvidenceError(
+            "release record package digest does not match the explicit artifact"
+        )
+    if release_record.get("artifact_name") != artifact_path.name:
+        raise EvidenceError("release artifact name does not match the explicit artifact")
+
+    snapshot_digest = sha256_file(cargo_lock_snapshot)
+    build_lock = release_record.get("build_inputs", {}).get(
+        "cargo_lock_snapshot", {}
+    )
+    if build_lock.get("sha256") != snapshot_digest:
+        raise EvidenceError(
+            "release build Cargo.lock digest does not match the explicit snapshot"
+        )
+    if build_lock.get("name") != cargo_lock_snapshot.name:
+        raise EvidenceError(
+            "release build Cargo.lock name does not match the explicit snapshot"
+        )
+    actual_packages = cargo_lock_packages(
+        cargo_lock_snapshot.read_text(encoding="utf-8")
+    )
+    if actual_packages != EXPECTED_PACKAGES:
+        raise EvidenceError(
+            "build Cargo.lock snapshot differs from frozen identity packages/checksums"
+        )
+
+    verification = release_record.get("identity_boundaries", {})
+    source_verifier = verification.get("source_verifier", {})
+    packaged_scan = verification.get("packaged_scan", {})
+    verifier_digest = sha256_file(verifier_path)
+    if source_verifier.get("path") != VERIFIER_PATH.as_posix():
+        raise EvidenceError("release record source verifier path is invalid")
+    if source_verifier.get("sha256") != verifier_digest:
+        raise EvidenceError("release record verifier script digest does not match checkout")
+    if source_verifier.get("passed") is not True:
+        raise EvidenceError("identity_boundaries.source_verifier.passed must be true")
+    if packaged_scan.get("passed") is not True:
+        raise EvidenceError("identity_boundaries.packaged_scan.passed must be true")
+    forbidden_literals = packaged_scan.get("forbidden_literals")
+    if forbidden_literals != ["BUZZ_PRIVATE_KEY", "identity.key", "get_nsec"]:
+        raise EvidenceError(
+            "identity_boundaries.packaged_scan.forbidden_literals is invalid"
+        )
+    run_identity_verifier(verifier_path)
+
+    contract_text = contract_path.read_text(encoding="utf-8")
+    contract_version = int(
+        require_match(
+            r"^pub const IDENTITY_CONTRACT_VERSION: u32 = ([0-9]+);$",
+            contract_text,
+            "identity contract version",
+        )
+    )
+    buzz_commit = require_match(
+        r'^pub const BUZZ_SOURCE_COMMIT: &str = "([0-9a-f]{40})";$',
+        contract_text,
+        "reviewed Buzz source commit",
+    )
+    vector = json.loads(vector_path.read_text(encoding="utf-8"))
+    vector_version = int(
+        require_match(r"_v([0-9]+)\.json$", vector_path.name, "public vector version")
+    )
+    if vector.get("source_commit") != buzz_commit:
+        raise EvidenceError("public vector and identity contract bind different Buzz commits")
+    if vector.get("manifest", {}).get("contract_version") != contract_version:
+        raise EvidenceError("public vector and identity contract versions differ")
+
+    packaged_app = inspect_packaged_app(
+        artifact_path,
+        release_record,
+        forbidden_literals,
+        verify_signatures=verify_signatures,
+    )
+    candidate = {
+        "omega": {
+            "repository": "https://github.com/OpenAgentsInc/omega",
+            "commit": commit,
+            "dirty": dirty,
+        },
+        "identity_contract": {
+            "version": contract_version,
+            "source_path": CONTRACT_PATH.as_posix(),
+            "source_sha256": sha256_file(contract_path),
+        },
+        "public_vector": {
+            "version": vector_version,
+            "path": VECTOR_PATH.as_posix(),
+            "sha256": sha256_file(vector_path),
+        },
+        "reviewed_source": {
+            "repository": "https://github.com/OpenAgentsInc/buzz",
+            "commit": buzz_commit,
+        },
+        "packages": [
+            {
+                "name": name,
+                "version": package["version"],
+                "cargo_checksum": package["checksum"],
+            }
+            for name, package in sorted(actual_packages.items())
+        ],
+        "build_cargo_lock": {
+            "name": cargo_lock_snapshot.name,
+            "sha256": snapshot_digest,
+        },
+        "artifact": {
+            "name": release_record["artifact_name"],
+            "version": release_record.get("version"),
+            "sha256": artifact_digest,
+            "release_record_sha256": sha256_file(release_record_path),
+            "packaged_app": packaged_app,
+        },
+        "automated_tripwires": {
+            "verifier_path": VERIFIER_PATH.as_posix(),
+            "verifier_script_sha256": verifier_digest,
+            "source_verification": "passed",
+            "packaged_boundary_scan": "passed",
+            "packaged_forbidden_literals": forbidden_literals,
+            "fresh_mounted_app_scan": packaged_app["fresh_boundary_scan"],
+            "scope": (
+                "Static and packaged boundary tripwires; these are not exhaustive "
+                "installed-candidate proof."
+            ),
+        },
+    }
+    candidate_digest = canonical_digest(candidate)
+    gates, attestation_errors = ingest_attestations(
+        attestations_dir, candidate_digest
+    )
+    if dirty:
+        attestation_errors["_dirty_source"] = (
+            "development-only dirty source binding cannot be admitted"
+        )
+    if not verify_signatures:
+        attestation_errors["_signature_bypass"] = (
+            "internal self-test signature bypass cannot be admitted"
+        )
+    admitted = all(gate["status"] == "passed" for gate in gates.values()) and not (
+        attestation_errors
+    )
+    record = {
+        "schema": "openagents.omega.identity-candidate-evidence.v1",
+        "schema_version": 1,
+        "status": "admitted" if admitted else "pending_required_gates",
+        "candidate_admitted": admitted,
+        "candidate": candidate,
+        "candidate_digest": {
+            "algorithm": "sha256",
+            "canonicalization": "RFC 8259 JSON; UTF-8; sorted keys; compact separators",
+            "value": candidate_digest,
+        },
+        "gates": gates,
+        "attestation_errors": attestation_errors,
+    }
+    validate_generated_record(
+        record, allow_internal_self_test_bypass=not verify_signatures
+    )
+    return record
+
+
+def write_record(path: Path, record: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(record, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+
+def create_self_test_dmg(
+    directory: Path, version: str, source_commit: str
+) -> tuple[Path, str, str]:
+    source = directory / "dmg-source"
+    executable_directory = source / "Omega.app/Contents/MacOS"
+    executable_directory.mkdir(parents=True)
+    omega_path = executable_directory / "omega"
+    cli_path = executable_directory / "cli"
+    omega_path.write_bytes(
+        f"omega evidence self-test executable\nZED_COMMIT_SHA={source_commit}\n".encode(
+            "ascii"
+        )
+    )
+    cli_path.write_bytes(b"omega cli evidence self-test executable\n")
+    omega_path.chmod(0o755)
+    cli_path.chmod(0o755)
+    info = {
+        "CFBundleName": "Omega",
+        "CFBundleDisplayName": "Omega",
+        "CFBundleIdentifier": "com.openagents.omega.rc",
+        "CFBundleShortVersionString": version,
+        "CFBundleVersion": version,
+        "CFBundleExecutable": "omega",
+        "CFBundlePackageType": "APPL",
+    }
+    info_path = source / "Omega.app/Contents/Info.plist"
+    info_path.write_bytes(plistlib.dumps(info))
+    artifact_path = directory / "Omega-evidence-self-test.dmg"
+    result = subprocess.run(
+        [
+            "hdiutil",
+            "create",
+            "-quiet",
+            "-format",
+            "UDRO",
+            "-volname",
+            "Omega Evidence Self Test",
+            "-srcfolder",
+            str(source),
+            str(artifact_path),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        detail = result.stderr.strip() or result.stdout.strip()
+        raise EvidenceError(f"could not create self-test DMG: {detail}")
+    return artifact_path, sha256_file(omega_path), sha256_file(cli_path)
+
+
+def self_test() -> None:
+    if shutil.which("hdiutil") is None:
+        raise EvidenceError("self-test requires hdiutil")
+    with tempfile.TemporaryDirectory(prefix="omega-identity-evidence-") as directory:
+        temp = Path(directory)
+        version = "evidence-self-test"
+        source_commit = git("rev-parse", "HEAD")
+        artifact_path, omega_digest, cli_digest = create_self_test_dmg(
+            temp, version, source_commit
+        )
+        lock_snapshot = temp / "Cargo.lock.snapshot"
+        lock_snapshot.write_bytes((ROOT / "Cargo.lock").read_bytes())
+        release_record = json.loads(
+            (ROOT / "crates/app_identity/fixtures/release_record_v1.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        release_record["artifact_name"] = artifact_path.name
+        release_record["version"] = version
+        release_record["bundle_version"] = version
+        release_record["signing_identity"] = PINNED_SIGNING_IDENTITY
+        release_record["team_id"] = PINNED_TEAM_ID
+        release_record["source"]["commit"] = source_commit
+        release_record["digests"].update(
+            {
+                "package_sha256": sha256_file(artifact_path),
+                "omega_binary_sha256": omega_digest,
+                "cli_binary_sha256": cli_digest,
+            }
+        )
+        release_record["build_inputs"] = {
+            "cargo_lock_snapshot": {
+                "name": lock_snapshot.name,
+                "sha256": sha256_file(lock_snapshot),
+            }
+        }
+        release_record["identity_boundaries"] = {
+            "source_verifier": {
+                "path": VERIFIER_PATH.as_posix(),
+                "sha256": sha256_file(ROOT / VERIFIER_PATH),
+                "passed": True,
+            },
+            "packaged_scan": {
+                "passed": True,
+                "forbidden_literals": [
+                    "BUZZ_PRIVATE_KEY",
+                    "identity.key",
+                    "get_nsec",
+                ],
+            },
+        }
+        release_record_path = temp / "release-record.json"
+        release_record_path.write_text(
+            json.dumps(release_record, indent=2) + "\n", encoding="utf-8"
+        )
+
+        wrong_signer_record = json.loads(json.dumps(release_record))
+        wrong_signer_record["signing_identity"] = "Developer ID Application: Not OpenAgents"
+        wrong_signer_path = temp / "wrong-signer-release-record.json"
+        wrong_signer_path.write_text(
+            json.dumps(wrong_signer_record) + "\n", encoding="utf-8"
+        )
+        try:
+            build_record(
+                wrong_signer_path,
+                artifact_path,
+                lock_snapshot,
+                allow_dirty=True,
+                attestations_dir=None,
+            )
+        except EvidenceError as error:
+            if "differs from pinned OpenAgents identity" not in str(error):
+                raise
+        else:
+            raise EvidenceError("release record with an unpinned signer was accepted")
+
+        wrong_team_record = json.loads(json.dumps(release_record))
+        wrong_team_record["team_id"] = "NOTOPENAGENTS"
+        wrong_team_path = temp / "wrong-team-release-record.json"
+        wrong_team_path.write_text(
+            json.dumps(wrong_team_record) + "\n", encoding="utf-8"
+        )
+        try:
+            build_record(
+                wrong_team_path,
+                artifact_path,
+                lock_snapshot,
+                allow_dirty=True,
+                attestations_dir=None,
+            )
+        except EvidenceError as error:
+            if "differs from pinned OpenAgents team" not in str(error):
+                raise
+        else:
+            raise EvidenceError("release record with an unpinned team was accepted")
+
+        try:
+            build_record(
+                release_record_path,
+                artifact_path,
+                lock_snapshot,
+                allow_dirty=True,
+                attestations_dir=None,
+            )
+        except EvidenceError as error:
+            if "DMG codesign verification failed" not in str(error):
+                raise
+        else:
+            raise EvidenceError(
+                "default production path accepted an unsigned self-test DMG"
+            )
+
+        pending = build_record(
+            release_record_path,
+            artifact_path,
+            lock_snapshot,
+            allow_dirty=True,
+            attestations_dir=None,
+            verify_signatures=False,
+        )
+        if pending["candidate_admitted"] or pending["status"] != "pending_required_gates":
+            raise EvidenceError("unattested self-test candidate was admitted")
+        second = build_record(
+            release_record_path,
+            artifact_path,
+            lock_snapshot,
+            allow_dirty=True,
+            attestations_dir=None,
+            verify_signatures=False,
+        )
+        if pending != second:
+            raise EvidenceError("same inputs did not produce identical evidence")
+
+        attestations = temp / "attestations"
+        attestations.mkdir()
+        observed_at = "2026-07-24T12:00:00Z"
+        for gate_name in GATE_REQUIREMENTS:
+            (attestations / f"{gate_name}.json").write_text(
+                json.dumps(
+                    {
+                        "candidate_digest": pending["candidate_digest"]["value"],
+                        "attestor": (
+                            "self-test:independent"
+                            if gate_name == "independent_verification"
+                            else f"self-test:owner:{gate_name}"
+                        ),
+                        "observed_at": observed_at,
+                        "evidence": {
+                            requirement: (
+                                f"self-test evidence for {gate_name}: {requirement}"
+                            )
+                            for requirement in GATE_REQUIREMENTS[gate_name]
+                        },
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+        coverage_path = attestations / "custody_scenarios.json"
+        incomplete_coverage = json.loads(coverage_path.read_text(encoding="utf-8"))
+        incomplete_coverage["evidence"].pop(
+            GATE_REQUIREMENTS["custody_scenarios"][-1]
+        )
+        coverage_path.write_text(
+            json.dumps(incomplete_coverage) + "\n", encoding="utf-8"
+        )
+        coverage_gates, coverage_errors = ingest_attestations(
+            attestations, pending["candidate_digest"]["value"]
+        )
+        if (
+            coverage_gates["custody_scenarios"]["status"] != "pending"
+            or "custody_scenarios" not in coverage_errors
+        ):
+            raise EvidenceError("incomplete requirement coverage was accepted")
+        incomplete_coverage["evidence"] = {
+            requirement: (
+                f"self-test evidence for custody_scenarios: {requirement}"
+            )
+            for requirement in GATE_REQUIREMENTS["custody_scenarios"]
+        }
+        coverage_path.write_text(
+            json.dumps(incomplete_coverage) + "\n", encoding="utf-8"
+        )
+        fully_attested = build_record(
+            release_record_path,
+            artifact_path,
+            lock_snapshot,
+            allow_dirty=True,
+            attestations_dir=attestations,
+            verify_signatures=False,
+        )
+        if any(
+            gate["status"] != "passed"
+            for gate in fully_attested["gates"].values()
+        ):
+            raise EvidenceError("valid self-test attestations did not pass every gate")
+        if fully_attested["candidate_admitted"]:
+            raise EvidenceError("signature-bypassed self-test candidate was admitted")
+        if "_signature_bypass" not in fully_attested["attestation_errors"]:
+            raise EvidenceError("signature-bypassed self-test omitted its admission blocker")
+        representable_admission = json.loads(json.dumps(fully_attested))
+        representable_admission["attestation_errors"].pop("_signature_bypass")
+        representable_admission["attestation_errors"].pop("_dirty_source", None)
+        representable_admission["candidate"]["omega"]["dirty"] = False
+        representable_admission["candidate"]["artifact"]["packaged_app"]["signing"] = {
+            "dmg": {
+                "verified": True,
+                "authority": PINNED_SIGNING_IDENTITY,
+                "team_id": PINNED_TEAM_ID,
+            },
+            "application": {
+                "verified": True,
+                "authority": PINNED_SIGNING_IDENTITY,
+                "team_id": PINNED_TEAM_ID,
+            },
+        }
+        representable_admission["candidate_digest"]["value"] = canonical_digest(
+            representable_admission["candidate"]
+        )
+        representable_admission["candidate_admitted"] = True
+        representable_admission["status"] = "admitted"
+        validate_generated_record(representable_admission)
+
+        fake_artifact = temp / "arbitrary-fake.dmg"
+        fake_artifact.write_bytes(b"not a disk image\n")
+        fake_record = json.loads(json.dumps(release_record))
+        fake_record["artifact_name"] = fake_artifact.name
+        fake_record["digests"]["package_sha256"] = sha256_file(fake_artifact)
+        fake_record_path = temp / "fake-release-record.json"
+        fake_record_path.write_text(json.dumps(fake_record) + "\n", encoding="utf-8")
+        try:
+            build_record(
+                fake_record_path,
+                fake_artifact,
+                lock_snapshot,
+                allow_dirty=True,
+                attestations_dir=None,
+                verify_signatures=False,
+            )
+        except EvidenceError as error:
+            if "not a mountable read-only DMG" not in str(error):
+                raise
+        else:
+            raise EvidenceError("arbitrary fake .dmg passed package validation")
+    print("Omega identity candidate evidence harness: self-test passed")
+
+
+def parse_arguments() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Bind an Omega identity-first evidence record to an explicit RC package "
+            "and build Cargo.lock snapshot."
+        )
+    )
+    parser.add_argument("--release-record", type=Path)
+    parser.add_argument("--artifact", type=Path)
+    parser.add_argument("--cargo-lock-snapshot", type=Path)
+    parser.add_argument("--attestations-dir", type=Path)
+    parser.add_argument(
+        "--output",
+        type=Path,
+        default=ROOT / "target/omega-identity-evidence/candidate-evidence.json",
+    )
+    parser.add_argument(
+        "--allow-dirty",
+        action="store_true",
+        help="development only: record dirty=true instead of refusing the checkout",
+    )
+    parser.add_argument("--self-test", action="store_true")
+    return parser.parse_args()
+
+
+def main() -> int:
+    arguments = parse_arguments()
+    try:
+        if arguments.self_test:
+            if any(
+                value is not None
+                for value in (
+                    arguments.release_record,
+                    arguments.artifact,
+                    arguments.cargo_lock_snapshot,
+                    arguments.attestations_dir,
+                )
+            ):
+                raise EvidenceError("--self-test does not accept candidate inputs")
+            self_test()
+            return 0
+        if (
+            arguments.release_record is None
+            or arguments.artifact is None
+            or arguments.cargo_lock_snapshot is None
+        ):
+            raise EvidenceError(
+                "--release-record, --artifact, and --cargo-lock-snapshot are required"
+            )
+        record = build_record(
+            arguments.release_record.resolve(),
+            arguments.artifact.resolve(),
+            arguments.cargo_lock_snapshot.resolve(),
+            allow_dirty=arguments.allow_dirty,
+            attestations_dir=(
+                None
+                if arguments.attestations_dir is None
+                else arguments.attestations_dir.resolve()
+            ),
+        )
+        write_record(arguments.output.resolve(), record)
+        print(f"wrote candidate evidence: {arguments.output.resolve()}")
+        if record["candidate_admitted"]:
+            print("candidate admitted: every required gate has a valid attestation")
+            return 0
+        print(
+            "candidate is not admitted: one or more required attestations are pending "
+            "or invalid",
+            file=sys.stderr,
+        )
+        return 3
+    except (EvidenceError, json.JSONDecodeError, OSError, subprocess.CalledProcessError) as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

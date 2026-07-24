@@ -23,12 +23,23 @@ readonly OMEGA_BUNDLE_ID="com.openagents.omega.rc"
 readonly OMEGA_VOLUME_NAME="Omega RC"
 readonly OMEGA_ARTIFACT_NAME="Omega-v${OMEGA_RC_VERSION}-macos-arm64.dmg"
 readonly OMEGA_RELEASE_RECORD_SCHEMA_VERSION=1
+readonly OMEGA_BUILD_LOCK_SNAPSHOT_NAME="Cargo.lock.omega-v${OMEGA_RC_VERSION}"
+readonly OMEGA_SOURCE_VERIFIER_PATH="script/verify-omega-identity"
+readonly OMEGA_IDENTITY_BOUNDARY_LIST="BUZZ_PRIVATE_KEY,identity.key,get_nsec"
 
 DRY_RUN=false
 SKIP_BUILD=false
 TARGET_TRIPLE="aarch64-apple-darwin"
 OUTPUT_DIR="${ROOT}/target/omega-rc"
 RELEASE_RECORD_PATH=""
+BUILD_LOCK_SNAPSHOT_PATH=""
+BUILD_LOCK_SNAPSHOT_NAME=""
+BUILD_LOCK_SNAPSHOT_DIGEST=""
+OMEGA_BINARY_DIGEST=""
+CLI_BINARY_DIGEST=""
+SOURCE_VERIFIER_DIGEST=""
+SOURCE_VERIFIER_PASSED=false
+PACKAGED_BOUNDARY_SCAN_PASSED=false
 
 usage() {
   cat <<EOF
@@ -40,8 +51,8 @@ Options:
   --dry-run              Validate prerequisites and release-record schema without
                          compiling, signing, or notarizing.
   --skip-build           Reuse an existing DMG at the expected output path and
-                         only refresh the release record (still requires a clean
-                         tree and signing identity check when a package exists).
+                         validate its existing release record without modifying
+                         or relabeling either file.
   --output-dir DIR       Directory for the DMG and release record
                          (default: target/omega-rc).
   --release-record PATH  Explicit release-record JSON path.
@@ -80,7 +91,13 @@ while [[ $# -gt 0 ]]; do
   shift
 done
 
+if [[ "${DRY_RUN}" == "true" && "${SKIP_BUILD}" == "true" ]]; then
+  echo "error: --dry-run and --skip-build are mutually exclusive." >&2
+  exit 2
+fi
+
 mkdir -p "${OUTPUT_DIR}"
+BUILD_LOCK_SNAPSHOT_PATH="${OUTPUT_DIR}/${OMEGA_BUILD_LOCK_SNAPSHOT_NAME}"
 if [[ -z "${RELEASE_RECORD_PATH}" ]]; then
   RELEASE_RECORD_PATH="${OUTPUT_DIR}/omega-v${OMEGA_RC_VERSION}-macos-arm64.release.json"
 fi
@@ -122,21 +139,52 @@ find_openagents_signing_identity() {
   fi
 }
 
+verify_packaged_identity_boundaries() {
+  local app_path="$1"
+  local forbidden_literal
+  local matches
+  local -a forbidden_literals=("BUZZ_PRIVATE_KEY" "identity.key" "get_nsec")
+  for forbidden_literal in "${forbidden_literals[@]}"; do
+    matches="$(LC_ALL=C grep -aRFl -- "${forbidden_literal}" "${app_path}" || true)"
+    if [[ -n "${matches}" ]]; then
+      echo "error: packaged Omega contains forbidden identity boundary ${forbidden_literal}:" >&2
+      echo "${matches}" >&2
+      exit 1
+    fi
+  done
+  PACKAGED_BOUNDARY_SCAN_PASSED=true
+}
+
+verify_source_identity_boundaries() {
+  "${OMEGA_SOURCE_VERIFIER_PATH}"
+  SOURCE_VERIFIER_DIGEST="$(sha256_file "${OMEGA_SOURCE_VERIFIER_PATH}")"
+  if [[ -z "${SOURCE_VERIFIER_DIGEST}" ]]; then
+    echo "error: source identity verifier digest is unavailable." >&2
+    exit 1
+  fi
+  SOURCE_VERIFIER_PASSED=true
+}
+
 validate_release_record_schema() {
   local path="$1"
   python3 - "${path}" "${OMEGA_RELEASE_RECORD_SCHEMA_VERSION}" <<'PY'
 import json
+import re
 import sys
 
 path, expected_schema = sys.argv[1], int(sys.argv[2])
 with open(path, encoding="utf-8") as handle:
     record = json.load(handle)
 
+def valid_sha256(value):
+    return isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value) is not None
+
 required = [
     "schema_version",
     "product",
     "channel",
     "version",
+    "bundle_version",
     "artifact_name",
     "volume_name",
     "bundle_identifier",
@@ -144,7 +192,10 @@ required = [
     "signing_identity",
     "source",
     "toolchains",
+    "execution",
+    "build_inputs",
     "digests",
+    "identity_boundaries",
     "notarization",
     "legal",
     "publication",
@@ -161,6 +212,8 @@ if record["product"] != "Omega":
     raise SystemExit("product must be Omega")
 if record["channel"] != "rc":
     raise SystemExit("channel must be rc")
+if record["bundle_version"] != "0.2.0":
+    raise SystemExit("bundle_version must be 0.2.0")
 if record["publication"].get("prerelease") is not True:
     raise SystemExit("publication.prerelease must be true")
 if record["publication"].get("latest") is not False:
@@ -171,10 +224,64 @@ if "commit" not in record["source"]:
     raise SystemExit("source.commit is required")
 digests = record["digests"]
 for key in ("cargo_lock_sha256", "icon_family_manifest_sha256"):
-    if key not in digests or not isinstance(digests[key], str) or not digests[key]:
-        raise SystemExit(f"digests.{key} must be a non-empty string")
+    if key not in digests or not valid_sha256(digests[key]):
+        raise SystemExit(f"digests.{key} must be a SHA-256 digest")
 if "package_sha256" not in digests:
     raise SystemExit("digests.package_sha256 is required (null when absent)")
+for key in ("omega_binary_sha256", "cli_binary_sha256"):
+    if key not in digests:
+        raise SystemExit(f"digests.{key} is required (null when absent)")
+
+execution = record["execution"]
+if not isinstance(execution.get("dry_run"), bool):
+    raise SystemExit("execution.dry_run must be a boolean")
+
+build_lock = record["build_inputs"].get("cargo_lock_snapshot", {})
+for key in ("name", "sha256"):
+    if key not in build_lock:
+        raise SystemExit(f"build_inputs.cargo_lock_snapshot.{key} is required")
+
+boundaries = record["identity_boundaries"]
+source_verifier = boundaries.get("source_verifier", {})
+if source_verifier.get("path") != "script/verify-omega-identity":
+    raise SystemExit("identity_boundaries.source_verifier.path is invalid")
+if source_verifier.get("passed") is not True:
+    raise SystemExit("identity_boundaries.source_verifier.passed must be true")
+if not valid_sha256(source_verifier.get("sha256")):
+    raise SystemExit("identity_boundaries.source_verifier.sha256 must be a SHA-256 digest")
+packaged_scan = boundaries.get("packaged_scan", {})
+if packaged_scan.get("forbidden_literals") != [
+    "BUZZ_PRIVATE_KEY",
+    "identity.key",
+    "get_nsec",
+]:
+    raise SystemExit("identity_boundaries.packaged_scan.forbidden_literals is invalid")
+
+if execution["dry_run"]:
+    if any(build_lock.get(key) is not None for key in ("name", "sha256")):
+        raise SystemExit("dry-run must not claim a build Cargo.lock snapshot")
+    if any(
+        digests.get(key) is not None
+        for key in ("package_sha256", "omega_binary_sha256", "cli_binary_sha256")
+    ):
+        raise SystemExit("dry-run must not claim package or binary digests")
+    if packaged_scan.get("passed") is not False:
+        raise SystemExit("dry-run packaged boundary scan must be false")
+else:
+    for key in ("name", "sha256"):
+        if not isinstance(build_lock.get(key), str) or not build_lock[key]:
+            raise SystemExit(f"build_inputs.cargo_lock_snapshot.{key} must be non-empty")
+    if build_lock["name"] != "Cargo.lock.omega-v0.2.0-rc1":
+        raise SystemExit("build_inputs.cargo_lock_snapshot.name is invalid")
+    if not valid_sha256(build_lock["sha256"]):
+        raise SystemExit("build_inputs.cargo_lock_snapshot.sha256 must be a SHA-256 digest")
+    if digests["cargo_lock_sha256"] != build_lock["sha256"]:
+        raise SystemExit("build Cargo.lock snapshot digest must match cargo_lock_sha256")
+    for key in ("package_sha256", "omega_binary_sha256", "cli_binary_sha256"):
+        if not valid_sha256(digests.get(key)):
+            raise SystemExit(f"digests.{key} must be a SHA-256 digest")
+    if packaged_scan.get("passed") is not True:
+        raise SystemExit("built package boundary scan must pass")
 print(f"release-record schema ok: {path}")
 PY
 }
@@ -205,11 +312,13 @@ write_release_record() {
   local notarization_attempted="$3"
   local notarization_stapled="$4"
   local package_digest
-  package_digest="$(sha256_file "${package_path}")"
+  if [[ "${DRY_RUN}" == "true" ]]; then
+    package_digest=""
+  else
+    package_digest="$(sha256_file "${package_path}")"
+  fi
   if [[ -z "${package_digest}" ]]; then
     package_digest="null"
-  else
-    package_digest="\"${package_digest}\""
   fi
 
   local commit upstream_commit rustc_version host_triple cargo_lock_digest icon_json
@@ -226,6 +335,7 @@ write_release_record() {
   OMEGA_RC_RECORD_OUT="${RELEASE_RECORD_PATH}" \
   OMEGA_RC_SCHEMA_VERSION="${OMEGA_RELEASE_RECORD_SCHEMA_VERSION}" \
   OMEGA_RC_VERSION_VALUE="${OMEGA_RC_VERSION}" \
+  OMEGA_RC_BUNDLE_VERSION_VALUE="${OMEGA_RC_SEMVER}" \
   OMEGA_RC_ARTIFACT_NAME="${OMEGA_ARTIFACT_NAME}" \
   OMEGA_RC_VOLUME_NAME="${OMEGA_VOLUME_NAME}" \
   OMEGA_RC_BUNDLE_ID="${OMEGA_BUNDLE_ID}" \
@@ -236,8 +346,18 @@ write_release_record() {
   OMEGA_RC_RUSTC="${rustc_version}" \
   OMEGA_RC_HOST="${host_triple}" \
   OMEGA_RC_CARGO_LOCK_DIGEST="${cargo_lock_digest}" \
+  OMEGA_RC_BUILD_LOCK_SNAPSHOT_NAME="${BUILD_LOCK_SNAPSHOT_NAME:-}" \
+  OMEGA_RC_BUILD_LOCK_SNAPSHOT_DIGEST="${BUILD_LOCK_SNAPSHOT_DIGEST}" \
   OMEGA_RC_ICON_JSON="${icon_json}" \
   OMEGA_RC_PACKAGE_DIGEST="${package_digest}" \
+  OMEGA_RC_OMEGA_BINARY_DIGEST="${OMEGA_BINARY_DIGEST}" \
+  OMEGA_RC_CLI_BINARY_DIGEST="${CLI_BINARY_DIGEST}" \
+  OMEGA_RC_SOURCE_VERIFIER_PATH="${OMEGA_SOURCE_VERIFIER_PATH}" \
+  OMEGA_RC_SOURCE_VERIFIER_DIGEST="${SOURCE_VERIFIER_DIGEST}" \
+  OMEGA_RC_SOURCE_VERIFIER_PASSED="${SOURCE_VERIFIER_PASSED}" \
+  OMEGA_RC_PACKAGED_SCAN_PASSED="${PACKAGED_BOUNDARY_SCAN_PASSED}" \
+  OMEGA_RC_IDENTITY_BOUNDARIES="${OMEGA_IDENTITY_BOUNDARY_LIST}" \
+  OMEGA_RC_DRY_RUN="${DRY_RUN}" \
   OMEGA_RC_NOTARIZATION_STATUS="${notarization_status}" \
   OMEGA_RC_NOTARIZATION_ATTEMPTED="${notarization_attempted}" \
   OMEGA_RC_NOTARIZATION_STAPLED="${notarization_stapled}" \
@@ -253,12 +373,18 @@ package_digest = os.environ["OMEGA_RC_PACKAGE_DIGEST"]
 package_sha256 = None if package_digest == "null" else package_digest
 package_path = os.environ["OMEGA_RC_PACKAGE_PATH"]
 version = os.environ["OMEGA_RC_VERSION_VALUE"]
+build_lock_name = os.environ.get("OMEGA_RC_BUILD_LOCK_SNAPSHOT_NAME") or None
+build_lock_digest = os.environ.get("OMEGA_RC_BUILD_LOCK_SNAPSHOT_DIGEST") or None
+omega_binary_digest = os.environ.get("OMEGA_RC_OMEGA_BINARY_DIGEST") or None
+cli_binary_digest = os.environ.get("OMEGA_RC_CLI_BINARY_DIGEST") or None
+dry_run = os.environ["OMEGA_RC_DRY_RUN"] == "true"
 
 record = {
     "schema_version": int(os.environ["OMEGA_RC_SCHEMA_VERSION"]),
     "product": "Omega",
     "channel": "rc",
     "version": version,
+    "bundle_version": os.environ["OMEGA_RC_BUNDLE_VERSION_VALUE"],
     "artifact_name": os.environ["OMEGA_RC_ARTIFACT_NAME"],
     "volume_name": os.environ["OMEGA_RC_VOLUME_NAME"],
     "bundle_identifier": os.environ["OMEGA_RC_BUNDLE_ID"],
@@ -275,6 +401,15 @@ record = {
         "host": os.environ["OMEGA_RC_HOST"],
         "target": "aarch64-apple-darwin",
     },
+    "execution": {
+        "dry_run": dry_run,
+    },
+    "build_inputs": {
+        "cargo_lock_snapshot": {
+            "name": build_lock_name,
+            "sha256": build_lock_digest,
+        },
+    },
     "digests": {
         "cargo_lock_sha256": os.environ["OMEGA_RC_CARGO_LOCK_DIGEST"],
         "icon_family_manifest_sha256": icons["manifest_sha256"],
@@ -282,6 +417,19 @@ record = {
         "pinned_icns_sha256": icons["pinned_icns_sha256"],
         "icon_outputs": icons["outputs"],
         "package_sha256": package_sha256,
+        "omega_binary_sha256": omega_binary_digest,
+        "cli_binary_sha256": cli_binary_digest,
+    },
+    "identity_boundaries": {
+        "source_verifier": {
+            "path": os.environ["OMEGA_RC_SOURCE_VERIFIER_PATH"],
+            "sha256": os.environ["OMEGA_RC_SOURCE_VERIFIER_DIGEST"],
+            "passed": os.environ["OMEGA_RC_SOURCE_VERIFIER_PASSED"] == "true",
+        },
+        "packaged_scan": {
+            "passed": os.environ["OMEGA_RC_PACKAGED_SCAN_PASSED"] == "true",
+            "forbidden_literals": os.environ["OMEGA_RC_IDENTITY_BOUNDARIES"].split(","),
+        },
     },
     "notarization": {
         "attempted": os.environ["OMEGA_RC_NOTARIZATION_ATTEMPTED"] == "true",
@@ -298,7 +446,7 @@ record = {
         "latest": False,
         "tag": f"v{version}",
     },
-    "package_path": package_path if Path(package_path).is_file() else None,
+    "package_path": package_path if not dry_run and Path(package_path).is_file() else None,
     "owner_blockers": [
         "Omega-owned Developer ID provisioning profile for com.openagents.omega.rc (current preview profile is Zed team MQ55VZLNZQ)",
         "Owner notarization key material when stapled Gatekeeper distribution is required",
@@ -314,22 +462,87 @@ PY
   validate_release_record_schema "${RELEASE_RECORD_PATH}"
 }
 
+validate_existing_release_record() {
+  local package_path="$1"
+  if [[ ! -f "${RELEASE_RECORD_PATH}" ]]; then
+    echo "error: --skip-build requires existing release record at ${RELEASE_RECORD_PATH}" >&2
+    exit 1
+  fi
+  validate_release_record_schema "${RELEASE_RECORD_PATH}"
+
+  local commit package_digest verifier_digest
+  commit="$(git rev-parse HEAD)"
+  package_digest="$(sha256_file "${package_path}")"
+  verifier_digest="$(sha256_file "${OMEGA_SOURCE_VERIFIER_PATH}")"
+  python3 - \
+    "${RELEASE_RECORD_PATH}" \
+    "${OUTPUT_DIR}" \
+    "${commit}" \
+    "${OMEGA_ARTIFACT_NAME}" \
+    "${package_digest}" \
+    "${verifier_digest}" <<'PY'
+import hashlib
+import json
+import sys
+from pathlib import Path
+
+record_path, output_dir, commit, artifact_name, package_digest, verifier_digest = (
+    sys.argv[1:]
+)
+record = json.loads(Path(record_path).read_text(encoding="utf-8"))
+
+if record["execution"]["dry_run"]:
+    raise SystemExit("--skip-build cannot reuse a dry-run release record")
+if record["source"].get("commit") != commit:
+    raise SystemExit("--skip-build release record commit does not match HEAD")
+if record.get("artifact_name") != artifact_name:
+    raise SystemExit("--skip-build release record artifact name is stale")
+if record["digests"].get("package_sha256") != package_digest:
+    raise SystemExit("--skip-build package digest does not match release record")
+if record["identity_boundaries"]["source_verifier"].get("sha256") != verifier_digest:
+    raise SystemExit("--skip-build source verifier digest does not match release record")
+
+snapshot = record["build_inputs"]["cargo_lock_snapshot"]
+snapshot_name = snapshot["name"]
+if Path(snapshot_name).name != snapshot_name:
+    raise SystemExit("--skip-build Cargo.lock snapshot name must be a basename")
+snapshot_path = Path(output_dir) / snapshot_name
+if not snapshot_path.is_file():
+    raise SystemExit(f"--skip-build Cargo.lock snapshot is missing: {snapshot_path}")
+snapshot_digest = hashlib.sha256(snapshot_path.read_bytes()).hexdigest()
+if snapshot_digest != snapshot["sha256"]:
+    raise SystemExit("--skip-build Cargo.lock snapshot digest does not match release record")
+
+print(f"validated existing Omega RC artifact and release record: {record_path}")
+PY
+}
+
 restore_channel_and_version() {
-  if [[ -f "${_OMEGA_RC_CHANNEL_BACKUP_FILE:-}" ]]; then
-    cp "${_OMEGA_RC_CHANNEL_BACKUP_FILE}" crates/zed/RELEASE_CHANNEL
-    rm -f "${_OMEGA_RC_CHANNEL_BACKUP_FILE}"
-  fi
-  if [[ -f "${_OMEGA_RC_CARGO_BACKUP_FILE:-}" ]]; then
-    cp "${_OMEGA_RC_CARGO_BACKUP_FILE}" crates/zed/Cargo.toml
-    rm -f "${_OMEGA_RC_CARGO_BACKUP_FILE}"
-  fi
+  (
+    cd "${ROOT}"
+    if [[ -f "${_OMEGA_RC_CHANNEL_BACKUP_FILE:-}" ]]; then
+      cp "${_OMEGA_RC_CHANNEL_BACKUP_FILE}" crates/zed/RELEASE_CHANNEL
+      rm -f "${_OMEGA_RC_CHANNEL_BACKUP_FILE}"
+    fi
+    if [[ -f "${_OMEGA_RC_CARGO_BACKUP_FILE:-}" ]]; then
+      cp "${_OMEGA_RC_CARGO_BACKUP_FILE}" crates/zed/Cargo.toml
+      rm -f "${_OMEGA_RC_CARGO_BACKUP_FILE}"
+    fi
+    if [[ -f "${_OMEGA_RC_LOCK_BACKUP_FILE:-}" ]]; then
+      cp "${_OMEGA_RC_LOCK_BACKUP_FILE}" Cargo.lock
+      rm -f "${_OMEGA_RC_LOCK_BACKUP_FILE}"
+    fi
+    rm -f crates/zed/Cargo.toml.backup
+  )
 }
 
 set_channel_and_version() {
   _OMEGA_RC_CHANNEL_BACKUP_FILE="$(mktemp)"
   _OMEGA_RC_CARGO_BACKUP_FILE="$(mktemp)"
+  _OMEGA_RC_LOCK_BACKUP_FILE="$(mktemp)"
   cp crates/zed/RELEASE_CHANNEL "${_OMEGA_RC_CHANNEL_BACKUP_FILE}"
   cp crates/zed/Cargo.toml "${_OMEGA_RC_CARGO_BACKUP_FILE}"
+  cp Cargo.lock "${_OMEGA_RC_LOCK_BACKUP_FILE}"
 
   printf '%s\n' "${OMEGA_RC_CHANNEL}" > crates/zed/RELEASE_CHANNEL
   python3 - <<PY
@@ -380,8 +593,18 @@ trap cleanup EXIT
 
 require_arm64_host_or_target
 require_clean_checkout
+verify_source_identity_boundaries
 
 DMG_PATH="${OUTPUT_DIR}/${OMEGA_ARTIFACT_NAME}"
+
+if [[ "${SKIP_BUILD}" == "true" ]]; then
+  if [[ ! -f "${DMG_PATH}" ]]; then
+    echo "error: --skip-build requires existing package at ${DMG_PATH}" >&2
+    exit 1
+  fi
+  validate_existing_release_record "${DMG_PATH}"
+  exit 0
+fi
 
 if [[ "${DRY_RUN}" == "true" ]]; then
   echo "Omega RC dry-run"
@@ -402,18 +625,19 @@ find_openagents_signing_identity
 maybe_import_certificate
 find_openagents_signing_identity
 
-if [[ "${SKIP_BUILD}" == "true" ]]; then
-  if [[ ! -f "${DMG_PATH}" ]]; then
-    echo "error: --skip-build requires existing package at ${DMG_PATH}" >&2
-    exit 1
-  fi
-  write_release_record "${DMG_PATH}" "not_attempted" "false" "false"
-  exit 0
-fi
-
 set_channel_and_version
 
 echo "Preparing Omega RC ${OMEGA_RC_VERSION} (channel=${OMEGA_RC_CHANNEL})"
+echo "Updating temporary Cargo.lock for zed ${OMEGA_RC_SEMVER}"
+cargo update --package zed --precise "${OMEGA_RC_SEMVER}"
+cp Cargo.lock "${BUILD_LOCK_SNAPSHOT_PATH}"
+BUILD_LOCK_SNAPSHOT_NAME="${OMEGA_BUILD_LOCK_SNAPSHOT_NAME}"
+BUILD_LOCK_SNAPSHOT_DIGEST="$(sha256_file "${BUILD_LOCK_SNAPSHOT_PATH}")"
+if [[ -z "${BUILD_LOCK_SNAPSHOT_DIGEST}" ]]; then
+  echo "error: failed to capture build Cargo.lock snapshot." >&2
+  exit 1
+fi
+
 script/generate-licenses
 
 rustup target add "${TARGET_TRIPLE}"
@@ -425,10 +649,11 @@ fi
 
 export CXXFLAGS="-stdlib=libc++"
 export ZED_BUNDLE=true
+export ZED_COMMIT_SHA="$(git rev-parse HEAD)"
 
 echo "Compiling omega binaries for ${TARGET_TRIPLE}"
-cargo build --release --package zed --package cli --target "${TARGET_TRIPLE}"
-cargo build --release --package remote_server --target "${TARGET_TRIPLE}"
+cargo build --locked --release --package zed --package cli --target "${TARGET_TRIPLE}"
+cargo build --locked --release --package remote_server --target "${TARGET_TRIPLE}"
 
 echo "Creating application bundle"
 pushd crates/zed >/dev/null
@@ -437,7 +662,11 @@ sed \
   -i.backup \
   "s/package.metadata.bundle-${OMEGA_RC_CHANNEL}/package.metadata.bundle/" \
   Cargo.toml
-app_path="$(cargo bundle --release --target "${TARGET_TRIPLE}" --select-workspace-root | xargs)"
+app_path="$(TERM=xterm-256color CARGO_TERM_COLOR=never cargo bundle --release --target "${TARGET_TRIPLE}" --select-workspace-root | xargs)"
+if [[ "$(sha256_file "${ROOT}/Cargo.lock")" != "${BUILD_LOCK_SNAPSHOT_DIGEST}" ]]; then
+  echo "error: cargo-bundle changed Cargo.lock after the locked release build." >&2
+  exit 1
+fi
 mv Cargo.toml.backup Cargo.toml
 rm -f Cargo.toml.backup
 popd >/dev/null
@@ -454,6 +683,7 @@ rm -f "${app_path}/Contents/embedded.provisionprofile"
 
 cp "target/${TARGET_TRIPLE}/release/omega" "${app_path}/Contents/MacOS/omega"
 cp "target/${TARGET_TRIPLE}/release/cli" "${app_path}/Contents/MacOS/cli"
+verify_packaged_identity_boundaries "${app_path}"
 
 # Strip associated-domains entitlement: it requires an Omega-owned profile.
 entitlements_path="${OUTPUT_DIR}/omega-rc.entitlements"
@@ -469,6 +699,12 @@ echo "Code signing with ${OMEGA_SIGNING_IDENTITY}"
 /usr/bin/codesign --force --timestamp --options runtime \
   --entitlements "${entitlements_path}" \
   --sign "${OMEGA_SIGNING_IDENTITY}" "${app_path}" -v
+OMEGA_BINARY_DIGEST="$(sha256_file "${app_path}/Contents/MacOS/omega")"
+CLI_BINARY_DIGEST="$(sha256_file "${app_path}/Contents/MacOS/cli")"
+if [[ -z "${OMEGA_BINARY_DIGEST}" || -z "${CLI_BINARY_DIGEST}" ]]; then
+  echo "error: signed Omega binary digests are unavailable." >&2
+  exit 1
+fi
 
 dmg_source_directory="${OUTPUT_DIR}/dmg-src"
 rm -rf "${dmg_source_directory}"

@@ -1,0 +1,511 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/OpenAgentsInc/omega/crates/omega_identity/fixtures/identity_candidate_evidence_schema_v1.json",
+  "title": "Omega identity candidate evidence v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "schema_version",
+    "status",
+    "candidate_admitted",
+    "candidate",
+    "candidate_digest",
+    "gates",
+    "attestation_errors"
+  ],
+  "properties": {
+    "schema": {
+      "const": "openagents.omega.identity-candidate-evidence.v1"
+    },
+    "schema_version": {
+      "const": 1
+    },
+    "status": {
+      "enum": [
+        "pending_required_gates",
+        "admitted"
+      ]
+    },
+    "candidate_admitted": {
+      "type": "boolean"
+    },
+    "candidate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "omega",
+        "identity_contract",
+        "public_vector",
+        "reviewed_source",
+        "packages",
+        "build_cargo_lock",
+        "artifact",
+        "automated_tripwires"
+      ],
+      "properties": {
+        "omega": {
+          "$ref": "#/$defs/sourceBinding"
+        },
+        "identity_contract": {
+          "type": "object",
+          "required": [
+            "version",
+            "source_path",
+            "source_sha256"
+          ]
+        },
+        "public_vector": {
+          "type": "object",
+          "required": [
+            "version",
+            "path",
+            "sha256"
+          ]
+        },
+        "reviewed_source": {
+          "type": "object",
+          "required": [
+            "repository",
+            "commit"
+          ]
+        },
+        "packages": {
+          "type": "array",
+          "minItems": 3,
+          "maxItems": 3,
+          "items": {
+            "type": "object",
+            "required": [
+              "name",
+              "version",
+              "cargo_checksum"
+            ]
+          }
+        },
+        "build_cargo_lock": {
+          "type": "object",
+          "required": [
+            "name",
+            "sha256"
+          ],
+          "properties": {
+            "sha256": {
+              "$ref": "#/$defs/sha256"
+            }
+          }
+        },
+        "artifact": {
+          "type": "object",
+          "required": [
+            "name",
+            "version",
+            "sha256",
+            "release_record_sha256",
+            "packaged_app"
+          ],
+          "properties": {
+            "sha256": {
+              "$ref": "#/$defs/sha256"
+            },
+            "release_record_sha256": {
+              "$ref": "#/$defs/sha256"
+            },
+            "packaged_app": {
+              "type": "object",
+              "required": [
+                "application_name",
+                "bundle_identifier",
+                "bundle_version",
+                "bundle_build_version",
+                "omega_binary_sha256",
+                "cli_binary_sha256",
+                "source_commit_marker",
+                "signing",
+                "fresh_boundary_scan"
+              ],
+              "properties": {
+                "source_commit_marker": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{40}$"
+                },
+                "omega_binary_sha256": {
+                  "$ref": "#/$defs/sha256"
+                },
+                "cli_binary_sha256": {
+                  "$ref": "#/$defs/sha256"
+                },
+                "signing": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "dmg",
+                    "application"
+                  ],
+                  "properties": {
+                    "dmg": {
+                      "$ref": "#/$defs/codeSigning"
+                    },
+                    "application": {
+                      "$ref": "#/$defs/codeSigning"
+                    }
+                  }
+                },
+                "fresh_boundary_scan": {
+                  "$ref": "#/$defs/observedScan"
+                }
+              }
+            }
+          }
+        },
+        "automated_tripwires": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "verifier_path",
+            "verifier_script_sha256",
+            "source_verification",
+            "packaged_boundary_scan",
+            "packaged_forbidden_literals",
+            "fresh_mounted_app_scan",
+            "scope"
+          ],
+          "properties": {
+            "verifier_path": {
+              "type": "string"
+            },
+            "verifier_script_sha256": {
+              "$ref": "#/$defs/sha256"
+            },
+            "source_verification": {
+              "const": "passed"
+            },
+            "packaged_boundary_scan": {
+              "const": "passed"
+            },
+            "packaged_forbidden_literals": {
+              "const": [
+                "BUZZ_PRIVATE_KEY",
+                "identity.key",
+                "get_nsec"
+              ]
+            },
+            "fresh_mounted_app_scan": {
+              "$ref": "#/$defs/observedScan"
+            },
+            "scope": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        }
+      }
+    },
+    "candidate_digest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "algorithm",
+        "canonicalization",
+        "value"
+      ],
+      "properties": {
+        "algorithm": {
+          "const": "sha256"
+        },
+        "canonicalization": {
+          "type": "string"
+        },
+        "value": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "gates": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "assurance_spec_admission",
+        "custody_scenarios",
+        "recovery_scenarios",
+        "forged_request_rejection",
+        "stale_task_fencing",
+        "installed_secret_tripwires",
+        "manual_journey",
+        "owner_observation",
+        "independent_verification",
+        "accessibility",
+        "install_lifecycle"
+      ],
+      "properties": {
+        "assurance_spec_admission": {
+          "$ref": "#/$defs/gate"
+        },
+        "custody_scenarios": {
+          "$ref": "#/$defs/gate"
+        },
+        "recovery_scenarios": {
+          "$ref": "#/$defs/gate"
+        },
+        "forged_request_rejection": {
+          "$ref": "#/$defs/gate"
+        },
+        "stale_task_fencing": {
+          "$ref": "#/$defs/gate"
+        },
+        "installed_secret_tripwires": {
+          "$ref": "#/$defs/gate"
+        },
+        "manual_journey": {
+          "$ref": "#/$defs/gate"
+        },
+        "owner_observation": {
+          "$ref": "#/$defs/gate"
+        },
+        "independent_verification": {
+          "$ref": "#/$defs/gate"
+        },
+        "accessibility": {
+          "$ref": "#/$defs/gate"
+        },
+        "install_lifecycle": {
+          "$ref": "#/$defs/gate"
+        }
+      }
+    },
+    "attestation_errors": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string",
+        "minLength": 1
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "candidate_admitted": {
+            "const": true
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "status": {
+            "const": "admitted"
+          },
+          "attestation_errors": {
+            "maxProperties": 0
+          },
+          "gates": {
+            "properties": {
+              "assurance_spec_admission": {
+                "$ref": "#/$defs/passedGate"
+              },
+              "custody_scenarios": {
+                "$ref": "#/$defs/passedGate"
+              },
+              "recovery_scenarios": {
+                "$ref": "#/$defs/passedGate"
+              },
+              "forged_request_rejection": {
+                "$ref": "#/$defs/passedGate"
+              },
+              "stale_task_fencing": {
+                "$ref": "#/$defs/passedGate"
+              },
+              "installed_secret_tripwires": {
+                "$ref": "#/$defs/passedGate"
+              },
+              "manual_journey": {
+                "$ref": "#/$defs/passedGate"
+              },
+              "owner_observation": {
+                "$ref": "#/$defs/passedGate"
+              },
+              "independent_verification": {
+                "$ref": "#/$defs/passedGate"
+              },
+              "accessibility": {
+                "$ref": "#/$defs/passedGate"
+              },
+              "install_lifecycle": {
+                "$ref": "#/$defs/passedGate"
+              }
+            }
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "status": {
+            "const": "pending_required_gates"
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "observedScan": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "forbidden_literals",
+        "matches",
+        "scope"
+      ],
+      "properties": {
+        "status": {
+          "const": "passed"
+        },
+        "forbidden_literals": {
+          "const": [
+            "BUZZ_PRIVATE_KEY",
+            "identity.key",
+            "get_nsec"
+          ]
+        },
+        "matches": {
+          "type": "object",
+          "maxProperties": 0
+        },
+        "scope": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "codeSigning": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "verified",
+        "authority",
+        "team_id"
+      ],
+      "properties": {
+        "verified": {
+          "const": true
+        },
+        "authority": {
+          "const": "Developer ID Application: OpenAgents, Inc. (HQWSG26L43)"
+        },
+        "team_id": {
+          "const": "HQWSG26L43"
+        }
+      }
+    },
+    "sourceBinding": {
+      "type": "object",
+      "required": [
+        "repository",
+        "commit",
+        "dirty"
+      ],
+      "properties": {
+        "repository": {
+          "type": "string"
+        },
+        "commit": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "dirty": {
+          "type": "boolean"
+        }
+      }
+    },
+    "gate": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/pendingGate"
+        },
+        {
+          "$ref": "#/$defs/passedGate"
+        }
+      ]
+    },
+    "pendingGate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "attestor",
+        "observed_at",
+        "evidence",
+        "required_evidence"
+      ],
+      "properties": {
+        "status": {
+          "const": "pending"
+        },
+        "attestor": {
+          "type": "null"
+        },
+        "observed_at": {
+          "type": "null"
+        },
+        "evidence": {
+          "type": "object",
+          "maxProperties": 0
+        },
+        "required_evidence": {
+          "$ref": "#/$defs/requiredEvidence"
+        }
+      }
+    },
+    "passedGate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "attestor",
+        "observed_at",
+        "evidence",
+        "required_evidence"
+      ],
+      "properties": {
+        "status": {
+          "const": "passed"
+        },
+        "attestor": {
+          "type": "string",
+          "minLength": 1
+        },
+        "observed_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "evidence": {
+          "type": "object",
+          "minProperties": 1,
+          "propertyNames": {
+            "type": "string",
+            "minLength": 1
+          },
+          "additionalProperties": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required_evidence": {
+          "$ref": "#/$defs/requiredEvidence"
+        }
+      }
+    },
+    "requiredEvidence": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    }
+  }
+}
