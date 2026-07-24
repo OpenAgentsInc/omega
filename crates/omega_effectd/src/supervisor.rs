@@ -266,6 +266,70 @@ impl OmegaEffectdSupervisor {
             .ok_or_else(|| anyhow!("assess_native_boundary missing assessment"))?)
     }
 
+    pub async fn start_agent_computer_session(
+        &mut self,
+        params: Value,
+    ) -> Result<Value, SupervisorError> {
+        let result = self
+            .request("start_agent_computer_session", Some(params), self.generation())
+            .await?;
+        Ok(result
+            .get("session")
+            .cloned()
+            .ok_or_else(|| anyhow!("start_agent_computer_session missing session"))?)
+    }
+
+    pub async fn refresh_agent_computer_session(
+        &mut self,
+        bearer_token: &str,
+        session_ref: &str,
+    ) -> Result<Value, SupervisorError> {
+        let result = self
+            .request(
+                "refresh_agent_computer_session",
+                Some(json!({
+                    "bearerToken": bearer_token,
+                    "sessionRef": session_ref,
+                })),
+                self.generation(),
+            )
+            .await?;
+        Ok(result
+            .get("session")
+            .cloned()
+            .ok_or_else(|| anyhow!("refresh_agent_computer_session missing session"))?)
+    }
+
+    pub async fn run_agent_computer_turn(
+        &mut self,
+        params: Value,
+    ) -> Result<Value, SupervisorError> {
+        self.request("run_agent_computer_turn", Some(params), self.generation())
+            .await
+    }
+
+    pub async fn get_agent_computer_session(
+        &mut self,
+        session_ref: &str,
+    ) -> Result<Value, SupervisorError> {
+        let result = self
+            .request(
+                "get_agent_computer_session",
+                Some(json!({ "sessionRef": session_ref })),
+                self.generation(),
+            )
+            .await?;
+        Ok(result
+            .get("session")
+            .cloned()
+            .unwrap_or(Value::Null))
+    }
+
+    pub async fn list_agent_computer_sessions(&mut self) -> Result<Value, SupervisorError> {
+        self.request("list_agent_computer_sessions", None, self.generation())
+            .await
+    }
+
     async fn mutate_run(&mut self, method: &str, run_ref: &str) -> Result<Value, SupervisorError> {
         let result = self
             .request(

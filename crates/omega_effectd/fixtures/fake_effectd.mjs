@@ -16,7 +16,9 @@ if (!dataRoot) {
 
 const runsFile = path.join(dataRoot, "full-auto", "runs.json")
 const bindingsFile = path.join(dataRoot, "full-auto", "native-bindings.json")
+const agentComputerSessionsFile = path.join(dataRoot, "agent-computer", "sessions.json")
 mkdirSync(path.join(dataRoot, "full-auto"), { recursive: true, mode: 0o700 })
+mkdirSync(path.join(dataRoot, "agent-computer"), { recursive: true, mode: 0o700 })
 
 let generation = 0
 let running = false
@@ -78,6 +80,50 @@ const saveBindings = (bindings) => {
       2,
     ),
   )
+}
+
+const loadAgentComputerSessions = () => {
+  if (!existsSync(agentComputerSessionsFile)) return []
+  try {
+    const parsed = JSON.parse(readFileSync(agentComputerSessionsFile, "utf8"))
+    return Array.isArray(parsed.sessions) ? parsed.sessions : []
+  } catch {
+    return []
+  }
+}
+
+const saveAgentComputerSessions = (sessions) => {
+  writeFileSync(
+    agentComputerSessionsFile,
+    JSON.stringify(
+      {
+        schema: "openagents.omega.agent_computer_session.v1",
+        sessions,
+      },
+      null,
+      2,
+    ),
+  )
+}
+
+const projectAgentComputerSession = (params, state = "queued") => {
+  const startedAt = new Date().toISOString()
+  return {
+    sessionRef: `ccs.fixture.${Date.now().toString(36)}`,
+    environment: "openagents_cloud",
+    controlPlaneBaseUrl: params.controlPlaneBaseUrl,
+    repoRef: params.repoRef,
+    objectiveDigest: "fixture-objective-digest",
+    state,
+    adapter: params.adapter ?? "codex",
+    lane: params.lane ?? "cloud-gcp",
+    placementRef: "placement.fixture.ac01",
+    artifactRef: state === "completed" ? "artifact.fixture.ac01" : null,
+    agentComputerRef: "agentcomputer.fixture.ac01",
+    agentComputerState: state === "completed" ? "reclaimed" : "active",
+    startedAt,
+    updatedAt: startedAt,
+  }
 }
 
 const listRuns = () =>
@@ -168,6 +214,11 @@ for await (const line of rl) {
         "publish_projection",
         "get_native_binding",
         "assess_native_boundary",
+        "start_agent_computer_session",
+        "refresh_agent_computer_session",
+        "run_agent_computer_turn",
+        "get_agent_computer_session",
+        "list_agent_computer_sessions",
       ],
       dataRoot,
       activeRunLimit: 8,
@@ -498,6 +549,86 @@ for await (const line of rl) {
         },
       },
     })
+    continue
+  }
+  if (request.method === "start_agent_computer_session") {
+    const params = request.params ?? {}
+    if (
+      typeof params.bearerToken !== "string" ||
+      typeof params.controlPlaneBaseUrl !== "string" ||
+      typeof params.repoRef !== "string" ||
+      typeof params.objective !== "string"
+    ) {
+      respond(request.id, generation, false, undefined, {
+        code: "invalid_request",
+        message:
+          "start_agent_computer_session requires bearerToken, controlPlaneBaseUrl, repoRef, and objective.",
+      })
+      continue
+    }
+    const sessions = loadAgentComputerSessions()
+    const session = projectAgentComputerSession(params, "queued")
+    sessions.push(session)
+    saveAgentComputerSessions(sessions)
+    respond(request.id, generation, true, { session })
+    continue
+  }
+  if (request.method === "refresh_agent_computer_session") {
+    const params = request.params ?? {}
+    const sessions = loadAgentComputerSessions()
+    const index = sessions.findIndex((row) => row.sessionRef === params.sessionRef)
+    if (index === -1) {
+      respond(request.id, generation, false, undefined, {
+        code: "invalid_request",
+        message: "No Agent Computer session exists for that sessionRef.",
+      })
+      continue
+    }
+    const next = {
+      ...sessions[index],
+      state: "running",
+      updatedAt: new Date().toISOString(),
+    }
+    sessions[index] = next
+    saveAgentComputerSessions(sessions)
+    respond(request.id, generation, true, { session: next })
+    continue
+  }
+  if (request.method === "run_agent_computer_turn") {
+    const params = request.params ?? {}
+    if (
+      typeof params.bearerToken !== "string" ||
+      typeof params.controlPlaneBaseUrl !== "string" ||
+      typeof params.repoRef !== "string" ||
+      typeof params.objective !== "string"
+    ) {
+      respond(request.id, generation, false, undefined, {
+        code: "invalid_request",
+        message:
+          "run_agent_computer_turn requires bearerToken, controlPlaneBaseUrl, repoRef, and objective.",
+      })
+      continue
+    }
+    const sessions = loadAgentComputerSessions()
+    const session = projectAgentComputerSession(params, "completed")
+    sessions.push(session)
+    saveAgentComputerSessions(sessions)
+    respond(request.id, generation, true, {
+      session,
+      finishReason: "stop",
+      eventKinds: ["turn.started", "text.delta", "turn.finished"],
+    })
+    continue
+  }
+  if (request.method === "get_agent_computer_session") {
+    const session =
+      loadAgentComputerSessions().find((row) => row.sessionRef === request.params?.sessionRef) ??
+      null
+    respond(request.id, generation, true, { session })
+    continue
+  }
+  if (request.method === "list_agent_computer_sessions") {
+    respond(request.id, generation, true, { sessions: loadAgentComputerSessions() })
     continue
   }
   respond(request.id, generation, false, undefined, {

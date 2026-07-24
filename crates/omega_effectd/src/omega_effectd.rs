@@ -170,4 +170,91 @@ mod tests {
             supervisor.stop().await.expect("supervisor stop");
         });
     }
+
+    #[test]
+    fn ac01_agent_computer_session_survives_restart_without_bearer() {
+        smol::block_on(async {
+            let root = tempdir().unwrap();
+            let mut supervisor = OmegaEffectdSupervisor::new(OmegaEffectdSupervisorOptions {
+                data_root: root.path().to_path_buf(),
+                command: fixture_command(&fixture_path()),
+                initial_generation: 1,
+                request_timeout: Duration::from_secs(5),
+            });
+
+            supervisor.start().await.expect("start");
+            let session = supervisor
+                .start_agent_computer_session(json!({
+                    "bearerToken": "secret-fixture-token",
+                    "controlPlaneBaseUrl": "https://openagents.com",
+                    "repoRef": "OpenAgentsInc/openagents",
+                    "objective": "Fixture Agent Computer launch",
+                    "adapter": "codex",
+                    "lane": "cloud-gcp",
+                }))
+                .await
+                .expect("start agent computer");
+            let session_ref = session
+                .get("sessionRef")
+                .and_then(|v| v.as_str())
+                .expect("sessionRef")
+                .to_string();
+            assert_eq!(
+                session.get("environment").and_then(|v| v.as_str()),
+                Some("openagents_cloud")
+            );
+
+            let refreshed = supervisor
+                .refresh_agent_computer_session("secret-fixture-token", &session_ref)
+                .await
+                .expect("refresh");
+            assert_eq!(
+                refreshed.get("state").and_then(|v| v.as_str()),
+                Some("running")
+            );
+
+            let turn = supervisor
+                .run_agent_computer_turn(json!({
+                    "bearerToken": "secret-fixture-token",
+                    "controlPlaneBaseUrl": "https://openagents.com",
+                    "repoRef": "OpenAgentsInc/openagents",
+                    "objective": "Fixture Agent Computer turn",
+                }))
+                .await
+                .expect("run turn");
+            assert_eq!(
+                turn.get("finishReason").and_then(|v| v.as_str()),
+                Some("stop")
+            );
+            assert_eq!(
+                turn.pointer("/session/state").and_then(|v| v.as_str()),
+                Some("completed")
+            );
+
+            supervisor.restart().await.expect("restart");
+            let listed = supervisor
+                .list_agent_computer_sessions()
+                .await
+                .expect("list after restart");
+            let sessions = listed
+                .get("sessions")
+                .and_then(|v| v.as_array())
+                .expect("sessions array");
+            assert!(
+                sessions.iter().any(|row| {
+                    row.get("sessionRef").and_then(|v| v.as_str()) == Some(session_ref.as_str())
+                }),
+                "agent computer session must survive restart: {listed}"
+            );
+
+            let disk = std::fs::read_to_string(
+                root.path().join("agent-computer").join("sessions.json"),
+            )
+            .expect("sessions disk");
+            assert!(!disk.contains("secret-fixture-token"));
+            assert!(!disk.contains("Fixture Agent Computer"));
+
+            supervisor.stop().await.expect("supervisor stop");
+        });
+    }
 }
