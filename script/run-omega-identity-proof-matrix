@@ -20,7 +20,7 @@ SCHEMA = "openagents.omega.identity-proof-matrix.v1"
 PROTOCOL = "openagents.omega.identity-proof.v1"
 SERVICE = "com.openagents.omega.identity-proof.v1"
 ACCOUNT = "disposable-proof-only"
-BUNDLE_IDENTIFIER = "com.openagents.omega"
+ALLOWED_BUNDLE_IDENTIFIERS = {"com.openagents.omega", "com.openagents.omega.rc"}
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
 
 
@@ -66,6 +66,16 @@ def require_object(value: Any, label: str) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ProofError(f"{label}_invalid")
     return value
+
+
+def validate_bundle_identifier(info: dict[str, Any], release: dict[str, Any]) -> None:
+    installed_identifier = info.get("CFBundleIdentifier")
+    release_identifier = release.get("bundle_identifier")
+    if (
+        installed_identifier not in ALLOWED_BUNDLE_IDENTIFIERS
+        or release_identifier != installed_identifier
+    ):
+        raise ProofError("installed_bundle_identifier_invalid")
 
 
 def validate_candidate(
@@ -122,8 +132,7 @@ def validate_candidate(
         info = plistlib.loads(info_path.read_bytes())
     except (OSError, plistlib.InvalidFileException) as error:
         raise ProofError("installed_info_invalid") from error
-    if info.get("CFBundleIdentifier") != BUNDLE_IDENTIFIER:
-        raise ProofError("installed_bundle_identifier_invalid")
+    validate_bundle_identifier(info, release)
 
     components = require_object(release.get("components"), "release_components")
     component = require_object(
@@ -578,6 +587,23 @@ def self_test() -> None:
         raise ProofError("public_evidence_leak")
     if require_digest(digest, "candidate_digest") != digest:
         raise ProofError("digest_validation_failed")
+    validate_bundle_identifier(
+        {"CFBundleIdentifier": "com.openagents.omega.rc"},
+        {"bundle_identifier": "com.openagents.omega.rc"},
+    )
+    for installed_identifier, release_identifier in (
+        ("com.openagents.omega.rc", "com.openagents.omega"),
+        ("com.example.omega", "com.example.omega"),
+    ):
+        try:
+            validate_bundle_identifier(
+                {"CFBundleIdentifier": installed_identifier},
+                {"bundle_identifier": release_identifier},
+            )
+        except ProofError:
+            pass
+        else:
+            raise ProofError("bundle_identifier_validation_failed")
     try:
         require_digest("A" * 64, "candidate_digest")
     except ProofError:
