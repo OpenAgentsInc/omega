@@ -47,6 +47,10 @@ GPUI is not run authority.
 - Reverse host handlers have a 30-second deadline. The outer request budget is
   180 seconds because one Full Auto operation can chain several reverse calls.
 - Restart re-reads `{dataRoot}/full-auto/` from disk.
+- Manual provider handoff is legal only while the run is paused. The service
+  rechecks target-lane readiness through the native host, durably rebinds the
+  run and dispatch profiles, and records the transition before Resume can
+  dispatch on the new lane.
 - Diagnostics are redacted. Objective and transcript stay out of list
   projections.
 - Do not let a GPUI entity rewrite a durable run after restart.
@@ -64,7 +68,8 @@ The nested runtime receives only the two V8 execution entitlements required by
 hardened Node (`allow-jit` and `allow-unsigned-executable-memory`); it does not
 inherit Omega's device, personal-data, automation, or filesystem entitlements.
 Installed proof launches both the mounted and installed copies through framed
-`initialize` and `health` requests.
+`initialize` and `health` requests. The packaged runtime also advertises and
+passes the framed `handoff` contract.
 
 Omega registers the reverse-host handler when it creates the shared supervisor.
 The handler stays on GPUI's foreground executor and delegates to the active

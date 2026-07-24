@@ -17,7 +17,8 @@ Omega ships a dedicated Full Auto dock panel.
 - Launcher: one objective, collapsed Advanced (title, done condition, turn
   cap), Start / Cancel
 - Monitor: up to eight active runs with typed states
-- Run view: pause / resume / stop / retry, mission text, turn list
+- Run view: pause / resume / paused-only Codex-to-Claude or Claude-to-Codex
+  handoff / stop / retry, mission text, turn list
 - No ordinary composer on this surface
 - Mutations call supervised `omega_effectd` only
 - Full Auto and Agent Computer share one application-scoped supervisor and
@@ -37,7 +38,7 @@ Omega ships a dedicated Full Auto dock panel.
   message.
 
 Crate: `crates/full_auto_ui`. Supervisor helpers: `start_run`, `get_run`,
-`pause_run`, `resume_run`, `stop_run`, `retry_run`.
+`pause_run`, `resume_run`, `handoff_run`, `stop_run`, `retry_run`.
 
 ## Verification
 
