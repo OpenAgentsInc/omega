@@ -11,7 +11,7 @@ must be installed beside Zed and exercised.
 ## Prerequisites
 
 1. A release record from `script/bundle-omega-rc` for
-   `Omega-v0.2.0-rc1-macos-arm64.dmg`.
+   `Omega-v0.2.0-rc2-macos-arm64.dmg`.
 2. Matching package digest in that record.
 3. OpenAgents signing / notarization evidence when distribution requires it.
 4. A clean user profile that already has Zed installed for the side-by-side
@@ -25,8 +25,8 @@ the candidate-bound manual evidence described below, then:
 
 ```sh
 script/prove-omega-rc-install \
-  --release-record target/omega-rc/omega-v0.2.0-rc1-macos-arm64.release.json \
-  --artifact target/omega-rc/Omega-v0.2.0-rc1-macos-arm64.dmg \
+  --release-record target/omega-rc/omega-v0.2.0-rc2-macos-arm64.release.json \
+  --artifact target/omega-rc/Omega-v0.2.0-rc2-macos-arm64.dmg \
   --app /Applications/Omega.app \
   --identity-evidence target/omega-identity-evidence/candidate-evidence.json \
   --manual-evidence target/omega-rc-proof/manual-evidence.json
@@ -43,9 +43,9 @@ public vector, reviewed Buzz source, and native package versions:
 
 ```sh
 script/generate-omega-identity-candidate-evidence \
-  --release-record target/omega-rc/omega-v0.2.0-rc1-macos-arm64.release.json \
-  --artifact target/omega-rc/Omega-v0.2.0-rc1-macos-arm64.dmg \
-  --cargo-lock-snapshot target/omega-rc/Cargo.lock.omega-v0.2.0-rc1
+  --release-record target/omega-rc/omega-v0.2.0-rc2-macos-arm64.release.json \
+  --artifact target/omega-rc/Omega-v0.2.0-rc2-macos-arm64.dmg \
+  --cargo-lock-snapshot target/omega-rc/Cargo.lock.omega-v0.2.0-rc2
 ```
 
 The command writes

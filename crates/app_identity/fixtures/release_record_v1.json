@@ -2,8 +2,8 @@
   "schema_version": 1,
   "product": "Omega",
   "channel": "rc",
-  "version": "0.2.0-rc1",
-  "artifact_name": "Omega-v0.2.0-rc1-macos-arm64.dmg",
+  "version": "0.2.0-rc2",
+  "artifact_name": "Omega-v0.2.0-rc2-macos-arm64.dmg",
   "volume_name": "Omega RC",
   "bundle_identifier": "com.openagents.omega.rc",
   "team_id": "HQWSG26L43",
@@ -40,7 +40,7 @@
     "repository": "OpenAgentsInc/omega",
     "prerelease": true,
     "latest": false,
-    "tag": "v0.2.0-rc1"
+    "tag": "v0.2.0-rc2"
   },
   "package_path": null,
   "owner_blockers": [

@@ -58,6 +58,7 @@ struct LegalSection {
 #[derive(Debug, Deserialize)]
 struct PublicationSection {
     repository: String,
+    tag: String,
     prerelease: bool,
     latest: bool,
 }
@@ -85,8 +86,8 @@ fn release_record_fixture_matches_rc_contract() {
     assert_eq!(record.schema_version, 1);
     assert_eq!(record.product, "Omega");
     assert_eq!(record.channel, "rc");
-    assert_eq!(record.version, "0.2.0-rc1");
-    assert_eq!(record.artifact_name, "Omega-v0.2.0-rc1-macos-arm64.dmg");
+    assert_eq!(record.version, "0.2.0-rc2");
+    assert_eq!(record.artifact_name, "Omega-v0.2.0-rc2-macos-arm64.dmg");
     assert_eq!(record.volume_name, "Omega RC");
     assert_eq!(record.bundle_identifier, "com.openagents.omega.rc");
     assert_eq!(record.team_id, "HQWSG26L43");
@@ -114,6 +115,7 @@ fn release_record_fixture_matches_rc_contract() {
     assert!(!record.notarization.stapled);
     assert_eq!(record.notarization.status, "not_attempted");
     assert_eq!(record.publication.repository, "OpenAgentsInc/omega");
+    assert_eq!(record.publication.tag, "v0.2.0-rc2");
     assert!(record.publication.prerelease);
     assert!(!record.publication.latest);
 }

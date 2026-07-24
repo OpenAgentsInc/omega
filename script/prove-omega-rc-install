@@ -25,7 +25,7 @@ ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_APP = Path("/Applications/Omega.app")
 DEFAULT_OUTPUT = ROOT / "target/omega-rc-proof"
 EXPECTED_PRODUCT = "Omega"
-EXPECTED_VERSION = "0.2.0-rc1"
+EXPECTED_VERSION = "0.2.0-rc2"
 EXPECTED_BUNDLE_ID = "com.openagents.omega.rc"
 EXPECTED_TEAM_ID = "HQWSG26L43"
 EXPECTED_SIGNER = "Developer ID Application: OpenAgents, Inc. (HQWSG26L43)"
@@ -295,6 +295,10 @@ def validate_release_record(record: dict[str, Any], record_path: Path, artifact:
         ):
             raise ProofError(f"release record {label} digest is invalid")
     publication = record.get("publication", {})
+    if publication.get("repository") != "OpenAgentsInc/omega":
+        raise ProofError("release publication repository must be OpenAgentsInc/omega")
+    if publication.get("tag") != f"v{EXPECTED_VERSION}":
+        raise ProofError(f"release publication tag must be v{EXPECTED_VERSION}")
     if publication.get("prerelease") is not True or publication.get("latest") is not False:
         raise ProofError("release publication must be prerelease=true and latest=false")
     notarization = record.get("notarization", {})
@@ -1103,7 +1107,7 @@ def prove(arguments: argparse.Namespace) -> int:
 def self_test() -> None:
     with tempfile.TemporaryDirectory(prefix="omega-proof-self-test-") as directory:
         root = Path(directory)
-        artifact = root / "Omega-v0.2.0-rc1-macos-arm64.dmg"
+        artifact = root / "Omega-v0.2.0-rc2-macos-arm64.dmg"
         artifact.write_bytes(b"signed candidate bytes")
         record_path = root / "release.json"
         record = {
@@ -1158,7 +1162,12 @@ def self_test() -> None:
                     "licenses.md": "e" * 64,
                 },
             },
-            "publication": {"prerelease": True, "latest": False},
+            "publication": {
+                "repository": "OpenAgentsInc/omega",
+                "tag": f"v{EXPECTED_VERSION}",
+                "prerelease": True,
+                "latest": False,
+            },
         }
         record_path.write_text(json.dumps(record), encoding="utf-8")
         validate_release_record(record, record_path, artifact)
@@ -1189,7 +1198,7 @@ def self_test() -> None:
                 for name in ("atomic-write-file", "keyring", "nostr")
             ],
             "build_cargo_lock": {
-                "name": "Cargo.lock.omega-v0.2.0-rc1",
+                "name": "Cargo.lock.omega-v0.2.0-rc2",
                 "sha256": "6" * 64,
             },
             "artifact": {
@@ -1359,6 +1368,16 @@ def self_test() -> None:
             pass
         else:
             raise ProofError("self-test accepted a tampered artifact digest")
+
+        stale_candidate = json.loads(json.dumps(record))
+        stale_candidate["version"] = "0.2.0-rc1"
+        stale_candidate["publication"]["tag"] = "v0.2.0-rc1"
+        try:
+            validate_release_record(stale_candidate, record_path, artifact)
+        except ProofError:
+            pass
+        else:
+            raise ProofError("self-test accepted the withdrawn rc1 candidate")
 
         packaged = root / "packaged.app"
         installed = root / "installed.app"

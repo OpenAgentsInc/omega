@@ -2,7 +2,7 @@
 # Owned Omega RC macOS package entry point (OMEGA-BRAND-05).
 #
 # Produces (or dry-runs the contract for):
-#   Omega-v0.2.0-rc1-macos-arm64.dmg
+#   Omega-v0.2.0-rc2-macos-arm64.dmg
 #
 # Does not claim notarization success. Notarization runs only when owner
 # notarization secrets are present; otherwise the release record records that
@@ -13,7 +13,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-readonly OMEGA_RC_VERSION="0.2.0-rc1"
+readonly OMEGA_RC_VERSION="0.2.0-rc2"
 readonly OMEGA_RC_SEMVER="0.2.0"
 readonly OMEGA_RC_CHANNEL="preview"
 readonly OMEGA_RC_DISPLAY_CHANNEL="rc"
@@ -323,12 +323,19 @@ verify_source_identity_boundaries() {
 
 validate_release_record_schema() {
   local path="$1"
-  python3 - "${path}" "${OMEGA_RELEASE_RECORD_SCHEMA_VERSION}" <<'PY'
+  python3 - \
+    "${path}" \
+    "${OMEGA_RELEASE_RECORD_SCHEMA_VERSION}" \
+    "${OMEGA_RC_VERSION}" \
+    "${OMEGA_ARTIFACT_NAME}" \
+    "${OMEGA_BUILD_LOCK_SNAPSHOT_NAME}" <<'PY'
 import json
 import re
 import sys
 
-path, expected_schema = sys.argv[1], int(sys.argv[2])
+path = sys.argv[1]
+expected_schema = int(sys.argv[2])
+expected_version, expected_artifact, expected_build_lock = sys.argv[3:]
 with open(path, encoding="utf-8") as handle:
     record = json.load(handle)
 
@@ -369,8 +376,16 @@ if record["product"] != "Omega":
     raise SystemExit("product must be Omega")
 if record["channel"] != "rc":
     raise SystemExit("channel must be rc")
+if record["version"] != expected_version:
+    raise SystemExit(f"version must be {expected_version}")
+if record["artifact_name"] != expected_artifact:
+    raise SystemExit(f"artifact_name must be {expected_artifact}")
 if record["bundle_version"] != "0.2.0":
     raise SystemExit("bundle_version must be 0.2.0")
+if record["publication"].get("repository") != "OpenAgentsInc/omega":
+    raise SystemExit("publication.repository must be OpenAgentsInc/omega")
+if record["publication"].get("tag") != f"v{expected_version}":
+    raise SystemExit(f"publication.tag must be v{expected_version}")
 if record["publication"].get("prerelease") is not True:
     raise SystemExit("publication.prerelease must be true")
 if record["publication"].get("latest") is not False:
@@ -502,7 +517,7 @@ else:
     for key in ("name", "sha256"):
         if not isinstance(build_lock.get(key), str) or not build_lock[key]:
             raise SystemExit(f"build_inputs.cargo_lock_snapshot.{key} must be non-empty")
-    if build_lock["name"] != "Cargo.lock.omega-v0.2.0-rc1":
+    if build_lock["name"] != expected_build_lock:
         raise SystemExit("build_inputs.cargo_lock_snapshot.name is invalid")
     if not valid_sha256(build_lock["sha256"]):
         raise SystemExit("build_inputs.cargo_lock_snapshot.sha256 must be a SHA-256 digest")
