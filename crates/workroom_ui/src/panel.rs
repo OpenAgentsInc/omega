@@ -1,7 +1,10 @@
-//! Sarah workroom dock panel (`OMEGA-SW-03`).
+//! Sarah workroom dock panel (`OMEGA-SW-03` / `OMEGA-SW-06`).
 //!
 //! Projection + command entry only. Durable state lives in the record behind
 //! supervised `omega-effectd`. Header text is exactly "Sarah".
+//!
+//! OMEGA-SW-06: local unread count + attention marker. Proactive tick turns
+//! share the transcript projection (no new source). Read state is local only.
 
 use anyhow::Result;
 use editor::Editor;
@@ -10,19 +13,22 @@ use gpui::{
     InteractiveElement, IntoElement, ParentElement, Render, SharedString, Styled, Task, WeakEntity,
     Window, div, px,
 };
-use omega_effectd::{SharedOmegaEffectdSupervisor, shared_supervisor};
-use serde_json::{Value, json};
-use ui::{Button, ButtonStyle, Label, LabelSize, prelude::*};
+use omega_effectd::{shared_supervisor, SharedOmegaEffectdSupervisor};
+use serde_json::{json, Value};
+use ui::{prelude::*, Button, ButtonStyle, Label, LabelSize};
 use workspace::{
-    Workspace,
     dock::{DockPosition, Panel, PanelEvent},
+    Workspace,
 };
 use zed_actions::workroom::{FocusComposer, InterruptTurn, OpenPanel};
 
+use crate::attention::{
+    empty_room_is_honest, AttentionMarker, OMEGA_AUTONOMOUS_TICK_ENABLED,
+};
 use crate::projections::{
-    ActivityProjection, ActivityRow, Freshness, GapState, InterruptIntentState, MessageAck,
-    ProjectionMeta, ReceiptRow, ReceiptsProjection, RoomProjection, RunPhase, RunStateProjection,
-    TranscriptProjection, TranscriptRow, WorkroomProjection, sources,
+    sources, ActivityProjection, ActivityRow, Freshness, GapState, InterruptIntentState,
+    MessageAck, ProjectionMeta, ReceiptRow, ReceiptsProjection, RoomProjection, RunPhase,
+    RunStateProjection, TranscriptProjection, TranscriptRow, WorkroomProjection,
 };
 
 const PANEL_KEY: &str = "SarahWorkroomPanel";
@@ -43,6 +49,10 @@ pub fn init(cx: &mut App) {
         workspace
             .register_action(|workspace, _: &OpenPanel, window, cx| {
                 workspace.focus_panel::<SarahWorkroomPanel>(window, cx);
+                if let Some(panel) = workspace.panel::<SarahWorkroomPanel>(cx) {
+                    // Local mark-read when the owner opens the room (OMEGA-SW-06).
+                    panel.update(cx, |panel, cx| panel.mark_room_read(cx));
+                }
             })
             .register_action(|workspace, _: &FocusComposer, window, cx| {
                 if let Some(panel) = workspace.panel::<SarahWorkroomPanel>(cx) {
@@ -96,6 +106,17 @@ impl SarahWorkroomPanel {
 
     fn focus_composer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.composer.focus_handle(cx).focus(window, cx);
+        // Opening / focusing the room is a local mark-read (MVP).
+        self.mark_room_read(cx);
+        cx.notify();
+    }
+
+    /// Local mark-read only (OMEGA-SW-06). Does not publish NIP-RS / kind 30078.
+    fn mark_room_read(&mut self, cx: &mut Context<Self>) {
+        self.projection.mark_room_read();
+        if self.projection.attention.unread_count == 0 {
+            self.status = "Room marked read (local only).".into();
+        }
         cx.notify();
     }
 
@@ -224,10 +245,12 @@ impl SarahWorkroomPanel {
             authority_revision,
             detail: None,
         };
+        self.projection.recompute_attention();
     }
 
     fn apply_snapshot(&mut self, value: &Value) {
-        // Transcript
+        // Transcript — ordinary turns only (including proactive tick turns).
+        // omega-effectd uses `entries`; older fixtures may use items/messages.
         let mut transcript = TranscriptProjection {
             meta: ProjectionMeta::fresh(sources::TRANSCRIPT),
             rows: Vec::new(),
@@ -236,12 +259,19 @@ impl SarahWorkroomPanel {
         };
         if let Some(items) = value
             .get("transcript")
-            .and_then(|t| t.get("items").or_else(|| t.get("messages")))
+            .and_then(|t| {
+                t.get("entries")
+                    .or_else(|| t.get("items"))
+                    .or_else(|| t.get("messages"))
+            })
             .and_then(|v| v.as_array())
         {
             for item in items {
+                // Proactive tick turns and Q&A answers share this path.
+                // Only an explicit pending ack/status stays non-confirmed.
                 let ack = match item
                     .get("ack")
+                    .or_else(|| item.get("status"))
                     .or_else(|| item.get("state"))
                     .and_then(|v| v.as_str())
                 {
@@ -249,8 +279,11 @@ impl SarahWorkroomPanel {
                     _ => MessageAck::Confirmed,
                 };
                 transcript.push_bounded(TranscriptRow {
-                    message_ref: string_field(Some(item), &["messageRef", "id", "ref"])
-                        .unwrap_or_else(|| "unknown".into()),
+                    message_ref: string_field(
+                        Some(item),
+                        &["messageRef", "eventId", "id", "ref", "cursor"],
+                    )
+                    .unwrap_or_else(|| "unknown".into()),
                     role: string_field(Some(item), &["role"]).unwrap_or_else(|| "unknown".into()),
                     text: string_field(Some(item), &["text", "content"]).unwrap_or_default(),
                     ack,
@@ -280,16 +313,24 @@ impl SarahWorkroomPanel {
         };
         if let Some(items) = value
             .get("activity")
-            .and_then(|a| a.get("items").or_else(|| a.get("events")))
+            .and_then(|a| {
+                a.get("entries")
+                    .or_else(|| a.get("items"))
+                    .or_else(|| a.get("events"))
+            })
             .and_then(|v| v.as_array())
         {
             for item in items {
                 activity.push_bounded(ActivityRow {
-                    event_ref: string_field(Some(item), &["eventRef", "id", "ref"])
-                        .unwrap_or_else(|| "unknown".into()),
-                    kind: string_field(Some(item), &["kind", "type"]).unwrap_or_else(|| "event".into()),
+                    event_ref: string_field(
+                        Some(item),
+                        &["eventRef", "eventId", "id", "ref"],
+                    )
+                    .unwrap_or_else(|| "unknown".into()),
+                    kind: string_field(Some(item), &["kind", "type", "entry"])
+                        .unwrap_or_else(|| "event".into()),
                     summary: string_field(Some(item), &["summary", "text"]).unwrap_or_default(),
-                    turn_ref: string_field(Some(item), &["turnRef", "turn_ref"]),
+                    turn_ref: string_field(Some(item), &["turnRef", "turn_ref", "turn"]),
                 });
             }
         } else if value.get("activity").is_none() {
@@ -376,6 +417,13 @@ impl SarahWorkroomPanel {
         }
         self.projection.run_state = run_state;
         self.projection.connection_detail = Some("Snapshot applied from omega-effectd.".into());
+        // OMEGA-SW-06: recompute local unread + attention after transcript page.
+        // Never invent proactive rows when the autonomous tick is off.
+        debug_assert!(
+            empty_room_is_honest(&self.projection.transcript, OMEGA_AUTONOMOUS_TICK_ENABLED),
+            "empty room must stay honest when autonomous tick is off"
+        );
+        self.projection.recompute_attention();
     }
 
     fn interrupt_turn(&mut self, cx: &mut Context<Self>) {
@@ -513,6 +561,11 @@ impl Panel for SarahWorkroomPanel {
         Some("Sarah")
     }
 
+    fn icon_label(&self, _: &Window, _: &App) -> Option<String> {
+        // One unread count for the room (OMEGA-SW-06).
+        self.projection.attention.icon_label()
+    }
+
     fn toggle_action(&self) -> Box<dyn gpui::Action> {
         Box::new(OpenPanel)
     }
@@ -543,10 +596,12 @@ impl Render for SarahWorkroomPanel {
             .when_some(p.connection_detail.clone(), |this, detail| {
                 this.child(Label::new(detail).color(Color::Muted))
             })
+            // OMEGA-SW-06: one unread count + one attention marker for the room.
+            .child(attention_body(&p.attention))
             // Room
             .child(section_header("Room", &p.room.meta))
             .child(room_body(&p.room))
-            // Transcript (capacity-bounded list)
+            // Transcript (capacity-bounded list; proactive ticks are ordinary rows)
             .child(section_header("Transcript", &p.transcript.meta))
             .child(
                 v_flex()
@@ -598,6 +653,12 @@ impl Render for SarahWorkroomPanel {
                             .on_click(cx.listener(|this, _, _, cx| this.refresh_from_effectd(cx))),
                     )
                     .child(
+                        Button::new("sarah-workroom-mark-read", "Mark read")
+                            .style(ButtonStyle::Subtle)
+                            .disabled(p.attention.unread_count == 0)
+                            .on_click(cx.listener(|this, _, _, cx| this.mark_room_read(cx))),
+                    )
+                    .child(
                         Button::new(
                             "sarah-workroom-interrupt",
                             if self.interrupting {
@@ -610,11 +671,34 @@ impl Render for SarahWorkroomPanel {
                             },
                         )
                         .style(ButtonStyle::Filled)
-                        .disabled(!can_interrupt && p.run_state.interrupt_intent != InterruptIntentState::Pending)
+                        .disabled(
+                            !can_interrupt
+                                && p.run_state.interrupt_intent != InterruptIntentState::Pending,
+                        )
                         .on_click(cx.listener(|this, _, _, cx| this.interrupt_turn(cx))),
                     ),
             )
     }
+}
+
+fn attention_body(attention: &crate::attention::RoomAttention) -> impl IntoElement {
+    let marker_color = if attention.marker == AttentionMarker::NeedsAttention {
+        Color::Accent
+    } else {
+        Color::Muted
+    };
+    let tick_note = attention.tick_note.map(|s| s.to_string());
+    v_flex()
+        .id("sarah-workroom-attention")
+        .gap_0p5()
+        .child(Label::new(attention.summary_line()).color(marker_color))
+        .when_some(tick_note, |this, note| {
+            this.child(
+                Label::new(note)
+                    .color(Color::Muted)
+                    .size(LabelSize::Small),
+            )
+        })
 }
 
 fn section_header(title: &'static str, meta: &ProjectionMeta) -> impl IntoElement {
@@ -848,5 +932,117 @@ mod panel_logic_tests {
         assert_eq!(run.interrupt_intent, InterruptIntentState::Pending);
         assert_eq!(run.phase, RunPhase::Running);
         assert_ne!(run.interrupt_intent, InterruptIntentState::Applied);
+    }
+
+    #[test]
+    fn apply_snapshot_maps_entries_and_proactive_turns_as_ordinary_rows() {
+        let value = json!({
+            "transcript": {
+                "entries": [
+                    {
+                        "eventId": "evt.owner.1",
+                        "role": "owner",
+                        "kind": "text",
+                        "text": "status?",
+                        "status": "accepted"
+                    },
+                    {
+                        "eventId": "message.sarah_auto.tick.1",
+                        "role": "sarah",
+                        "kind": "text",
+                        "text": "Release is green.",
+                        "status": "confirmed"
+                    }
+                ],
+                "cursor": "cursor.1",
+                "gapState": "none"
+            },
+            "activity": { "entries": [], "gapState": "none" },
+            "runState": { "state": "idle", "turnRef": null }
+        });
+
+        // Exercise the same field paths as SarahWorkroomPanel::apply_snapshot
+        // without constructing a full GPUI panel.
+        let mut projection = WorkroomProjection::honest_unsubscribed();
+        let mut transcript = TranscriptProjection {
+            meta: ProjectionMeta::fresh(sources::TRANSCRIPT),
+            rows: Vec::new(),
+            cursor: string_field(value.get("transcript"), &["cursor"]),
+            truncated: false,
+        };
+        if let Some(items) = value
+            .get("transcript")
+            .and_then(|t| {
+                t.get("entries")
+                    .or_else(|| t.get("items"))
+                    .or_else(|| t.get("messages"))
+            })
+            .and_then(|v| v.as_array())
+        {
+            for item in items {
+                let ack = match item
+                    .get("ack")
+                    .or_else(|| item.get("status"))
+                    .or_else(|| item.get("state"))
+                    .and_then(|v| v.as_str())
+                {
+                    Some("pending") => MessageAck::Pending,
+                    _ => MessageAck::Confirmed,
+                };
+                transcript.push_bounded(TranscriptRow {
+                    message_ref: string_field(
+                        Some(item),
+                        &["messageRef", "eventId", "id", "ref", "cursor"],
+                    )
+                    .unwrap_or_else(|| "unknown".into()),
+                    role: string_field(Some(item), &["role"]).unwrap_or_else(|| "unknown".into()),
+                    text: string_field(Some(item), &["text", "content"]).unwrap_or_default(),
+                    ack,
+                });
+            }
+        }
+        projection.transcript = transcript;
+        projection.room.thread_ref = Some("thread.sarah.abc".into());
+        projection.recompute_attention();
+
+        assert_eq!(projection.transcript.rows.len(), 2);
+        assert_eq!(projection.transcript.rows[1].role, "sarah");
+        assert_eq!(
+            projection.transcript.rows[1].message_ref,
+            "message.sarah_auto.tick.1"
+        );
+        assert_eq!(projection.transcript.rows[1].ack, MessageAck::Confirmed);
+        // Proactive update raises the same attention path as a Q&A answer.
+        assert_eq!(projection.attention.unread_count, 1);
+        assert_eq!(
+            projection.attention.marker,
+            AttentionMarker::NeedsAttention
+        );
+        assert!(empty_room_is_honest(
+            &projection.transcript,
+            OMEGA_AUTONOMOUS_TICK_ENABLED
+        ));
+
+        projection.mark_room_read();
+        assert_eq!(projection.attention.unread_count, 0);
+        assert_eq!(projection.attention.marker, AttentionMarker::None);
+    }
+
+    #[test]
+    fn tick_off_empty_snapshot_stays_honest() {
+        assert!(!OMEGA_AUTONOMOUS_TICK_ENABLED);
+        let empty = TranscriptProjection {
+            meta: ProjectionMeta::fresh(sources::TRANSCRIPT),
+            rows: Vec::new(),
+            cursor: None,
+            truncated: false,
+        };
+        assert!(empty_room_is_honest(&empty, OMEGA_AUTONOMOUS_TICK_ENABLED));
+        let mut p = WorkroomProjection::honest_unsubscribed();
+        p.transcript = empty;
+        p.recompute_attention();
+        assert_eq!(p.attention.unread_count, 0);
+        assert!(!p.attention.marker.is_set());
+        assert!(p.attention.tick_note.is_some());
     }
 }

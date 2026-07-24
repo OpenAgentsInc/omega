@@ -1,9 +1,12 @@
-//! Workroom projection models (`OMEGA-SW-03` / MVP §7).
+//! Workroom projection models (`OMEGA-SW-03` / `OMEGA-SW-06` / MVP §7).
 //!
 //! GPUI holds no durable state. These types are in-memory projections rebuilt
 //! from omega-effectd events and snapshots. Every row carries source,
 //! freshness, and gap labels. A missing source stays visible and honest.
 //! Pending never renders as applied.
+//!
+//! Room attention (unread + marker) is derived from the transcript plus a
+//! local read marker — see [`crate::attention`].
 
 /// Capacity bound for transcript rows in the pane (virtualization deferred).
 pub const MAX_TRANSCRIPT_ROWS: usize = 200;
@@ -417,6 +420,9 @@ impl RunStateProjection {
 }
 
 /// Full in-memory pane projection. Rebuilt from effectd; never durable.
+///
+/// `attention` is local-only (OMEGA-SW-06). It is not a second conversation
+/// store and is not cross-device read state.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WorkroomProjection {
     pub room: RoomProjection,
@@ -424,6 +430,7 @@ pub struct WorkroomProjection {
     pub activity: ActivityProjection,
     pub receipts: ReceiptsProjection,
     pub run_state: RunStateProjection,
+    pub attention: crate::attention::RoomAttention,
     pub connection_detail: Option<String>,
 }
 
@@ -436,6 +443,7 @@ impl WorkroomProjection {
             activity: ActivityProjection::honest_empty(),
             receipts: ReceiptsProjection::honest_empty(),
             run_state: RunStateProjection::honest_empty(),
+            attention: crate::attention::RoomAttention::honest_empty(),
             connection_detail: Some(
                 "Subscribes to omega-effectd only. No durable pane state.".into(),
             ),
@@ -453,6 +461,31 @@ impl WorkroomProjection {
         self.receipts.detail = Some(detail.clone());
         self.run_state.meta = ProjectionMeta::unavailable(sources::EFFECTD, &detail);
         self.run_state.reason = Some(detail);
+        // Unavailable sources must not invent attention or fake tick activity.
+        let read = self.attention.read_state.clone();
+        self.attention = crate::attention::compute_room_attention(
+            &self.transcript,
+            read,
+            self.room.thread_ref.as_deref(),
+        );
+    }
+
+    /// Recompute unread + attention marker from the current transcript page.
+    pub fn recompute_attention(&mut self) {
+        let read = self.attention.read_state.clone();
+        self.attention = crate::attention::compute_room_attention(
+            &self.transcript,
+            read,
+            self.room.thread_ref.as_deref(),
+        );
+    }
+
+    /// Local mark-read (MVP). Does not publish NIP-RS.
+    pub fn mark_room_read(&mut self) {
+        self.attention
+            .read_state
+            .mark_read_from_transcript(&self.transcript);
+        self.recompute_attention();
     }
 
     pub fn header() -> &'static str {
@@ -476,6 +509,40 @@ mod tests {
         assert_eq!(p.run_state.phase, RunPhase::Unknown);
         assert!(p.room.detail.is_some());
         assert!(p.run_state.reason.is_some());
+        // OMEGA-SW-06: empty + tick off → no attention, no synthetic activity.
+        assert_eq!(p.attention.unread_count, 0);
+        assert_eq!(
+            p.attention.marker,
+            crate::attention::AttentionMarker::None
+        );
+        assert!(crate::attention::empty_room_is_honest(
+            &p.transcript,
+            crate::attention::OMEGA_AUTONOMOUS_TICK_ENABLED
+        ));
+    }
+
+    #[test]
+    fn mark_room_read_clears_local_attention() {
+        let mut p = WorkroomProjection::honest_unsubscribed();
+        p.transcript.meta = ProjectionMeta::fresh(sources::TRANSCRIPT);
+        p.transcript.push_bounded(TranscriptRow {
+            message_ref: "message.sarah_auto.1".into(),
+            role: "sarah".into(),
+            text: "proactive update".into(),
+            ack: MessageAck::Confirmed,
+        });
+        p.room.thread_ref = Some("thread.sarah.abc".into());
+        p.recompute_attention();
+        assert_eq!(p.attention.unread_count, 1);
+        assert!(p.attention.marker.is_set());
+
+        p.mark_room_read();
+        assert_eq!(p.attention.unread_count, 0);
+        assert!(!p.attention.marker.is_set());
+        assert_eq!(
+            p.attention.read_state.last_read_message_ref.as_deref(),
+            Some("message.sarah_auto.1")
+        );
     }
 
     #[test]

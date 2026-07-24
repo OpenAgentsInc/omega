@@ -1,19 +1,30 @@
-//! Sarah workroom GPUI pane (`OMEGA-SW-03`).
+//! Sarah workroom GPUI pane (`OMEGA-SW-03` / `OMEGA-SW-06`).
 //!
 //! Dock panel + Agent menu entry + open / focus-composer / interrupt actions.
 //! Renders the five §7 projections with source, freshness, and gap labels.
 //! GPUI is projection-only: no durable thread, receipt, or turn store here.
 //! Framed requests go to supervised `omega-effectd` only.
+//!
+//! OMEGA-SW-06: local unread count + attention marker; proactive tick turns
+//! render as ordinary transcript rows. Read state is local MVP only (NIP-RS
+//! is SARAH-NR-07). Autonomous tick stays default off.
 
+mod attention;
 mod panel;
 mod projections;
 
+pub use attention::{
+    autonomous_tick_enabled, compute_room_attention, count_unread, empty_room_is_honest,
+    is_attention_role, proactive_turn_as_transcript_row, row_raises_attention,
+    tick_off_honest_note, AttentionMarker, LocalReadState, RoomAttention,
+    OMEGA_AUTONOMOUS_TICK_ENABLED, SARAH_AUTONOMOUS_TICK_FLAG,
+};
 pub use panel::{init, SarahWorkroomPanel};
 pub use projections::{
-    ActivityProjection, ActivityRow, Freshness, GapState, InterruptIntentState, MessageAck,
-    ProjectionMeta, ReceiptRow, ReceiptsProjection, RoomProjection, RunPhase, RunStateProjection,
-    TranscriptProjection, TranscriptRow, WorkroomProjection, MAX_ACTIVITY_ROWS,
-    MAX_RECEIPT_ROWS, MAX_TRANSCRIPT_ROWS, PANE_HEADER, sources,
+    sources, ActivityProjection, ActivityRow, Freshness, GapState, InterruptIntentState,
+    MessageAck, ProjectionMeta, ReceiptRow, ReceiptsProjection, RoomProjection, RunPhase,
+    RunStateProjection, TranscriptProjection, TranscriptRow, WorkroomProjection,
+    MAX_ACTIVITY_ROWS, MAX_RECEIPT_ROWS, MAX_TRANSCRIPT_ROWS, PANE_HEADER,
 };
 
 #[cfg(test)]
