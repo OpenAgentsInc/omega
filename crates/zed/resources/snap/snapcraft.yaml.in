@@ -1,23 +1,22 @@
-name: zed
-title: Zed
+name: omega
+title: Omega
 base: core24
 version: "$RELEASE_VERSION"
-summary: The editor for what's next
+summary: The OpenAgents desktop client and integrated development environment
 description: |
-  Zed is a modern open-source code editor, built from the ground up in Rust with
-  a GPU-accelerated renderer. We help you build software faster than ever before.
+  Omega brings people, agents, conversations, code, reviews, approvals, and
+  execution into one native workspace.
 grade: stable
 confinement: classic
 compression: lzo
-website: https://zed.dev/
-source-code: https://github.com/zed-industries/zed
-issues: https://github.com/zed-industries/zed/issues
-contact: https://zed.dev/community-links#support-and-feedback
+website: https://www.openagents.com/
+source-code: https://github.com/OpenAgentsInc/omega
+issues: https://github.com/OpenAgentsInc/omega/issues
 
 parts:
-  zed:
+  omega:
     plugin: dump
-    source: "https://github.com/zed-industries/zed/releases/download/v$RELEASE_VERSION/zed-linux-x86_64.tar.gz"
+    source: "https://github.com/OpenAgentsInc/omega/releases/download/v$RELEASE_VERSION/omega-linux-x86_64.tar.gz"
 
     organize:
       # These renames seem to not be necessary, but it's tidier.
@@ -52,8 +51,8 @@ parts:
       - -usr/share/man
 
 apps:
-  zed:
-    command: usr/bin/zed
-    common-id: dev.zed.Zed
+  omega:
+    command: usr/bin/omega
+    common-id: com.openagents.omega
     environment:
       ZED_BUNDLE_TYPE: snap

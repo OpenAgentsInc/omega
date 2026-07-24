@@ -18,6 +18,7 @@ use gpui::{App, AsyncApp, Global, TaskExt, WindowHandle};
 use onboarding::FIRST_OPEN;
 use onboarding::show_onboarding_view;
 use recent_projects::{RemoteSettings, navigate_to_positions, open_remote_project};
+use release_channel::ReleaseChannel;
 use remote::{RemoteConnectionOptions, WslConnectionOptions};
 use settings::Settings;
 use std::path::{Path, PathBuf};
@@ -154,6 +155,16 @@ impl OpenRequest {
         }
 
         for url in request.urls {
+            let protocol_prefix = format!(
+                "{}://",
+                ReleaseChannel::try_global(cx)
+                    .unwrap_or(*release_channel::RELEASE_CHANNEL)
+                    .protocol_scheme()
+            );
+            let url = url
+                .strip_prefix(&protocol_prefix)
+                .map(|path| format!("zed://{path}"))
+                .unwrap_or(url);
             if let Some(server_name) = url.strip_prefix("zed-cli://") {
                 this.kind = Some(OpenRequestKind::CliConnection(connect_to_cli(server_name)?));
             } else if let Some(action_index) = url.strip_prefix("zed-dock-action://") {

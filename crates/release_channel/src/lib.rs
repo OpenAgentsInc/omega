@@ -30,10 +30,10 @@ pub static RELEASE_CHANNEL: LazyLock<ReleaseChannel> =
 #[cfg(target_os = "windows")]
 pub fn app_identifier() -> &'static str {
     match *RELEASE_CHANNEL {
-        ReleaseChannel::Dev => "Zed-Editor-Dev",
-        ReleaseChannel::Nightly => "Zed-Editor-Nightly",
-        ReleaseChannel::Preview => "Zed-Editor-Preview",
-        ReleaseChannel::Stable => "Zed-Editor-Stable",
+        ReleaseChannel::Dev => "OpenAgents-Omega-Dev",
+        ReleaseChannel::Nightly => "OpenAgents-Omega-Nightly",
+        ReleaseChannel::Preview => "OpenAgents-Omega-RC",
+        ReleaseChannel::Stable => "OpenAgents-Omega",
     }
 }
 
@@ -190,12 +190,7 @@ impl ReleaseChannel {
 
     /// Returns the display name for this [`ReleaseChannel`].
     pub fn display_name(&self) -> &'static str {
-        match self {
-            ReleaseChannel::Dev => "Zed Dev",
-            ReleaseChannel::Nightly => "Zed Nightly",
-            ReleaseChannel::Preview => "Zed Preview",
-            ReleaseChannel::Stable => "Zed",
-        }
+        self.app_channel().display_name()
     }
 
     /// Returns the programmatic name for this [`ReleaseChannel`].
@@ -210,14 +205,19 @@ impl ReleaseChannel {
 
     /// Returns the application ID that's used by Wayland as application ID
     /// and WM_CLASS on X11.
-    /// This also has to match the bundle identifier for Zed on macOS.
+    /// This also has to match the bundle identifier on macOS.
     pub fn app_id(&self) -> &'static str {
-        match self {
-            ReleaseChannel::Dev => "dev.zed.Zed-Dev",
-            ReleaseChannel::Nightly => "dev.zed.Zed-Nightly",
-            ReleaseChannel::Preview => "dev.zed.Zed-Preview",
-            ReleaseChannel::Stable => "dev.zed.Zed",
-        }
+        self.app_channel().app_id()
+    }
+
+    /// Returns the namespace prepended to credentials for this release channel.
+    pub fn credential_namespace(&self) -> &'static str {
+        self.app_channel().credential_namespace()
+    }
+
+    /// Returns the URL scheme registered by this release channel.
+    pub fn protocol_scheme(&self) -> &'static str {
+        self.app_channel().protocol_scheme()
     }
 
     /// Returns the query parameter for this [`ReleaseChannel`].
@@ -246,6 +246,15 @@ impl ReleaseChannel {
             None => format!("{ZED_DOCS_URL}/{slug}"),
         }
     }
+
+    fn app_channel(&self) -> app_identity::AppChannel {
+        match self {
+            Self::Dev => app_identity::AppChannel::Dev,
+            Self::Nightly => app_identity::AppChannel::Nightly,
+            Self::Preview => app_identity::AppChannel::Rc,
+            Self::Stable => app_identity::AppChannel::Stable,
+        }
+    }
 }
 
 /// Error indicating that release channel string does not match any known release channel names.
@@ -268,7 +277,31 @@ impl FromStr for ReleaseChannel {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
     use super::ReleaseChannel;
+
+    #[test]
+    fn omega_channel_identities_are_unique() {
+        let display_names = ReleaseChannel::ALL.map(|channel| channel.display_name());
+        let app_ids = ReleaseChannel::ALL.map(|channel| channel.app_id());
+        let credential_namespaces =
+            ReleaseChannel::ALL.map(|channel| channel.credential_namespace());
+        let protocol_schemes = ReleaseChannel::ALL.map(|channel| channel.protocol_scheme());
+
+        for values in [
+            display_names.as_slice(),
+            app_ids.as_slice(),
+            credential_namespaces.as_slice(),
+            protocol_schemes.as_slice(),
+        ] {
+            assert_eq!(values.iter().copied().collect::<HashSet<_>>().len(), 4);
+        }
+
+        assert_eq!(ReleaseChannel::Preview.display_name(), "Omega RC");
+        assert_eq!(ReleaseChannel::Preview.app_id(), "com.openagents.omega.rc");
+        assert_eq!(ReleaseChannel::Preview.protocol_scheme(), "omega-rc");
+    }
 
     #[test]
     fn test_docs_url_for_release_channel() {

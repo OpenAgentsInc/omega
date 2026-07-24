@@ -5,33 +5,37 @@ cd "$(dirname "$0")/../.."
 shopt -s extglob
 
 script/bundle-linux --flatpak
-archive_match="zed(-[a-zA-Z0-9]+)?-linux-$(uname -m)\.tar\.gz"
+archive_match="omega(-[a-zA-Z0-9]+)?-linux-$(uname -m)\.tar\.gz"
 archive=$(ls "target/release" | grep -E ${archive_match})
 channel=$(<crates/zed/RELEASE_CHANNEL)
 
 export CHANNEL="$channel"
 export ARCHIVE="$archive"
 if [[ "$channel" == "dev" ]]; then
-    export APP_ID="dev.zed.ZedDev"
-    export APP_NAME="Zed Devel"
+    export APP_ID="com.openagents.omega.dev"
+    export APP_NAME="Omega Dev"
+    export APP_SCHEME="omega-dev"
     export BRANDING_LIGHT="#99c1f1"
     export BRANDING_DARK="#1a5fb4"
     export ICON_FILE="app-icon-dev"
 elif [[ "$channel" == "nightly" ]]; then
-    export APP_ID="dev.zed.ZedNightly"
-    export APP_NAME="Zed Nightly"
+    export APP_ID="com.openagents.omega.nightly"
+    export APP_NAME="Omega Nightly"
+    export APP_SCHEME="omega-nightly"
     export BRANDING_LIGHT="#e9aa6a"
     export BRANDING_DARK="#1a5fb4"
     export ICON_FILE="app-icon-nightly"
 elif [[ "$channel" == "preview" ]]; then
-    export APP_ID="dev.zed.ZedPreview"
-    export APP_NAME="Zed Preview"
+    export APP_ID="com.openagents.omega.rc"
+    export APP_NAME="Omega RC"
+    export APP_SCHEME="omega-rc"
     export BRANDING_LIGHT="#99c1f1"
     export BRANDING_DARK="#1a5fb4"
     export ICON_FILE="app-icon-preview"
 elif [[ "$channel" == "stable" ]]; then
-    export APP_ID="dev.zed.Zed"
-    export APP_NAME="Zed"
+    export APP_ID="com.openagents.omega"
+    export APP_NAME="Omega"
+    export APP_SCHEME="omega"
     export BRANDING_LIGHT="#99c1f1"
     export BRANDING_DARK="#1a5fb4"
     export ICON_FILE="app-icon"

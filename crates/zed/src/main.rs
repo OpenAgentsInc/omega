@@ -4,14 +4,12 @@
 mod reliability;
 mod zed;
 
-// Ensure the binary name stays in sync with APP_NAME so that the paths used
-// at runtime (data dir, config dir, etc.) match what the binary is called.
+// Ensure the binary name stays in sync with the application identity.
 const _: () = assert!(
-    paths::APP_NAME_LOWERCASE
+    app_identity::BINARY_NAME
         .as_bytes()
         .eq_ignore_ascii_case(env!("CARGO_BIN_NAME").as_bytes()),
-    "paths::APP_NAME_LOWERCASE must match the binary name. \
-     Forks: update APP_NAME in crates/paths/src/paths.rs when renaming the binary.",
+    "app_identity::BINARY_NAME must match the binary name.",
 );
 
 use agent_ui::AgentPanel;
@@ -1663,14 +1661,14 @@ fn stdout_is_a_pty() -> bool {
 }
 
 #[derive(Parser, Debug)]
-#[command(name = "zed", disable_version_flag = true, max_term_width = 100)]
+#[command(name = "omega", disable_version_flag = true, max_term_width = 100)]
 struct Args {
     /// A sequence of space-separated paths or urls that you want to open.
     ///
     /// Use `path:line:row` syntax to open a file at a specific location.
     /// Non-existing paths and directories will ignore `:line:row` suffix.
     ///
-    /// URLs can either be `file://` or `zed://` scheme, or relative to <https://zed.dev>.
+    /// URLs can use `file://`, the current Omega channel scheme, or the legacy `zed://` scheme.
     paths_or_urls: Vec<String>,
 
     /// Pairs of file paths to diff. Can be specified multiple times.
@@ -1681,14 +1679,14 @@ struct Args {
     /// Sets a custom directory for all user data (e.g., database, extensions, logs).
     ///
     /// This overrides the default platform-specific data directory location.
-    /// On macOS, the default is `~/Library/Application Support/Zed`.
-    /// On Linux/FreeBSD, the default is `$XDG_DATA_HOME/zed`.
-    /// On Windows, the default is `%LOCALAPPDATA%\Zed`.
+    /// On macOS, the default is `~/Library/Application Support/<Omega channel>`.
+    /// On Linux/FreeBSD, the default is `$XDG_DATA_HOME/<omega-channel>`.
+    /// On Windows, the default is `%LOCALAPPDATA%\<Omega channel>`.
     #[arg(long, value_name = "DIR", verbatim_doc_comment)]
     user_data_dir: Option<String>,
 
     /// The username and WSL distribution to use when opening paths. If not specified,
-    /// Zed will attempt to open the paths directly.
+    /// Omega will attempt to open the paths directly.
     ///
     /// The username is optional, and if not specified, the default user for the distribution
     /// will be used.
@@ -1793,6 +1791,12 @@ fn parse_url_arg(arg: &str, cx: &App) -> String {
                 || arg.starts_with("zed://")
                 || arg.starts_with("zed-cli://")
                 || arg.starts_with("ssh://")
+                || arg.starts_with(&format!(
+                    "{}://",
+                    ReleaseChannel::try_global(cx)
+                        .unwrap_or(*release_channel::RELEASE_CHANNEL)
+                        .protocol_scheme()
+                ))
                 || parse_zed_link(arg, cx).is_some()
             {
                 arg.into()

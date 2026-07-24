@@ -42,26 +42,114 @@ pub fn global(cx: &App) -> Arc<dyn CredentialsProvider> {
         .unwrap_or_else(|| new(cx))
 }
 
+/// Returns a channel-namespaced system keychain provider.
+///
+/// This entry point never selects the plaintext development provider. It is
+/// not the sovereign identity custody API: the generic provider copies secret
+/// bytes into ordinary vectors. Identity custody must use the typed, direct
+/// keyring boundary introduced with the signer.
+pub fn system_keychain(cx: &App) -> Arc<dyn CredentialsProvider> {
+    new_with_sensitivity(cx, CredentialSensitivity::Sovereign)
+}
+
 fn new(cx: &App) -> Arc<dyn CredentialsProvider> {
-    let use_development_provider = match ReleaseChannel::try_global(cx) {
-        Some(ReleaseChannel::Dev) => {
-            // In development we default to using the development
-            // credentials provider to avoid getting spammed by relentless
-            // keychain access prompts.
-            //
-            // However, if the `ZED_DEVELOPMENT_USE_KEYCHAIN` environment
-            // variable is set, we will use the actual keychain.
-            !*ZED_DEVELOPMENT_USE_KEYCHAIN
-        }
-        Some(ReleaseChannel::Nightly | ReleaseChannel::Preview | ReleaseChannel::Stable) | None => {
-            false
-        }
+    new_with_sensitivity(cx, CredentialSensitivity::Normal)
+}
+
+fn new_with_sensitivity(
+    cx: &App,
+    sensitivity: CredentialSensitivity,
+) -> Arc<dyn CredentialsProvider> {
+    let release_channel =
+        ReleaseChannel::try_global(cx).unwrap_or(*release_channel::RELEASE_CHANNEL);
+    let backend = backend_for(release_channel, sensitivity, *ZED_DEVELOPMENT_USE_KEYCHAIN);
+
+    let inner: Arc<dyn CredentialsProvider> = match backend {
+        CredentialBackend::DevelopmentFile => Arc::new(DevelopmentCredentialsProvider::new()),
+        CredentialBackend::SystemKeychain => Arc::new(KeychainCredentialsProvider),
     };
 
-    if use_development_provider {
-        Arc::new(DevelopmentCredentialsProvider::new())
+    Arc::new(NamespacedCredentialsProvider {
+        namespace: release_channel.credential_namespace(),
+        inner,
+    })
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+enum CredentialSensitivity {
+    Normal,
+    Sovereign,
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+enum CredentialBackend {
+    DevelopmentFile,
+    SystemKeychain,
+}
+
+fn backend_for(
+    release_channel: ReleaseChannel,
+    sensitivity: CredentialSensitivity,
+    development_use_keychain: bool,
+) -> CredentialBackend {
+    if release_channel == ReleaseChannel::Dev
+        && sensitivity == CredentialSensitivity::Normal
+        && !development_use_keychain
+    {
+        CredentialBackend::DevelopmentFile
     } else {
-        Arc::new(KeychainCredentialsProvider)
+        CredentialBackend::SystemKeychain
+    }
+}
+
+fn namespaced_credential_key(namespace: &str, url: &str) -> String {
+    format!("{namespace}:{url}")
+}
+
+struct NamespacedCredentialsProvider {
+    namespace: &'static str,
+    inner: Arc<dyn CredentialsProvider>,
+}
+
+impl CredentialsProvider for NamespacedCredentialsProvider {
+    fn read_credentials<'a>(
+        &'a self,
+        url: &'a str,
+        cx: &'a AsyncApp,
+    ) -> Pin<Box<dyn Future<Output = Result<Option<(String, Vec<u8>)>>> + 'a>> {
+        async move {
+            let key = namespaced_credential_key(self.namespace, url);
+            self.inner.read_credentials(&key, cx).await
+        }
+        .boxed_local()
+    }
+
+    fn write_credentials<'a>(
+        &'a self,
+        url: &'a str,
+        username: &'a str,
+        password: &'a [u8],
+        cx: &'a AsyncApp,
+    ) -> Pin<Box<dyn Future<Output = Result<()>> + 'a>> {
+        async move {
+            let key = namespaced_credential_key(self.namespace, url);
+            self.inner
+                .write_credentials(&key, username, password, cx)
+                .await
+        }
+        .boxed_local()
+    }
+
+    fn delete_credentials<'a>(
+        &'a self,
+        url: &'a str,
+        cx: &'a AsyncApp,
+    ) -> Pin<Box<dyn Future<Output = Result<()>> + 'a>> {
+        async move {
+            let key = namespaced_credential_key(self.namespace, url);
+            self.inner.delete_credentials(&key, cx).await
+        }
+        .boxed_local()
     }
 }
 
@@ -177,5 +265,56 @@ impl CredentialsProvider for DevelopmentCredentialsProvider {
             self.save_credentials(&credentials)
         }
         .boxed_local()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashSet;
+
+    use super::*;
+
+    #[test]
+    fn sovereign_credentials_always_use_the_system_keychain() {
+        for release_channel in ReleaseChannel::ALL {
+            for development_use_keychain in [false, true] {
+                assert_eq!(
+                    backend_for(
+                        release_channel,
+                        CredentialSensitivity::Sovereign,
+                        development_use_keychain,
+                    ),
+                    CredentialBackend::SystemKeychain
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn normal_development_credentials_retain_the_development_provider() {
+        assert_eq!(
+            backend_for(ReleaseChannel::Dev, CredentialSensitivity::Normal, false),
+            CredentialBackend::DevelopmentFile
+        );
+        assert_eq!(
+            backend_for(ReleaseChannel::Dev, CredentialSensitivity::Normal, true),
+            CredentialBackend::SystemKeychain
+        );
+    }
+
+    #[test]
+    fn credential_keys_are_isolated_by_release_channel() {
+        let keys = ReleaseChannel::ALL.map(|release_channel| {
+            namespaced_credential_key(
+                release_channel.credential_namespace(),
+                "https://example.com",
+            )
+        });
+
+        assert_eq!(keys.iter().collect::<HashSet<_>>().len(), 4);
+        assert!(
+            keys.iter()
+                .all(|key| key.starts_with("com.openagents.omega"))
+        );
     }
 }

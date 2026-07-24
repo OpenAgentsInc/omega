@@ -1966,6 +1966,12 @@ pub fn parse_zed_link(link: &str, cx: &App) -> Option<ZedLink> {
         .or_else(|| {
             link.strip_prefix(ZED_URL_SCHEME)
                 .and_then(|result| result.strip_prefix("://"))
+        })
+        .or_else(|| {
+            let release_channel =
+                ReleaseChannel::try_global(cx).unwrap_or(*release_channel::RELEASE_CHANNEL);
+            link.strip_prefix(release_channel.protocol_scheme())
+                .and_then(|result| result.strip_prefix("://"))
         })?;
 
     let mut parts = path.split('/');

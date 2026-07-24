@@ -81,8 +81,8 @@ If you are new to these tools, see the `gdb` docs [here](https://www.gnu.org/sof
 After enabling full debug info and building with `cargo build`, run `rust-gdb` or `rust-lldb` against the compiled Zed binary:
 
 ```
-rust-gdb target/debug/zed
-rust-lldb target/debug/zed
+rust-gdb target/debug/omega
+rust-lldb target/debug/omega
 ```
 
 You can also attach to a running Zed process (for example, one started with `cargo run`):

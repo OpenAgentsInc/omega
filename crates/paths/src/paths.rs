@@ -1,4 +1,4 @@
-//! Paths to locations used by Zed.
+//! Paths to application data and configuration.
 
 use std::env;
 use std::path::{Path, PathBuf};
@@ -11,40 +11,17 @@ use util::rel_path::RelPath;
 /// A default editorconfig file name to use when resolving project settings.
 pub const EDITORCONFIG_NAME: &str = ".editorconfig";
 
-/// The application name, used to derive platform-specific data, config, cache,
-/// and state directory paths.
-///
-/// Forks should change this to avoid colliding with Zed's user data.
-pub const APP_NAME: &str = "Zed";
+pub use app_identity::BINARY_NAME;
 
-/// Lowercased form of [`APP_NAME`], for use in XDG-style paths on
-/// Linux/FreeBSD and the macOS `~/.config` fallback.
-pub const APP_NAME_LOWERCASE: &str = {
-    assert!(!APP_NAME.is_empty(), "APP_NAME must not be empty");
-    assert!(APP_NAME.as_bytes().is_ascii(), "APP_NAME must be ASCII");
-    const BYTES: [u8; APP_NAME.len()] = {
-        let mut bytes = [0u8; APP_NAME.len()];
-        let mut i = 0;
-        while i < APP_NAME.len() {
-            assert!(
-                APP_NAME.as_bytes()[i] != b'/' && APP_NAME.as_bytes()[i] != b'\\',
-                "APP_NAME must not contain path separators",
-            );
-            assert!(
-                APP_NAME.as_bytes()[i] >= 0x20,
-                "APP_NAME must not contain control characters"
-            );
-            bytes[i] = APP_NAME.as_bytes()[i];
-            i += 1;
-        }
-        bytes.make_ascii_lowercase();
-        bytes
-    };
-    match std::str::from_utf8(&BYTES) {
-        Ok(s) => s,
-        Err(_) => unreachable!(),
-    }
-};
+/// Returns the channel-specific application display name used for data roots.
+pub fn app_name() -> &'static str {
+    app_identity::CHANNEL.display_name()
+}
+
+/// Returns the channel-specific application slug used for XDG-style roots.
+pub fn app_storage_slug() -> &'static str {
+    app_identity::CHANNEL.storage_slug()
+}
 
 /// A custom data directory override, set only by `set_custom_data_dir`.
 /// This is used to override the default data directory location.
@@ -53,16 +30,16 @@ static CUSTOM_DATA_DIR: OnceLock<PathBuf> = OnceLock::new();
 
 /// The resolved data directory, combining custom override or platform defaults.
 /// This is set once and cached for subsequent calls.
-/// On macOS, this is `~/Library/Application Support/Zed`.
-/// On Linux/FreeBSD, this is `$XDG_DATA_HOME/zed`.
-/// On Windows, this is `%LOCALAPPDATA%\Zed`.
+/// On macOS, this is `~/Library/Application Support/<Omega channel>`.
+/// On Linux/FreeBSD, this is `$XDG_DATA_HOME/<omega-channel>`.
+/// On Windows, this is `%LOCALAPPDATA%\<Omega channel>`.
 static CURRENT_DATA_DIR: OnceLock<PathBuf> = OnceLock::new();
 
 /// The resolved config directory, combining custom override or platform defaults.
 /// This is set once and cached for subsequent calls.
-/// On macOS, this is `~/.config/zed`.
-/// On Linux/FreeBSD, this is `$XDG_CONFIG_HOME/zed`.
-/// On Windows, this is `%APPDATA%\Zed`.
+/// On macOS, this is `~/.config/<omega-channel>`.
+/// On Linux/FreeBSD, this is `$XDG_CONFIG_HOME/<omega-channel>`.
+/// On Windows, this is `%APPDATA%\<Omega channel>`.
 static CONFIG_DIR: OnceLock<PathBuf> = OnceLock::new();
 
 /// Returns the relative path to the zed_server directory on the ssh host.
@@ -126,16 +103,16 @@ pub fn config_dir() -> &'static PathBuf {
         } else if cfg!(target_os = "windows") {
             dirs::config_dir()
                 .expect("failed to determine RoamingAppData directory")
-                .join(APP_NAME)
+                .join(app_name())
         } else if cfg!(any(target_os = "linux", target_os = "freebsd")) {
             if let Ok(flatpak_xdg_config) = std::env::var("FLATPAK_XDG_CONFIG_HOME") {
                 flatpak_xdg_config.into()
             } else {
                 dirs::config_dir().expect("failed to determine XDG_CONFIG_HOME directory")
             }
-            .join(APP_NAME_LOWERCASE)
+            .join(app_storage_slug())
         } else {
-            home_dir().join(".config").join(APP_NAME_LOWERCASE)
+            home_dir().join(".config").join(app_storage_slug())
         }
     })
 }
@@ -148,18 +125,18 @@ pub fn data_dir() -> &'static PathBuf {
         } else if cfg!(target_os = "macos") {
             home_dir()
                 .join("Library/Application Support")
-                .join(APP_NAME)
+                .join(app_name())
         } else if cfg!(any(target_os = "linux", target_os = "freebsd")) {
             if let Ok(flatpak_xdg_data) = std::env::var("FLATPAK_XDG_DATA_HOME") {
                 flatpak_xdg_data.into()
             } else {
                 dirs::data_local_dir().expect("failed to determine XDG_DATA_HOME directory")
             }
-            .join(APP_NAME_LOWERCASE)
+            .join(app_storage_slug())
         } else if cfg!(target_os = "windows") {
             dirs::data_local_dir()
                 .expect("failed to determine LocalAppData directory")
-                .join(APP_NAME)
+                .join(app_name())
         } else {
             config_dir().clone() // Fallback
         }
@@ -169,8 +146,15 @@ pub fn data_dir() -> &'static PathBuf {
 pub fn state_dir() -> &'static PathBuf {
     static STATE_DIR: OnceLock<PathBuf> = OnceLock::new();
     STATE_DIR.get_or_init(|| {
+        if let Some(custom_dir) = CUSTOM_DATA_DIR.get() {
+            return custom_dir.join("state");
+        }
+
         if cfg!(target_os = "macos") {
-            return home_dir().join(".local").join("state").join(APP_NAME);
+            return home_dir()
+                .join(".local")
+                .join("state")
+                .join(app_storage_slug());
         }
 
         if cfg!(any(target_os = "linux", target_os = "freebsd")) {
@@ -179,12 +163,12 @@ pub fn state_dir() -> &'static PathBuf {
             } else {
                 dirs::state_dir().expect("failed to determine XDG_STATE_HOME directory")
             }
-            .join(APP_NAME_LOWERCASE);
+            .join(app_storage_slug());
         } else {
             // Windows
             return dirs::data_local_dir()
                 .expect("failed to determine LocalAppData directory")
-                .join(APP_NAME);
+                .join(app_name());
         }
     })
 }
@@ -193,16 +177,20 @@ pub fn state_dir() -> &'static PathBuf {
 pub fn temp_dir() -> &'static PathBuf {
     static TEMP_DIR: OnceLock<PathBuf> = OnceLock::new();
     TEMP_DIR.get_or_init(|| {
+        if let Some(custom_dir) = CUSTOM_DATA_DIR.get() {
+            return custom_dir.join("cache");
+        }
+
         if cfg!(target_os = "macos") {
             return dirs::cache_dir()
                 .expect("failed to determine cachesDirectory directory")
-                .join(APP_NAME);
+                .join(app_storage_slug());
         }
 
         if cfg!(target_os = "windows") {
             return dirs::cache_dir()
                 .expect("failed to determine LocalAppData directory")
-                .join(APP_NAME);
+                .join(app_storage_slug());
         }
 
         if cfg!(any(target_os = "linux", target_os = "freebsd")) {
@@ -211,10 +199,10 @@ pub fn temp_dir() -> &'static PathBuf {
             } else {
                 dirs::cache_dir().expect("failed to determine XDG_CACHE_HOME directory")
             }
-            .join(APP_NAME_LOWERCASE);
+            .join(app_storage_slug());
         }
 
-        home_dir().join(".cache").join(APP_NAME_LOWERCASE)
+        home_dir().join(".cache").join(app_storage_slug())
     })
 }
 
@@ -228,8 +216,10 @@ pub fn hang_traces_dir() -> &'static PathBuf {
 pub fn logs_dir() -> &'static PathBuf {
     static LOGS_DIR: OnceLock<PathBuf> = OnceLock::new();
     LOGS_DIR.get_or_init(|| {
-        if cfg!(target_os = "macos") {
-            home_dir().join("Library/Logs").join(APP_NAME)
+        if let Some(custom_dir) = CUSTOM_DATA_DIR.get() {
+            custom_dir.join("logs")
+        } else if cfg!(target_os = "macos") {
+            home_dir().join("Library/Logs").join(app_storage_slug())
         } else {
             data_dir().join("logs")
         }
@@ -242,16 +232,16 @@ pub fn remote_server_state_dir() -> &'static PathBuf {
     REMOTE_SERVER_STATE.get_or_init(|| data_dir().join("server_state"))
 }
 
-/// Returns the path to the `Zed.log` file.
+/// Returns the path to the current channel's log file.
 pub fn log_file() -> &'static PathBuf {
     static LOG_FILE: OnceLock<PathBuf> = OnceLock::new();
-    LOG_FILE.get_or_init(|| logs_dir().join(format!("{}.log", APP_NAME)))
+    LOG_FILE.get_or_init(|| logs_dir().join(format!("{}.log", app_storage_slug())))
 }
 
-/// Returns the path to the `Zed.log.old` file.
+/// Returns the path to the current channel's previous log file.
 pub fn old_log_file() -> &'static PathBuf {
     static OLD_LOG_FILE: OnceLock<PathBuf> = OnceLock::new();
-    OLD_LOG_FILE.get_or_init(|| logs_dir().join(format!("{}.log.old", APP_NAME)))
+    OLD_LOG_FILE.get_or_init(|| logs_dir().join(format!("{}.log.old", app_storage_slug())))
 }
 
 /// Returns the path to the database directory.
@@ -335,12 +325,16 @@ pub fn agents_file() -> &'static PathBuf {
 /// Flatpak sandbox would see a different `agents_file()` at runtime than
 /// this displays. The display string trades that precision for
 /// readability in announcement copy.
-#[cfg(target_os = "windows")]
-pub const GLOBAL_AGENTS_FILE_DISPLAY: &str =
-    const_format::concatcp!("%APPDATA%\\", APP_NAME, "\\AGENTS.md");
-#[cfg(not(target_os = "windows"))]
-pub const GLOBAL_AGENTS_FILE_DISPLAY: &str =
-    const_format::concatcp!("~/.config/", APP_NAME_LOWERCASE, "/AGENTS.md");
+pub fn global_agents_file_display() -> &'static str {
+    static DISPLAY: LazyLock<String> = LazyLock::new(|| {
+        if cfg!(target_os = "windows") {
+            format!("%APPDATA%\\{}\\AGENTS.md", app_name())
+        } else {
+            format!("~/.config/{}/AGENTS.md", app_storage_slug())
+        }
+    });
+    DISPLAY.as_str()
+}
 
 /// Returns the path to the extensions directory.
 ///
@@ -634,4 +628,33 @@ pub fn global_gitignore_path() -> Option<PathBuf> {
     GLOBAL_GITIGNORE_PATH
         .get_or_init(::ignore::gitignore::gitconfig_excludes_path)
         .clone()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_roots_use_the_current_omega_channel() {
+        assert!(app_name().starts_with("Omega"));
+        assert!(app_storage_slug().starts_with("omega"));
+        assert_eq!(
+            config_dir().file_name().and_then(|name| name.to_str()),
+            Some(app_storage_slug())
+        );
+
+        if cfg!(any(target_os = "macos", target_os = "windows")) {
+            assert_eq!(
+                data_dir().file_name().and_then(|name| name.to_str()),
+                Some(app_name())
+            );
+        } else {
+            assert_eq!(
+                data_dir().file_name().and_then(|name| name.to_str()),
+                Some(app_storage_slug())
+            );
+        }
+
+        assert!(!log_file().to_string_lossy().to_lowercase().contains("zed"));
+    }
 }

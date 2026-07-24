@@ -1209,7 +1209,8 @@ fn register_actions(
                         Toast::new(
                             NotificationId::unique::<RegisterZedScheme>(),
                             format!(
-                                "zed:// links will now open in {}.",
+                                "{}:// links will now open in {}.",
+                                ReleaseChannel::global(cx).protocol_scheme(),
                                 ReleaseChannel::global(cx).display_name()
                             ),
                         ),
@@ -1219,7 +1220,7 @@ fn register_actions(
                 Ok(())
             })
             .detach_and_prompt_err(
-                "Error registering zed:// scheme",
+                "Error registering Omega URL scheme",
                 window,
                 cx,
                 |_, _, _| None,
