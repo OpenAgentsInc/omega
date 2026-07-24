@@ -4,9 +4,9 @@ use cloud_api_types::Plan;
 use db::kvp::KeyValueStore;
 use fs::Fs;
 use gpui::{
-    Action, AnyElement, App, AppContext, AsyncWindowContext, Context, Entity, EventEmitter,
-    FocusHandle, Focusable, Global, IntoElement, KeyContext, Render, ScrollHandle, SharedString,
-    Subscription, Task, WeakEntity, Window, actions,
+    Action, AnyElement, AnyWindowHandle, App, AppContext, AsyncWindowContext, Context, Entity,
+    EventEmitter, FocusHandle, Focusable, Global, IntoElement, KeyContext, Render, ScrollHandle,
+    SharedString, Subscription, Task, WeakEntity, Window, actions,
 };
 use notifications::status_toast::StatusToast;
 use project::agent_server_store::AllAgentServersSettings;
@@ -35,6 +35,7 @@ mod basics_page;
 mod identity_controller;
 mod identity_profile;
 mod identity_section;
+mod identity_startup;
 pub mod multibuffer_hint;
 mod secure_input;
 mod theme_preview;
@@ -57,7 +58,17 @@ pub struct ImportCursorSettings {
     pub skip_prompt: bool,
 }
 
-pub const FIRST_OPEN: &str = "first_open";
+pub use identity_startup::await_identity_ready;
+
+const IDENTITY_ONBOARDING_COMPLETION_KEY: &str = "omega_identity_onboarding_completion_v1";
+const IDENTITY_ONBOARDING_COMPLETION_SCHEMA: &str =
+    "openagents.omega.identity-onboarding-completion.v1";
+
+#[derive(serde::Serialize)]
+struct IdentityOnboardingCompletion<'a> {
+    schema: &'static str,
+    identity_ref: &'a str,
+}
 
 actions!(
     onboarding,
@@ -93,7 +104,7 @@ pub fn init(cx: &mut App) {
                     if let Some(existing) = existing {
                         workspace.activate_item(&existing, true, true, window, cx);
                     } else {
-                        let settings_page = Onboarding::new(workspace, window, cx);
+                        let settings_page = Onboarding::new_manual(workspace, window, cx);
                         workspace.add_item_to_active_pane(
                             Box::new(settings_page),
                             None,
@@ -193,34 +204,56 @@ pub fn show_onboarding_view(app_state: Arc<AppState>, cx: &mut App) -> Task<anyh
         |workspace, window, cx| {
             {
                 workspace.toggle_dock(DockPosition::Left, window, cx);
-                let onboarding_page = Onboarding::new(workspace, window, cx);
+                let onboarding_page = Onboarding::new_bootstrap(workspace, window, cx);
                 workspace.add_item_to_center(Box::new(onboarding_page.clone()), window, cx);
 
                 window.focus(&onboarding_page.focus_handle(cx), cx);
 
                 cx.notify();
             };
-            let kvp = KeyValueStore::global(cx);
-            db::write_and_log(cx, move || async move {
-                kvp.write_kvp(FIRST_OPEN.to_string(), "false".to_string())
-                    .await
-            });
         },
     )
 }
 
 struct Onboarding {
+    mode: OnboardingMode,
     workspace: WeakEntity<Workspace>,
     focus_handle: FocusHandle,
     user_store: Entity<UserStore>,
     scroll_handle: ScrollHandle,
     identity_section: Entity<identity_section::IdentitySection>,
+    finish_task: Option<Task<()>>,
+    finish_error: Option<SharedString>,
     _settings_subscription: Subscription,
     _identity_subscription: Subscription,
 }
 
+#[derive(Copy, Clone)]
+enum OnboardingMode {
+    Bootstrap(AnyWindowHandle),
+    Manual,
+}
+
 impl Onboarding {
-    fn new(workspace: &Workspace, window: &mut Window, cx: &mut App) -> Entity<Self> {
+    fn new_bootstrap(workspace: &Workspace, window: &mut Window, cx: &mut App) -> Entity<Self> {
+        Self::new(
+            workspace,
+            OnboardingMode::Bootstrap(window.window_handle()),
+            window,
+            cx,
+        )
+    }
+
+    fn new_manual(workspace: &Workspace, window: &mut Window, cx: &mut App) -> Entity<Self> {
+        Self::new(workspace, OnboardingMode::Manual, window, cx)
+    }
+
+    fn new(
+        workspace: &Workspace,
+        mode: OnboardingMode,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Entity<Self> {
         let font_family_cache = theme::FontFamilyCache::global(cx);
 
         let installed_agents = cx
@@ -260,7 +293,7 @@ impl Onboarding {
         );
 
         let identity_section = identity_section::IdentitySection::new(0, window, cx);
-        cx.new(|cx| {
+        let onboarding = cx.new(|cx| {
             cx.spawn(async move |this, cx| {
                 font_family_cache.prefetch(cx).await;
                 this.update(cx, |_, cx| {
@@ -270,25 +303,89 @@ impl Onboarding {
             .detach();
 
             Self {
+                mode,
                 workspace: workspace.weak_handle(),
                 focus_handle: cx.focus_handle(),
                 scroll_handle: ScrollHandle::new(),
                 identity_section: identity_section.clone(),
+                finish_task: None,
+                finish_error: None,
                 user_store: workspace.user_store().clone(),
                 _settings_subscription: cx
                     .observe_global::<SettingsStore>(move |_, cx| cx.notify()),
                 _identity_subscription: cx.observe(&identity_section, |_, _, cx| cx.notify()),
             }
-        })
+        });
+        identity_startup::onboarding_opened(cx);
+        onboarding
     }
 
     fn on_finish(&mut self, _: &Finish, _: &mut Window, cx: &mut Context<Self>) {
-        if !self.identity_section.read(cx).is_ready() {
-            cx.notify();
+        if self.finish_task.is_some() {
             return;
         }
-        telemetry::event!("Finish Setup");
-        go_to_welcome_page(cx);
+        let Some(identity_ref) = self.identity_section.read(cx).ready_identity_ref() else {
+            cx.notify();
+            return;
+        };
+        let completion = IdentityOnboardingCompletion {
+            schema: IDENTITY_ONBOARDING_COMPLETION_SCHEMA,
+            identity_ref: identity_ref.as_str(),
+        };
+        let Ok(completion) = serde_json::to_string(&completion) else {
+            self.finish_error = Some("Could not record identity setup completion.".into());
+            cx.notify();
+            return;
+        };
+        let kvp = KeyValueStore::global(cx);
+        self.finish_error = None;
+        self.finish_task = Some(cx.spawn(async move |this, cx| {
+            let result = kvp
+                .write_kvp(IDENTITY_ONBOARDING_COMPLETION_KEY.to_string(), completion)
+                .await;
+            if let Err(error) = result {
+                zlog::error!("failed to record identity onboarding completion: {error:#}");
+                this.update(cx, |this, cx| {
+                    this.finish_task = None;
+                    this.finish_error = Some("Could not finish setup. Please try again.".into());
+                    cx.notify();
+                })
+                .ok();
+                return;
+            }
+
+            let Ok(mode) = this.read_with(cx, |this, _| this.mode) else {
+                return;
+            };
+            match mode {
+                OnboardingMode::Bootstrap(window_handle) => {
+                    if let Err(error) = window_handle.update(cx, |_, window, cx| {
+                        window.remove_window();
+                        telemetry::event!("Finish Setup");
+                        identity_startup::release_identity_waiters(cx);
+                    }) {
+                        zlog::error!("failed to close identity onboarding window: {error:#}");
+                        this.update(cx, |this, cx| {
+                            this.finish_task = None;
+                            this.finish_error =
+                                Some("Could not finish setup. Please try again.".into());
+                            cx.notify();
+                        })
+                        .ok();
+                        return;
+                    }
+                }
+                OnboardingMode::Manual => {
+                    this.update(cx, |this, cx| {
+                        this.finish_task = None;
+                        telemetry::event!("Finish Setup");
+                        identity_startup::release_identity_waiters(cx);
+                        go_to_welcome_page(cx);
+                    })
+                    .ok();
+                }
+            }
+        }));
     }
 
     fn handle_sign_in(&mut self, _: &SignIn, window: &mut Window, cx: &mut Context<Self>) {
@@ -376,21 +473,42 @@ impl Render for Onboarding {
                                                     ),
                                             ),
                                     )
-                                    .child({
-                                        Button::new("finish_setup", "Finish Setup")
-                                            .style(ButtonStyle::Filled)
-                                            .size(ButtonSize::Medium)
-                                            .width(rems_from_px(200.))
-                                            .disabled(!self.identity_section.read(cx).is_ready())
-                                            .key_binding(KeyBinding::for_action_in(
-                                                &Finish,
-                                                &self.focus_handle,
-                                                cx,
-                                            ))
-                                            .on_click(|_, window, cx| {
-                                                window.dispatch_action(Finish.boxed_clone(), cx);
+                                    .child(
+                                        v_flex()
+                                            .gap_1()
+                                            .items_end()
+                                            .child({
+                                                Button::new("finish_setup", "Finish Setup")
+                                                    .style(ButtonStyle::Filled)
+                                                    .size(ButtonSize::Medium)
+                                                    .width(rems_from_px(200.))
+                                                    .disabled(
+                                                        self.finish_task.is_some()
+                                                            || !self
+                                                                .identity_section
+                                                                .read(cx)
+                                                                .is_ready(),
+                                                    )
+                                                    .key_binding(KeyBinding::for_action_in(
+                                                        &Finish,
+                                                        &self.focus_handle,
+                                                        cx,
+                                                    ))
+                                                    .on_click(|_, window, cx| {
+                                                        window.dispatch_action(
+                                                            Finish.boxed_clone(),
+                                                            cx,
+                                                        );
+                                                    })
                                             })
-                                    }),
+                                            .when_some(self.finish_error.clone(), |this, error| {
+                                                this.child(
+                                                    Label::new(error)
+                                                        .size(LabelSize::Small)
+                                                        .color(Color::Error),
+                                                )
+                                            }),
+                                    ),
                             )
                             .child(Divider::horizontal().color(ui::DividerColor::BorderVariant))
                             .child(self.render_page(cx)),
@@ -449,6 +567,7 @@ impl Item for Onboarding {
     }
 
     fn on_removed(&self, cx: &mut Context<Self>) {
+        identity_startup::onboarding_closed(cx);
         self.identity_section
             .update(cx, |section, cx| section.clear_transient_state(cx));
     }
@@ -645,7 +764,7 @@ impl workspace::SerializableItem for Onboarding {
         window.spawn(cx, async move |cx| {
             if let Some(_) = db.get_onboarding_page(item_id, workspace_id)? {
                 workspace.update_in(cx, |workspace, window, cx| {
-                    Onboarding::new(workspace, window, cx)
+                    Onboarding::new_manual(workspace, window, cx)
                 })
             } else {
                 Err(anyhow::anyhow!("No onboarding page to deserialize"))
@@ -661,6 +780,9 @@ impl workspace::SerializableItem for Onboarding {
         _window: &mut Window,
         cx: &mut ui::Context<Self>,
     ) -> Option<gpui::Task<gpui::Result<()>>> {
+        if matches!(self.mode, OnboardingMode::Bootstrap(_)) {
+            return None;
+        }
         let workspace_id = workspace.database_id()?;
 
         let db = persistence::OnboardingPagesDb::global(cx);
@@ -672,7 +794,7 @@ impl workspace::SerializableItem for Onboarding {
     }
 
     fn should_serialize(&self, event: &Self::Event) -> bool {
-        event == &ItemEvent::UpdateTab
+        matches!(self.mode, OnboardingMode::Manual) && event == &ItemEvent::UpdateTab
     }
 }
 

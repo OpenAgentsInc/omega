@@ -24,6 +24,7 @@ component.workspace = true
 db.workspace = true
 documented.workspace = true
 fs.workspace = true
+futures.workspace = true
 fuzzy.workspace = true
 gpui.workspace = true
 menu.workspace = true

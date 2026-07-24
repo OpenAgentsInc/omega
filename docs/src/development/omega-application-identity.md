@@ -212,6 +212,32 @@ into Omega's local data directory and represented by an opaque
 `local-avatar:` token. This presentation record has no signing, relay, event
 kind, or publication fields and is never a Nostr kind 0 profile.
 
+### First-launch routing
+
+Every initial editor surface waits on one process-global identity startup
+coordinator. The coordinator owns one shared background call to
+`inspect_for_process_start`; nested restore, open-request, CLI, file, remote,
+new-window, and new-file paths reuse that result and cannot acknowledge a reset
+marker twice in one process. The operating-system single-instance decision
+happens before this coordinator is installed.
+
+Ready custody releases callers immediately. Every other custody state, and an
+inspection error, opens at most one identity onboarding view and keeps each
+owned launch intent suspended in its original task. The intent, including a CLI
+response sink and wait flag, resumes through its existing dispatch path only
+after the user finishes onboarding. Closing the view does not release callers;
+it permits a later request to reopen the singleton view.
+
+Finish rechecks the live section's durable Ready inspection, writes the
+identity-bound `omega_identity_onboarding_completion_v1` local completion
+record, removes the dedicated bootstrap window, and then releases all waiters.
+Manual Editor Onboarding remains in its existing workspace. A bootstrap-window
+open failure is a shared terminal error, so current and future intents fail
+instead of hanging or bypassing identity. Merely opening onboarding writes no
+completion flag. The completion record is presentation history rather than
+identity authority: every new Omega process still performs the
+custody/public-manifest startup inspection.
+
 ## Native identity provenance
 
 Omega's native identity contract adapts selected patterns from

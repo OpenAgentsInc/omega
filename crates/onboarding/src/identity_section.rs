@@ -342,6 +342,14 @@ impl IdentitySection {
             .is_some_and(|inspection| inspection.custody.state == CustodyState::Ready)
     }
 
+    pub(crate) fn ready_identity_ref(&self) -> Option<IdentityRef> {
+        self.controller
+            .durable()
+            .filter(|inspection| inspection.custody.state == CustodyState::Ready)
+            .and_then(|inspection| inspection.custody.identity.as_ref())
+            .map(|identity| identity.identity_ref().clone())
+    }
+
     pub(crate) fn clear_transient_state(&mut self, cx: &mut Context<Self>) {
         self.controller.cancel();
         self.operation_task = None;

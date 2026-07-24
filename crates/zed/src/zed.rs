@@ -53,7 +53,7 @@ use language_tools::lsp_log_view::LspLogToolbarItemView;
 use markdown::{Markdown, MarkdownElement, MarkdownFont, MarkdownStyle};
 use migrate::{MigrationBanner, MigrationEvent, MigrationNotification, MigrationType};
 use migrator::migrate_keymap;
-use onboarding::multibuffer_hint::MultibufferHint;
+use onboarding::{await_identity_ready, multibuffer_hint::MultibufferHint};
 pub use open_listener::*;
 use outline_panel::OutlinePanel;
 use paths::{
@@ -1019,41 +1019,58 @@ fn register_actions(
             }
         })
         .register_action(|workspace, action: &workspace::Open, window, cx| {
-            telemetry::event!("Project Opened");
-            workspace::prompt_for_open_path_and_open(
-                workspace,
-                workspace.app_state().clone(),
-                PathPromptOptions {
-                    files: true,
-                    directories: true,
-                    multiple: true,
-                    prompt: None,
-                },
-                action.create_new_window.unwrap_or_else(|| {
-                    matches!(
-                        WorkspaceSettings::get_global(cx).default_open_behavior,
-                        DefaultOpenBehavior::NewWindow
-                    )
-                }),
-                window,
-                cx,
-            );
+            let app_state = workspace.app_state().clone();
+            let create_new_window = action.create_new_window;
+            cx.spawn_in(window, async move |this, cx| {
+                await_identity_ready(app_state.clone(), cx).await?;
+                this.update_in(cx, |workspace, window, cx| {
+                    telemetry::event!("Project Opened");
+                    workspace::prompt_for_open_path_and_open(
+                        workspace,
+                        app_state,
+                        PathPromptOptions {
+                            files: true,
+                            directories: true,
+                            multiple: true,
+                            prompt: None,
+                        },
+                        create_new_window.unwrap_or_else(|| {
+                            matches!(
+                                WorkspaceSettings::get_global(cx).default_open_behavior,
+                                DefaultOpenBehavior::NewWindow
+                            )
+                        }),
+                        window,
+                        cx,
+                    );
+                })?;
+                anyhow::Ok(())
+            })
+            .detach_and_log_err(cx);
         })
         .register_action(|workspace, _: &workspace::OpenFiles, window, cx| {
-            let directories = cx.can_select_mixed_files_and_dirs();
-            workspace::prompt_for_open_path_and_open(
-                workspace,
-                workspace.app_state().clone(),
-                PathPromptOptions {
-                    files: true,
-                    directories,
-                    multiple: true,
-                    prompt: None,
-                },
-                true,
-                window,
-                cx,
-            );
+            let app_state = workspace.app_state().clone();
+            cx.spawn_in(window, async move |this, cx| {
+                await_identity_ready(app_state.clone(), cx).await?;
+                this.update_in(cx, |workspace, window, cx| {
+                    let directories = cx.can_select_mixed_files_and_dirs();
+                    workspace::prompt_for_open_path_and_open(
+                        workspace,
+                        app_state,
+                        PathPromptOptions {
+                            files: true,
+                            directories,
+                            multiple: true,
+                            prompt: None,
+                        },
+                        true,
+                        window,
+                        cx,
+                    );
+                })?;
+                anyhow::Ok(())
+            })
+            .detach_and_log_err(cx);
         })
         .register_action(|workspace, action: &zed_actions::OpenRemote, window, cx| {
             if !action.from_existing_connection {
@@ -1064,21 +1081,25 @@ fn register_actions(
             if workspace.project().read(cx).is_local() {
                 return;
             }
-            telemetry::event!("Project Opened");
-            let paths = workspace.prompt_for_open_path(
-                PathPromptOptions {
-                    files: true,
-                    directories: true,
-                    multiple: true,
-                    prompt: None,
-                },
-                DirectoryLister::Project(workspace.project().clone()),
-                window,
-                cx,
-            );
+            let app_state = workspace.app_state().clone();
             cx.spawn_in(window, async move |this, cx| {
+                await_identity_ready(app_state, cx).await?;
+                let paths = this.update_in(cx, |workspace, window, cx| {
+                    telemetry::event!("Project Opened");
+                    workspace.prompt_for_open_path(
+                        PathPromptOptions {
+                            files: true,
+                            directories: true,
+                            multiple: true,
+                            prompt: None,
+                        },
+                        DirectoryLister::Project(workspace.project().clone()),
+                        window,
+                        cx,
+                    )
+                })?;
                 let Some(paths) = paths.await.log_err().flatten() else {
-                    return;
+                    return anyhow::Ok(());
                 };
                 if let Some(task) = this
                     .update_in(cx, |this, window, cx| {
@@ -1088,8 +1109,9 @@ fn register_actions(
                 {
                     task.await.log_err();
                 }
+                anyhow::Ok(())
             })
-            .detach()
+            .detach_and_log_err(cx)
         })
         .register_action({
             let fs = app_state.fs.clone();
@@ -1265,30 +1287,40 @@ fn register_actions(
         .register_action({
             let app_state = app_state.clone();
             move |_, _: &NewWindow, _, cx| {
-                open_new(
-                    Default::default(),
-                    app_state.clone(),
-                    cx,
-                    |workspace, window, cx| {
-                        cx.activate(true);
-                        // Create buffer synchronously to avoid flicker
-                        let project = workspace.project().clone();
-                        let buffer = project.update(cx, |project, cx| {
-                            project.create_local_buffer("", None, true, cx)
+                cx.spawn({
+                    let app_state = app_state.clone();
+                    async move |_, cx| {
+                        await_identity_ready(app_state.clone(), cx).await?;
+                        cx.update(|cx| {
+                            open_new(
+                                Default::default(),
+                                app_state,
+                                cx,
+                                |workspace, window, cx| {
+                                    cx.activate(true);
+                                    // Create buffer synchronously to avoid flicker
+                                    let project = workspace.project().clone();
+                                    let buffer = project.update(cx, |project, cx| {
+                                        project.create_local_buffer("", None, true, cx)
+                                    });
+                                    let editor = cx.new(|cx| {
+                                        Editor::for_buffer(buffer, Some(project), window, cx)
+                                    });
+                                    workspace.add_item_to_active_pane(
+                                        Box::new(editor),
+                                        None,
+                                        true,
+                                        window,
+                                        cx,
+                                    );
+                                },
+                            )
+                            .detach();
                         });
-                        let editor = cx.new(|cx| {
-                            Editor::for_buffer(buffer, Some(project), window, cx)
-                        });
-                        workspace.add_item_to_active_pane(
-                            Box::new(editor),
-                            None,
-                            true,
-                            window,
-                            cx,
-                        );
-                    },
-                )
-                .detach();
+                        anyhow::Ok(())
+                    }
+                })
+                .detach_and_log_err(cx);
             }
         })
         .register_action({
@@ -1310,14 +1342,29 @@ fn register_actions(
         .register_action({
             let app_state = app_state.clone();
             move |_, _: &NewFile, _, cx| {
-                open_new(
-                    Default::default(),
-                    app_state.clone(),
-                    cx,
-                    |workspace, window, cx| {
-                        Editor::new_file(workspace, &Default::default(), window, cx)
-                    },
-                )
+                cx.spawn({
+                    let app_state = app_state.clone();
+                    async move |_, cx| {
+                        await_identity_ready(app_state.clone(), cx).await?;
+                        cx.update(|cx| {
+                            open_new(
+                                Default::default(),
+                                app_state,
+                                cx,
+                                |workspace, window, cx| {
+                                    Editor::new_file(
+                                        workspace,
+                                        &Default::default(),
+                                        window,
+                                        cx,
+                                    )
+                                },
+                            )
+                            .detach_and_log_err(cx);
+                        });
+                        anyhow::Ok(())
+                    }
+                })
                 .detach_and_log_err(cx);
             }
         });

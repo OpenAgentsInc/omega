@@ -12522,6 +12522,7 @@ dependencies = [
  "db",
  "documented",
  "fs",
+ "futures 0.3.32",
  "fuzzy",
  "gpui",
  "menu",
