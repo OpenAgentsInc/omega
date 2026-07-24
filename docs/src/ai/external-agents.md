@@ -46,9 +46,9 @@ To choose your billing method, open a Claude Agent thread, run `/login`, and aut
 
 ## Codex {#codex-cli}
 
-Use Codex when you want Codex running as an ACP-integrated External Agent in Zed.
+Use Codex when you want Codex running as an ACP-integrated External Agent in Omega.
 
-Install Codex from the [ACP Registry](#registry), then start a Codex thread from the Agent Panel or Threads Sidebar. Codex owns its own authentication and billing. An OpenAI API key configured for [Zed Agent](./zed-agent.md) does not automatically configure Codex.
+Install Codex from the [ACP Registry](#registry), then start a Codex thread from the Agent Panel or Threads Sidebar. Codex owns its own authentication and billing. Omega starts the external agent with its Codex-native configuration, so an existing local Codex login remains the single credential source; Omega does not copy its tokens into another provider store. An OpenAI API key configured for Omega's built-in agent does not automatically configure Codex.
 
 Codex may support ChatGPT login, Codex API keys, OpenAI API keys, or Codex-native configuration depending on the installed version and environment. To change authentication, use the Codex thread's native login/logout flow.
 

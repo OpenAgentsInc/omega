@@ -546,6 +546,8 @@ fn render_import_settings_section(tab_index: &mut isize, cx: &mut App) -> impl I
 
 pub(crate) const FEATURED_AGENT_IDS: &[&str] =
     &["claude-acp", "codex-acp", "github-copilot-cli", "cursor"];
+const AGENT_SETUP_DESCRIPTION: &str =
+    "Install external agents to start a thread. Codex uses your existing Codex login; Omega never copies it.";
 
 fn render_registry_agent_button(
     agent: &RegistryAgent,
@@ -640,12 +642,7 @@ fn render_ai_section(cx: &mut App) -> impl IntoElement {
     v_flex()
         .gap_0p5()
         .child(Label::new("Agent Setup"))
-        .child(
-            Label::new(
-                "Install external agents to start a thread. Hosted cloud agent plans are not available in Omega.",
-            )
-            .color(Color::Muted),
-        )
+        .child(Label::new(AGENT_SETUP_DESCRIPTION).color(Color::Muted))
         .child(grid)
 }
 
@@ -716,5 +713,7 @@ mod tests {
             FEATURED_AGENT_IDS,
             ["claude-acp", "codex-acp", "github-copilot-cli", "cursor"]
         );
+        assert!(AGENT_SETUP_DESCRIPTION.contains("existing Codex login"));
+        assert!(AGENT_SETUP_DESCRIPTION.contains("never copies"));
     }
 }
