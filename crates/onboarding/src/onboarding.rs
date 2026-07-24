@@ -32,6 +32,7 @@ use zed_actions::OpenOnboarding;
 
 mod base_keymap_picker;
 mod basics_page;
+mod identity_section;
 pub mod multibuffer_hint;
 mod theme_preview;
 
@@ -210,6 +211,7 @@ struct Onboarding {
     focus_handle: FocusHandle,
     user_store: Entity<UserStore>,
     scroll_handle: ScrollHandle,
+    identity_state: identity_section::IdentityFixtureState,
     _settings_subscription: Subscription,
 }
 
@@ -266,6 +268,7 @@ impl Onboarding {
                 workspace: workspace.weak_handle(),
                 focus_handle: cx.focus_handle(),
                 scroll_handle: ScrollHandle::new(),
+                identity_state: identity_section::fixture_state_for_current_build(),
                 user_store: workspace.user_store().clone(),
                 _settings_subscription: cx
                     .observe_global::<SettingsStore>(move |_, cx| cx.notify()),
@@ -297,7 +300,8 @@ impl Onboarding {
     }
 
     fn render_page(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        crate::basics_page::render_basics_page(&self.user_store, cx).into_any_element()
+        crate::basics_page::render_basics_page(&self.user_store, self.identity_state, cx)
+            .into_any_element()
     }
 }
 
@@ -347,15 +351,15 @@ impl Render for Onboarding {
                                     .child(
                                         h_flex()
                                             .gap_4()
-                                            .child(Vector::square(VectorName::ZedLogo, rems(2.5)))
+                                            .child(Vector::square(VectorName::OmegaLogo, rems(2.5)))
                                             .child(
                                                 v_flex()
                                                     .child(
-                                                        Headline::new("Welcome to Zed")
+                                                        Headline::new("Welcome to Omega")
                                                             .size(HeadlineSize::Small),
                                                     )
                                                     .child(
-                                                        Label::new("The editor for what's next")
+                                                        Label::new("Your last IDE.")
                                                             .color(Color::Muted)
                                                             .size(LabelSize::Small)
                                                             .italic(),
@@ -422,6 +426,7 @@ impl Item for Onboarding {
             workspace: self.workspace.clone(),
             user_store: self.user_store.clone(),
             scroll_handle: ScrollHandle::new(),
+            identity_state: self.identity_state,
             focus_handle: cx.focus_handle(),
             _settings_subscription: cx.observe_global::<SettingsStore>(move |_, cx| cx.notify()),
         })))

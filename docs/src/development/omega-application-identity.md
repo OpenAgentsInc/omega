@@ -31,3 +31,20 @@ Normal development credentials can still use the channel-local development
 credentials file. Identity custody code must use the secure-only provider seam,
 which always selects the system keychain and applies the channel credential
 namespace.
+
+## Review identity onboarding fixtures
+
+Development builds accept `OMEGA_IDENTITY_FIXTURE` so every public onboarding
+state can be reviewed without writing a key. Supported values are
+`reset-failed`, `locked`, `relaunch-required`, `conflict`, `lost`,
+`incomplete`, `absent`, `creating`, and `ready`.
+
+For example:
+
+```sh
+OMEGA_IDENTITY_FIXTURE=ready cargo run --profile release-fast
+```
+
+These states are presentation fixtures. Identity actions remain disabled until
+secure custody is connected, and the masked import preview contains no private
+key material.

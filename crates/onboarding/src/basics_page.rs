@@ -23,6 +23,7 @@ use vim_mode_setting::VimModeSetting;
 
 use crate::{
     ImportCursorSettings, ImportVsCodeSettings, SettingsImportState,
+    identity_section::{IdentityFixtureState, render_identity_section},
     theme_preview::{ThemePreviewStyle, ThemePreviewTile},
 };
 
@@ -704,12 +705,17 @@ fn render_ai_section(user_store: &Entity<UserStore>, cx: &mut App) -> impl IntoE
         .child(grid)
 }
 
-pub(crate) fn render_basics_page(user_store: &Entity<UserStore>, cx: &mut App) -> impl IntoElement {
+pub(crate) fn render_basics_page(
+    user_store: &Entity<UserStore>,
+    identity_state: IdentityFixtureState,
+    cx: &mut App,
+) -> impl IntoElement {
     let mut tab_index = 0;
 
     v_flex()
         .id("basics-page")
         .gap_6()
+        .child(render_identity_section(&mut tab_index, identity_state))
         .child(render_theme_section(&mut tab_index, cx))
         .child(render_base_keymap_section(&mut tab_index, cx))
         .child(render_ai_section(user_store, cx))
@@ -718,4 +724,31 @@ pub(crate) fn render_basics_page(user_store: &Entity<UserStore>, cx: &mut App) -
         .child(render_worktree_auto_trust_switch(&mut tab_index, cx))
         .child(Divider::horizontal().color(ui::DividerColor::BorderVariant))
         .child(render_telemetry_section(&mut tab_index, cx))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn omega_onboarding_preserves_theme_families() {
+        assert_eq!(LIGHT_THEMES, ["One Light", "Ayu Light", "Gruvbox Light"]);
+        assert_eq!(DARK_THEMES, ["One Dark", "Ayu Dark", "Gruvbox Dark"]);
+        assert_eq!(
+            FAMILY_NAMES.map(|name| name.to_string()),
+            ["One", "Ayu", "Gruvbox"]
+        );
+        assert_eq!(
+            get_theme_family_themes("Ayu Dark"),
+            Some(("Ayu Light", "Ayu Dark"))
+        );
+    }
+
+    #[test]
+    fn omega_onboarding_preserves_featured_registry_agents() {
+        assert_eq!(
+            FEATURED_AGENT_IDS,
+            ["claude-acp", "codex-acp", "github-copilot-cli", "cursor"]
+        );
+    }
 }
