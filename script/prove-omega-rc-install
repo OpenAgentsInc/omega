@@ -1,0 +1,312 @@
+#!/usr/bin/env bash
+#
+# Produce (or refuse) an installed Omega RC proof bundle for issue #16.
+#
+# Without a signed/notarized candidate, this writes an incomplete proof and
+# exits non-zero. Closing #16 requires a completed installed proof.
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$ROOT"
+
+OMEGA_RC_VERSION="${OMEGA_RC_VERSION:-0.2.0-rc1}"
+OMEGA_RC_ARTIFACT_NAME="${OMEGA_RC_ARTIFACT_NAME:-Omega-v${OMEGA_RC_VERSION}-macos-arm64.dmg}"
+OMEGA_RC_BUNDLE_ID="${OMEGA_RC_BUNDLE_ID:-com.openagents.omega.rc}"
+OMEGA_APP_PATH="${OMEGA_APP_PATH:-/Applications/Omega.app}"
+OUT_DIR="${OMEGA_PROOF_OUT:-${ROOT}/target/omega-rc-proof}"
+RELEASE_RECORD="${OMEGA_RELEASE_RECORD:-${ROOT}/target/omega-rc/release-record.json}"
+PACKAGE_PATH="${OMEGA_PACKAGE_PATH:-${ROOT}/target/omega-rc/${OMEGA_RC_ARTIFACT_NAME}}"
+
+usage() {
+  cat <<'EOF'
+Usage: script/prove-omega-rc-install [--harness-check] [--release-record PATH] [--app PATH]
+
+  --harness-check        Validate proof schema + docs only (no install evidence).
+  --release-record PATH  Release record from script/bundle-omega-rc.
+  --app PATH             Installed Omega.app path (default: /Applications/Omega.app).
+  --out DIR              Proof output directory.
+EOF
+}
+
+MODE="prove"
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --harness-check)
+      MODE="harness"
+      shift
+      ;;
+    --release-record)
+      RELEASE_RECORD="$2"
+      shift 2
+      ;;
+    --app)
+      OMEGA_APP_PATH="$2"
+      shift 2
+      ;;
+    --out)
+      OUT_DIR="$2"
+      shift 2
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "error: unknown argument: $1" >&2
+      usage >&2
+      exit 2
+      ;;
+  esac
+done
+
+mkdir -p "$OUT_DIR"
+PROOF_JSON="${OUT_DIR}/installed-proof.json"
+NOTES_MD="${OUT_DIR}/NOTES.md"
+
+write_json() {
+  python3 - "$@" <<'PY'
+import json
+import sys
+
+payload = json.loads(sys.argv[1])
+path = sys.argv[2]
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(payload, handle, indent=2, sort_keys=True)
+    handle.write("\n")
+print(f"wrote {path}")
+PY
+}
+
+if [[ "$MODE" == "harness" ]]; then
+  test -f "$ROOT/docs/src/development/omega-rc-installed-proof.md"
+  test -x "$ROOT/script/prove-omega-rc-install"
+  if ! grep -q 'omega-rc-installed-proof.md' "$ROOT/docs/src/SUMMARY.md"; then
+    echo "error: docs/src/SUMMARY.md must link omega-rc-installed-proof.md" >&2
+    exit 1
+  fi
+  write_json "$(python3 - <<'PY'
+import json
+print(json.dumps({
+  "schema_version": 1,
+  "status": "harness_ok",
+  "product": "Omega",
+  "version": "0.2.0-rc1",
+  "checks": {
+    "menu_about_omega": "pending",
+    "welcome_omega_branding": "pending",
+    "settings_about_omega": "pending",
+    "dock_icon_openagents_family": "pending",
+    "codesign_team_hqwsg26l43": "pending",
+    "notarization_accepted": "pending",
+    "gatekeeper_assessment_pass": "pending",
+    "no_zed_auth_prompts": "pending",
+    "no_zed_cloud_prompts": "pending",
+  },
+  "blockers": [],
+}))
+PY
+)" "$PROOF_JSON"
+  cat >"$NOTES_MD" <<EOF
+# Omega RC installed proof — harness check
+
+Harness validated. No installed candidate was exercised.
+EOF
+  echo "Harness OK: ${PROOF_JSON}"
+  exit 0
+fi
+
+BLOCKERS=()
+STATUS="incomplete"
+
+if [[ ! -f "$RELEASE_RECORD" ]]; then
+  BLOCKERS+=("missing release-record.json (run script/bundle-omega-rc first)")
+fi
+
+if [[ ! -f "$PACKAGE_PATH" ]]; then
+  BLOCKERS+=("missing signed package artifact at ${PACKAGE_PATH}")
+fi
+
+if [[ ! -d "$OMEGA_APP_PATH" ]]; then
+  BLOCKERS+=("Omega.app not installed at ${OMEGA_APP_PATH}")
+fi
+
+RECORD_JSON="{}"
+if [[ -f "$RELEASE_RECORD" ]]; then
+  RECORD_JSON="$(python3 - "$RELEASE_RECORD" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+record = json.loads(Path(sys.argv[1]).read_text())
+required = [
+    "schema_version",
+    "product",
+    "channel",
+    "version",
+    "artifact_name",
+    "bundle_identifier",
+    "team_id",
+    "signing_identity",
+    "source",
+    "digests",
+    "notarization",
+    "legal",
+    "publication",
+]
+missing = [key for key in required if key not in record]
+errors = []
+if missing:
+    errors.append(f"release record missing keys: {', '.join(missing)}")
+if record.get("product") != "Omega":
+    errors.append("product must be Omega")
+if record.get("channel") != "rc":
+    errors.append("channel must be rc")
+if record.get("bundle_identifier") != "com.openagents.omega.rc":
+    errors.append("bundle_identifier must be com.openagents.omega.rc")
+if record.get("team_id") != "HQWSG26L43":
+    errors.append("team_id must be HQWSG26L43")
+if record.get("legal", {}).get("commercial_terms_attached") is not False:
+    errors.append("commercial_terms_attached must be false")
+publication = record.get("publication", {})
+if publication.get("prerelease") is not True or publication.get("latest") is not False:
+    errors.append("publication must be prerelease=true and latest=false")
+notarization = record.get("notarization", {})
+if notarization.get("attempted") is not True or notarization.get("stapled") is not True:
+    errors.append("notarization must be attempted and stapled for installed proof")
+if record.get("digests", {}).get("package_sha256") in (None, ""):
+    errors.append("digests.package_sha256 required for installed proof")
+print(json.dumps({"record": record, "errors": errors}))
+PY
+)"
+  RECORD_ERRORS="$(python3 -c 'import json,sys; print("\n".join(json.load(sys.stdin)["errors"]))' <<<"$RECORD_JSON")"
+  if [[ -n "$RECORD_ERRORS" ]]; then
+    while IFS= read -r line; do
+      [[ -n "$line" ]] && BLOCKERS+=("$line")
+    done <<<"$RECORD_ERRORS"
+  fi
+fi
+
+CODESIGN_OUT=""
+SPCTL_OUT=""
+INFO_PLIST_CHECKS=""
+if [[ -d "$OMEGA_APP_PATH" ]]; then
+  CODESIGN_OUT="$(codesign -dv --verbose=4 "$OMEGA_APP_PATH" 2>&1 || true)"
+  printf '%s\n' "$CODESIGN_OUT" >"${OUT_DIR}/codesign.txt"
+  if ! grep -q 'TeamIdentifier=HQWSG26L43' <<<"$CODESIGN_OUT"; then
+    BLOCKERS+=("installed app TeamIdentifier is not HQWSG26L43")
+  fi
+  if ! grep -q 'Identifier=com.openagents.omega.rc' <<<"$CODESIGN_OUT"; then
+    BLOCKERS+=("installed app Identifier is not com.openagents.omega.rc")
+  fi
+
+  SPCTL_OUT="$(spctl --assess --type execute --verbose=4 "$OMEGA_APP_PATH" 2>&1 || true)"
+  printf '%s\n' "$SPCTL_OUT" >"${OUT_DIR}/spctl.txt"
+  if ! grep -qi 'accepted' <<<"$SPCTL_OUT"; then
+    BLOCKERS+=("Gatekeeper assessment did not accept installed app")
+  fi
+
+  INFO_PLIST_CHECKS="$(python3 - "$OMEGA_APP_PATH" <<'PY'
+import plistlib
+import sys
+from pathlib import Path
+
+info_path = Path(sys.argv[1]) / "Contents" / "Info.plist"
+info = plistlib.loads(info_path.read_bytes())
+checks = {
+    "CFBundleName": info.get("CFBundleName"),
+    "CFBundleDisplayName": info.get("CFBundleDisplayName"),
+    "CFBundleIdentifier": info.get("CFBundleIdentifier"),
+    "CFBundleIconFile": info.get("CFBundleIconFile"),
+}
+errors = []
+if checks["CFBundleName"] != "Omega":
+    errors.append(f"CFBundleName={checks['CFBundleName']!r} (expected Omega)")
+if checks["CFBundleDisplayName"] not in ("Omega", None, "Omega RC"):
+    if checks["CFBundleDisplayName"] and "Omega" not in str(checks["CFBundleDisplayName"]):
+        errors.append(f"CFBundleDisplayName={checks['CFBundleDisplayName']!r}")
+if checks["CFBundleIdentifier"] != "com.openagents.omega.rc":
+    errors.append(f"CFBundleIdentifier={checks['CFBundleIdentifier']!r}")
+print("\n".join(errors))
+PY
+)"
+  if [[ -n "$INFO_PLIST_CHECKS" ]]; then
+    while IFS= read -r line; do
+      [[ -n "$line" ]] && BLOCKERS+=("$line")
+    done <<<"$INFO_PLIST_CHECKS"
+  fi
+fi
+
+if [[ ${#BLOCKERS[@]} -eq 0 ]]; then
+  STATUS="complete"
+fi
+
+python3 - "$PROOF_JSON" "$STATUS" "$OMEGA_APP_PATH" "$RELEASE_RECORD" "$PACKAGE_PATH" "${BLOCKERS[@]}" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+status = sys.argv[2]
+app_path = sys.argv[3]
+release_record = sys.argv[4]
+package_path = sys.argv[5]
+blockers = list(sys.argv[6:])
+
+payload = {
+    "schema_version": 1,
+    "status": status,
+    "product": "Omega",
+    "version": "0.2.0-rc1",
+    "app_path": app_path,
+    "release_record_path": release_record,
+    "package_path": package_path,
+    "checks": {
+        "menu_about_omega": "manual_pending" if status != "complete" else "manual_required",
+        "welcome_omega_branding": "manual_pending" if status != "complete" else "manual_required",
+        "settings_about_omega": "manual_pending" if status != "complete" else "manual_required",
+        "dock_icon_openagents_family": "manual_pending" if status != "complete" else "manual_required",
+        "codesign_team_hqwsg26l43": "blocked" if status != "complete" else "pass",
+        "notarization_accepted": "blocked" if status != "complete" else "pass",
+        "gatekeeper_assessment_pass": "blocked" if status != "complete" else "pass",
+        "no_zed_auth_prompts": "manual_pending" if status != "complete" else "manual_required",
+        "no_zed_cloud_prompts": "manual_pending" if status != "complete" else "manual_required",
+    },
+    "blockers": blockers,
+}
+path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+print(f"wrote {path}")
+PY
+
+{
+  echo "# Omega RC installed proof"
+  echo
+  echo "- status: \`${STATUS}\`"
+  echo "- app: \`${OMEGA_APP_PATH}\`"
+  echo "- release record: \`${RELEASE_RECORD}\`"
+  echo "- package: \`${PACKAGE_PATH}\`"
+  echo
+  if [[ ${#BLOCKERS[@]} -gt 0 ]]; then
+    echo "## Blockers"
+    echo
+    for blocker in "${BLOCKERS[@]}"; do
+      echo "- ${blocker}"
+    done
+    echo
+  fi
+  echo "## Manual UI checklist (required for complete proof)"
+  echo
+  echo "- About Omega shows Omega branding"
+  echo "- Welcome page shows Omega logo/title"
+  echo "- Settings About shows Omega"
+  echo "- Dock icon is OpenAgents family"
+  echo "- No Zed sign-in / Zed cloud upsells"
+} >"$NOTES_MD"
+
+echo "Proof written: ${PROOF_JSON}"
+if [[ "$STATUS" != "complete" ]]; then
+  echo "Installed proof incomplete (${#BLOCKERS[@]} blocker(s))." >&2
+  exit 1
+fi
+
+echo "Installed proof complete. Attach ${OUT_DIR} when closing issue #16."
+exit 0
