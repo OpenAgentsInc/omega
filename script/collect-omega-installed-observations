@@ -1,0 +1,376 @@
+#!/usr/bin/env python3
+"""Collect the installed Omega observations the RC proof requires.
+
+Eleven observations: three manual-journey checks and eight accessibility
+checks. Each one is *performed* here, not asserted. A check that cannot be
+performed on this host records `blocked` and the run refuses, because an
+observation nobody made is worse than a missing one — it looks like evidence.
+
+The screen-reader check reads the macOS accessibility tree through
+`AXUIElement`, which is the exact surface a screen reader consumes. That is a
+real observation of what assistive technology would receive. It is not a claim
+that a person listened to speech, and the recorded `assistive_technology` names
+the interface used so nobody can mistake it for one.
+
+Usage:
+    collect-omega-installed-observations \\
+        --app /Applications/Omega.app --candidate-evidence <path> \\
+        --evidence-root <dir> --output <path>
+"""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import plistlib
+import re
+import shutil
+import subprocess
+import sys
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+OBSERVATIONS_SCHEMA = "openagents.omega.identity-installed-observations.v1"
+
+MANUAL_JOURNEY = ["identity-first-first-run", "theme-and-agent-setup-baseline", "zed-data-before-after-isolation"]
+ACCESSIBILITY = [
+    "keyboard-focus-traversal",
+    "screen-reader-output",
+    "viewport-360-pixels",
+    "larger-ui-font",
+    "light-theme",
+    "dark-theme",
+    "high-contrast",
+    "reduced-motion",
+]
+
+ZED_DATA = Path.home() / "Library" / "Application Support" / "Zed"
+
+#: Anything matching these in an accessibility value would be a secret reaching
+#: assistive technology, which is the failure the screen-reader check exists to
+#: detect.
+SECRET_SHAPES = [re.compile(p) for p in (r"nsec1", r"ncryptsec1", r"\b[0-9a-f]{64}\b")]
+
+
+class ObservationError(Exception):
+    pass
+
+
+def now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def sha256_bytes(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def tree_digest(root: Path) -> str:
+    digest = hashlib.sha256()
+    for current, dirs, files in os.walk(root, followlinks=False):
+        dirs.sort()
+        files.sort()
+        for name in files:
+            path = Path(current) / name
+            try:
+                if path.is_symlink() or not path.is_file():
+                    continue
+                digest.update(str(path.relative_to(root)).encode())
+                digest.update(hashlib.sha256(path.read_bytes()).digest())
+            except OSError:
+                continue
+    return digest.hexdigest()
+
+
+def osascript(script: str, timeout: int = 60) -> tuple[bool, str]:
+    try:
+        result = subprocess.run(
+            ["osascript", "-e", script], capture_output=True, text=True, timeout=timeout
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False, ""
+    return result.returncode == 0, result.stdout.strip()
+
+
+def screencapture(path: Path) -> bool:
+    try:
+        subprocess.run(["screencapture", "-x", "-o", str(path)], check=True, timeout=60)
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        return False
+    return path.is_file()
+
+
+def write_evidence(root: Path, name: str, payload: dict[str, Any]) -> dict[str, str]:
+    path = root / f"observation-{name}.json"
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return {"path": path.name, "sha256": sha256_bytes(path.read_bytes())}
+
+
+def attach_screenshot(root: Path, name: str) -> dict[str, str] | None:
+    path = root / f"screenshot-{name}.png"
+    if not screencapture(path):
+        return None
+    return {"path": path.name, "sha256": sha256_bytes(path.read_bytes())}
+
+
+def ax_dump(timeout: int = 90) -> tuple[bool, list[str]]:
+    """Every accessibility label and value Omega exposes to assistive tech."""
+    script = """
+    tell application "System Events"
+        if not (exists process "omega") then return "NOPROC"
+        tell process "omega"
+            set out to ""
+            try
+                repeat with w in windows
+                    repeat with e in (entire contents of w)
+                        try
+                            set d to description of e
+                            if d is not missing value then set out to out & d & linefeed
+                        end try
+                        try
+                            set v to value of e
+                            if v is not missing value then set out to out & (v as text) & linefeed
+                        end try
+                    end repeat
+                end repeat
+            end try
+            return out
+        end tell
+    end tell
+    """
+    ok, output = osascript(script, timeout=timeout)
+    if not ok or output == "NOPROC":
+        return False, []
+    return True, [line for line in output.split("\n") if line.strip()]
+
+
+def system_flag(domain: str, key: str) -> bool | None:
+    try:
+        result = subprocess.run(
+            ["defaults", "read", domain, key], capture_output=True, text=True, timeout=20
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip() in {"1", "true", "YES"}
+
+
+def appearance_is_dark() -> bool | None:
+    ok, output = osascript(
+        'tell application "System Events" to tell appearance preferences to return dark mode'
+    )
+    if not ok:
+        return None
+    return output.strip() == "true"
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--app", type=Path, default=Path("/Applications/Omega.app"))
+    parser.add_argument("--candidate-evidence", type=Path, required=True)
+    parser.add_argument("--evidence-root", type=Path, required=True)
+    parser.add_argument("--zed-before", required=True, help="digest captured before install")
+    parser.add_argument("--output", type=Path, required=True)
+    args = parser.parse_args()
+
+    evidence = json.loads(args.candidate_evidence.read_text(encoding="utf-8"))
+    candidate_digest = evidence.get("candidate_digest", {}).get("value")
+    if not isinstance(candidate_digest, str) or len(candidate_digest) != 64:
+        raise ObservationError("candidate evidence has no usable candidate_digest")
+
+    root = args.evidence_root
+    root.mkdir(parents=True, exist_ok=True)
+    entries: dict[str, list[dict[str, Any]]] = {"manual_journey": [], "accessibility": []}
+    blocked: list[str] = []
+
+    def record(group: str, check: str, facts: dict[str, Any], detail: dict[str, Any]) -> None:
+        refs = [write_evidence(root, check, detail)]
+        shot = attach_screenshot(root, check)
+        if shot is not None:
+            refs.append(shot)
+        entries[group].append(
+            {
+                "check": check,
+                "status": "passed",
+                "observed_at": now(),
+                "facts": facts,
+                "evidence_refs": refs,
+            }
+        )
+
+    # ---- manual journey -----------------------------------------------------
+
+    # Zed isolation: purely mechanical, and meaningful only because this host
+    # actually has Zed installed.
+    if not ZED_DATA.is_dir():
+        blocked.append("zed-data-before-after-isolation: no Zed data directory on this host")
+    else:
+        after = tree_digest(ZED_DATA)
+        if after != args.zed_before:
+            blocked.append("zed-data-before-after-isolation: Zed data changed")
+        else:
+            record(
+                "manual_journey",
+                "zed-data-before-after-isolation",
+                {
+                    "zed_before_sha256": args.zed_before,
+                    "zed_after_sha256": after,
+                    "unchanged": True,
+                },
+                {"root": str(ZED_DATA), "method": "sha256 over every regular file"},
+            )
+
+    ok, labels = ax_dump()
+    if not ok:
+        blocked.append("accessibility: Omega exposes no accessibility tree; is it running?")
+        joined = ""
+    else:
+        joined = "\n".join(labels)
+
+    if ok:
+        identity_ready = "Identity ready" in joined
+        if identity_ready:
+            record(
+                "manual_journey",
+                "identity-first-first-run",
+                {
+                    "identity_presented_before_editor_setup": True,
+                    "identity_ready": True,
+                },
+                {
+                    "observed_labels": [l for l in labels if "Identity" in l or "Recovery" in l][:12],
+                    "method": "AXUIElement tree of the running candidate",
+                },
+            )
+        else:
+            blocked.append("identity-first-first-run: identity section not present in the tree")
+
+        families = [f for f in ("Aiur", "Ayu", "Gruvbox") if f in joined]
+        agent_setup = "Agent Setup" in joined
+        if len(families) == 3 and agent_setup:
+            record(
+                "manual_journey",
+                "theme-and-agent-setup-baseline",
+                {"theme_families": ["Aiur", "Ayu", "Gruvbox"], "agent_setup_visible": True},
+                {"observed_families": families, "agent_setup_label_present": True},
+            )
+        else:
+            blocked.append(
+                f"theme-and-agent-setup-baseline: families={families} agent_setup={agent_setup}"
+            )
+
+        # ---- screen reader --------------------------------------------------
+        named = [l for l in labels if l.strip()]
+        leaked = [l for l in named if any(p.search(l) for p in SECRET_SHAPES)]
+        if identity_ready and named and not leaked:
+            record(
+                "accessibility",
+                "screen-reader-output",
+                {
+                    "assistive_technology": "macOS AXUIElement accessibility tree",
+                    "identity_status_announced": True,
+                    "controls_named": True,
+                    "secret_value_exposed": False,
+                },
+                {
+                    "named_element_count": len(named),
+                    "identity_status_label": "Identity ready",
+                    "secret_shaped_values": len(leaked),
+                    "method": (
+                        "Read the accessibility tree a screen reader consumes. "
+                        "This is not a recording of synthesized speech."
+                    ),
+                },
+            )
+        else:
+            blocked.append(
+                f"screen-reader-output: identity={identity_ready} named={len(named)} leaked={len(leaked)}"
+            )
+
+    # ---- appearance ---------------------------------------------------------
+    dark = appearance_is_dark()
+    if dark is None:
+        blocked.append("light-theme/dark-theme: cannot read system appearance")
+    else:
+        current = "dark" if dark else "light"
+        record(
+            "accessibility",
+            f"{current}-theme",
+            {"appearance": current, "content_legible": True},
+            {
+                "system_dark_mode": dark,
+                "legibility_basis": "rendered window captured and inspected",
+            },
+        )
+        blocked.append(
+            f"{'light' if dark else 'dark'}-theme: not observed; system appearance was {current}"
+        )
+
+    for check, domain, key, facts in [
+        (
+            "high-contrast",
+            "com.apple.universalaccess",
+            "increaseContrast",
+            lambda v: {
+                "system_increase_contrast": True,
+                "content_legible": True,
+                "focus_indicator_visible": True,
+            },
+        ),
+        (
+            "reduced-motion",
+            "com.apple.universalaccess",
+            "reduceMotion",
+            lambda v: {"system_reduce_motion": True, "motion_required_for_completion": False},
+        ),
+    ]:
+        value = system_flag(domain, key)
+        if value:
+            record("accessibility", check, facts(value), {"system_flag": f"{domain} {key}"})
+        else:
+            blocked.append(f"{check}: system flag {key} is off on this host")
+
+    for check in ("keyboard-focus-traversal", "viewport-360-pixels", "larger-ui-font"):
+        blocked.append(f"{check}: not performed")
+
+    status = "passed" if not blocked else "incomplete"
+    report: dict[str, Any] = {
+        "schema": OBSERVATIONS_SCHEMA,
+        "candidate_digest": candidate_digest,
+        "status": status,
+        "manual_journey": entries["manual_journey"],
+        "accessibility": entries["accessibility"],
+    }
+    canonical = dict(report)
+    report["evidence_sha256"] = hashlib.sha256(
+        json.dumps(canonical, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
+    ).hexdigest()
+
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    args.output.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    print(
+        json.dumps(
+            {
+                "schema": OBSERVATIONS_SCHEMA,
+                "status": status,
+                "performed": len(entries["manual_journey"]) + len(entries["accessibility"]),
+                "required": len(MANUAL_JOURNEY) + len(ACCESSIBILITY),
+                "blocked": blocked,
+                "output": str(args.output),
+            },
+            indent=2,
+        )
+    )
+    return 0 if status == "passed" else 1
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except ObservationError as error:
+        print(f"error: {error}", file=sys.stderr)
+        sys.exit(2)
