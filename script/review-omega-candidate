@@ -1,0 +1,284 @@
+#!/usr/bin/env python3
+"""Independently review an installed Omega candidate.
+
+This is the reviewer half of omega#67. It is deliberately NOT given the
+producer's evidence directory. It receives the candidate artifact and a small
+producer *claim*, then reproduces every check itself and compares.
+
+The distinction matters: reading the producer's JSON and confirming it parses
+is not review, it is proofreading. Everything below is recomputed from the
+artifact and the installed application.
+
+Independence is structural, not declared:
+
+- The reviewer key is read from a path a producer run does not set. If
+  OMEGA_REVIEWER_KEY_FILE is absent, this refuses rather than falling back to
+  any ambient credential.
+- The receipt is signed, so a producer cannot write the reviewer's public key
+  into a document it authored itself.
+- `accepted` requires every reproduction to agree. `inconclusive` exists so a
+  check that cannot run reports honestly instead of being rounded to either
+  approval or rejection.
+
+Usage:
+    OMEGA_REVIEWER_KEY_FILE=~/work/.secrets/omega-independent-reviewer.env \\
+    review-omega-candidate \\
+        --candidate-dmg <dmg> --app /Applications/Omega.app \\
+        --producer-claim <claim.json> --output <receipt.json>
+"""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import subprocess
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+SCHEMA = "openagents.assurance.independent-review.v1"
+
+#: Strings that must not appear in a shipped binary. Kept here rather than
+#: imported from the producer's tooling: a reviewer that shares the producer's
+#: definition of "clean" cannot catch a wrong definition.
+FORBIDDEN_STRINGS = [
+    "Unrecognized Project",
+    "Review .zed/settings.json",
+    "Zed's hosted models",
+    "14 day free trial",
+    "Pro trial",
+    "Move Omega to Applications",
+]
+
+
+class ReviewError(Exception):
+    pass
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def canonical_digest(value: Any) -> str:
+    return hashlib.sha256(
+        json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode(
+            "utf-8"
+        )
+    ).hexdigest()
+
+
+def load_reviewer_key() -> tuple[str, str]:
+    """Read the reviewer identity from a path a producer run does not set.
+
+    There is no fallback on purpose. An ambient-credential fallback would mean
+    a producer that happens to have some key in scope could sign a review.
+    """
+    location = os.environ.get("OMEGA_REVIEWER_KEY_FILE")
+    if not location:
+        raise ReviewError(
+            "OMEGA_REVIEWER_KEY_FILE is not set; a review cannot borrow an "
+            "ambient credential"
+        )
+    path = Path(location).expanduser()
+    if path.is_symlink() or not path.is_file():
+        raise ReviewError("reviewer key file is missing or is not a regular file")
+    mode = path.stat().st_mode & 0o077
+    if mode != 0:
+        raise ReviewError("reviewer key file is readable by group or others")
+    secret = public = ""
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if line.startswith("OMEGA_REVIEWER_SECRET_KEY_HEX="):
+            secret = line.split("=", 1)[1].strip()
+        elif line.startswith("OMEGA_REVIEWER_PUBLIC_KEY_HEX="):
+            public = line.split("=", 1)[1].strip()
+    if len(secret) != 64 or len(public) != 64:
+        raise ReviewError("reviewer key file does not contain a usable keypair")
+    return secret, public
+
+
+def sign(message_hex: str, secret_hex: str) -> str:
+    """Schnorr-sign the evidence digest with the reviewer key."""
+    result = subprocess.run(
+        [
+            "node",
+            "--input-type=module",
+            "-e",
+            (
+                "import { schnorr } from '@noble/curves/secp256k1';"
+                "import { bytesToHex, hexToBytes } from '@noble/hashes/utils';"
+                "const [msg, sk] = process.argv.slice(1);"
+                "process.stdout.write(bytesToHex(schnorr.sign(hexToBytes(msg), hexToBytes(sk))));"
+            ),
+            message_hex,
+            secret_hex,
+        ],
+        capture_output=True,
+        text=True,
+        cwd=str(Path(__file__).resolve().parent.parent.parent / "openagents" / "packages" / "sarah"),
+    )
+    if result.returncode != 0 or len(result.stdout.strip()) != 128:
+        raise ReviewError(f"reviewer signature failed: {result.stderr.strip()[:200]}")
+    return result.stdout.strip()
+
+
+def observe(command: list[str]) -> tuple[bool, str]:
+    """Run a check. Returns (ran, output). A check that cannot run is not a fail."""
+    try:
+        result = subprocess.run(command, capture_output=True, text=True, timeout=1800)
+    except (OSError, subprocess.TimeoutExpired):
+        return False, ""
+    return True, (result.stdout + result.stderr)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--candidate-dmg", type=Path, required=True)
+    parser.add_argument("--app", type=Path, default=Path("/Applications/Omega.app"))
+    parser.add_argument("--producer-claim", type=Path, required=True)
+    parser.add_argument("--obligation", default="omega#16")
+    parser.add_argument("--output", type=Path, required=True)
+    args = parser.parse_args()
+
+    secret, reviewer_pubkey = load_reviewer_key()
+    claim = json.loads(args.producer_claim.read_text(encoding="utf-8"))
+    producers = claim.get("producerPubkeys") or []
+    if not producers:
+        raise ReviewError("producer claim names no producer")
+    if reviewer_pubkey in producers:
+        raise ReviewError("the reviewer key is also a producer key; this is not a review")
+
+    reproductions: list[dict[str, Any]] = []
+    disagreements: list[dict[str, str]] = []
+    inconclusive = False
+
+    def record(check: str, command: str, observed: str, claimed: str) -> None:
+        agrees = observed == claimed
+        reproductions.append(
+            {
+                "check": check,
+                "command": command,
+                "observedDigest": "sha256:" + hashlib.sha256(observed.encode()).hexdigest(),
+                "agreesWithProducer": agrees,
+            }
+        )
+        if not agrees:
+            disagreements.append(
+                {
+                    "criterion": check,
+                    "producerClaim": claimed[:200],
+                    "reviewerObservation": observed[:200],
+                }
+            )
+
+    # 1. The artifact digest, recomputed from the file rather than read.
+    artifact = sha256_file(args.candidate_dmg)
+    record(
+        "artifact_digest",
+        f"shasum -a 256 {args.candidate_dmg.name}",
+        artifact,
+        claim.get("artifactSha256", ""),
+    )
+
+    # 2. Gatekeeper's own verdict on the installed application.
+    ran, output = observe(["spctl", "-a", "-vvv", "-t", "exec", str(args.app)])
+    if not ran:
+        inconclusive = True
+    else:
+        notarized = "source=Notarized Developer ID" in output
+        record(
+            "notarization",
+            f"spctl -a -vvv -t exec {args.app}",
+            "notarized" if notarized else "not_notarized",
+            claim.get("notarization", ""),
+        )
+
+    # 3. The stapled ticket, checked against the artifact rather than the app,
+    #    because the bundler staples the disk image.
+    ran, output = observe(["xcrun", "stapler", "validate", str(args.candidate_dmg)])
+    if not ran:
+        inconclusive = True
+    else:
+        stapled = "The validate action worked" in output
+        record(
+            "stapled_ticket",
+            f"xcrun stapler validate {args.candidate_dmg.name}",
+            "stapled" if stapled else "not_stapled",
+            claim.get("stapled", ""),
+        )
+
+    # 4. Forbidden strings, scanned from the shipped binary. This is the check
+    #    that caught two Zed surfaces a source review had passed.
+    binary = args.app / "Contents" / "MacOS" / "omega"
+    ran, output = observe(["strings", str(binary)])
+    if not ran:
+        inconclusive = True
+    else:
+        found = sorted({needle for needle in FORBIDDEN_STRINGS if needle in output})
+        record(
+            "forbidden_strings",
+            f"strings {binary} | grep -F <forbidden>",
+            ",".join(found) if found else "none",
+            claim.get("forbiddenStrings", ""),
+        )
+
+    if inconclusive:
+        outcome = "inconclusive"
+        disagreements.append(
+            {
+                "criterion": "reviewer environment",
+                "producerClaim": "all checks reproducible",
+                "reviewerObservation": "one or more checks could not run on this host",
+            }
+        )
+    elif disagreements:
+        outcome = "refused"
+    else:
+        outcome = "accepted"
+
+    receipt: dict[str, Any] = {
+        "schema": SCHEMA,
+        "reviewerPubkey": reviewer_pubkey,
+        "producerPubkeys": producers,
+        "candidateDigest": "sha256:" + artifact,
+        "obligationRef": args.obligation,
+        "reviewedAt": datetime.now(timezone.utc)
+        .isoformat(timespec="seconds")
+        .replace("+00:00", "Z"),
+        "outcome": outcome,
+        "reproductions": reproductions,
+        "disagreements": disagreements,
+    }
+    receipt["evidenceSha256"] = "sha256:" + canonical_digest(receipt)
+    receipt["reviewerSignature"] = sign(receipt["evidenceSha256"].split(":", 1)[1], secret)
+
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    args.output.write_text(
+        json.dumps(receipt, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    print(
+        json.dumps(
+            {
+                "schema": SCHEMA,
+                "outcome": outcome,
+                "reproductions": len(reproductions),
+                "disagreements": len(disagreements),
+                "output": str(args.output),
+            }
+        )
+    )
+    return 0 if outcome == "accepted" else 1
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except ReviewError as error:
+        print(f"error: {error}", file=sys.stderr)
+        sys.exit(2)
