@@ -41,9 +41,11 @@ use crate::{
     Issue31CommandHandlingStatus, Issue31CommandRecord, Issue31CommandRecordV2,
     Issue31CommandStatus, Issue31HostConfiguration, Issue31HostController, Issue31HostDiscovery,
     Issue31HostDiscoveryV2, Issue31NostrError, Issue31OwnerProjectionBody,
-    Issue31OwnerProjectionInput, Issue31PairingEvent, Issue31PairingRecord, Issue31SourceRole,
-    Issue31TargetOutcomeProjection, SARAH_AUTHORITY_RECEIPT_KIND, SARAH_ENGRAM_KIND,
-    SARAH_READ_STATE_KIND, SARAH_REMINDER_KIND, emit_issue31_owner_projection,
+    Issue31GrantState, Issue31OwnerProjectionInput, Issue31PairingEvent, Issue31PairingRecord,
+    Issue31SourceRole, Issue31TargetOutcomeProjection, Issue31WithheldCause,
+    Issue31WithheldSourceCount, Issue31WithheldSourcesInput, SARAH_AUTHORITY_RECEIPT_KIND,
+    SARAH_ENGRAM_KIND, SARAH_READ_STATE_KIND, SARAH_REMINDER_KIND, emit_issue31_owner_projection,
+    emit_issue31_withheld_sources,
 };
 
 pub use crate::openagents_binding::BindingState;
@@ -88,6 +90,12 @@ const MAX_COMMAND_RESULTS: usize = 4_096;
 const MAX_PRIVATE_OUTBOX_ITEMS: usize = 1_024;
 const MAX_RELAY_ACKNOWLEDGEMENTS: usize = 4_096;
 const MAX_QUARANTINED_ISSUE31_EVENTS: usize = 4_096;
+/// The quarantine reason recorded when a source event cannot become a
+/// projection. It is the only quarantine reason that withholds something the
+/// owner was entitled to read; the pairing and command reasons quarantine
+/// control records, which are not part of the owner's view.
+const ISSUE31_PROJECTION_SOURCE_QUARANTINE_REASON: &str = "reason.omega.invalid_projection_source";
+const ISSUE31_PROJECTION_SCAN_BOUND_REASON: &str = "reason.omega.projection_scan_bound";
 const CURSOR_PREFIX: &str = "cursor.";
 const MOCK_RELAY_LABEL: &str = "mock://local";
 
@@ -953,6 +961,10 @@ pub struct SarahConversationClient {
     issue31_control_cursor: Option<String>,
     issue31_projection_cursor: Option<String>,
     issue31_quarantined_events: BTreeMap<String, String>,
+    /// The last coverage statement published to each `grant_ref:generation`,
+    /// so a re-run that observed the same world does not republish it with only
+    /// a new timestamp.
+    issue31_withheld_emissions: BTreeMap<String, (String, Vec<Issue31WithheldSourceCount>)>,
     issue31_state_path: Option<PathBuf>,
     #[cfg(test)]
     issue31_fail_commit_after: Cell<Option<usize>>,
@@ -1038,6 +1050,7 @@ impl SarahConversationClient {
             issue31_control_cursor: None,
             issue31_projection_cursor: None,
             issue31_quarantined_events: BTreeMap::new(),
+            issue31_withheld_emissions: BTreeMap::new(),
             issue31_state_path: None,
             #[cfg(test)]
             issue31_fail_commit_after: Cell::new(None),
@@ -1172,6 +1185,7 @@ impl SarahConversationClient {
             issue31_control_cursor,
             issue31_projection_cursor,
             issue31_quarantined_events,
+            issue31_withheld_emissions: BTreeMap::new(),
             issue31_state_path: Some(issue31_state_path),
             #[cfg(test)]
             issue31_fail_commit_after: Cell::new(None),
@@ -2574,6 +2588,7 @@ impl SarahConversationClient {
         let conversation_ref = self.config.conversation_ref();
         let mut cursor = self.issue31_projection_cursor.clone();
         let mut last_scanned_cursor = None;
+        let mut scan_bound_reached = true;
         for _ in 0..8 {
             let page =
                 self.query_with_auth(&conversation_ref, cursor.as_deref(), MAX_PAGE_LIMIT)?;
@@ -2603,7 +2618,7 @@ impl SarahConversationClient {
                     Err(_) => {
                         self.quarantine_issue31_event(
                             &source.event_id,
-                            "reason.omega.invalid_projection_source",
+                            ISSUE31_PROJECTION_SOURCE_QUARANTINE_REASON,
                             controller,
                         )?;
                         continue;
@@ -2648,7 +2663,7 @@ impl SarahConversationClient {
                 if refused_by_own_decoder {
                     self.quarantine_issue31_event(
                         &source.event_id,
-                        "reason.omega.invalid_projection_source",
+                        ISSUE31_PROJECTION_SOURCE_QUARANTINE_REASON,
                         controller,
                     )?;
                     continue;
@@ -2669,17 +2684,86 @@ impl SarahConversationClient {
                 }
             }
             let Some(next_cursor) = page.next_cursor else {
-                if let Some(last_scanned_cursor) = last_scanned_cursor {
-                    self.issue31_projection_cursor = Some(last_scanned_cursor);
-                }
-                return Ok(());
+                scan_bound_reached = false;
+                break;
             };
             cursor = Some(next_cursor);
+        }
+        if scan_bound_reached {
+            // The scan ran out of pages before it ran out of conversation. The
+            // host does not know how many sources it never looked at, so it
+            // must say so rather than let the device read a short list as a
+            // complete one.
+            self.last_gap_state = strongest_gap_state(self.last_gap_state, GapState::Possible);
         }
         if let Some(last_scanned_cursor) = last_scanned_cursor {
             self.issue31_projection_cursor = Some(last_scanned_cursor);
         }
-        self.last_gap_state = strongest_gap_state(self.last_gap_state, GapState::Possible);
+        self.emit_issue31_withheld_sources(&grants, scan_bound_reached, now)?;
+        Ok(())
+    }
+
+    /// Tell every admitted device how complete its own projection is.
+    ///
+    /// This is the device-visible half of the two host-local surfaces that
+    /// silently shorten the owner's view: the quarantine, whose count only ever
+    /// reached `BootstrapResult`, and the bounded projection scan, which only
+    /// ever moved `last_gap_state`. A complete pass publishes a record too —
+    /// silence has to mean "unknown", or the absence of a signal reads as
+    /// completeness and this whole mechanism buys nothing.
+    fn emit_issue31_withheld_sources(
+        &mut self,
+        grants: &[Issue31GrantState],
+        scan_bound_reached: bool,
+        now: u64,
+    ) -> Result<(), SarahConversationError> {
+        let quarantined = u32::try_from(
+            self.issue31_quarantined_events
+                .values()
+                .filter(|reason| reason.as_str() == ISSUE31_PROJECTION_SOURCE_QUARANTINE_REASON)
+                .count(),
+        )
+        .unwrap_or(u32::MAX);
+        let mut withheld = Vec::new();
+        if quarantined > 0 {
+            withheld.push(Issue31WithheldSourceCount {
+                cause: Issue31WithheldCause::Quarantined,
+                count: quarantined,
+                exact: true,
+                reason_ref: ISSUE31_PROJECTION_SOURCE_QUARANTINE_REASON.to_string(),
+            });
+        }
+        if scan_bound_reached {
+            withheld.push(Issue31WithheldSourceCount {
+                cause: Issue31WithheldCause::ScanBound,
+                count: 1,
+                exact: false,
+                reason_ref: ISSUE31_PROJECTION_SCAN_BOUND_REASON.to_string(),
+            });
+        }
+        for grant in grants {
+            let emission = emit_issue31_withheld_sources(Issue31WithheldSourcesInput {
+                host_ref: &grant.host_ref,
+                host_public_key_hex: &grant.host_public_key_hex,
+                device_public_key_hex: &grant.device_public_key_hex,
+                grant_ref: &grant.grant_ref,
+                expected_generation: grant.generation,
+                observed_at: now,
+                withheld: withheld.clone(),
+            })
+            .map_err(issue31_error)?;
+            let key = format!("{}:{}", grant.grant_ref, grant.generation);
+            let substance = emission.record.substance();
+            if self.issue31_withheld_emissions.get(&key) == Some(&substance) {
+                continue;
+            }
+            self.enqueue_issue31_private_content(
+                crate::ISSUE31_WITHHELD_SOURCES_SCHEMA,
+                &emission.content,
+                &grant.device_public_key_hex,
+            )?;
+            self.issue31_withheld_emissions.insert(key, substance);
+        }
         Ok(())
     }
 
@@ -4397,7 +4481,355 @@ mod tests {
         assert!(controller.source_was_projected(&grant_ref, 1, &"1".repeat(64)));
         assert!(!controller.source_was_projected(&grant_ref, 1, &"2".repeat(64)));
         assert!(controller.source_was_projected(&grant_ref, 1, &"3".repeat(64)));
-        assert_eq!(client.issue31_private_outbox.len(), 2);
+        // Two surviving projections, plus the coverage statement that tells the
+        // device the third source was withheld.
+        assert_eq!(client.issue31_private_outbox.len(), 3);
+        assert_eq!(withheld_outbox_refs(&client).len(), 1);
+    }
+
+    /// Every outbox entry queued under the withheld-sources schema.
+    ///
+    /// The outbox stores sealed gift wraps, so the test reads the host's own
+    /// statement of what it published rather than trying to decrypt them; the
+    /// outbox reference proves the record was actually queued for the device.
+    fn withheld_outbox_refs(client: &SarahConversationClient) -> Vec<String> {
+        client
+            .issue31_private_outbox
+            .keys()
+            .filter(|outbox_ref| outbox_ref.starts_with(crate::ISSUE31_WITHHELD_SOURCES_SCHEMA))
+            .cloned()
+            .collect()
+    }
+
+    fn withheld_substance(
+        client: &SarahConversationClient,
+        grant_ref: &str,
+        generation: u64,
+    ) -> Option<(String, Vec<Issue31WithheldSourceCount>)> {
+        client
+            .issue31_withheld_emissions
+            .get(&format!("{grant_ref}:{generation}"))
+            .cloned()
+    }
+
+    /// Pair one device with the host so the projection pass has somewhere to
+    /// send a coverage statement.
+    fn pair_issue31_device(
+        host_configuration: Issue31HostConfiguration,
+        device_public_key_hex: &str,
+    ) -> Issue31HostController {
+        let host_ref = host_configuration.host_ref.clone();
+        let host_public_key_hex = host_configuration.host_public_key_hex.clone();
+        let mut controller =
+            Issue31HostController::new(host_configuration).expect("host controller");
+        controller
+            .set_admitted_device_policy(
+                vec![device_public_key_hex.to_string()],
+                vec![crate::Issue31PairingScope::ObserveIssue31],
+            )
+            .expect("admit the device");
+        let challenge = controller
+            .handle_pairing_event(
+                Issue31PairingEvent {
+                    event_id: "a".repeat(64),
+                    record: Issue31PairingRecord::PairingRequest {
+                        schema: crate::ISSUE31_PAIRING_SCHEMA.into(),
+                        host_ref: host_ref.clone(),
+                        host_public_key_hex: host_public_key_hex.clone(),
+                        device_public_key_hex: device_public_key_hex.to_string(),
+                        issued_at: 100,
+                        pairing_request_ref: "pairing_request.coverage".into(),
+                        requested_scopes: vec![crate::Issue31PairingScope::ObserveIssue31],
+                        expires_at: 100_000,
+                    },
+                },
+                100,
+            )
+            .expect("pairing request")
+            .expect("pairing challenge");
+        let Issue31PairingRecord::PairingChallenge {
+            challenge: challenge_value,
+            ..
+        } = &challenge
+        else {
+            panic!("expected a pairing challenge");
+        };
+        let challenge_value = challenge_value.clone();
+        controller
+            .record_emitted_pairing("b".repeat(64), challenge)
+            .expect("record the challenge");
+        let grant = controller
+            .handle_pairing_event(
+                Issue31PairingEvent {
+                    event_id: "c".repeat(64),
+                    record: Issue31PairingRecord::PairingResponse {
+                        schema: crate::ISSUE31_PAIRING_SCHEMA.into(),
+                        host_ref,
+                        host_public_key_hex,
+                        device_public_key_hex: device_public_key_hex.to_string(),
+                        issued_at: 110,
+                        pairing_response_ref: "pairing_response.coverage".into(),
+                        pairing_challenge_event_id: "b".repeat(64),
+                        challenge: challenge_value,
+                        expires_at: 100_000,
+                    },
+                },
+                110,
+            )
+            .expect("pairing response")
+            .expect("scoped grant");
+        controller
+            .record_emitted_pairing("d".repeat(64), grant)
+            .expect("record the grant");
+        controller
+    }
+
+    /// Falsification, drop path one. A quarantined source is removed from the
+    /// owner's view by a host-local map whose count never left the host. The
+    /// device must be told an exact number and why, and the statement must go
+    /// back to `complete` for a pass that withholds nothing.
+    #[test]
+    fn a_quarantined_source_is_reported_to_the_device_as_an_exact_withheld_count() {
+        let signer = SigningIdentity::generate();
+        let mut config = SarahConversationConfig::mock_fixture();
+        config.identity.owner_public_key_hex = signer.public_key_hex.clone();
+        let owner_public_key_hex = signer.public_key_hex.clone();
+        let sarah_public_key_hex = config.identity.sarah_public_key_hex.clone();
+        let conversation_ref = config.conversation_ref();
+        let mut relay = MockRelayAdapter::new();
+        for (index, (event_id, created_at, text)) in [
+            ("1".repeat(64), 10_u64, "readable"),
+            // Inside every record-level bound and outside the projection body
+            // contract, so the host quarantines it.
+            ("2".repeat(64), 11, ""),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            relay.seed_event(StoredConversationEvent {
+                event_id,
+                kind: crate::ISSUE31_PRIVATE_RUMOR_KIND,
+                pubkey: owner_public_key_hex.clone(),
+                created_at,
+                conversation_ref: conversation_ref.clone(),
+                content_summary: text.into(),
+                tags: Vec::new(),
+                record_kind: "message".into(),
+                store_index: index,
+            });
+        }
+        let mut client = SarahConversationClient::with_relay(config, Box::new(relay), signer);
+        let device_public_key_hex = "2".repeat(64);
+        let mut controller = pair_issue31_device(
+            Issue31HostConfiguration {
+                host_ref: "omega.host.local".into(),
+                host_public_key_hex: owner_public_key_hex,
+                sarah_public_key_hex,
+                conversation: conversation_ref,
+                display_name: "Omega host".into(),
+                relay_urls: vec!["wss://relay.example.com".into()],
+                generation: 1,
+            },
+            &device_public_key_hex,
+        );
+        let grant_ref = controller.active_grants(200).expect("grants")[0]
+            .grant_ref
+            .clone();
+
+        client.ensure_connected().expect("connect the mock relay");
+        client
+            .project_issue31_sources(&mut controller, 200)
+            .expect("the pass survives a quarantined source");
+
+        let (coverage, withheld) =
+            withheld_substance(&client, &grant_ref, 1).expect("a coverage statement was published");
+        assert_eq!(coverage, crate::ISSUE31_WITHHELD_COVERAGE_PARTIAL);
+        assert_eq!(
+            withheld,
+            vec![Issue31WithheldSourceCount {
+                cause: Issue31WithheldCause::Quarantined,
+                count: 1,
+                exact: true,
+                reason_ref: ISSUE31_PROJECTION_SOURCE_QUARANTINE_REASON.into(),
+            }]
+        );
+        assert_eq!(withheld_outbox_refs(&client).len(), 1);
+
+        // Restore: a host with nothing quarantined states completeness rather
+        // than staying quiet, because silence would have to read as unknown.
+        let clean_signer = SigningIdentity::generate();
+        let mut clean_config = SarahConversationConfig::mock_fixture();
+        clean_config.identity.owner_public_key_hex = clean_signer.public_key_hex.clone();
+        let clean_owner = clean_signer.public_key_hex.clone();
+        let clean_sarah = clean_config.identity.sarah_public_key_hex.clone();
+        let clean_conversation = clean_config.conversation_ref();
+        let mut clean_relay = MockRelayAdapter::new();
+        clean_relay.seed_event(StoredConversationEvent {
+            event_id: "1".repeat(64),
+            kind: crate::ISSUE31_PRIVATE_RUMOR_KIND,
+            pubkey: clean_owner.clone(),
+            created_at: 10,
+            conversation_ref: clean_conversation.clone(),
+            content_summary: "readable".into(),
+            tags: Vec::new(),
+            record_kind: "message".into(),
+            store_index: 0,
+        });
+        let mut clean_client =
+            SarahConversationClient::with_relay(clean_config, Box::new(clean_relay), clean_signer);
+        let mut clean_controller = pair_issue31_device(
+            Issue31HostConfiguration {
+                host_ref: "omega.host.local".into(),
+                host_public_key_hex: clean_owner,
+                sarah_public_key_hex: clean_sarah,
+                conversation: clean_conversation,
+                display_name: "Omega host".into(),
+                relay_urls: vec!["wss://relay.example.com".into()],
+                generation: 1,
+            },
+            &device_public_key_hex,
+        );
+        clean_client
+            .ensure_connected()
+            .expect("connect the mock relay");
+        clean_client
+            .project_issue31_sources(&mut clean_controller, 200)
+            .expect("a clean pass");
+        assert_eq!(
+            withheld_substance(&clean_client, &grant_ref, 1),
+            Some((crate::ISSUE31_WITHHELD_COVERAGE_COMPLETE.to_string(), vec![]))
+        );
+    }
+
+    /// Falsification, drop path two. The bounded projection scan stops after
+    /// eight pages and, before this change, said so only in the host's own
+    /// `last_gap_state`. The device must see an inexact count, and must see it
+    /// clear once the scan catches up.
+    #[test]
+    fn the_projection_scan_bound_is_reported_to_the_device_and_clears_when_it_catches_up() {
+        let signer = SigningIdentity::generate();
+        let mut config = SarahConversationConfig::mock_fixture();
+        config.identity.owner_public_key_hex = signer.public_key_hex.clone();
+        let owner_public_key_hex = signer.public_key_hex.clone();
+        let sarah_public_key_hex = config.identity.sarah_public_key_hex.clone();
+        let conversation_ref = config.conversation_ref();
+        let mut relay = MockRelayAdapter::new();
+        // One page past the eight-page bound. The kind is outside the
+        // projection set, so this measures the scan bound itself rather than
+        // the cost of projecting five hundred sources.
+        let pages_past_the_bound = 8 * MAX_PAGE_LIMIT + 1;
+        for index in 0..pages_past_the_bound {
+            relay.seed_event(StoredConversationEvent {
+                event_id: format!("{index:064x}"),
+                kind: 1,
+                pubkey: owner_public_key_hex.clone(),
+                created_at: 10 + index as u64,
+                conversation_ref: conversation_ref.clone(),
+                content_summary: "unrelated".into(),
+                tags: Vec::new(),
+                record_kind: "note".into(),
+                store_index: index,
+            });
+        }
+        let mut client = SarahConversationClient::with_relay(config, Box::new(relay), signer);
+        let device_public_key_hex = "2".repeat(64);
+        let mut controller = pair_issue31_device(
+            Issue31HostConfiguration {
+                host_ref: "omega.host.local".into(),
+                host_public_key_hex: owner_public_key_hex,
+                sarah_public_key_hex,
+                conversation: conversation_ref,
+                display_name: "Omega host".into(),
+                relay_urls: vec!["wss://relay.example.com".into()],
+                generation: 1,
+            },
+            &device_public_key_hex,
+        );
+        let grant_ref = controller.active_grants(200).expect("grants")[0]
+            .grant_ref
+            .clone();
+
+        client.ensure_connected().expect("connect the mock relay");
+        client
+            .project_issue31_sources(&mut controller, 200)
+            .expect("the bounded pass");
+
+        let (coverage, withheld) =
+            withheld_substance(&client, &grant_ref, 1).expect("a coverage statement was published");
+        assert_eq!(coverage, crate::ISSUE31_WITHHELD_COVERAGE_PARTIAL);
+        assert_eq!(
+            withheld,
+            vec![Issue31WithheldSourceCount {
+                cause: Issue31WithheldCause::ScanBound,
+                count: 1,
+                exact: false,
+                reason_ref: ISSUE31_PROJECTION_SCAN_BOUND_REASON.into(),
+            }]
+        );
+        assert_eq!(client.last_gap_state, GapState::Possible);
+        let after_bounded_pass = withheld_outbox_refs(&client);
+        assert_eq!(after_bounded_pass.len(), 1);
+
+        // The cursor advanced, so the next pass reaches the end and the device
+        // is told so. A signal that could only ever get worse would be a worse
+        // lie than none.
+        client
+            .project_issue31_sources(&mut controller, 300)
+            .expect("the catching-up pass");
+        assert_eq!(
+            withheld_substance(&client, &grant_ref, 1),
+            Some((crate::ISSUE31_WITHHELD_COVERAGE_COMPLETE.to_string(), vec![]))
+        );
+        let after_catching_up = withheld_outbox_refs(&client);
+        assert_eq!(after_catching_up.len(), 2);
+        assert!(after_catching_up[0] != after_catching_up[1]);
+    }
+
+    /// The host re-runs its projection pass continuously. A statement that has
+    /// not changed must not be republished with only a new timestamp, or the
+    /// device's own store fills with restatements of one fact.
+    #[test]
+    fn an_unchanged_coverage_statement_is_not_republished() {
+        let signer = SigningIdentity::generate();
+        let mut config = SarahConversationConfig::mock_fixture();
+        config.identity.owner_public_key_hex = signer.public_key_hex.clone();
+        let owner_public_key_hex = signer.public_key_hex.clone();
+        let sarah_public_key_hex = config.identity.sarah_public_key_hex.clone();
+        let conversation_ref = config.conversation_ref();
+        let mut relay = MockRelayAdapter::new();
+        relay.seed_event(StoredConversationEvent {
+            event_id: "1".repeat(64),
+            kind: crate::ISSUE31_PRIVATE_RUMOR_KIND,
+            pubkey: owner_public_key_hex.clone(),
+            created_at: 10,
+            conversation_ref: conversation_ref.clone(),
+            content_summary: "readable".into(),
+            tags: Vec::new(),
+            record_kind: "message".into(),
+            store_index: 0,
+        });
+        let mut client = SarahConversationClient::with_relay(config, Box::new(relay), signer);
+        let mut controller = pair_issue31_device(
+            Issue31HostConfiguration {
+                host_ref: "omega.host.local".into(),
+                host_public_key_hex: owner_public_key_hex,
+                sarah_public_key_hex,
+                conversation: conversation_ref,
+                display_name: "Omega host".into(),
+                relay_urls: vec!["wss://relay.example.com".into()],
+                generation: 1,
+            },
+            &"2".repeat(64),
+        );
+        client.ensure_connected().expect("connect the mock relay");
+        client
+            .project_issue31_sources(&mut controller, 200)
+            .expect("the first pass");
+        assert_eq!(withheld_outbox_refs(&client).len(), 1);
+        client
+            .project_issue31_sources(&mut controller, 400)
+            .expect("the second pass, at a different clock");
+        assert_eq!(withheld_outbox_refs(&client).len(), 1);
     }
 
     #[test]

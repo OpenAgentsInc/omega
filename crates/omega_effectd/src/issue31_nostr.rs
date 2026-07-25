@@ -10,6 +10,7 @@ pub const ISSUE31_PAIRING_SCHEMA: &str = "openagents.omega.issue31.pairing.v1";
 pub const ISSUE31_COMMAND_SCHEMA: &str = "openagents.omega.issue31.command.v1";
 pub const ISSUE31_COMMAND_SCHEMA_V2: &str = "openagents.omega.issue31.command.v2";
 pub const ISSUE31_OWNER_PROJECTION_SCHEMA: &str = "openagents.omega.issue31.owner_projection.v1";
+pub const ISSUE31_WITHHELD_SOURCES_SCHEMA: &str = "openagents.omega.issue31.withheld_sources.v1";
 pub const ISSUE31_HOST_DISCOVERY_KIND: u16 = 31_990;
 pub const ISSUE31_PRIVATE_RUMOR_KIND: u16 = 14;
 pub const ISSUE31_PRIVATE_SEAL_KIND: u16 = 13;
@@ -1794,6 +1795,240 @@ pub fn emit_issue31_owner_projection(
         ));
     }
     Ok(Issue31OwnerProjectionEmission {
+        record: decoded,
+        content,
+    })
+}
+
+/// Why a source the owner is entitled to see never became a projection.
+///
+/// Only causes the host can actually observe are on the wire. A device-side
+/// read failure is real and is counted, but it is counted on the device, so a
+/// host cannot assert something only the device can know.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum Issue31WithheldCause {
+    /// The source was quarantined: its plaintext, its `d` tag, or its
+    /// projection body was refused, so it was removed from the pass.
+    Quarantined,
+    /// The bounded projection scan stopped before the end of the conversation,
+    /// so an unknown number of later sources were never examined at all.
+    ScanBound,
+}
+
+impl Issue31WithheldCause {
+    /// Whether the host can state an exact number for this cause.
+    ///
+    /// A quarantine is counted one event at a time, so it is exact. The scan
+    /// bound is the opposite: the host stopped reading, so it knows only that
+    /// at least one source is unexamined. Reporting "1 withheld" as exact when
+    /// nine hundred are unread would be a worse lie than silence.
+    fn is_exact(self) -> bool {
+        match self {
+            Self::Quarantined => true,
+            Self::ScanBound => false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Issue31WithheldSourceCount {
+    pub cause: Issue31WithheldCause,
+    pub count: u32,
+    /// `true` when `count` is the number withheld, `false` when it is a lower
+    /// bound and the true number is unknown.
+    pub exact: bool,
+    pub reason_ref: String,
+}
+
+/// A host statement, per admitted device, about how complete that device's
+/// owner projection is.
+///
+/// Exit 4 of omega#46 requires that every engram reaches the device or that the
+/// gap is exact. Before this record there was no mechanism the device could
+/// see: a phone rendered a confident, complete-looking list and nothing said it
+/// was short. Silence is not completeness, so a device with no such record must
+/// read "unknown", never "complete" — that is why a complete pass emits a
+/// record too, rather than emitting nothing.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Issue31WithheldSourcesRecord {
+    pub schema: String,
+    pub record_type: String,
+    pub host_ref: String,
+    pub host_public_key_hex: String,
+    pub device_public_key_hex: String,
+    pub grant_ref: String,
+    pub expected_generation: u64,
+    pub observed_at: u64,
+    /// `complete` when nothing was withheld, `partial` when something was.
+    /// The two states are structurally different so a reader cannot render
+    /// them the same way by accident.
+    pub coverage: String,
+    pub withheld: Vec<Issue31WithheldSourceCount>,
+}
+
+pub const ISSUE31_WITHHELD_COVERAGE_COMPLETE: &str = "complete";
+pub const ISSUE31_WITHHELD_COVERAGE_PARTIAL: &str = "partial";
+const MAX_ISSUE31_WITHHELD_ENTRIES: usize = 8;
+
+impl Issue31WithheldSourcesRecord {
+    pub fn decode(bytes: &[u8]) -> Result<Self, Issue31NostrError> {
+        if bytes.len() > 8 * 1024 {
+            return Err(Issue31NostrError::Invalid(
+                "withheld sources record exceeds the record budget".into(),
+            ));
+        }
+        let record: Self = serde_json::from_slice(bytes)
+            .map_err(|error| Issue31NostrError::Decode(error.to_string()))?;
+        record.validate()?;
+        Ok(record)
+    }
+
+    pub fn validate(&self) -> Result<(), Issue31NostrError> {
+        if self.schema != ISSUE31_WITHHELD_SOURCES_SCHEMA
+            || self.record_type != "withheld_sources"
+            || !valid_ref(&self.host_ref)
+            || !valid_hex64(&self.host_public_key_hex)
+            || !valid_hex64(&self.device_public_key_hex)
+            || !valid_ref(&self.grant_ref)
+            || self.expected_generation == 0
+        {
+            return Err(Issue31NostrError::Invalid(
+                "invalid withheld sources binding".into(),
+            ));
+        }
+        if self.withheld.len() > MAX_ISSUE31_WITHHELD_ENTRIES {
+            return Err(Issue31NostrError::Invalid(
+                "withheld sources record exceeds its entry bound".into(),
+            ));
+        }
+        let mut seen: BTreeSet<(Issue31WithheldCause, &str)> = BTreeSet::new();
+        for entry in &self.withheld {
+            if entry.count == 0 {
+                return Err(Issue31NostrError::Invalid(
+                    "a withheld source count of zero is not a withheld source".into(),
+                ));
+            }
+            if entry.exact != entry.cause.is_exact() {
+                return Err(Issue31NostrError::Invalid(
+                    "withheld source exactness does not match what its cause can know".into(),
+                ));
+            }
+            if !valid_ref(&entry.reason_ref) {
+                return Err(Issue31NostrError::Invalid(
+                    "a withheld source count needs an exact reason".into(),
+                ));
+            }
+            if !seen.insert((entry.cause, entry.reason_ref.as_str())) {
+                return Err(Issue31NostrError::Invalid(
+                    "withheld source counts repeat a cause and reason".into(),
+                ));
+            }
+        }
+        let expected_coverage = if self.withheld.is_empty() {
+            ISSUE31_WITHHELD_COVERAGE_COMPLETE
+        } else {
+            ISSUE31_WITHHELD_COVERAGE_PARTIAL
+        };
+        if self.coverage != expected_coverage {
+            return Err(Issue31NostrError::Invalid(
+                "withheld sources coverage does not match its counts".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn validate_private_binding(
+        &self,
+        sender_public_key_hex: &str,
+        recipient_public_key_hex: &str,
+    ) -> Result<(), Issue31NostrError> {
+        self.validate()?;
+        if sender_public_key_hex != self.host_public_key_hex
+            || recipient_public_key_hex != self.device_public_key_hex
+        {
+            return Err(Issue31NostrError::Invalid(
+                "withheld sources signer or recipient is invalid".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// The part of the record that says something about the world, with the
+    /// observation time removed.
+    ///
+    /// The host re-runs its projection pass continuously. Re-publishing an
+    /// identical statement with only a new timestamp would fill the relay with
+    /// noise, so the host compares this instead.
+    pub fn substance(&self) -> (String, Vec<Issue31WithheldSourceCount>) {
+        (self.coverage.clone(), self.withheld.clone())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Issue31WithheldSourcesInput<'a> {
+    pub host_ref: &'a str,
+    pub host_public_key_hex: &'a str,
+    pub device_public_key_hex: &'a str,
+    pub grant_ref: &'a str,
+    pub expected_generation: u64,
+    pub observed_at: u64,
+    pub withheld: Vec<Issue31WithheldSourceCount>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Issue31WithheldSourcesEmission {
+    pub record: Issue31WithheldSourcesRecord,
+    pub content: String,
+}
+
+/// Emit one device's withheld-source statement.
+///
+/// This follows `emit_issue31_owner_projection`: the bytes are routed back
+/// through this record's own decoder and private-binding check before they are
+/// returned, so the host cannot publish a coverage statement its own reader
+/// would refuse. `coverage` is derived from the counts rather than supplied,
+/// because a caller-chosen coverage value is a second source of truth for
+/// something the counts already decide — and it is exactly the field a bug
+/// would set to "complete" over a non-empty list.
+pub fn emit_issue31_withheld_sources(
+    input: Issue31WithheldSourcesInput<'_>,
+) -> Result<Issue31WithheldSourcesEmission, Issue31NostrError> {
+    let mut withheld = input.withheld;
+    withheld.sort_by(|left, right| {
+        left.cause
+            .cmp(&right.cause)
+            .then_with(|| left.reason_ref.cmp(&right.reason_ref))
+    });
+    let coverage = if withheld.is_empty() {
+        ISSUE31_WITHHELD_COVERAGE_COMPLETE
+    } else {
+        ISSUE31_WITHHELD_COVERAGE_PARTIAL
+    };
+    let record = Issue31WithheldSourcesRecord {
+        schema: ISSUE31_WITHHELD_SOURCES_SCHEMA.into(),
+        record_type: "withheld_sources".into(),
+        host_ref: input.host_ref.into(),
+        host_public_key_hex: input.host_public_key_hex.into(),
+        device_public_key_hex: input.device_public_key_hex.into(),
+        grant_ref: input.grant_ref.into(),
+        expected_generation: input.expected_generation,
+        observed_at: input.observed_at,
+        coverage: coverage.into(),
+        withheld,
+    };
+    let content = serde_json::to_string(&record)
+        .map_err(|error| Issue31NostrError::Invalid(error.to_string()))?;
+    let decoded = Issue31WithheldSourcesRecord::decode(content.as_bytes())?;
+    decoded.validate_private_binding(input.host_public_key_hex, input.device_public_key_hex)?;
+    if decoded != record {
+        return Err(Issue31NostrError::Invalid(
+            "withheld sources record did not survive its own decoder".into(),
+        ));
+    }
+    Ok(Issue31WithheldSourcesEmission {
         record: decoded,
         content,
     })
@@ -3703,6 +3938,263 @@ mod tests {
                 serde_json::from_slice(bytes).expect("fixture is JSON");
             assert_eq!(emitted, fixture, "{label} emitted bytes differ from fixture");
         }
+    }
+
+    const WITHHELD_SOURCES_FIXTURES: &[(&str, &str, &[u8])] = &[
+        (
+            "complete",
+            "c1339d6da3b99ca83c099cf87d3cf93a81fa1c90aac25ab54af8f886ce36c28a",
+            include_bytes!(
+                "../fixtures/openagents.omega.issue31.withheld_sources.v1.canonical-complete.json"
+            ),
+        ),
+        (
+            "partial",
+            "acb28484bf4d8722d774837abda0cc36edce0c74dc599edff820e4e70476bb01",
+            include_bytes!(
+                "../fixtures/openagents.omega.issue31.withheld_sources.v1.canonical-partial.json"
+            ),
+        ),
+    ];
+
+    /// Each negative fixture is one specific way a coverage statement could lie
+    /// about how much of the owner's view reached the device.
+    const WITHHELD_SOURCES_NEGATIVE_FIXTURES: &[(&str, &str, &[u8])] = &[
+        (
+            "complete-with-counts",
+            "8d5e2b9a718a65b2c808343e0723707acb423928652d3b399c5ef3b396a506fa",
+            include_bytes!(
+                "../fixtures/openagents.omega.issue31.withheld_sources.v1.negative-complete-with-counts.json"
+            ),
+        ),
+        (
+            "scan-bound-exact",
+            "8ece8427b2d133bf13ace98a8eee7e1755a58a4dceccf45c507f15f3351a5b54",
+            include_bytes!(
+                "../fixtures/openagents.omega.issue31.withheld_sources.v1.negative-scan-bound-exact.json"
+            ),
+        ),
+        (
+            "zero-count",
+            "02babd0fb35243371e977d3db394ed71b91de7df2ea60270bf5f19d08ed40c81",
+            include_bytes!(
+                "../fixtures/openagents.omega.issue31.withheld_sources.v1.negative-zero-count.json"
+            ),
+        ),
+        (
+            "unreadable-cause",
+            "c8eca6e40d9555c329a537eb14e667e6191f71267ca09db5885f9820630e7033",
+            include_bytes!(
+                "../fixtures/openagents.omega.issue31.withheld_sources.v1.negative-unreadable-cause.json"
+            ),
+        ),
+    ];
+
+    /// The coverage statement is the only thing that lets a device tell "this is
+    /// everything" from "this is what arrived". The digests are pinned
+    /// identically in the TypeScript peer, so a one-sided edit fails on both
+    /// sides rather than drifting into disagreement about what the phone is
+    /// being told.
+    #[test]
+    fn withheld_sources_fixtures_decode_and_bind() {
+        for (label, digest, bytes) in WITHHELD_SOURCES_FIXTURES {
+            assert_eq!(
+                &format!("{:x}", Sha256::digest(bytes)),
+                digest,
+                "{label} fixture bytes changed"
+            );
+            let record = Issue31WithheldSourcesRecord::decode(bytes)
+                .unwrap_or_else(|error| panic!("{label} fixture decodes: {error}"));
+            record
+                .validate_private_binding(&"1".repeat(64), &"2".repeat(64))
+                .unwrap_or_else(|error| panic!("{label} fixture binds: {error}"));
+        }
+    }
+
+    #[test]
+    fn a_complete_statement_and_a_partial_statement_are_not_the_same_record() {
+        let complete = Issue31WithheldSourcesRecord::decode(WITHHELD_SOURCES_FIXTURES[0].2)
+            .expect("the complete fixture decodes");
+        let partial = Issue31WithheldSourcesRecord::decode(WITHHELD_SOURCES_FIXTURES[1].2)
+            .expect("the partial fixture decodes");
+        assert_eq!(complete.coverage, ISSUE31_WITHHELD_COVERAGE_COMPLETE);
+        assert!(complete.withheld.is_empty());
+        assert_eq!(partial.coverage, ISSUE31_WITHHELD_COVERAGE_PARTIAL);
+        assert_ne!(complete.coverage, partial.coverage);
+        // Every count names why, because "3 missing" without a reason is
+        // nearly as unhelpful as silence.
+        for entry in &partial.withheld {
+            assert!(is_issue31_public_ref(&entry.reason_ref));
+            assert!(entry.count > 0);
+        }
+        assert_eq!(
+            partial
+                .withheld
+                .iter()
+                .map(|entry| entry.cause)
+                .collect::<Vec<_>>(),
+            vec![
+                Issue31WithheldCause::Quarantined,
+                Issue31WithheldCause::ScanBound
+            ]
+        );
+    }
+
+    /// Each named refusal gets its own assertion, so no case can be carried by
+    /// a neighbour's evidence.
+    #[test]
+    fn a_complete_coverage_over_a_non_empty_count_list_is_refused() {
+        let (label, digest, bytes) = WITHHELD_SOURCES_NEGATIVE_FIXTURES[0];
+        assert_eq!(
+            &format!("{:x}", Sha256::digest(bytes)),
+            digest,
+            "{label} fixture bytes changed"
+        );
+        assert!(
+            Issue31WithheldSourcesRecord::decode(bytes).is_err(),
+            "a record that says complete while withholding sources must be refused"
+        );
+    }
+
+    #[test]
+    fn an_exact_scan_bound_count_is_refused() {
+        let (label, digest, bytes) = WITHHELD_SOURCES_NEGATIVE_FIXTURES[1];
+        assert_eq!(
+            &format!("{:x}", Sha256::digest(bytes)),
+            digest,
+            "{label} fixture bytes changed"
+        );
+        assert!(
+            Issue31WithheldSourcesRecord::decode(bytes).is_err(),
+            "a host that stopped reading cannot state an exact number"
+        );
+    }
+
+    #[test]
+    fn a_withheld_count_of_zero_is_refused() {
+        let (label, digest, bytes) = WITHHELD_SOURCES_NEGATIVE_FIXTURES[2];
+        assert_eq!(
+            &format!("{:x}", Sha256::digest(bytes)),
+            digest,
+            "{label} fixture bytes changed"
+        );
+        assert!(
+            Issue31WithheldSourcesRecord::decode(bytes).is_err(),
+            "a zero count is not a withheld source"
+        );
+    }
+
+    /// A device-side read failure is real, but only the device can observe it.
+    /// The wire vocabulary has no such cause, so a host cannot assert one.
+    #[test]
+    fn a_host_cannot_claim_a_cause_only_the_device_can_observe() {
+        let (label, digest, bytes) = WITHHELD_SOURCES_NEGATIVE_FIXTURES[3];
+        assert_eq!(
+            &format!("{:x}", Sha256::digest(bytes)),
+            digest,
+            "{label} fixture bytes changed"
+        );
+        assert!(
+            Issue31WithheldSourcesRecord::decode(bytes).is_err(),
+            "a device-observed cause must not be assertable by the host"
+        );
+    }
+
+    #[test]
+    fn the_withheld_emitter_reproduces_every_canonical_fixture() {
+        for (label, _, bytes) in WITHHELD_SOURCES_FIXTURES {
+            let expected =
+                Issue31WithheldSourcesRecord::decode(bytes).expect("canonical fixture decodes");
+            let emission = emit_issue31_withheld_sources(Issue31WithheldSourcesInput {
+                host_ref: &expected.host_ref,
+                host_public_key_hex: &expected.host_public_key_hex,
+                device_public_key_hex: &expected.device_public_key_hex,
+                grant_ref: &expected.grant_ref,
+                expected_generation: expected.expected_generation,
+                observed_at: expected.observed_at,
+                withheld: expected.withheld.clone(),
+            })
+            .unwrap_or_else(|error| panic!("{label} emits: {error}"));
+            assert_eq!(emission.record, expected, "{label} emitted record differs");
+            let emitted: serde_json::Value =
+                serde_json::from_str(&emission.content).expect("emitted content is JSON");
+            let fixture: serde_json::Value =
+                serde_json::from_slice(bytes).expect("fixture is JSON");
+            assert_eq!(emitted, fixture, "{label} emitted bytes differ from fixture");
+        }
+    }
+
+    /// Falsification. `coverage` is derived from the counts rather than
+    /// supplied, so the one field a bug would set to "complete" over a
+    /// non-empty list cannot be set at all. Feeding the emitter a count list it
+    /// must refuse proves the routing back through its own decoder is load
+    /// bearing rather than decorative.
+    #[test]
+    fn the_withheld_emitter_cannot_produce_a_record_its_own_decoder_refuses() {
+        let repeated = vec![
+            Issue31WithheldSourceCount {
+                cause: Issue31WithheldCause::Quarantined,
+                count: 1,
+                exact: true,
+                reason_ref: "reason.omega.invalid_projection_source".into(),
+            },
+            Issue31WithheldSourceCount {
+                cause: Issue31WithheldCause::Quarantined,
+                count: 4,
+                exact: true,
+                reason_ref: "reason.omega.invalid_projection_source".into(),
+            },
+        ];
+        let error = emit_issue31_withheld_sources(Issue31WithheldSourcesInput {
+            host_ref: "omega.host.local",
+            host_public_key_hex: &"1".repeat(64),
+            device_public_key_hex: &"2".repeat(64),
+            grant_ref: "grant.omega.device_1",
+            expected_generation: 3,
+            observed_at: 1_784_937_651,
+            withheld: repeated,
+        })
+        .expect_err("two counts for one cause and reason are ambiguous");
+        assert!(matches!(error, Issue31NostrError::Invalid(_)));
+    }
+
+    /// Falsification, on the other half. A cause that cannot state an exact
+    /// number must not be emitted as though it could, even when the caller asks
+    /// for it.
+    #[test]
+    fn the_withheld_emitter_refuses_a_precision_the_cause_cannot_have() {
+        let error = emit_issue31_withheld_sources(Issue31WithheldSourcesInput {
+            host_ref: "omega.host.local",
+            host_public_key_hex: &"1".repeat(64),
+            device_public_key_hex: &"2".repeat(64),
+            grant_ref: "grant.omega.device_1",
+            expected_generation: 3,
+            observed_at: 1_784_937_651,
+            withheld: vec![Issue31WithheldSourceCount {
+                cause: Issue31WithheldCause::ScanBound,
+                count: 900,
+                exact: true,
+                reason_ref: "reason.omega.projection_scan_bound".into(),
+            }],
+        })
+        .expect_err("the scan bound cannot be exact");
+        assert!(matches!(error, Issue31NostrError::Invalid(_)));
+
+        emit_issue31_withheld_sources(Issue31WithheldSourcesInput {
+            host_ref: "omega.host.local",
+            host_public_key_hex: &"1".repeat(64),
+            device_public_key_hex: &"2".repeat(64),
+            grant_ref: "grant.omega.device_1",
+            expected_generation: 3,
+            observed_at: 1_784_937_651,
+            withheld: vec![Issue31WithheldSourceCount {
+                cause: Issue31WithheldCause::ScanBound,
+                count: 900,
+                exact: false,
+                reason_ref: "reason.omega.projection_scan_bound".into(),
+            }],
+        })
+        .expect("the same count as a lower bound is exactly what the host knows");
     }
 
     /// Falsification. A read-state body can sit inside every per-field bound the
