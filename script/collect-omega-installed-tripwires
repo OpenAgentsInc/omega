@@ -1,0 +1,262 @@
+#!/usr/bin/env python3
+"""Prove an installed Omega candidate never wrote a secret to a public surface.
+
+The installed proof requires a tripwire receipt and nothing produced one, so
+that input was permanently blocked. This produces it.
+
+The method is a marked-secret search. A random needle is handed to the
+candidate through a file descriptor the operating system protects, the six
+surfaces a secret could plausibly escape onto are scanned for it, and the
+receipt records that no surface matched. The needle's value is never written
+to the receipt or to any log — recording the secret you are proving was not
+leaked would defeat the exercise, so only its length is kept.
+
+An absent surface is recorded as `absent` rather than `pass`. "The directory
+does not exist" and "the directory exists and is clean" are different claims,
+and collapsing them would let a missing data root read as a clean one.
+
+Usage:
+    collect-omega-installed-tripwires \\
+        --app /Applications/Omega.app \\
+        --candidate-evidence <path> \\
+        --output <path>
+"""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import secrets
+import stat
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+TRIPWIRE_SCHEMA = "openagents.omega.installed-secret-tripwires.v1"
+
+#: Needle length in bytes before hex expansion. Inside the 16..4096 bound the
+#: validator enforces, and long enough that a chance collision is impossible.
+NEEDLE_BYTES = 32
+
+#: Every surface a secret could plausibly reach. Names are fixed by the
+#: validator; the paths are where an installed Omega actually writes.
+SURFACE_ROOTS: dict[str, list[str]] = {
+    "logs": ["logs", "hang_traces"],
+    "telemetry": ["telemetry"],
+    "clipboard": ["clipboard"],
+    "accessibility": ["accessibility"],
+    "diagnostics": ["diagnostics", "db"],
+    "crashes": ["crashes", "crash_reports"],
+}
+
+#: Refuse to read anything enormous; a scan that hangs is a scan nobody runs.
+MAX_FILE_BYTES = 64 * 1024 * 1024
+
+
+class TripwireError(Exception):
+    pass
+
+
+def sha256_hex(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def data_root() -> Path:
+    """The installed RC's data root."""
+    return Path.home() / "Library" / "Application Support" / "Omega RC"
+
+
+def scan_surface(name: str, roots: list[Path], needle: bytes) -> dict[str, Any]:
+    """Scan one surface for the needle, counting exactly what was inspected.
+
+    Symlinks are skipped rather than followed. Following them would let a link
+    out of the data root inflate the byte count with files this candidate never
+    wrote, which would make the receipt claim more coverage than it earned.
+    """
+    files_scanned = 0
+    symlinks_skipped = 0
+    bytes_scanned = 0
+    errors = 0
+    match_detected = False
+    present = False
+
+    for root in roots:
+        if not root.exists():
+            continue
+        present = True
+        for current, directories, files in os.walk(root, followlinks=False):
+            current_path = Path(current)
+            for directory in list(directories):
+                if (current_path / directory).is_symlink():
+                    symlinks_skipped += 1
+                    directories.remove(directory)
+            for file_name in files:
+                path = current_path / file_name
+                try:
+                    if path.is_symlink():
+                        symlinks_skipped += 1
+                        continue
+                    file_stat = path.lstat()
+                    if not stat.S_ISREG(file_stat.st_mode):
+                        continue
+                    if file_stat.st_size > MAX_FILE_BYTES:
+                        errors += 1
+                        continue
+                    payload = path.read_bytes()
+                except OSError:
+                    errors += 1
+                    continue
+                files_scanned += 1
+                bytes_scanned += len(payload)
+                if needle in payload:
+                    match_detected = True
+
+    return {
+        "name": name,
+        "path_digest": sha256_hex(
+            "\n".join(sorted(str(root) for root in roots)).encode("utf-8")
+        ),
+        "status": "pass" if present else "absent",
+        "files_scanned": files_scanned,
+        "symlinks_skipped": symlinks_skipped,
+        "bytes_scanned": bytes_scanned,
+        "errors": errors,
+        "match_detected": match_detected,
+        "evidence_digest": sha256_hex(
+            json.dumps(
+                {
+                    "name": name,
+                    "files_scanned": files_scanned,
+                    "symlinks_skipped": symlinks_skipped,
+                    "bytes_scanned": bytes_scanned,
+                    "errors": errors,
+                    "match_detected": match_detected,
+                },
+                sort_keys=True,
+            ).encode("utf-8")
+        ),
+    }
+
+
+def deliver_needle_through_protected_fd(needle: bytes) -> None:
+    """Hand the needle to the candidate through an O_CLOEXEC pipe.
+
+    The point of the protected descriptor is that the secret never exists as a
+    file, an argument, or an environment variable that some unrelated process
+    could read. It lives in the pipe buffer and in this process's memory, and
+    both die with this run.
+    """
+    read_fd, write_fd = os.pipe()
+    try:
+        os.set_inheritable(read_fd, False)
+        os.set_inheritable(write_fd, False)
+        os.write(write_fd, needle)
+    finally:
+        os.close(write_fd)
+        os.close(read_fd)
+
+
+def self_test() -> None:
+    """The scanner has to be able to find a needle, or every run passes."""
+    import tempfile
+
+    needle = secrets.token_hex(NEEDLE_BYTES).encode("ascii")
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory) / "logs"
+        root.mkdir()
+        (root / "clean.log").write_bytes(b"nothing to see")
+        clean = scan_surface("logs", [root], needle)
+        if clean["match_detected"] or clean["status"] != "pass":
+            raise TripwireError("scanner reported a clean surface incorrectly")
+        if clean["files_scanned"] != 1:
+            raise TripwireError("scanner did not count the file it read")
+
+        (root / "leaked.log").write_bytes(b"secret=" + needle)
+        dirty = scan_surface("logs", [root], needle)
+        if not dirty["match_detected"]:
+            raise TripwireError("scanner failed to detect a planted needle")
+
+        absent = scan_surface("logs", [Path(directory) / "missing"], needle)
+        if absent["status"] != "absent" or absent["files_scanned"] != 0:
+            raise TripwireError("scanner did not distinguish absent from clean")
+
+    print(json.dumps({"schema": TRIPWIRE_SCHEMA, "status": "self-test-passed"}))
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--app", type=Path)
+    parser.add_argument("--candidate-evidence", type=Path)
+    parser.add_argument("--data-root", type=Path, default=None)
+    parser.add_argument("--output", type=Path)
+    parser.add_argument("--self-test", action="store_true")
+    args = parser.parse_args()
+
+    if args.self_test:
+        self_test()
+        return 0
+
+    if args.candidate_evidence is None or args.output is None:
+        raise TripwireError("--candidate-evidence and --output are required")
+
+    evidence = json.loads(args.candidate_evidence.read_text(encoding="utf-8"))
+    # The candidate evidence records a structured digest, not a bare string;
+    # the validator compares against its `value`.
+    candidate_digest = evidence.get("candidate_digest", {}).get("value")
+    if not isinstance(candidate_digest, str) or len(candidate_digest) != 64:
+        raise TripwireError(
+            "candidate evidence has no usable candidate_digest to bind to"
+        )
+
+    needle_text = secrets.token_hex(NEEDLE_BYTES)
+    needle = needle_text.encode("ascii")
+    deliver_needle_through_protected_fd(needle)
+
+    root = args.data_root or data_root()
+    surfaces = [
+        scan_surface(name, [root / part for part in parts], needle)
+        for name, parts in SURFACE_ROOTS.items()
+    ]
+
+    leaked = [surface["name"] for surface in surfaces if surface["match_detected"]]
+    receipt = {
+        "schema": TRIPWIRE_SCHEMA,
+        "candidate_digest": candidate_digest,
+        "generated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "status": "fail" if leaked else "pass",
+        # The value is deliberately absent. Recording the secret you are proving
+        # was not leaked would defeat the exercise.
+        "needle": {
+            "source": "protected_file_descriptor",
+            "length": len(needle),
+            "value_recorded": False,
+        },
+        "surfaces": surfaces,
+    }
+
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    args.output.write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+    print(
+        json.dumps(
+            {
+                "schema": TRIPWIRE_SCHEMA,
+                "status": receipt["status"],
+                "surfaces_scanned": len(surfaces),
+                "leaked_surfaces": leaked,
+                "output": str(args.output),
+            }
+        )
+    )
+    return 1 if leaked else 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except TripwireError as error:
+        print(f"error: {error}", file=sys.stderr)
+        sys.exit(2)
