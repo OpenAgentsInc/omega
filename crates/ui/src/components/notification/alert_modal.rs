@@ -206,7 +206,7 @@ impl Component for AlertModal {
                                         h_flex()
                                             .gap_1()
                                             .child(Icon::new(IconName::Warning).color(Color::Warning))
-                                            .child(Headline::new("Unrecognized Workspace").size(HeadlineSize::Small))
+                                            .child(Headline::new("Example Alert").size(HeadlineSize::Small))
                                     )
                                     .child(
                                         h_flex()
@@ -215,16 +215,16 @@ impl Component for AlertModal {
                                     )
                             )
                             .child(
-                                "Untrusted workspaces are opened in Restricted Mode to protect your system.
-Review .zed/settings.json for any extensions or commands configured by this project.",
+                                "Sample body copy for the alert modal component gallery.
+This preview is design-system sample content and describes no real behaviour.",
                             )
                             .child(
                                 v_flex()
                                     .mt_1()
-                                    .child(Label::new("Restricted mode prevents:").color(Color::Muted))
-                                    .child(ListBulletItem::new("Project settings from being applied"))
-                                    .child(ListBulletItem::new("Language servers from running"))
-                                    .child(ListBulletItem::new("MCP integrations from installing"))
+                                    .child(Label::new("This example lists:").color(Color::Muted))
+                                    .child(ListBulletItem::new("A first bullet item"))
+                                    .child(ListBulletItem::new("A second bullet item"))
+                                    .child(ListBulletItem::new("A third bullet item"))
                             )
                             .footer(
                                 h_flex()
@@ -232,12 +232,12 @@ Review .zed/settings.json for any extensions or commands configured by this proj
                                     .justify_between()
                                     .child(
                                         Checkbox::new("trust-parent", ToggleState::Unselected)
-                                            .label("Trust all projects in parent directory")
+                                            .label("An example checkbox option")
                                     )
                                     .child(
                                         h_flex()
                                             .gap_1()
-                                            .child(Button::new("restricted", "Stay in Restricted Mode").color(Color::Muted))
+                                            .child(Button::new("secondary", "Secondary Action").color(Color::Muted))
                                             .child(Button::new("trust", "Trust and Continue").style(ButtonStyle::Filled))
                                     )
                             )

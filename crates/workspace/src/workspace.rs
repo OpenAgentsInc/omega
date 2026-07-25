@@ -16,7 +16,6 @@ pub mod path_list {
 pub mod path_link;
 mod persistence;
 pub mod searchable;
-pub mod security_modal;
 pub mod shared_screen;
 pub use shared_screen::SharedScreen;
 pub mod focus_follows_mouse;
@@ -101,7 +100,7 @@ use project::{
     debugger::{breakpoint_store::BreakpointStoreEvent, session::ThreadStatus},
     project_settings::ProjectSettings,
     toolchain_store::ToolchainStoreEvent,
-    trusted_worktrees::{RemoteHostLocation, TrustedWorktrees, TrustedWorktreesEvent},
+    trusted_worktrees::{TrustedWorktrees, TrustedWorktreesEvent},
 };
 use remote::{
     RemoteClientDelegate, RemoteConnection, RemoteConnectionOptions,
@@ -167,7 +166,6 @@ use crate::{
         SerializedAxis,
         model::{SerializedItem, SerializedPane, SerializedPaneGroup},
     },
-    security_modal::SecurityModal,
 };
 
 pub const SERIALIZATION_THROTTLE_TIME: Duration = Duration::from_millis(200);
@@ -2158,15 +2156,6 @@ impl Workspace {
                     })
                     .log_err();
             }
-
-            // Auto-show the security modal if the project has restricted worktrees
-            window
-                .update(cx, |_, window, cx| {
-                    workspace.update(cx, |workspace, cx| {
-                        workspace.show_worktree_trust_security_modal(false, window, cx);
-                    });
-                })
-                .log_err();
 
             Ok(OpenResult {
                 window,
@@ -7668,11 +7657,6 @@ impl Workspace {
                     }
                 },
             ))
-            .on_action(cx.listener(
-                |workspace: &mut Workspace, _: &ToggleWorktreeSecurity, window, cx| {
-                    workspace.show_worktree_trust_security_modal(true, window, cx);
-                },
-            ))
             .on_action(
                 cx.listener(|_: &mut Workspace, _: &ClearTrustedWorktrees, _, cx| {
                     if let Some(trusted_worktrees) = TrustedWorktrees::try_get_global(cx) {
@@ -8521,39 +8505,6 @@ impl Workspace {
         });
     }
 
-    pub fn show_worktree_trust_security_modal(
-        &mut self,
-        toggle: bool,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if let Some(security_modal) = self.active_modal::<SecurityModal>(cx) {
-            if toggle {
-                security_modal.update(cx, |security_modal, cx| {
-                    security_modal.dismiss(cx);
-                })
-            } else {
-                security_modal.update(cx, |security_modal, cx| {
-                    security_modal.refresh_restricted_paths(cx);
-                });
-            }
-        } else {
-            let has_restricted_worktrees = TrustedWorktrees::has_restricted_worktrees(
-                &self.project().read(cx).worktree_store(),
-                cx,
-            );
-            if has_restricted_worktrees {
-                let project = self.project().read(cx);
-                let remote_host = project
-                    .remote_connection_options(cx)
-                    .map(RemoteHostLocation::from);
-                let worktree_store = project.worktree_store().downgrade();
-                self.toggle_modal(window, cx, |window, cx| {
-                    SecurityModal::new(worktree_store, remote_host, window, cx)
-                });
-            }
-        }
-    }
 }
 
 pub trait AnyActiveCall {

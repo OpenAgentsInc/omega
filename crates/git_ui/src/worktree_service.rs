@@ -660,14 +660,6 @@ fn maybe_propagate_worktree_trust(
     })
     .ok();
 
-    // After trust propagation, refresh the security modal on the new workspace
-    // so it dismisses itself if there are no more restricted worktrees.
-    cx.update(|window, cx| {
-        new_workspace.update(cx, |workspace, cx| {
-            workspace.show_worktree_trust_security_modal(false, window, cx);
-        });
-    })
-    .ok();
 }
 
 /// Handles the `CreateWorktree` action generically, without any agent panel involvement.
@@ -1689,15 +1681,10 @@ mod tests {
             "linked worktree should inherit trust from the main worktree"
         );
 
-        // The security modal should not be showing
-        let has_modal = new_workspace.read_with(cx, |ws, cx| {
-            ws.active_modal::<workspace::security_modal::SecurityModal>(cx)
-                .is_some()
-        });
-        assert!(
-            !has_modal,
-            "security modal should not show for a linked worktree created from a trusted main worktree"
-        );
+        // The security modal it used to assert against no longer exists:
+        // OMEGA-DELTA-0009 deleted the Restricted Mode UI outright. The
+        // meaningful half of this test is the trust inheritance asserted
+        // above, which still holds.
     }
 
     #[test]

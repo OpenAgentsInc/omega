@@ -30,6 +30,8 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0005",
     "OMEGA-DELTA-0006",
     "OMEGA-DELTA-0007",
+    "OMEGA-DELTA-0008",
+    "OMEGA-DELTA-0009",
 ];
 
 /// Files deleted from the fork, checked by absence.
@@ -45,6 +47,19 @@ pub const REMOVED_FILES: &[&str] = &[
     "crates/extensions_ui/src/extension_suggest.rs",
     "crates/recent_projects/src/dev_container_suggest.rs",
     "crates/zed/src/zed/move_to_applications.rs",
+    // OMEGA-DELTA-0009
+    "crates/workspace/src/security_modal.rs",
+];
+
+/// Strings that must not appear anywhere under `crates/`.
+///
+/// These are checked across the whole source tree rather than in one file,
+/// because the last two both survived a source-level review and were caught
+/// only by scanning the packaged binary.
+pub const FORBIDDEN_SOURCE_STRINGS: &[(&str, &str)] = &[
+    ("OMEGA-DELTA-0008", "Zed\u{27}s hosted models"),
+    ("OMEGA-DELTA-0008", "14 day free trial"),
+    ("OMEGA-DELTA-0009", "Review .zed/settings.json"),
 ];
 
 /// Read a repository file relative to the workspace root.
@@ -318,6 +333,55 @@ mod tests {
             "OMEGA-DELTA-0007: the debug-session terminate confirmation has \
              returned to {}",
             path.display()
+        );
+    }
+
+    /// OMEGA-DELTA-0008 and 0009. Strings that must not ship.
+    ///
+    /// Checked across the tree rather than per file: both of these survived a
+    /// source-level review and were caught only by scanning the binary.
+    #[test]
+    fn no_zed_product_copy_survives_anywhere() {
+        let crates_root = repository_path("crates");
+        let mut offenders: Vec<String> = Vec::new();
+        let mut stack = vec![crates_root];
+        while let Some(directory) = stack.pop() {
+            let Ok(entries) = std::fs::read_dir(&directory) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_symlink() {
+                    continue;
+                }
+                if path.is_dir() {
+                    if path.file_name().is_some_and(|name| name == "target") {
+                        continue;
+                    }
+                    stack.push(path);
+                    continue;
+                }
+                if path.extension().is_none_or(|extension| extension != "rs") {
+                    continue;
+                }
+                // This crate names the strings in order to forbid them.
+                if path.ends_with("omega_deltas.rs") {
+                    continue;
+                }
+                let Ok(source) = std::fs::read_to_string(&path) else {
+                    continue;
+                };
+                for (delta, needle) in FORBIDDEN_SOURCE_STRINGS {
+                    if source.contains(needle) {
+                        offenders.push(format!("{delta}: {needle:?} in {}", path.display()));
+                    }
+                }
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "forbidden Zed product copy has returned:\n{}",
+            offenders.join("\n")
         );
     }
 

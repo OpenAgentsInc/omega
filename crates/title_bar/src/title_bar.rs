@@ -52,7 +52,7 @@ use ui::{
 use update_version::UpdateVersion;
 use util::ResultExt;
 use workspace::{
-    AccessibleMode, MultiWorkspace, ToggleWorktreeSecurity, Workspace,
+    AccessibleMode, MultiWorkspace, Workspace,
     notifications::{NotifyResultExt, NotifyTaskExt as _},
 };
 
@@ -310,7 +310,6 @@ impl Render for TitleBar {
                                 title_bar.child(menu)
                             },
                         )
-                        .children(self.render_restricted_mode(cx))
                         .when(render_project_items, |title_bar| {
                             title_bar
                                 .when(title_bar_settings.show_project_items, |title_bar| {
@@ -686,47 +685,6 @@ impl TitleBar {
         )
     }
 
-    pub fn render_restricted_mode(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let has_restricted_worktrees =
-            TrustedWorktrees::has_restricted_worktrees(&self.project.read(cx).worktree_store(), cx);
-        if !has_restricted_worktrees {
-            return None;
-        }
-
-        let button = Button::new("restricted_mode_trigger", "Restricted Mode")
-            .style(ButtonStyle::Tinted(TintColor::Warning))
-            .label_size(LabelSize::Small)
-            .color(Color::Warning)
-            .start_icon(
-                Icon::new(IconName::Warning)
-                    .size(IconSize::Small)
-                    .color(Color::Warning),
-            )
-            .tooltip(|_, cx| {
-                Tooltip::with_meta(
-                    "You're in Restricted Mode",
-                    Some(&ToggleWorktreeSecurity),
-                    "Mark this project as trusted and unlock all features",
-                    cx,
-                )
-            })
-            .on_click({
-                cx.listener(move |this, _, window, cx| {
-                    this.workspace
-                        .update(cx, |workspace, cx| {
-                            workspace.show_worktree_trust_security_modal(true, window, cx)
-                        })
-                        .log_err();
-                })
-            });
-
-        if ui::utils::MACOS_SDK_26_OR_LATER {
-            // Make up for Tahoe's traffic light buttons having less spacing around them
-            Some(div().child(button).ml_0p5().into_any_element())
-        } else {
-            Some(button.into_any_element())
-        }
-    }
 
     pub fn render_project_host(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         if self.project.read(cx).is_via_remote_server() {

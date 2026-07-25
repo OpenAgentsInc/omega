@@ -150,3 +150,40 @@ cargo test -p omega_deltas
   unreachable in Omega. Deleting it would mean surgery on the shutdown path for
   no behavioural change.
 - **Enforced by:** `debug_terminate_never_prompts`.
+
+### OMEGA-DELTA-0008 — No Zed subscription or hosted-plan copy
+
+- **Upstream Zed:** `zed_ai_description` in
+  `crates/language_models/src/provider/cloud.rs` renders a subscription pitch —
+  Pro, Student, Business, VIP, and *"Subscribe for access to Zed's hosted
+  models. Start with a 14 day free trial."*
+- **Omega:** replaced with neutral copy about a configured provider.
+- **Why:** it advertised a product Omega does not sell, named Zed as the vendor,
+  and told the operator to buy something they cannot buy. omega#16 forbids
+  presenting Zed as the product.
+- **How it was found:** scanning the **installed rc4 binary**, not the source
+  tree. The earlier source-level passes missed it because it lives in a
+  different function from the plan definitions that were deleted. Binary
+  verification is the only reason this is not still shipping.
+- **Enforced by:** `no_zed_product_copy_survives_anywhere`.
+
+### OMEGA-DELTA-0009 — The Restricted Mode UI is gone, not dormant
+
+- **Upstream Zed:** a security modal, a title-bar "Restricted Mode" badge, a
+  settings banner, and the trust-modal plumbing behind them.
+- **Omega:** `crates/workspace/src/security_modal.rs` is deleted, along with
+  `show_worktree_trust_security_modal`, the auto-show on project open, the
+  `ToggleWorktreeSecurity` handler, the title-bar badge, the settings banner,
+  and the component-gallery sample that carried
+  *"Review .zed/settings.json"*.
+- **Why:** `OMEGA-DELTA-0001` stopped the modal appearing but left it compiled
+  in, which an adversarial review flagged and a binary scan confirmed — the
+  `.zed/settings.json` identifier was still shipping in `0.2.0-rc4`.
+  Unreachable code that a rebase can revive is not a removal.
+- **Known remainder:** two dead render blocks still mention "Restricted Mode"
+  (`crates/agent_ui/src/profile_selector.rs`,
+  `crates/language_tools/src/lsp_button.rs`). They are gated on state that can
+  no longer be true, and "Restricted Mode" is a feature name rather than a Zed
+  product identifier, so they are not an omega#16 violation. Tracked on
+  omega#64 rather than claimed as done.
+- **Enforced by:** `removed_surfaces_stay_removed`, `no_zed_product_copy_survives_anywhere`.

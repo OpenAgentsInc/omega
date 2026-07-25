@@ -437,39 +437,26 @@ struct ZedAiConfiguration {
 
 fn zed_ai_description(
     is_connected: bool,
-    plan: Option<Plan>,
+    _plan: Option<Plan>,
     is_zed_model_provider_enabled: bool,
-    eligible_for_trial: bool,
+    _eligible_for_trial: bool,
 ) -> &'static str {
+    // Omega does not sell a hosted AI service, so this used to render a
+    // subscription pitch for a product that does not exist here, naming Zed as
+    // the vendor: Pro, Student, Business, VIP, and "Start with a 14 day free
+    // trial". omega#16 forbids presenting Zed as the product, and the copy also
+    // told the operator to buy something they cannot buy. See OMEGA-DELTA-0008.
+    //
+    // The plan and trial-eligibility inputs are kept in the signature because
+    // the upstream call sites still pass them; the distinction they encoded is
+    // one Omega deliberately does not make.
     if !is_connected {
-        return "Sign in to have access to Zed's complete agentic experience with hosted models.";
+        return "Sign in to use hosted models from a configured provider.";
     }
-
-    match plan {
-        Some(Plan::ZedPro) => {
-            "You have access to Zed's hosted models through your Pro subscription."
-        }
-        Some(Plan::ZedProTrial) => "You have access to Zed's hosted models through your Pro trial.",
-        Some(Plan::ZedStudent) => {
-            "You have access to Zed's hosted models through your Student subscription."
-        }
-        Some(Plan::ZedBusiness) => {
-            if is_zed_model_provider_enabled {
-                "You have access to Zed's hosted models through your organization."
-            } else {
-                "Zed's hosted models are disabled by your organization's configuration."
-            }
-        }
-        Some(Plan::ZedVip) => {
-            "You have access to Zed's hosted models through your VIP subscription."
-        }
-        Some(Plan::ZedFree) | None => {
-            if eligible_for_trial {
-                "Subscribe for access to Zed's hosted models. Start with a 14 day free trial."
-            } else {
-                "Subscribe for access to Zed's hosted models."
-            }
-        }
+    if is_zed_model_provider_enabled {
+        "Hosted models are available from your configured provider."
+    } else {
+        "Hosted models are disabled by your current configuration."
     }
 }
 
