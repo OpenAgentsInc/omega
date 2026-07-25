@@ -5,8 +5,11 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 pub const ISSUE31_HOST_DISCOVERY_SCHEMA: &str = "openagents.omega.issue31.host_discovery.v1";
+pub const ISSUE31_HOST_DISCOVERY_SCHEMA_V2: &str = "openagents.omega.issue31.host_discovery.v2";
 pub const ISSUE31_PAIRING_SCHEMA: &str = "openagents.omega.issue31.pairing.v1";
 pub const ISSUE31_COMMAND_SCHEMA: &str = "openagents.omega.issue31.command.v1";
+pub const ISSUE31_COMMAND_SCHEMA_V2: &str = "openagents.omega.issue31.command.v2";
+pub const ISSUE31_OWNER_PROJECTION_SCHEMA: &str = "openagents.omega.issue31.owner_projection.v1";
 pub const ISSUE31_HOST_DISCOVERY_KIND: u16 = 31_990;
 pub const ISSUE31_PRIVATE_RUMOR_KIND: u16 = 14;
 pub const ISSUE31_PRIVATE_SEAL_KIND: u16 = 13;
@@ -78,6 +81,77 @@ impl Issue31HostDiscovery {
         {
             return Err(Issue31NostrError::Invalid(
                 "host discovery failed its schema, identity, protocol, relay, or lifetime law"
+                    .into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Issue31HostDiscoveryV2 {
+    pub schema: String,
+    pub host_ref: String,
+    pub host_public_key_hex: String,
+    pub sarah_public_key_hex: String,
+    pub conversation: String,
+    pub display_name: String,
+    pub protocols: Vec<String>,
+    pub relay_urls: Vec<String>,
+    pub generation: u64,
+    pub issued_at: u64,
+    pub expires_at: u64,
+}
+
+impl Issue31HostDiscoveryV2 {
+    pub fn decode(bytes: &[u8]) -> Result<Self, Issue31NostrError> {
+        if bytes.len() > 64 * 1024 {
+            return Err(Issue31NostrError::Invalid(
+                "host discovery exceeds the record budget".into(),
+            ));
+        }
+        let record: Self = serde_json::from_slice(bytes)
+            .map_err(|error| Issue31NostrError::Decode(error.to_string()))?;
+        record.validate()?;
+        Ok(record)
+    }
+
+    pub fn validate(&self) -> Result<(), Issue31NostrError> {
+        if self.schema != ISSUE31_HOST_DISCOVERY_SCHEMA_V2
+            || !valid_ref(&self.host_ref)
+            || !valid_hex64(&self.host_public_key_hex)
+            || !valid_hex64(&self.sarah_public_key_hex)
+            || self.sarah_public_key_hex == self.host_public_key_hex
+            || !valid_conversation_tag(&self.conversation)
+            || self.display_name.is_empty()
+            || self.display_name.len() > 80
+            || self.generation == 0
+            || self.expires_at <= self.issued_at
+            || self.protocols.len() != 3
+            || !all_unique(&self.protocols)
+            || !self
+                .protocols
+                .iter()
+                .any(|protocol| protocol == ISSUE31_PAIRING_SCHEMA)
+            || !self
+                .protocols
+                .iter()
+                .any(|protocol| protocol == ISSUE31_COMMAND_SCHEMA)
+            || !self
+                .protocols
+                .iter()
+                .any(|protocol| protocol == ISSUE31_COMMAND_SCHEMA_V2)
+            || self.relay_urls.is_empty()
+            || self.relay_urls.len() > 8
+            || !all_unique(&self.relay_urls)
+            || self
+                .relay_urls
+                .iter()
+                .any(|relay_url| !valid_relay_url(relay_url))
+        {
+            return Err(Issue31NostrError::Invalid(
+                "v2 host discovery failed its schema, identity, protocol, relay, or lifetime law"
                     .into(),
             ));
         }
@@ -2047,6 +2121,16 @@ fn valid_relay_url(value: &str) -> bool {
         && url.fragment().is_none()
 }
 
+fn valid_conversation_tag(value: &str) -> bool {
+    let Some(hex_part) = value.strip_prefix("sarah.") else {
+        return false;
+    };
+    hex_part.len() == 24
+        && hex_part
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+}
+
 fn all_unique(values: &[String]) -> bool {
     values.iter().collect::<BTreeSet<_>>().len() == values.len()
 }
@@ -2097,6 +2181,31 @@ mod tests {
         .expect("reconcile");
         assert_eq!(states.len(), 1);
         assert!(states[0].result.is_some());
+    }
+
+    #[test]
+    fn v2_host_discovery_validation() {
+        let v2 = Issue31HostDiscoveryV2 {
+            schema: ISSUE31_HOST_DISCOVERY_SCHEMA_V2.into(),
+            host_ref: "omega.host.local".into(),
+            host_public_key_hex: "1".repeat(64),
+            sarah_public_key_hex: "3".repeat(64),
+            conversation: format!("sarah.{}", "a".repeat(24)),
+            display_name: "Omega Primary Host".into(),
+            protocols: vec![
+                ISSUE31_PAIRING_SCHEMA.into(),
+                ISSUE31_COMMAND_SCHEMA.into(),
+                ISSUE31_COMMAND_SCHEMA_V2.into(),
+            ],
+            relay_urls: vec!["wss://relay.openagents.com".into()],
+            generation: 1,
+            issued_at: 100,
+            expires_at: 200,
+        };
+        v2.validate().expect("v2 discovery valid");
+        let encoded = serde_json::to_vec(&v2).expect("serialize");
+        let decoded = Issue31HostDiscoveryV2::decode(&encoded).expect("decode v2");
+        assert_eq!(decoded.conversation, format!("sarah.{}", "a".repeat(24)));
     }
 
     #[test]
