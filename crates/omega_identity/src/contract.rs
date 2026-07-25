@@ -123,7 +123,7 @@ impl NostrPublicKeyHex {
         &self.0
     }
 
-    fn public_key(&self) -> Result<PublicKey, ContractError> {
+    pub(crate) fn public_key(&self) -> Result<PublicKey, ContractError> {
         parse_public_key(&self.0)
     }
 }
@@ -654,6 +654,108 @@ pub struct SigningResult {
     pub event_id: String,
     pub signature: String,
     pub signed_event_json: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PrivateMessageRequest {
+    pub request_ref: ReceiptRef,
+    pub identity_ref: IdentityRef,
+    pub recipients: Vec<NostrPublicKeyHex>,
+    pub rumor: UnsignedEventTemplate,
+}
+
+impl PrivateMessageRequest {
+    pub fn validate(&self) -> Result<(), ContractError> {
+        validate_reference("request_ref", self.request_ref.as_str())?;
+        validate_reference("identity_ref", self.identity_ref.as_str())?;
+        if self.recipients.is_empty()
+            || self.recipients.len() > 8
+            || self.rumor.kind != Kind::PrivateDirectMessage.as_u16()
+            || self.rumor.content.len() > 64 * 1024
+            || self.rumor.tags.len() > 128
+        {
+            return Err(ContractError::SigningNotAdmitted);
+        }
+        let mut unique = std::collections::HashSet::new();
+        for recipient in &self.recipients {
+            recipient.public_key()?;
+            if !unique.insert(recipient.as_str()) {
+                return Err(ContractError::SigningNotAdmitted);
+            }
+        }
+        self.rumor
+            .tags
+            .iter()
+            .cloned()
+            .map(|tag| Tag::parse(tag).map_err(|_| ContractError::InvalidTag))
+            .collect::<Result<Vec<_>, _>>()?;
+        let recipient_set: std::collections::HashSet<&str> = self
+            .recipients
+            .iter()
+            .map(NostrPublicKeyHex::as_str)
+            .collect();
+        let mut tagged_recipient_set = std::collections::HashSet::new();
+        for tag in &self.rumor.tags {
+            if tag.first().map(String::as_str) != Some("p") {
+                continue;
+            }
+            let tagged_recipient = tag.get(1).ok_or(ContractError::SigningNotAdmitted)?;
+            NostrPublicKeyHex::new(tagged_recipient)?;
+            if !tagged_recipient_set.insert(tagged_recipient.as_str()) {
+                return Err(ContractError::SigningNotAdmitted);
+            }
+        }
+        if tagged_recipient_set != recipient_set {
+            return Err(ContractError::SigningNotAdmitted);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn unsigned_rumor(
+        &self,
+        identity: &PublicIdentity,
+    ) -> Result<UnsignedEvent, ContractError> {
+        self.validate()?;
+        identity.validate()?;
+        if &self.identity_ref != identity.identity_ref() {
+            return Err(ContractError::SigningNotAdmitted);
+        }
+        let tags = self
+            .rumor
+            .tags
+            .iter()
+            .cloned()
+            .map(|tag| Tag::parse(tag).map_err(|_| ContractError::InvalidTag))
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut rumor = UnsignedEvent::new(
+            identity.public_key_hex().public_key()?,
+            Timestamp::from_secs(self.rumor.created_at),
+            Kind::PrivateDirectMessage,
+            tags,
+            self.rumor.content.clone(),
+        );
+        rumor.ensure_id();
+        Ok(rumor)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GiftWrappedPrivateMessage {
+    pub receiver_public_key_hex: String,
+    pub rumor_event_id: String,
+    pub gift_wrap_event_json: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UnwrappedPrivateMessage {
+    pub rumor_event_id: String,
+    pub sender_public_key_hex: String,
+    pub created_at: u64,
+    pub tags: Vec<Vec<String>>,
+    pub content: String,
 }
 
 #[cfg(test)]

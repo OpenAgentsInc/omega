@@ -64,6 +64,14 @@ pub enum HostMethod {
     RefreshEvidence,
     InterruptTurn,
     AppendSystemNote,
+    SarahSessionStatus,
+    SarahBootstrap,
+    SarahRoomSnapshot,
+    SarahSendMessage,
+    SarahInterruptTurn,
+    SarahDeviceGrants,
+    SarahRenewDeviceGrant,
+    SarahRevokeDeviceGrant,
     #[serde(other)]
     Unsupported,
 }

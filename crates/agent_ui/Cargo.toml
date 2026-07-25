@@ -36,6 +36,7 @@ agent_settings.workspace = true
 agent_skills.workspace = true
 ai_onboarding.workspace = true
 anyhow.workspace = true
+app_identity.workspace = true
 heapless.workspace = true
 audio = { workspace = true, optional = true }
 base64.workspace = true
@@ -78,6 +79,7 @@ menu.workspace = true
 multi_buffer.workspace = true
 notifications.workspace = true
 omega_effectd.workspace = true
+omega_identity.workspace = true
 ordered-float.workspace = true
 parking_lot.workspace = true
 paths.workspace = true

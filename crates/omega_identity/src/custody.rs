@@ -5,17 +5,21 @@ use std::{
 
 use app_identity::AppChannel;
 use nostr::{
-    JsonUtil,
-    nips::nip49::{EncryptedSecretKey, KeySecurity},
+    Event, EventBuilder, JsonUtil, Kind,
+    nips::{
+        nip49::{EncryptedSecretKey, KeySecurity},
+        nip59,
+    },
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
     AdmittedSigningRequest, CompletionRecord, ContractError, CustodyConflict,
-    CustodyConflictReason, CustodyResult, CustodyState, IdentityInspection, IdentityManifest,
-    IdentityRef, ImportedSecret, KeyringLocator, PendingIdentityOperation,
-    PendingIdentityTransaction, PublicIdentity, PublicStoreError, ReceiptRef, SigningResult,
+    CustodyConflictReason, CustodyResult, CustodyState, GiftWrappedPrivateMessage,
+    IdentityInspection, IdentityManifest, IdentityRef, ImportedSecret, KeyringLocator,
+    PendingIdentityOperation, PendingIdentityTransaction, PrivateMessageRequest, PublicIdentity,
+    PublicStoreError, ReceiptRef, SigningResult, UnwrappedPrivateMessage,
     mutation_lock::{IdentityMutationGuard, MutationLockError},
     proof::{IDENTITY_PROOF_KEYRING_ACCOUNT, IDENTITY_PROOF_KEYRING_SERVICE, ProofCrashBoundary},
     public_store::{
@@ -470,6 +474,97 @@ impl IdentityService {
             event_id: event.id.to_hex(),
             signature: event.sig.to_string(),
             signed_event_json,
+        })
+    }
+
+    pub fn gift_wrap_private_message(
+        &self,
+        request: &PrivateMessageRequest,
+    ) -> Result<Vec<GiftWrappedPrivateMessage>, CustodyError> {
+        let _mutation_guard = IdentityMutationGuard::acquire(&self.locator)?;
+        self.require_no_reset_locked()?;
+        let resolved = self.resolve_locked();
+        if resolved.result.state != CustodyState::Ready {
+            return Err(CustodyError::CustodyDenied(resolved.result.state));
+        }
+        let identity = resolved
+            .result
+            .identity
+            .ok_or(CustodyError::CustodyDenied(CustodyState::Incomplete))?;
+        let secret = resolved
+            .secret
+            .ok_or(CustodyError::CustodyDenied(CustodyState::Incomplete))?;
+        let keys = secret
+            .keys()
+            .map_err(|_| CustodyError::CustodyDenied(CustodyState::Incomplete))?;
+        let rumor = request.unsigned_rumor(&identity)?;
+        rumor.verify_id().map_err(|_| CustodyError::SigningFailed)?;
+        let rumor_event_id = rumor.id.ok_or(CustodyError::SigningFailed)?.to_hex();
+        let mut wrapped = Vec::with_capacity(request.recipients.len());
+        for recipient in &request.recipients {
+            let recipient_public_key = recipient.public_key()?;
+            let gift_wrap = smol::block_on(EventBuilder::gift_wrap(
+                &keys,
+                &recipient_public_key,
+                rumor.clone(),
+                [],
+            ))
+            .map_err(|_| CustodyError::SigningFailed)?;
+            wrapped.push(GiftWrappedPrivateMessage {
+                receiver_public_key_hex: recipient.as_str().to_string(),
+                rumor_event_id: rumor_event_id.clone(),
+                gift_wrap_event_json: gift_wrap
+                    .try_as_json()
+                    .map_err(|_| CustodyError::SigningFailed)?,
+            });
+        }
+        Ok(wrapped)
+    }
+
+    pub fn unwrap_private_message(
+        &self,
+        gift_wrap_event_json: &str,
+    ) -> Result<UnwrappedPrivateMessage, CustodyError> {
+        if gift_wrap_event_json.len() > 1_048_576 {
+            return Err(CustodyError::SigningFailed);
+        }
+        let _mutation_guard = IdentityMutationGuard::acquire(&self.locator)?;
+        self.require_no_reset_locked()?;
+        let resolved = self.resolve_locked();
+        if resolved.result.state != CustodyState::Ready {
+            return Err(CustodyError::CustodyDenied(resolved.result.state));
+        }
+        let secret = resolved
+            .secret
+            .ok_or(CustodyError::CustodyDenied(CustodyState::Incomplete))?;
+        let keys = secret
+            .keys()
+            .map_err(|_| CustodyError::CustodyDenied(CustodyState::Incomplete))?;
+        let gift_wrap =
+            Event::from_json(gift_wrap_event_json).map_err(|_| CustodyError::SigningFailed)?;
+        if gift_wrap.kind != Kind::GiftWrap || gift_wrap.verify().is_err() {
+            return Err(CustodyError::SigningFailed);
+        }
+        let gift = smol::block_on(nip59::extract_rumor(&keys, &gift_wrap))
+            .map_err(|_| CustodyError::SigningFailed)?;
+        if gift.rumor.kind != Kind::PrivateDirectMessage {
+            return Err(CustodyError::SigningFailed);
+        }
+        gift.rumor
+            .verify_id()
+            .map_err(|_| CustodyError::SigningFailed)?;
+        let rumor_event_id = gift.rumor.id.ok_or(CustodyError::SigningFailed)?.to_hex();
+        Ok(UnwrappedPrivateMessage {
+            rumor_event_id,
+            sender_public_key_hex: gift.sender.to_hex(),
+            created_at: gift.rumor.created_at.as_secs(),
+            tags: gift
+                .rumor
+                .tags
+                .iter()
+                .map(|tag| tag.as_slice().to_vec())
+                .collect(),
+            content: gift.rumor.content,
         })
     }
 
@@ -2584,6 +2679,69 @@ mod tests {
         assert_eq!(signed.identity, identity);
         assert_eq!(signed.event_id, event.id.to_hex());
         assert_eq!(signed.signature, event.sig.to_string());
+    }
+
+    #[test]
+    fn nip17_wrap_and_unwrap_keep_secret_material_inside_custody() {
+        let temporary_directory = tempfile::tempdir().expect("create temporary directory");
+        let sender = service(
+            FakeStore::empty(),
+            temporary_directory.path().join("sender"),
+        );
+        let recipient = IdentityService::new(
+            AppChannel::Dev,
+            CustodyPaths::for_data_root(temporary_directory.path().join("recipient")),
+            FakeStore::empty(),
+            Arc::new(FixedGenerator([2; 32])),
+        );
+        let sender_identity = sender
+            .create(ReceiptRef::new("sender-create").expect("sender receipt"))
+            .expect("create sender")
+            .identity
+            .expect("sender identity");
+        let recipient_identity = recipient
+            .create(ReceiptRef::new("recipient-create").expect("recipient receipt"))
+            .expect("create recipient")
+            .identity
+            .expect("recipient identity");
+        let recipient_public_key = recipient_identity.public_key_hex().clone();
+        let request = PrivateMessageRequest {
+            request_ref: ReceiptRef::new("private-message-1").expect("private receipt"),
+            identity_ref: sender_identity.identity_ref().clone(),
+            recipients: vec![recipient_public_key.clone()],
+            rumor: UnsignedEventTemplate {
+                created_at: 1_700_000_001,
+                kind: Kind::PrivateDirectMessage.as_u16(),
+                tags: vec![
+                    vec!["p".to_string(), recipient_public_key.as_str().to_string()],
+                    vec!["conversation".to_string(), "sarah.fixture".to_string()],
+                ],
+                content: "owner-private".to_string(),
+            },
+        };
+
+        let wrapped = sender
+            .gift_wrap_private_message(&request)
+            .expect("gift wrap");
+        assert_eq!(wrapped.len(), 1);
+        let outer = Event::from_json(&wrapped[0].gift_wrap_event_json).expect("outer event");
+        assert_eq!(outer.kind, Kind::GiftWrap);
+        assert!(!outer.content.contains("owner-private"));
+
+        let unwrapped = recipient
+            .unwrap_private_message(&wrapped[0].gift_wrap_event_json)
+            .expect("recipient unwrap");
+        assert_eq!(unwrapped.rumor_event_id, wrapped[0].rumor_event_id);
+        assert_eq!(
+            unwrapped.sender_public_key_hex,
+            sender_identity.public_key_hex().as_str()
+        );
+        assert_eq!(unwrapped.content, "owner-private");
+        assert!(
+            sender
+                .unwrap_private_message(&wrapped[0].gift_wrap_event_json)
+                .is_err()
+        );
     }
 
     #[test]

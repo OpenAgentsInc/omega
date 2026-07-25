@@ -428,11 +428,20 @@ impl OmegaEffectdSupervisor {
     }
 
     /// SARAH-NR-06: publish an owner message onto the Nostr conversation.
-    pub async fn sarah_send_message(&mut self, text: &str) -> Result<Value, SupervisorError> {
+    pub async fn sarah_send_message(
+        &mut self,
+        text: &str,
+        idempotency_ref: &str,
+    ) -> Result<Value, SupervisorError> {
+        let generation = self.generation();
         self.request(
             "sarah_send_message",
-            Some(json!({ "text": text })),
-            self.generation(),
+            Some(json!({
+                "text": text,
+                "idempotencyRef": idempotency_ref,
+                "expectedGeneration": generation,
+            })),
+            generation,
         )
         .await
     }
@@ -441,11 +450,64 @@ impl OmegaEffectdSupervisor {
     pub async fn sarah_interrupt_turn(
         &mut self,
         turn_ref: &str,
+        idempotency_ref: &str,
     ) -> Result<Value, SupervisorError> {
+        let generation = self.generation();
         self.request(
             "sarah_interrupt_turn",
-            Some(json!({ "turnRef": turn_ref })),
-            self.generation(),
+            Some(json!({
+                "turnRef": turn_ref,
+                "idempotencyRef": idempotency_ref,
+                "expectedGeneration": generation,
+            })),
+            generation,
+        )
+        .await
+    }
+
+    pub async fn sarah_device_grants(&mut self) -> Result<Value, SupervisorError> {
+        self.request("sarah_device_grants", None, self.generation())
+            .await
+    }
+
+    pub async fn sarah_renew_device_grant(
+        &mut self,
+        grant_ref: &str,
+        scopes: &[crate::Issue31PairingScope],
+        expires_at: u64,
+        idempotency_ref: &str,
+    ) -> Result<Value, SupervisorError> {
+        let generation = self.generation();
+        self.request(
+            "sarah_renew_device_grant",
+            Some(json!({
+                "grantRef": grant_ref,
+                "scopes": scopes,
+                "expiresAt": expires_at,
+                "idempotencyRef": idempotency_ref,
+                "expectedGeneration": generation,
+            })),
+            generation,
+        )
+        .await
+    }
+
+    pub async fn sarah_revoke_device_grant(
+        &mut self,
+        grant_ref: &str,
+        reason_ref: &str,
+        idempotency_ref: &str,
+    ) -> Result<Value, SupervisorError> {
+        let generation = self.generation();
+        self.request(
+            "sarah_revoke_device_grant",
+            Some(json!({
+                "grantRef": grant_ref,
+                "reasonRef": reason_ref,
+                "idempotencyRef": idempotency_ref,
+                "expectedGeneration": generation,
+            })),
+            generation,
         )
         .await
     }

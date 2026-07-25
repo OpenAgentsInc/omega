@@ -497,6 +497,7 @@ dependencies = [
  "agent_skills",
  "ai_onboarding",
  "anyhow",
+ "app_identity",
  "async-channel 2.5.0",
  "audio",
  "base64 0.22.1",
@@ -544,6 +545,7 @@ dependencies = [
  "node_runtime",
  "notifications",
  "omega_effectd",
+ "omega_identity",
  "ordered-float 2.10.1",
  "parking_lot",
  "paths",
@@ -1161,6 +1163,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "async-native-tls"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9343dc5acf07e79ff82d0c37899f079db3534d99f189a1837c8e549c99405bec"
+dependencies = [
+ "futures-util",
+ "native-tls",
+ "thiserror 1.0.69",
+ "url",
+]
+
+[[package]]
 name = "async-net"
 version = "2.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1312,6 +1326,8 @@ version = "0.31.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ee88b4c88ac8c9ea446ad43498955750a4bbe64c4392f21ccfe5d952865e318f"
 dependencies = [
+ "async-native-tls",
+ "async-std",
  "atomic-waker",
  "futures-core",
  "futures-io",
@@ -12539,6 +12555,8 @@ name = "omega_effectd"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-io",
+ "async-tungstenite",
  "base64 0.22.1",
  "credentials_provider",
  "futures 0.3.32",
@@ -12546,6 +12564,7 @@ dependencies = [
  "http_client",
  "libc",
  "nostr",
+ "omega_identity",
  "paths",
  "rand 0.9.4",
  "serde",
@@ -12575,6 +12594,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "smol",
  "tempfile",
  "thiserror 2.0.17",
  "windows-sys 0.61.2",
@@ -20118,6 +20138,7 @@ dependencies = [
  "http 1.3.1",
  "httparse",
  "log",
+ "native-tls",
  "rand 0.9.4",
  "rustls 0.23.40",
  "rustls-pki-types",
@@ -23088,6 +23109,7 @@ dependencies = [
  "theme",
  "ui",
  "util",
+ "uuid",
  "workspace",
  "zed_actions",
 ]

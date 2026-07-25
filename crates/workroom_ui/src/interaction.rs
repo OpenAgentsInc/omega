@@ -333,7 +333,7 @@ impl InteractionState {
             .iter()
             .position(|p| p.local_ref == local_ref)?;
         let pending = self.pending_sends.remove(idx);
-        if let Some(turn_ref) = turn_ref.clone() {
+        if let Some(turn_ref) = turn_ref {
             self.run.turn_ref = Some(turn_ref);
         }
         // Accepted message only — claim may still be outstanding.

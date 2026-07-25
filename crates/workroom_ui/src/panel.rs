@@ -27,11 +27,13 @@ use gpui::{
     Window, div, px,
 };
 use omega_effectd::{
-    BindingProjection, BindingState, OpenAgentsBinding, SharedOmegaEffectdSupervisor,
-    shared_supervisor, try_openagents_binding,
+    BindingProjection, BindingState, Issue31GrantProjection, OpenAgentsBinding,
+    SharedOmegaEffectdSupervisor, shared_supervisor, try_openagents_binding,
 };
 use serde_json::{Value, json};
 use ui::{Button, ButtonStyle, Label, LabelSize, prelude::*};
+use util::ResultExt as _;
+use uuid::Uuid;
 use workspace::{
     Workspace,
     dock::{DockPosition, Panel, PanelEvent},
@@ -52,6 +54,42 @@ use crate::projections::{
 };
 
 const PANEL_KEY: &str = "SarahWorkroomPanel";
+const MAX_NOSTR_RECORD_ROWS: usize = 64;
+
+#[derive(Clone, Debug)]
+struct NostrRecordRow {
+    event_id: String,
+    kind: u16,
+    record_kind: String,
+    author_fingerprint: String,
+    created_at: String,
+    source: String,
+}
+
+#[derive(Clone, Debug)]
+struct NostrRecordsProjection {
+    rows: Vec<NostrRecordRow>,
+    cursor: Option<String>,
+    next_cursor: Option<String>,
+    gap: GapState,
+    source: String,
+    detail: Option<String>,
+    truncated: bool,
+}
+
+impl NostrRecordsProjection {
+    fn unavailable(detail: impl Into<String>) -> Self {
+        Self {
+            rows: Vec::new(),
+            cursor: None,
+            next_cursor: None,
+            gap: GapState::Unavailable,
+            source: "confirmed_nostr".into(),
+            detail: Some(detail.into()),
+            truncated: false,
+        }
+    }
+}
 
 pub struct SarahWorkroomPanel {
     _workspace: WeakEntity<Workspace>,
@@ -74,6 +112,10 @@ pub struct SarahWorkroomPanel {
     interrupting: bool,
     full_auto_runs: Vec<WorkroomFullAutoRun>,
     full_auto_detail: Option<String>,
+    device_grants: Vec<Issue31GrantProjection>,
+    device_grants_detail: Option<String>,
+    nostr_records: NostrRecordsProjection,
+    grant_busy: Option<String>,
     _refresh: Option<Task<()>>,
 }
 
@@ -151,6 +193,12 @@ impl SarahWorkroomPanel {
             interrupting: false,
             full_auto_runs: Vec::new(),
             full_auto_detail: Some("Full Auto records have not been refreshed yet.".into()),
+            device_grants: Vec::new(),
+            device_grants_detail: Some("Device grants have not been refreshed yet.".into()),
+            nostr_records: NostrRecordsProjection::unavailable(
+                "Confirmed Nostr record references have not been refreshed yet.",
+            ),
+            grant_busy: None,
             _refresh: None,
         };
         panel.ensure_supervisor(cx);
@@ -227,7 +275,7 @@ impl SarahWorkroomPanel {
                 };
                 cx.notify();
             })
-            .ok();
+            .log_err();
         })
         .detach();
     }
@@ -248,7 +296,7 @@ impl SarahWorkroomPanel {
                 panel.status = "OpenAgents account unbound.".into();
                 cx.notify();
             })
-            .ok();
+            .log_err();
         })
         .detach();
     }
@@ -317,10 +365,29 @@ impl SarahWorkroomPanel {
                         .sarah_room_snapshot(Some(json!({
                             "transcriptLimit": 50,
                             "activityLimit": 50,
+                            "nostrLimit": 50,
                         })))
                         .await
                     {
                         Ok(value) => Ok(value),
+                        Err(error) => Err(error.to_string()),
+                    }
+                }
+                Err(error) => Err(error.clone()),
+            };
+
+            let device_grants = match &bootstrap {
+                Ok(_) => {
+                    let mut guard = supervisor.lock().await;
+                    match guard.sarah_device_grants().await {
+                        Ok(value) => value
+                            .get("grants")
+                            .cloned()
+                            .ok_or_else(|| "device grant response omitted grants".to_string())
+                            .and_then(|grants| {
+                                serde_json::from_value::<Vec<Issue31GrantProjection>>(grants)
+                                    .map_err(|error| error.to_string())
+                            }),
                         Err(error) => Err(error.to_string()),
                     }
                 }
@@ -354,6 +421,21 @@ impl SarahWorkroomPanel {
 
             this.update(cx, |panel, cx| {
                 panel.refreshing = false;
+                match device_grants {
+                    Ok(grants) => {
+                        panel.device_grants = grants;
+                        panel.device_grants_detail = if panel.device_grants.is_empty() {
+                            Some("No paired device grants.".into())
+                        } else {
+                            None
+                        };
+                    }
+                    Err(error) => {
+                        panel.device_grants.clear();
+                        panel.device_grants_detail =
+                            Some(format!("Device grants unavailable: {error}"));
+                    }
+                }
                 match full_auto {
                     Ok(values) => {
                         panel.full_auto_runs = values
@@ -389,12 +471,18 @@ impl SarahWorkroomPanel {
                         panel.projection.run_state.meta =
                             ProjectionMeta::unavailable(sources::RUN_STATE, &snap_err);
                         panel.projection.run_state.reason = Some(snap_err.clone());
+                        panel.nostr_records = NostrRecordsProjection::unavailable(format!(
+                            "Confirmed Nostr record references unavailable: {snap_err}"
+                        ));
                         panel.status = format!("Bootstrap ok; room snapshot unavailable: {snap_err}")
                             .into();
                     }
                     (Err(error), _) => {
                         // Methods may not exist until SARAH-NR-06. Stay honest.
                         panel.projection.mark_effectd_unavailable(error.clone());
+                        panel.nostr_records = NostrRecordsProjection::unavailable(format!(
+                            "Confirmed Nostr record source unavailable: {error}"
+                        ));
                         panel.status = format!(
                             "Sarah record methods unavailable ({error}). Sources stay labeled missing."
                         )
@@ -403,7 +491,7 @@ impl SarahWorkroomPanel {
                 }
                 cx.notify();
             })
-            .ok();
+            .log_err();
         })
         .detach();
     }
@@ -653,6 +741,8 @@ impl SarahWorkroomPanel {
         }
         self.projection.receipts = receipts;
 
+        self.nostr_records = parse_nostr_records_projection(value.get("nostrRecords"));
+
         // Run state — NR-06 uses `state`; legacy used `phase`.
         let run = value.get("runState").or_else(|| value.get("run_state"));
         let phase_str = string_field(run, &["phase", "state", "status"]);
@@ -663,8 +753,7 @@ impl SarahWorkroomPanel {
         let reason = string_field(run, &["reason", "finishReason", "finish_reason"]);
         let turn_ref = string_field(run, &["turnRef", "turn_ref"]);
 
-        self.interaction
-            .apply_snapshot_run(phase, turn_ref.clone(), reason.clone());
+        self.interaction.apply_snapshot_run(phase, turn_ref, reason);
 
         let mut run_state = self.interaction.run.clone();
         if run.is_none() {
@@ -792,13 +881,14 @@ impl SarahWorkroomPanel {
         };
 
         self.sending = true;
+        let idempotency_ref = format!("idempotency.workroom.send.{}", Uuid::new_v4());
         cx.notify();
 
         cx.spawn(async move |this, cx| {
             let result = {
                 let mut guard = supervisor.lock().await;
                 match guard.ensure_started().await {
-                    Ok(()) => guard.sarah_send_message(&text).await,
+                    Ok(()) => guard.sarah_send_message(&text, &idempotency_ref).await,
                     Err(error) => Err(omega_effectd::SupervisorError::Anyhow(error)),
                 }
             };
@@ -817,7 +907,7 @@ impl SarahWorkroomPanel {
                         if let Some(confirmed) = panel.interaction.confirm_send(
                             &local_ref,
                             message_ref.clone(),
-                            turn_ref.clone(),
+                            turn_ref,
                         ) {
                             panel.upsert_transcript_row(confirmed);
                         } else {
@@ -852,7 +942,101 @@ impl SarahWorkroomPanel {
                 }
                 cx.notify();
             })
-            .ok();
+            .log_err();
+        })
+        .detach();
+    }
+
+    fn renew_device_grant(&mut self, grant: Issue31GrantProjection, cx: &mut Context<Self>) {
+        if self.grant_busy.is_some() || grant.status != "active" {
+            return;
+        }
+        self.ensure_supervisor(cx);
+        let Some(supervisor) = self.supervisor.clone() else {
+            self.status = "omega-effectd unavailable; device grant was not renewed.".into();
+            cx.notify();
+            return;
+        };
+        let grant_ref = grant.grant_ref.clone();
+        let scopes = grant.scopes;
+        let expires_at = u64::try_from(chrono::Utc::now().timestamp().max(0))
+            .unwrap_or(0)
+            .saturating_add(24 * 60 * 60);
+        let idempotency_ref = format!("idempotency.workroom.grant_renew.{}", Uuid::new_v4());
+        self.grant_busy = Some(grant_ref.clone());
+        self.status = format!("Renewing device grant {grant_ref}…").into();
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let result = {
+                let mut guard = supervisor.lock().await;
+                match guard.ensure_started().await {
+                    Ok(()) => {
+                        guard
+                            .sarah_renew_device_grant(
+                                &grant_ref,
+                                &scopes,
+                                expires_at,
+                                &idempotency_ref,
+                            )
+                            .await
+                    }
+                    Err(error) => Err(omega_effectd::SupervisorError::Anyhow(error)),
+                }
+            };
+            this.update(cx, |panel, cx| {
+                panel.grant_busy = None;
+                panel.status = match result {
+                    Ok(_) => format!("Device grant {grant_ref} renewed.").into(),
+                    Err(error) => format!("Device grant renewal failed: {error}").into(),
+                };
+                panel.refresh_from_effectd(cx);
+                cx.notify();
+            })
+            .log_err();
+        })
+        .detach();
+    }
+
+    fn revoke_device_grant(&mut self, grant_ref: String, cx: &mut Context<Self>) {
+        if self.grant_busy.is_some() {
+            return;
+        }
+        self.ensure_supervisor(cx);
+        let Some(supervisor) = self.supervisor.clone() else {
+            self.status = "omega-effectd unavailable; device grant was not revoked.".into();
+            cx.notify();
+            return;
+        };
+        let idempotency_ref = format!("idempotency.workroom.grant_revoke.{}", Uuid::new_v4());
+        self.grant_busy = Some(grant_ref.clone());
+        self.status = format!("Revoking device grant {grant_ref}…").into();
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let result = {
+                let mut guard = supervisor.lock().await;
+                match guard.ensure_started().await {
+                    Ok(()) => {
+                        guard
+                            .sarah_revoke_device_grant(
+                                &grant_ref,
+                                "reason.omega.owner_revoked",
+                                &idempotency_ref,
+                            )
+                            .await
+                    }
+                    Err(error) => Err(omega_effectd::SupervisorError::Anyhow(error)),
+                }
+            };
+            this.update(cx, |panel, cx| {
+                panel.grant_busy = None;
+                panel.status = match result {
+                    Ok(_) => format!("Device grant {grant_ref} revoked.").into(),
+                    Err(error) => format!("Device grant revocation failed: {error}").into(),
+                };
+                panel.refresh_from_effectd(cx);
+                cx.notify();
+            })
+            .log_err();
         })
         .detach();
     }
@@ -880,13 +1064,18 @@ impl SarahWorkroomPanel {
             .or_else(|| self.projection.run_state.turn_ref.clone())
             .unwrap_or_else(|| "active".into());
         self.interrupting = true;
+        let idempotency_ref = format!("idempotency.workroom.interrupt.{}", Uuid::new_v4());
         cx.notify();
 
         cx.spawn(async move |this, cx| {
             let result = {
                 let mut guard = supervisor.lock().await;
                 match guard.ensure_started().await {
-                    Ok(()) => guard.sarah_interrupt_turn(&turn_ref).await,
+                    Ok(()) => {
+                        guard
+                            .sarah_interrupt_turn(&turn_ref, &idempotency_ref)
+                            .await
+                    }
                     Err(error) => Err(omega_effectd::SupervisorError::Anyhow(error)),
                 }
             };
@@ -939,7 +1128,7 @@ impl SarahWorkroomPanel {
                 }
                 cx.notify();
             })
-            .ok();
+            .log_err();
         })
         .detach();
     }
@@ -1113,6 +1302,12 @@ impl Render for SarahWorkroomPanel {
         let terminal = self.interaction.terminal.clone();
         let honest = self.interaction.uses_honest_liveness();
         let header = active.header();
+        let device_grants = device_grants_body(
+            &self.device_grants,
+            self.device_grants_detail.as_deref(),
+            self.grant_busy.as_deref(),
+            cx,
+        );
 
         v_flex()
             .id("sarah-workroom-panel")
@@ -1259,6 +1454,8 @@ impl Render for SarahWorkroomPanel {
                         &self.full_auto_runs,
                         self.full_auto_detail.as_deref(),
                     ))
+                    .child(Label::new("Paired devices").color(Color::Muted))
+                    .child(device_grants)
             })
             // --- Community room (SARAH-CW-08) — same pane, separate history ---
             .when(showing_community, |this| {
@@ -1290,6 +1487,18 @@ impl Render for SarahWorkroomPanel {
                             .child(transcript_body(&community.transcript)),
                     )
             })
+            .child(Label::new("Confirmed Nostr records").color(Color::Muted))
+            .child(
+                v_flex()
+                    .id("workroom-confirmed-nostr-records")
+                    .border_1()
+                    .border_color(cx.theme().colors().border)
+                    .rounded_md()
+                    .p_2()
+                    .max_h(px(140.))
+                    .overflow_y_scroll()
+                    .child(nostr_records_body(&self.nostr_records)),
+            )
             // One composer for the pane (not a second composer).
             .child(
                 Label::new(if showing_community {
@@ -1354,6 +1563,69 @@ impl Render for SarahWorkroomPanel {
                     ),
             )
     }
+}
+
+fn device_grants_body(
+    grants: &[Issue31GrantProjection],
+    detail: Option<&str>,
+    busy_grant_ref: Option<&str>,
+    cx: &mut Context<SarahWorkroomPanel>,
+) -> impl IntoElement + use<> {
+    v_flex()
+        .id("sarah-workroom-device-grants")
+        .gap_1()
+        .border_1()
+        .rounded_md()
+        .p_2()
+        .when_some(detail.map(str::to_string), |this, detail| {
+            this.child(Label::new(detail).color(Color::Muted))
+        })
+        .children(grants.iter().cloned().enumerate().map(|(index, grant)| {
+            let renew_grant = grant.clone();
+            let revoke_grant_ref = grant.grant_ref.clone();
+            let busy = busy_grant_ref.is_some();
+            let active = grant.status == "active";
+            let revoked = grant.status == "revoked";
+            v_flex()
+                .gap_0p5()
+                .child(Label::new(format!(
+                    "Device {} · {} · generation {}",
+                    grant.device_fingerprint, grant.status, grant.generation
+                )))
+                .child(
+                    Label::new(format!(
+                        "grant={} · expires={} · scopes={:?}",
+                        grant.grant_ref,
+                        grant
+                            .expires_at
+                            .map(|expires_at| expires_at.to_string())
+                            .unwrap_or_else(|| "none".into()),
+                        grant.scopes
+                    ))
+                    .color(Color::Muted)
+                    .size(LabelSize::Small),
+                )
+                .child(
+                    h_flex()
+                        .gap_1()
+                        .child(
+                            Button::new(("renew-device-grant", index), "Renew 24h")
+                                .style(ButtonStyle::Subtle)
+                                .disabled(busy || !active)
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.renew_device_grant(renew_grant.clone(), cx);
+                                })),
+                        )
+                        .child(
+                            Button::new(("revoke-device-grant", index), "Revoke")
+                                .style(ButtonStyle::Subtle)
+                                .disabled(busy || revoked)
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.revoke_device_grant(revoke_grant_ref.clone(), cx);
+                                })),
+                        ),
+                )
+        }))
 }
 
 fn full_auto_body(runs: &[WorkroomFullAutoRun], detail: Option<&str>) -> impl IntoElement {
@@ -1682,6 +1954,115 @@ fn activity_body(activity: &ActivityProjection) -> impl IntoElement {
     col
 }
 
+fn parse_nostr_records_projection(record_page: Option<&Value>) -> NostrRecordsProjection {
+    let Some(record_page) = record_page else {
+        return NostrRecordsProjection::unavailable(
+            "Snapshot omitted confirmed Nostr record references.",
+        );
+    };
+    let source =
+        string_field(Some(record_page), &["source"]).unwrap_or_else(|| "confirmed_nostr".into());
+    let mut rows = Vec::new();
+    let mut truncated = false;
+    if let Some(items) = record_page.get("entries").and_then(Value::as_array) {
+        for item in items {
+            if rows.len() == MAX_NOSTR_RECORD_ROWS {
+                truncated = true;
+                break;
+            }
+            let Some(event_id) = string_field(Some(item), &["eventId", "event_id"]) else {
+                continue;
+            };
+            let Some(kind) = item
+                .get("kind")
+                .and_then(Value::as_u64)
+                .and_then(|kind| u16::try_from(kind).ok())
+            else {
+                continue;
+            };
+            rows.push(NostrRecordRow {
+                event_id,
+                kind,
+                record_kind: string_field(Some(item), &["recordKind", "record_kind"])
+                    .unwrap_or_else(|| "record".into()),
+                author_fingerprint: string_field(
+                    Some(item),
+                    &["authorFingerprint", "author_fingerprint"],
+                )
+                .unwrap_or_else(|| "UNKNOWN".into()),
+                created_at: string_field(Some(item), &["createdAt", "created_at"])
+                    .unwrap_or_else(|| "unknown".into()),
+                source: string_field(Some(item), &["source"]).unwrap_or_else(|| source.clone()),
+            });
+        }
+    }
+    let gap = match string_field(Some(record_page), &["gapState", "gap_state"]).as_deref() {
+        Some("none") => GapState::None,
+        Some(_) => GapState::Gap,
+        None => GapState::Unavailable,
+    };
+    NostrRecordsProjection {
+        rows,
+        cursor: string_field(Some(record_page), &["cursor"]),
+        next_cursor: string_field(Some(record_page), &["nextCursor", "next_cursor"]),
+        gap,
+        source,
+        detail: (gap == GapState::Unavailable)
+            .then(|| "Confirmed Nostr record page omitted gap state.".into()),
+        truncated,
+    }
+}
+
+fn nostr_records_body(records: &NostrRecordsProjection) -> impl IntoElement {
+    let mut column = v_flex().gap_1().child(
+        Label::new(format!(
+            "source={} · gap={} · cursor={} · next={}",
+            records.source,
+            records.gap.label(),
+            records.cursor.as_deref().unwrap_or("missing"),
+            records.next_cursor.as_deref().unwrap_or("end")
+        ))
+        .color(if records.gap == GapState::None {
+            Color::Muted
+        } else {
+            Color::Warning
+        })
+        .size(LabelSize::Small),
+    );
+    if let Some(detail) = &records.detail {
+        column = column.child(Label::new(detail.clone()).color(Color::Muted));
+    }
+    if records.rows.is_empty() {
+        return column.child(
+            Label::new(if records.gap == GapState::Unavailable {
+                "Confirmed Nostr record source unavailable (not an empty success)."
+            } else {
+                "No confirmed AE, RS, ER, NIP-29, or LBR references in this page."
+            })
+            .color(Color::Muted),
+        );
+    }
+    for row in &records.rows {
+        column = column.child(Label::new(format!(
+            "kind={} · {} · {} · author={} · {} · source={}",
+            row.kind,
+            row.record_kind,
+            row.event_id,
+            row.author_fingerprint,
+            row.created_at,
+            row.source
+        )));
+    }
+    if records.truncated {
+        column = column.child(
+            Label::new("(confirmed record references truncated at capacity bound)")
+                .color(Color::Muted)
+                .size(LabelSize::Small),
+        );
+    }
+    column
+}
+
 fn receipts_body(receipts: &ReceiptsProjection) -> impl IntoElement {
     v_flex()
         .gap_0p5()
@@ -1910,6 +2291,36 @@ mod panel_logic_tests {
         assert_eq!(parse_run_phase("turn.started"), RunPhase::Running);
         assert_eq!(parse_run_phase("turn.finished"), RunPhase::Finished);
         assert_eq!(parse_run_phase("interrupted"), RunPhase::Interrupted);
+    }
+
+    #[test]
+    fn confirmed_nostr_record_projection_keeps_only_bounded_public_refs() {
+        let value = json!({
+            "entries": [{
+                "eventId": "a".repeat(64),
+                "kind": 30174,
+                "recordKind": "memory",
+                "authorFingerprint": "0123456789ABCDEF",
+                "createdAt": "2026-07-24T00:00:00Z",
+                "source": "confirmed_nostr"
+            }],
+            "cursor": format!("cursor.1.{}", "a".repeat(64)),
+            "nextCursor": null,
+            "gapState": "possible",
+            "source": "confirmed_nostr"
+        });
+        let projection = parse_nostr_records_projection(Some(&value));
+        assert_eq!(projection.rows.len(), 1);
+        assert_eq!(projection.rows[0].kind, 30_174);
+        assert_eq!(projection.rows[0].record_kind, "memory");
+        assert_eq!(projection.rows[0].source, "confirmed_nostr");
+        assert_eq!(projection.gap, GapState::Gap);
+        assert_eq!(projection.source, "confirmed_nostr");
+        assert!(projection.next_cursor.is_none());
+
+        let missing = parse_nostr_records_projection(None);
+        assert_eq!(missing.gap, GapState::Unavailable);
+        assert!(missing.rows.is_empty());
     }
 
     #[test]

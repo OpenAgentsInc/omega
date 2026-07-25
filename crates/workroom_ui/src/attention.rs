@@ -405,7 +405,7 @@ mod tests {
         assert_eq!(row.role, answer.role);
         assert_eq!(row.ack, answer.ack);
 
-        let mut t = page(vec![confirmed_owner("m1", "status?"), row.clone()]);
+        let mut t = page(vec![confirmed_owner("m1", "status?"), row]);
         t.push_bounded(answer);
         assert_eq!(t.rows.len(), 3);
         assert!(t.rows.iter().all(|r| r.role == "owner" || r.role == "sarah"));

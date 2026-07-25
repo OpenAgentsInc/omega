@@ -14,12 +14,15 @@ doctest = false
 
 [dependencies]
 anyhow.workspace = true
+async-io.workspace = true
+async-tungstenite = { workspace = true, features = ["async-native-tls", "async-std-runtime"] }
 base64.workspace = true
 credentials_provider.workspace = true
 futures.workspace = true
 gpui.workspace = true
 http_client.workspace = true
-nostr.workspace = true
+nostr = { workspace = true, features = ["nip59"] }
+omega_identity.workspace = true
 paths.workspace = true
 rand.workspace = true
 serde.workspace = true

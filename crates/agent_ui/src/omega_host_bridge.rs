@@ -2,14 +2,18 @@ use std::cell::RefCell;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use acp_thread::{AgentThreadEntry, ThreadStatus};
 use chrono::Utc;
-use gpui::{AnyWindowHandle, App, AsyncApp, Entity, WeakEntity};
+use gpui::{AnyWindowHandle, App, AppContext, AsyncApp, Entity, WeakEntity};
 use omega_effectd::{
-    HostMethod, HostRequestFrame, HostResponseError, HostResponseErrorCode,
-    OmegaEffectdHostHandler, OpenAgentsSession, VerifiedOpenAgentsSession,
+    ConversationIdentity, HostMethod, HostRequestFrame, HostResponseError, HostResponseErrorCode,
+    OmegaEffectdHostHandler, OpenAgentsSession, SARAH_METHOD_BOOTSTRAP, SARAH_METHOD_DEVICE_GRANTS,
+    SARAH_METHOD_INTERRUPT_TURN, SARAH_METHOD_RENEW_DEVICE_GRANT, SARAH_METHOD_REVOKE_DEVICE_GRANT,
+    SARAH_METHOD_ROOM_SNAPSHOT, SARAH_METHOD_SEND_MESSAGE, SARAH_METHOD_SESSION_STATUS,
+    SarahConversationClient, SarahConversationConfig, VerifiedOpenAgentsSession,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -82,6 +86,7 @@ struct HostBridgeState {
     threads: Vec<HostThread>,
     correlation_path: PathBuf,
     load_error: Option<String>,
+    sarah_conversation: Option<Arc<Mutex<SarahConversationClient>>>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -183,6 +188,7 @@ pub fn omega_effectd_host_handler(cx: &App) -> OmegaEffectdHostHandler {
         threads,
         correlation_path,
         load_error,
+        sarah_conversation: None,
     }));
     Rc::new(move |request| {
         let async_cx = async_cx.clone();
@@ -192,13 +198,151 @@ pub fn omega_effectd_host_handler(cx: &App) -> OmegaEffectdHostHandler {
     })
 }
 
+fn production_sarah_conversation() -> Result<SarahConversationClient, HostResponseError> {
+    let relay_urls = std::env::var("OPENAGENTS_OMEGA_NOSTR_RELAYS")
+        .map_err(|_| unavailable("OPENAGENTS_OMEGA_NOSTR_RELAYS is not configured."))?
+        .split(',')
+        .map(str::trim)
+        .filter(|relay_url| !relay_url.is_empty())
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    let sarah_public_key_hex = std::env::var("OPENAGENTS_OMEGA_SARAH_PUBLIC_KEY_HEX")
+        .map_err(|_| unavailable("OPENAGENTS_OMEGA_SARAH_PUBLIC_KEY_HEX is not configured."))?;
+    let admitted_device_public_key_hexes =
+        std::env::var("OPENAGENTS_OMEGA_NOSTR_DEVICE_PUBLIC_KEYS")
+            .map_err(|_| {
+                unavailable("OPENAGENTS_OMEGA_NOSTR_DEVICE_PUBLIC_KEYS is not configured.")
+            })?
+            .split(',')
+            .map(str::trim)
+            .filter(|public_key| !public_key.is_empty())
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+    let approved_device_scopes = std::env::var("OPENAGENTS_OMEGA_NOSTR_DEVICE_SCOPES")
+        .map_err(|_| unavailable("OPENAGENTS_OMEGA_NOSTR_DEVICE_SCOPES is not configured."))?
+        .split(',')
+        .map(str::trim)
+        .filter(|scope| !scope.is_empty())
+        .map(omega_effectd::Issue31PairingScope::parse)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| {
+            unavailable(format!("Issue 31 device scope policy is invalid: {error}"))
+        })?;
+    let community_group_ids = std::env::var("OPENAGENTS_OMEGA_NOSTR_COMMUNITY_GROUP_IDS")
+        .unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter(|group_id| !group_id.is_empty())
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    let community_public_key_hexes = std::env::var("OPENAGENTS_OMEGA_NOSTR_COMMUNITY_PUBLIC_KEYS")
+        .unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter(|public_key| !public_key.is_empty())
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    let identity_service = Arc::new(omega_identity::IdentityService::system(
+        *app_identity::CHANNEL,
+    ));
+    let custody = identity_service
+        .inspect()
+        .map_err(|error| unavailable(format!("Omega identity custody is unavailable: {error}")))?;
+    let owner_public_key_hex = custody
+        .identity
+        .map(|identity| identity.public_key_hex().as_str().to_string())
+        .ok_or_else(|| unavailable("Omega identity custody is not ready."))?;
+    let conversation_digest = std::env::var("OPENAGENTS_OMEGA_SARAH_CONVERSATION_DIGEST")
+        .unwrap_or_else(|_| owner_public_key_hex.chars().take(24).collect());
+    let config = SarahConversationConfig {
+        generation: 1,
+        conversation_digest,
+        identity: ConversationIdentity {
+            owner_public_key_hex,
+            sarah_public_key_hex,
+            account_label: None,
+            binding_state: omega_effectd::BindingState::Unbound,
+        },
+        relay_url: relay_urls.first().cloned(),
+        admitted_device_public_key_hexes,
+        approved_device_scopes,
+        community_group_ids,
+        community_public_key_hexes,
+    };
+    SarahConversationClient::new_production(config, relay_urls, identity_service)
+        .map_err(|error| unavailable(format!("Sarah Nostr transport is unavailable: {error}")))
+}
+
+async fn sarah_request(
+    request: HostRequestFrame,
+    state: &Rc<RefCell<HostBridgeState>>,
+    cx: &mut AsyncApp,
+) -> Result<Value, HostResponseError> {
+    let method = match request.method {
+        HostMethod::SarahSessionStatus => SARAH_METHOD_SESSION_STATUS,
+        HostMethod::SarahBootstrap => SARAH_METHOD_BOOTSTRAP,
+        HostMethod::SarahRoomSnapshot => SARAH_METHOD_ROOM_SNAPSHOT,
+        HostMethod::SarahSendMessage => SARAH_METHOD_SEND_MESSAGE,
+        HostMethod::SarahInterruptTurn => SARAH_METHOD_INTERRUPT_TURN,
+        HostMethod::SarahDeviceGrants => SARAH_METHOD_DEVICE_GRANTS,
+        HostMethod::SarahRenewDeviceGrant => SARAH_METHOD_RENEW_DEVICE_GRANT,
+        HostMethod::SarahRevokeDeviceGrant => SARAH_METHOD_REVOKE_DEVICE_GRANT,
+        _ => return Err(unsupported("Unknown Sarah host method.")),
+    };
+    let conversation = state.borrow().sarah_conversation.clone();
+    let conversation = match conversation {
+        Some(conversation) => conversation,
+        None => match production_sarah_conversation() {
+            Ok(conversation) => {
+                let conversation = Arc::new(Mutex::new(conversation));
+                let mut state = state.borrow_mut();
+                state.sarah_conversation = Some(conversation.clone());
+                conversation
+            }
+            Err(error) => return Err(error),
+        },
+    };
+    let params = request.params;
+    let generation = request.generation;
+    cx.background_spawn(async move {
+        let mut conversation = conversation
+            .lock()
+            .map_err(|_| unavailable("Sarah Nostr transport state is unavailable."))?;
+        conversation
+            .synchronize_process_generation(generation)
+            .map_err(sarah_host_error)?;
+        conversation
+            .handle_request(method, generation, Some(&params))
+            .map_err(sarah_host_error)
+    })
+    .await
+}
+
+fn sarah_host_error(error: omega_effectd::SarahConversationError) -> HostResponseError {
+    let code = match error.protocol_code() {
+        omega_effectd::ProtocolErrorCode::StaleGeneration => HostResponseErrorCode::StaleGeneration,
+        omega_effectd::ProtocolErrorCode::InvalidRequest => HostResponseErrorCode::InvalidRequest,
+        omega_effectd::ProtocolErrorCode::UnknownMethod => HostResponseErrorCode::Unsupported,
+        omega_effectd::ProtocolErrorCode::HostUnavailable => HostResponseErrorCode::Unavailable,
+        omega_effectd::ProtocolErrorCode::HostTimeout => HostResponseErrorCode::Unavailable,
+        omega_effectd::ProtocolErrorCode::NotRunning
+        | omega_effectd::ProtocolErrorCode::RunNotFound => HostResponseErrorCode::Unavailable,
+        omega_effectd::ProtocolErrorCode::FrameTooLarge => HostResponseErrorCode::InvalidRequest,
+        omega_effectd::ProtocolErrorCode::Internal => HostResponseErrorCode::Internal,
+    };
+    HostResponseError {
+        code,
+        message: error.to_string(),
+    }
+}
+
 async fn handle_request(
     request: HostRequestFrame,
     state: Rc<RefCell<HostBridgeState>>,
     openagents_session: OpenAgentsSession,
     mut cx: AsyncApp,
 ) -> Result<Value, HostResponseError> {
-    match request.method {
+    match request.method.clone() {
         HostMethod::ResolveWorkspace => resolve_workspace(request.params, &state, &mut cx),
         HostMethod::ResolveSyncSession => {
             resolve_sync_session(request.params, &openagents_session, &mut cx).await
@@ -211,6 +355,15 @@ async fn handle_request(
         }
         HostMethod::InterruptTurn => interrupt_turn(request.params, &state, &mut cx).await,
         HostMethod::AppendSystemNote => append_system_note(request.params),
+        HostMethod::SarahSessionStatus
+        | HostMethod::SarahBootstrap
+        | HostMethod::SarahRoomSnapshot
+        | HostMethod::SarahSendMessage
+        | HostMethod::SarahInterruptTurn
+        | HostMethod::SarahDeviceGrants => sarah_request(request, &state, &mut cx).await,
+        HostMethod::SarahRenewDeviceGrant | HostMethod::SarahRevokeDeviceGrant => {
+            sarah_request(request, &state, &mut cx).await
+        }
         HostMethod::Unsupported => Err(unsupported("Unknown Omega host method.")),
     }
 }
@@ -1336,6 +1489,7 @@ mod tests {
             }],
             correlation_path: path.clone(),
             load_error: None,
+            sarah_conversation: None,
         };
 
         persist_correlation_journal(&state).expect("persist correlation journal");
@@ -1384,6 +1538,7 @@ mod tests {
             }],
             correlation_path: path.clone(),
             load_error: None,
+            sarah_conversation: None,
         }));
 
         record_turn_completion(&state, "turn.full-auto.1", 7, HostTurnOutcome::Completed)
@@ -1436,6 +1591,7 @@ mod tests {
             }],
             correlation_path: path.clone(),
             load_error: None,
+            sarah_conversation: None,
         }));
 
         record_turn_completion(

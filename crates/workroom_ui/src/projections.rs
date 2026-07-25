@@ -409,13 +409,8 @@ impl RunStateProjection {
     }
 
     pub fn interrupt_not_falsely_applied(&self) -> bool {
-        !(self.interrupt_intent == InterruptIntentState::Pending
-            && self.phase == RunPhase::Interrupted
-            && self.meta.gap == GapState::None
-            && self.meta.freshness == Freshness::Fresh
-            && false) // structural: pending intent alone never sets Applied
-            && (self.interrupt_intent != InterruptIntentState::Applied
-                || self.phase == RunPhase::Interrupted)
+        self.interrupt_intent != InterruptIntentState::Applied
+            || self.phase == RunPhase::Interrupted
     }
 }
 

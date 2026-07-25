@@ -3,6 +3,8 @@
 //! Authority: OpenAgentsInc/omega#21 (`OMEGA-FA-02`).
 //! Durable run truth stays in omega-effectd on disk. GPUI is not run authority.
 
+mod issue31_nostr;
+mod nostr_websocket_relay;
 mod openagents_binding;
 mod openagents_session;
 mod protocol;
@@ -22,6 +24,8 @@ pub use openagents_binding::{
     init_openagents_binding, openagents_binding, try_openagents_binding,
 };
 
+pub use issue31_nostr::*;
+pub use nostr_websocket_relay::WebSocketRelayAdapter;
 pub use openagents_session::{
     OpenAgentsSession, OpenAgentsSessionPhase, VerifiedOpenAgentsSession, init_openagents_session,
     openagents_session,
@@ -36,7 +40,8 @@ pub use sarah_conversation::{
     BootstrapResult, ConversationIdentity, GapState, InterruptTurnResult, MockRelayAdapter,
     RelayTransport, RoomSnapshotResult, RoomStateEvent, SARAH_EVENT_ROOM_EVENT,
     SARAH_EVENT_ROOM_STATE, SARAH_FRAMED_METHODS, SARAH_METHOD_BOOTSTRAP,
-    SARAH_METHOD_INTERRUPT_TURN, SARAH_METHOD_ROOM_SNAPSHOT, SARAH_METHOD_SEND_MESSAGE,
+    SARAH_METHOD_DEVICE_GRANTS, SARAH_METHOD_INTERRUPT_TURN, SARAH_METHOD_RENEW_DEVICE_GRANT,
+    SARAH_METHOD_REVOKE_DEVICE_GRANT, SARAH_METHOD_ROOM_SNAPSHOT, SARAH_METHOD_SEND_MESSAGE,
     SARAH_METHOD_SESSION_STATUS, SarahConversationClient, SarahConversationConfig,
     SarahConversationError, SendMessageResult, SessionStatusResult, SigningIdentity,
     asserts_no_khala_sync_client,
@@ -608,7 +613,7 @@ mod tests {
             assert!(conversation_ref.starts_with("sarah."));
 
             let sent = supervisor
-                .sarah_send_message("hello from fixture")
+                .sarah_send_message("hello from fixture", "idempotency.fixture.send.1")
                 .await
                 .expect("send");
             assert_eq!(sent.get("accepted").and_then(|v| v.as_bool()), Some(true));
@@ -638,7 +643,7 @@ mod tests {
             );
 
             let interrupt = supervisor
-                .sarah_interrupt_turn(&turn_ref)
+                .sarah_interrupt_turn(&turn_ref, "idempotency.fixture.interrupt.1")
                 .await
                 .expect("interrupt");
             assert_eq!(

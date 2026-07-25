@@ -652,9 +652,9 @@ impl WorkroomSurface {
         &mut self,
         sample_owner_row: TranscriptRow,
     ) -> bool {
-        self.owner_private.transcript.push_bounded(sample_owner_row.clone());
-        let before_len = self.owner_private.transcript.rows.len();
         let before_ref = sample_owner_row.message_ref.clone();
+        self.owner_private.transcript.push_bounded(sample_owner_row);
+        let before_len = self.owner_private.transcript.rows.len();
         self.select_room(RoomKind::Community);
         let after_len = self.owner_private.transcript.rows.len();
         let still_present = self

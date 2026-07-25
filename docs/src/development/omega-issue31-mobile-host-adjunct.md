@@ -3,6 +3,7 @@
 - Date: 2026-07-24
 - Packet: `OMEGA-MOB-31-00`
 - Issue: [#44](https://github.com/OpenAgentsInc/omega/issues/44)
+- Connected record: [#45](https://github.com/OpenAgentsInc/omega/issues/45)
 - Parent: [#31](https://github.com/OpenAgentsInc/omega/issues/31)
 
 ## Result {#result}
@@ -34,6 +35,164 @@ memory, read state, reminders, attention targets, community membership,
 community work, and experience are not copied into this schema. The mobile
 read model joins their signed records with these four projections by stable
 reference.
+
+## Nostr host transport {#nostr-host-transport}
+
+Omega's Issue 31 host transport is Nostr-primary. On Sarah bootstrap and room
+refresh, the production host publishes a signed parameterized-replaceable
+kind `31990` discovery event, queries every configured relay for NIP-59 gift
+wraps addressed to the owner key, and locally validates every signature, kind,
+author, tag, private sender/recipient binding, schema, and grant before use.
+Relay filters are only an optimization. A relay `OK` frame confirms transport;
+only a signed `command_result` is terminal command truth.
+
+Pairing and command records use a kind `14` rumor, kind `13` NIP-44 seal, and
+kind `1059` NIP-59 gift wrap. The host enforces the complete request,
+challenge, response, and scoped-grant chain. Renewal preserves the grant
+reference and advances exactly one generation. Revocation is terminal for that
+grant reference, including after process restart and replay of old relay
+events. Host-admin renewal and revocation are exposed only through the bounded
+`sarah_renew_device_grant` and `sarah_revoke_device_grant` methods; there is no
+generic remote-authority method.
+
+The host-signed discovery content binds both `hostPublicKeyHex` and the distinct
+`sarahPublicKeyHex`. Every host-authored scoped grant, renewal, and revocation
+repeats that Sarah key, and the grant fold rejects any lifecycle event that
+changes it. Mobile admits Sarah-authored private records only while the active
+grant binding matches the current unexpired host-signed discovery. The host key
+remains pairing and structured-command authority; the Sarah binding does not
+turn Sarah into host/controller authority.
+
+Host subscriptions and local admission include NIP-29 group chat kind `9` and
+the NIP-LBR request/result/feedback lifecycle kinds `5934`, `6934`, and `7000`.
+They are never admitted merely because a relay returned them: signatures and
+bounded event shape must verify. NIP-29 records must carry exactly one locally
+configured `h` group tag; LBR records must be authored by a locally configured
+requester or provider key. Owner, Sarah, device, and relay status do not imply
+community authority. Device keys are admitted only as the signer of
+schema-validated private pairing and command intents; pre-admission never lets
+a device author generic Sarah or community records. Sarah-owned conversation
+records retain their conversation binding. NIP-AE, NIP-RS, and NIP-ER instead
+use their native author, address, owner, and time-tag contracts, without an
+invented `conversation` tag.
+
+Production configuration is read from:
+
+- `OPENAGENTS_OMEGA_NOSTR_RELAYS`: one to eight comma-separated, credential-free
+  `ws://` or `wss://` endpoints. Paths are allowed; credentials, URL query
+  strings, and fragments are refused, matching the mobile discovery policy.
+- `OPENAGENTS_OMEGA_SARAH_PUBLIC_KEY_HEX`: Sarah's lowercase 64-hex Nostr public
+  key.
+- `OPENAGENTS_OMEGA_NOSTR_DEVICE_PUBLIC_KEYS`: required comma-separated
+  allowlist of one to 32 lowercase 64-hex mobile-device Nostr public keys.
+  Missing, empty, duplicated, uppercase, or malformed values fail closed before
+  Omega exposes the production Sarah transport. Omega challenges pairing
+  requests only from this local allowlist, including when the request asks for
+  every scope. Bootstrap exposes only uppercase 16-character SHA-256 device
+  fingerprints for owner verification; it never exposes or logs the raw
+  configuration value.
+- `OPENAGENTS_OMEGA_NOSTR_DEVICE_SCOPES`: required comma-separated owner-approved
+  scope subset applied to the admitted device keys. Accepted values are
+  `observe_issue31`, `send_message`, `interrupt_turn`, `control_full_auto`,
+  `request_provider_handoff`, and `act_in_community`. A grant contains only the
+  intersection of this policy and the device request; an empty intersection
+  receives no challenge. Adding a device key therefore never implicitly grants
+  every privileged scope.
+- `OPENAGENTS_OMEGA_NOSTR_COMMUNITY_GROUP_IDS`: optional comma-separated local
+  admission policy for NIP-29 `h` group identifiers. With no configured group,
+  no NIP-29 group record is subscribed to or admitted.
+- `OPENAGENTS_OMEGA_NOSTR_COMMUNITY_PUBLIC_KEYS`: optional comma-separated local
+  admission policy for lowercase 64-hex NIP-LBR requester/provider public keys.
+  With no configured key, no LBR lifecycle record is subscribed to or admitted.
+- `OPENAGENTS_OMEGA_SARAH_CONVERSATION_DIGEST`: optional stable conversation
+  digest; by default Omega derives 24 characters from the owner public key.
+
+The Omega identity must already be ready in channel-specific secure custody.
+Missing environment or custody is re-evaluated on the next Sarah host request,
+so correcting configuration does not require restarting Omega. Discovery is
+refreshed before its 24-hour record approaches expiry. A same-generation
+replacement is a renewal only when every binding field is identical, its
+`issuedAt` is strictly newer, and its `expiresAt` advances. A binding change at
+the same generation remains a conflict. Omega replaces a partially
+acknowledged pending announcement atomically and never advances stored expiry
+metadata without storing the exact newly signed event.
+
+The device allowlist is runtime-local admission policy, not Nostr identity or
+durable grant history. Omega rebinds it after loading host state. Changing it
+controls which new pairing requests receive a challenge without rewriting or
+silently invalidating existing grants; owners must use explicit grant
+revocation when an already-paired device loses authority.
+
+The Sarah Workroom exposes an owner-facing **Paired devices** section backed by
+the bounded `sarah_device_grants` projection. It shows grant reference, hashed
+device fingerprint, generation, status, expiry, and scopes without exposing a
+raw device key. Active rows provide explicit 24-hour renewal and revocation
+buttons wired to the generation-fenced host methods. Relay records cannot
+invoke these owner-admin methods.
+
+The exact signed outbox, grant history, terminal command results, normal Sarah
+send/interrupt results, run/turn state, message sequence, control-scan cursor,
+and idempotency fingerprints are atomically stored under the channel data root at
+`openagents/issue31-nostr-host-state.json`. The directory and file are owner
+only (`0700` and `0600` on Unix). The bounded document contains public records,
+encrypted gift-wrap bytes, and public-safe references; it never contains an
+`nsec`, raw private key, bearer token, or provider credential. A malformed,
+oversized, symlinked, identity-mismatched, or relay-configuration-mismatched
+state file fails closed. Recovery is to preserve the file while restoring the
+matching identity/configuration; deliberate re-pairing uses a new grant
+reference after owner revocation.
+
+Outbox state, the controller transition, and normal Sarah send/interrupt
+idempotency result are committed before the first network publish. One healthy
+relay acknowledgement permits host processing to continue, while the exact
+signed event and the per-relay acknowledgement set remain durable until every
+configured relay has acknowledged it. Lagging relays are retried without
+regenerating or resigning the event. Room state reports the actual healthy
+relay set and a partial relay is degraded/gapped, not falsely connected.
+
+The effectd process generation is a restart fence and may advance while Omega
+is running. It is synchronized only from the already-fenced host request and
+cannot move backwards. It is deliberately separate from the stable Nostr host
+discovery generation and from each scoped grant generation, so an effectd
+restart neither invalidates persisted pairing state nor changes discovery
+identity. Transcript and activity pagination likewise keep independent
+cursors and limits; neither stream advances the other stream's resume point.
+The independent Issue 31 control scan also persists its cursor. Each refresh
+drains at most eight 64-record pages; if more remain, Omega advances the cursor
+only through records already processed and reports a possible gap instead of
+silently abandoning the tail. WebSocket reads use one absolute deadline and a
+64-control-frame budget, so ping/pong traffic cannot extend an operation
+forever.
+
+One expired, unknown-lineage, or otherwise invalid signed pairing/command
+record cannot poison the subscription. Omega writes a bounded quarantine entry
+from event ID to a typed public-safe reason reference, commits it before moving
+on, continues with later records, and advances the control cursor only through
+the scanned page. Transport, signature, custody, and durable-write failures
+still fail the whole synchronization.
+
+Remote action intents do not currently dispatch into a generation-fenced real
+Full Auto or agent controller. Omega therefore returns the typed terminal
+`unavailable` result with `reason.omega.controller_not_bound` and leaves local
+run state untouched. Neither a relay acknowledgement nor a host-side display
+mutation is reported as completed/stopped execution. A later controller
+integration may change this only after observing the real idempotent controller
+outcome.
+
+Pairing and command intake uses the same durability order. Omega applies an
+inbound record to a cloned controller, signs and inserts any terminal response
+into the exact outbox, and atomically commits both before treating the inbound
+event as processed. Signing, enqueue, or durable-write failure therefore leaves
+the event retryable after restart. Distinct owner sends also bind their
+idempotency reference into the rumor tags and durable outbox key, so identical
+text submitted as two commands cannot collapse into one Nostr event.
+
+Room snapshots expose an independently paginated `nostrRecords` page for
+confirmed NIP-AE, NIP-RS, NIP-ER, NIP-29, and NIP-LBR references. The workroom
+renders only bounded event ID, kind, record family, author fingerprint,
+timestamp, cursor, source, and gap state. Encrypted or private record content is
+never copied into this projection, and an unavailable/gapped source is not
+rendered as an empty success.
 
 This split keeps all eleven issue 31 coverage rows visible without creating an
 aggregate event or a REST mirror. An unavailable host projection does not hide
@@ -77,10 +236,31 @@ The canonical fixture covers idle, pending, refused, and terminal states. The
 negative fixtures prove unknown private fields, unsafe references, and an
 incoherent unavailable projection fail closed.
 
+The production Nostr record contract is frozen independently under
+`crates/omega_effectd/fixtures` and mirrored byte-for-byte by OpenAgents
+Mobile:
+
+| Fixture | SHA-256 |
+| --- | --- |
+| `openagents.omega.issue31.host_discovery.v1.canonical.json` | `f68dab0de93f533a97b59ebac2db7ea28e66a8aef913e108bfb5c1fa74618f6b` |
+| `openagents.omega.issue31.pairing.v1.canonical.json` | `82b36c29d74b3f07ef5d50941532eb038d4f2839d640019b136e013b7dc426fa` |
+| `openagents.omega.issue31.command.v1.canonical-intent.json` | `c990ba250393d271bc4040d2f11fefea909c3bb733e0a33895512c28151c56c2` |
+| `openagents.omega.issue31.command.v1.canonical-result.json` | `89581c5090117eecf766884dd762db99f301b6669a123ca034ff634f6b883ee8` |
+
+The pairing fixture includes the host-authored Sarah identity binding. A hash
+change is therefore a cross-repository contract change, not formatting churn.
+
 ## Verification {#verification}
 
 ```sh
 cargo test -p workroom_receipts --lib
+cargo test -p omega_identity --lib
+cargo test -p omega_effectd --lib
+cargo test -p agent_ui -p workroom_ui --lib
+./script/clippy -p omega_identity
+./script/clippy -p omega_effectd
+./script/clippy -p agent_ui
+./script/clippy -p workroom_ui
 ./script/clippy -p workroom_receipts
 ```
 
