@@ -553,7 +553,7 @@ impl Editor {
             .all::<MultiBufferOffset>(&self.display_snapshot(cx));
 
         if selections.is_empty() {
-            log::warn!("There should always be at least one selection in Zed. This is a bug.");
+            log::warn!("There should always be at least one selection in Omega. This is a bug.");
             return;
         };
 

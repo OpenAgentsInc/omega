@@ -121,7 +121,7 @@ impl Display for DevContainerError {
                 DevContainerError::DevContainerValidationFailed(failure) => failure.to_string(),
                 DevContainerError::MultipleMatchingContainers(ids) => format!(
                     "Multiple containers match this project's dev container labels ({}). \
-                     Zed can't decide which to connect to. Stop and remove the stale one(s) with \
+                     Omega can't decide which to connect to. Stop and remove the stale one(s) with \
                      `docker stop <id>` and `docker rm <id>`, then try again.",
                     ids.join(", ")
                 ),

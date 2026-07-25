@@ -945,7 +945,7 @@ edition = "2021"
     // Create README.md
     let readme = r#"# Test Project
 
-This is a test project for visual testing of Zed.
+This is a test project for visual testing of Omega.
 
 ## Features
 
@@ -2201,7 +2201,7 @@ fn run_agent_thread_view_test(
 
     // Send the message to trigger the image response
     let send_future = thread.update(cx, |thread, cx| {
-        thread.send(vec!["Show me the Zed logo".into()], cx)
+        thread.send(vec!["Show me the Omega logo".into()], cx)
     });
 
     cx.background_executor.allow_parking();

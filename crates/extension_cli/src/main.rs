@@ -71,7 +71,7 @@ async fn main() -> Result<()> {
     log::info!("compiling extension");
 
     let user_agent = format!(
-        "Zed Extension CLI/{} ({}; {})",
+        "Omega Extension CLI/{} ({}; {})",
         env!("CARGO_PKG_VERSION"),
         std::env::consts::OS,
         std::env::consts::ARCH

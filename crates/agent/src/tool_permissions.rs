@@ -317,7 +317,7 @@ impl ToolPermissionDecision {
                     // hidden sub-commands that bypass the allow patterns.
                     return ToolPermissionDecision::Deny(format!(
                         "The {} shell does not support \"always allow\" patterns for the terminal \
-                         tool because Zed cannot parse its command chaining syntax. Please remove \
+                         tool because Omega cannot parse its command chaining syntax. Please remove \
                          the always_allow patterns from your tool_permissions settings, or switch \
                          to a POSIX-conforming shell.",
                         shell_kind

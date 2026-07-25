@@ -1370,7 +1370,7 @@ impl ConfigurationView {
                     )
                     .child(
                         ListBulletItem::new(
-                            "Click 'Connect' below to start using llama.cpp in Zed",
+                            "Click 'Connect' below to start using llama.cpp in Omega",
                         )
                         .label_color(Color::Muted),
                     ),
@@ -1414,7 +1414,7 @@ impl ConfigurationView {
             .mb_2()
             .child(
                 Label::new(format!(
-                    "You can also set the {API_KEY_ENV_VAR_NAME} environment variable and restart Zed."
+                    "You can also set the {API_KEY_ENV_VAR_NAME} environment variable and restart Omega."
                 ))
                 .size(LabelSize::Small)
                 .color(Color::Muted),

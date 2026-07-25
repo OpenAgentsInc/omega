@@ -48,21 +48,21 @@ trait InstalledApp {
 
 #[derive(Parser, Debug)]
 #[command(
-    name = "zed",
+    name = "omega",
     disable_version_flag = true,
-    before_help = "The Zed CLI binary.
-This CLI is a separate binary that invokes Zed.
+    before_help = "The Omega CLI binary.
+This CLI is a separate binary that invokes Omega.
 
 Examples:
-    `zed`
-          Simply opens Zed
-    `zed --foreground`
+    `omega`
+          Simply opens Omega
+    `omega --foreground`
           Runs in foreground (shows all logs)
-    `zed path-to-your-project`
-          Open your project in Zed
-    `zed -n path-to-file `
+    `omega path-to-your-project`
+          Open your project in Omega
+    `omega -n path-to-file `
           Open file/folder in a new window",
-    after_help = "To read from stdin, append '-', e.g. 'ps axf | zed -'"
+    after_help = "To read from stdin, append '-', e.g. 'ps axf | omega -'"
 )]
 struct Args {
     /// Wait for all of the given paths to be opened/closed before exiting.
@@ -79,7 +79,7 @@ struct Args {
     /// Reuse an existing window, replacing its workspace
     #[arg(short, long, overrides_with_all = ["add", "new", "existing", "classic"], hide = true)]
     reuse: bool,
-    /// Open in existing Zed window
+    /// Open in existing Omega window
     #[arg(short = 'e', long = "existing", overrides_with_all = ["add", "new", "reuse", "classic"])]
     existing: bool,
     /// Use the classic open behavior: new window for directories, reuse for files
@@ -95,25 +95,25 @@ struct Args {
     )]
     #[arg(long, value_name = "DIR", value_hint = clap::ValueHint::DirPath)]
     user_data_dir: Option<String>,
-    /// The paths to open in Zed (space-separated).
+    /// The paths to open in Omega (space-separated).
     ///
     /// Use `path:line:column` syntax to open a file at the given line and column.
     #[arg(trailing_var_arg = true, value_hint = clap::ValueHint::AnyPath)]
     paths_with_position: Vec<String>,
-    /// Print Zed's version and the app path.
+    /// Print Omega's version and the app path.
     #[arg(short, long)]
     version: bool,
     /// Run zed in the foreground (useful for debugging)
     #[arg(long)]
     foreground: bool,
-    /// Custom path to Zed.app or the zed binary
+    /// Custom path to Omega.app or the omega binary
     #[arg(long)]
     zed: Option<PathBuf>,
     /// Run zed in dev-server mode
     #[arg(long)]
     dev_server_token: Option<String>,
     /// The username and WSL distribution to use when opening paths. If not specified,
-    /// Zed will attempt to open the paths directly.
+    /// Omega will attempt to open the paths directly.
     ///
     /// The username is optional, and if not specified, the default user for the distribution
     /// will be used.
@@ -124,7 +124,7 @@ struct Args {
     #[cfg(target_os = "windows")]
     #[arg(long, value_name = "USER@DISTRO")]
     wsl: Option<String>,
-    /// Not supported in Zed CLI, only supported on Zed binary
+    /// Not supported in Omega CLI, only supported on Omega binary
     /// Will attempt to give the correct command to run
     #[arg(long)]
     system_specs: bool,
@@ -138,10 +138,10 @@ struct Args {
     /// When directories are provided, recurses into them and shows all changed files in a single multi-diff view.
     #[arg(long, action = clap::ArgAction::Append, num_args = 2, value_names = ["OLD_PATH", "NEW_PATH"], value_hint = clap::ValueHint::AnyPath)]
     diff: Vec<String>,
-    /// Generate shell completions for Zed
+    /// Generate shell completions for Omega
     #[arg(long, value_names = ["SHELL"])]
     completions: Option<Shell>,
-    /// Uninstall Zed from user system
+    /// Uninstall Omega from user system
     #[cfg(all(
         any(target_os = "linux", target_os = "macos"),
         not(feature = "no-bundled-uninstall")
@@ -150,7 +150,7 @@ struct Args {
     uninstall: bool,
 
     /// Used for SSH/Git password authentication, to remove the need for netcat as a dependency,
-    /// by having Zed act like netcat communicating over a Unix socket.
+    /// by having Omega act like netcat communicating over a Unix socket.
     #[arg(long, hide = true)]
     askpass: Option<String>,
 }
@@ -203,7 +203,7 @@ fn parse_path_with_position(argument_str: &str) -> anyhow::Result<String> {
 }
 
 /// Returns whether a `--diff` argument refers to an existing path, allowing a
-/// trailing `:line:column` suffix (parsed later by the Zed side, matching how
+/// trailing `:line:column` suffix (parsed later by the Omega side, matching how
 /// regular `zed path:line:column` arguments are handled).
 fn diff_path_exists(diff_path: &str) -> bool {
     Path::new(diff_path).exists() || PathWithPosition::parse_str(diff_path).path.exists()
@@ -551,7 +551,7 @@ fn run() -> Result<()> {
     if args.system_specs {
         let path = app.path();
         let msg = [
-            "The `--system-specs` argument is not supported in the Zed CLI, only on Zed binary.",
+            "The `--system-specs` argument is not supported in the Omega CLI, only on Omega binary.",
             "To retrieve the system specs on the command line, run the following command:",
             &format!("{} --system-specs", path.display()),
         ];
@@ -582,7 +582,7 @@ fn run() -> Result<()> {
     }
 
     let (server, server_name) =
-        IpcOneShotServer::<IpcHandshake>::new().context("Handshake before Zed spawn")?;
+        IpcOneShotServer::<IpcHandshake>::new().context("Handshake before Omega spawn")?;
     let url = format!("zed-cli://{server_name}");
 
     let open_behavior = if args.new {
@@ -709,7 +709,7 @@ fn run() -> Result<()> {
             let exit_status = exit_status.clone();
             let user_data_dir_for_thread = user_data_dir.clone();
             move || {
-                let (_, handshake) = server.accept().context("Handshake after Zed spawn")?;
+                let (_, handshake) = server.accept().context("Handshake after Omega spawn")?;
                 let (tx, rx) = (handshake.requests, handshake.responses);
 
                 #[cfg(target_os = "windows")]
@@ -851,7 +851,7 @@ fn prompt_open_behavior() -> Option<cli::CliBehaviorSetting> {
     let blue = console::Style::new().blue();
     let items = [
         format!(
-            "Add to existing Zed window ({})",
+            "Add to existing Omega window ({})",
             blue.apply_to("zed --existing")
         ),
         format!("Open a new window ({})", blue.apply_to("zed --classic")),
@@ -860,7 +860,7 @@ fn prompt_open_behavior() -> Option<cli::CliBehaviorSetting> {
     let prompt = format!(
         "Configure default behavior for {}\n{}",
         blue.apply_to("zed <path>"),
-        console::style("You can change this later in Zed settings"),
+        console::style("You can change this later in Omega settings"),
     );
 
     let selection = dialoguer::Select::new()

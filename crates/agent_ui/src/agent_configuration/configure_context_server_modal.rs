@@ -1225,7 +1225,7 @@ fn wait_for_context_server(
                 Err(Arc::from("Context server store was dropped"))
             }
             futures::future::Either::Right(_) => Err(Arc::from(format!(
-                "Timed out waiting for context server `{}` to start. Check the Zed log for details.",
+                "Timed out waiting for context server `{}` to start. Check the Omega log for details.",
                 context_server_id_for_timeout
             ))),
         }

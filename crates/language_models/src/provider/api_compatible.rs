@@ -220,7 +220,7 @@ impl<S: ApiCompatibleProviderSettings> Render for ApiCompatibleProviderConfigura
                 )
                 .child(
                     Label::new(format!(
-                        "You can also set the {env_var_name} environment variable and restart Zed.",
+                        "You can also set the {env_var_name} environment variable and restart Omega.",
                     ))
                     .size(LabelSize::Small)
                     .color(Color::Muted),

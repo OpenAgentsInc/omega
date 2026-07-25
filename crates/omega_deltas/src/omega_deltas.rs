@@ -58,6 +58,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0028",
     "OMEGA-DELTA-0029",
     "OMEGA-DELTA-0030",
+    "OMEGA-DELTA-0031",
 ];
 
 /// OMEGA-DELTA-0025. The file that declares the measured digest.
@@ -1250,6 +1251,435 @@ pub const BLOCKED_COPY_CORPUS: &[&str] = &[
     "crates/app_identity/src/shell_branding.rs",
     "crates/omega_deltas/src/omega_deltas.rs",
 ];
+
+// ------------------------------------------------------------ OMEGA-DELTA-0031
+
+/// One brand-bearing prose literal that can reach a user.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ProseLiteral {
+    /// Which mechanism puts this text in front of a user.
+    pub kind: &'static str,
+    /// Repository-relative file it was read from.
+    pub file: String,
+    /// Line the literal starts on.
+    pub line: usize,
+    /// The literal, with runs of whitespace collapsed.
+    pub text: String,
+}
+
+/// What the prose scanners read, as opposed to what they found.
+///
+/// The anti-vacuity guard. A clean tree yields almost no brand-bearing prose
+/// and so does a scanner that stopped parsing, and those two must not look the
+/// same from the outside.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct ProseReadCounts {
+    /// Rust sources walked.
+    pub rust_files: usize,
+    /// Rust string literals lexed.
+    pub literals: usize,
+    /// Doc lines in files that really derive `JsonSchema`.
+    pub schema_docs: usize,
+    /// Doc lines inside an action declaration.
+    pub action_docs: usize,
+    /// Doc lines in files clap prints as `--help`.
+    pub clap_docs: usize,
+    /// Files in the embedded-asset inventory.
+    pub embedded: usize,
+}
+
+/// Collapse runs of whitespace so a literal has one spelling.
+///
+/// A multi-line literal is indented to wherever it happens to sit in the
+/// source, and that indentation is not part of the sentence.
+#[must_use]
+pub fn normalize_prose(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Whether `text` reads as a sentence rather than an identifier or a path.
+///
+/// Three tokens or more, at least two of them plain alphabetic words. This is
+/// the one judgement in the whole derivation: it keeps `crates/zed/src` and
+/// `X-Zed-Predict-Edits-Mode` out of a registry that would otherwise be mostly
+/// noise. It is deliberately loose — `Zed Plex Sans` is three words and is in
+/// the inventory, classified, rather than quietly filtered away.
+#[must_use]
+pub fn is_prose(text: &str) -> bool {
+    let tokens: Vec<&str> = text.split_whitespace().collect();
+    if tokens.len() < 3 {
+        return false;
+    }
+    let plain = tokens
+        .iter()
+        .filter(|token| {
+            let trimmed = token.trim_matches(|character: char| {
+                !character.is_ascii_alphabetic() && character != '\''
+            });
+            !trimmed.is_empty()
+                && trimmed
+                    .chars()
+                    .all(|character| character.is_ascii_alphabetic() || character == '\'')
+        })
+        .count();
+    plain >= 2
+}
+
+/// Every Rust string literal in `source`, as `(start line, contents)`.
+///
+/// Raw and multi-line literals included, comments skipped. A regex over single
+/// lines misses exactly the literals carrying the longest copy: the OAuth
+/// callback page, the run-as-root warning and four provider error messages are
+/// all multi-line, and every one of them named a competitor as the product.
+#[must_use]
+pub fn rust_string_literals(source: &str) -> Vec<(usize, String)> {
+    let mut out = Vec::new();
+    let mut index = 0;
+    let mut line = 1usize;
+    while index < source.len() {
+        let rest = &source[index..];
+        let character = rest.as_bytes()[0];
+        if character == b'\n' {
+            line += 1;
+            index += 1;
+        } else if rest.starts_with("//") {
+            index += rest.find('\n').unwrap_or(rest.len());
+        } else if rest.starts_with("/*") {
+            let (consumed, newlines) = skip_block_comment(rest);
+            line += newlines;
+            index += consumed;
+        } else if character == b'r'
+            && matches!(rest.as_bytes().get(1), Some(b'"' | b'#'))
+            && let Some((body, consumed)) = raw_string_literal(rest)
+        {
+            let start = line;
+            line += body.matches('\n').count();
+            out.push((start, body));
+            index += consumed;
+        } else if character == b'"' {
+            let (body, consumed) = quoted_string_literal(rest);
+            let start = line;
+            line += body.matches('\n').count();
+            out.push((start, body));
+            index += consumed;
+        } else if character == b'\'' {
+            // A char literal or a lifetime; neither can hold prose. Only
+            // `'"'` has to be stepped over as a unit, so that its quote does
+            // not read as the start of a string.
+            index += if rest.as_bytes().get(1) == Some(&b'"') && rest.as_bytes().get(2) == Some(&b'\'')
+            {
+                3
+            } else {
+                1
+            };
+        } else {
+            index += rest.chars().next().map_or(1, char::len_utf8);
+        }
+    }
+    out
+}
+
+/// Consume a possibly nested block comment, returning `(bytes, newlines)`.
+fn skip_block_comment(source: &str) -> (usize, usize) {
+    let mut depth = 1;
+    let mut index = 2;
+    let mut newlines = 0;
+    while index < source.len() && depth > 0 {
+        let rest = &source[index..];
+        if rest.starts_with("/*") {
+            depth += 1;
+            index += 2;
+        } else if rest.starts_with("*/") {
+            depth -= 1;
+            index += 2;
+        } else {
+            let character = rest.chars().next().unwrap_or('*');
+            if character == '\n' {
+                newlines += 1;
+            }
+            index += character.len_utf8();
+        }
+    }
+    (index, newlines)
+}
+
+/// Parse `r"..."` / `r#"..."#` at the start of `source`.
+fn raw_string_literal(source: &str) -> Option<(String, usize)> {
+    let bytes = source.as_bytes();
+    let mut cursor = 1;
+    while bytes.get(cursor) == Some(&b'#') {
+        cursor += 1;
+    }
+    if bytes.get(cursor) != Some(&b'"') {
+        return None;
+    }
+    cursor += 1;
+    let close = format!("\"{}", "#".repeat(cursor - 2));
+    let end = source[cursor..].find(&close)? + cursor;
+    Some((source[cursor..end].to_owned(), end + close.len()))
+}
+
+/// Parse `"..."` at the start of `source`, keeping escapes as written.
+///
+/// Escapes are kept rather than resolved because the source is what a reviewer
+/// reads and what the classification registry records. The packaged half of
+/// the gate resolves them, because the binary holds the value.
+fn quoted_string_literal(source: &str) -> (String, usize) {
+    let mut body = String::new();
+    let mut cursor = 1;
+    while cursor < source.len() {
+        let rest = &source[cursor..];
+        if let Some(escaped) = rest.strip_prefix('\\') {
+            let width = 1 + escaped.chars().next().map_or(0, char::len_utf8);
+            body.push_str(&rest[..width]);
+            cursor += width;
+        } else if rest.starts_with('"') {
+            cursor += 1;
+            break;
+        } else {
+            let character = rest.chars().next().unwrap_or('"');
+            body.push(character);
+            cursor += character.len_utf8();
+        }
+    }
+    (body, cursor)
+}
+
+/// Line numbers inside a `#[cfg(test)]` item, which a release build drops.
+///
+/// Over-excluding here would be a hole, which is why the packaged half of the
+/// gate reads the binary that was actually built and honours none of this.
+#[must_use]
+pub fn cfg_test_lines(source: &str) -> std::collections::BTreeSet<usize> {
+    let lines: Vec<&str> = source.lines().collect();
+    let mut out = std::collections::BTreeSet::new();
+    for (start, line) in lines.iter().enumerate() {
+        let trimmed = line.trim_start();
+        if !trimmed.starts_with("#[cfg(") || !trimmed.contains("test") {
+            continue;
+        }
+        let mut depth: i64 = 0;
+        let mut opened = false;
+        for (cursor, item) in lines.iter().enumerate().skip(start) {
+            depth += i64::try_from(item.matches('{').count()).unwrap_or(0);
+            depth -= i64::try_from(item.matches('}').count()).unwrap_or(0);
+            if item.contains('{') {
+                opened = true;
+            }
+            out.insert(cursor + 1);
+            if opened && depth <= 0 {
+                break;
+            }
+        }
+    }
+    out
+}
+
+/// Doc lines the keymap editor renders as an action's description.
+///
+/// Inside an `actions!(..)` body, or immediately above an `#[action(..)]`
+/// derive. `OMEGA-DELTA-0022` recorded action doc comments as unchecked;
+/// `client::SignIn` describes itself as signing in to a *Zed* account, which
+/// is true, and only a check that reads them can say so on purpose.
+#[must_use]
+pub fn action_doc_lines(source: &str) -> std::collections::BTreeSet<usize> {
+    let mut out = std::collections::BTreeSet::new();
+    let lines: Vec<&str> = source.lines().collect();
+    let mut rest = source;
+    let mut base = 0;
+    while let Some(at) = rest.find("actions!(") {
+        let open = base + at + "actions!(".len() - 1;
+        let mut depth = 0;
+        let mut index = open;
+        let bytes = source.as_bytes();
+        while index < bytes.len() {
+            match bytes[index] {
+                b'(' => depth += 1,
+                b')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                _ => {}
+            }
+            index += 1;
+        }
+        let first = source[..open].matches('\n').count() + 1;
+        let last = source[..index.min(source.len())].matches('\n').count() + 1;
+        out.extend(first..=last);
+        base += at + "actions!(".len();
+        rest = &source[base..];
+    }
+    for (index, line) in lines.iter().enumerate() {
+        if !line.contains("#[action(") {
+            continue;
+        }
+        let mut cursor = index;
+        while cursor > 0 {
+            cursor -= 1;
+            let trimmed = lines[cursor].trim_start();
+            if trimmed.starts_with("///") || trimmed.starts_with("//!") {
+                out.insert(cursor + 1);
+            } else if !trimmed.starts_with("#[") {
+                break;
+            }
+        }
+    }
+    out
+}
+
+fn doc_comment_body(line: &str) -> Option<&str> {
+    let trimmed = line.trim_start();
+    trimmed
+        .strip_prefix("///")
+        .or_else(|| trimmed.strip_prefix("//!"))
+}
+
+/// Every brand-bearing prose literal that can reach a user, plus read counts.
+///
+/// Five streams, each derived from a mechanism that exists in the tree rather
+/// than from a list of files somebody remembered. See the `prose` section of
+/// `script/omega-brand-gate.json`, which both halves of the gate read.
+#[must_use]
+pub fn prose_inventory(policy: &serde_json::Value) -> (Vec<ProseLiteral>, ProseReadCounts) {
+    let mut items = Vec::new();
+    let mut read = ProseReadCounts::default();
+    let repository = normalize_path(&repository_path("."));
+    let rust_root = policy["prose"]["rust_root"].as_str().unwrap_or("crates");
+
+    for_each_source_file(&repository_path(rust_root), &["rs"], |path, source| {
+        read.rust_files += 1;
+        let literals = rust_string_literals(source);
+        read.literals += literals.len();
+        let lines: Vec<&str> = source.lines().collect();
+        let code: String = lines
+            .iter()
+            .map(|line| if doc_comment_body(line).is_some() { "" } else { *line })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let schema = derives_any(&code, &["JsonSchema"]);
+        let clap = derives_any(&code, &["Parser", "Args", "Subcommand"])
+            || code.contains("#[command(")
+            || code.contains("clap::Parser");
+        let actions = action_doc_lines(source);
+        for (number, _line) in lines.iter().enumerate() {
+            if doc_comment_body(lines[number]).is_none() {
+                continue;
+            }
+            if actions.contains(&(number + 1)) {
+                read.action_docs += 1;
+            } else if schema {
+                read.schema_docs += 1;
+            } else if clap {
+                read.clap_docs += 1;
+            }
+        }
+        if brand_hits(source, policy).is_empty() {
+            return;
+        }
+        let relative = normalize_path(path)
+            .strip_prefix(&repository)
+            .map_or_else(|_| path.display().to_string(), |tail| tail.display().to_string());
+        let is_test_file = is_test_path(&relative);
+        let skipped = if is_test_file {
+            std::collections::BTreeSet::new()
+        } else {
+            cfg_test_lines(source)
+        };
+        for (number, body) in literals {
+            if is_test_file || skipped.contains(&number) {
+                continue;
+            }
+            if !brand_hits(&body, policy).is_empty() && is_prose(&body) {
+                items.push(ProseLiteral {
+                    kind: "rust_string",
+                    file: relative.clone(),
+                    line: number,
+                    text: normalize_prose(&body),
+                });
+            }
+        }
+        for (index, line) in lines.iter().enumerate() {
+            let number = index + 1;
+            if is_test_file || skipped.contains(&number) {
+                continue;
+            }
+            let Some(body) = doc_comment_body(line) else {
+                continue;
+            };
+            if brand_hits(body, policy).is_empty() || !is_prose(body) {
+                continue;
+            }
+            let kind = if actions.contains(&number) {
+                "action_doc"
+            } else if schema {
+                "schema_doc"
+            } else if clap {
+                "clap_doc"
+            } else {
+                continue;
+            };
+            items.push(ProseLiteral {
+                kind,
+                file: relative.clone(),
+                line: number,
+                text: normalize_prose(body),
+            });
+        }
+    });
+
+    for relative in embedded_asset_inventory() {
+        read.embedded += 1;
+        let Ok(source) = std::fs::read_to_string(repository_path(&relative)) else {
+            continue;
+        };
+        if brand_hits(&source, policy).is_empty() {
+            continue;
+        }
+        for (index, line) in source.lines().enumerate() {
+            if !brand_hits(line, policy).is_empty() && is_prose(line) {
+                items.push(ProseLiteral {
+                    kind: "asset",
+                    file: relative.clone(),
+                    line: index + 1,
+                    text: normalize_prose(line),
+                });
+            }
+        }
+    }
+    items.sort();
+    (items, read)
+}
+
+/// Whether any `#[derive(..)]` in `code` names one of `traits`.
+///
+/// Doc lines are stripped by the caller before this runs, so a derive written
+/// inside a rustdoc EXAMPLE does not pull a whole framework crate's internal
+/// documentation into the inventory. `gpui/src/action.rs` documents
+/// `#[derive(.., schemars::JsonSchema, Action)]` in a code sample and has no
+/// settings type in it at all.
+fn derives_any(code: &str, traits: &[&str]) -> bool {
+    let mut rest = code;
+    while let Some(at) = rest.find("#[derive(") {
+        rest = &rest[at + "#[derive(".len()..];
+        let list = rest.split(')').next().unwrap_or("");
+        if traits.iter().any(|name| list.contains(name)) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Whether `relative` names a file a release build never compiles.
+fn is_test_path(relative: &str) -> bool {
+    let normalized = relative.replace('\\', "/");
+    normalized.ends_with("_test.rs")
+        || normalized.ends_with("_tests.rs")
+        || ["/tests/", "/test/", "/benches/", "/examples/", "/fixtures/"]
+            .iter()
+            .any(|segment| normalized.contains(segment))
+}
 
 #[cfg(test)]
 mod tests {
@@ -3132,6 +3562,205 @@ mod tests {
         );
     }
 
+    /// OMEGA-DELTA-0031. Every brand-bearing prose literal is classified.
+    ///
+    /// `OMEGA-DELTA-0022` named this class and could not close it. The string
+    /// rule it shipped enforces the compatibility allow-list's `blocked`
+    /// claims, which is a written-down denylist: a *new* sentence naming a
+    /// competitor as the product passes until somebody remembers to add it.
+    /// That is exactly how "Use GitHub Copilot in Zed" reached a signed,
+    /// notarized `0.2.0-rc11`, and why the signed, notarized `0.2.0-rc13`
+    /// still told the user "Click 'Connect' below to start using Ollama in
+    /// Zed" from two provider onboarding pages, titled the OAuth callback page
+    /// in their browser after somebody else's product, and handed the model a
+    /// system prompt beginning "You are the Zed coding agent running inside
+    /// the Zed editor".
+    ///
+    /// This inverts the default. The inventory is derived from five shipping
+    /// mechanisms; everything in it must be *classified* in the policy; an
+    /// unclassified literal fails. A new sentence is unclassified the moment
+    /// it is written.
+    #[test]
+    fn no_unclassified_prose_names_a_competitor() {
+        let policy = brand_policy().expect("brand policy parses");
+        let prose = &policy["prose"];
+        let (items, read) = prose_inventory(&policy);
+
+        for (key, actual, label) in [
+            ("minimum_rust_files", read.rust_files, "Rust sources"),
+            (
+                "minimum_rust_string_literals",
+                read.literals,
+                "Rust string literals",
+            ),
+            (
+                "minimum_schema_doc_lines",
+                read.schema_docs,
+                "settings-schema doc lines",
+            ),
+            (
+                "minimum_action_doc_lines",
+                read.action_docs,
+                "action doc lines",
+            ),
+            ("minimum_clap_doc_lines", read.clap_docs, "--help doc lines"),
+            (
+                "minimum_embedded_files",
+                read.embedded,
+                "embedded asset files",
+            ),
+        ] {
+            let floor = prose[key].as_u64().unwrap_or(u64::MAX) as usize;
+            assert!(
+                actual >= floor,
+                "OMEGA-DELTA-0031: only {actual} {label} were read, below the \
+                 {floor} floor in {BRAND_GATE_POLICY_PATH}. That parser broke, \
+                 and a check that reads nothing reports green about nothing."
+            );
+        }
+
+        let classified = prose["classified"]
+            .as_object()
+            .expect("prose.classified is an object");
+        assert!(
+            classified.len() >= 20,
+            "OMEGA-DELTA-0031: only {} prose literals are classified, so this \
+             registry is not a record of anybody having read the tree",
+            classified.len()
+        );
+        for (text, entry) in classified {
+            assert!(
+                entry["class"].is_string() && entry["reason"].is_string(),
+                "OMEGA-DELTA-0031: prose.classified[{text:?}] needs a class and \
+                 a reason. An entry is a record that somebody read the sentence \
+                 and decided it names somebody else rather than us."
+            );
+            let class = entry["class"].as_str().unwrap_or_default();
+            assert!(
+                prose["classes"].get(class).is_some(),
+                "OMEGA-DELTA-0031: prose.classified[{text:?}] uses class \
+                 {class:?}, which prose.classes does not define"
+            );
+        }
+
+        let corpus: std::collections::BTreeSet<&str> = prose["corpus_files"]
+            .as_object()
+            .expect("prose.corpus_files is an object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        for relative in &corpus {
+            assert!(
+                repository_path(relative).is_file(),
+                "OMEGA-DELTA-0031: exempt corpus file {relative} does not exist, \
+                 so the exemption is hiding nothing and should be deleted"
+            );
+        }
+
+        let mut unclassified: Vec<String> = items
+            .iter()
+            .filter(|item| {
+                !corpus.contains(item.file.as_str()) && !classified.contains_key(&item.text)
+            })
+            .map(|item| {
+                format!(
+                    "{}:{} [{}] {:?}",
+                    item.file,
+                    item.line,
+                    item.kind,
+                    item.text.chars().take(160).collect::<String>()
+                )
+            })
+            .collect();
+        unclassified.sort();
+        unclassified.dedup();
+        assert!(
+            unclassified.is_empty(),
+            "OMEGA-DELTA-0031: brand-bearing prose that nobody has classified. \
+             Substitute our own name: if the sentence stays true with 'Omega' \
+             in it, the brand was standing where our product's name belongs, so \
+             rewrite it. If it becomes false, it names somebody else's product \
+             and belongs in prose.classified in {BRAND_GATE_POLICY_PATH} with a \
+             class and a reason.\n{}",
+            unclassified.join("\n")
+        );
+
+        let present: std::collections::BTreeSet<&str> =
+            items.iter().map(|item| item.text.as_str()).collect();
+        let mut stale: Vec<&String> = classified
+            .iter()
+            .filter(|(text, entry)| {
+                entry["packaged_only"] != serde_json::Value::Bool(true)
+                    && !present.contains(text.as_str())
+            })
+            .map(|(text, _)| text)
+            .collect();
+        stale.sort();
+        assert!(
+            stale.is_empty(),
+            "OMEGA-DELTA-0031: these classified literals are no longer anywhere \
+             in the tree. Either the sentence went and the entry should go with \
+             it, or a scanner stopped reading the stream that used to find it — \
+             which is what this assertion exists to catch.\n{}",
+            stale
+                .iter()
+                .map(|text| text.chars().take(100).collect::<String>())
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+    }
+
+    /// OMEGA-DELTA-0031. The prose lexer reads what it claims to read.
+    ///
+    /// The first version of this scanner counted lines wrongly across a `\`
+    /// line continuation, so six multi-line literals — four provider error
+    /// toasts among them — were attributed to the wrong line and silently
+    /// skipped by the rewrite that was supposed to fix them.
+    #[test]
+    fn the_prose_lexer_reads_multi_line_and_raw_literals() {
+        let source = concat!(
+            "fn demo() {\n",
+            "    // \"not a literal\"\n",
+            "    let a = \"first\";\n",
+            "    let b = \"second \\\n",
+            "        continued\";\n",
+            "    let c = r#\"raw \"quoted\" body\"#;\n",
+            "    let d = \"after\";\n",
+            "}\n",
+        );
+        let literals = rust_string_literals(source);
+        let found: Vec<(usize, &str)> = literals
+            .iter()
+            .map(|(line, body)| (*line, body.as_str()))
+            .collect();
+        assert_eq!(found[0], (3, "first"), "single-line literal and its line");
+        assert_eq!(found[1].0, 4, "a continued literal starts on its first line");
+        assert!(
+            found[1].1.contains("continued"),
+            "the continuation is part of the literal: {:?}",
+            found[1].1
+        );
+        assert_eq!(
+            found[2],
+            (6, "raw \"quoted\" body"),
+            "a raw literal keeps its inner quotes"
+        );
+        assert_eq!(found[3], (7, "after"), "the line count survives the raw literal");
+        assert!(
+            !found.iter().any(|(_, body)| body.contains("not a literal")),
+            "a comment is not a literal"
+        );
+
+        assert!(is_prose("Click 'Connect' below to start using Ollama in Omega"));
+        assert!(!is_prose("crates/zed/src/main.rs"));
+        assert!(!is_prose("X-Zed-Predict-Edits-Mode"));
+        assert!(
+            is_prose("Zed Plex Sans"),
+            "a three-word font family name stays in the inventory to be classified, \
+             not filtered out of it"
+        );
+    }
+
     #[test]
     fn delta_ids_are_unique() {
         let mut seen = std::collections::BTreeSet::new();
@@ -3942,3 +4571,5 @@ mod tests {
         );
     }
 }
+
+

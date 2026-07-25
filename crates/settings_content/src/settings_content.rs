@@ -173,7 +173,7 @@ pub struct SettingsContent {
     pub agent: Option<AgentSettingsContent>,
     pub agent_servers: Option<AllAgentServersSettings>,
 
-    /// Configuration of audio in Zed.
+    /// Configuration of audio in Omega.
     pub audio: Option<AudioSettingsContent>,
 
     /// Whether or not to automatically check for updates.
@@ -181,8 +181,8 @@ pub struct SettingsContent {
     /// Default: true
     pub auto_update: Option<bool>,
 
-    /// This base keymap settings adjusts the default keybindings in Zed to be similar
-    /// to other common code editors. By default, Zed's keymap closely follows VSCode's
+    /// This base keymap settings adjusts the default keybindings in Omega to be similar
+    /// to other common code editors. By default, Omega's keymap closely follows VSCode's
     /// keymap, with minor adjustments, this corresponds to the "VSCode" setting.
     ///
     /// Default: VSCode
@@ -255,16 +255,16 @@ pub struct SettingsContent {
     /// The URL used as the key for credential storage.
     ///
     /// When set, credentials are stored under this URL instead of `server_url`.
-    /// This allows running multiple Zed instances side by side without them
+    /// This allows running multiple Omega instances side by side without them
     /// overwriting each other's keychain entries.
     pub credentials_url: Option<String>,
 
     /// Configuration for session-related features
     pub session: Option<SessionSettingsContent>,
-    /// Control what info is collected by Zed.
+    /// Control what info is collected by Omega.
     pub telemetry: Option<TelemetrySettingsContent>,
 
-    /// Configuration of the terminal in Zed.
+    /// Configuration of the terminal in Omega.
     pub terminal: Option<TerminalSettingsContent>,
 
     pub title_bar: Option<TitleBarSettingsContent>,
@@ -280,7 +280,7 @@ pub struct SettingsContent {
     /// Settings for the which-key popup.
     pub which_key: Option<WhichKeySettingsContent>,
 
-    /// Settings related to Vim mode in Zed.
+    /// Settings related to Vim mode in Omega.
     pub vim: Option<VimSettingsContent>,
 
     /// Number of lines to search for modelines at the beginning and end of files.
@@ -299,7 +299,7 @@ pub struct SettingsContent {
 }
 
 /// Configuration for developer-oriented instrumentation tools that collect
-/// diagnostic data about a running Zed instance.
+/// diagnostic data about a running Omega instance.
 #[with_fallible_options]
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema, MergeFrom)]
 pub struct InstrumentationSettingsContent {
@@ -417,7 +417,7 @@ pub enum ProfileBase {
     /// Apply profile settings on top of the user's current settings.
     #[default]
     User,
-    /// Apply profile settings on top of Zed's default settings, ignoring user customizations.
+    /// Apply profile settings on top of Omega's default settings, ignoring user customizations.
     Default,
 }
 
@@ -428,7 +428,7 @@ pub struct SettingsProfile {
     /// What base settings to start from before applying this profile's overrides.
     ///
     /// - `user`: Apply on top of user's settings (default)
-    /// - `default`: Apply on top of Zed's default settings, ignoring user customizations
+    /// - `default`: Apply on top of Omega's default settings, ignoring user customizations
     #[serde(default)]
     pub base: ProfileBase,
 
@@ -500,7 +500,7 @@ impl strum::VariantNames for BaseKeymapContent {
     ];
 }
 
-/// Configuration of audio in Zed.
+/// Configuration of audio in Omega.
 #[with_fallible_options]
 #[derive(Clone, PartialEq, Default, Serialize, Deserialize, JsonSchema, MergeFrom, Debug)]
 pub struct AudioSettingsContent {
@@ -544,7 +544,7 @@ impl From<Option<String>> for AudioOutputDeviceName {
     }
 }
 
-/// Control what info is collected by Zed.
+/// Control what info is collected by Omega.
 #[with_fallible_options]
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Debug, MergeFrom)]
 pub struct TelemetrySettingsContent {
@@ -552,7 +552,7 @@ pub struct TelemetrySettingsContent {
     ///
     /// Default: true
     pub diagnostics: Option<bool>,
-    /// Send anonymized usage data like what languages you're using Zed with.
+    /// Send anonymized usage data like what languages you're using Omega with.
     ///
     /// Default: true
     pub metrics: Option<bool>,
@@ -580,7 +580,7 @@ pub struct DebuggerSettingsContent {
     ///
     /// Default: line
     pub stepping_granularity: Option<SteppingGranularity>,
-    /// Whether the breakpoints should be reused across Zed sessions.
+    /// Whether the breakpoints should be reused across Omega sessions.
     ///
     /// Default: true
     pub save_breakpoints: Option<bool>,
@@ -592,7 +592,7 @@ pub struct DebuggerSettingsContent {
     ///
     /// Default: 2000ms
     pub timeout: Option<u64>,
-    /// Whether to log messages between active debug adapters and Zed
+    /// Whether to log messages between active debug adapters and Omega
     ///
     /// Default: true
     pub log_dap_communications: Option<bool>,
@@ -653,7 +653,7 @@ pub enum DockPosition {
     Right,
 }
 
-/// Configuration of voice calls in Zed.
+/// Configuration of voice calls in Omega.
 #[with_fallible_options]
 #[derive(Clone, PartialEq, Default, Serialize, Deserialize, JsonSchema, MergeFrom, Debug)]
 pub struct CallSettingsContent {
@@ -888,7 +888,7 @@ pub struct FileFinderSettingsContent {
     /// Default: true
     pub skip_focus_for_active_in_search: Option<bool>,
     /// Whether to use gitignored files when searching.
-    /// Only the file Zed had indexed will be used, not necessary all the gitignored files.
+    /// Only the file Omega had indexed will be used, not necessary all the gitignored files.
     ///
     /// Default: Smart
     pub include_ignored: Option<IncludeIgnoredContent>,
@@ -916,7 +916,7 @@ pub struct FileFinderSettingsContent {
 pub enum IncludeIgnoredContent {
     /// Use all gitignored files
     All,
-    /// Use only the files Zed had indexed
+    /// Use only the files Omega had indexed
     Indexed,
     /// Be smart and search for ignored when called from a gitignored worktree
     #[default]
@@ -1256,7 +1256,7 @@ pub struct RemoteSettingsContent {
     pub use_podman: Option<bool>,
     /// Whether to build dev container images with BuildKit.
     ///
-    /// When unset, Zed auto-detects BuildKit by probing for the `buildx` CLI
+    /// When unset, Omega auto-detects BuildKit by probing for the `buildx` CLI
     /// plugin. Set to `false` to force the classic Docker builder, which is
     /// required for Docker-compatible engines that lack an integrated BuildKit
     /// (e.g. Apple Container via a Docker-API bridge), where BuildKit builds

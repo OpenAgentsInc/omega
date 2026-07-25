@@ -139,7 +139,7 @@ pub struct EditPredictionSettingsContent {
     pub ollama: Option<OllamaEditPredictionSettingsContent>,
     /// Settings specific to using custom OpenAI-compatible servers for edit prediction.
     pub open_ai_compatible_api: Option<CustomEditPredictionProviderSettingsContent>,
-    /// Controls whether Zed may collect training data when using Zed's Edit Predictions.
+    /// Controls whether Omega may collect training data when using Zed's Edit Predictions.
     /// Data is only ever captured for files in projects that are detected as open source.
     ///
     /// - `"default"`: use the preference previously set via the status-bar toggle,
@@ -284,7 +284,7 @@ pub struct OllamaEditPredictionSettingsContent {
     pub prompt_format: Option<EditPredictionPromptFormatContent>,
 }
 
-/// Controls whether Zed collects training data when using Zed's Edit Predictions.
+/// Controls whether Omega collects training data when using Zed's Edit Predictions.
 #[derive(
     Copy,
     Clone,
@@ -305,7 +305,7 @@ pub enum EditPredictionDataCollectionChoice {
     /// if no preference has been stored.
     #[default]
     Default,
-    /// Allow Zed to collect training data from open-source projects.
+    /// Allow Omega to collect training data from open-source projects.
     Yes,
     /// Never allow training data collection.
     No,
@@ -522,7 +522,7 @@ pub struct LanguageSettingsContent {
     ///
     /// Default: auto
     pub formatter: Option<FormatterList>,
-    /// Zed's Prettier integration settings.
+    /// Omega's Prettier integration settings.
     /// Allows to enable/disable formatting with Prettier
     /// and configure default Prettier, used when no project-level Prettier installation is found.
     ///
@@ -609,12 +609,12 @@ pub struct LanguageSettingsContent {
     /// Inlay hint related settings.
     pub inlay_hints: Option<InlayHintSettingsContent>,
     /// Whether to automatically type closing characters for you. For example,
-    /// when you type '(', Zed will automatically add a closing ')' at the correct position.
+    /// when you type '(', Omega will automatically add a closing ')' at the correct position.
     ///
     /// Default: true
     pub use_autoclose: Option<bool>,
     /// Whether to automatically surround text with characters for you. For example,
-    /// when you select text and type '(', Zed will automatically surround text with ().
+    /// when you select text and type '(', Omega will automatically surround text with ().
     ///
     /// Default: true
     pub use_auto_surround: Option<bool>,
@@ -1041,13 +1041,13 @@ impl AsRef<[Formatter]> for FormatterList {
 #[derive(Clone, Default, Debug, Serialize, Deserialize, PartialEq, Eq, JsonSchema, MergeFrom)]
 #[serde(rename_all = "snake_case")]
 pub enum Formatter {
-    /// Format files using Zed's Prettier integration (if applicable),
+    /// Format files using Omega's Prettier integration (if applicable),
     /// or falling back to formatting via language server.
     #[default]
     Auto,
     /// Do not format code.
     None,
-    /// Format code using Zed's Prettier integration.
+    /// Format code using Omega's Prettier integration.
     Prettier,
     /// Format code using an external command.
     External {
@@ -1160,13 +1160,13 @@ pub struct LanguageTaskSettingsContent {
     /// Extra task variables to set for a particular language.
     pub variables: Option<HashMap<String, String>>,
     pub enabled: Option<bool>,
-    /// Use LSP tasks over Zed language extension ones.
+    /// Use LSP tasks over Omega language extension ones.
     /// If no LSP tasks are returned due to error/timeout or regular execution,
-    /// Zed language extension tasks will be used instead.
+    /// Omega language extension tasks will be used instead.
     ///
-    /// Other Zed tasks will still be shown:
-    /// * Zed task from either of the task config file
-    /// * Zed task from history (e.g. one-off task was spawned before)
+    /// Other Omega tasks will still be shown:
+    /// * Omega task from either of the task config file
+    /// * Omega task from history (e.g. one-off task was spawned before)
     pub prefer_lsp: Option<bool>,
 }
 

@@ -684,8 +684,18 @@ pub struct GitExcludeOverride {
 }
 
 impl GitExcludeOverride {
-    const START_BLOCK_MARKER: &str = "\n\n#  ====== Auto-added by Zed: =======\n";
-    const END_BLOCK_MARKER: &str = "\n#  ====== End of auto-added by Zed =======\n";
+    const START_BLOCK_MARKER: &str = "\n\n#  ====== Auto-added by Omega: =======\n";
+    const END_BLOCK_MARKER: &str = "\n#  ====== End of auto-added by Omega =======\n";
+    /// The markers Omega wrote into `.git/info/exclude` before the prose rename.
+    ///
+    /// A marker is not only a label: it is how the block is found again and
+    /// removed. Renaming it without reading the old one back would strand an
+    /// inherited-marker block in the user's repository, still excluding files
+    /// from git with nothing left that knows how to clean it up.
+    const LEGACY_BLOCK_MARKERS: &[(&str, &str)] = &[(
+        "\n\n#  ====== Auto-added by Zed: =======\n",
+        "\n#  ====== End of auto-added by Zed =======\n",
+    )];
 
     pub async fn new(git_exclude_path: PathBuf) -> Result<Self> {
         let original_excludes =
@@ -736,28 +746,30 @@ impl GitExcludeOverride {
     }
 
     fn remove_auto_generated_block(content: &str) -> String {
-        let start_marker = Self::START_BLOCK_MARKER;
-        let end_marker = Self::END_BLOCK_MARKER;
         let mut content = content.to_string();
 
-        let start_index = content.find(start_marker);
-        let end_index = content.rfind(end_marker);
-
-        if let (Some(start), Some(end)) = (start_index, end_index) {
-            if end > start {
-                content.replace_range(start..end + end_marker.len(), "");
-            }
-        }
-
-        // Older versions of Zed didn't have end-of-block markers,
-        // so it's impossible to determine auto-generated lines.
-        // Conservatively remove the standard list of excludes
-        let standard_excludes = format!(
-            "{}{}",
+        for (start_marker, end_marker) in std::iter::once(&(
             Self::START_BLOCK_MARKER,
-            include_str!("./checkpoint.gitignore")
-        );
-        content = content.replace(&standard_excludes, "");
+            Self::END_BLOCK_MARKER,
+        ))
+        .chain(Self::LEGACY_BLOCK_MARKERS)
+        {
+            let start_index = content.find(start_marker);
+            let end_index = content.rfind(end_marker);
+
+            if let (Some(start), Some(end)) = (start_index, end_index) {
+                if end > start {
+                    content.replace_range(start..end + end_marker.len(), "");
+                }
+            }
+
+            // Older versions didn't have end-of-block markers, so it's
+            // impossible to determine auto-generated lines. Conservatively
+            // remove the standard list of excludes.
+            let standard_excludes =
+                format!("{}{}", start_marker, include_str!("./checkpoint.gitignore"));
+            content = content.replace(&standard_excludes, "");
+        }
 
         content
     }

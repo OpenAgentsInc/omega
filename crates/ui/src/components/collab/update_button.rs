@@ -100,19 +100,19 @@ impl UpdateButton {
     }
 
     pub fn checking() -> Self {
-        Self::new(IconName::LoadCircle, "Checking for Zed Updates…")
+        Self::new(IconName::LoadCircle, "Checking for Omega Updates…")
             .icon_animate(true)
             .disabled(true)
     }
 
     pub fn downloading(progress: Option<f32>) -> Self {
-        Self::new(IconName::Download, "Downloading Zed Update…")
+        Self::new(IconName::Download, "Downloading Omega Update…")
             .progress(progress)
             .disabled(true)
     }
 
     pub fn installing(version: impl Into<SharedString>) -> Self {
-        Self::new(IconName::LoadCircle, "Installing Zed Update…")
+        Self::new(IconName::LoadCircle, "Installing Omega Update…")
             .icon_animate(true)
             .tooltip(version)
             .disabled(true)
@@ -228,7 +228,7 @@ impl Component for UpdateButton {
 
     fn description() -> &'static str {
         "A button component displayed in the title bar to \
-        show auto-update status and allow users to restart Zed."
+        show auto-update status and allow users to restart Omega."
     }
 
     fn preview(_window: &mut Window, _cx: &mut App) -> AnyElement {

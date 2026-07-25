@@ -544,14 +544,14 @@ cat > "$payload" || exit 1
 
 # First try letting gpg-agent/keychain supply the passphrase without any
 # interactive pinentry. If that succeeds (cached passphrase)
-# forward its output and we're done, so Zed never shows a modal.
+# forward its output and we're done, so Omega never shows a modal.
 if {gpg_program} --pinentry-mode error "$@" < "$payload" > "$signature" 2> "$status"; then
     cat "$status" >&2
     cat "$signature"
     exit 0
 fi
 
-# The silent attempt failed: ask Zed for the passphrase, then hand it to gpg on
+# The silent attempt failed: ask Omega for the passphrase, then hand it to gpg on
 # fd 3 using loopback mode so no pinentry/terminal is required.
 passphrase=$(printf '%s\0' {prompt} | {askpass_program} --askpass={askpass_socket} 2>/dev/null)
 printf '%s\n' "$passphrase" |

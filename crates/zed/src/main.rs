@@ -1730,12 +1730,12 @@ struct Args {
     /// Prints system specs.
     ///
     /// Useful for submitting issues on GitHub when encountering a bug that
-    /// prevents Zed from starting, so you can't run `zed: copy system specs to
+    /// prevents Omega from starting, so you can't run `omega: copy system specs to
     /// clipboard`
     #[arg(long)]
     system_specs: bool,
 
-    /// Used for recording minidumps on crashes by having Zed run a separate
+    /// Used for recording minidumps on crashes by having Omega run a separate
     /// process communicating over a socket.
     #[arg(long, hide = true)]
     crash_handler: Option<PathBuf>,
@@ -1753,7 +1753,7 @@ struct Args {
     dock_action: Option<usize>,
 
     /// Used for SSH/Git password authentication, to remove the need for netcat as a dependency,
-    /// by having Zed act like netcat communicating over a Unix socket.
+    /// by having Omega act like netcat communicating over a Unix socket.
     #[arg(long)]
     #[cfg(not(target_os = "windows"))]
     #[arg(hide = true)]
@@ -1771,7 +1771,7 @@ struct Args {
     #[arg(long, hide = true)]
     record_etw_trace: bool,
 
-    /// The PID of the Zed process to trace for heap analysis.
+    /// The PID of the Omega process to trace for heap analysis.
     #[cfg(target_os = "windows")]
     #[arg(long, hide = true, allow_hyphen_values = true)]
     etw_zed_pid: Option<i64>,
@@ -1781,7 +1781,7 @@ struct Args {
     #[arg(long, hide = true)]
     etw_output: Option<PathBuf>,
 
-    /// Unix socket path for IPC with the parent Zed process.
+    /// Unix socket path for IPC with the parent Omega process.
     #[cfg(target_os = "windows")]
     #[arg(long, hide = true)]
     etw_socket: Option<String>,

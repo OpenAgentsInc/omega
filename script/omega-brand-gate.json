@@ -65,7 +65,9 @@
       "zed's own agent",
       "zed-agent-terminal-"
     ],
-    "symbols": ["ZED_AGENT_ID"],
+    "symbols": [
+      "ZED_AGENT_ID"
+    ],
     "_forbidden_path_stems_comment": [
       "A file name is a surface too. The docs page moved from zed-agent.md to",
       "omega-agent.md, and a content scan cannot see the difference — the",
@@ -75,9 +77,26 @@
       "Matched against the file stem, case-insensitively, so it does not fire",
       "on crates/zed or on a directory named zed_eval."
     ],
-    "forbidden_path_stems": ["zed-agent", "zed_agent"],
-    "scan_roots": ["crates", "docs/src", "assets", "script"],
-    "extensions": ["rs", "md", "json", "toml", "py", "sh", "yml", "yaml"],
+    "forbidden_path_stems": [
+      "zed-agent",
+      "zed_agent"
+    ],
+    "scan_roots": [
+      "crates",
+      "docs/src",
+      "assets",
+      "script"
+    ],
+    "extensions": [
+      "rs",
+      "md",
+      "json",
+      "toml",
+      "py",
+      "sh",
+      "yml",
+      "yaml"
+    ],
     "allowances": {
       "crates/gpui_macros/src/derive_inspector_reflection.rs": "States which agent generated this upstream file ('generated using Zed Agent with Claude Opus 4'). Historical provenance of somebody else's authorship, not Omega presenting itself.",
       "crates/gpui_macros/tests/derive_inspector_reflection.rs": "Same provenance note on the companion test file.",
@@ -221,5 +240,327 @@
       "omega::GetMerch"
     ],
     "third_party_allowances": {}
+  },
+  "prose": {
+    "_comment": [
+      "OMEGA-DELTA-0031. Every brand-bearing prose literal that can reach a user,",
+      "derived from what ships and classified one by one.",
+      "",
+      "OMEGA-DELTA-0022 closed assets, asset-name enums and command-palette labels",
+      "with derived inventories. Prose was the hole it named and could not close:",
+      "the string half enforced the compatibility allow-list's `blocked` claims,",
+      "which is a written-down denylist, so a NEW sentence naming Zed as the",
+      "product passed until somebody remembered to add it. That is exactly how",
+      "'Use GitHub Copilot in Zed' shipped in 0.2.0-rc11, and the signed,",
+      "notarized 0.2.0-rc13 still told the user 'Click Connect below to start",
+      "using Ollama in Zed'.",
+      "",
+      "This section inverts the default. The inventory is derived; every literal",
+      "in it must be CLASSIFIED here; anything unclassified fails. A new sentence",
+      "is unclassified the moment it is written, so it fails on the commit that",
+      "adds it rather than on the release that ships it.",
+      "",
+      "THE RULE, for telling a product claim from a third-party reference:",
+      "substitute our own name. If the sentence stays TRUE with 'Omega' in place",
+      "of the brand, the brand was standing where our product's name belongs and",
+      "it is a product claim -- rewrite it. 'start using Ollama in Zed' becomes",
+      "'start using Ollama in Omega', which is true, so it was a claim about us.",
+      "If the substitution makes the sentence FALSE, it states a fact about",
+      "somebody else's product, service, documentation, or authorship -- keep it.",
+      "'similar to Zed's default keybindings' does not become true of Omega's",
+      "keybindings, so the preset is really describing Zed. Classes below are",
+      "the reasons a substitution would have been false.",
+      "",
+      "Do not add an entry to make a build pass. An entry is a written record",
+      "that somebody read the sentence and decided it names Zed rather than us."
+    ],
+    "classes": {
+      "zed_product": "Names Zed's own editor, keymap preset, or documentation.",
+      "zed_service": "Names Zed's hosted service, account, plan, billing, server, or cloud artifact.",
+      "zed_authorship": "Records Zed as the author or copyright holder of an inherited artifact.",
+      "fork_seam": "Names an inherited identifier -- a font family, a marker string -- where the value IS the thing being named, so renaming it breaks a lookup rather than a claim.",
+      "omega_contrast": "Omega-authored copy that names Zed in order to say how Omega differs from it."
+    },
+    "rust_root": "crates",
+    "asset_root": "assets",
+    "_derivation_comment": [
+      "Four streams, each derived from a mechanism that exists in the tree rather",
+      "than from a list of files somebody remembered:",
+      "",
+      "  rust_string  every Rust string literal under rust_root, including raw and",
+      "               multi-line ones, outside #[cfg(test)] items and test files.",
+      "               A literal is compiled in; nothing can prove one is never",
+      "               rendered, and assuming so is what left the provider copy",
+      "               standing through four release candidates.",
+      "  schema_doc   doc comments in a file that really derives JsonSchema, which",
+      "               is how schemars turns them into the settings schema's",
+      "               `description` values and how the settings editor renders",
+      "               them as tooltips. Doc lines are stripped before the derive is",
+      "               looked for, so a derive inside a doc EXAMPLE does not pull a",
+      "               whole framework crate's rustdoc into the inventory.",
+      "  action_doc   doc comments inside an actions!(...) body or immediately",
+      "               above an #[action(...)] derive -- the action descriptions the",
+      "               keymap editor shows.",
+      "  clap_doc     doc comments in a file deriving Parser/Args/Subcommand or",
+      "               using #[command(...)], which clap prints as --help output.",
+      "  asset        every line of every text file in the embedded-asset",
+      "               inventory OMEGA-DELTA-0022 already derives -- keymap and",
+      "               default-settings comments, agent prompt templates, themes.",
+      "",
+      "A literal is in the inventory when it carries a brand.words / brand.substrings",
+      "hit AND is prose-shaped: at least three whitespace-separated tokens, at least",
+      "two of them plain alphabetic words. That keeps identifiers, paths and headers",
+      "out, and it is the one judgement in the derivation -- widen it before",
+      "narrowing it."
+    ],
+    "minimum_rust_files": 1500,
+    "minimum_rust_string_literals": 100000,
+    "minimum_schema_doc_lines": 6000,
+    "minimum_action_doc_lines": 1200,
+    "minimum_clap_doc_lines": 300,
+    "minimum_embedded_files": 400,
+    "_guard_comment": [
+      "The floors are on what the scanners READ, not on what they find, because a",
+      "clean tree finds little and a broken parser finds nothing, and those two",
+      "must not look the same. Every classified entry is also asserted to still be",
+      "present, so the registry cannot become a graveyard and a scanner that stops",
+      "reading a stream fails on that stream's entries."
+    ],
+    "corpus_files": {
+      "crates/omega_deltas/src/omega_deltas.rs": "Names the forbidden phrasings in order to forbid them.",
+      "crates/app_identity/src/public_branding.rs": "Names the forbidden phrasings in order to forbid them.",
+      "crates/app_identity/src/shell_branding.rs": "Names the forbidden phrasings in order to forbid them.",
+      "script/omega-brand-gate.json": "This policy file."
+    },
+    "classified": {
+      "// For information on binding keys, see the Zed": {
+        "class": "zed_product",
+        "reason": "Points the user at Zed's own key-bindings documentation, alongside the zed.dev link on the next line. The keymap file format is inherited and Zed documents it."
+      },
+      "// Omega ships this on. It was turned off by the Zed service-isolation": {
+        "class": "omega_contrast",
+        "reason": "Omega-authored comment stating how this default differs from upstream."
+      },
+      "// Zed host, so this does not weaken the service isolation the ollama": {
+        "class": "omega_contrast",
+        "reason": "Omega-authored comment naming the upstream host the isolation rule is about."
+      },
+      "// Omega defaults to \"allow\". Upstream Zed defaults to \"confirm\".": {
+        "class": "omega_contrast",
+        "reason": "Omega-authored comment stating how this default differs from upstream."
+      },
+      "// Local and registry ACP agents remain enabled. Hosted Zed services are": {
+        "class": "omega_contrast",
+        "reason": "Omega-authored comment naming Zed's hosted services as the thing Omega does not use."
+      },
+      "// Controls whether Omega may collect training data when using Zed's Edit Predictions.": {
+        "class": "zed_service",
+        "reason": "Edit Predictions is Zed's hosted service. The collector is Omega and says so; the service keeps its own name."
+      },
+      "// Omega defaults this to true. Upstream Zed defaults it to false and shows": {
+        "class": "omega_contrast",
+        "reason": "Omega-authored comment stating how this default differs from upstream."
+      },
+      "// The server to connect to. Omega does not use Zed production services.": {
+        "class": "omega_contrast",
+        "reason": "Omega-authored comment naming the service Omega is isolated from."
+      },
+      "\"author\": \"Zed Industries\",": {
+        "class": "zed_authorship",
+        "reason": "Authorship of the inherited One, Ayu and Gruvbox themes. Overwriting somebody else's authorship line is not de-branding."
+      },
+      "We currently only support Zed Cloud as a provider.": {
+        "class": "zed_service",
+        "reason": "Zed Cloud is Zed's hosted service. Substituting Omega would claim a web-search provider Omega does not run."
+      },
+      "Remote server downloads are unavailable: Omega does not use Zed cloud artifacts. Build a local remote server or set OMEGA_ALLOW_ZED_SERVICES=1 for an approved compatibility experiment.": {
+        "class": "omega_contrast",
+        "reason": "Omega-authored refusal naming the artifacts Omega declines to download."
+      },
+      "Dev servers were removed in v0.157.x please upgrade to SSH remoting: https://zed.dev/docs/remote-development": {
+        "class": "zed_product",
+        "reason": "Links Zed's own remote-development documentation for an inherited feature."
+      },
+      "Signs in to Zed account.": {
+        "class": "zed_service",
+        "reason": "The client::SignIn action signs in to Zed's collaboration account. The keymap editor renders this description; naming it Omega would describe an account Omega does not issue."
+      },
+      "Signs out of Zed account.": {
+        "class": "zed_service",
+        "reason": "Companion of client::SignIn, same reason."
+      },
+      "Zed's Edit Predictions": {
+        "class": "zed_service",
+        "reason": "Display name of Zed's hosted edit-prediction provider, the way ai_zed.svg labels Zed's model provider."
+      },
+      "This Omega build does not use Zed billing or hosted prediction plans.": {
+        "class": "omega_contrast",
+        "reason": "Omega-authored statement naming the billing Omega is not on."
+      },
+      "<?xml version=\"1.0\" encoding=\"utf-8\"?> <WindowsPerformanceRecorder Version=\"1.0\" Author=\"Zed Industries\"> <Profiles> {heap_provider} <Profile Id=\"ZedHeap.Verbose.Memory\" Base=\"Heap.Verbose.Memory\" Name=\"ZedHeap\" DetailLevel=\"Verbose\" LoggingMode=\"Memory\" Description=\"Heap tracing\"> {heap_collector} </Profile> </Profiles> <TraceMergeProperties> <TraceMergeProperty Id=\"TraceMerge_Default\" Name=\"TraceMerge_Default\"> <FileCompression Value=\"true\"/> </TraceMergeProperty> </TraceMergeProperties> </WindowsPerformanceRecorder>": {
+        "class": "zed_authorship",
+        "reason": "Authorship field of the inherited Windows Performance Recorder profile. Not shown in the product; written into a .wprp handed to Microsoft's tooling."
+      },
+      "\\n\\n# ====== Auto-added by Zed: =======\\n": {
+        "class": "fork_seam",
+        "reason": "The marker Omega wrote into .git/info/exclude before this rename. It is read back so a block an earlier build left behind is still found and removed; it is never written again. A marker is how the block is located, not only how it is labelled."
+      },
+      "\\n# ====== End of auto-added by Zed =======\\n": {
+        "class": "fork_seam",
+        "reason": "Closing half of the inherited marker above, same reason."
+      },
+      "Zed Plex Sans": {
+        "class": "fork_seam",
+        "reason": "Family name recorded inside the shipped font files themselves. Renaming it is a font-asset change, not a prose change, and a name that does not match the font's own family name resolves to nothing."
+      },
+      "Zed Plex Mono": {
+        "class": "fork_seam",
+        "reason": "Companion of Zed Plex Sans, same reason."
+      },
+      "Skipping Zed cloud language model provider; Omega production services isolation is enabled": {
+        "class": "omega_contrast",
+        "reason": "Omega-authored log line naming the provider Omega declines to register."
+      },
+      "Failed to sign in with your Zed account (401).": {
+        "class": "zed_service",
+        "reason": "The Zed Cloud provider's own authentication error. Substituting Omega would claim an account Omega does not issue."
+      },
+      "You are not signed in to your Zed account. \\ Sign in to continue.": {
+        "class": "zed_service",
+        "reason": "Zed Cloud provider, same reason."
+      },
+      "Enable Fast Mode for Zed AI?": {
+        "class": "zed_service",
+        "reason": "Rewritten from \"Enable Fast Mode for Zed?\", which read as the application. It now names Zed's hosted service, which is what the toggle and the billing sentence below it belong to."
+      },
+      "Fast mode routes requests through the upstream provider's fast mode or priority tier. The \\ upstream provider's premium per-token pricing applies and is passed through to \\ your Zed billing.": {
+        "class": "zed_service",
+        "reason": "Names Zed's billing, which is where this charge lands."
+      },
+      "Sign In to use Zed AI": {
+        "class": "zed_service",
+        "reason": "Zed AI is Zed's hosted model service."
+      },
+      "The configuration surface for Zed's hosted AI models, \\ showing the user's connection status, current plan, trial eligibility, \\ and entry points for enabling the Zed model provider.": {
+        "class": "zed_service",
+        "reason": "Component-preview description of the Zed Cloud configuration surface."
+      },
+      "Zed Pro Trial Plan": {
+        "class": "zed_service",
+        "reason": "A plan Zed sells."
+      },
+      "Zed Pro Plan": {
+        "class": "zed_service",
+        "reason": "A plan Zed sells."
+      },
+      "Business Plan - Zed models enabled": {
+        "class": "zed_service",
+        "reason": "Zed's business plan, and the models Zed hosts on it. Substituting Omega would claim a plan and a hosted model fleet Omega does not sell."
+      },
+      "Business Plan - Zed models disabled": {
+        "class": "zed_service",
+        "reason": "Companion of the line above."
+      },
+      "Sends an authenticated request to the Zed LLM service, retrying once with": {
+        "class": "zed_service",
+        "reason": "Names Zed's LLM service, which is what this client talks to."
+      },
+      "Represents error responses from Zed's cloud API.": {
+        "class": "zed_service",
+        "reason": "Names Zed's cloud API."
+      },
+      "Prebuilt remote servers are not yet available for windows-{arch}. See https://zed.dev/docs/remote-development": {
+        "class": "zed_product",
+        "reason": "Links Zed's own remote-development documentation."
+      },
+      "set -eu channel=\"$1\" version=\"$2\" dest=\"$HOME/.local/libexec/zed/$channel\" marker=\"$dest/.zed-wsl-helper-version\" want=\"$channel $version\" # Reuse an exact, already-installed channel+version — but never for the floating # \"latest\" tag (dev builds), which must always re-fetch so they track the most # recent nightly instead of pinning to whatever was downloaded first. if [ \"$version\" != \"latest\" ] && [ \"$(cat \"$marker\" 2>/dev/null || true)\" = \"$want\" ]; then helper=$(find \"$dest\" -type f -path '*/libexec/zed-editor' -print 2>/dev/null | head -n 1 || true) if [ -n \"$helper\" ] && [ -x \"$helper\" ]; then printf 'zed-wsl-helper: %s\\n' \"$helper\" exit 0 fi fi arch=$(uname -m) case \"$arch\" in x86_64 | amd64) arch=\"x86_64\" ;; aarch64 | arm64) arch=\"aarch64\" ;; *) echo \"unsupported WSL architecture for the zed sandbox helper: $arch\" >&2; exit 1 ;; esac url=\"https://cloud.zed.dev/releases/$channel/$version/download?asset=zed&arch=$arch&os=linux&source=zed-wsl-sandbox\" tmp=$(mktemp -d \"${TMPDIR:-/tmp}/zed-wsl-helper-XXXXXX\") trap 'rm -rf \"$tmp\"' EXIT tarball=\"$tmp/zed.tar.gz\" if command -v curl >/dev/null 2>&1; then curl -fL \"$url\" -o \"$tarball\" elif command -v wget >/dev/null 2>&1; then wget -O \"$tarball\" \"$url\" else echo 'neither curl nor wget is available in WSL to download zed' >&2 exit 1 fi mkdir -p \"$tmp/unpacked\" tar -xzf \"$tarball\" -C \"$tmp/unpacked\" helper_src=$(find \"$tmp/unpacked\" -type f -path '*/libexec/zed-editor' -print 2>/dev/null | head -n 1 || true) if [ -z \"$helper_src\" ]; then echo 'the downloaded zed tarball did not contain a libexec/zed-editor binary' >&2 exit 1 fi app=$(dirname \"$(dirname \"$helper_src\")\") # Install atomically: stage the unpacked app next to the destination on the same # filesystem, then swap it into place so a concurrent run never sees (or execs) a # partially-written install. The whole app dir is kept so the binary's bundled # libraries ($ORIGIN/../lib) remain alongside it. mkdir -p \"$(dirname \"$dest\")\" rm -rf \"$dest.new\" \"$dest.old\" cp -a \"$app\" \"$dest.new\" if [ -e \"$dest\" ]; then mv \"$dest\" \"$dest.old\"; fi mv \"$dest.new\" \"$dest\" rm -rf \"$dest.old\" printf '%s' \"$want\" > \"$marker\" helper=$(find \"$dest\" -type f -path '*/libexec/zed-editor' -print 2>/dev/null | head -n 1 || true) if [ -z \"$helper\" ] || [ ! -x \"$helper\" ]; then echo \"the installed zed sandbox helper is missing or not executable under $dest\" >&2 exit 1 fi printf 'zed-wsl-helper: %s\\n' \"$helper\" exit 0": {
+        "class": "zed_service",
+        "reason": "Downloads Zed's released Linux build from cloud.zed.dev to use as the WSL sandbox helper. The script really does fetch Zed's artifact, so every zed path and URL in it names Zed's product. Whether Omega should depend on that CDN is a runtime question, not a prose one."
+      },
+      "documentation](https://zed.dev/docs/key-bindings#contexts) for more details.": {
+        "class": "zed_product",
+        "reason": "Links Zed's own key-bindings documentation from the keymap schema."
+      },
+      "Controls whether Omega may collect training data when using Zed's Edit Predictions.": {
+        "class": "zed_service",
+        "reason": "Edit Predictions is Zed's hosted service; the collector is Omega and says so."
+      },
+      "Controls whether Omega collects training data when using Zed's Edit Predictions.": {
+        "class": "zed_service",
+        "reason": "Companion of the line above."
+      },
+      "Omega defaults this to true; upstream Zed defaults it to false.": {
+        "class": "omega_contrast",
+        "reason": "Omega-authored setting description stating how this default differs from upstream."
+      },
+      "The URL of the Zed server to connect to.": {
+        "class": "zed_service",
+        "reason": "The collaboration server this setting points at is Zed's."
+      },
+      "buffer. These URLs look like `https://zed.dev/channel/channel-name-CHANNEL_ID/notes`.": {
+        "class": "zed_service",
+        "reason": "Channel-notes URLs on Zed's collaboration service."
+      },
+      "Skipping Zed account authentication; Omega production services isolation is enabled": {
+        "class": "omega_contrast",
+        "reason": "Omega-authored log line naming the account flow Omega declines to run."
+      },
+      "inotify_init returned {} This may be due to system-wide limits on inotify instances. For troubleshooting see: https://zed.dev/docs/linux": {
+        "class": "zed_product",
+        "reason": "Links Zed's own Linux troubleshooting documentation."
+      },
+      "ReadDirectoryChangesW initialization failed: {} This may occur on network filesystems and WSL paths. For troubleshooting see: https://zed.dev/docs/windows": {
+        "class": "zed_product",
+        "reason": "Links Zed's own Windows troubleshooting documentation."
+      },
+      "Copyright 2022 - 2024 Zed Industries, Inc.": {
+        "class": "zed_authorship",
+        "reason": "Copyright line in the generated assets/licenses.md attribution page. The file is gitignored and produced at build time, so it exists only in the package.",
+        "packaged_only": true
+      },
+      "Copyright 2022 - 2025 Zed Industries, Inc.": {
+        "class": "zed_authorship",
+        "reason": "Copyright line in the generated attribution page.",
+        "packaged_only": true
+      },
+      "Copyright 2024 Zed Industries, Inc.": {
+        "class": "zed_authorship",
+        "reason": "Copyright line in the generated attribution page.",
+        "packaged_only": true
+      },
+      "Copyright (c) 2026 Zed Industries": {
+        "class": "zed_authorship",
+        "reason": "Copyright line in the generated attribution page.",
+        "packaged_only": true
+      },
+      "// Aiur is Omega's own theme and is dark-only. Upstream Zed ships One Dark and": {
+        "class": "omega_contrast",
+        "reason": "Omega-authored comment naming the upstream default this replaces (OMEGA-DELTA-0016)."
+      },
+      "// Upstream Zed names this \"Zed (Default)\". It has to match": {
+        "class": "zed_product",
+        "reason": "Names Zed's own built-in icon theme, which is what the Omega value replaces (OMEGA-DELTA-0028)."
+      },
+      "// Upstream Zed ships true, which points the updater at Zed's release feed —": {
+        "class": "omega_contrast",
+        "reason": "Omega-authored comment naming the upstream default and the feed it points at (OMEGA-DELTA-0026)."
+      },
+      "// Which edit prediction provider to use. Upstream Zed ships \"zed\", which": {
+        "class": "omega_contrast",
+        "reason": "Omega-authored comment naming the upstream default provider (OMEGA-DELTA-0026)."
+      },
+      "// Empty in Omega. Upstream Zed installs the \"html\" extension from Zed's": {
+        "class": "omega_contrast",
+        "reason": "Omega-authored comment naming the upstream default and the registry it installs from (OMEGA-DELTA-0026)."
+      },
+      "// OMEGA_ALLOW_ZED_SERVICES=1. This host is intentionally non-Zed, and is": {
+        "class": "omega_contrast",
+        "reason": "Omega-authored comment naming the compatibility escape hatch and what it opts into."
+      },
+      "// Upstream Zed ships this empty. Omega configures codex-acp because Full Auto": {
+        "class": "omega_contrast",
+        "reason": "Omega-authored comment naming the upstream default this replaces (OMEGA-DELTA-0026)."
+      }
+    }
   }
 }

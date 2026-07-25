@@ -360,7 +360,7 @@ fn clean_error_message(message: &str) -> String {
     let lower = message.to_lowercase();
 
     if lower.contains("vercel_oidc_token") && lower.contains("oidc token") {
-        return "Authentication failed for Vercel AI Gateway. Use a Vercel AI Gateway key (vck_...).\nCreate or manage keys in Vercel AI Gateway console.\nIf this persists, regenerate the key and update it in Vercel AI Gateway provider settings in Zed.".to_string();
+        return "Authentication failed for Vercel AI Gateway. Use a Vercel AI Gateway key (vck_...).\nCreate or manage keys in Vercel AI Gateway console.\nIf this persists, regenerate the key and update it in Vercel AI Gateway provider settings in Omega.".to_string();
     }
 
     if lower.contains("invalid api key") || lower.contains("invalid_api_key") {

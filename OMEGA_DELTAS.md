@@ -1294,3 +1294,161 @@ cargo test -p omega_deltas
   `crates/omega_deltas`; plus the falsification suites in
   `crates/full_auto_ui` (`thread_run_link`, `dispatch`) and
   `crates/workroom_receipts` (`the_single_pair_entry_point_names_each_refusal`).
+### OMEGA-DELTA-0031 — No user-facing sentence presents a competitor as the product
+
+- **Upstream Zed:** names itself throughout its own copy, which is correct for
+  Zed and is inherited wholesale by a fork.
+- **Omega, before this:** the signed, notarized **`0.2.0-rc13`** still told the
+  user, in its own voice:
+  - `Click 'Connect' below to start using Ollama in Zed` — and the identical
+    llama.cpp line. Provider onboarding, one click from the model picker.
+  - `Checking for Zed Updates…` / `Downloading Zed Update…` /
+    `Installing Zed Update…` in the **title bar**.
+  - `<title>Authorization Successful — Zed</title>` and a `Zed` brand line on
+    the **OAuth callback page rendered in the user's browser**.
+  - `You are the Zed coding agent running inside the Zed editor.` — the
+    **system prompt**, i.e. the identity handed to the model on every turn.
+  - `# ====== Auto-added by Zed: =======`, written into the user's
+    `.git/info/exclude`.
+  - `Open with Zed` in the Windows Explorer context menu, `Error: Running Zed
+    as root…`, `Zed managed Node.js`, `Request blocked by the Zed sandbox
+    network policy.`, `Zed: v{version}` in the system specs a user pastes into
+    a bug report, and ~forty settings-schema descriptions the settings editor
+    renders as tooltips (`Settings related to calls in Zed`,
+    `Configuration of voice calls in Zed.`, …).
+  - Every brand check on omega#16 passed while all of that shipped.
+- **Why the previous gate did not catch it.** OMEGA-DELTA-0022 closed assets,
+  asset-name enums and command-palette labels with derived inventories, and
+  **named this class as the one it could not close**: its string rule enforces
+  the compatibility allow-list's `blocked` claims, which is a written-down
+  denylist. A *new* sentence fails only once somebody adds it — which is
+  exactly how `Use GitHub Copilot in Zed` survived — and 168 brand-bearing
+  prose literals were left unclassified.
+- **Omega now:** the default is inverted. Every brand-bearing prose literal in
+  a **derived** inventory must be **classified** in
+  `script/omega-brand-gate.json`; an unclassified one fails. A new sentence is
+  unclassified the moment it is written, so it fails on the commit that adds it
+  rather than on the release that ships it. Two hundred and seventy lines of
+  copy across 94 files were rewritten to Omega, and 56 literals are recorded as
+  deliberate references to Zed with a class and a reason (4 of them exist only
+  in the package).
+- **The rule, for product claim versus third-party reference.** Substitute our
+  own name. If the sentence stays **true** with `Omega` in place of the brand,
+  the brand was standing where our product's name belongs and it is a product
+  claim — rewrite it. `start using Ollama in Zed` → `start using Ollama in
+  Omega` is true, so it was a claim about us. If the substitution makes the
+  sentence **false**, it states a fact about somebody else's product, service,
+  documentation, or authorship — keep it. `similar to Zed's default
+  keybindings` does not become true of Omega's keybindings, so the preset
+  really is describing Zed. The five classes in the policy are the reasons a
+  substitution would have been false: `zed_product`, `zed_service`,
+  `zed_authorship`, `fork_seam`, `omega_contrast`.
+- **How this inventory is complete rather than enumerated.** Five streams, each
+  derived from a mechanism that exists in the tree:
+  - **Every Rust string literal** under `crates/`, including raw and
+    multi-line ones, outside `#[cfg(test)]` items and test files. A literal is
+    compiled in; nothing can prove one is never rendered, and assuming
+    otherwise is what left the provider copy standing through four release
+    candidates. The lexer matters: a regex over single lines misses exactly the
+    literals carrying the longest copy — the OAuth page, the run-as-root
+    warning and four provider error toasts are all multi-line.
+  - **Every settings-schema description**: doc comments in a file that really
+    derives `JsonSchema`, which is how `schemars` turns them into the schema's
+    `description` values and how the settings editor renders them as tooltips.
+    Doc lines are stripped before the derive is looked for, so a derive written
+    inside a rustdoc *example* does not drag a framework crate's internal
+    documentation into the inventory.
+  - **Every action description**: doc comments inside an `actions!(…)` body or
+    above an `#[action(…)]` derive — the text the keymap editor shows.
+    OMEGA-DELTA-0022 recorded these as unchecked.
+  - **Every `--help` line**: doc comments in a file deriving
+    `Parser`/`Args`/`Subcommand` or using `#[command(…)]`.
+  - **Every shipped asset line**, over the embedded-asset inventory
+    OMEGA-DELTA-0022 already derives — keymap and default-settings comments,
+    the agent prompt templates, themes.
+  A literal enters the inventory when it carries a `brand.words` /
+  `brand.substrings` hit **and** is prose-shaped: three tokens or more, at
+  least two plain alphabetic words. That is the one judgement in the
+  derivation, and it is deliberately loose — `Zed Plex Sans` is three words and
+  is *in* the inventory, classified, rather than quietly filtered away.
+- **Anti-vacuity.** The floors are on what the scanners **read**, not on what
+  they find, because a clean tree finds almost nothing and a broken parser
+  finds nothing, and those two must not look alike: 1500 Rust sources, 100 000
+  string literals, 6000 schema doc lines, 1200 action doc lines, 300 `--help`
+  doc lines, 400 embedded files. Separately, every classified entry is asserted
+  to still be **present**, so the registry cannot become a graveyard and a
+  scanner that stops reading a stream fails on that stream's entries.
+- **The two halves are checked against each other.** `crates/omega_deltas` and
+  `script/verify-omega-brand` implement the inventory independently in Rust and
+  Python from the one policy file. Dumped and diffed on this tree they produce
+  **byte-identical** inventories — 90 literals, same kind, file, line and text —
+  which is the drift guard a shared policy file only half provides. The two
+  lexers disagree on six string literals out of 135 000 on an edge case in char
+  literals; none carries a brand, and the counts are only used as floors.
+- **The packaged half reads values, not source.** Assets and literals survive
+  in the executable, so the shipped binary is scanned directly: it does not
+  honour `#[cfg(test)]`, does not care which crate a string came from, and sees
+  generated files — the licence attribution page is gitignored and exists only
+  in the package, which is where `Copyright 2022 - 2024 Zed Industries, Inc.`
+  comes from. A stripped string table has no separators, so the scan is
+  anchored on each brand occurrence and reports one only when the brand is
+  written as a word in running text **and** no classified sentence spans that
+  position. Classified entries are compared as the compiler leaves them: a `\`
+  continuation joins two lines with no separator and a `\n` splits the run, so
+  the fragments are matched, not the source spelling.
+- **Two live defects fell out of the inventory rather than out of a search.**
+  `f10` on Linux and Windows was bound to
+  `["app_menu::OpenApplicationMenu", "Zed"]`, naming a menu that has been
+  `PRODUCT_NAME` — "Omega" — since the rename: the key did nothing. And
+  renaming the `.git/info/exclude` marker without reading the old one back
+  would have stranded an inherited-marker block in the user's repository, still
+  excluding files from git with nothing left that knew how to remove it, so
+  `GitExcludeOverride` now cleans up both.
+- **References deliberately kept**, each with a class and a reason in the
+  policy: Zed's hosted service, account, plans, billing and servers
+  (`Zed Pro Plan`, `Business Plan - Zed models enabled`, `Signs in to Zed
+  account.`, `Zed's Edit Predictions`, the whole Zed Cloud provider); Zed's own
+  documentation (`zed.dev/docs/...` in remote-development, keymap,
+  Linux and Windows troubleshooting copy); Zed's authorship of the inherited
+  One/Ayu/Gruvbox themes and the Windows Performance Recorder profile; the
+  `Zed Plex Sans` / `Zed Plex Mono` family names recorded inside the shipped
+  font files; the retired `.git/info/exclude` marker, read back for cleanup;
+  and Omega-authored copy that names Zed in order to say how Omega differs from
+  it. `Enable Fast Mode for Zed?` was the one genuinely ambiguous case — it
+  read as the application — and became `Enable Fast Mode for Zed AI?`, naming
+  the service the toggle and its billing actually belong to. We are removing
+  Zed **as our identity**, not erasing that Zed exists.
+- **Enforced by:** `no_unclassified_prose_names_a_competitor` and
+  `the_prose_lexer_reads_multi_line_and_raw_literals` in
+  `crates/omega_deltas/`, and `check_prose_inventory` /
+  `check_packaged_prose` in `script/verify-omega-brand`, which
+  `script/bundle-omega-rc` already runs against the built bundle. The packaged
+  half rejects the installed `0.2.0-rc13` on **200** distinct windows, every
+  one of which is prose this delta rewrote.
+- **Falsified.** A new sentence naming Zed as the product was added to a
+  provider page and to `assets/settings/default.json`; both halves failed as
+  unclassified and both recovered when it was removed. `Click 'Connect' below
+  to start using Ollama in Zed` was restored verbatim and both halves failed
+  again. A classified entry was deleted from the policy and the surviving
+  literal failed; the entry was pointed at a sentence that is not in the tree
+  and the staleness assertion failed. Each floor was raised above the observed
+  count in turn and the corresponding guard fired. And the packaged half was
+  run against the signed, notarized `0.2.0-rc13` in `/Applications`, which it
+  rejects, and against a stub bundle whose binary holds no strings, where its
+  own vacuity guard fired. Rebasing onto seven newly landed
+  `assets/settings/default.json` comments naming Zed failed the gate on all
+  seven until each was classified — the mechanism working on somebody else's
+  concurrent change rather than on a planted one.
+- **What this still does not cover.** The scan reads `crates/` and the embedded
+  assets; `docs/`, `.github/`, `script/` and `crates/zed/resources/` are
+  outside it, so a Zed sentence in the docs site or a workflow file passes.
+  Prose-shape is a heuristic: a one- or two-word label like `name = "zed"` in
+  the CLI's clap `#[command]` is not prose and is not seen — that identifier
+  still spells the old name and is a known residual. Nothing reads a rendered
+  pixel, so a sentence that is correct in source and truncated on screen still
+  passes. The packaged half runs against the macOS bundle only, so Linux
+  `.desktop`, Flatpak, Snap and Windows resources are unchecked. `#[cfg(test)]`
+  exclusion is a source-side convenience whose only real backstop is the
+  packaged scan. And no name is forbidden unless `brand.words` or
+  `brand.substrings` says so: this delta is about *how completely* a forbidden
+  name is looked for, not about which names are forbidden.

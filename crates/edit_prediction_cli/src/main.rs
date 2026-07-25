@@ -659,7 +659,7 @@ impl EpArgs {
     }
 }
 
-/// Minimum Zed version required for Snowflake queries.
+/// Minimum Omega version required for Snowflake queries.
 /// This version introduced the current request schema with predicted edits in the edit
 /// history, and open source repos distinguished.
 const MIN_CAPTURE_VERSION: pull_examples::MinCaptureVersion = pull_examples::MinCaptureVersion {

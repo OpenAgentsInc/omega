@@ -122,10 +122,10 @@ fn write_llms_txt(destination: &Path, site_url: &str, pages: &[DocsPage]) -> Res
     let mut contents = String::new();
     contents.push_str("# Zed Docs\n\n");
     contents.push_str(
-        "> Official Zed documentation index with links to Markdown versions of each docs page.\n\n",
+        "> Official Omega documentation index with links to Markdown versions of each docs page.\n\n",
     );
     contents.push_str(
-        "Use these links for concise Markdown copies of Zed documentation pages. Each linked page mirrors the corresponding `/docs/*.html` page without site navigation or styling.\n\n",
+        "Use these links for concise Markdown copies of Omega documentation pages. Each linked page mirrors the corresponding `/docs/*.html` page without site navigation or styling.\n\n",
     );
     let mut current_section = None;
     for page in pages {

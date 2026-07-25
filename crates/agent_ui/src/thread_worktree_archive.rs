@@ -275,7 +275,7 @@ async fn verify_created_by_zed(root: &RootPlan, cx: &mut AsyncApp) -> Result<()>
         .map_err(|_| anyhow!("worktree creation time check was canceled"))?
         .with_context(|| {
             format!(
-                "refusing to delete worktree at {}: failed to verify that Zed created it",
+                "refusing to delete worktree at {}: failed to verify that Omega created it",
                 root.root_path.display()
             )
         })?;
@@ -294,8 +294,8 @@ async fn verify_created_by_zed(root: &RootPlan, cx: &mut AsyncApp) -> Result<()>
             .await
             .log_err();
             Err(anyhow!(
-                "refusing to delete worktree at {}: it is not the worktree Zed created \
-                 (it was likely removed and recreated outside Zed)",
+                "refusing to delete worktree at {}: it is not the worktree Omega created \
+                 (it was likely removed and recreated outside Omega)",
                 root.root_path.display()
             ))
         }

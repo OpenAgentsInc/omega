@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 #
-# Omega brand gate (OMEGA-DELTA-0017, OMEGA-DELTA-0018, OMEGA-DELTA-0022).
+# Omega brand gate (OMEGA-DELTA-0017, OMEGA-DELTA-0018, OMEGA-DELTA-0022,
+# OMEGA-DELTA-0031).
 #
 # Two modes:
 #
@@ -19,6 +20,14 @@
 # about assets/icons/. The inventories here are derived from what decides what
 # ships -- the assets tree, the enums that name a path into it, and every gpui
 # action declaration -- rather than from a list of remembered places.
+#
+# OMEGA-DELTA-0031 closes the class OMEGA-DELTA-0022 named and could not
+# close: arbitrary user-facing prose. The previous string rule enforced the
+# compatibility allow-list's `blocked` claims, which is a written-down
+# denylist, so a NEW sentence naming Zed as the product passed until somebody
+# added it. This one inverts the default -- every brand-bearing prose literal
+# in a derived inventory must be classified in the policy, and an unclassified
+# one fails.
 #
 # Policy lives in script/omega-brand-gate.json and is shared with
 # crates/omega_deltas so the source and packaged sides cannot drift.
@@ -72,6 +81,7 @@ ICONS = POLICY["icons"]
 EMBEDDED = POLICY["embedded_assets"]
 ENUMS = POLICY["asset_name_enums"]
 ACTIONS = POLICY["actions"]
+PROSE = POLICY["prose"]
 ALLOWED_STEMS = set(ICONS["third_party_allowances"])
 STEM_TOKENS = [token.lower() for token in ICONS["forbidden_stem_tokens"]]
 VARIANT_TOKENS = ICONS["forbidden_variant_tokens"]
@@ -442,6 +452,293 @@ def check_action_labels() -> None:
             )
 
 
+# ------------------------------------------- OMEGA-DELTA-0031, prose inventory
+
+
+PROSE_CLASSIFIED = PROSE["classified"]
+PROSE_CORPUS = set(PROSE["corpus_files"])
+DOC_LINE = re.compile(r"^\s*(?:///|//!)(.*)$")
+DERIVES_SCHEMA = re.compile(r"#\[derive\([^)]*JsonSchema")
+DERIVES_CLAP = re.compile(r"#\[derive\([^)]*(?:Parser|Args|Subcommand)|#\[command\(|clap::Parser")
+PLAIN_WORD = re.compile(r"[A-Za-z']+")
+
+
+def normalize_prose(text: str) -> str:
+    return " ".join(text.split())
+
+
+def is_prose(text: str) -> bool:
+    """Prose-shaped: three tokens or more, at least two plain alphabetic words.
+
+    The one judgement in the whole derivation. It keeps identifiers, asset
+    paths and header names out of a registry that would otherwise be mostly
+    noise, and it is deliberately loose: `Zed Plex Sans` is three words and is
+    in the inventory, classified, rather than quietly filtered away.
+    """
+    tokens = text.split()
+    if len(tokens) < 3:
+        return False
+    plain = 0
+    for token in tokens:
+        trimmed = token.strip(
+            "".join(
+                character
+                for character in set(token)
+                if not ("a" <= character.lower() <= "z") and character != "'"
+            )
+        )
+        if trimmed and PLAIN_WORD.fullmatch(trimmed):
+            plain += 1
+    return plain >= 2
+
+
+def rust_string_literals(text: str) -> list[tuple[int, str]]:
+    """(start line, contents) for every Rust string literal in `text`.
+
+    Raw strings and multi-line strings included, comments skipped. A regex over
+    single lines misses exactly the literals that carry the longest copy: the
+    OAuth callback page, the root-user warning and four provider error
+    messages are all multi-line.
+    """
+    out: list[tuple[int, str]] = []
+    index, length, line = 0, len(text), 1
+    while index < length:
+        char = text[index]
+        if char == "\n":
+            line += 1
+            index += 1
+            continue
+        if text.startswith("//", index):
+            while index < length and text[index] != "\n":
+                index += 1
+            continue
+        if text.startswith("/*", index):
+            depth, index = 1, index + 2
+            while index < length and depth:
+                if text.startswith("/*", index):
+                    depth += 1
+                    index += 2
+                elif text.startswith("*/", index):
+                    depth -= 1
+                    index += 2
+                else:
+                    if text[index] == "\n":
+                        line += 1
+                    index += 1
+            continue
+        if char == "r" and index + 1 < length and text[index + 1] in '"#':
+            cursor = index + 1
+            hashes = 0
+            while cursor < length and text[cursor] == "#":
+                hashes += 1
+                cursor += 1
+            if cursor < length and text[cursor] == '"':
+                start_line, cursor = line, cursor + 1
+                close = '"' + "#" * hashes
+                end = text.find(close, cursor)
+                if end == -1:
+                    break
+                body = text[cursor:end]
+                line += body.count("\n")
+                out.append((start_line, body))
+                index = end + len(close)
+                continue
+        if char == '"':
+            start_line = line
+            cursor, buffer = index + 1, []
+            while cursor < length:
+                if text[cursor] == "\\":
+                    line += text.count("\n", cursor, cursor + 2)
+                    buffer.append(text[cursor : cursor + 2])
+                    cursor += 2
+                    continue
+                if text[cursor] == '"':
+                    break
+                if text[cursor] == "\n":
+                    line += 1
+                buffer.append(text[cursor])
+                cursor += 1
+            out.append((start_line, "".join(buffer)))
+            index = cursor + 1
+            continue
+        if char == "'":
+            if text.startswith("\\", index + 1):
+                index += 4
+            elif index + 2 < length and text[index + 2] == "'":
+                index += 3
+            else:
+                index += 1
+            continue
+        index += 1
+    return out
+
+
+TEST_PATH = re.compile(r"(^|/)(tests?|benches|examples|fixtures)/|_tests?\.rs$")
+
+
+def cfg_test_lines(text: str) -> set[int]:
+    """Line numbers inside a `#[cfg(test)]` item, which a release does not build.
+
+    Over-excluding here would be a hole, so the packaged half below reads the
+    binary that was actually built and does not honour this at all.
+    """
+    out: set[int] = set()
+    lines = text.splitlines()
+    for start, line in enumerate(lines):
+        if not re.match(r"\s*#\[cfg\(\s*(?:any\([^)]*)?test", line):
+            continue
+        depth, opened = 0, False
+        for cursor in range(start, len(lines)):
+            depth += lines[cursor].count("{") - lines[cursor].count("}")
+            if "{" in lines[cursor]:
+                opened = True
+            out.add(cursor + 1)
+            if opened and depth <= 0:
+                break
+    return out
+
+
+def action_doc_lines(text: str) -> set[int]:
+    """Doc lines the keymap editor renders as an action's description."""
+    out: set[int] = set()
+    lines = text.splitlines()
+    for match in re.finditer(r"(?:gpui::)?actions!\(", text):
+        depth, index = 0, match.end() - 1
+        while index < len(text):
+            if text[index] == "(":
+                depth += 1
+            elif text[index] == ")":
+                depth -= 1
+                if depth == 0:
+                    break
+            index += 1
+        out.update(
+            range(text.count("\n", 0, match.start()) + 1, text.count("\n", 0, index) + 2)
+        )
+    for index, line in enumerate(lines):
+        if "#[action(" not in line:
+            continue
+        cursor = index - 1
+        while cursor >= 0 and (DOC_LINE.match(lines[cursor]) or lines[cursor].strip().startswith("#[")):
+            if DOC_LINE.match(lines[cursor]):
+                out.add(cursor + 1)
+            cursor -= 1
+    return out
+
+
+@functools.lru_cache(maxsize=None)
+def prose_inventory() -> tuple[tuple[tuple[str, str, int, str], ...], dict[str, int]]:
+    """Every brand-bearing prose literal that can reach a user, plus read counts.
+
+    The counts are the anti-vacuity guard. They measure what the scanners read,
+    not what they found, because a clean tree finds nothing and a broken parser
+    also finds nothing.
+    """
+    items: list[tuple[str, str, int, str]] = []
+    read = dict(rust_files=0, literals=0, schema_docs=0, action_docs=0, clap_docs=0, embedded=0)
+    for path, text in rust_sources(ROOT / PROSE["rust_root"]):
+        relative = str(path.relative_to(ROOT))
+        read["rust_files"] += 1
+        literals = rust_string_literals(text)
+        read["literals"] += len(literals)
+        lines = text.splitlines()
+        code = "\n".join("" if DOC_LINE.match(line) else line for line in lines)
+        schema = bool(DERIVES_SCHEMA.search(code))
+        clap = bool(DERIVES_CLAP.search(code))
+        actions = action_doc_lines(text)
+        for number, line in enumerate(lines, 1):
+            if not DOC_LINE.match(line):
+                continue
+            if number in actions:
+                read["action_docs"] += 1
+            elif schema:
+                read["schema_docs"] += 1
+            elif clap:
+                read["clap_docs"] += 1
+        if not brand_hits(text):
+            continue
+        is_test_file = bool(TEST_PATH.search(relative))
+        skipped = set() if is_test_file else cfg_test_lines(text)
+        for number, body in literals:
+            if is_test_file or number in skipped:
+                continue
+            if brand_hits(body) and is_prose(body):
+                items.append(("rust_string", relative, number, normalize_prose(body)))
+        for number, line in enumerate(lines, 1):
+            if is_test_file or number in skipped:
+                continue
+            doc = DOC_LINE.match(line)
+            if doc is None or not brand_hits(doc.group(1)) or not is_prose(doc.group(1)):
+                continue
+            if number in actions:
+                kind = "action_doc"
+            elif schema:
+                kind = "schema_doc"
+            elif clap:
+                kind = "clap_doc"
+            else:
+                continue
+            items.append((kind, relative, number, normalize_prose(doc.group(1))))
+
+    for relative in embedded_asset_inventory():
+        read["embedded"] += 1
+        try:
+            text = (ROOT / relative).read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        if not brand_hits(text):
+            continue
+        for number, line in enumerate(text.splitlines(), 1):
+            if brand_hits(line) and is_prose(line):
+                items.append(("asset", relative, number, normalize_prose(line)))
+    return tuple(items), read
+
+
+def check_prose_inventory() -> None:
+    """OMEGA-DELTA-0031, source side."""
+    items, read = prose_inventory()
+    floors = [
+        ("minimum_rust_files", read["rust_files"], "Rust sources"),
+        ("minimum_rust_string_literals", read["literals"], "Rust string literals"),
+        ("minimum_schema_doc_lines", read["schema_docs"], "settings-schema doc lines"),
+        ("minimum_action_doc_lines", read["action_docs"], "action doc lines"),
+        ("minimum_clap_doc_lines", read["clap_docs"], "--help doc lines"),
+        ("minimum_embedded_files", read["embedded"], "embedded asset files"),
+    ]
+    for key, actual, label in floors:
+        if actual < PROSE[key]:
+            fail(
+                f"OMEGA-DELTA-0031: only {actual} {label} were read, below the "
+                f"{PROSE[key]} floor. That parser broke, and a check that reads "
+                "nothing reports green about nothing."
+            )
+
+    unclassified: list[str] = []
+    for kind, relative, number, text in items:
+        if relative in PROSE_CORPUS or text in PROSE_CLASSIFIED:
+            continue
+        unclassified.append(f"{relative}:{number} [{kind}] {text[:160]!r}")
+    for entry in sorted(set(unclassified)):
+        fail(
+            f"OMEGA-DELTA-0031: unclassified brand-bearing prose at {entry}. "
+            "Substitute our own name: if the sentence stays true with 'Omega' "
+            "in it, the brand was standing where our product's name belongs -- "
+            "rewrite it. If it becomes false, it names somebody else's product "
+            "and belongs in prose.classified with a class and a reason."
+        )
+
+    present = {text for _kind, _relative, _number, text in items}
+    for text, entry in PROSE_CLASSIFIED.items():
+        if entry.get("packaged_only") or text in present:
+            continue
+        fail(
+            f"OMEGA-DELTA-0031: prose.classified records {text[:80]!r}, which is "
+            "no longer anywhere in the tree. Either the sentence was removed and "
+            "the entry should go with it, or a scanner stopped reading the "
+            "stream that used to find it."
+        )
+
+
 # -------------------------------------------------------------- packaged mode
 
 
@@ -593,11 +890,138 @@ def check_packaged_assets_and_actions(app: Path) -> None:
             )
 
 
+
+def packaged_covering_fragments() -> list[str]:
+    """Classified prose as it survives compilation, normalized.
+
+    A classified entry is the literal as written; the binary holds the value.
+    Two differences matter and both produced false failures the first time this
+    ran: a `\\` line continuation joins two lines with no separator, and a
+    `\\n` becomes a real newline that splits the printable run in half, so only
+    a fragment of the sentence is ever contiguous in the string table.
+    """
+    fragments: list[str] = []
+    for text in PROSE_CLASSIFIED:
+        joined = text.replace("\\ ", " ")
+        for part in re.split(r"\\[nrt]", joined):
+            part = normalize_prose(part)
+            if part and brand_hits(part):
+                fragments.append(part)
+    return fragments
+
+
+def normalized_with_offsets(text: str) -> tuple[str, list[int]]:
+    """`normalize_prose(text)` plus the source index each output character came
+    from, so a brand occurrence in the raw run can be located in the normalized
+    one."""
+    out: list[str] = []
+    offsets: list[int] = []
+    pending = False
+    for index, char in enumerate(text):
+        if char.isspace():
+            pending = bool(out)
+            continue
+        if pending:
+            out.append(" ")
+            offsets.append(index)
+            pending = False
+        out.append(char)
+        offsets.append(index)
+    return "".join(out), offsets
+
+
+def check_packaged_prose(app: Path) -> None:
+    """OMEGA-DELTA-0031, packaged side.
+
+    Every brand-bearing prose literal in the executable that actually ships,
+    read out of the binary rather than out of the tree it was supposedly built
+    from. This half does not honour `#[cfg(test)]`, does not care which crate a
+    string came from, and sees generated files: the licence attribution page is
+    gitignored and exists only here.
+
+    A stripped string table has no separators, so a literal runs on into its
+    neighbour. The scan is therefore anchored on each brand occurrence and
+    reports one only when the brand sits in running text AND no classified
+    sentence spans that position.
+    """
+    binary = app / "Contents/MacOS/omega"
+    if not binary.is_file():
+        fail(f"packaged Omega binary is missing: {binary}")
+        return
+    data = binary.read_bytes()
+
+    covering = packaged_covering_fragments()
+    if not covering:
+        fail("OMEGA-DELTA-0031: no classified prose carries a brand; check vacuous")
+        return
+
+    # A brand occurrence only counts as prose when it is written as a word in
+    # running text. `/Zed/` in a path list, `ENV=Zed` in a task-template
+    # placeholder and `X-Zed-Predict-Edits-Mode` in an HTTP header are all
+    # neighbours of real sentences in a stripped string table, and reporting
+    # them is how a gate earns the reputation that gets it deleted.
+    before_ok = set(" (\"'`\t*[|>\u2014-")
+    after_ok = set(" .,:;!?)]}'\"`<>/\u2014\u2026\t-")
+
+    scanned, offenders = 0, set()
+    for run in re.finditer(rb"[\x20-\x7e]{8,}", data):
+        blob = run.group(0).decode("ascii")
+        if not any(word in blob for word in WORDS):
+            continue
+        flat, offsets = normalized_with_offsets(blob)
+        for word in WORDS:
+            for match in re.finditer(re.escape(word), blob):
+                start, end = match.start(), match.end()
+                before = blob[start - 1] if start else " "
+                after = blob[end] if end < len(blob) else " "
+                if before.isalnum() or after.isalnum():
+                    continue
+                if before not in before_ok or after not in after_ok:
+                    continue
+                # A brand hyphenated on both sides is part of an identifier.
+                if before == "-" and after == "-":
+                    continue
+                window = blob[max(0, start - 90) : end + 90]
+                if not is_prose(window):
+                    continue
+                scanned += 1
+                try:
+                    flat_start = offsets.index(start)
+                except ValueError:
+                    continue
+                flat_end = flat_start + (end - start)
+                covered = False
+                for fragment in covering:
+                    at = flat.find(fragment)
+                    while at != -1 and not covered:
+                        if at <= flat_start and flat_end <= at + len(fragment):
+                            covered = True
+                        at = flat.find(fragment, at + 1)
+                    if covered:
+                        break
+                if not covered:
+                    offenders.add(normalize_prose(window))
+    if scanned == 0:
+        fail(
+            "OMEGA-DELTA-0031: no brand-bearing prose was found in the packaged "
+            "binary at all, not even the classified third-party references. The "
+            "string scan broke; a clean package still carries those."
+        )
+    for window in sorted(offenders):
+        fail(
+            f"OMEGA-DELTA-0031: packaged Omega carries unclassified prose: "
+            f"...{window}... The package was built from a tree that still "
+            "presents a competitor as the product, whatever the source scan "
+            "above says about this checkout."
+        )
+
+
 check_info_plist_fragments()
 check_icon_inventory()
 check_embedded_assets()
 check_asset_name_enums()
 check_action_labels()
+check_prose_inventory()
 if APP is not None:
     if not APP.is_dir():
         fail(f"packaged application is missing: {APP}")
@@ -605,6 +1029,7 @@ if APP is not None:
         check_packaged_info_plist(APP)
         check_packaged_icons(APP)
         check_packaged_assets_and_actions(APP)
+        check_packaged_prose(APP)
 
 if failures:
     print("Omega brand gate FAILED:", file=sys.stderr)

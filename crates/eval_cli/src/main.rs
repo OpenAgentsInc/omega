@@ -65,7 +65,7 @@ use crate::headless::AgentCliAppState;
 )]
 struct Args {
     /// Output current environment variables as JSON to stdout.
-    /// Used internally by Zed's shell environment capture.
+    /// Used internally by Omega's shell environment capture.
     #[arg(long, hide = true)]
     printenv: bool,
 
@@ -338,10 +338,10 @@ fn main() {
 
 /// Name of the env var carrying a JSON object to merge into
 /// `language_models.openai_compatible` user settings before model discovery, in
-/// the same shape as Zed's `openai_compatible` settings key (provider id ->
+/// the same shape as Omega's `openai_compatible` settings key (provider id ->
 /// `{ "api_url": ..., "available_models": [...] }`). Lets zed-eval route the
 /// agent itself through an OpenAI-compatible endpoint (e.g. Baseten) that isn't
-/// one of Zed's built-in providers, without hardcoding it into eval-cli.
+/// one of Omega's built-in providers, without hardcoding it into eval-cli.
 const OPENAI_COMPATIBLE_PROVIDERS_ENV: &str = "ZED_OPENAI_COMPATIBLE_PROVIDERS";
 
 fn openai_compatible_providers_override() -> Option<String> {
@@ -363,7 +363,7 @@ fn apply_openai_compatible_providers(providers_json: &str, cx: &mut gpui::App) -
 
 /// Name of the env var carrying a JSON array to merge into
 /// `language_models.anthropic.available_models` user settings before model
-/// discovery, in the same shape as Zed's `anthropic.available_models` settings
+/// discovery, in the same shape as Omega's `anthropic.available_models` settings
 /// key (a list of `{ "name": ..., "max_tokens": ..., ... }` entries). Lets
 /// zed-eval run models that exist on the Anthropic API for the configured
 /// key (e.g. early-access-program models) but aren't returned by the live

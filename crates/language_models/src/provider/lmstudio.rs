@@ -1034,7 +1034,7 @@ impl ConfigurationView {
             .mb_2()
             .child(
                 Label::new(format!(
-                    "You can also set the {API_KEY_ENV_VAR_NAME} environment variable and restart Zed."
+                    "You can also set the {API_KEY_ENV_VAR_NAME} environment variable and restart Omega."
                 ))
                 .size(LabelSize::Small)
                 .color(Color::Muted),

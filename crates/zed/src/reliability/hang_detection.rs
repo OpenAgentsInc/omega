@@ -45,7 +45,7 @@ pub(crate) fn start(client: Arc<Client>, cx: &mut App) {
     cx.on_action(move |_: &HangAction, _| {
         log::warn!(
             "Hanging the foreground for {hang_time:?} by blocking in an action. \
-            Zed will be unresponsive for that time. This should trigger a report in the log",
+            Omega will be unresponsive for that time. This should trigger a report in the log",
         );
         thread::sleep(hang_time + Duration::from_micros(1));
         log::warn!("Hang ended");
@@ -65,7 +65,7 @@ pub(crate) fn start(client: Arc<Client>, cx: &mut App) {
         cx.spawn(async move |_| {
             log::warn!(
                 "Hanging the foreground executor for {hang_time:?} seconds to test \
-                performance monitoring! Zed will be unresponsive for that time. \
+                performance monitoring! Omega will be unresponsive for that time. \
                 This should trigger a report in the log"
             );
             thread::sleep(hang_time + Duration::from_micros(1));

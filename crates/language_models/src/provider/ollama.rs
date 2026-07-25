@@ -877,7 +877,7 @@ impl ConfigurationView {
                             .child(Label::new("ollama run gpt-oss:20b").inline_code(cx)),
                     )
                     .child(
-                        ListBulletItem::new("Click 'Connect' below to start using Ollama in Zed")
+                        ListBulletItem::new("Click 'Connect' below to start using Ollama in Omega")
                             .label_color(Color::Muted),
                     ),
             )
@@ -918,7 +918,7 @@ impl ConfigurationView {
           .mb_2()
           .child(
               Label::new(
-                  format!("You can also set the {API_KEY_ENV_VAR_NAME} environment variable and restart Zed.")
+                  format!("You can also set the {API_KEY_ENV_VAR_NAME} environment variable and restart Omega.")
               )
               .size(LabelSize::Small)
               .color(Color::Muted),

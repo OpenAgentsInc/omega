@@ -598,7 +598,7 @@ impl fmt::Display for SandboxError {
             }
             SandboxError::BwrapSetuidRejected => write!(
                 formatter,
-                "the only available `bwrap` is setuid-root, which Zed refuses to run"
+                "the only available `bwrap` is setuid-root, which Omega refuses to run"
             ),
             SandboxError::SandboxProbeFailed => {
                 write!(
