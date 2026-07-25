@@ -1845,6 +1845,12 @@ pub struct Issue31HostController {
     command_results_v2: BTreeMap<String, (Issue31CommandRecordV2, Issue31CommandRecordV2)>,
     #[serde(default)]
     projected_source_event_ids: BTreeMap<String, BTreeSet<String>>,
+    /// Revocation event ids the owner has explicitly cleared by re-admitting the
+    /// device they name. A revocation that is not listed here permanently blocks
+    /// its device from being challenged or granted again, whatever the runtime
+    /// admission allowlist says.
+    #[serde(default)]
+    cleared_device_revocation_event_ids: BTreeSet<String>,
 }
 
 const MAX_ISSUE31_PAIRING_EVENTS: usize = 4_096;
@@ -1894,6 +1900,7 @@ impl Issue31HostController {
             command_results: BTreeMap::new(),
             command_results_v2: BTreeMap::new(),
             projected_source_event_ids: BTreeMap::new(),
+            cleared_device_revocation_event_ids: BTreeSet::new(),
         })
     }
 
@@ -2059,6 +2066,85 @@ impl Issue31HostController {
         self.processed_pairing_event_ids.contains(event_id)
     }
 
+    /// Every revocation in the durable pairing log that names this device and
+    /// that the owner has not cleared by re-admitting it.
+    ///
+    /// The grant fold is keyed by `grant_ref`, so it can only ever say that one
+    /// grant died. Revocation is a statement about the *device*: without this
+    /// scan a revoked device simply pairs again under a fresh `grant_ref` and
+    /// restores the exact authority the owner just took away. The scan looks at
+    /// every pairing event, not just the grant being folded.
+    pub fn outstanding_device_revocations(&self, device_public_key_hex: &str) -> Vec<String> {
+        self.pairing_events
+            .iter()
+            .filter(|event| {
+                matches!(&event.record, Issue31PairingRecord::GrantRevocation { .. })
+                    && record_device_public_key(&event.record) == device_public_key_hex
+                    && !self
+                        .cleared_device_revocation_event_ids
+                        .contains(&event.event_id)
+            })
+            .map(|event| event.event_id.clone())
+            .collect()
+    }
+
+    pub fn device_admission_is_revoked(&self, device_public_key_hex: &str) -> bool {
+        !self
+            .outstanding_device_revocations(device_public_key_hex)
+            .is_empty()
+    }
+
+    /// Owner-side re-admission: clear the revocations that currently block this
+    /// device so it may pair again.
+    ///
+    /// Only the revocations that exist *now* are cleared, by event id. A later
+    /// revocation is a new event id and is therefore not cleared, so it fails
+    /// closed; and replaying an already-cleared revocation cannot re-block the
+    /// device, because clearance is keyed to the event rather than to a counter.
+    pub fn readmit_device(
+        &mut self,
+        device_public_key_hex: &str,
+    ) -> Result<Vec<String>, Issue31NostrError> {
+        if !valid_hex64(device_public_key_hex) {
+            return Err(Issue31NostrError::Invalid(
+                "Issue 31 device public key is invalid".into(),
+            ));
+        }
+        let outstanding = self.outstanding_device_revocations(device_public_key_hex);
+        if self.cleared_device_revocation_event_ids.len() + outstanding.len()
+            > MAX_ISSUE31_PROCESSED_EVENTS
+        {
+            return Err(Issue31NostrError::Invalid(
+                "Issue 31 cleared revocation bound is exhausted".into(),
+            ));
+        }
+        for event_id in &outstanding {
+            self.cleared_device_revocation_event_ids
+                .insert(event_id.clone());
+        }
+        Ok(outstanding)
+    }
+
+    /// Re-admit the device behind a grant without ever naming its public key.
+    ///
+    /// The owner-facing grant projection deliberately shows only a fingerprint,
+    /// so the owner acts on a `grant_ref` and the host resolves the device.
+    pub fn readmit_device_for_grant(
+        &mut self,
+        grant_ref: &str,
+    ) -> Result<Vec<String>, Issue31NostrError> {
+        let grant = fold_issue31_grant(&self.pairing_events, grant_ref)?.ok_or_else(|| {
+            Issue31NostrError::Invalid("cannot re-admit the device of an unknown grant".into())
+        })?;
+        if grant.status != Issue31GrantStatus::Revoked {
+            return Err(Issue31NostrError::Invalid(
+                "re-admission applies only to a revoked grant".into(),
+            ));
+        }
+        let device_public_key_hex = grant.device_public_key_hex;
+        self.readmit_device(&device_public_key_hex)
+    }
+
     pub fn validate_persisted_state(&self) -> Result<(), Issue31NostrError> {
         Self::new(self.configuration.clone())?;
         if self.pairing_events.len() > MAX_ISSUE31_PAIRING_EVENTS
@@ -2066,6 +2152,7 @@ impl Issue31HostController {
             || self.processed_command_event_ids.len() > MAX_ISSUE31_PROCESSED_EVENTS
             || self.command_results.len() > MAX_ISSUE31_COMMAND_RESULTS
             || self.command_results_v2.len() > MAX_ISSUE31_COMMAND_RESULTS
+            || self.cleared_device_revocation_event_ids.len() > MAX_ISSUE31_PROCESSED_EVENTS
             || self
                 .projected_source_event_ids
                 .values()
@@ -2090,11 +2177,25 @@ impl Issue31HostController {
             .processed_pairing_event_ids
             .iter()
             .chain(&self.processed_command_event_ids)
+            .chain(&self.cleared_device_revocation_event_ids)
             .any(|event_id| !valid_hex64(event_id))
         {
             return Err(Issue31NostrError::Invalid(
                 "persisted processed event id is invalid".into(),
             ));
+        }
+        // A cleared revocation must name a revocation that actually exists in the
+        // durable log. Otherwise persisted state could pre-clear a revocation the
+        // owner has not yet issued and silently unblock a device on arrival.
+        for event_id in &self.cleared_device_revocation_event_ids {
+            if !self.pairing_events.iter().any(|event| {
+                event.event_id == *event_id
+                    && matches!(&event.record, Issue31PairingRecord::GrantRevocation { .. })
+            }) {
+                return Err(Issue31NostrError::Invalid(
+                    "persisted device re-admission clears an unknown revocation".into(),
+                ));
+            }
         }
         for (idempotency_ref, (intent, result)) in &self.command_results {
             validate_ref_value(idempotency_ref, "persisted idempotency")?;
@@ -2220,6 +2321,16 @@ impl Issue31HostController {
                 .is_none_or(|approved| requested_scopes.iter().all(|scope| !approved.contains(scope)))
         ) {
             return Ok(None);
+        }
+        if matches!(
+            &event.record,
+            Issue31PairingRecord::PairingRequest { device_public_key_hex, .. }
+                | Issue31PairingRecord::PairingResponse { device_public_key_hex, .. }
+                if self.device_admission_is_revoked(device_public_key_hex)
+        ) {
+            return Err(Issue31NostrError::Invalid(
+                "device admission was revoked; owner re-admission is required".into(),
+            ));
         }
         let outbound = match &event.record {
             Issue31PairingRecord::PairingRequest {
@@ -3462,6 +3573,187 @@ mod tests {
             .expect("pairing object")
             .remove("sarahPublicKeyHex");
         assert!(Issue31PairingRecord::decode(pairing.to_string().as_bytes()).is_err());
+    }
+
+    /// Drive a full pairing handshake for `device_public_key_hex` and return the
+    /// grant the host issued, or `Err` if the host refused at any step.
+    fn attempt_pairing(
+        controller: &mut Issue31HostController,
+        configuration: &Issue31HostConfiguration,
+        device_public_key_hex: &str,
+        seed: &str,
+        now: u64,
+    ) -> Result<Option<Issue31PairingRecord>, Issue31NostrError> {
+        let request_event_id = format!("{:x}", Sha256::digest(format!("{seed}.request")));
+        let challenge_event_id = format!("{:x}", Sha256::digest(format!("{seed}.challenge")));
+        let response_event_id = format!("{:x}", Sha256::digest(format!("{seed}.response")));
+        let challenge = controller.handle_pairing_event(
+            Issue31PairingEvent {
+                event_id: request_event_id,
+                record: Issue31PairingRecord::PairingRequest {
+                    schema: ISSUE31_PAIRING_SCHEMA.into(),
+                    host_ref: configuration.host_ref.clone(),
+                    host_public_key_hex: configuration.host_public_key_hex.clone(),
+                    device_public_key_hex: device_public_key_hex.to_string(),
+                    issued_at: now,
+                    pairing_request_ref: format!("pairing_request.{seed}"),
+                    requested_scopes: vec![Issue31PairingScope::ControlFullAuto],
+                    expires_at: now.saturating_add(600),
+                },
+            },
+            now,
+        )?;
+        let Some(challenge) = challenge else {
+            return Ok(None);
+        };
+        let challenge_value = match &challenge {
+            Issue31PairingRecord::PairingChallenge { challenge, .. } => challenge.clone(),
+            _ => panic!("expected a pairing challenge"),
+        };
+        controller.record_emitted_pairing(challenge_event_id.clone(), challenge)?;
+        controller.handle_pairing_event(
+            Issue31PairingEvent {
+                event_id: response_event_id,
+                record: Issue31PairingRecord::PairingResponse {
+                    schema: ISSUE31_PAIRING_SCHEMA.into(),
+                    host_ref: configuration.host_ref.clone(),
+                    host_public_key_hex: configuration.host_public_key_hex.clone(),
+                    device_public_key_hex: device_public_key_hex.to_string(),
+                    issued_at: now,
+                    pairing_response_ref: format!("pairing_response.{seed}"),
+                    pairing_challenge_event_id: challenge_event_id,
+                    challenge: challenge_value,
+                    expires_at: now.saturating_add(600),
+                },
+            },
+            now,
+        )
+    }
+
+    /// A revoked device must not be able to restore its authority by pairing
+    /// again. The grant fold is keyed by `grant_ref`, so a fresh handshake would
+    /// otherwise mint a brand-new `grant_ref` carrying the same scopes the owner
+    /// just took away, with no owner action in between.
+    #[test]
+    fn revoked_device_cannot_repair_without_owner_readmission() {
+        let (configuration, mut controller, device_public_key_hex, revoked_grant_ref) =
+            restart_fixture();
+        assert!(controller.device_admission_is_revoked(&device_public_key_hex));
+        let refusal = attempt_pairing(
+            &mut controller,
+            &configuration,
+            &device_public_key_hex,
+            "revoked.repair",
+            200,
+        )
+        .expect_err("a revoked device must be refused a pairing challenge");
+        assert!(matches!(refusal, Issue31NostrError::Invalid(message) if message
+            .contains("device admission was revoked")));
+        // The only grant on record is still the revoked one.
+        let projections = controller.grant_projections(200).expect("grant list");
+        assert_eq!(projections.len(), 1);
+        assert_eq!(projections[0].grant_ref, revoked_grant_ref);
+        assert_eq!(projections[0].status, "revoked");
+    }
+
+    /// The runtime admission allowlist is not persisted — it is re-applied from
+    /// configuration on every start. So an in-memory block would evaporate on
+    /// restart. The block has to live in the durable pairing log.
+    #[test]
+    fn revocation_block_survives_restart_and_allowlist_rebind() {
+        let (configuration, controller, device_public_key_hex, _) = restart_fixture();
+        let encoded = serde_json::to_vec(&controller).expect("serialize controller");
+        let mut reloaded: Issue31HostController =
+            serde_json::from_slice(&encoded).expect("deserialize controller");
+        reloaded.validate_persisted_state().expect("persisted state");
+        // Exactly what start-up does: re-apply the owner's configured allowlist.
+        reloaded
+            .set_admitted_device_policy(
+                vec![device_public_key_hex.clone()],
+                vec![Issue31PairingScope::ControlFullAuto],
+            )
+            .expect("rebind runtime policy");
+        assert!(reloaded.device_admission_is_revoked(&device_public_key_hex));
+        attempt_pairing(
+            &mut reloaded,
+            &configuration,
+            &device_public_key_hex,
+            "restart.repair",
+            200,
+        )
+        .expect_err("the durable revocation must outlive a restart");
+    }
+
+    /// Re-admission is an explicit owner act, and it clears the revocations that
+    /// exist at that moment by event id. Replaying a cleared revocation must not
+    /// re-block the device, and a later revocation must block it again.
+    #[test]
+    fn owner_readmission_clears_only_the_revocations_it_saw() {
+        let (configuration, mut controller, device_public_key_hex, revoked_grant_ref) =
+            restart_fixture();
+        let cleared = controller
+            .readmit_device(&device_public_key_hex)
+            .expect("readmit");
+        assert_eq!(cleared.len(), 1);
+        assert!(!controller.device_admission_is_revoked(&device_public_key_hex));
+        let grant = attempt_pairing(
+            &mut controller,
+            &configuration,
+            &device_public_key_hex,
+            "readmitted.repair",
+            200,
+        )
+        .expect("re-admitted device pairs")
+        .expect("re-admitted device receives a grant");
+        let Issue31PairingRecord::ScopedGrant {
+            grant_ref: new_grant_ref,
+            ..
+        } = &grant
+        else {
+            panic!("expected a scoped grant");
+        };
+        assert_ne!(new_grant_ref, &revoked_grant_ref);
+        let new_grant_ref = new_grant_ref.clone();
+        controller
+            .record_emitted_pairing(format!("{:x}", Sha256::digest("readmitted.grant")), grant)
+            .expect("record grant");
+        // Replaying the already-cleared revocation cannot re-block the device.
+        assert!(!controller.device_admission_is_revoked(&device_public_key_hex));
+        // A *new* revocation is a new event id, so it is not cleared and blocks again.
+        let revocation = controller
+            .revoke_grant(&new_grant_ref, 300, Some("reason.omega.owner_revoked".into()))
+            .expect("revoke the new grant");
+        controller
+            .record_emitted_pairing(
+                format!("{:x}", Sha256::digest("readmitted.revocation")),
+                revocation,
+            )
+            .expect("record revocation");
+        assert!(controller.device_admission_is_revoked(&device_public_key_hex));
+        attempt_pairing(
+            &mut controller,
+            &configuration,
+            &device_public_key_hex,
+            "second.repair",
+            400,
+        )
+        .expect_err("a second revocation must fail closed again");
+    }
+
+    /// Persisted state must not be able to pre-clear a revocation that does not
+    /// exist, which would silently unblock a device the moment its revocation
+    /// arrived from the relay.
+    #[test]
+    fn persisted_readmission_must_name_a_real_revocation() {
+        let (_, controller, _, _) = restart_fixture();
+        let mut encoded: serde_json::Value =
+            serde_json::from_slice(&serde_json::to_vec(&controller).expect("serialize"))
+                .expect("controller json");
+        encoded["clearedDeviceRevocationEventIds"] =
+            serde_json::json!([serde_json::Value::String("9".repeat(64))]);
+        let forged: Issue31HostController =
+            serde_json::from_value(encoded).expect("deserialize forged controller");
+        assert!(forged.validate_persisted_state().is_err());
     }
 
     #[test]

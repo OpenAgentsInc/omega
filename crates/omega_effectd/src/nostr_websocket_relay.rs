@@ -478,6 +478,26 @@ impl WebSocketRelayAdapter {
         }
     }
 
+    /// The order in which `publish` walks the configured relays.
+    ///
+    /// Normally left to right. But `publish` is the one operation that hands
+    /// `IdentityRequired` back to its caller, and the caller answers the NIP-42
+    /// challenge on whichever relay raised it and then retries exactly once.
+    /// Restarting that retry at relay 0 would tear down the socket it just
+    /// authenticated in order to re-attempt a relay that is down — and since a
+    /// reconnect earns a fresh challenge, the retry would raise
+    /// `IdentityRequired` again and the publish could never complete. A healthy
+    /// authenticating relay listed after a dead one would be unreachable.
+    ///
+    /// So while an authenticated session is open, that relay is tried first and
+    /// the rest follow. Every relay is still attempted; only the order moves.
+    fn publish_relay_order(&self) -> Vec<usize> {
+        publish_relay_order(
+            self.relay_urls.len(),
+            (self.authenticated && self.socket.is_some()).then_some(self.active_relay_index),
+        )
+    }
+
     fn query_once_until(
         &mut self,
         conversation_ref: &str,
@@ -1022,7 +1042,7 @@ impl RelayTransport for WebSocketRelayAdapter {
     fn publish(&mut self, event: &Event) -> Result<(), SarahConversationError> {
         let event_id = event.id.to_hex();
         let mut last_error = None;
-        for relay_index in 0..self.relay_urls.len() {
+        for relay_index in self.publish_relay_order() {
             let relay_url = self.relay_urls[relay_index].clone();
             if self
                 .publish_acknowledgements
@@ -1207,6 +1227,19 @@ impl RelayTransport for WebSocketRelayAdapter {
     fn requires_private_messages(&self) -> bool {
         true
     }
+}
+
+/// Order the relays a publish should attempt, given an open authenticated
+/// session on `resume_at` if there is one.
+///
+/// Every relay is always attempted exactly once; only the order changes.
+fn publish_relay_order(relay_count: usize, resume_at: Option<usize>) -> Vec<usize> {
+    let Some(resume_at) = resume_at.filter(|index| *index < relay_count) else {
+        return (0..relay_count).collect();
+    };
+    std::iter::once(resume_at)
+        .chain((0..relay_count).filter(move |index| *index != resume_at))
+        .collect()
 }
 
 fn normalize_relay_url(relay_url: &str) -> Result<String, SarahConversationError> {
@@ -1626,6 +1659,314 @@ mod tests {
             &record.id.to_hex()[..16],
             url
         );
+    }
+
+    /// Connect, authenticate if the relay asks, and hand back a ready adapter.
+    ///
+    /// Shared by the live proofs so each one exercises the identical NIP-42
+    /// path the production client uses, rather than a per-test approximation.
+    #[cfg(test)]
+    fn live_authenticated_adapter(relay_urls: Vec<String>, keys: &Keys) -> WebSocketRelayAdapter {
+        let mut relay = WebSocketRelayAdapter::new_for_keys(relay_urls, keys.clone())
+            .expect("adapter for live relay");
+        relay.connect().expect("connect to live relay");
+        relay
+    }
+
+    /// Publish through the real adapter, meeting the NIP-42 challenge lazily
+    /// exactly as `SarahConversationClient::publish_with_auth` does.
+    #[cfg(test)]
+    fn live_publish(
+        relay: &mut WebSocketRelayAdapter,
+        auth_url: &str,
+        keys: &Keys,
+        record: &Event,
+    ) -> Result<(), SarahConversationError> {
+        match relay.publish(record) {
+            Err(SarahConversationError::IdentityRequired) => {
+                let challenge = relay
+                    .auth_challenge()
+                    .expect("relay must expose a challenge after refusing the publish");
+                let auth_event = EventBuilder::new(Kind::Custom(22242), "")
+                    .tag(nostr::Tag::parse(["relay", auth_url]).expect("relay tag"))
+                    .tag(
+                        nostr::Tag::parse(["challenge", challenge.challenge.as_str()])
+                            .expect("challenge tag"),
+                    )
+                    .sign_with_keys(keys)
+                    .expect("signed auth event");
+                relay
+                    .authenticate(&auth_event)
+                    .expect("NIP-42 authenticate");
+                relay.publish(record)
+            }
+            other => other,
+        }
+    }
+
+    #[cfg(test)]
+    fn live_turn_record(keys: &Keys, conversation_ref: &str, body: &str, created_at: u64) -> Event {
+        EventBuilder::new(Kind::Custom(SARAH_TURN_RECORD_KIND), body)
+            .tag(nostr::Tag::parse(["conversation", conversation_ref]).expect("conversation tag"))
+            .custom_created_at(nostr::Timestamp::from(created_at))
+            .sign_with_keys(keys)
+            .expect("signed turn record")
+    }
+
+    #[cfg(test)]
+    fn live_relay_env() -> Option<(String, String)> {
+        let url = std::env::var("OMEGA_LIVE_RELAY_URL").ok()?;
+        let auth_url = std::env::var("OMEGA_LIVE_RELAY_AUTH_URL").unwrap_or_else(|_| url.clone());
+        Some((url, auth_url))
+    }
+
+    /// Exit: "Confirmed records remain readable when the application service is
+    /// unavailable and the relays are reachable."
+    ///
+    /// The publishing adapter is dropped outright — the strongest available
+    /// stand-in for the application service being gone — and a second adapter
+    /// with no cursors, no cache and no shared state reads the record back from
+    /// relay storage alone.
+    #[test]
+    #[ignore = "requires a live relay; set OMEGA_LIVE_RELAY_URL"]
+    fn live_relay_confirmed_records_outlive_the_application_service() {
+        let Some((url, auth_url)) = live_relay_env() else {
+            eprintln!("OMEGA_LIVE_RELAY_URL unset; skipping");
+            return;
+        };
+        let keys = Keys::generate();
+        let conversation_ref = format!("sarah.live.survive.{}", &keys.public_key().to_hex()[..16]);
+        let record = live_turn_record(
+            &keys,
+            &conversation_ref,
+            "readable without the application service",
+            nostr::Timestamp::now().as_secs(),
+        );
+        {
+            let mut publisher = live_authenticated_adapter(vec![url.clone()], &keys);
+            live_publish(&mut publisher, &auth_url, &keys, &record).expect("publish");
+            assert!(
+                publisher.publication_complete(&record.id.to_hex()),
+                "the relay must acknowledge before we call anything confirmed"
+            );
+        } // The application service disappears here, taking all of its state.
+
+        let mut reader = live_authenticated_adapter(vec![url.clone()], &keys);
+        let page = match reader.query(&conversation_ref, None, 10) {
+            Err(SarahConversationError::IdentityRequired) => {
+                let challenge = reader.auth_challenge().expect("challenge");
+                let auth_event = EventBuilder::new(Kind::Custom(22242), "")
+                    .tag(nostr::Tag::parse(["relay", auth_url.as_str()]).expect("relay tag"))
+                    .tag(
+                        nostr::Tag::parse(["challenge", challenge.challenge.as_str()])
+                            .expect("challenge tag"),
+                    )
+                    .sign_with_keys(&keys)
+                    .expect("signed auth event");
+                reader.authenticate(&auth_event).expect("authenticate");
+                reader.query(&conversation_ref, None, 10).expect("query")
+            }
+            other => other.expect("query"),
+        };
+        assert!(
+            page.events
+                .iter()
+                .any(|event| event.event_id == record.id.to_hex()),
+            "a confirmed record must be readable from a relay with no application service"
+        );
+        eprintln!(
+            "live relay OK: {} survived the application service and read back from {url}",
+            &record.id.to_hex()[..16]
+        );
+    }
+
+    /// Exit: "Relay outage and failover do not create false completion."
+    ///
+    /// Two halves. With one dead relay and one live relay the publish must
+    /// succeed and be credited *only* to the relay that actually acknowledged.
+    /// With every relay dead the publish must fail and completion must stay
+    /// false — an unreachable relay can never be read as a completed write.
+    #[test]
+    #[ignore = "requires a live relay; set OMEGA_LIVE_RELAY_URL"]
+    fn live_relay_outage_and_failover_never_report_false_completion() {
+        let Some((url, auth_url)) = live_relay_env() else {
+            eprintln!("OMEGA_LIVE_RELAY_URL unset; skipping");
+            return;
+        };
+        // Port 9 is discard: the connection is refused rather than hanging.
+        let dead_url = "ws://127.0.0.1:9".to_string();
+        let keys = Keys::generate();
+        let conversation_ref = format!("sarah.live.failover.{}", &keys.public_key().to_hex()[..16]);
+
+        let record = live_turn_record(
+            &keys,
+            &conversation_ref,
+            "failover",
+            nostr::Timestamp::now().as_secs(),
+        );
+        let mut failover =
+            live_authenticated_adapter(vec![dead_url.clone(), url.clone()], &keys);
+        live_publish(&mut failover, &auth_url, &keys, &record).expect("publish must fail over");
+        let event_id = record.id.to_hex();
+        let acknowledged = failover.acknowledged_relays(&event_id);
+        assert!(
+            acknowledged.contains(&url),
+            "the live relay acknowledged and must be credited"
+        );
+        assert!(
+            !acknowledged.contains(&dead_url),
+            "an unreachable relay must never be credited with an acknowledgement"
+        );
+        // Completion means every configured relay acknowledged. One relay being
+        // down is exactly the case where a weaker rule would manufacture a false
+        // completion, so partial success must not read as complete, and the gap
+        // must be visible.
+        assert!(
+            !failover.publication_complete(&event_id),
+            "a publish that reached only some relays must not report completion"
+        );
+        assert_eq!(failover.gap_state(), GapState::Possible);
+
+        // Total outage: no relay can acknowledge, so nothing may be complete.
+        let outage_record = live_turn_record(
+            &keys,
+            &conversation_ref,
+            "total outage",
+            nostr::Timestamp::now().as_secs(),
+        );
+        let mut outage = WebSocketRelayAdapter::new_for_keys(vec![dead_url], keys.clone())
+            .expect("adapter for a dead relay");
+        let _ = outage.connect();
+        assert!(
+            outage.publish(&outage_record).is_err(),
+            "a publish to an unreachable relay must fail rather than succeed silently"
+        );
+        assert!(
+            !outage.publication_complete(&outage_record.id.to_hex()),
+            "a total relay outage must never report a completed publication"
+        );
+        assert!(outage.acknowledged_relays(&outage_record.id.to_hex()).is_empty());
+        eprintln!("live relay OK: failover credited only {url}; total outage stayed incomplete");
+    }
+
+    /// Exit: "Duplicate, reordered, missing, and stale events converge or show
+    /// an exact gap."
+    ///
+    /// Against the real relay: the same signed event published twice converges
+    /// to one record; events written newest-first still read back in a stable
+    /// order; and a cursor the relay has never seen is reported as a confirmed
+    /// gap rather than silently treated as an empty tail.
+    #[test]
+    #[ignore = "requires a live relay; set OMEGA_LIVE_RELAY_URL"]
+    fn live_relay_duplicate_reorder_and_gap_converge_or_report_exactly() {
+        let Some((url, auth_url)) = live_relay_env() else {
+            eprintln!("OMEGA_LIVE_RELAY_URL unset; skipping");
+            return;
+        };
+        let keys = Keys::generate();
+        let conversation_ref = format!("sarah.live.converge.{}", &keys.public_key().to_hex()[..16]);
+        let base = nostr::Timestamp::now().as_secs();
+        let mut relay = live_authenticated_adapter(vec![url.clone()], &keys);
+
+        // Written newest-first, so a naive reader would surface them reversed.
+        let newest = live_turn_record(&keys, &conversation_ref, "third", base + 2);
+        let middle = live_turn_record(&keys, &conversation_ref, "second", base + 1);
+        let oldest = live_turn_record(&keys, &conversation_ref, "first", base);
+        for record in [&newest, &middle, &oldest] {
+            live_publish(&mut relay, &auth_url, &keys, record).expect("publish");
+        }
+        // The duplicate: the identical signed event, published a second time.
+        // A relay may answer OK or reject it as a duplicate; neither may create
+        // a second record.
+        let _ = live_publish(&mut relay, &auth_url, &keys, &newest);
+
+        let page = relay
+            .query(&conversation_ref, None, 32)
+            .expect("query the live relay");
+        let ids = page
+            .events
+            .iter()
+            .map(|event| event.event_id.clone())
+            .collect::<Vec<_>>();
+        let unique = ids.iter().collect::<HashSet<_>>();
+        assert_eq!(
+            ids.len(),
+            unique.len(),
+            "a republished event must converge to a single record"
+        );
+        let ordering = page
+            .events
+            .iter()
+            .map(|event| event.created_at)
+            .collect::<Vec<_>>();
+        let mut sorted = ordering.clone();
+        sorted.sort_unstable();
+        assert_eq!(
+            ordering, sorted,
+            "out-of-order writes must read back in a deterministic order"
+        );
+        assert_eq!(page.gap_state, GapState::None);
+
+        // A cursor the relay has never issued is an exact, reported gap.
+        let missing = relay
+            .query(&conversation_ref, Some("cursor.999999.deadbeef"), 32)
+            .expect("query with an unknown cursor");
+        assert_eq!(
+            missing.gap_state,
+            GapState::Confirmed,
+            "an unknown cursor must be reported as an exact gap, not an empty tail"
+        );
+        eprintln!(
+            "live relay OK: {} records converged, ordered, and the unknown cursor reported an exact gap on {url}",
+            page.events.len()
+        );
+    }
+
+    /// A publish retry must resume on the relay it just authenticated.
+    ///
+    /// Restarting at relay 0 after answering a NIP-42 challenge on relay 1 drops
+    /// the authenticated session to re-attempt a relay that is down. The
+    /// reconnect that follows earns a fresh challenge, so the caller's single
+    /// retry raises `IdentityRequired` again and the publish never completes.
+    /// This is the deterministic form of a failure first caught against the live
+    /// relay with a dead relay ordered first.
+    #[test]
+    fn an_authenticated_publish_retry_resumes_on_the_relay_it_authenticated() {
+        // No authenticated session: plain left to right.
+        assert_eq!(publish_relay_order(3, None), vec![0, 1, 2]);
+        // Authenticated on relay 1 — the case where relay 0 is down and relay 1
+        // issued the NIP-42 challenge. Relay 1 is retried first, and relay 0 and
+        // relay 2 are still attempted.
+        assert_eq!(publish_relay_order(3, Some(1)), vec![1, 0, 2]);
+        // Every relay appears exactly once, whatever the resume point.
+        for resume_at in 0..3 {
+            let order = publish_relay_order(3, Some(resume_at));
+            assert_eq!(order.len(), 3);
+            assert_eq!(order.iter().collect::<HashSet<_>>().len(), 3);
+            assert_eq!(order[0], resume_at);
+        }
+        // An out-of-range resume point cannot drop or duplicate a relay.
+        assert_eq!(publish_relay_order(2, Some(7)), vec![0, 1]);
+        assert!(publish_relay_order(0, Some(0)).is_empty());
+    }
+
+    /// The adapter's own accessor must agree with the pure ordering rule: an
+    /// authenticated flag with no open socket is not an authenticated session.
+    #[test]
+    fn a_closed_socket_is_not_an_authenticated_session() {
+        let keys = Keys::generate();
+        let mut relay = WebSocketRelayAdapter::new_for_keys(
+            vec![
+                "wss://down.example.com".to_string(),
+                "wss://live.example.com".to_string(),
+            ],
+            keys,
+        )
+        .expect("relay");
+        relay.active_relay_index = 1;
+        relay.authenticated = true;
+        assert!(relay.socket.is_none());
+        assert_eq!(relay.publish_relay_order(), vec![0, 1]);
     }
 
     #[test]

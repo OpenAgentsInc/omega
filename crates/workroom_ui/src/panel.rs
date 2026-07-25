@@ -1041,6 +1041,46 @@ impl SarahWorkroomPanel {
         .detach();
     }
 
+    fn readmit_device(&mut self, grant_ref: String, cx: &mut Context<Self>) {
+        if self.grant_busy.is_some() {
+            return;
+        }
+        self.ensure_supervisor(cx);
+        let Some(supervisor) = self.supervisor.clone() else {
+            self.status = "omega-effectd unavailable; device was not re-admitted.".into();
+            cx.notify();
+            return;
+        };
+        let idempotency_ref = format!("idempotency.workroom.device_readmit.{}", Uuid::new_v4());
+        self.grant_busy = Some(grant_ref.clone());
+        self.status = format!("Re-admitting the device behind {grant_ref}…").into();
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let result = {
+                let mut guard = supervisor.lock().await;
+                match guard.ensure_started().await {
+                    Ok(()) => guard.sarah_readmit_device(&grant_ref, &idempotency_ref).await,
+                    Err(error) => Err(omega_effectd::SupervisorError::Anyhow(error)),
+                }
+            };
+            this.update(cx, |panel, cx| {
+                panel.grant_busy = None;
+                panel.status = match result {
+                    // Re-admission restores nothing by itself. The device still
+                    // has to pair again, so the status must not read as access.
+                    Ok(_) => "Device re-admitted. It must pair again before it has any access."
+                        .to_string()
+                        .into(),
+                    Err(error) => format!("Device re-admission failed: {error}").into(),
+                };
+                panel.refresh_from_effectd(cx);
+                cx.notify();
+            })
+            .log_err();
+        })
+        .detach();
+    }
+
     fn interrupt_turn(&mut self, cx: &mut Context<Self>) {
         if self.interrupting {
             return;
@@ -1583,6 +1623,7 @@ fn device_grants_body(
         .children(grants.iter().cloned().enumerate().map(|(index, grant)| {
             let renew_grant = grant.clone();
             let revoke_grant_ref = grant.grant_ref.clone();
+            let readmit_grant_ref = grant.grant_ref.clone();
             let busy = busy_grant_ref.is_some();
             let active = grant.status == "active";
             let revoked = grant.status == "revoked";
@@ -1622,6 +1663,14 @@ fn device_grants_body(
                                 .disabled(busy || revoked)
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     this.revoke_device_grant(revoke_grant_ref.clone(), cx);
+                                })),
+                        )
+                        .child(
+                            Button::new(("readmit-device", index), "Re-admit device")
+                                .style(ButtonStyle::Subtle)
+                                .disabled(busy || !revoked)
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.readmit_device(readmit_grant_ref.clone(), cx);
                                 })),
                         ),
                 )

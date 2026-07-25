@@ -512,6 +512,29 @@ impl OmegaEffectdSupervisor {
         .await
     }
 
+    /// Re-admit the device behind a revoked grant so it may pair again.
+    ///
+    /// Revocation fails closed for the device, so this is the owner's only path
+    /// back. It grants nothing on its own — the device must still complete a
+    /// fresh signed pairing handshake.
+    pub async fn sarah_readmit_device(
+        &mut self,
+        grant_ref: &str,
+        idempotency_ref: &str,
+    ) -> Result<Value, SupervisorError> {
+        let generation = self.generation();
+        self.request(
+            "sarah_readmit_device",
+            Some(json!({
+                "grantRef": grant_ref,
+                "idempotencyRef": idempotency_ref,
+                "expectedGeneration": generation,
+            })),
+            generation,
+        )
+        .await
+    }
+
     async fn mutate_run(&mut self, method: &str, run_ref: &str) -> Result<Value, SupervisorError> {
         let result = self
             .request(

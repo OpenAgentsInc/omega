@@ -57,6 +57,10 @@ pub const SARAH_METHOD_INTERRUPT_TURN: &str = "sarah_interrupt_turn";
 pub const SARAH_METHOD_DEVICE_GRANTS: &str = "sarah_device_grants";
 pub const SARAH_METHOD_RENEW_DEVICE_GRANT: &str = "sarah_renew_device_grant";
 pub const SARAH_METHOD_REVOKE_DEVICE_GRANT: &str = "sarah_revoke_device_grant";
+/// Owner re-admission of a device whose grant was revoked. Revocation fails
+/// closed for the device, not just the grant, so without this the owner has no
+/// way to let a device back in.
+pub const SARAH_METHOD_READMIT_DEVICE: &str = "sarah_readmit_device";
 pub const SARAH_EVENT_ROOM_EVENT: &str = "sarah_room_event";
 pub const SARAH_EVENT_ROOM_STATE: &str = "sarah_room_state";
 
@@ -69,6 +73,7 @@ pub const SARAH_FRAMED_METHODS: &[&str] = &[
     SARAH_METHOD_DEVICE_GRANTS,
     SARAH_METHOD_RENEW_DEVICE_GRANT,
     SARAH_METHOD_REVOKE_DEVICE_GRANT,
+    SARAH_METHOD_READMIT_DEVICE,
 ];
 
 /// NIP-AO ephemeral control kind used for interrupt / cancel_turn.
@@ -1392,6 +1397,24 @@ impl SarahConversationClient {
                 }
                 self.revoke_issue31_grant(grant_ref, reason_ref, idempotency_ref, fingerprint)
             }
+            SARAH_METHOD_READMIT_DEVICE => {
+                let (idempotency_ref, expected_generation) = command_binding(params, generation)?;
+                self.ensure_generation(expected_generation)?;
+                let grant_ref = params
+                    .and_then(|value| value.get("grantRef"))
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| {
+                        SarahConversationError::InvalidRequest(
+                            "sarah_readmit_device requires grantRef".into(),
+                        )
+                    })?;
+                let fingerprint = command_fingerprint(method, params)?;
+                if let Some(cached) = self.cached_command(&idempotency_ref, &fingerprint)? {
+                    self.retry_durable_outbox()?;
+                    return Ok(cached);
+                }
+                self.readmit_issue31_device(grant_ref, idempotency_ref, fingerprint)
+            }
             _ => Err(SarahConversationError::InvalidRequest(format!(
                 "unknown Sarah method {method}"
             ))),
@@ -1528,6 +1551,50 @@ impl SarahConversationClient {
             Ok(response)
         })();
         self.issue31_host = Some(controller);
+        let persistence = self.persist_issue31_host_state();
+        finish_durable_operation(result, persistence)
+    }
+
+    /// Clear the revocations blocking the device behind `grant_ref`.
+    ///
+    /// This publishes nothing. Re-admission is host-local owner policy, not a
+    /// record other peers are entitled to act on: the device still has to run a
+    /// fresh, signed pairing handshake to obtain a new grant, and that grant is
+    /// the only thing that carries authority.
+    fn readmit_issue31_device(
+        &mut self,
+        grant_ref: &str,
+        idempotency_ref: String,
+        fingerprint: String,
+    ) -> Result<Value, SarahConversationError> {
+        self.ensure_connected()?;
+        self.ensure_command_result_capacity(&idempotency_ref)?;
+        let controller = self.issue31_host.take().ok_or_else(|| {
+            SarahConversationError::InvalidRequest("Issue 31 host is not configured".into())
+        })?;
+        // Mutate a candidate so a refused or unpersistable re-admission cannot
+        // leave a cleared revocation behind in the live controller.
+        let mut candidate = controller.clone();
+        let result = (|| {
+            let cleared = candidate
+                .readmit_device_for_grant(grant_ref)
+                .map_err(issue31_error)?;
+            let response = json!({
+                "accepted": true,
+                "grantRef": grant_ref,
+                "clearedRevocations": cleared.len(),
+            });
+            self.command_results.insert(
+                idempotency_ref.clone(),
+                (fingerprint.clone(), response.clone()),
+            );
+            if let Err(error) = self.persist_issue31_host_state_with_controller(&candidate) {
+                self.command_results.remove(&idempotency_ref);
+                return Err(error);
+            }
+            Ok(response)
+        })();
+        self.issue31_host = Some(if result.is_ok() { candidate } else { controller });
         let persistence = self.persist_issue31_host_state();
         finish_durable_operation(result, persistence)
     }
@@ -4010,6 +4077,7 @@ mod tests {
                 "sarah_device_grants",
                 "sarah_renew_device_grant",
                 "sarah_revoke_device_grant",
+                "sarah_readmit_device",
             ]
         );
         assert_eq!(SARAH_EVENT_ROOM_EVENT, "sarah_room_event");
@@ -4426,6 +4494,7 @@ mod tests {
                 SARAH_METHOD_DEVICE_GRANTS
                     | SARAH_METHOD_RENEW_DEVICE_GRANT
                     | SARAH_METHOD_REVOKE_DEVICE_GRANT
+                    | SARAH_METHOD_READMIT_DEVICE
             ) {
                 continue;
             }
