@@ -63,6 +63,32 @@ grant binding matches the current unexpired host-signed discovery. The host key
 remains pairing and structured-command authority; the Sarah binding does not
 turn Sarah into host/controller authority.
 
+Discovery v2 additionally binds the exact `sarah.<24 hex>` conversation and
+advertises both command v1 and command v2. Omega publishes v2 by default while
+continuing to decode persisted v1 discovery and commands. A persisted v1 host
+state is migrated by binding the configured conversation and replacing its
+announcement with a newly signed v2 record; grant lineage and revocation
+history are preserved.
+
+Command v2 carries typed, bounded arguments for Sarah send and interrupt,
+NIP-RS read-frontier advance, and NIP-ER reminder create/change/complete/cancel.
+Its `accepted` result means only that Omega admitted and handled the command;
+target completion remains a separate source record. Send and interrupt use the
+real Sarah publication path. Read-state writes merge the grow-only max register
+before publishing an owner-authored, NIP-44-encrypted kind `30078` record.
+Reminder lifecycle writes publish owner-authored, NIP-44-encrypted replaceable
+kind `30300` records. Relay acknowledgement is never rewritten as target
+completion.
+
+For every active `observe_issue31` grant, Omega projects each admitted owner or
+Sarah source record into an `openagents.omega.issue31.owner_projection.v1`
+record encrypted to that device. The projection binds the source event ID,
+exact author, kind, creation time, role, grant, and generation. Omega decrypts
+NIP-AE, NIP-RS, NIP-ER, turn, and authority records only inside identity
+custody, then re-encrypts the bounded projection to the device; neither owner
+nor Sarah secret keys are exportable. Projection replay state is bounded and
+durable, so restart and relay replay cannot duplicate or rebind a source.
+
 Host subscriptions and local admission include NIP-29 group chat kind `9` and
 the NIP-LBR request/result/feedback lifecycle kinds `5934`, `6934`, and `7000`.
 They are never admitted merely because a relay returned them: signatures and
@@ -171,13 +197,12 @@ on, continues with later records, and advances the control cursor only through
 the scanned page. Transport, signature, custody, and durable-write failures
 still fail the whole synchronization.
 
-Remote action intents do not currently dispatch into a generation-fenced real
-Full Auto or agent controller. Omega therefore returns the typed terminal
-`unavailable` result with `reason.omega.controller_not_bound` and leaves local
-run state untouched. Neither a relay acknowledgement nor a host-side display
-mutation is reported as completed/stopped execution. A later controller
-integration may change this only after observing the real idempotent controller
-outcome.
+Legacy v1 Full Auto, provider-handoff, and community action intents do not yet
+dispatch into a generation-fenced real controller. Omega returns typed
+`unavailable` with `reason.omega.controller_not_bound` and leaves local state
+untouched. Command-v2 Sarah and owner-state actions use their real Nostr paths,
+but `accepted` is deliberately non-terminal. Neither a relay acknowledgement
+nor a host-side display mutation is reported as completed/stopped execution.
 
 Pairing and command intake uses the same durability order. Omega applies an
 inbound record to a cloned controller, signs and inserts any terminal response
@@ -246,6 +271,10 @@ Mobile:
 | `openagents.omega.issue31.pairing.v1.canonical.json` | `82b36c29d74b3f07ef5d50941532eb038d4f2839d640019b136e013b7dc426fa` |
 | `openagents.omega.issue31.command.v1.canonical-intent.json` | `c990ba250393d271bc4040d2f11fefea909c3bb733e0a33895512c28151c56c2` |
 | `openagents.omega.issue31.command.v1.canonical-result.json` | `89581c5090117eecf766884dd762db99f301b6669a123ca034ff634f6b883ee8` |
+| `openagents.omega.issue31.host_discovery.v2.canonical.json` | `a5604d4c792a5ed556f023e150f01b371c5cf702b95b72786e0c7a9adbbdcb1c` |
+| `openagents.omega.issue31.command.v2.canonical-intent.json` | `7bb7b23680be10756184668ae7722c09c634a1941b086f66d0425da4e8371bbe` |
+| `openagents.omega.issue31.command.v2.canonical-result.json` | `51bca57e14c3d45518c342c2d1f848972281de848f809c34566ed183c7e4e387` |
+| `openagents.omega.issue31.owner_projection.v1.canonical.json` | `2a8bec5fa23f27d20db35f3d76bd59817672431328f191bc4302dfa37e7f804d` |
 
 The pairing fixture includes the host-authored Sarah identity binding. A hash
 change is therefore a cross-repository contract change, not formatting churn.

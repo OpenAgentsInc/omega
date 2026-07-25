@@ -7,6 +7,7 @@ use app_identity::AppChannel;
 use nostr::{
     Event, EventBuilder, JsonUtil, Kind,
     nips::{
+        nip44::{self, Version as Nip44Version},
         nip49::{EncryptedSecretKey, KeySecurity},
         nip59,
     },
@@ -18,8 +19,8 @@ use crate::{
     AdmittedSigningRequest, CompletionRecord, ContractError, CustodyConflict,
     CustodyConflictReason, CustodyResult, CustodyState, GiftWrappedPrivateMessage,
     IdentityInspection, IdentityManifest, IdentityRef, ImportedSecret, KeyringLocator,
-    PendingIdentityOperation, PendingIdentityTransaction, PrivateMessageRequest, PublicIdentity,
-    PublicStoreError, ReceiptRef, SigningResult, UnwrappedPrivateMessage,
+    NostrPublicKeyHex, PendingIdentityOperation, PendingIdentityTransaction, PrivateMessageRequest,
+    PublicIdentity, PublicStoreError, ReceiptRef, SigningResult, UnwrappedPrivateMessage,
     mutation_lock::{IdentityMutationGuard, MutationLockError},
     proof::{IDENTITY_PROOF_KEYRING_ACCOUNT, IDENTITY_PROOF_KEYRING_SERVICE, ProofCrashBoundary},
     public_store::{
@@ -443,6 +444,9 @@ impl IdentityService {
     }
 
     pub fn sign(&self, request: &AdmittedSigningRequest) -> Result<SigningResult, CustodyError> {
+        if request.purpose != crate::SigningPurpose::NostrEvent {
+            return Err(CustodyError::SigningFailed);
+        }
         let _mutation_guard = IdentityMutationGuard::acquire(&self.locator)?;
         self.require_no_reset_locked()?;
         let resolved = self.resolve_locked();
@@ -475,6 +479,89 @@ impl IdentityService {
             signature: event.sig.to_string(),
             signed_event_json,
         })
+    }
+
+    pub fn sign_nip44_encrypted_to_self(
+        &self,
+        request: &AdmittedSigningRequest,
+    ) -> Result<SigningResult, CustodyError> {
+        if request.purpose != crate::SigningPurpose::Nip44EncryptedSelfEvent {
+            return Err(CustodyError::SigningFailed);
+        }
+        let _mutation_guard = IdentityMutationGuard::acquire(&self.locator)?;
+        self.require_no_reset_locked()?;
+        let resolved = self.resolve_locked();
+        if resolved.result.state != CustodyState::Ready {
+            return Err(CustodyError::CustodyDenied(resolved.result.state));
+        }
+        let identity = resolved
+            .result
+            .identity
+            .ok_or(CustodyError::CustodyDenied(CustodyState::Incomplete))?;
+        let secret = resolved
+            .secret
+            .ok_or(CustodyError::CustodyDenied(CustodyState::Incomplete))?;
+        let keys = secret
+            .keys()
+            .map_err(|_| CustodyError::CustodyDenied(CustodyState::Incomplete))?;
+        let ciphertext = nip44::encrypt(
+            keys.secret_key(),
+            &keys.public_key(),
+            request.event.content.as_bytes(),
+            Nip44Version::V2,
+        )
+        .map_err(|_| CustodyError::SigningFailed)?;
+        let mut encrypted_request = request.clone();
+        encrypted_request.purpose = crate::SigningPurpose::NostrEvent;
+        encrypted_request.event.content = ciphertext;
+        let unsigned_event = encrypted_request.unsigned_event(&identity)?;
+        let event = unsigned_event
+            .sign_with_keys(&keys)
+            .map_err(|_| CustodyError::SigningFailed)?;
+        let signed_event_json = event
+            .try_as_json()
+            .map_err(|_| CustodyError::SigningFailed)?;
+        Ok(SigningResult {
+            request_ref: request.request_ref.clone(),
+            identity,
+            event_id: event.id.to_hex(),
+            signature: event.sig.to_string(),
+            signed_event_json,
+        })
+    }
+
+    pub fn decrypt_nip44_from(
+        &self,
+        sender_public_key_hex: &NostrPublicKeyHex,
+        ciphertext: &str,
+    ) -> Result<String, CustodyError> {
+        if ciphertext.len() > 1_048_576 {
+            return Err(CustodyError::SigningFailed);
+        }
+        let _mutation_guard = IdentityMutationGuard::acquire(&self.locator)?;
+        self.require_no_reset_locked()?;
+        let resolved = self.resolve_locked();
+        if resolved.result.state != CustodyState::Ready {
+            return Err(CustodyError::CustodyDenied(resolved.result.state));
+        }
+        let secret = resolved
+            .secret
+            .ok_or(CustodyError::CustodyDenied(CustodyState::Incomplete))?;
+        let keys = secret
+            .keys()
+            .map_err(|_| CustodyError::CustodyDenied(CustodyState::Incomplete))?;
+        let sender_public_key = sender_public_key_hex.public_key()?;
+        nip44::decrypt(keys.secret_key(), &sender_public_key, ciphertext.as_bytes())
+            .map_err(|_| CustodyError::SigningFailed)
+    }
+
+    pub fn decrypt_nip44_from_self(&self, ciphertext: &str) -> Result<String, CustodyError> {
+        let identity = self
+            .inspect()?
+            .identity
+            .ok_or(CustodyError::CustodyDenied(CustodyState::Incomplete))?;
+        let public_key = NostrPublicKeyHex::new(identity.public_key_hex().as_str())?;
+        self.decrypt_nip44_from(&public_key, ciphertext)
     }
 
     pub fn gift_wrap_private_message(
@@ -2679,6 +2766,43 @@ mod tests {
         assert_eq!(signed.identity, identity);
         assert_eq!(signed.event_id, event.id.to_hex());
         assert_eq!(signed.signature, event.sig.to_string());
+    }
+
+    #[test]
+    fn nip44_self_encryption_never_signs_the_plaintext_template() {
+        let temporary_directory = tempfile::tempdir().expect("create temporary directory");
+        let service = service(FakeStore::empty(), temporary_directory.path().to_path_buf());
+        let identity = service
+            .create(receipt())
+            .expect("create identity")
+            .identity
+            .expect("created public identity");
+        let request = AdmittedSigningRequest {
+            request_ref: ReceiptRef::new("nip44-self-record").expect("request receipt"),
+            identity_ref: identity.identity_ref().clone(),
+            purpose: crate::SigningPurpose::Nip44EncryptedSelfEvent,
+            event: UnsignedEventTemplate {
+                created_at: 1_700_000_002,
+                kind: 30_078,
+                tags: vec![vec!["d".into(), "read-state:mobile".into()]],
+                content: "{\"v\":1,\"client_id\":\"mobile\",\"contexts\":{}}".into(),
+            },
+        };
+
+        assert!(service.sign(&request).is_err());
+        let signed = service
+            .sign_nip44_encrypted_to_self(&request)
+            .expect("encrypt and sign");
+        let event = Event::from_json(&signed.signed_event_json).expect("signed event");
+        event.verify().expect("verify signed event");
+        assert_ne!(event.content, request.event.content);
+        assert!(!event.content.contains("client_id"));
+        assert_eq!(
+            service
+                .decrypt_nip44_from_self(&event.content)
+                .expect("decrypt self record"),
+            request.event.content
+        );
     }
 
     #[test]

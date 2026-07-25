@@ -581,6 +581,7 @@ pub struct RecoveryResult {
 #[serde(rename_all = "snake_case")]
 pub enum SigningPurpose {
     NostrEvent,
+    Nip44EncryptedSelfEvent,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

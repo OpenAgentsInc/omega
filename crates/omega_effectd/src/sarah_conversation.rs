@@ -17,7 +17,13 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use nostr::{Event, EventBuilder, JsonUtil, Keys, Kind, PublicKey, RelayUrl, Tag, nips::nip42};
+use nostr::{
+    Event, EventBuilder, JsonUtil, Keys, Kind, PublicKey, RelayUrl, Tag,
+    nips::{
+        nip42,
+        nip44::{self, Version as Nip44Version},
+    },
+};
 use omega_identity::{
     AdmittedSigningRequest, IdentityService, NostrPublicKeyHex, PrivateMessageRequest, ReceiptRef,
     SigningPurpose, UnsignedEventTemplate,
@@ -29,10 +35,15 @@ use thiserror::Error;
 
 use crate::protocol::{MAX_FRAME_BYTES, PROTOCOL_SCHEMA};
 use crate::{
-    ISSUE31_COMMAND_SCHEMA, ISSUE31_HOST_DISCOVERY_KIND, ISSUE31_PAIRING_SCHEMA,
-    Issue31CommandEvent, Issue31CommandExecution, Issue31CommandRecord, Issue31CommandStatus,
-    Issue31HostConfiguration, Issue31HostController, Issue31HostDiscovery, Issue31NostrError,
-    Issue31PairingEvent, Issue31PairingRecord,
+    ISSUE31_COMMAND_SCHEMA, ISSUE31_COMMAND_SCHEMA_V2, ISSUE31_HOST_DISCOVERY_KIND,
+    ISSUE31_PAIRING_SCHEMA, Issue31AuthorityDecisionProjection, Issue31CommandArguments,
+    Issue31CommandEvent, Issue31CommandExecution, Issue31CommandExecutionV2,
+    Issue31CommandHandlingStatus, Issue31CommandRecord, Issue31CommandRecordV2,
+    Issue31CommandStatus, Issue31HostConfiguration, Issue31HostController, Issue31HostDiscovery,
+    Issue31HostDiscoveryV2, Issue31NostrError, Issue31OwnerProjectionBody,
+    Issue31OwnerProjectionRecord, Issue31PairingEvent, Issue31PairingRecord, Issue31SourceRole,
+    Issue31TargetOutcomeProjection, SARAH_AUTHORITY_RECEIPT_KIND, SARAH_ENGRAM_KIND,
+    SARAH_READ_STATE_KIND, SARAH_REMINDER_KIND,
 };
 
 pub use crate::openagents_binding::BindingState;
@@ -489,6 +500,8 @@ impl RelayTransport for MockRelayAdapter {
         let record_kind = match event.kind.as_u16() {
             NIP_AO_KIND => "control",
             SARAH_TURN_RECORD_KIND => "activity",
+            SARAH_READ_STATE_KIND => "read_state",
+            SARAH_REMINDER_KIND => "reminder",
             _ => "message",
         };
         let store_index = self.events.len();
@@ -522,7 +535,10 @@ impl RelayTransport for MockRelayAdapter {
         let matching: Vec<StoredConversationEvent> = self
             .events
             .iter()
-            .filter(|event| event.conversation_ref == conversation_ref)
+            .filter(|event| {
+                event.conversation_ref == conversation_ref
+                    || matches!(event.kind, SARAH_READ_STATE_KIND | SARAH_REMINDER_KIND)
+            })
             .cloned()
             .collect();
         let start_index = after_cursor
@@ -653,6 +669,82 @@ impl ConversationSigner {
                     .sign(&request)
                     .map_err(|error| SarahConversationError::Identity(error.to_string()))?;
                 Event::from_json(signed.signed_event_json)
+                    .map_err(|error| SarahConversationError::Identity(error.to_string()))
+            }
+        }
+    }
+
+    fn sign_encrypted_self_record(
+        &self,
+        kind: u16,
+        plaintext: &str,
+        tags: Vec<Tag>,
+    ) -> Result<Event, SarahConversationError> {
+        match self {
+            Self::Keys(identity) => {
+                let ciphertext = nip44::encrypt(
+                    identity.keys.secret_key(),
+                    &identity.keys.public_key(),
+                    plaintext.as_bytes(),
+                    Nip44Version::V2,
+                )
+                .map_err(|error| SarahConversationError::Identity(error.to_string()))?;
+                identity.sign_custom(kind, &ciphertext, tags)
+            }
+            Self::OmegaIdentity(identity_service) => {
+                let custody = identity_service
+                    .inspect()
+                    .map_err(|error| SarahConversationError::Identity(error.to_string()))?;
+                let identity = custody
+                    .identity
+                    .ok_or(SarahConversationError::IdentityRequired)?;
+                let semantic_binding = serde_json::to_vec(&json!({
+                    "kind": kind,
+                    "plaintextDigest": format!("{:x}", Sha256::digest(plaintext.as_bytes())),
+                    "tags": tags.iter().map(|tag| tag.as_slice()).collect::<Vec<_>>(),
+                }))
+                .map_err(|error| SarahConversationError::Internal(error.to_string()))?;
+                let request = AdmittedSigningRequest {
+                    request_ref: digest_receipt_ref("issue31.encrypted-self", &semantic_binding)?,
+                    identity_ref: identity.identity_ref().clone(),
+                    purpose: SigningPurpose::Nip44EncryptedSelfEvent,
+                    event: UnsignedEventTemplate {
+                        created_at: unix_now(),
+                        kind,
+                        tags: tags.iter().map(|tag| tag.as_slice().to_vec()).collect(),
+                        content: plaintext.to_string(),
+                    },
+                };
+                let signed = identity_service
+                    .sign_nip44_encrypted_to_self(&request)
+                    .map_err(|error| SarahConversationError::Identity(error.to_string()))?;
+                Event::from_json(signed.signed_event_json)
+                    .map_err(|error| SarahConversationError::Identity(error.to_string()))
+            }
+        }
+    }
+
+    fn decrypt_record(
+        &self,
+        sender_public_key_hex: &str,
+        ciphertext: &str,
+    ) -> Result<String, SarahConversationError> {
+        match self {
+            Self::Keys(identity) => {
+                let sender_public_key = PublicKey::from_hex(sender_public_key_hex)
+                    .map_err(|error| SarahConversationError::Identity(error.to_string()))?;
+                nip44::decrypt(
+                    identity.keys.secret_key(),
+                    &sender_public_key,
+                    ciphertext.as_bytes(),
+                )
+                .map_err(|error| SarahConversationError::Identity(error.to_string()))
+            }
+            Self::OmegaIdentity(identity_service) => {
+                let sender_public_key = NostrPublicKeyHex::new(sender_public_key_hex)
+                    .map_err(|error| SarahConversationError::Identity(error.to_string()))?;
+                identity_service
+                    .decrypt_nip44_from(&sender_public_key, ciphertext)
                     .map_err(|error| SarahConversationError::Identity(error.to_string()))
             }
         }
@@ -854,6 +946,7 @@ pub struct SarahConversationClient {
     issue31_private_outbox: BTreeMap<String, PendingIssue31PrivatePublish>,
     issue31_relay_acknowledgements: BTreeMap<String, Vec<String>>,
     issue31_control_cursor: Option<String>,
+    issue31_projection_cursor: Option<String>,
     issue31_quarantined_events: BTreeMap<String, String>,
     issue31_state_path: Option<PathBuf>,
     #[cfg(test)]
@@ -887,6 +980,8 @@ struct DurableIssue31HostState {
     private_outbox: BTreeMap<String, DurableIssue31PrivatePublish>,
     relay_acknowledgements: BTreeMap<String, Vec<String>>,
     control_cursor: Option<String>,
+    #[serde(default)]
+    projection_cursor: Option<String>,
     #[serde(default)]
     quarantined_events: BTreeMap<String, String>,
     command_results: BTreeMap<String, (String, Value)>,
@@ -936,6 +1031,7 @@ impl SarahConversationClient {
             issue31_private_outbox: BTreeMap::new(),
             issue31_relay_acknowledgements: BTreeMap::new(),
             issue31_control_cursor: None,
+            issue31_projection_cursor: None,
             issue31_quarantined_events: BTreeMap::new(),
             issue31_state_path: None,
             #[cfg(test)]
@@ -968,6 +1064,7 @@ impl SarahConversationClient {
             host_ref: "omega.host.local".into(),
             host_public_key_hex: config.identity.owner_public_key_hex.clone(),
             sarah_public_key_hex: config.identity.sarah_public_key_hex.clone(),
+            conversation: config.conversation_ref(),
             display_name: "Local Omega".into(),
             relay_urls,
             generation: ISSUE31_NOSTR_HOST_GENERATION,
@@ -1026,6 +1123,9 @@ impl SarahConversationClient {
         let issue31_control_cursor = persisted
             .as_ref()
             .and_then(|persisted| persisted.control_cursor.clone());
+        let issue31_projection_cursor = persisted
+            .as_ref()
+            .and_then(|persisted| persisted.projection_cursor.clone());
         let issue31_quarantined_events = persisted
             .as_ref()
             .map(|persisted| persisted.quarantined_events.clone())
@@ -1065,6 +1165,7 @@ impl SarahConversationClient {
             issue31_private_outbox,
             issue31_relay_acknowledgements,
             issue31_control_cursor,
+            issue31_projection_cursor,
             issue31_quarantined_events,
             issue31_state_path: Some(issue31_state_path),
             #[cfg(test)]
@@ -1370,12 +1471,14 @@ impl SarahConversationClient {
             controller
                 .record_emitted_pairing(event_id.clone(), record)
                 .map_err(issue31_error)?;
+            let previous_projection_cursor = self.issue31_projection_cursor.take();
             let response = json!({ "accepted": true, "eventId": event_id, "grantRef": grant_ref });
             self.command_results.insert(
                 idempotency_ref.clone(),
                 (fingerprint.clone(), response.clone()),
             );
             if let Err(error) = self.persist_issue31_host_state_with_controller(&controller) {
+                self.issue31_projection_cursor = previous_projection_cursor;
                 self.command_results.remove(&idempotency_ref);
                 self.rollback_issue31_enqueue(&enqueued);
                 return Err(error);
@@ -1437,7 +1540,7 @@ impl SarahConversationClient {
         self.persist_issue31_host_state_with_controller(controller)?;
         let now = unix_now();
         let discovery = controller
-            .discovery(now, now.saturating_add(24 * 60 * 60))
+            .discovery_v2(now, now.saturating_add(24 * 60 * 60))
             .map_err(issue31_error)?;
         if self.issue31_discovery_generation != Some(discovery.generation)
             || self
@@ -1531,6 +1634,11 @@ impl SarahConversationClient {
                     }
                 };
                 if let Some(outbound) = outbound {
+                    let resets_projection_cursor = matches!(
+                        outbound,
+                        Issue31PairingRecord::ScopedGrant { .. }
+                            | Issue31PairingRecord::GrantRenewal { .. }
+                    );
                     let enqueued = self.enqueue_issue31_pairing_record(&outbound)?;
                     if let Err(error) =
                         candidate.record_emitted_pairing(enqueued.rumor_event_id.clone(), outbound)
@@ -1538,8 +1646,14 @@ impl SarahConversationClient {
                         self.rollback_issue31_enqueue(&enqueued);
                         return Err(issue31_error(error));
                     }
+                    let previous_projection_cursor = resets_projection_cursor
+                        .then(|| self.issue31_projection_cursor.take())
+                        .flatten();
                     if let Err(error) = self.persist_issue31_host_state_with_controller(&candidate)
                     {
+                        if resets_projection_cursor {
+                            self.issue31_projection_cursor = previous_projection_cursor;
+                        }
                         self.rollback_issue31_enqueue(&enqueued);
                         return Err(error);
                     }
@@ -1551,6 +1665,87 @@ impl SarahConversationClient {
                     *controller = candidate;
                 }
             } else {
+                let command_schema = serde_json::from_str::<Value>(&event.content_summary)
+                    .ok()
+                    .and_then(|value| value.get("schema")?.as_str().map(str::to_owned));
+                if command_schema.as_deref() == Some(ISSUE31_COMMAND_SCHEMA_V2) {
+                    let record =
+                        match Issue31CommandRecordV2::decode(event.content_summary.as_bytes()) {
+                            Ok(record) => record,
+                            Err(_) => {
+                                self.quarantine_issue31_event(
+                                    &event.event_id,
+                                    "reason.omega.invalid_command_record",
+                                    controller,
+                                )?;
+                                continue;
+                            }
+                        };
+                    let mut candidate = controller.clone();
+                    let result = match candidate.handle_command_event_v2(
+                        event.event_id.clone(),
+                        record,
+                        now,
+                        |arguments,
+                         idempotency_ref,
+                         grant_ref,
+                         device_public_key_hex,
+                         expected_generation| {
+                            self.issue31_host = Some(controller.clone());
+                            let execution = self.execute_issue31_action_v2(
+                                arguments,
+                                idempotency_ref,
+                                grant_ref,
+                                device_public_key_hex,
+                                expected_generation,
+                            );
+                            self.issue31_host.take();
+                            execution
+                        },
+                    ) {
+                        Ok(result) => result,
+                        Err(_) => {
+                            self.quarantine_issue31_event(
+                                &event.event_id,
+                                "reason.omega.command_rejected",
+                                controller,
+                            )?;
+                            continue;
+                        }
+                    };
+                    if let Some(result) = result {
+                        if let Issue31CommandRecordV2::CommandResult {
+                            status: Issue31CommandHandlingStatus::Accepted,
+                            grant_ref,
+                            expected_generation,
+                            source_event_id: Some(source_event_id),
+                            ..
+                        } = &result
+                        {
+                            candidate
+                                .record_source_projection(
+                                    grant_ref.clone(),
+                                    *expected_generation,
+                                    source_event_id.clone(),
+                                )
+                                .map_err(issue31_error)?;
+                        }
+                        let enqueued = self.enqueue_issue31_command_record_v2(&result)?;
+                        if let Err(error) =
+                            self.persist_issue31_host_state_with_controller(&candidate)
+                        {
+                            self.rollback_issue31_enqueue(&enqueued);
+                            return Err(error);
+                        }
+                        *controller = candidate;
+                        self.flush_issue31_outbox()?;
+                        self.persist_issue31_host_state_with_controller(controller)?;
+                    } else {
+                        self.persist_issue31_host_state_with_controller(&candidate)?;
+                        *controller = candidate;
+                    }
+                    continue;
+                }
                 let record = match Issue31CommandRecord::decode(event.content_summary.as_bytes()) {
                     Ok(record) => record,
                     Err(_) => {
@@ -1599,6 +1794,10 @@ impl SarahConversationClient {
                 }
             }
         }
+        self.project_issue31_sources(controller, now)?;
+        self.persist_issue31_host_state_with_controller(controller)?;
+        self.flush_issue31_outbox()?;
+        self.persist_issue31_host_state_with_controller(controller)?;
         if let Some(last_scanned_cursor) = last_scanned_cursor {
             self.issue31_control_cursor = Some(last_scanned_cursor);
         }
@@ -1644,7 +1843,7 @@ impl SarahConversationClient {
 
     fn sign_issue31_discovery(
         &self,
-        discovery: &crate::Issue31HostDiscovery,
+        discovery: &Issue31HostDiscoveryV2,
     ) -> Result<Event, SarahConversationError> {
         let content = serde_json::to_string(discovery)
             .map_err(|error| SarahConversationError::Internal(error.to_string()))?;
@@ -1685,6 +1884,19 @@ impl SarahConversationClient {
             .map_err(|error| SarahConversationError::Internal(error.to_string()))?;
         self.enqueue_issue31_private_content(
             ISSUE31_COMMAND_SCHEMA,
+            &content,
+            record.device_public_key_hex(),
+        )
+    }
+
+    fn enqueue_issue31_command_record_v2(
+        &mut self,
+        record: &Issue31CommandRecordV2,
+    ) -> Result<EnqueuedIssue31PrivateRecord, SarahConversationError> {
+        let content = serde_json::to_string(record)
+            .map_err(|error| SarahConversationError::Internal(error.to_string()))?;
+        self.enqueue_issue31_private_content(
+            ISSUE31_COMMAND_SCHEMA_V2,
             &content,
             record.device_public_key_hex(),
         )
@@ -1891,6 +2103,7 @@ impl SarahConversationClient {
                 private_outbox,
                 relay_acknowledgements: self.issue31_relay_acknowledgements.clone(),
                 control_cursor: self.issue31_control_cursor.clone(),
+                projection_cursor: self.issue31_projection_cursor.clone(),
                 quarantined_events: self.issue31_quarantined_events.clone(),
                 command_results: self.command_results.clone(),
                 active_turn_ref: self.active_turn_ref.clone(),
@@ -1909,6 +2122,621 @@ impl SarahConversationClient {
             status: Issue31CommandStatus::Unavailable,
             outcome_ref: "outcome.omega.unavailable".into(),
             reason_ref: Some("reason.omega.controller_not_bound".into()),
+        }
+    }
+
+    fn execute_issue31_action_v2(
+        &mut self,
+        arguments: &Issue31CommandArguments,
+        idempotency_ref: &str,
+        grant_ref: &str,
+        device_public_key_hex: &str,
+        expected_generation: u64,
+    ) -> Issue31CommandExecutionV2 {
+        let handling_suffix = &format!("{:x}", Sha256::digest(idempotency_ref.as_bytes()))[..24];
+        let accepted = |source_event_id| Issue31CommandExecutionV2 {
+            status: Issue31CommandHandlingStatus::Accepted,
+            handling_ref: format!("handling.omega.{handling_suffix}"),
+            reason_ref: None,
+            source_event_id,
+        };
+        let unavailable = |reason: &str| Issue31CommandExecutionV2 {
+            status: Issue31CommandHandlingStatus::Unavailable,
+            handling_ref: format!("handling.omega.{handling_suffix}"),
+            reason_ref: Some(reason.into()),
+            source_event_id: None,
+        };
+        let failed = |reason: &str| Issue31CommandExecutionV2 {
+            status: Issue31CommandHandlingStatus::Failed,
+            handling_ref: format!("handling.omega.{handling_suffix}"),
+            reason_ref: Some(reason.into()),
+            source_event_id: None,
+        };
+        match arguments {
+            Issue31CommandArguments::SendMessage {
+                conversation, text, ..
+            } if conversation == &self.config.conversation_ref() => {
+                match self.send_message(text, idempotency_ref, expected_generation) {
+                    Ok(result) => {
+                        let projection = Issue31OwnerProjectionBody::Message {
+                            role: Issue31SourceRole::Owner,
+                            conversation: conversation.clone(),
+                            text: text.clone(),
+                            reply_to_event_id: None,
+                        };
+                        match self.enqueue_issue31_source_projection(
+                            &result.event_id,
+                            projection,
+                            grant_ref,
+                            device_public_key_hex,
+                            expected_generation,
+                        ) {
+                            Ok(()) => accepted(Some(result.event_id)),
+                            Err(_) => failed("reason.omega.projection_failed"),
+                        }
+                    }
+                    Err(
+                        SarahConversationError::Relay(_)
+                        | SarahConversationError::Identity(_)
+                        | SarahConversationError::IdentityRequired,
+                    ) => unavailable("reason.omega.transport_unavailable"),
+                    Err(_) => failed("reason.omega.action_failed"),
+                }
+            }
+            Issue31CommandArguments::InterruptTurn {
+                conversation,
+                turn_ref,
+                ..
+            } if conversation == &self.config.conversation_ref() => {
+                match self.interrupt_turn(turn_ref, idempotency_ref, expected_generation) {
+                    Ok(_) => accepted(None),
+                    Err(
+                        SarahConversationError::Relay(_)
+                        | SarahConversationError::Identity(_)
+                        | SarahConversationError::IdentityRequired,
+                    ) => unavailable("reason.omega.transport_unavailable"),
+                    Err(_) => failed("reason.omega.action_failed"),
+                }
+            }
+            Issue31CommandArguments::SendMessage { .. }
+            | Issue31CommandArguments::InterruptTurn { .. } => Issue31CommandExecutionV2 {
+                status: Issue31CommandHandlingStatus::Refused,
+                handling_ref: format!("handling.omega.{handling_suffix}"),
+                reason_ref: Some("reason.omega.conversation_mismatch".into()),
+                source_event_id: None,
+            },
+            Issue31CommandArguments::ReadStatePatch { .. }
+            | Issue31CommandArguments::ReminderCreate { .. }
+            | Issue31CommandArguments::ReminderChange { .. }
+            | Issue31CommandArguments::ReminderComplete { .. }
+            | Issue31CommandArguments::ReminderCancel { .. } => {
+                match self.execute_issue31_owner_state_action(arguments) {
+                    Ok((event_id, projection)) => match self.enqueue_issue31_source_projection(
+                        &event_id,
+                        projection,
+                        grant_ref,
+                        device_public_key_hex,
+                        expected_generation,
+                    ) {
+                        Ok(()) => accepted(Some(event_id)),
+                        Err(_) => failed("reason.omega.projection_failed"),
+                    },
+                    Err(
+                        SarahConversationError::Relay(_)
+                        | SarahConversationError::Identity(_)
+                        | SarahConversationError::IdentityRequired,
+                    ) => unavailable("reason.omega.transport_unavailable"),
+                    Err(_) => failed("reason.omega.action_failed"),
+                }
+            }
+        }
+    }
+
+    fn execute_issue31_owner_state_action(
+        &mut self,
+        arguments: &Issue31CommandArguments,
+    ) -> Result<(String, Issue31OwnerProjectionBody), SarahConversationError> {
+        match arguments {
+            Issue31CommandArguments::ReadStatePatch {
+                slot_id,
+                client_id,
+                context_ref,
+                read_at,
+                ..
+            } => {
+                if *read_at > u32::MAX as u64 {
+                    return Err(SarahConversationError::InvalidRequest(
+                        "read-state timestamp exceeds the NIP-RS bound".into(),
+                    ));
+                }
+                let d_tag = format!("read-state:{slot_id}");
+                let mut contexts = self.load_issue31_read_state_contexts(&d_tag)?;
+                contexts
+                    .entry(context_ref.clone())
+                    .and_modify(|current| *current = (*current).max(*read_at))
+                    .or_insert(*read_at);
+                if contexts.len() > 10_000 {
+                    return Err(SarahConversationError::InvalidRequest(
+                        "read-state context bound is exhausted".into(),
+                    ));
+                }
+                let plaintext = serde_json::to_string(&json!({
+                    "v": 1,
+                    "client_id": client_id,
+                    "contexts": contexts,
+                }))
+                .map_err(|error| SarahConversationError::Internal(error.to_string()))?;
+                let tags = vec![
+                    Tag::parse(["d", d_tag.as_str()]).map_err(|error| {
+                        SarahConversationError::InvalidRequest(error.to_string())
+                    })?,
+                    Tag::parse(["t", "read-state"]).map_err(|error| {
+                        SarahConversationError::InvalidRequest(error.to_string())
+                    })?,
+                    Tag::parse(["alt", "encrypted read state"]).map_err(|error| {
+                        SarahConversationError::InvalidRequest(error.to_string())
+                    })?,
+                ];
+                let event_id =
+                    self.publish_issue31_encrypted_source(SARAH_READ_STATE_KIND, &plaintext, tags)?;
+                Ok((
+                    event_id,
+                    Issue31OwnerProjectionBody::ReadState { d_tag, plaintext },
+                ))
+            }
+            Issue31CommandArguments::ReminderCreate {
+                reminder_id,
+                note,
+                target_event_id,
+                not_before,
+                expiration,
+                ..
+            }
+            | Issue31CommandArguments::ReminderChange {
+                reminder_id,
+                note,
+                target_event_id,
+                not_before,
+                expiration,
+                ..
+            } => {
+                let plaintext = serde_json::to_string(&json!({
+                    "status": "pending",
+                    "note": note,
+                    "target": target_event_id.as_ref().map(|event_id| json!({ "id": event_id })),
+                }))
+                .map_err(|error| SarahConversationError::Internal(error.to_string()))?;
+                let mut tags = vec![
+                    Tag::parse(["d", reminder_id.as_str()]).map_err(|error| {
+                        SarahConversationError::InvalidRequest(error.to_string())
+                    })?,
+                    Tag::parse(["alt", "Encrypted reminder"]).map_err(|error| {
+                        SarahConversationError::InvalidRequest(error.to_string())
+                    })?,
+                    Tag::parse(["not_before", not_before.to_string().as_str()]).map_err(
+                        |error| SarahConversationError::InvalidRequest(error.to_string()),
+                    )?,
+                ];
+                if let Some(expiration) = expiration {
+                    tags.push(
+                        Tag::parse(["expiration", expiration.to_string().as_str()]).map_err(
+                            |error| SarahConversationError::InvalidRequest(error.to_string()),
+                        )?,
+                    );
+                }
+                let event_id =
+                    self.publish_issue31_encrypted_source(SARAH_REMINDER_KIND, &plaintext, tags)?;
+                Ok((
+                    event_id,
+                    Issue31OwnerProjectionBody::Reminder {
+                        reminder_id: reminder_id.clone(),
+                        plaintext,
+                        not_before: Some(*not_before),
+                        expiration: *expiration,
+                    },
+                ))
+            }
+            Issue31CommandArguments::ReminderComplete { reminder_id, .. }
+            | Issue31CommandArguments::ReminderCancel { reminder_id, .. } => {
+                let status =
+                    if matches!(arguments, Issue31CommandArguments::ReminderComplete { .. }) {
+                        "done"
+                    } else {
+                        "cancelled"
+                    };
+                let plaintext = serde_json::to_string(&json!({ "status": status }))
+                    .map_err(|error| SarahConversationError::Internal(error.to_string()))?;
+                let tags = vec![
+                    Tag::parse(["d", reminder_id.as_str()]).map_err(|error| {
+                        SarahConversationError::InvalidRequest(error.to_string())
+                    })?,
+                    Tag::parse(["alt", "Encrypted reminder"]).map_err(|error| {
+                        SarahConversationError::InvalidRequest(error.to_string())
+                    })?,
+                ];
+                let event_id =
+                    self.publish_issue31_encrypted_source(SARAH_REMINDER_KIND, &plaintext, tags)?;
+                Ok((
+                    event_id,
+                    Issue31OwnerProjectionBody::Reminder {
+                        reminder_id: reminder_id.clone(),
+                        plaintext,
+                        not_before: None,
+                        expiration: None,
+                    },
+                ))
+            }
+            Issue31CommandArguments::SendMessage { .. }
+            | Issue31CommandArguments::InterruptTurn { .. } => Err(
+                SarahConversationError::InvalidRequest("not an owner-state action".into()),
+            ),
+        }
+    }
+
+    fn load_issue31_read_state_contexts(
+        &mut self,
+        d_tag: &str,
+    ) -> Result<BTreeMap<String, u64>, SarahConversationError> {
+        let conversation_ref = self.config.conversation_ref();
+        let mut cursor = None;
+        let mut contexts: BTreeMap<String, u64> = BTreeMap::new();
+        for _ in 0..8 {
+            let page =
+                self.query_with_auth(&conversation_ref, cursor.as_deref(), MAX_PAGE_LIMIT)?;
+            for event in page.events {
+                if event.kind != SARAH_READ_STATE_KIND
+                    || event.pubkey != self.config.identity.owner_public_key_hex
+                    || stored_tag_value(&event.tags, "d").as_deref() != Some(d_tag)
+                {
+                    continue;
+                }
+                let plaintext = self
+                    .signer
+                    .decrypt_record(&event.pubkey, &event.content_summary)?;
+                let value: Value = serde_json::from_str(&plaintext)
+                    .map_err(|error| SarahConversationError::InvalidRequest(error.to_string()))?;
+                let Some(record_contexts) = value.get("contexts").and_then(Value::as_object) else {
+                    continue;
+                };
+                for (context_ref, read_at) in record_contexts {
+                    let Some(read_at) = read_at.as_u64() else {
+                        continue;
+                    };
+                    if context_ref.len() <= 256 && read_at <= u32::MAX as u64 {
+                        contexts
+                            .entry(context_ref.clone())
+                            .and_modify(|current| *current = (*current).max(read_at))
+                            .or_insert(read_at);
+                    }
+                }
+            }
+            let Some(next_cursor) = page.next_cursor else {
+                break;
+            };
+            cursor = Some(next_cursor);
+        }
+        Ok(contexts)
+    }
+
+    fn publish_issue31_encrypted_source(
+        &mut self,
+        kind: u16,
+        plaintext: &str,
+        tags: Vec<Tag>,
+    ) -> Result<String, SarahConversationError> {
+        let event = self
+            .signer
+            .sign_encrypted_self_record(kind, plaintext, tags)?;
+        let event_id = event.id.to_hex();
+        self.publish_with_auth(&event)?;
+        Ok(event_id)
+    }
+
+    fn enqueue_issue31_source_projection(
+        &mut self,
+        source_event_id: &str,
+        projection: Issue31OwnerProjectionBody,
+        grant_ref: &str,
+        device_public_key_hex: &str,
+        expected_generation: u64,
+    ) -> Result<(), SarahConversationError> {
+        let source = self.load_issue31_source_event(source_event_id)?;
+        if source.pubkey != self.config.identity.owner_public_key_hex {
+            return Err(SarahConversationError::InvalidRequest(
+                "Issue 31 projection source is not owner-authored".into(),
+            ));
+        }
+        let record = Issue31OwnerProjectionRecord {
+            schema: crate::ISSUE31_OWNER_PROJECTION_SCHEMA.into(),
+            record_type: "owner_projection".into(),
+            host_ref: "omega.host.local".into(),
+            host_public_key_hex: self.config.identity.owner_public_key_hex.clone(),
+            device_public_key_hex: device_public_key_hex.into(),
+            grant_ref: grant_ref.into(),
+            expected_generation,
+            source_event_id: source.event_id,
+            source_author_public_key_hex: source.pubkey,
+            source_role: Issue31SourceRole::Owner,
+            source_kind: source.kind,
+            source_created_at: source.created_at,
+            projected_at: unix_now().max(source.created_at),
+            projection,
+        };
+        record
+            .validate_private_binding(
+                &self.config.identity.owner_public_key_hex,
+                device_public_key_hex,
+                &self.config.identity.sarah_public_key_hex,
+            )
+            .map_err(issue31_error)?;
+        let content = serde_json::to_string(&record)
+            .map_err(|error| SarahConversationError::Internal(error.to_string()))?;
+        self.enqueue_issue31_private_content(
+            crate::ISSUE31_OWNER_PROJECTION_SCHEMA,
+            &content,
+            device_public_key_hex,
+        )?;
+        Ok(())
+    }
+
+    fn load_issue31_source_event(
+        &mut self,
+        source_event_id: &str,
+    ) -> Result<StoredConversationEvent, SarahConversationError> {
+        let conversation_ref = self.config.conversation_ref();
+        let mut cursor = self.issue31_projection_cursor.clone();
+        for _ in 0..8 {
+            let page =
+                self.query_with_auth(&conversation_ref, cursor.as_deref(), MAX_PAGE_LIMIT)?;
+            if let Some(source) = page
+                .events
+                .iter()
+                .find(|event| event.event_id == source_event_id)
+            {
+                return Ok(source.clone());
+            }
+            let Some(next_cursor) = page.next_cursor else {
+                break;
+            };
+            cursor = Some(next_cursor);
+        }
+        Err(SarahConversationError::Relay(
+            "confirmed Issue 31 source event was not observable after publish".into(),
+        ))
+    }
+
+    fn project_issue31_sources(
+        &mut self,
+        controller: &mut Issue31HostController,
+        now: u64,
+    ) -> Result<(), SarahConversationError> {
+        let grants = controller.active_grants(now).map_err(issue31_error)?;
+        if grants.is_empty() {
+            return Ok(());
+        }
+        let conversation_ref = self.config.conversation_ref();
+        let mut cursor = self.issue31_projection_cursor.clone();
+        let mut last_scanned_cursor = None;
+        for _ in 0..8 {
+            let page =
+                self.query_with_auth(&conversation_ref, cursor.as_deref(), MAX_PAGE_LIMIT)?;
+            if let Some(page_cursor) = page.events.last().map(stored_event_cursor) {
+                last_scanned_cursor = Some(page_cursor);
+            }
+            for source in page.events {
+                if !matches!(
+                    source.kind,
+                    crate::ISSUE31_PRIVATE_RUMOR_KIND
+                        | SARAH_TURN_RECORD_KIND
+                        | SARAH_AUTHORITY_RECEIPT_KIND
+                        | SARAH_ENGRAM_KIND
+                        | SARAH_READ_STATE_KIND
+                        | SARAH_REMINDER_KIND
+                ) {
+                    continue;
+                }
+                if source.kind == crate::ISSUE31_PRIVATE_RUMOR_KIND
+                    && source.record_kind != "message"
+                {
+                    continue;
+                }
+                let projection = match self.issue31_projection_body(&source) {
+                    Ok(Some(projection)) => projection,
+                    Ok(None) => continue,
+                    Err(_) => {
+                        self.quarantine_issue31_event(
+                            &source.event_id,
+                            "reason.omega.invalid_projection_source",
+                            controller,
+                        )?;
+                        continue;
+                    }
+                };
+                for grant in &grants {
+                    if controller.source_was_projected(
+                        &grant.grant_ref,
+                        grant.generation,
+                        &source.event_id,
+                    ) {
+                        continue;
+                    }
+                    let record = Issue31OwnerProjectionRecord {
+                        schema: crate::ISSUE31_OWNER_PROJECTION_SCHEMA.into(),
+                        record_type: "owner_projection".into(),
+                        host_ref: grant.host_ref.clone(),
+                        host_public_key_hex: grant.host_public_key_hex.clone(),
+                        device_public_key_hex: grant.device_public_key_hex.clone(),
+                        grant_ref: grant.grant_ref.clone(),
+                        expected_generation: grant.generation,
+                        source_event_id: source.event_id.clone(),
+                        source_author_public_key_hex: source.pubkey.clone(),
+                        source_role: projection_source_role(&projection),
+                        source_kind: source.kind,
+                        source_created_at: source.created_at,
+                        projected_at: now.max(source.created_at),
+                        projection: projection.clone(),
+                    };
+                    record
+                        .validate_private_binding(
+                            &self.config.identity.owner_public_key_hex,
+                            &grant.device_public_key_hex,
+                            &grant.sarah_public_key_hex,
+                        )
+                        .map_err(issue31_error)?;
+                    let content = serde_json::to_string(&record)
+                        .map_err(|error| SarahConversationError::Internal(error.to_string()))?;
+                    self.enqueue_issue31_private_content(
+                        crate::ISSUE31_OWNER_PROJECTION_SCHEMA,
+                        &content,
+                        &grant.device_public_key_hex,
+                    )?;
+                    controller
+                        .record_source_projection(
+                            grant.grant_ref.clone(),
+                            grant.generation,
+                            source.event_id.clone(),
+                        )
+                        .map_err(issue31_error)?;
+                }
+            }
+            let Some(next_cursor) = page.next_cursor else {
+                if let Some(last_scanned_cursor) = last_scanned_cursor {
+                    self.issue31_projection_cursor = Some(last_scanned_cursor);
+                }
+                return Ok(());
+            };
+            cursor = Some(next_cursor);
+        }
+        if let Some(last_scanned_cursor) = last_scanned_cursor {
+            self.issue31_projection_cursor = Some(last_scanned_cursor);
+        }
+        self.last_gap_state = strongest_gap_state(self.last_gap_state, GapState::Possible);
+        Ok(())
+    }
+
+    fn issue31_projection_body(
+        &self,
+        source: &StoredConversationEvent,
+    ) -> Result<Option<Issue31OwnerProjectionBody>, SarahConversationError> {
+        let owner_key = &self.config.identity.owner_public_key_hex;
+        let sarah_key = &self.config.identity.sarah_public_key_hex;
+        match source.kind {
+            crate::ISSUE31_PRIVATE_RUMOR_KIND
+                if source.record_kind == "message"
+                    && (source.pubkey == *owner_key || source.pubkey == *sarah_key) =>
+            {
+                let role = if source.pubkey == *owner_key {
+                    Issue31SourceRole::Owner
+                } else {
+                    Issue31SourceRole::Sarah
+                };
+                Ok(Some(Issue31OwnerProjectionBody::Message {
+                    role,
+                    conversation: self.config.conversation_ref(),
+                    text: source.content_summary.clone(),
+                    reply_to_event_id: stored_tag_value(&source.tags, "e"),
+                }))
+            }
+            SARAH_TURN_RECORD_KIND if source.pubkey == *sarah_key => {
+                let plaintext = self
+                    .signer
+                    .decrypt_record(&source.pubkey, &source.content_summary)?;
+                let payload = serde_json::from_str::<Value>(&plaintext)
+                    .map_err(|error| SarahConversationError::InvalidRequest(error.to_string()))?;
+                Ok(Some(Issue31OwnerProjectionBody::Turn { payload }))
+            }
+            SARAH_AUTHORITY_RECEIPT_KIND if source.pubkey == *sarah_key => {
+                let plaintext = self
+                    .signer
+                    .decrypt_record(&source.pubkey, &source.content_summary)?;
+                let value = serde_json::from_str::<Value>(&plaintext)
+                    .map_err(|error| SarahConversationError::InvalidRequest(error.to_string()))?;
+                let state = match value.get("decision").and_then(Value::as_str) {
+                    Some("allow") => "allowed",
+                    Some("refuse") => "refused",
+                    _ => {
+                        return Err(SarahConversationError::InvalidRequest(
+                            "authority receipt has an invalid decision".into(),
+                        ));
+                    }
+                };
+                let turn_ref = stored_tag_value(&source.tags, "turn").ok_or_else(|| {
+                    SarahConversationError::InvalidRequest(
+                        "authority receipt omitted its turn tag".into(),
+                    )
+                })?;
+                let suffix = &source.event_id[..24];
+                let reason_ref = value
+                    .get("reservedCategory")
+                    .and_then(Value::as_str)
+                    .filter(|category| {
+                        category
+                            .bytes()
+                            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+                    })
+                    .map(|category| format!("reason.openagents.{category}"));
+                Ok(Some(Issue31OwnerProjectionBody::AuthorityReceipt {
+                    receipt_ref: format!("receipt.issue31.{suffix}"),
+                    turn_ref,
+                    authority_decision: Issue31AuthorityDecisionProjection {
+                        state: state.into(),
+                        decision_ref: format!("decision.issue31.{suffix}"),
+                        reason_ref,
+                    },
+                    target_outcome: Issue31TargetOutcomeProjection {
+                        state: "pending".into(),
+                        outcome_ref: None,
+                        reason_ref: None,
+                    },
+                }))
+            }
+            SARAH_ENGRAM_KIND if source.pubkey == *sarah_key => {
+                let plaintext = self
+                    .signer
+                    .decrypt_record(&source.pubkey, &source.content_summary)?;
+                let d_tag = stored_tag_value(&source.tags, "d").ok_or_else(|| {
+                    SarahConversationError::InvalidRequest("engram omitted its d tag".into())
+                })?;
+                Ok(Some(Issue31OwnerProjectionBody::Engram {
+                    d_tag,
+                    plaintext,
+                }))
+            }
+            SARAH_READ_STATE_KIND if source.pubkey == *owner_key => {
+                let plaintext = self
+                    .signer
+                    .decrypt_record(&source.pubkey, &source.content_summary)?;
+                let d_tag = stored_tag_value(&source.tags, "d").ok_or_else(|| {
+                    SarahConversationError::InvalidRequest("read state omitted its d tag".into())
+                })?;
+                Ok(Some(Issue31OwnerProjectionBody::ReadState {
+                    d_tag,
+                    plaintext,
+                }))
+            }
+            SARAH_REMINDER_KIND if source.pubkey == *owner_key => {
+                let plaintext = self
+                    .signer
+                    .decrypt_record(&source.pubkey, &source.content_summary)?;
+                let reminder_id = stored_tag_value(&source.tags, "d").ok_or_else(|| {
+                    SarahConversationError::InvalidRequest("reminder omitted its d tag".into())
+                })?;
+                let not_before = stored_tag_value(&source.tags, "not_before")
+                    .map(|value| value.parse::<u64>())
+                    .transpose()
+                    .map_err(|error| SarahConversationError::InvalidRequest(error.to_string()))?;
+                let expiration = stored_tag_value(&source.tags, "expiration")
+                    .map(|value| value.parse::<u64>())
+                    .transpose()
+                    .map_err(|error| SarahConversationError::InvalidRequest(error.to_string()))?;
+                Ok(Some(Issue31OwnerProjectionBody::Reminder {
+                    reminder_id,
+                    plaintext,
+                    not_before,
+                    expiration,
+                }))
+            }
+            _ => Ok(None),
         }
     }
 
@@ -2681,8 +3509,12 @@ fn load_issue31_host_state(
             "durable Issue 31 host state exceeds its byte bound".into(),
         ));
     }
-    let state: DurableIssue31HostState = serde_json::from_slice(&bytes)
+    let mut state: DurableIssue31HostState = serde_json::from_slice(&bytes)
         .map_err(|error| SarahConversationError::Internal(error.to_string()))?;
+    state
+        .controller
+        .adopt_conversation_if_missing(&expected_configuration.conversation)
+        .map_err(issue31_error)?;
     if state.schema != ISSUE31_DURABLE_STATE_SCHEMA
         || !state
             .controller
@@ -2693,6 +3525,10 @@ fn load_issue31_host_state(
         || state.quarantined_events.len() > MAX_QUARANTINED_ISSUE31_EVENTS
         || state
             .control_cursor
+            .as_deref()
+            .is_some_and(|cursor| !valid_event_cursor(cursor))
+        || state
+            .projection_cursor
             .as_deref()
             .is_some_and(|cursor| !valid_event_cursor(cursor))
         || state
@@ -2739,26 +3575,65 @@ fn load_issue31_host_state(
             "durable Issue 31 relay acknowledgements are invalid".into(),
         ));
     }
-    if let Some(event_json) = &state.discovery_event_json {
-        let event = Event::from_json(event_json)
+    if let Some(event_json) = state.discovery_event_json.clone() {
+        let event = Event::from_json(&event_json)
             .map_err(|error| SarahConversationError::Internal(error.to_string()))?;
-        let discovery =
-            Issue31HostDiscovery::decode(event.content.as_bytes()).map_err(issue31_error)?;
+        let value = serde_json::from_str::<Value>(&event.content)
+            .map_err(|error| SarahConversationError::Internal(error.to_string()))?;
+        let is_v2 = value.get("schema").and_then(Value::as_str)
+            == Some(crate::ISSUE31_HOST_DISCOVERY_SCHEMA_V2);
+        let (generation, expires_at, host_ref, host_key, sarah_key, display_name, relay_urls) =
+            if is_v2 {
+                let discovery = Issue31HostDiscoveryV2::decode(event.content.as_bytes())
+                    .map_err(issue31_error)?;
+                if discovery.conversation != expected_configuration.conversation {
+                    return Err(SarahConversationError::Internal(
+                        "durable Issue 31 discovery binds another conversation".into(),
+                    ));
+                }
+                (
+                    discovery.generation,
+                    discovery.expires_at,
+                    discovery.host_ref,
+                    discovery.host_public_key_hex,
+                    discovery.sarah_public_key_hex,
+                    discovery.display_name,
+                    discovery.relay_urls,
+                )
+            } else {
+                let discovery = Issue31HostDiscovery::decode(event.content.as_bytes())
+                    .map_err(issue31_error)?;
+                (
+                    discovery.generation,
+                    discovery.expires_at,
+                    discovery.host_ref,
+                    discovery.host_public_key_hex,
+                    discovery.sarah_public_key_hex,
+                    discovery.display_name,
+                    discovery.relay_urls,
+                )
+            };
         if event.kind.as_u16() != ISSUE31_HOST_DISCOVERY_KIND
             || event.pubkey.to_hex() != expected_configuration.host_public_key_hex
             || event.verify().is_err()
-            || state.discovery_generation != Some(discovery.generation)
-            || state.discovery_expires_at != Some(discovery.expires_at)
-            || discovery.host_ref != expected_configuration.host_ref
-            || discovery.host_public_key_hex != expected_configuration.host_public_key_hex
-            || discovery.sarah_public_key_hex != expected_configuration.sarah_public_key_hex
-            || discovery.display_name != expected_configuration.display_name
-            || discovery.relay_urls != expected_configuration.relay_urls
-            || discovery.generation != expected_configuration.generation
+            || state.discovery_generation != Some(generation)
+            || state.discovery_expires_at != Some(expires_at)
+            || host_ref != expected_configuration.host_ref
+            || host_key != expected_configuration.host_public_key_hex
+            || sarah_key != expected_configuration.sarah_public_key_hex
+            || display_name != expected_configuration.display_name
+            || relay_urls != expected_configuration.relay_urls
+            || generation != expected_configuration.generation
         {
             return Err(SarahConversationError::Internal(
                 "durable Issue 31 discovery outbox event is invalid".into(),
             ));
+        }
+        if !is_v2 {
+            state.discovery_generation = None;
+            state.discovery_expires_at = None;
+            state.discovery_event_json = None;
+            state.relay_acknowledgements.remove(&event.id.to_hex());
         }
     }
     durable_private_outbox_into_runtime(
@@ -2925,6 +3800,25 @@ fn conversation_tags(
         Tag::parse(tag).map_err(|error| SarahConversationError::InvalidRequest(error.to_string()))
     })
     .collect()
+}
+
+fn stored_tag_value(tags: &[Vec<String>], name: &str) -> Option<String> {
+    tags.iter().find_map(|tag| {
+        (tag.first().map(String::as_str) == Some(name))
+            .then(|| tag.get(1).cloned())
+            .flatten()
+    })
+}
+
+fn projection_source_role(projection: &Issue31OwnerProjectionBody) -> Issue31SourceRole {
+    match projection {
+        Issue31OwnerProjectionBody::Message { role, .. } => *role,
+        Issue31OwnerProjectionBody::ReadState { .. }
+        | Issue31OwnerProjectionBody::Reminder { .. } => Issue31SourceRole::Owner,
+        Issue31OwnerProjectionBody::Turn { .. }
+        | Issue31OwnerProjectionBody::AuthorityReceipt { .. }
+        | Issue31OwnerProjectionBody::Engram { .. } => Issue31SourceRole::Sarah,
+    }
 }
 
 fn private_recipients(
@@ -3196,6 +4090,74 @@ mod tests {
         assert!(interrupt.pending);
         assert_eq!(interrupt.status, "pending");
         assert_eq!(interrupt.turn_ref, sent.turn_ref);
+    }
+
+    #[test]
+    fn issue31_owner_state_actions_publish_encrypted_mergeable_sources() {
+        let mut client = client();
+        client.bootstrap().expect("bootstrap");
+        let context_ref = "sarah-conversation:sarah.aaaaaaaaaaaaaaaaaaaaaaaa";
+        let read_arguments = |read_at| Issue31CommandArguments::ReadStatePatch {
+            action_ref: "action.issue31.read_state.advance".into(),
+            slot_id: "owner-mobile".into(),
+            client_id: "iphone".into(),
+            context_ref: context_ref.into(),
+            read_at,
+        };
+        let (_, first_projection) = client
+            .execute_issue31_owner_state_action(&read_arguments(100))
+            .expect("first read-state write");
+        let (second_event_id, second_projection) = client
+            .execute_issue31_owner_state_action(&read_arguments(200))
+            .expect("merged read-state write");
+        assert_ne!(second_event_id, "0".repeat(64));
+        assert!(matches!(
+            first_projection,
+            Issue31OwnerProjectionBody::ReadState { .. }
+        ));
+        let Issue31OwnerProjectionBody::ReadState { plaintext, .. } = second_projection else {
+            panic!("read-state projection");
+        };
+        let value: Value = serde_json::from_str(&plaintext).expect("read-state plaintext");
+        assert_eq!(value["contexts"][context_ref], 200);
+        let contexts = client
+            .load_issue31_read_state_contexts("read-state:owner-mobile")
+            .expect("reload read-state contexts");
+        assert_eq!(contexts.get(context_ref), Some(&200));
+
+        let reminder_id = "a".repeat(32);
+        let (_, reminder_projection) = client
+            .execute_issue31_owner_state_action(&Issue31CommandArguments::ReminderCreate {
+                action_ref: "action.issue31.reminder.create".into(),
+                reminder_id: reminder_id.clone(),
+                note: Some("Review the signed build".into()),
+                target_event_id: None,
+                not_before: 300,
+                expiration: Some(600),
+            })
+            .expect("reminder write");
+        assert!(matches!(
+            reminder_projection,
+            Issue31OwnerProjectionBody::Reminder {
+                reminder_id: projected_id,
+                not_before: Some(300),
+                expiration: Some(600),
+                ..
+            } if projected_id == reminder_id
+        ));
+        let conversation_ref = client.config.conversation_ref();
+        let page = client
+            .query_with_auth(&conversation_ref, None, MAX_PAGE_LIMIT)
+            .expect("query encrypted sources");
+        assert!(page.events.iter().any(|event| {
+            event.kind == SARAH_READ_STATE_KIND
+                && !event.content_summary.contains("client_id")
+                && !event.content_summary.contains(context_ref)
+        }));
+        assert!(page.events.iter().any(|event| {
+            event.kind == SARAH_REMINDER_KIND
+                && !event.content_summary.contains("Review the signed build")
+        }));
     }
 
     #[test]
@@ -3585,6 +4547,7 @@ mod tests {
             host_ref: "omega.host.local".into(),
             host_public_key_hex: signer.public_key_hex.clone(),
             sarah_public_key_hex: config.identity.sarah_public_key_hex.clone(),
+            conversation: config.conversation_ref(),
             display_name: "Local Omega".into(),
             relay_urls,
             generation: ISSUE31_NOSTR_HOST_GENERATION,
@@ -3635,6 +4598,7 @@ mod tests {
             host_ref: "omega.host.local".into(),
             host_public_key_hex: signer.public_key_hex.clone(),
             sarah_public_key_hex: config.identity.sarah_public_key_hex.clone(),
+            conversation: config.conversation_ref(),
             display_name: "Local Omega".into(),
             relay_urls,
             generation: ISSUE31_NOSTR_HOST_GENERATION,
@@ -3753,6 +4717,7 @@ mod tests {
             host_ref: "omega.host.local".into(),
             host_public_key_hex: signer.public_key_hex.clone(),
             sarah_public_key_hex: config.identity.sarah_public_key_hex.clone(),
+            conversation: config.conversation_ref(),
             display_name: "Local Omega".into(),
             relay_urls: vec!["wss://relay.example.com".into()],
             generation: ISSUE31_NOSTR_HOST_GENERATION,
@@ -3835,6 +4800,7 @@ mod tests {
             host_ref: "omega.host.local".into(),
             host_public_key_hex: signer.public_key_hex.clone(),
             sarah_public_key_hex,
+            conversation: config.conversation_ref(),
             display_name: "Local Omega".into(),
             relay_urls: vec!["wss://relay.example.com".into()],
             generation: ISSUE31_NOSTR_HOST_GENERATION,
@@ -3906,6 +4872,7 @@ mod tests {
             host_ref: "omega.host.local".into(),
             host_public_key_hex: signer.public_key_hex.clone(),
             sarah_public_key_hex,
+            conversation: config.conversation_ref(),
             display_name: "Local Omega".into(),
             relay_urls: vec!["wss://relay.example.com".into()],
             generation: ISSUE31_NOSTR_HOST_GENERATION,
@@ -3982,6 +4949,7 @@ mod tests {
             )]),
             relay_acknowledgements: BTreeMap::new(),
             control_cursor: Some(format!("cursor.10.{}", "f".repeat(64))),
+            projection_cursor: Some(format!("cursor.11.{}", "e".repeat(64))),
             quarantined_events: BTreeMap::from([(
                 "9".repeat(64),
                 "reason.omega.invalid_pairing_record".into(),

@@ -14,6 +14,18 @@ pub const ISSUE31_HOST_DISCOVERY_KIND: u16 = 31_990;
 pub const ISSUE31_PRIVATE_RUMOR_KIND: u16 = 14;
 pub const ISSUE31_PRIVATE_SEAL_KIND: u16 = 13;
 pub const ISSUE31_PRIVATE_GIFT_WRAP_KIND: u16 = 1_059;
+pub const ISSUE31_ACTION_SEND_MESSAGE: &str = "action.issue31.sarah.send";
+pub const ISSUE31_ACTION_INTERRUPT_TURN: &str = "action.issue31.sarah.interrupt";
+pub const ISSUE31_ACTION_ADVANCE_READ_STATE: &str = "action.issue31.read_state.advance";
+pub const ISSUE31_ACTION_CREATE_REMINDER: &str = "action.issue31.reminder.create";
+pub const ISSUE31_ACTION_CHANGE_REMINDER: &str = "action.issue31.reminder.change";
+pub const ISSUE31_ACTION_COMPLETE_REMINDER: &str = "action.issue31.reminder.complete";
+pub const ISSUE31_ACTION_CANCEL_REMINDER: &str = "action.issue31.reminder.cancel";
+pub const SARAH_TURN_RECORD_KIND: u16 = 44_300;
+pub const SARAH_AUTHORITY_RECEIPT_KIND: u16 = 44_301;
+pub const SARAH_ENGRAM_KIND: u16 = 30_174;
+pub const SARAH_READ_STATE_KIND: u16 = 30_078;
+pub const SARAH_REMINDER_KIND: u16 = 30_300;
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum Issue31NostrError {
@@ -1117,6 +1129,604 @@ impl Issue31CommandRecord {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum Issue31CommandArguments {
+    SendMessage {
+        #[serde(rename = "actionRef")]
+        action_ref: String,
+        conversation: String,
+        text: String,
+    },
+    InterruptTurn {
+        #[serde(rename = "actionRef")]
+        action_ref: String,
+        conversation: String,
+        #[serde(rename = "turnRef")]
+        turn_ref: String,
+    },
+    ReadStatePatch {
+        #[serde(rename = "actionRef")]
+        action_ref: String,
+        #[serde(rename = "slotId")]
+        slot_id: String,
+        #[serde(rename = "clientId")]
+        client_id: String,
+        #[serde(rename = "contextRef")]
+        context_ref: String,
+        #[serde(rename = "readAt")]
+        read_at: u64,
+    },
+    ReminderCreate {
+        #[serde(rename = "actionRef")]
+        action_ref: String,
+        #[serde(rename = "reminderId")]
+        reminder_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        note: Option<String>,
+        #[serde(
+            rename = "targetEventId",
+            default,
+            skip_serializing_if = "Option::is_none"
+        )]
+        target_event_id: Option<String>,
+        #[serde(rename = "notBefore")]
+        not_before: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expiration: Option<u64>,
+    },
+    ReminderChange {
+        #[serde(rename = "actionRef")]
+        action_ref: String,
+        #[serde(rename = "reminderId")]
+        reminder_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        note: Option<String>,
+        #[serde(
+            rename = "targetEventId",
+            default,
+            skip_serializing_if = "Option::is_none"
+        )]
+        target_event_id: Option<String>,
+        #[serde(rename = "notBefore")]
+        not_before: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expiration: Option<u64>,
+    },
+    ReminderComplete {
+        #[serde(rename = "actionRef")]
+        action_ref: String,
+        #[serde(rename = "reminderId")]
+        reminder_id: String,
+    },
+    ReminderCancel {
+        #[serde(rename = "actionRef")]
+        action_ref: String,
+        #[serde(rename = "reminderId")]
+        reminder_id: String,
+    },
+}
+
+impl Issue31CommandArguments {
+    pub fn action_ref(&self) -> &str {
+        match self {
+            Self::SendMessage { action_ref, .. }
+            | Self::InterruptTurn { action_ref, .. }
+            | Self::ReadStatePatch { action_ref, .. }
+            | Self::ReminderCreate { action_ref, .. }
+            | Self::ReminderChange { action_ref, .. }
+            | Self::ReminderComplete { action_ref, .. }
+            | Self::ReminderCancel { action_ref, .. } => action_ref,
+        }
+    }
+
+    pub fn validate(&self) -> Result<(), Issue31NostrError> {
+        let valid_short_identifier = |value: &str| {
+            !value.is_empty()
+                && value.len() <= 64
+                && value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || b"._:-".contains(&byte))
+        };
+        match self {
+            Self::SendMessage {
+                action_ref,
+                conversation,
+                text,
+            } if action_ref == ISSUE31_ACTION_SEND_MESSAGE
+                && valid_conversation_tag(conversation)
+                && !text.is_empty()
+                && text.len() <= 12_000 =>
+            {
+                Ok(())
+            }
+            Self::InterruptTurn {
+                action_ref,
+                conversation,
+                turn_ref,
+            } if action_ref == ISSUE31_ACTION_INTERRUPT_TURN
+                && valid_conversation_tag(conversation)
+                && valid_ref(turn_ref) =>
+            {
+                Ok(())
+            }
+            Self::ReadStatePatch {
+                action_ref,
+                slot_id,
+                client_id,
+                context_ref,
+                ..
+            } if action_ref == ISSUE31_ACTION_ADVANCE_READ_STATE
+                && valid_short_identifier(slot_id)
+                && valid_short_identifier(client_id)
+                && !context_ref.is_empty()
+                && context_ref.len() <= 256
+                && !context_ref.chars().any(char::is_control) =>
+            {
+                Ok(())
+            }
+            Self::ReminderCreate {
+                action_ref,
+                reminder_id,
+                note,
+                target_event_id,
+                not_before,
+                expiration,
+            } if action_ref == ISSUE31_ACTION_CREATE_REMINDER => validate_reminder_arguments(
+                reminder_id,
+                note.as_deref(),
+                target_event_id.as_deref(),
+                *not_before,
+                *expiration,
+            ),
+            Self::ReminderChange {
+                action_ref,
+                reminder_id,
+                note,
+                target_event_id,
+                not_before,
+                expiration,
+            } if action_ref == ISSUE31_ACTION_CHANGE_REMINDER => validate_reminder_arguments(
+                reminder_id,
+                note.as_deref(),
+                target_event_id.as_deref(),
+                *not_before,
+                *expiration,
+            ),
+            Self::ReminderComplete {
+                action_ref,
+                reminder_id,
+            } if action_ref == ISSUE31_ACTION_COMPLETE_REMINDER && valid_hex32(reminder_id) => {
+                Ok(())
+            }
+            Self::ReminderCancel {
+                action_ref,
+                reminder_id,
+            } if action_ref == ISSUE31_ACTION_CANCEL_REMINDER && valid_hex32(reminder_id) => Ok(()),
+            _ => Err(Issue31NostrError::Invalid(
+                "Issue 31 command arguments violate their action contract".into(),
+            )),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Issue31CommandHandlingStatus {
+    Accepted,
+    Failed,
+    Refused,
+    Unavailable,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "recordType", rename_all = "snake_case", deny_unknown_fields)]
+pub enum Issue31CommandRecordV2 {
+    CommandIntent {
+        schema: String,
+        #[serde(rename = "hostRef")]
+        host_ref: String,
+        #[serde(rename = "hostPublicKeyHex")]
+        host_public_key_hex: String,
+        #[serde(rename = "devicePublicKeyHex")]
+        device_public_key_hex: String,
+        #[serde(rename = "grantRef")]
+        grant_ref: String,
+        #[serde(rename = "idempotencyRef")]
+        idempotency_ref: String,
+        #[serde(rename = "expectedGeneration")]
+        expected_generation: u64,
+        arguments: Issue31CommandArguments,
+        #[serde(rename = "issuedAt")]
+        issued_at: u64,
+        #[serde(rename = "expiresAt")]
+        expires_at: u64,
+    },
+    CommandResult {
+        schema: String,
+        #[serde(rename = "hostRef")]
+        host_ref: String,
+        #[serde(rename = "hostPublicKeyHex")]
+        host_public_key_hex: String,
+        #[serde(rename = "devicePublicKeyHex")]
+        device_public_key_hex: String,
+        #[serde(rename = "grantRef")]
+        grant_ref: String,
+        #[serde(rename = "intentEventId")]
+        intent_event_id: String,
+        #[serde(rename = "actionRef")]
+        action_ref: String,
+        #[serde(rename = "idempotencyRef")]
+        idempotency_ref: String,
+        #[serde(rename = "expectedGeneration")]
+        expected_generation: u64,
+        status: Issue31CommandHandlingStatus,
+        #[serde(rename = "handlingRef")]
+        handling_ref: String,
+        #[serde(rename = "reasonRef", default, skip_serializing_if = "Option::is_none")]
+        reason_ref: Option<String>,
+        #[serde(
+            rename = "sourceEventId",
+            default,
+            skip_serializing_if = "Option::is_none"
+        )]
+        source_event_id: Option<String>,
+        #[serde(rename = "handledAt")]
+        handled_at: u64,
+    },
+}
+
+impl Issue31CommandRecordV2 {
+    pub fn decode(bytes: &[u8]) -> Result<Self, Issue31NostrError> {
+        if bytes.len() > 64 * 1024 {
+            return Err(Issue31NostrError::Invalid(
+                "command v2 record exceeds the record budget".into(),
+            ));
+        }
+        let record: Self = serde_json::from_slice(bytes)
+            .map_err(|error| Issue31NostrError::Decode(error.to_string()))?;
+        record.validate()?;
+        Ok(record)
+    }
+
+    pub fn validate(&self) -> Result<(), Issue31NostrError> {
+        let (schema, host_ref, host_key, device_key, grant_ref, idempotency_ref, generation) =
+            self.binding();
+        if schema != ISSUE31_COMMAND_SCHEMA_V2
+            || !valid_ref(host_ref)
+            || !valid_hex64(host_key)
+            || !valid_hex64(device_key)
+            || !valid_ref(grant_ref)
+            || !valid_ref(idempotency_ref)
+            || generation == 0
+        {
+            return Err(Issue31NostrError::Invalid(
+                "invalid command v2 binding".into(),
+            ));
+        }
+        match self {
+            Self::CommandIntent {
+                arguments,
+                issued_at,
+                expires_at,
+                ..
+            } => {
+                arguments.validate()?;
+                validate_lifetime(*issued_at, *expires_at)
+            }
+            Self::CommandResult {
+                intent_event_id,
+                action_ref,
+                status,
+                handling_ref,
+                reason_ref,
+                source_event_id,
+                ..
+            } => {
+                validate_hex_value(intent_event_id, "intent event")?;
+                validate_ref_value(action_ref, "action")?;
+                validate_ref_value(handling_ref, "handling")?;
+                if let Some(reason_ref) = reason_ref {
+                    validate_ref_value(reason_ref, "reason")?;
+                }
+                if let Some(source_event_id) = source_event_id {
+                    validate_hex_value(source_event_id, "source event")?;
+                }
+                if *status == Issue31CommandHandlingStatus::Accepted && reason_ref.is_some() {
+                    return Err(Issue31NostrError::Invalid(
+                        "accepted command handling cannot carry a failure reason".into(),
+                    ));
+                }
+                Ok(())
+            }
+        }
+    }
+
+    fn binding(&self) -> (&str, &str, &str, &str, &str, &str, u64) {
+        match self {
+            Self::CommandIntent {
+                schema,
+                host_ref,
+                host_public_key_hex,
+                device_public_key_hex,
+                grant_ref,
+                idempotency_ref,
+                expected_generation,
+                ..
+            }
+            | Self::CommandResult {
+                schema,
+                host_ref,
+                host_public_key_hex,
+                device_public_key_hex,
+                grant_ref,
+                idempotency_ref,
+                expected_generation,
+                ..
+            } => (
+                schema,
+                host_ref,
+                host_public_key_hex,
+                device_public_key_hex,
+                grant_ref,
+                idempotency_ref,
+                *expected_generation,
+            ),
+        }
+    }
+
+    pub fn validate_private_binding(
+        &self,
+        sender_public_key_hex: &str,
+        recipient_public_key_hex: &str,
+    ) -> Result<(), Issue31NostrError> {
+        self.validate()?;
+        let (_, _, host_key, device_key, _, _, _) = self.binding();
+        let device_authored = matches!(self, Self::CommandIntent { .. });
+        let (expected_sender, expected_recipient) = if device_authored {
+            (device_key, host_key)
+        } else {
+            (host_key, device_key)
+        };
+        if sender_public_key_hex != expected_sender
+            || recipient_public_key_hex != expected_recipient
+        {
+            return Err(Issue31NostrError::Invalid(
+                "command v2 signer or recipient does not match its binding".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn device_public_key_hex(&self) -> &str {
+        self.binding().3
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Issue31SourceRole {
+    Owner,
+    Sarah,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Issue31AuthorityDecisionProjection {
+    pub state: String,
+    pub decision_ref: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason_ref: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Issue31TargetOutcomeProjection {
+    pub state: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason_ref: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum Issue31OwnerProjectionBody {
+    Message {
+        role: Issue31SourceRole,
+        conversation: String,
+        text: String,
+        #[serde(
+            rename = "replyToEventId",
+            default,
+            skip_serializing_if = "Option::is_none"
+        )]
+        reply_to_event_id: Option<String>,
+    },
+    Turn {
+        payload: serde_json::Value,
+    },
+    AuthorityReceipt {
+        #[serde(rename = "receiptRef")]
+        receipt_ref: String,
+        #[serde(rename = "turnRef")]
+        turn_ref: String,
+        #[serde(rename = "authorityDecision")]
+        authority_decision: Issue31AuthorityDecisionProjection,
+        #[serde(rename = "targetOutcome")]
+        target_outcome: Issue31TargetOutcomeProjection,
+    },
+    Engram {
+        #[serde(rename = "dTag")]
+        d_tag: String,
+        plaintext: String,
+    },
+    ReadState {
+        #[serde(rename = "dTag")]
+        d_tag: String,
+        plaintext: String,
+    },
+    Reminder {
+        #[serde(rename = "reminderId")]
+        reminder_id: String,
+        plaintext: String,
+        #[serde(rename = "notBefore", default, skip_serializing_if = "Option::is_none")]
+        not_before: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expiration: Option<u64>,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Issue31OwnerProjectionRecord {
+    pub schema: String,
+    pub record_type: String,
+    pub host_ref: String,
+    pub host_public_key_hex: String,
+    pub device_public_key_hex: String,
+    pub grant_ref: String,
+    pub expected_generation: u64,
+    pub source_event_id: String,
+    pub source_author_public_key_hex: String,
+    pub source_role: Issue31SourceRole,
+    pub source_kind: u16,
+    pub source_created_at: u64,
+    pub projected_at: u64,
+    pub projection: Issue31OwnerProjectionBody,
+}
+
+impl Issue31OwnerProjectionRecord {
+    pub fn decode(bytes: &[u8]) -> Result<Self, Issue31NostrError> {
+        if bytes.len() > 640 * 1024 {
+            return Err(Issue31NostrError::Invalid(
+                "owner projection exceeds the record budget".into(),
+            ));
+        }
+        let record: Self = serde_json::from_slice(bytes)
+            .map_err(|error| Issue31NostrError::Decode(error.to_string()))?;
+        record.validate()?;
+        Ok(record)
+    }
+
+    pub fn validate(&self) -> Result<(), Issue31NostrError> {
+        if self.schema != ISSUE31_OWNER_PROJECTION_SCHEMA
+            || self.record_type != "owner_projection"
+            || !valid_ref(&self.host_ref)
+            || !valid_hex64(&self.host_public_key_hex)
+            || !valid_hex64(&self.device_public_key_hex)
+            || !valid_ref(&self.grant_ref)
+            || self.expected_generation == 0
+            || !valid_hex64(&self.source_event_id)
+            || !valid_hex64(&self.source_author_public_key_hex)
+            || self.projected_at < self.source_created_at
+        {
+            return Err(Issue31NostrError::Invalid(
+                "invalid owner projection binding".into(),
+            ));
+        }
+        let (expected_kind, expected_role) = self.projection.validate()?;
+        if self.source_kind != expected_kind || self.source_role != expected_role {
+            return Err(Issue31NostrError::Invalid(
+                "owner projection source kind or role does not match its body".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn validate_private_binding(
+        &self,
+        sender_public_key_hex: &str,
+        recipient_public_key_hex: &str,
+        sarah_public_key_hex: &str,
+    ) -> Result<(), Issue31NostrError> {
+        self.validate()?;
+        let expected_source_author = match self.source_role {
+            Issue31SourceRole::Owner => &self.host_public_key_hex,
+            Issue31SourceRole::Sarah => sarah_public_key_hex,
+        };
+        if sender_public_key_hex != self.host_public_key_hex
+            || recipient_public_key_hex != self.device_public_key_hex
+            || self.source_author_public_key_hex != expected_source_author
+        {
+            return Err(Issue31NostrError::Invalid(
+                "owner projection signer, recipient, or source author is invalid".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl Issue31OwnerProjectionBody {
+    fn validate(&self) -> Result<(u16, Issue31SourceRole), Issue31NostrError> {
+        match self {
+            Self::Message {
+                role,
+                conversation,
+                text,
+                reply_to_event_id,
+            } if valid_conversation_tag(conversation)
+                && !text.is_empty()
+                && text.len() <= 12_000
+                && reply_to_event_id
+                    .as_ref()
+                    .is_none_or(|value| valid_hex64(value)) =>
+            {
+                Ok((ISSUE31_PRIVATE_RUMOR_KIND, *role))
+            }
+            Self::Turn { payload } if valid_turn_payload(payload) => {
+                Ok((SARAH_TURN_RECORD_KIND, Issue31SourceRole::Sarah))
+            }
+            Self::AuthorityReceipt {
+                receipt_ref,
+                turn_ref,
+                authority_decision,
+                target_outcome,
+            } => {
+                validate_ref_value(receipt_ref, "receipt")?;
+                validate_ref_value(turn_ref, "turn")?;
+                validate_authority_projection(authority_decision, target_outcome)?;
+                Ok((SARAH_AUTHORITY_RECEIPT_KIND, Issue31SourceRole::Sarah))
+            }
+            Self::Engram { d_tag, plaintext }
+                if valid_hex64(d_tag)
+                    && !plaintext.is_empty()
+                    && plaintext.len() <= 65_535
+                    && valid_engram_plaintext(plaintext) =>
+            {
+                Ok((SARAH_ENGRAM_KIND, Issue31SourceRole::Sarah))
+            }
+            Self::ReadState { d_tag, plaintext }
+                if !d_tag.is_empty()
+                    && d_tag.len() <= 256
+                    && !plaintext.is_empty()
+                    && plaintext.len() <= 524_288
+                    && valid_read_state_plaintext(plaintext) =>
+            {
+                Ok((SARAH_READ_STATE_KIND, Issue31SourceRole::Owner))
+            }
+            Self::Reminder {
+                reminder_id,
+                plaintext,
+                not_before,
+                expiration,
+            } if valid_hex32(reminder_id)
+                && !plaintext.is_empty()
+                && plaintext.len() <= 524_288
+                && valid_reminder_plaintext(plaintext, *not_before)
+                && expiration
+                    .zip(*not_before)
+                    .is_none_or(|(expiration, not_before)| expiration > not_before) =>
+            {
+                Ok((SARAH_REMINDER_KIND, Issue31SourceRole::Owner))
+            }
+            _ => Err(Issue31NostrError::Invalid(
+                "owner projection body violates its source contract".into(),
+            )),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Issue31CommandEvent {
     pub event_id: String,
@@ -1199,6 +1809,8 @@ pub struct Issue31HostConfiguration {
     pub host_ref: String,
     pub host_public_key_hex: String,
     pub sarah_public_key_hex: String,
+    #[serde(default)]
+    pub conversation: String,
     pub display_name: String,
     pub relay_urls: Vec<String>,
     pub generation: u64,
@@ -1211,6 +1823,14 @@ pub struct Issue31CommandExecution {
     pub reason_ref: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Issue31CommandExecutionV2 {
+    pub status: Issue31CommandHandlingStatus,
+    pub handling_ref: String,
+    pub reason_ref: Option<String>,
+    pub source_event_id: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Issue31HostController {
@@ -1221,11 +1841,16 @@ pub struct Issue31HostController {
     processed_pairing_event_ids: BTreeSet<String>,
     processed_command_event_ids: BTreeSet<String>,
     command_results: BTreeMap<String, (Issue31CommandRecord, Issue31CommandRecord)>,
+    #[serde(default)]
+    command_results_v2: BTreeMap<String, (Issue31CommandRecordV2, Issue31CommandRecordV2)>,
+    #[serde(default)]
+    projected_source_event_ids: BTreeMap<String, BTreeSet<String>>,
 }
 
 const MAX_ISSUE31_PAIRING_EVENTS: usize = 4_096;
 const MAX_ISSUE31_PROCESSED_EVENTS: usize = 4_096;
 const MAX_ISSUE31_COMMAND_RESULTS: usize = 1_024;
+const MAX_ISSUE31_PROJECTED_SOURCE_EVENTS: usize = 16_384;
 
 impl Issue31HostController {
     pub fn new(configuration: Issue31HostConfiguration) -> Result<Self, Issue31NostrError> {
@@ -1242,6 +1867,24 @@ impl Issue31HostController {
             expires_at: 2,
         }
         .validate()?;
+        Issue31HostDiscoveryV2 {
+            schema: ISSUE31_HOST_DISCOVERY_SCHEMA_V2.into(),
+            host_ref: configuration.host_ref.clone(),
+            host_public_key_hex: configuration.host_public_key_hex.clone(),
+            sarah_public_key_hex: configuration.sarah_public_key_hex.clone(),
+            conversation: configuration.conversation.clone(),
+            display_name: configuration.display_name.clone(),
+            protocols: vec![
+                ISSUE31_PAIRING_SCHEMA.into(),
+                ISSUE31_COMMAND_SCHEMA.into(),
+                ISSUE31_COMMAND_SCHEMA_V2.into(),
+            ],
+            relay_urls: configuration.relay_urls.clone(),
+            generation: configuration.generation,
+            issued_at: 1,
+            expires_at: 2,
+        }
+        .validate()?;
         Ok(Self {
             configuration,
             admitted_device_scopes: BTreeMap::new(),
@@ -1249,6 +1892,8 @@ impl Issue31HostController {
             processed_pairing_event_ids: BTreeSet::new(),
             processed_command_event_ids: BTreeSet::new(),
             command_results: BTreeMap::new(),
+            command_results_v2: BTreeMap::new(),
+            projected_source_event_ids: BTreeMap::new(),
         })
     }
 
@@ -1273,8 +1918,49 @@ impl Issue31HostController {
         Ok(discovery)
     }
 
+    pub fn discovery_v2(
+        &self,
+        issued_at: u64,
+        expires_at: u64,
+    ) -> Result<Issue31HostDiscoveryV2, Issue31NostrError> {
+        let discovery = Issue31HostDiscoveryV2 {
+            schema: ISSUE31_HOST_DISCOVERY_SCHEMA_V2.into(),
+            host_ref: self.configuration.host_ref.clone(),
+            host_public_key_hex: self.configuration.host_public_key_hex.clone(),
+            sarah_public_key_hex: self.configuration.sarah_public_key_hex.clone(),
+            conversation: self.configuration.conversation.clone(),
+            display_name: self.configuration.display_name.clone(),
+            protocols: vec![
+                ISSUE31_PAIRING_SCHEMA.into(),
+                ISSUE31_COMMAND_SCHEMA.into(),
+                ISSUE31_COMMAND_SCHEMA_V2.into(),
+            ],
+            relay_urls: self.configuration.relay_urls.clone(),
+            generation: self.configuration.generation,
+            issued_at,
+            expires_at,
+        };
+        discovery.validate()?;
+        Ok(discovery)
+    }
+
     pub fn matches_configuration(&self, configuration: &Issue31HostConfiguration) -> bool {
         &self.configuration == configuration
+    }
+
+    pub fn adopt_conversation_if_missing(
+        &mut self,
+        conversation: &str,
+    ) -> Result<(), Issue31NostrError> {
+        if self.configuration.conversation.is_empty() {
+            if !valid_conversation_tag(conversation) {
+                return Err(Issue31NostrError::Invalid(
+                    "invalid Issue 31 migration conversation".into(),
+                ));
+            }
+            self.configuration.conversation = conversation.into();
+        }
+        Ok(())
     }
 
     pub fn set_admitted_device_policy(
@@ -1379,6 +2065,13 @@ impl Issue31HostController {
             || self.processed_pairing_event_ids.len() > MAX_ISSUE31_PROCESSED_EVENTS
             || self.processed_command_event_ids.len() > MAX_ISSUE31_PROCESSED_EVENTS
             || self.command_results.len() > MAX_ISSUE31_COMMAND_RESULTS
+            || self.command_results_v2.len() > MAX_ISSUE31_COMMAND_RESULTS
+            || self
+                .projected_source_event_ids
+                .values()
+                .map(BTreeSet::len)
+                .sum::<usize>()
+                > MAX_ISSUE31_PROJECTED_SOURCE_EVENTS
         {
             return Err(Issue31NostrError::Invalid(
                 "persisted Issue 31 host state exceeds its bounds".into(),
@@ -1436,6 +2129,56 @@ impl Issue31HostController {
             {
                 return Err(Issue31NostrError::Invalid(
                     "persisted command result changes its intent binding".into(),
+                ));
+            }
+        }
+        for (idempotency_ref, (intent, result)) in &self.command_results_v2 {
+            validate_ref_value(idempotency_ref, "persisted idempotency")?;
+            intent.validate()?;
+            result.validate()?;
+            let Issue31CommandRecordV2::CommandIntent {
+                idempotency_ref: intent_idempotency_ref,
+                issued_at,
+                arguments,
+                ..
+            } = intent
+            else {
+                return Err(Issue31NostrError::Invalid(
+                    "persisted command v2 result omitted its intent".into(),
+                ));
+            };
+            let Issue31CommandRecordV2::CommandResult {
+                intent_event_id,
+                action_ref,
+                idempotency_ref: result_idempotency_ref,
+                handled_at,
+                ..
+            } = result
+            else {
+                return Err(Issue31NostrError::Invalid(
+                    "persisted command v2 result stored a second intent".into(),
+                ));
+            };
+            if intent.binding() != result.binding()
+                || action_ref != arguments.action_ref()
+                || intent_idempotency_ref != idempotency_ref
+                || result_idempotency_ref != idempotency_ref
+                || handled_at < issued_at
+                || !self.processed_command_event_ids.contains(intent_event_id)
+            {
+                return Err(Issue31NostrError::Invalid(
+                    "persisted command v2 result changes its intent binding".into(),
+                ));
+            }
+        }
+        for (grant_ref, source_event_ids) in &self.projected_source_event_ids {
+            validate_ref_value(grant_ref, "projected grant")?;
+            if source_event_ids
+                .iter()
+                .any(|event_id| !valid_hex64(event_id))
+            {
+                return Err(Issue31NostrError::Invalid(
+                    "persisted projected source event id is invalid".into(),
                 ));
             }
         }
@@ -1767,6 +2510,193 @@ impl Issue31HostController {
         Ok(Some(result))
     }
 
+    pub fn handle_command_event_v2<F>(
+        &mut self,
+        event_id: String,
+        record: Issue31CommandRecordV2,
+        now: u64,
+        execute: F,
+    ) -> Result<Option<Issue31CommandRecordV2>, Issue31NostrError>
+    where
+        F: FnOnce(&Issue31CommandArguments, &str, &str, &str, u64) -> Issue31CommandExecutionV2,
+    {
+        if !valid_hex64(&event_id) {
+            return Err(Issue31NostrError::Invalid(
+                "Issue 31 command v2 event id is invalid".into(),
+            ));
+        }
+        if self.processed_command_event_ids.contains(&event_id) {
+            return Ok(None);
+        }
+        record.validate()?;
+        if self.processed_command_event_ids.len() >= MAX_ISSUE31_PROCESSED_EVENTS {
+            return Err(Issue31NostrError::Invalid(
+                "Issue 31 processed command event bound is exhausted".into(),
+            ));
+        }
+        let Issue31CommandRecordV2::CommandIntent {
+            host_ref,
+            host_public_key_hex,
+            device_public_key_hex,
+            grant_ref,
+            idempotency_ref,
+            expected_generation,
+            arguments,
+            issued_at,
+            expires_at,
+            ..
+        } = &record
+        else {
+            self.processed_command_event_ids.insert(event_id);
+            return Ok(None);
+        };
+        if let Some((prior_intent, prior_result)) = self.command_results_v2.get(idempotency_ref) {
+            if prior_intent == &record {
+                self.processed_command_event_ids.insert(event_id);
+                return Ok(Some(prior_result.clone()));
+            }
+            return Err(Issue31NostrError::Invalid(format!(
+                "idempotency ref {idempotency_ref} conflicts with an earlier command v2"
+            )));
+        }
+        if self.command_results_v2.len() >= MAX_ISSUE31_COMMAND_RESULTS {
+            return Err(Issue31NostrError::Invalid(
+                "Issue 31 command v2 result bound is exhausted".into(),
+            ));
+        }
+
+        let refusal = |reason: &str| Issue31CommandExecutionV2 {
+            status: Issue31CommandHandlingStatus::Refused,
+            handling_ref: "handling.omega.refused".into(),
+            reason_ref: Some(reason.into()),
+            source_event_id: None,
+        };
+        let execution = if host_ref != &self.configuration.host_ref
+            || host_public_key_hex != &self.configuration.host_public_key_hex
+        {
+            refusal("reason.omega.host_binding_mismatch")
+        } else if require_live_record(*issued_at, *expires_at, now, "command v2 intent").is_err() {
+            refusal("reason.omega.command_expired")
+        } else {
+            let grant = fold_issue31_grant(&self.pairing_events, grant_ref)?;
+            match grant {
+                Some(grant)
+                    if grant.status == Issue31GrantStatus::Active
+                        && grant.device_public_key_hex == *device_public_key_hex
+                        && grant.generation == *expected_generation
+                        && grant.expires_at.is_some_and(|expires_at| now < expires_at) =>
+                {
+                    let required_scope = required_scope(arguments.action_ref());
+                    match required_scope {
+                        Some(scope) if grant.scopes.contains(&scope) => execute(
+                            arguments,
+                            idempotency_ref,
+                            grant_ref,
+                            device_public_key_hex,
+                            *expected_generation,
+                        ),
+                        Some(_) => refusal("reason.omega.scope_denied"),
+                        None => Issue31CommandExecutionV2 {
+                            status: Issue31CommandHandlingStatus::Unavailable,
+                            handling_ref: "handling.omega.unavailable".into(),
+                            reason_ref: Some("reason.omega.action_unsupported".into()),
+                            source_event_id: None,
+                        },
+                    }
+                }
+                _ => refusal("reason.omega.grant_invalid"),
+            }
+        };
+        let result = Issue31CommandRecordV2::CommandResult {
+            schema: ISSUE31_COMMAND_SCHEMA_V2.into(),
+            host_ref: host_ref.clone(),
+            host_public_key_hex: host_public_key_hex.clone(),
+            device_public_key_hex: device_public_key_hex.clone(),
+            grant_ref: grant_ref.clone(),
+            intent_event_id: event_id.clone(),
+            action_ref: arguments.action_ref().into(),
+            idempotency_ref: idempotency_ref.clone(),
+            expected_generation: *expected_generation,
+            status: execution.status,
+            handling_ref: execution.handling_ref,
+            reason_ref: execution.reason_ref,
+            source_event_id: execution.source_event_id,
+            handled_at: now,
+        };
+        result.validate()?;
+        self.processed_command_event_ids.insert(event_id);
+        self.command_results_v2
+            .insert(idempotency_ref.clone(), (record, result.clone()));
+        Ok(Some(result))
+    }
+
+    pub fn active_grants(&self, now: u64) -> Result<Vec<Issue31GrantState>, Issue31NostrError> {
+        let grant_refs = self
+            .pairing_events
+            .iter()
+            .filter_map(|event| {
+                event
+                    .record
+                    .lifecycle_binding()
+                    .map(|binding| binding.4.to_string())
+            })
+            .collect::<BTreeSet<_>>();
+        let mut grants = Vec::new();
+        for grant_ref in grant_refs {
+            let Some(grant) = fold_issue31_grant(&self.pairing_events, &grant_ref)? else {
+                continue;
+            };
+            if grant.status == Issue31GrantStatus::Active
+                && grant.expires_at.is_some_and(|expires_at| now < expires_at)
+                && grant.scopes.contains(&Issue31PairingScope::ObserveIssue31)
+            {
+                grants.push(grant);
+            }
+        }
+        Ok(grants)
+    }
+
+    pub fn source_was_projected(
+        &self,
+        grant_ref: &str,
+        generation: u64,
+        source_event_id: &str,
+    ) -> bool {
+        let projection_ref = format!("{grant_ref}:{generation}");
+        self.projected_source_event_ids
+            .get(&projection_ref)
+            .is_some_and(|event_ids| event_ids.contains(source_event_id))
+    }
+
+    pub fn record_source_projection(
+        &mut self,
+        grant_ref: String,
+        generation: u64,
+        source_event_id: String,
+    ) -> Result<(), Issue31NostrError> {
+        validate_ref_value(&grant_ref, "projected grant")?;
+        validate_generation(generation)?;
+        validate_hex_value(&source_event_id, "projected source event")?;
+        let projection_ref = format!("{grant_ref}:{generation}");
+        let projected_count = self
+            .projected_source_event_ids
+            .values()
+            .map(BTreeSet::len)
+            .sum::<usize>();
+        if projected_count >= MAX_ISSUE31_PROJECTED_SOURCE_EVENTS
+            && !self.source_was_projected(&grant_ref, generation, &source_event_id)
+        {
+            return Err(Issue31NostrError::Invalid(
+                "Issue 31 projected source event bound is exhausted".into(),
+            ));
+        }
+        self.projected_source_event_ids
+            .entry(projection_ref)
+            .or_default()
+            .insert(source_event_id);
+        Ok(())
+    }
+
     fn insert_pairing_event(
         &mut self,
         event: Issue31PairingEvent,
@@ -1862,8 +2792,17 @@ fn require_live_record(
 
 fn required_scope(action_ref: &str) -> Option<Issue31PairingScope> {
     match action_ref {
-        "action.omega.send_message" => Some(Issue31PairingScope::SendMessage),
-        "action.omega.interrupt_turn" => Some(Issue31PairingScope::InterruptTurn),
+        "action.omega.send_message" | ISSUE31_ACTION_SEND_MESSAGE => {
+            Some(Issue31PairingScope::SendMessage)
+        }
+        "action.omega.interrupt_turn" | ISSUE31_ACTION_INTERRUPT_TURN => {
+            Some(Issue31PairingScope::InterruptTurn)
+        }
+        ISSUE31_ACTION_ADVANCE_READ_STATE
+        | ISSUE31_ACTION_CREATE_REMINDER
+        | ISSUE31_ACTION_CHANGE_REMINDER
+        | ISSUE31_ACTION_COMPLETE_REMINDER
+        | ISSUE31_ACTION_CANCEL_REMINDER => Some(Issue31PairingScope::ObserveIssue31),
         "action.omega.full_auto.stop"
         | "action.omega.full_auto.pause"
         | "action.omega.full_auto.resume" => Some(Issue31PairingScope::ControlFullAuto),
@@ -1891,6 +2830,7 @@ pub(crate) fn restart_fixture() -> (
         host_ref: "omega.host.local".into(),
         host_public_key_hex: host_public_key_hex.clone(),
         sarah_public_key_hex: "3".repeat(64),
+        conversation: "sarah.0123456789abcdef01234567".into(),
         display_name: "Local Omega".into(),
         relay_urls: vec!["wss://relay.example.com".into()],
         generation: 1,
@@ -2039,6 +2979,204 @@ fn validate_hex_value(value: &str, field: &str) -> Result<(), Issue31NostrError>
     }
 }
 
+fn validate_reminder_arguments(
+    reminder_id: &str,
+    note: Option<&str>,
+    target_event_id: Option<&str>,
+    not_before: u64,
+    expiration: Option<u64>,
+) -> Result<(), Issue31NostrError> {
+    if !valid_hex32(reminder_id)
+        || note.is_some_and(|note| note.len() > 4_096)
+        || target_event_id.is_some_and(|event_id| !valid_hex64(event_id))
+        || expiration.is_some_and(|expiration| expiration <= not_before)
+    {
+        return Err(Issue31NostrError::Invalid(
+            "invalid Issue 31 reminder arguments".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_authority_projection(
+    decision: &Issue31AuthorityDecisionProjection,
+    outcome: &Issue31TargetOutcomeProjection,
+) -> Result<(), Issue31NostrError> {
+    if !matches!(decision.state.as_str(), "allowed" | "refused")
+        || !valid_ref(&decision.decision_ref)
+        || decision
+            .reason_ref
+            .as_ref()
+            .is_some_and(|reason| !valid_ref(reason))
+        || !matches!(
+            outcome.state.as_str(),
+            "pending" | "succeeded" | "failed" | "stopped" | "unavailable"
+        )
+        || outcome
+            .outcome_ref
+            .as_ref()
+            .is_some_and(|reference| !valid_ref(reference))
+        || outcome
+            .reason_ref
+            .as_ref()
+            .is_some_and(|reason| !valid_ref(reason))
+        || (outcome.state != "pending" && outcome.outcome_ref.is_none())
+    {
+        return Err(Issue31NostrError::Invalid(
+            "invalid Issue 31 authority receipt projection".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn valid_turn_payload(payload: &serde_json::Value) -> bool {
+    let Some(object) = payload.as_object() else {
+        return false;
+    };
+    let allowed_keys = [
+        "schema",
+        "entry",
+        "conversation",
+        "turnRef",
+        "seq",
+        "timestamp",
+        "parents",
+        "payload",
+    ];
+    if object.len() != allowed_keys.len()
+        || object
+            .keys()
+            .any(|key| !allowed_keys.contains(&key.as_str()))
+        || object.get("schema").and_then(serde_json::Value::as_str)
+            != Some("openagents.sarah.turn_record.v1")
+        || !object
+            .get("entry")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|entry| {
+                matches!(
+                    entry,
+                    "turn.started"
+                        | "tool.call"
+                        | "tool.result"
+                        | "tool.error"
+                        | "turn.finished"
+                        | "turn.interrupted"
+                )
+            })
+        || !object
+            .get("conversation")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(valid_conversation_tag)
+        || !object
+            .get("turnRef")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|value| !value.is_empty() && value.len() <= 256)
+        || !object
+            .get("seq")
+            .and_then(serde_json::Value::as_u64)
+            .is_some_and(|sequence| sequence >= 1)
+        || !object
+            .get("timestamp")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|timestamp| !timestamp.is_empty())
+        || !object
+            .get("payload")
+            .is_some_and(serde_json::Value::is_object)
+    {
+        return false;
+    }
+    object
+        .get("parents")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|parents| {
+            parents.iter().all(|parent| {
+                let Some(parent) = parent.as_object() else {
+                    return false;
+                };
+                parent.len() == 2
+                    && parent
+                        .get("eventId")
+                        .and_then(serde_json::Value::as_str)
+                        .is_some_and(valid_hex64)
+                    && parent
+                        .get("marker")
+                        .and_then(serde_json::Value::as_str)
+                        .is_some_and(|marker| {
+                            matches!(
+                                marker,
+                                "prompt" | "reply" | "root" | "mention" | "tool" | "prior"
+                            )
+                        })
+            })
+        })
+}
+
+fn valid_engram_plaintext(plaintext: &str) -> bool {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(plaintext) else {
+        return false;
+    };
+    let Some(object) = value.as_object() else {
+        return false;
+    };
+    let Some(slug) = object.get("slug").and_then(serde_json::Value::as_str) else {
+        return false;
+    };
+    if slug == "core" {
+        return object
+            .get("profile")
+            .and_then(serde_json::Value::as_str)
+            .is_some();
+    }
+    let valid_slug = slug.starts_with("mem/")
+        && slug.len() <= 255
+        && slug.split('/').skip(1).all(|segment| {
+            !segment.is_empty()
+                && segment.len() <= 64
+                && segment.bytes().enumerate().all(|(index, byte)| {
+                    byte.is_ascii_lowercase()
+                        || byte.is_ascii_digit()
+                        || (index > 0 && matches!(byte, b'_' | b'-'))
+                })
+        });
+    valid_slug
+        && object
+            .get("value")
+            .is_some_and(|value| value.is_null() || value.is_string())
+}
+
+fn valid_read_state_plaintext(plaintext: &str) -> bool {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(plaintext) else {
+        return false;
+    };
+    let Some(object) = value.as_object() else {
+        return false;
+    };
+    object.get("v").and_then(serde_json::Value::as_u64) == Some(1)
+        && object
+            .get("client_id")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|client_id| !client_id.is_empty() && client_id.len() <= 64)
+        && object
+            .get("contexts")
+            .and_then(serde_json::Value::as_object)
+            .is_some_and(|contexts| contexts.len() <= 10_000)
+}
+
+fn valid_reminder_plaintext(plaintext: &str, not_before: Option<u64>) -> bool {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(plaintext) else {
+        return false;
+    };
+    let Some(status) = value
+        .as_object()
+        .and_then(|object| object.get("status"))
+        .and_then(serde_json::Value::as_str)
+    else {
+        return false;
+    };
+    matches!(status, "pending" | "done" | "cancelled")
+        && (status != "pending" || not_before.is_some())
+}
+
 fn validate_scopes(scopes: &[Issue31PairingScope], field: &str) -> Result<(), Issue31NostrError> {
     let unique: BTreeSet<Issue31PairingScope> = scopes.iter().copied().collect();
     if scopes.is_empty() || scopes.len() > 6 || unique.len() != scopes.len() {
@@ -2050,6 +3188,13 @@ fn validate_scopes(scopes: &[Issue31PairingScope], field: &str) -> Result<(), Is
 
 fn valid_hex64(value: &str) -> bool {
     value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+}
+
+fn valid_hex32(value: &str) -> bool {
+    value.len() == 32
         && value
             .bytes()
             .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
@@ -2184,6 +3329,63 @@ mod tests {
     }
 
     #[test]
+    fn shared_v2_fixtures_decode_with_canonical_hashes() {
+        let discovery_bytes =
+            include_bytes!("../fixtures/openagents.omega.issue31.host_discovery.v2.canonical.json");
+        let intent_bytes =
+            include_bytes!("../fixtures/openagents.omega.issue31.command.v2.canonical-intent.json");
+        let result_bytes =
+            include_bytes!("../fixtures/openagents.omega.issue31.command.v2.canonical-result.json");
+        let projection_bytes = include_bytes!(
+            "../fixtures/openagents.omega.issue31.owner_projection.v1.canonical.json"
+        );
+        let discovery = Issue31HostDiscoveryV2::decode(discovery_bytes).expect("v2 discovery");
+        let intent = Issue31CommandRecordV2::decode(intent_bytes).expect("v2 intent");
+        let result = Issue31CommandRecordV2::decode(result_bytes).expect("v2 result");
+        let projection =
+            Issue31OwnerProjectionRecord::decode(projection_bytes).expect("owner projection");
+        projection
+            .validate_private_binding(&"1".repeat(64), &"2".repeat(64), &"3".repeat(64))
+            .expect("projection source binding");
+
+        assert_eq!(discovery.conversation, "sarah.0123456789abcdef01234567");
+        assert!(matches!(
+            intent,
+            Issue31CommandRecordV2::CommandIntent { .. }
+        ));
+        assert!(matches!(
+            result,
+            Issue31CommandRecordV2::CommandResult {
+                status: Issue31CommandHandlingStatus::Accepted,
+                ..
+            }
+        ));
+        assert!(matches!(
+            projection.projection,
+            Issue31OwnerProjectionBody::Message {
+                role: Issue31SourceRole::Owner,
+                ..
+            }
+        ));
+        assert_eq!(
+            format!("{:x}", Sha256::digest(discovery_bytes)),
+            "a5604d4c792a5ed556f023e150f01b371c5cf702b95b72786e0c7a9adbbdcb1c"
+        );
+        assert_eq!(
+            format!("{:x}", Sha256::digest(intent_bytes)),
+            "7bb7b23680be10756184668ae7722c09c634a1941b086f66d0425da4e8371bbe"
+        );
+        assert_eq!(
+            format!("{:x}", Sha256::digest(result_bytes)),
+            "51bca57e14c3d45518c342c2d1f848972281de848f809c34566ed183c7e4e387"
+        );
+        assert_eq!(
+            format!("{:x}", Sha256::digest(projection_bytes)),
+            "2a8bec5fa23f27d20db35f3d76bd59817672431328f191bc4302dfa37e7f804d"
+        );
+    }
+
+    #[test]
     fn v2_host_discovery_validation() {
         let v2 = Issue31HostDiscoveryV2 {
             schema: ISSUE31_HOST_DISCOVERY_SCHEMA_V2.into(),
@@ -2206,6 +3408,34 @@ mod tests {
         let encoded = serde_json::to_vec(&v2).expect("serialize");
         let decoded = Issue31HostDiscoveryV2::decode(&encoded).expect("decode v2");
         assert_eq!(decoded.conversation, format!("sarah.{}", "a".repeat(24)));
+    }
+
+    #[test]
+    fn persisted_v1_controller_adopts_the_configured_conversation() {
+        let configuration = Issue31HostConfiguration {
+            host_ref: "omega.host.local".into(),
+            host_public_key_hex: "1".repeat(64),
+            sarah_public_key_hex: "3".repeat(64),
+            conversation: "sarah.0123456789abcdef01234567".into(),
+            display_name: "Local Omega".into(),
+            relay_urls: vec!["wss://relay.example.com".into()],
+            generation: 1,
+        };
+        let controller = Issue31HostController::new(configuration.clone()).expect("controller");
+        let mut value = serde_json::to_value(controller).expect("controller json");
+        value["configuration"]
+            .as_object_mut()
+            .expect("configuration object")
+            .remove("conversation");
+        let mut restored: Issue31HostController =
+            serde_json::from_value(value).expect("deserialize v1 state");
+        restored
+            .adopt_conversation_if_missing(&configuration.conversation)
+            .expect("adopt conversation");
+        assert!(restored.matches_configuration(&configuration));
+        restored
+            .validate_persisted_state()
+            .expect("validate migrated state");
     }
 
     #[test]
@@ -2242,6 +3472,7 @@ mod tests {
             host_ref: "omega.host.local".into(),
             host_public_key_hex: host_public_key_hex.clone(),
             sarah_public_key_hex: "3".repeat(64),
+            conversation: "sarah.0123456789abcdef01234567".into(),
             display_name: "Local Omega".into(),
             relay_urls: vec!["wss://relay.example.com".into()],
             generation: 1,
@@ -2263,7 +3494,10 @@ mod tests {
         controller
             .set_admitted_device_policy(
                 vec![device_public_key_hex.clone()],
-                vec![Issue31PairingScope::ControlFullAuto],
+                vec![
+                    Issue31PairingScope::ObserveIssue31,
+                    Issue31PairingScope::ControlFullAuto,
+                ],
             )
             .expect("admit device");
         let expected_fingerprint =
@@ -2369,7 +3603,13 @@ mod tests {
                 ..
             } => {
                 assert_eq!(sarah_public_key_hex, &"3".repeat(64));
-                assert_eq!(scopes, &vec![Issue31PairingScope::ControlFullAuto]);
+                assert_eq!(
+                    scopes,
+                    &vec![
+                        Issue31PairingScope::ObserveIssue31,
+                        Issue31PairingScope::ControlFullAuto,
+                    ]
+                );
                 grant_ref.clone()
             }
             _ => panic!("expected scoped grant"),
@@ -2386,8 +3626,8 @@ mod tests {
                     record: Issue31CommandRecord::CommandIntent {
                         schema: ISSUE31_COMMAND_SCHEMA.into(),
                         host_ref: "omega.host.local".into(),
-                        host_public_key_hex,
-                        device_public_key_hex,
+                        host_public_key_hex: host_public_key_hex.clone(),
+                        device_public_key_hex: device_public_key_hex.clone(),
                         grant_ref: grant_ref.clone(),
                         action_ref: "action.omega.full_auto.stop".into(),
                         idempotency_ref: "idempotency.device.stop_one".into(),
@@ -2418,6 +3658,63 @@ mod tests {
             }
         ));
 
+        let v2_executions = Cell::new(0_u32);
+        let v2_result = controller
+            .handle_command_event_v2(
+                "7".repeat(64),
+                Issue31CommandRecordV2::CommandIntent {
+                    schema: ISSUE31_COMMAND_SCHEMA_V2.into(),
+                    host_ref: "omega.host.local".into(),
+                    host_public_key_hex,
+                    device_public_key_hex,
+                    grant_ref: grant_ref.clone(),
+                    idempotency_ref: "idempotency.device.read_one".into(),
+                    expected_generation: 1,
+                    arguments: Issue31CommandArguments::ReadStatePatch {
+                        action_ref: ISSUE31_ACTION_ADVANCE_READ_STATE.into(),
+                        slot_id: "mobile".into(),
+                        client_id: "iphone".into(),
+                        context_ref: "sarah-conversation:sarah.0123456789abcdef01234567".into(),
+                        read_at: 104,
+                    },
+                    issued_at: 103,
+                    expires_at: 200,
+                },
+                104,
+                |arguments, _, _, _, _| {
+                    assert!(matches!(
+                        arguments,
+                        Issue31CommandArguments::ReadStatePatch { .. }
+                    ));
+                    v2_executions.set(v2_executions.get().saturating_add(1));
+                    Issue31CommandExecutionV2 {
+                        status: Issue31CommandHandlingStatus::Accepted,
+                        handling_ref: "handling.omega.read_one".into(),
+                        reason_ref: None,
+                        source_event_id: Some("8".repeat(64)),
+                    }
+                },
+            )
+            .expect("command v2")
+            .expect("handling result");
+        assert_eq!(v2_executions.get(), 1);
+        assert!(matches!(
+            v2_result,
+            Issue31CommandRecordV2::CommandResult {
+                status: Issue31CommandHandlingStatus::Accepted,
+                source_event_id: Some(_),
+                ..
+            }
+        ));
+        assert_eq!(
+            controller.active_grants(104).expect("active grants").len(),
+            1
+        );
+        controller
+            .record_source_projection(grant_ref.clone(), 1, "8".repeat(64))
+            .expect("record projection");
+        assert!(controller.source_was_projected(&grant_ref, 1, &"8".repeat(64)));
+
         let renewal = controller
             .renew_grant(
                 &grant_ref,
@@ -2429,6 +3726,11 @@ mod tests {
         controller
             .record_emitted_pairing("f".repeat(64), renewal)
             .expect("record renewal");
+        assert!(!controller.source_was_projected(&grant_ref, 2, &"8".repeat(64)));
+        controller
+            .record_source_projection(grant_ref.clone(), 2, "8".repeat(64))
+            .expect("record renewed projection");
+        assert!(controller.source_was_projected(&grant_ref, 2, &"8".repeat(64)));
         let revocation = controller
             .revoke_grant(&grant_ref, 106, Some("reason.omega.owner_revoked".into()))
             .expect("revocation");
@@ -2493,6 +3795,7 @@ mod tests {
             host_ref: "omega.host.local".into(),
             host_public_key_hex: host_public_key_hex.clone(),
             sarah_public_key_hex: "3".repeat(64),
+            conversation: "sarah.0123456789abcdef01234567".into(),
             display_name: "Local Omega".into(),
             relay_urls: vec!["wss://relay.example.com".into()],
             generation: 1,

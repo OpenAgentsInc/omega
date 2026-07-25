@@ -21,8 +21,10 @@ use crate::sarah_conversation::{
     SarahConversationError, StoredConversationEvent,
 };
 use crate::{
-    ISSUE31_COMMAND_SCHEMA, ISSUE31_HOST_DISCOVERY_KIND, ISSUE31_PAIRING_SCHEMA,
-    Issue31CommandRecord, Issue31HostDiscovery, Issue31PairingRecord,
+    ISSUE31_COMMAND_SCHEMA, ISSUE31_COMMAND_SCHEMA_V2, ISSUE31_HOST_DISCOVERY_KIND,
+    ISSUE31_HOST_DISCOVERY_SCHEMA_V2, ISSUE31_OWNER_PROJECTION_SCHEMA, ISSUE31_PAIRING_SCHEMA,
+    Issue31CommandRecord, Issue31CommandRecordV2, Issue31HostDiscovery, Issue31HostDiscoveryV2,
+    Issue31OwnerProjectionRecord, Issue31PairingRecord,
 };
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -34,6 +36,7 @@ const INITIAL_BACKOFF: Duration = Duration::from_millis(100);
 const MAX_BACKOFF: Duration = Duration::from_millis(800);
 const MAX_PENDING_PUBLICATIONS: usize = 4_096;
 const MAX_CACHED_EVENTS: usize = 8_192;
+const MAX_CACHED_CONTENT_BYTES: usize = 16 * 1024 * 1024;
 const MAX_CONTROL_FRAMES_PER_READ: usize = 64;
 
 #[allow(clippy::disallowed_methods)]
@@ -499,7 +502,7 @@ impl WebSocketRelayAdapter {
         }));
         request.push(json!({
             "kinds": [NIP_AE_KIND, NIP_ER_KIND],
-            "authors": [self.sarah_public_key_hex.as_str()],
+            "authors": [self.owner_public_key_hex.as_str(), self.sarah_public_key_hex.as_str()],
             "limit": 256
         }));
         request.push(json!({
@@ -766,6 +769,8 @@ impl WebSocketRelayAdapter {
                 &content,
                 &sender_public_key_hex,
                 &recipient_public_key_hex,
+                &self.owner_public_key_hex,
+                &self.sarah_public_key_hex,
                 &tags,
             )?;
             if record_kind == "message" {
@@ -783,11 +788,7 @@ impl WebSocketRelayAdapter {
                 pubkey: sender_public_key_hex,
                 created_at,
                 conversation_ref: conversation_ref.to_string(),
-                content_summary: if record_kind == "message" {
-                    bounded_summary(&content)
-                } else {
-                    content
-                },
+                content_summary: content,
                 tags,
                 record_kind: record_kind.to_string(),
                 store_index: 0,
@@ -802,12 +803,26 @@ impl WebSocketRelayAdapter {
             .map(|tag| tag.as_slice().to_vec())
             .collect();
         if kind == ISSUE31_HOST_DISCOVERY_KIND {
-            let discovery = Issue31HostDiscovery::decode(event.content.as_bytes())
+            let value = serde_json::from_str::<Value>(&event.content)
                 .map_err(|error| SarahConversationError::InvalidRequest(error.to_string()))?;
+            let (host_ref, host_public_key_hex) = if value.get("schema").and_then(Value::as_str)
+                == Some(ISSUE31_HOST_DISCOVERY_SCHEMA_V2)
+            {
+                let discovery = Issue31HostDiscoveryV2::decode(event.content.as_bytes())
+                    .map_err(|error| SarahConversationError::InvalidRequest(error.to_string()))?;
+                if discovery.conversation != conversation_ref {
+                    return Ok(None);
+                }
+                (discovery.host_ref, discovery.host_public_key_hex)
+            } else {
+                let discovery = Issue31HostDiscovery::decode(event.content.as_bytes())
+                    .map_err(|error| SarahConversationError::InvalidRequest(error.to_string()))?;
+                (discovery.host_ref, discovery.host_public_key_hex)
+            };
             if author != self.owner_public_key_hex
                 || author != self.custody_public_key_hex()?
-                || discovery.host_public_key_hex != author
-                || tag_value(&tags, "d").as_deref() != Some(discovery.host_ref.as_str())
+                || host_public_key_hex != author
+                || tag_value(&tags, "d").as_deref() != Some(host_ref.as_str())
                 || tag_value(&tags, "k").as_deref() != Some("1059")
                 || tag_value(&tags, "t").as_deref() != Some("omega-issue31-host")
                 || tag_value(&tags, "alt").as_deref() != Some("Omega Issue 31 Nostr host discovery")
@@ -831,7 +846,9 @@ impl WebSocketRelayAdapter {
                 return Ok(None);
             }
         } else if kind == NIP_ER_KIND {
-            if author != self.sarah_public_key_hex || !valid_nip_er_tags(&tags) {
+            if (author != self.owner_public_key_hex && author != self.sarah_public_key_hex)
+                || !valid_nip_er_tags(&tags)
+            {
                 return Ok(None);
             }
         } else if kind == NIP_29_GROUP_CHAT_KIND {
@@ -855,7 +872,13 @@ impl WebSocketRelayAdapter {
             pubkey: author,
             created_at: event.created_at.as_secs(),
             conversation_ref: conversation_ref.to_string(),
-            content_summary: bounded_summary(&event.content),
+            content_summary: if SARAH_RECORD_KINDS.contains(&kind)
+                || matches!(kind, NIP_AE_KIND | NIP_RS_KIND | NIP_ER_KIND)
+            {
+                event.content.clone()
+            } else {
+                bounded_summary(&event.content)
+            },
             tags,
             record_kind: public_record_kind(event.kind.as_u16()).to_string(),
             store_index: 0,
@@ -870,6 +893,16 @@ impl WebSocketRelayAdapter {
         });
         if events.len() > MAX_CACHED_EVENTS {
             events.drain(..events.len().saturating_sub(MAX_CACHED_EVENTS));
+            self.gap_state = GapState::Possible;
+            self.event_cache_truncated = true;
+        }
+        let mut content_bytes = events
+            .iter()
+            .map(|event| event.content_summary.len())
+            .sum::<usize>();
+        while content_bytes > MAX_CACHED_CONTENT_BYTES && events.len() > 1 {
+            let removed = events.remove(0);
+            content_bytes = content_bytes.saturating_sub(removed.content_summary.len());
             self.gap_state = GapState::Possible;
             self.event_cache_truncated = true;
         }
@@ -1248,6 +1281,8 @@ fn private_record_kind(
     content: &str,
     sender_public_key_hex: &str,
     recipient_public_key_hex: &str,
+    owner_public_key_hex: &str,
+    sarah_public_key_hex: &str,
     tags: &[Vec<String>],
 ) -> Result<&'static str, SarahConversationError> {
     let schema = serde_json::from_str::<Value>(content)
@@ -1267,6 +1302,33 @@ fn private_record_kind(
                 .validate_private_binding(sender_public_key_hex, recipient_public_key_hex)
                 .map_err(|error| SarahConversationError::InvalidRequest(error.to_string()))?;
             Ok("control")
+        }
+        Some(ISSUE31_COMMAND_SCHEMA_V2) => {
+            require_single_private_recipient(tags, recipient_public_key_hex)?;
+            let record = Issue31CommandRecordV2::decode(content.as_bytes())
+                .map_err(|error| SarahConversationError::InvalidRequest(error.to_string()))?;
+            record
+                .validate_private_binding(sender_public_key_hex, recipient_public_key_hex)
+                .map_err(|error| SarahConversationError::InvalidRequest(error.to_string()))?;
+            Ok("control")
+        }
+        Some(ISSUE31_OWNER_PROJECTION_SCHEMA) => {
+            require_single_private_recipient(tags, recipient_public_key_hex)?;
+            let record = Issue31OwnerProjectionRecord::decode(content.as_bytes())
+                .map_err(|error| SarahConversationError::InvalidRequest(error.to_string()))?;
+            if record.host_public_key_hex != owner_public_key_hex {
+                return Err(SarahConversationError::InvalidRequest(
+                    "owner projection targets another host".into(),
+                ));
+            }
+            record
+                .validate_private_binding(
+                    sender_public_key_hex,
+                    recipient_public_key_hex,
+                    sarah_public_key_hex,
+                )
+                .map_err(|error| SarahConversationError::InvalidRequest(error.to_string()))?;
+            Ok("owner_projection")
         }
         Some(ISSUE31_PAIRING_SCHEMA) => {
             require_single_private_recipient(tags, recipient_public_key_hex)?;
@@ -1670,8 +1732,7 @@ mod tests {
                 .tags(vec![
                     nostr::Tag::parse(["p", attacker.public_key().to_hex().as_str()])
                         .expect("recipient tag"),
-                    nostr::Tag::parse(["conversation", "sarah.test"])
-                        .expect("conversation tag"),
+                    nostr::Tag::parse(["conversation", "sarah.test"]).expect("conversation tag"),
                 ])
                 .build(sarah.public_key());
         let wrong_recipient_gift_wrap = smol::block_on(EventBuilder::gift_wrap(
@@ -1731,6 +1792,8 @@ mod tests {
                 &content,
                 &attacker.public_key().to_hex(),
                 &owner_public_key_hex,
+                &owner_public_key_hex,
+                &sarah.public_key().to_hex(),
                 &tags,
             )
             .is_err()
@@ -1745,9 +1808,79 @@ mod tests {
                 &malformed,
                 &device.public_key().to_hex(),
                 &owner_public_key_hex,
+                &owner_public_key_hex,
+                &sarah.public_key().to_hex(),
                 &tags,
             )
             .is_err()
+        );
+        let command_v2 = json!({
+            "schema": ISSUE31_COMMAND_SCHEMA_V2,
+            "recordType": "command_intent",
+            "hostRef": "omega.host.local",
+            "hostPublicKeyHex": owner_public_key_hex,
+            "devicePublicKeyHex": device.public_key().to_hex(),
+            "grantRef": "grant.omega.device_1",
+            "idempotencyRef": "idempotency.issue31.read_1",
+            "expectedGeneration": 1,
+            "arguments": {
+                "kind": "read_state_patch",
+                "actionRef": "action.issue31.read_state.advance",
+                "slotId": "mobile",
+                "clientId": "iphone",
+                "contextRef": "sarah-conversation:sarah.0123456789abcdef01234567",
+                "readAt": 150,
+            },
+            "issuedAt": 100,
+            "expiresAt": 200,
+        })
+        .to_string();
+        assert_eq!(
+            private_record_kind(
+                &command_v2,
+                &device.public_key().to_hex(),
+                &owner_public_key_hex,
+                &owner_public_key_hex,
+                &sarah.public_key().to_hex(),
+                &tags,
+            )
+            .expect("command v2 admission"),
+            "control"
+        );
+        let projection = json!({
+            "schema": ISSUE31_OWNER_PROJECTION_SCHEMA,
+            "recordType": "owner_projection",
+            "hostRef": "omega.host.local",
+            "hostPublicKeyHex": owner_public_key_hex,
+            "devicePublicKeyHex": device.public_key().to_hex(),
+            "grantRef": "grant.omega.device_1",
+            "expectedGeneration": 1,
+            "sourceEventId": "b".repeat(64),
+            "sourceAuthorPublicKeyHex": owner_public_key_hex,
+            "sourceRole": "owner",
+            "sourceKind": 14,
+            "sourceCreatedAt": 150,
+            "projectedAt": 151,
+            "projection": {
+                "kind": "message",
+                "role": "owner",
+                "conversation": "sarah.0123456789abcdef01234567",
+                "text": "Ready",
+            },
+        })
+        .to_string();
+        let projection_tags = vec![vec!["p".into(), device.public_key().to_hex()]];
+        assert_eq!(
+            private_record_kind(
+                &projection,
+                &owner_public_key_hex,
+                &device.public_key().to_hex(),
+                &owner_public_key_hex,
+                &sarah.public_key().to_hex(),
+                &projection_tags,
+            )
+            .expect("owner projection admission"),
+            "owner_projection"
         );
         assert_eq!(query_gap_after_eose(12, false), GapState::None);
         assert_eq!(query_gap_after_eose(256, false), GapState::Possible);
