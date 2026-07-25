@@ -9,7 +9,7 @@ Zed's key binding system is fully customizable. You can rebind any action, creat
 
 ## Predefined Keymaps
 
-If you're used to a specific editor's defaults, you can change your `base_keymap` through the settings window ({#kb zed::OpenSettings}) or directly through your `settings.json` file ({#kb zed::OpenSettingsFile}).
+If you're used to a specific editor's defaults, you can change your `base_keymap` through the settings window ({#kb omega::OpenSettings}) or directly through your `settings.json` file ({#kb omega::OpenSettingsFile}).
 We currently support:
 
 - Zed (default)
@@ -22,14 +22,14 @@ We currently support:
 - Cursor
 - None (disables _all_ key bindings)
 
-This setting can also be changed via the command palette through the {#action zed::ToggleBaseKeymapSelector} action.
+This setting can also be changed via the command palette through the {#action omega::ToggleBaseKeymapSelector} action.
 
 You can also enable `vim_mode` or `helix_mode`, which add modal bindings.
 For more information, see the documentation for [Vim mode](./vim.md) and [Helix mode](./helix.md).
 
 ## Keymap Editor
 
-You can access the keymap editor through the {#kb zed::OpenKeymap} action or by running {#action zed::OpenKeymap} action from the command palette. You can easily add or change a keybind for an action with the `Change Keybinding` or `Add Keybinding` button on the command palette's left bottom corner.
+You can access the keymap editor through the {#kb omega::OpenKeymap} action or by running {#action omega::OpenKeymap} action from the command palette. You can easily add or change a keybind for an action with the `Change Keybinding` or `Add Keybinding` button on the command palette's left bottom corner.
 
 In there, you can see all of the existing actions in Zed as well as the associated keybindings set to them by default.
 
@@ -44,7 +44,7 @@ The keymap file is stored in the following locations for each platform:
 - macOS/Linux: `~/.config/zed/keymap.json`
 - Windows: `~\AppData\Roaming\Zed/keymap.json`
 
-You can open the keymap with the {#action zed::OpenKeymapFile} action from the command palette.
+You can open the keymap with the {#action omega::OpenKeymapFile} action from the command palette.
 
 This file contains a JSON array of objects with `"bindings"`.
 If no `"context"` is set, the bindings are always active.
@@ -103,7 +103,7 @@ A few examples:
 ```json [keymap]
 {
   "bindings": {
-    "cmd-k cmd-s": "zed::OpenKeymap", // matches ⌘-k then ⌘-s
+    "cmd-k cmd-s": "omega::OpenKeymap", // matches ⌘-k then ⌘-s
     "space e": "editor::ShowCompletions", // type space then e
     "ç": "editor::ShowCompletions", // matches ⌥-c
     "shift shift": "file_finder::Toggle" // matches pressing and releasing shift twice

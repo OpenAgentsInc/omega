@@ -398,7 +398,7 @@ impl Render for EditPredictionButton {
                                     source = "Edit Prediction Status Button"
                                 );
                                 window.dispatch_action(
-                                    zed_actions::OpenZedPredictOnboarding.boxed_clone(),
+                                    zed_actions::OpenOmegaPredictOnboarding.boxed_clone(),
                                     cx,
                                 );
                             })),

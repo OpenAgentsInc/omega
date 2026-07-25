@@ -26,9 +26,9 @@
       "expiry": "until-omega-project-dir"
     },
     {
-      "match": "crates named zed / zed_actions / zed_*",
+      "match": "crates named zed / zed_actions / zed_* (crate and module names only)",
       "path": "crates/zed",
-      "reason": "Internal crate and action namespaces stay as fork compatibility seams; they are not user-facing product copy.",
+      "reason": "Internal crate and module names stay as fork compatibility seams. This entry previously also covered the `zed` ACTION namespace and claimed it was not user-facing product copy; that was wrong. The command palette renders an action's namespace, so `zed: about`, `zed: quit` and `zed: get merch` were product copy and shipped in 0.2.0-rc11. Actions now declare the `omega` namespace (OMEGA-DELTA-0022) and the old `zed::` names survive only as deprecated_aliases, which resolve existing user keymaps and are never shown.",
       "owner": "OpenAgents",
       "disposition": "approved_compatibility",
       "expiry": "none"
@@ -82,7 +82,7 @@
       "expiry": "until-omega-docs"
     },
     {
-      "match": "Zed Keybind Context",
+      "match": "Keybind Context",
       "path": "crates/settings_ui/src/settings_ui.rs",
       "reason": "Internal keymap context filter label, not a product claim in settings chrome.",
       "owner": "OpenAgents",
@@ -90,12 +90,12 @@
       "expiry": "none"
     },
     {
-      "match": "IconName::ZedAgent / VectorName::Zed*",
-      "path": "crates/ui",
-      "reason": "Inherited asset enum identifiers remain until OpenAgents icon/vector names fully replace them.",
+      "match": "VectorName::ZedLogo / VectorName::ZedXCopilot / assets/images/zed_*.svg",
+      "path": "crates/ui/src/components/image.rs",
+      "reason": "Recorded source_only, meaning the identifier existed but nothing rendered it. That was false: `workspace: open component preview` was in the 0.2.0-rc11 RELEASE command palette with no dev gate, and drawing the Vector preview put the Zed Z on screen in a signed, notarized build; the Zed x Copilot lockup rendered above the Copilot sign-in modal. A logo carries no text, so no string scan could ever have seen either. The artwork, the enum variants and the release-build command are all removed (OMEGA-DELTA-0022). Nothing here is retained -- this entry stands as the record that source_only was the wrong disposition.",
       "owner": "OpenAgents",
-      "disposition": "source_only",
-      "expiry": "until-asset-rename"
+      "disposition": "blocked",
+      "expiry": "none"
     },
     {
       "match": "Welcome to Zed",
@@ -128,6 +128,22 @@
       "owner": "OpenAgents",
       "disposition": "blocked",
       "expiry": "none"
+    },
+    {
+      "match": "Use GitHub Copilot in Zed",
+      "path": null,
+      "reason": "Forbidden public product claim; must not appear in reachable Omega UI. Shipped in 0.2.0-rc11 as a window title, as the modal Headline and beside the Zed x Copilot lockup -- one surface, three presentations, in no allow-list entry, while `Welcome to Zed` and `About Zed` were listed blocked. The GitHub Copilot integration is retained; the \"in Zed\" framing is not.",
+      "owner": "OpenAgents",
+      "disposition": "blocked",
+      "expiry": "none"
+    },
+    {
+      "match": "zed:// URL scheme",
+      "path": "crates/zed/src/zed/open_listener.rs",
+      "reason": "The legacy URL scheme stays resolvable so existing zed:// deep links keep opening. The action that handles it is omega::OpenAppUrl; the scheme string is not a palette label or product copy.",
+      "owner": "OpenAgents",
+      "disposition": "approved_compatibility",
+      "expiry": "until-omega-scheme-only"
     }
   ]
 }

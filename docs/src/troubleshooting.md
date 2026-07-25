@@ -15,15 +15,15 @@ Other times, troubleshooting means gathering the right information (logs, profil
 
 When reporting issues or seeking help, it's useful to know your Zed version and system specifications. You can retrieve this information using the following actions from the command palette:
 
-- {#action zed::About}: Find your Zed version number
-- {#action zed::CopySystemSpecsIntoClipboard}: Populate your clipboard with Zed version number, operating system version, and hardware specs
-- {#action zed::CopyInstalledExtensionsIntoClipboard}: Populate your clipboard with a list of your installed extensions and versions
+- {#action omega::About}: Find your Zed version number
+- {#action omega::CopySystemSpecsIntoClipboard}: Populate your clipboard with Zed version number, operating system version, and hardware specs
+- {#action omega::CopyInstalledExtensionsIntoClipboard}: Populate your clipboard with a list of your installed extensions and versions
 
 ## Zed Log
 
 Often, a good first place to look when troubleshooting any issue in Zed is the Zed log, which might contain clues about what's going wrong.
-You can review the most recent 1000 lines of the log by running the {#action zed::OpenLog} action from the command palette.
-If you want to view the full file, you can reveal it in your operating system's native file manager via {#action zed::RevealLogInFileManager} from the command palette.
+You can review the most recent 1000 lines of the log by running the {#action omega::OpenLog} action from the command palette.
+If you want to view the full file, you can reveal it in your operating system's native file manager via {#action omega::RevealLogInFileManager} from the command palette.
 
 You'll find the Zed log in the respective location on each operating system:
 

@@ -21,7 +21,7 @@ Furthermore, the extension provides support for [EEx](https://hexdocs.pm/eex/EEx
 
 ## Language Servers
 
-The Elixir extension offers language server support for ElixirLS, Expert, Dexter, Next LS, and Lexical. By default, only ElixirLS is enabled. You can change or disable the enabled language servers in your settings ({#kb zed::OpenSettings}) under Languages > Elixir/EEx/HEEx or directly within your settings file.
+The Elixir extension offers language server support for ElixirLS, Expert, Dexter, Next LS, and Lexical. By default, only ElixirLS is enabled. You can change or disable the enabled language servers in your settings ({#kb omega::OpenSettings}) under Languages > Elixir/EEx/HEEx or directly within your settings file.
 
 Some of the language servers can also accept initialization or workspace configuration options. See the sections below for an outline of what each server supports. The configuration can be passed in your settings file via `lsp.{language-server-id}.initialization_options` and `lsp.{language-server-id}.settings` respectively.
 

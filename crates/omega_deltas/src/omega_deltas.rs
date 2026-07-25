@@ -49,6 +49,8 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0019",
     "OMEGA-DELTA-0020",
     "OMEGA-DELTA-0021",
+    "OMEGA-DELTA-0022",
+    "OMEGA-DELTA-0023",
 ];
 
 /// OMEGA-DELTA-0021. The file that holds the executor-disclosure record.
@@ -686,6 +688,338 @@ pub fn for_each_source_file(
         }
     }
 }
+
+// ------------------------------------------------------------ OMEGA-DELTA-0022
+
+/// Every `#[folder = "…"]` in the repository, as (declaring file, folder).
+///
+/// `rust-embed` resolves the attribute against `CARGO_MANIFEST_DIR`, so the
+/// base is the crate root rather than the directory the attribute is written
+/// in. Deriving the embed roots instead of listing them is the whole point:
+/// `assets/images/` was never in a list, and that is where the Zed artwork sat
+/// while `OMEGA-DELTA-0018` reported `assets/icons/` clean.
+#[must_use]
+pub fn embed_folders() -> Vec<(String, std::path::PathBuf)> {
+    let root = repository_path("crates");
+    let mut found = Vec::new();
+    for_each_source_file(&root, &["rs"], |path, source| {
+        let mut folders = Vec::new();
+        let mut rest = source;
+        while let Some(at) = rest.find("#[folder") {
+            rest = &rest[at..];
+            let Some((_, after_equals)) = rest.split_once('=') else {
+                break;
+            };
+            let Some(value) = after_equals.split('"').nth(1) else {
+                break;
+            };
+            folders.push(value.to_owned());
+            rest = &rest[1..];
+        }
+        if folders.is_empty() {
+            return;
+        }
+        let crate_root = path
+            .ancestors()
+            .find(|ancestor| ancestor.join("Cargo.toml").is_file())
+            .unwrap_or_else(|| path.parent().unwrap_or(path));
+        for folder in folders {
+            found.push((
+                path.display().to_string(),
+                normalize_path(&crate_root.join(folder)),
+            ));
+        }
+    });
+    found.sort();
+    found
+}
+
+/// Lexically resolve `.` and `..` without touching the filesystem.
+fn normalize_path(path: &std::path::Path) -> std::path::PathBuf {
+    let mut out = std::path::PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+            std::path::Component::CurDir => {}
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+/// Every file `rust-embed` can ship, as a repository-relative path.
+///
+/// The assets tree plus every directory an embed declaration points at. A
+/// subdirectory list would be a claim about the subdirectories somebody
+/// remembered; this is the set the embed macros actually read.
+#[must_use]
+pub fn embedded_asset_inventory() -> Vec<String> {
+    let repository = normalize_path(&repository_path("."));
+    let mut roots = vec![normalize_path(&repository_path("assets"))];
+    roots.extend(embed_folders().into_iter().map(|(_, folder)| folder));
+    let mut files = std::collections::BTreeSet::new();
+    for root in roots {
+        let mut stack = vec![root];
+        while let Some(directory) = stack.pop() {
+            let Ok(entries) = std::fs::read_dir(&directory) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_symlink() {
+                    continue;
+                }
+                if path.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                if path.file_name().is_some_and(|name| name == ".DS_Store") {
+                    continue;
+                }
+                if let Ok(relative) = normalize_path(&path).strip_prefix(&repository) {
+                    files.insert(relative.display().to_string());
+                }
+            }
+        }
+    }
+    files.into_iter().collect()
+}
+
+/// Every gpui action in the repository, as `(namespace, name, file)`.
+///
+/// There are exactly two ways to declare one — `actions!(namespace, [..])` and
+/// `#[action(namespace = ..)]` on a derive — and both are read here, so this
+/// is the complete set of `namespace: action name` labels the command palette
+/// can display. Nothing had ever read an action declaration before
+/// `0.2.0-rc11` offered `zed: about`, `zed: quit` and `zed: get merch`.
+#[must_use]
+pub fn action_declarations() -> Vec<(String, String, String)> {
+    let root = repository_path("crates");
+    let mut declarations = Vec::new();
+    for_each_source_file(&root, &["rs"], |path, source| {
+        let file = path.display().to_string();
+        let mut rest = source;
+        while let Some(at) = rest.find("actions!(") {
+            let after = &rest[at + "actions!(".len()..];
+            rest = after;
+            let Some((namespace, body)) = actions_macro_body(after) else {
+                continue;
+            };
+            for line in body.lines() {
+                let name = line.trim().trim_end_matches(',');
+                if is_action_variant(name) {
+                    declarations.push((namespace.clone(), name.to_owned(), file.clone()));
+                }
+            }
+        }
+        for (namespace, name) in derived_actions(source) {
+            declarations.push((namespace, name, file.clone()));
+        }
+    });
+    declarations.sort();
+    declarations
+}
+
+/// `namespace` and the bracketed body of an `actions!(namespace, [ .. ])` call.
+fn actions_macro_body(after_open: &str) -> Option<(String, &str)> {
+    let (head, rest) = after_open.split_once(",")?;
+    let namespace = head.trim().to_owned();
+    if namespace.is_empty()
+        || !namespace
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || character == '_')
+    {
+        return None;
+    }
+    let open = rest.find('[')?;
+    let mut depth = 1_usize;
+    let bytes = rest.as_bytes();
+    let mut index = open + 1;
+    while index < bytes.len() && depth > 0 {
+        match bytes[index] {
+            b'[' => depth += 1,
+            b']' => depth -= 1,
+            _ => {}
+        }
+        index += 1;
+    }
+    Some((namespace, &rest[open + 1..index.saturating_sub(1)]))
+}
+
+fn is_action_variant(name: &str) -> bool {
+    !name.is_empty()
+        && name.starts_with(|character: char| character.is_ascii_uppercase())
+        && name
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric())
+}
+
+/// Actions declared with `#[action(namespace = ..)]` on a struct or enum.
+fn derived_actions(source: &str) -> Vec<(String, String)> {
+    let mut found = Vec::new();
+    let mut rest = source;
+    while let Some(at) = rest.find("#[action(") {
+        let after = &rest[at + "#[action(".len()..];
+        rest = &rest[at + 1..];
+        let Some(close) = after.find(")]") else {
+            continue;
+        };
+        let attribute = &after[..close];
+        let Some(namespace) = attribute
+            .split("namespace")
+            .nth(1)
+            .and_then(|tail| tail.trim_start().strip_prefix('='))
+            .map(|tail| {
+                tail.trim_start()
+                    .chars()
+                    .take_while(|character| {
+                        character.is_ascii_alphanumeric() || *character == '_'
+                    })
+                    .collect::<String>()
+            })
+            .filter(|namespace| !namespace.is_empty())
+        else {
+            continue;
+        };
+        let tail = &after[close + 2..];
+        let mut name = None;
+        for keyword in ["pub struct ", "pub enum "] {
+            if let Some(at) = tail.find(keyword) {
+                // Only accept a declaration that follows immediately, allowing
+                // for other attributes in between but not a whole other item.
+                if tail[..at].contains("\n\n") {
+                    continue;
+                }
+                let candidate: String = tail[at + keyword.len()..]
+                    .chars()
+                    .take_while(|character| {
+                        character.is_ascii_alphanumeric() || *character == '_'
+                    })
+                    .collect();
+                if !candidate.is_empty() && name.is_none() {
+                    name = Some(candidate);
+                }
+            }
+        }
+        if let Some(name) = name {
+            found.push((namespace, name));
+        }
+    }
+    found
+}
+
+/// Old action names kept resolvable for existing user keymaps.
+///
+/// A `deprecated_aliases` entry names the action Omega used to have. It is
+/// never shown in the palette, so it is exempt from the label rules — and only
+/// the strings actually inside such a list are.
+#[must_use]
+pub fn deprecated_action_aliases() -> std::collections::BTreeSet<String> {
+    let root = repository_path("crates");
+    let mut aliases = std::collections::BTreeSet::new();
+    for_each_source_file(&root, &["rs"], |_path, source| {
+        let mut rest = source;
+        while let Some(at) = rest.find("deprecated_aliases") {
+            let after = &rest[at..];
+            rest = &rest[at + 1..];
+            let Some(open) = after.find('[') else { continue };
+            let Some(close) = after[open..].find(']') else {
+                continue;
+            };
+            let list = &after[open..open + close];
+            for (index, part) in list.split('"').enumerate() {
+                if index % 2 == 1 {
+                    aliases.insert(part.to_owned());
+                }
+            }
+        }
+    });
+    aliases
+}
+
+/// Enums whose `impl` builds an embedded asset path, and their variants.
+///
+/// Discovered, not listed. `OMEGA-DELTA-0018` named `crates/icons/src/icons.rs`
+/// in the policy file; `VectorName` in `crates/ui/src/components/image.rs` does
+/// the identical job for `assets/images/` and was outside the gate, which is
+/// how `VectorName::ZedLogo` and `VectorName::ZedXCopilot` survived
+/// `0.2.0-rc11`.
+#[must_use]
+pub fn asset_name_enums() -> std::collections::BTreeMap<String, Vec<String>> {
+    let directories: std::collections::BTreeSet<String> = embedded_asset_inventory()
+        .iter()
+        .filter_map(|relative| {
+            let mut parts = relative.split('/');
+            if parts.next()? != "assets" {
+                return None;
+            }
+            let directory = parts.next()?;
+            parts.next()?;
+            Some(directory.to_owned())
+        })
+        .collect();
+
+    let root = repository_path("crates");
+    let mut discovered = std::collections::BTreeMap::new();
+    for_each_source_file(&root, &["rs"], |_path, source| {
+        let names_an_asset = directories
+            .iter()
+            .any(|directory| source.contains(&format!("format!(\"{directory}/{{")));
+        if !names_an_asset {
+            return;
+        }
+        let mut rest = source;
+        while let Some(at) = rest.find("pub enum ") {
+            let after = &rest[at + "pub enum ".len()..];
+            rest = &rest[at + 1..];
+            let name: String = after
+                .chars()
+                .take_while(|character| character.is_ascii_alphanumeric() || *character == '_')
+                .collect();
+            if name.is_empty() {
+                continue;
+            }
+            let Some((_, body, _)) = next_enum_body(source, &name) else {
+                continue;
+            };
+            let variants: Vec<String> = body
+                .lines()
+                .map(str::trim)
+                .map(|line| line.trim_end_matches(','))
+                .filter(|line| is_action_variant(line))
+                .map(str::to_owned)
+                .collect();
+            if !variants.is_empty() {
+                discovered.insert(name, variants);
+            }
+        }
+    });
+    discovered
+}
+
+/// Public product claims the compatibility allow-list records as `blocked`.
+///
+/// The allow-list is the reviewed record of every retained Zed identifier, and
+/// `blocked` is its strongest disposition — but until `OMEGA-DELTA-0022`
+/// nothing read those entries back against the tree, so `Welcome to Zed` was
+/// listed while `Use GitHub Copilot in Zed` shipped in three places.
+pub const COMPATIBILITY_ALLOWLIST_PATH: &str =
+    "crates/app_identity/fixtures/compatibility_allowlist.json";
+
+/// Files whose job is to hold the forbidden strings.
+///
+/// A corpus file names a blocked claim on purpose, to assert it is absent
+/// everywhere else. Exempting them by path is not a hole: each one is a test
+/// or a policy record, and each is checked by name here so the list cannot
+/// quietly grow to cover a real surface.
+pub const BLOCKED_COPY_CORPUS: &[&str] = &[
+    COMPATIBILITY_ALLOWLIST_PATH,
+    "crates/app_identity/src/public_branding.rs",
+    "crates/app_identity/src/shell_branding.rs",
+    "crates/omega_deltas/src/omega_deltas.rs",
+];
 
 #[cfg(test)]
 mod tests {
@@ -1532,6 +1866,351 @@ mod tests {
         );
     }
 
+    /// OMEGA-DELTA-0022. No file `rust-embed` ships names a competitor.
+    ///
+    /// The inventory is the assets tree plus every directory an embed
+    /// declaration points at, not a list of asset directories. `0.2.0-rc11`
+    /// shipped `assets/images/zed_logo.svg` and `zed_x_copilot.svg` embedded in
+    /// its signed binary while `OMEGA-DELTA-0018` reported `assets/icons/`
+    /// clean — truthfully, because `assets/images/` was in no list.
+    #[test]
+    fn no_embedded_asset_carries_a_competitor_name() {
+        let policy = brand_policy().expect("brand gate policy parses");
+        let embedded = &policy["embedded_assets"];
+        let allowed: std::collections::BTreeSet<String> = embedded["third_party_allowances"]
+            .as_object()
+            .expect("embedded_assets.third_party_allowances is an object")
+            .keys()
+            .cloned()
+            .collect();
+        let tokens: Vec<String> =
+            policy_strings(&policy, "embedded_assets", "forbidden_path_tokens")
+                .iter()
+                .map(|token| token.to_lowercase())
+                .collect();
+        assert!(
+            !tokens.is_empty(),
+            "OMEGA-DELTA-0022: an empty token list makes this check vacuous"
+        );
+
+        let folders = embed_folders();
+        assert!(
+            !folders.is_empty(),
+            "OMEGA-DELTA-0022: no rust-embed #[folder] declarations were found, \
+             so the inventory is no longer derived from what decides what ships"
+        );
+
+        let inventory = embedded_asset_inventory();
+        let minimum = usize::try_from(
+            embedded["minimum_inventory"]
+                .as_u64()
+                .expect("embedded_assets.minimum_inventory is a number"),
+        )
+        .expect("minimum_inventory fits in usize");
+        assert!(
+            inventory.len() >= minimum,
+            "OMEGA-DELTA-0022: only {} embeddable files were found, below the \
+             {minimum} floor. The walk broke and this check is reporting green \
+             about nothing.",
+            inventory.len()
+        );
+
+        let offenders: Vec<&String> = inventory
+            .iter()
+            .filter(|relative| !allowed.contains(*relative))
+            .filter(|relative| {
+                let lowered = relative.to_lowercase();
+                tokens.iter().any(|token| lowered.contains(token))
+            })
+            .collect();
+        assert!(
+            offenders.is_empty(),
+            "OMEGA-DELTA-0022: a competitor's name is back in a directory \
+             rust-embed ships: {offenders:?}. Replace the artwork and the file \
+             name, or record in {BRAND_GATE_POLICY_PATH} why it identifies \
+             somebody else's product."
+        );
+    }
+
+    /// OMEGA-DELTA-0022. No enum that names a shipped asset names a competitor.
+    ///
+    /// The enums are discovered from the source. Listing them is what left
+    /// `VectorName` outside `OMEGA-DELTA-0018` while `IconName` was inside it,
+    /// which is the entire reason `VectorName::ZedLogo` reached rc11.
+    #[test]
+    fn no_asset_name_enum_carries_a_competitor_name() {
+        let policy = brand_policy().expect("brand gate policy parses");
+        let section = &policy["asset_name_enums"];
+        let allowed: std::collections::BTreeSet<String> = section["third_party_allowances"]
+            .as_object()
+            .expect("asset_name_enums.third_party_allowances is an object")
+            .keys()
+            .cloned()
+            .collect();
+        let tokens: Vec<String> =
+            policy_strings(&policy, "asset_name_enums", "forbidden_variant_tokens");
+        assert!(
+            !tokens.is_empty(),
+            "OMEGA-DELTA-0022: an empty token list makes this check vacuous"
+        );
+
+        let discovered = asset_name_enums();
+        for required in policy_strings(&policy, "asset_name_enums", "required_discoveries") {
+            assert!(
+                discovered.contains_key(&required),
+                "OMEGA-DELTA-0022: the asset-name-enum discovery no longer finds \
+                 {required}. The parser broke and this check is reporting green \
+                 about nothing. Found: {:?}",
+                discovered.keys().collect::<Vec<_>>()
+            );
+        }
+
+        let mut offenders: Vec<String> = Vec::new();
+        for (name, variants) in &discovered {
+            assert!(
+                variants.len() >= 2,
+                "OMEGA-DELTA-0022: {name} parsed as {} variants",
+                variants.len()
+            );
+            for variant in variants {
+                let label = format!("{name}::{variant}");
+                if allowed.contains(&label) {
+                    continue;
+                }
+                if tokens.iter().any(|token| variant.contains(token)) {
+                    offenders.push(label);
+                }
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "OMEGA-DELTA-0022: an identifier that resolves to a shipped asset \
+             names a competitor: {offenders:?}. Renaming the file without \
+             renaming the identifier leaves the next rebase a name to restore \
+             the artwork under."
+        );
+    }
+
+    /// OMEGA-DELTA-0022. No command-palette label names a competitor.
+    ///
+    /// The palette renders `namespace: action name` for every registered
+    /// action. `0.2.0-rc11` offered `zed: about`, `zed: quit` and
+    /// `zed: get merch` while the compatibility allow-list recorded that
+    /// namespace as "not user-facing product copy". The targets were already
+    /// correct; the label was the defect, and nothing had ever read an action
+    /// declaration.
+    #[test]
+    fn no_command_palette_label_names_a_competitor() {
+        let policy = brand_policy().expect("brand gate policy parses");
+        let section = &policy["actions"];
+        let declarations = action_declarations();
+        let minimum = usize::try_from(
+            section["minimum_inventory"]
+                .as_u64()
+                .expect("actions.minimum_inventory is a number"),
+        )
+        .expect("minimum_inventory fits in usize");
+        assert!(
+            declarations.len() >= minimum,
+            "OMEGA-DELTA-0022: only {} action declarations were parsed, below \
+             the {minimum} floor; this check is vacuous",
+            declarations.len()
+        );
+
+        let labels: std::collections::BTreeSet<String> = declarations
+            .iter()
+            .map(|(namespace, name, _)| format!("{namespace}::{name}"))
+            .collect();
+        for required in policy_strings(&policy, "actions", "required_actions") {
+            assert!(
+                labels.contains(&required),
+                "OMEGA-DELTA-0022: {required} is not in the parsed action set, \
+                 so the parser is not reading the declarations it claims to"
+            );
+        }
+
+        let allowed: std::collections::BTreeSet<String> = section["third_party_allowances"]
+            .as_object()
+            .expect("actions.third_party_allowances is an object")
+            .keys()
+            .cloned()
+            .collect();
+        let namespace_tokens: Vec<String> =
+            policy_strings(&policy, "actions", "forbidden_namespace_tokens")
+                .iter()
+                .map(|token| token.to_lowercase())
+                .collect();
+        let name_tokens: Vec<String> = policy_strings(&policy, "actions", "forbidden_name_tokens");
+        assert!(
+            !namespace_tokens.is_empty() && !name_tokens.is_empty(),
+            "OMEGA-DELTA-0022: an empty token list makes this check vacuous"
+        );
+
+        let mut offenders: Vec<String> = Vec::new();
+        for (namespace, name, file) in &declarations {
+            if allowed.contains(&format!("{namespace}::{name}")) {
+                continue;
+            }
+            let lowered = namespace.to_lowercase();
+            if namespace_tokens.iter().any(|token| lowered.contains(token)) {
+                offenders.push(format!("{namespace}: … (declared in {file})"));
+            }
+            if name_tokens.iter().any(|token| name.contains(token)) {
+                offenders.push(format!("{namespace}::{name} (declared in {file})"));
+            }
+        }
+        offenders.sort();
+        offenders.dedup();
+        assert!(
+            offenders.is_empty(),
+            "OMEGA-DELTA-0022: the command palette would offer a competitor's \
+             name to the owner: {offenders:?}. An action namespace is a \
+             user-facing label, not an internal seam. Rename it and keep the \
+             old name as a deprecated alias so existing keymaps resolve."
+        );
+    }
+
+    /// OMEGA-DELTA-0022. Renaming an action keeps existing keymaps working.
+    ///
+    /// The built-in keymap is loaded and unwrapped at startup, so an
+    /// unresolvable action is a hard panic before any window opens — the same
+    /// shape that shipped in `0.2.0-rc6`. Every `zed::` name the namespace
+    /// rename retired therefore has to survive as a deprecated alias.
+    #[test]
+    fn the_retired_action_namespace_still_resolves() {
+        let aliases = deprecated_action_aliases();
+        for retired in [
+            "zed::About",
+            "zed::Quit",
+            "zed::GetMerch",
+            "zed::OpenSettings",
+            "zed::NoAction",
+            "zed::Unbind",
+        ] {
+            assert!(
+                aliases.contains(retired),
+                "OMEGA-DELTA-0022: {retired} is not a deprecated alias any more. \
+                 An existing user keymap naming it would stop resolving, and an \
+                 unresolvable action in the built-in keymap panics at startup."
+            );
+        }
+
+        let keymaps = repository_path("assets/keymaps");
+        let mut offenders = Vec::new();
+        for_each_source_file(&keymaps, &["json"], |path, source| {
+            if source.contains("\"zed::") {
+                offenders.push(path.display().to_string());
+            }
+        });
+        assert!(
+            offenders.is_empty(),
+            "OMEGA-DELTA-0022: a shipped keymap still dispatches a retired \
+             `zed::` action: {offenders:?}. Aliases exist for the owner's own \
+             keymap, not for ours."
+        );
+    }
+
+    /// OMEGA-DELTA-0022. A blocked public claim appears nowhere in the tree.
+    ///
+    /// The compatibility allow-list has recorded `blocked` claims since the
+    /// identity work began, but nothing read them back against the source, so
+    /// `Welcome to Zed` and `About Zed` were listed while
+    /// `Use GitHub Copilot in Zed` shipped in `0.2.0-rc11` as a window title,
+    /// as a modal `Headline`, and beside the Zed x Copilot lockup — one
+    /// surface, three presentations, in no entry at all.
+    #[test]
+    fn blocked_public_copy_appears_nowhere_in_the_tree() {
+        let path = repository_path(COMPATIBILITY_ALLOWLIST_PATH);
+        let raw = std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
+        let allowlist: serde_json::Value =
+            serde_json::from_str(&raw).expect("compatibility allow-list parses");
+        let blocked: Vec<String> = allowlist["entries"]
+            .as_array()
+            .expect("the allow-list has entries")
+            .iter()
+            .filter(|entry| entry["disposition"] == "blocked")
+            .filter_map(|entry| entry["match"].as_str())
+            .map(str::to_owned)
+            .collect();
+        assert!(
+            blocked.len() >= 4,
+            "OMEGA-DELTA-0022: only {} blocked claims are recorded, so this \
+             check has almost nothing to enforce",
+            blocked.len()
+        );
+        assert!(
+            blocked.iter().any(|claim| claim == "Use GitHub Copilot in Zed"),
+            "OMEGA-DELTA-0022: the claim that shipped in rc11 must stay recorded \
+             as blocked, or the next lane has no record that it was a defect"
+        );
+
+        let corpus: std::collections::BTreeSet<&str> = BLOCKED_COPY_CORPUS.iter().copied().collect();
+        for relative in &corpus {
+            assert!(
+                repository_path(relative).is_file(),
+                "OMEGA-DELTA-0022: exempt corpus file {relative} does not exist, \
+                 so the exemption is hiding nothing and should be deleted"
+            );
+        }
+
+        let mut offenders: Vec<String> = Vec::new();
+        for directory in ["crates", "assets"] {
+            let root = repository_path(directory);
+            for_each_source_file(&root, &["rs", "json", "md", "toml"], |path, source| {
+                let normalized = normalize_path(path);
+                let relative = normalized
+                    .strip_prefix(normalize_path(&repository_path(".")))
+                    .map_or_else(
+                        |_| normalized.display().to_string(),
+                        |tail| tail.display().to_string(),
+                    );
+                if corpus.contains(relative.as_str()) {
+                    return;
+                }
+                for claim in &blocked {
+                    if source.contains(claim.as_str()) {
+                        offenders.push(format!("{relative}: {claim:?}"));
+                    }
+                }
+            });
+        }
+        offenders.sort();
+        assert!(
+            offenders.is_empty(),
+            "OMEGA-DELTA-0022: a public product claim the allow-list records as \
+             blocked is back in the tree:\n{}",
+            offenders.join("\n")
+        );
+    }
+
+    /// OMEGA-DELTA-0022. The component preview is not in the release palette.
+    ///
+    /// It renders every component's developer-authored `preview` fn, which is
+    /// not reviewed as product copy or product artwork. It shipped in the
+    /// release palette of `0.2.0-rc11` with no dev gate — unlike
+    /// `dev::ToggleInspector` and `dev::ResetOnboarding`, both of which are
+    /// gated — and opening it drew the Zed `Z` through the `Vector` preview.
+    #[test]
+    fn the_component_preview_is_gated_to_dev_builds() {
+        let path = repository_path("crates/component_preview/src/component_preview.rs");
+        let source = std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
+        for required in [
+            "#[cfg(not(debug_assertions))]",
+            "hide_action_types",
+            "OpenComponentPreview",
+        ] {
+            assert!(
+                source.contains(required),
+                "OMEGA-DELTA-0022: {} no longer contains {required:?}, so a \
+                 release build would offer `workspace: open component preview` \
+                 and render unreviewed developer previews to the owner.",
+                path.display()
+            );
+        }
+    }
+
     /// OMEGA-DELTA-0017 and OMEGA-DELTA-0018. The packaging path runs the gate.
     ///
     /// The source checks above cannot see a packaging regression, and the
@@ -1576,6 +2255,66 @@ mod tests {
                  gate ever reading its Info.plist or its icons."
             );
         }
+    }
+
+    /// OMEGA-DELTA-0023. The packaging path staples the application.
+    ///
+    /// `script/bundle-omega-rc` stapled the DMG only. A DMG ticket covers the
+    /// disk image the owner throws away; it does not travel with the
+    /// application that ends up in `/Applications`, so
+    /// `stapler validate /Applications/Omega.app` reported no ticket and
+    /// Gatekeeper acceptance could rest on an online lookup with Apple —
+    /// which cannot prove the offline first start omega#16 requires.
+    ///
+    /// The order matters as much as the call: the app has to be stapled
+    /// *before* the disk image is built, or the DMG is assembled from an
+    /// unstapled bundle and the ticket never reaches the installed product.
+    #[test]
+    fn the_packaging_path_staples_the_application() {
+        let path = repository_path(RC_BUNDLE_SCRIPT_PATH);
+        let script = std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
+
+        for required in [
+            "stapler\" staple \"${app_path}\"",
+            "stapler\" validate \"${app_path}\"",
+            "stapler\" validate \"${DMG_PATH}\"",
+            "stapler\" validate \"${stapled_app_path}\"",
+            "OMEGA_RC_NOTARIZATION_APP_STAPLED",
+            "notarization.app_stapled is required",
+        ] {
+            assert!(
+                script.contains(required),
+                "OMEGA-DELTA-0023: {RC_BUNDLE_SCRIPT_PATH} no longer contains \
+                 {required:?}. A candidate could be published with a stapled \
+                 disk image and an unstapled application, which is exactly the \
+                 state that blocks the offline-start proof on omega#16."
+            );
+        }
+
+        let staple_app = script
+            .find("stapler\" staple \"${app_path}\"")
+            .expect("the app staple call was asserted above");
+        let create_dmg = script
+            .find("hdiutil create")
+            .expect("the bundle script creates a disk image");
+        assert!(
+            staple_app < create_dmg,
+            "OMEGA-DELTA-0023: the disk image is built before the application is \
+             stapled, so it would be assembled from an unstapled bundle and the \
+             ticket would never reach /Applications."
+        );
+
+        let record = repository_path("crates/app_identity/fixtures/release_record_v1.json");
+        let fixture = std::fs::read_to_string(&record)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", record.display()));
+        let parsed: serde_json::Value =
+            serde_json::from_str(&fixture).expect("release record fixture parses");
+        assert!(
+            parsed["notarization"].get("app_stapled").is_some(),
+            "OMEGA-DELTA-0023: the release record must carry app_stapled \
+             separately from stapled, or the two get conflated again"
+        );
     }
 
     /// An ID that names two entries names none of them.

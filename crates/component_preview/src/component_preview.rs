@@ -22,9 +22,45 @@ use workspace::{
     Item, ItemId, SerializableItem, Workspace, WorkspaceId, delete_unloaded_items, item::ItemEvent,
 };
 
+/// OMEGA-DELTA-0022. `workspace: open component preview` is a developer
+/// surface: it renders every component's `preview` fn, which is authored for
+/// developers and is not reviewed as product copy or product artwork. It
+/// shipped in the **release** command palette of `0.2.0-rc11` with no dev
+/// gate, unlike `dev::ToggleInspector` and `dev::ResetOnboarding`, and drawing
+/// the `Vector` preview put a competitor's logo on screen in a signed,
+/// notarized build. A logo carries no text, so no string scan can see it.
+///
+/// The artwork is gone as well — this gate is the second half, so an
+/// unreviewed preview cannot reach an owner's screen through a command they
+/// were never meant to be offered.
+#[cfg(not(debug_assertions))]
+fn hide_component_preview_from_release_palette(cx: &mut App) {
+    use std::any::TypeId;
+    use workspace::notifications::NotifyResultExt as _;
+
+    cx.on_action(|_: &workspace::OpenComponentPreview, cx| {
+        Err::<(), anyhow::Error>(anyhow::anyhow!(
+            "workspace::OpenComponentPreview is only available in debug builds"
+        ))
+        .notify_app_err(cx);
+    });
+
+    command_palette_hooks::CommandPaletteFilter::update_global(cx, |filter, _cx| {
+        filter.hide_action_types(&[TypeId::of::<workspace::OpenComponentPreview>()]);
+    });
+}
+
 pub fn init(app_state: Arc<AppState>, cx: &mut App) {
     workspace::register_serializable_item::<ComponentPreview>(cx);
 
+    #[cfg(not(debug_assertions))]
+    {
+        hide_component_preview_from_release_palette(cx);
+        let _ = app_state;
+        return;
+    }
+
+    #[cfg(debug_assertions)]
     cx.observe_new(move |workspace: &mut Workspace, _window, cx| {
         let app_state = app_state.clone();
         let project = workspace.project().clone();

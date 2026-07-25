@@ -646,3 +646,156 @@ cargo test -p omega_deltas
   plus `a_restarted_process_still_discloses_the_lane_that_owns_a_thread` in
   `crates/agent_ui`, which empties the process-local lane index exactly as a
   process exit does and rebuilds the disclosure from the journal on disk.
+
+### OMEGA-DELTA-0022 — No competitor's identity in any shipped asset or any command-palette label
+
+- **Upstream Zed:** ships `assets/images/zed_logo.svg` and
+  `assets/images/zed_x_copilot.svg` behind `VectorName::ZedLogo` and
+  `VectorName::ZedXCopilot`, declares every application-level action in the
+  `zed` namespace, and titles the Copilot device-code flow
+  "Use GitHub Copilot in Zed".
+- **Omega, before this:** all three shipped in `0.2.0-rc11`, signed and
+  notarized, **after** OMEGA-DELTA-0017 and OMEGA-DELTA-0018 had been added and
+  reported green.
+  1. The Zed logo **rendered in a release build**.
+     `workspace: open component preview` was in the release command palette
+     with no dev gate — the product gates `dev::ToggleInspector` and
+     `dev::ResetOnboarding`, but not this — and drawing the `Vector` preview put
+     the Zed **Z** on screen. The compatibility allow-list recorded
+     `VectorName::Zed*` as `source_only`, meaning nothing rendered it. That was
+     false.
+  2. **"Use GitHub Copilot in Zed"** appeared as a floating-window title bar, as
+     the modal `Headline`, and beside the Zed × Copilot lockup — one user-facing
+     surface, three presentations — and was in **no** allow-list entry, while
+     `Welcome to Zed` and `About Zed` were listed `blocked`. Same class, missed.
+  3. The **`zed:` command namespace was user-facing**: `zed: about`,
+     `zed: quit` and `zed: get merch` were visible in the palette while the
+     allow-list entry claimed these "are not user-facing product copy". The
+     targets were already correct (`MERCH_URL` → openagents.com, the About
+     window titled `About Omega`); the label and the classification were the
+     defect.
+- **Omega now:**
+  1. Both images are deleted, `VectorName::ZedLogo` and `VectorName::ZedXCopilot`
+     are gone, the `Vector` preview draws `OmegaLogo`, the Copilot modal draws
+     `IconName::Copilot`, and `workspace: open component preview` is registered
+     only under `debug_assertions` — hidden from the palette and refused in a
+     release build, the way `dev::ToggleInspector` already was. Removing the
+     artwork and gating the surface are both done, because either alone leaves
+     the other half of the failure standing.
+  2. Every presentation of the Copilot surface names Omega. The GitHub Copilot
+     **integration is retained**; the *"in Zed"* framing is not. The claim is
+     recorded `blocked` in the compatibility allow-list, and blocked claims are
+     now read back against the whole tree.
+  3. Sixty-six actions moved from the `zed` namespace to `omega`, plus
+     `cli::RegisterZedScheme` → `RegisterAppScheme`, `feedback::EmailZed` →
+     `EmailOpenAgents`, `zed_predict_onboarding::OpenZedPredictOnboarding` →
+     `omega_predict_onboarding::OpenOmegaPredictOnboarding`,
+     `zed::OpenZedRepo` → `omega::OpenRepository` (it opens the *Omega*
+     repository) and `zed::OpenZedUrl` → `omega::OpenAppUrl`. Every retired name
+     survives as a `deprecated_aliases` entry so an existing user keymap still
+     resolves, and the shipped keymaps dispatch the new names. The
+     `zed-keybind-context` grammar directory, embedded in the binary and
+     surfaced as the language name "Zed Keybind Context", is now
+     `keybind-context` / "Keybind Context".
+- **Why the previous gate did not catch any of it.** OMEGA-DELTA-0018
+  inventories `assets/icons/*.svg` and the `IconName` enum. `assets/images/*.svg`
+  and `VectorName` are outside it entirely — and that is exactly where the
+  surviving artwork lived. Nothing had ever read an action declaration, and
+  nothing read the allow-list's own `blocked` entries back against the tree.
+  **A gate scoped to one directory reports green about that directory and says
+  nothing about the product.** This was the third time Zed branding survived a
+  gate that truthfully reported clean: rc5/rc6 scanned the packaged app for
+  three identity literals, rc10 added the packaged `Info.plist` and the icon
+  set, and rc11 still shipped all three of the above.
+- **How this inventory is complete rather than enumerated.** Each of the four
+  inventories is *derived from the thing that decides what ships*, and each
+  carries an anti-vacuity guard that fails if the derivation stops working:
+  - **Every embedded file.** The assets tree plus every directory any
+    `#[folder = "…"]` in the repository points at, resolved against the crate
+    root the way `rust-embed` resolves it. A rust-embed folder added tomorrow is
+    inside the gate the day it is added. Guards: a floor on the file count, and
+    a failure if no embed declaration is found at all.
+  - **Every enum that names an embedded asset.** Discovered by finding
+    `format!("<dir>/{…}")` for a directory that is in the inventory above, then
+    reading that file's enums. `IconName` and `VectorName` are both found this
+    way; the policy no longer names a file. Guard: `required_discoveries` fails
+    if either stops being found.
+  - **Every command-palette label.** Every `actions!(namespace, [...])` block
+    and every `#[action(namespace = …)]` derive in the tree — the only two ways
+    to declare a gpui action, so this is the complete set of
+    `namespace: action name` labels the palette can display. Guards: a floor of
+    1000 declarations and `required_actions`.
+  - **Every blocked public claim.** Read out of the compatibility allow-list and
+    searched for across `crates/` and `assets/`, with four named corpus files
+    exempt (the allow-list and the tests that assert the strings' absence), each
+    asserted to exist so the exemption list cannot quietly grow.
+- **References deliberately kept.** `ai_zed.svg` labels Zed's base-keymap preset
+  (beside VS Code, JetBrains and Sublime Text) and Zed's hosted model provider,
+  exactly as `ai_anthropic.svg` labels Anthropic — recorded as a third-party
+  allowance in both the icon and embedded-asset sections. The `zed://` URL
+  scheme still resolves so existing deep links open. `ZED_*` environment
+  variables, `.zed` project folders and the `zed`/`zed_actions` crate names stay
+  as fork seams. Every `zed::` action name survives as a deprecated alias.
+  We are removing Zed **as our identity**, not erasing that Zed exists.
+- **Enforced by:** `no_embedded_asset_carries_a_competitor_name`,
+  `no_asset_name_enum_carries_a_competitor_name`,
+  `no_command_palette_label_names_a_competitor`,
+  `the_retired_action_namespace_still_resolves`,
+  `blocked_public_copy_appears_nowhere_in_the_tree` and
+  `the_component_preview_is_gated_to_dev_builds` in `crates/omega_deltas/`
+  (source tree), `no_vector_name_carries_a_competitor_name` in `crates/ui/`, and
+  `script/verify-omega-brand --app` from `script/bundle-omega-rc`, which scans
+  the packaged executable's embedded asset paths for the forbidden token and
+  asserts the current `omega::` action labels were actually built. It rejects
+  the installed `0.2.0-rc11` on `images/zed_logo.svg`, `images/zed_x_copilot.svg`
+  and three missing `omega::` labels. Policy is shared in
+  `script/omega-brand-gate.json`.
+- **What these gates still do not cover.** No gate recognises a competitor's
+  drawing under a name nobody flagged — the digest pins only say the shipped
+  bytes are the reviewed bytes, and only for the files in `reviewed_marks`.
+  **Nothing inspects rendered pixels.** Arbitrary user-facing prose is not under
+  a complete inventory: the string half enforces the allow-list's `blocked`
+  claims, which is a written-down list, so a *new* sentence naming Zed as the
+  product fails only once somebody adds it — that is exactly how
+  "Use GitHub Copilot in Zed" survived, and widening it further needs the 168
+  remaining brand-bearing prose literals classified, which this lane did not do.
+  Action *doc comments*, which the palette does not show but the keymap editor
+  does, are unchecked. The packaged half checks action labels by **presence of
+  the current ones**, not by exhaustive absence: a stripped binary's string
+  table has no separators and no type information, so `zed::About` appears as
+  `zed::AboutOpens` and a module path like
+  `zed_edit_prediction_delegate::ZedEditPredictionDelegate` is indistinguishable
+  from an action name. The absence rule is enforced on the source, where a
+  declaration can be read. The packaged half runs against the macOS bundle only, so
+  Linux `.desktop`, Flatpak, Snap and Windows resources are unchecked. And no
+  name is forbidden unless it is written in `script/omega-brand-gate.json`.
+  Rendered review of a candidate is still an owner step, not a mechanical one.
+- **Falsified.** Each defect was reintroduced and the gate watched to fail, then
+  restored: the artwork back in `assets/images/`, `VectorName::ZedLogo` back on
+  the enum, `Use GitHub Copilot in Zed` back in the modal, `actions!(zed, …)`
+  back in `zed_actions`, and the dev gate removed from the component preview.
+  The widened gate also rejects the installed `0.2.0-rc11` itself, on
+  `images/zed_logo.svg`, `images/zed_x_copilot.svg` and three missing `omega::`
+  action labels — the same way the previous gate was proven by rejecting rc10.
+
+### OMEGA-DELTA-0023 — The application bundle is stapled, not only the disk image
+
+- **Upstream Zed:** notarizes and staples the release archive.
+- **Omega, before this:** `script/bundle-omega-rc` submitted and stapled the
+  **DMG only**. `stapler validate /Applications/Omega.app` on the installed
+  product reported no ticket, so Gatekeeper acceptance of the installed
+  application could rest on an online lookup with Apple.
+- **Why it matters:** omega#16 requires **offline first start**. A DMG ticket
+  covers the disk image the owner throws away; it does not travel with the
+  application that ends up in `/Applications`. Without a ticket stapled to the
+  `.app`, first launch on a machine with no network is not provably accepted,
+  and the offline-start scope item cannot be closed honestly.
+- **Omega now:** the signed `Omega.app` is zipped, submitted to `notarytool`,
+  and stapled **before** the disk image is built, so the DMG is assembled from
+  the already-stapled application. The DMG is then signed, submitted and
+  stapled as before. Both are validated with `stapler validate` afterwards, and
+  the release record carries `notarization.app_stapled` alongside
+  `notarization.stapled` so the two cannot be conflated.
+- **Enforced by:** `the_packaging_path_staples_the_application` in
+  `crates/omega_deltas/`, which fails if the bundle script stops stapling or
+  stops validating the `.app`.

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Omega brand gate (OMEGA-DELTA-0017, OMEGA-DELTA-0018).
+# Omega brand gate (OMEGA-DELTA-0017, OMEGA-DELTA-0018, OMEGA-DELTA-0022).
 #
 # Two modes:
 #
@@ -12,6 +12,13 @@
 # three Zed logo marks in the status bar while every brand check on omega#16
 # passed, because those checks scanned the executable for three identity
 # literals and nothing had ever read Info.plist or looked at an asset.
+#
+# OMEGA-DELTA-0022 widened the inventories after 0.2.0-rc11 shipped Zed
+# artwork out of assets/images/ and a user-facing `zed:` command namespace,
+# both of which were outside OMEGA-DELTA-0018's scope while it reported green
+# about assets/icons/. The inventories here are derived from what decides what
+# ships -- the assets tree, the enums that name a path into it, and every gpui
+# action declaration -- rather than from a list of remembered places.
 #
 # Policy lives in script/omega-brand-gate.json and is shared with
 # crates/omega_deltas so the source and packaged sides cannot drift.
@@ -47,6 +54,7 @@ done
 python3 - "${repository_root}" "${APP_PATH}" <<'PY'
 from __future__ import annotations
 
+import functools
 import hashlib
 import json
 import plistlib
@@ -61,6 +69,9 @@ POLICY = json.loads((ROOT / "script/omega-brand-gate.json").read_text(encoding="
 WORDS = POLICY["brand"]["words"]
 SUBSTRINGS = [value.lower() for value in POLICY["brand"]["substrings"]]
 ICONS = POLICY["icons"]
+EMBEDDED = POLICY["embedded_assets"]
+ENUMS = POLICY["asset_name_enums"]
+ACTIONS = POLICY["actions"]
 ALLOWED_STEMS = set(ICONS["third_party_allowances"])
 STEM_TOKENS = [token.lower() for token in ICONS["forbidden_stem_tokens"]]
 VARIANT_TOKENS = ICONS["forbidden_variant_tokens"]
@@ -196,6 +207,241 @@ def check_icon_inventory() -> None:
             )
 
 
+# ------------------------------------------- OMEGA-DELTA-0022, shared parsers
+
+
+@functools.lru_cache(maxsize=None)
+def rust_sources(root: Path) -> tuple[tuple[Path, str], ...]:
+    """Every Rust source under `root`, read once and cached."""
+    return tuple(
+        (path, path.read_text(encoding="utf-8", errors="replace"))
+        for path in sorted(root.rglob("*.rs"))
+        if "/target/" not in str(path)
+    )
+
+
+@functools.lru_cache(maxsize=None)
+def embed_folders() -> tuple[tuple[str, Path], ...]:
+    """Every `#[folder = "..."]` in the repository, as (declaring file, folder).
+
+    rust-embed resolves the path against CARGO_MANIFEST_DIR, so the base is the
+    crate root, not the directory the attribute is written in.
+    """
+    found: list[tuple[str, Path]] = []
+    for path, text in rust_sources(ROOT / EMBEDDED["embed_declaration_root"]):
+        matches = re.findall(r'#\[folder\s*=\s*"([^"]+)"\]', text)
+        if not matches:
+            continue
+        crate_root = next(
+            (parent for parent in path.parents if (parent / "Cargo.toml").is_file()),
+            path.parent,
+        )
+        for folder in matches:
+            found.append((str(path.relative_to(ROOT)), (crate_root / folder).resolve()))
+    return tuple(found)
+
+
+@functools.lru_cache(maxsize=None)
+def embedded_asset_inventory() -> tuple[str, ...]:
+    """Every file rust-embed can ship, repository-relative.
+
+    The asset tree plus every directory any `#[folder = ...]` in the repository
+    points at. Not a list of asset directories: rust-embed ships whole
+    directories, so the directories it names are the inventory, and a list of
+    the ones somebody remembered is how assets/images/zed_logo.svg reached a
+    signed, notarized 0.2.0-rc11 while OMEGA-DELTA-0018 reported assets/icons/
+    clean, truthfully.
+
+    Deriving the roots from the embed declarations rather than writing them
+    here means a rust-embed folder added tomorrow is inside the gate the day it
+    is added, instead of being outside it until somebody notices.
+    """
+    roots = [ROOT / EMBEDDED["asset_root"]]
+    roots.extend(folder for _source, folder in embed_folders())
+    files: set[str] = set()
+    for root in roots:
+        if not root.is_dir():
+            continue
+        for path in root.rglob("*"):
+            if path.is_file() and path.name != ".DS_Store":
+                try:
+                    files.add(str(path.resolve().relative_to(ROOT)))
+                except ValueError:
+                    continue
+    return tuple(sorted(files))
+
+
+def action_declarations() -> list[tuple[str, str, str]]:
+    """Every gpui action in the repository as (namespace, name, file).
+
+    There are exactly two ways to declare one, and both are read here, so this
+    is the complete set of `namespace: action name` labels the command palette
+    can display.
+    """
+    declarations: list[tuple[str, str, str]] = []
+    root = ROOT / ACTIONS["search_root"]
+    for path, text in rust_sources(root):
+        relative = str(path.relative_to(ROOT))
+        for match in re.finditer(r"(?:gpui::)?actions!\(\s*", text):
+            head = re.match(r"([A-Za-z_][A-Za-z0-9_]*)(\s*,\s*\[)", text[match.end() :])
+            if head is None:
+                continue
+            namespace = head.group(1)
+            start = match.end() + head.end(2)
+            depth, index = 1, start
+            while index < len(text) and depth:
+                if text[index] == "[":
+                    depth += 1
+                elif text[index] == "]":
+                    depth -= 1
+                index += 1
+            for line in text[start : index - 1].splitlines():
+                stripped = line.strip().rstrip(",")
+                if re.fullmatch(r"[A-Z][A-Za-z0-9]*", stripped):
+                    declarations.append((namespace, stripped, relative))
+        for match in re.finditer(
+            r"#\[action\(([^)]*)\)\]"
+            r"(?:\s*#\[[^\]]*\])*\s*pub\s+(?:struct|enum)\s+([A-Za-z0-9_]+)",
+            text,
+            re.S,
+        ):
+            namespace = re.search(
+                r"namespace\s*=\s*([A-Za-z_][A-Za-z0-9_]*)", match.group(1)
+            )
+            if namespace is not None:
+                declarations.append((namespace.group(1), match.group(2), relative))
+    return declarations
+
+
+# --------------------------------------------------- OMEGA-DELTA-0022, source
+
+
+@functools.lru_cache(maxsize=None)
+def asset_path_directories() -> frozenset[str]:
+    """Leading path segment of every embedded asset, as rust-embed keys it."""
+    root = Path(EMBEDDED["asset_root"])
+    directories = set()
+    for relative in embedded_asset_inventory():
+        path = Path(relative)
+        if path.parts[0] == root.name and len(path.parts) > 2:
+            directories.add(path.parts[1])
+    return frozenset(directories)
+
+
+def check_embedded_assets() -> None:
+    """OMEGA-DELTA-0022, source side."""
+    inventory = embedded_asset_inventory()
+    allowed = set(EMBEDDED["third_party_allowances"])
+    tokens = [token.lower() for token in EMBEDDED["forbidden_path_tokens"]]
+    minimum = EMBEDDED["minimum_inventory"]
+    if len(inventory) < minimum:
+        fail(
+            f"OMEGA-DELTA-0022: only {len(inventory)} embeddable files were "
+            f"found, below the {minimum} floor. The walk broke and this check "
+            "is reporting green about nothing."
+        )
+    if not embed_folders():
+        fail(
+            "OMEGA-DELTA-0022: no rust-embed #[folder] declarations were found, "
+            "so the inventory is no longer derived from what decides what ships"
+        )
+    for relative in inventory:
+        if relative in allowed:
+            continue
+        if any(token in relative.lower() for token in tokens):
+            fail(
+                f"OMEGA-DELTA-0022: {relative} carries a competitor's name and "
+                "is inside a directory rust-embed ships. Replace the artwork "
+                "and the file name, or record why it identifies somebody "
+                "else's product in script/omega-brand-gate.json."
+            )
+
+
+def check_asset_name_enums() -> None:
+    """Every enum that turns an identifier into an embedded asset path.
+
+    Discovered from the source rather than listed, because listing is what let
+    VectorName sit outside OMEGA-DELTA-0018 while IconName was inside it.
+    """
+    tokens = ENUMS["forbidden_variant_tokens"]
+    allowed = set(ENUMS["third_party_allowances"])
+    directories = asset_path_directories()
+    discovered: dict[str, list[str]] = {}
+    for _path, text in rust_sources(ROOT / ENUMS["search_root"]):
+        named = {
+            match.group(1)
+            for match in re.finditer(r'format!\(\s*"([A-Za-z0-9_]+)/\{', text)
+            if match.group(1) in directories
+        }
+        if not named:
+            continue
+        for match in re.finditer(r"pub enum ([A-Za-z0-9_]+) \{\n(.*?)\n\}", text, re.S):
+            name, body = match.group(1), match.group(2)
+            variants = [
+                line.strip().rstrip(",")
+                for line in body.splitlines()
+                if re.fullmatch(r"[A-Z][A-Za-z0-9]*,?", line.strip())
+            ]
+            if variants:
+                discovered[name] = variants
+
+    for required in ENUMS["required_discoveries"]:
+        if required not in discovered:
+            fail(
+                f"OMEGA-DELTA-0022: the asset-name-enum discovery no longer "
+                f"finds {required}. The parser broke and this check is "
+                "reporting green about nothing."
+            )
+    for name, variants in sorted(discovered.items()):
+        if len(variants) < ENUMS["minimum_variants"]:
+            fail(f"OMEGA-DELTA-0022: {name} parsed as {len(variants)} variants")
+        for variant in variants:
+            if f"{name}::{variant}" in allowed:
+                continue
+            if any(token in variant for token in tokens):
+                fail(
+                    f"OMEGA-DELTA-0022: {name}::{variant} names a competitor "
+                    "and resolves to a shipped asset. Renaming the file without "
+                    "renaming the identifier leaves the next rebase a name to "
+                    "restore the artwork under."
+                )
+
+
+def check_action_labels() -> None:
+    """OMEGA-DELTA-0022. The command palette shows every action's name."""
+    declarations = action_declarations()
+    minimum = ACTIONS["minimum_inventory"]
+    if len(declarations) < minimum:
+        fail(
+            f"OMEGA-DELTA-0022: only {len(declarations)} action declarations "
+            f"were parsed, below the {minimum} floor; this check is vacuous"
+        )
+    labels = {f"{namespace}::{name}" for namespace, name, _ in declarations}
+    for required in ACTIONS["required_actions"]:
+        if required not in labels:
+            fail(
+                f"OMEGA-DELTA-0022: {required} is not in the parsed action set, "
+                "so the parser is not reading the declarations it claims to"
+            )
+    allowed = set(ACTIONS["third_party_allowances"])
+    namespace_tokens = [token.lower() for token in ACTIONS["forbidden_namespace_tokens"]]
+    name_tokens = ACTIONS["forbidden_name_tokens"]
+    for namespace, name, source in sorted(declarations):
+        if f"{namespace}::{name}" in allowed:
+            continue
+        if any(token in namespace.lower() for token in namespace_tokens):
+            fail(
+                f"OMEGA-DELTA-0022: the command palette would offer "
+                f"'{namespace}: ...' from {source}. An action namespace is a "
+                "user-facing label, not an internal seam."
+            )
+        if any(token in name for token in name_tokens):
+            fail(
+                f"OMEGA-DELTA-0022: the command palette would offer "
+                f"'{namespace}::{name}' from {source}, which names a competitor."
+            )
+
+
 # -------------------------------------------------------------- packaged mode
 
 
@@ -278,14 +524,87 @@ def check_packaged_icons(app: Path) -> None:
             )
 
 
+def check_packaged_assets_and_actions(app: Path) -> None:
+    """OMEGA-DELTA-0022, packaged side.
+
+    Assets are embedded into the executable by rust-embed and action names are
+    built at compile time, so both survive in the binary as strings. The asset
+    directories searched for are derived from the assets tree rather than
+    listed, so a directory added tomorrow is read the same way assets/images/
+    now is -- it was the missing directory in rc11, not a missing rule.
+    """
+    binary = app / "Contents/MacOS/omega"
+    if not binary.is_file():
+        fail(f"packaged Omega binary is missing: {binary}")
+        return
+    data = binary.read_bytes()
+
+    root = Path(EMBEDDED["asset_root"])
+    directories = sorted(asset_path_directories())
+    if not directories:
+        fail("OMEGA-DELTA-0022: no asset directories were derived; check vacuous")
+        return
+    allowed = [
+        relative[len(f"{root}/") :]
+        for relative in EMBEDDED["third_party_allowances"]
+        if relative.startswith(f"{root}/")
+    ]
+    tokens = [token.lower() for token in EMBEDDED["forbidden_path_tokens"]]
+    directory_group = "|".join(re.escape(name) for name in directories)
+
+    # Rust string tables have no separators, so a match runs on into the next
+    # literal. The scan is anchored on the forbidden token rather than trying
+    # to find where one path ends: a match is reported only when a competitor's
+    # name is inside something shaped like an embedded asset path, and an
+    # allowance is accepted as a prefix of the run-on match.
+    if not re.search(rb"(?:" + directory_group.encode() + rb")/", data):
+        fail(
+            "OMEGA-DELTA-0022: no embedded asset paths were found in the "
+            "packaged binary; this check would be vacuous"
+        )
+    token_group = "|".join(re.escape(token) for token in tokens)
+    pattern = rf"(?:{directory_group})/[\w./-]*(?:{token_group})[\w./-]*".encode()
+    for match in sorted({found.decode() for found in re.findall(pattern, data)}):
+        if any(match.startswith(entry) for entry in allowed):
+            continue
+        fail(f"OMEGA-DELTA-0022: packaged Omega embeds {match}")
+
+    # Action labels, checked by presence of the current ones.
+    #
+    # A stripped binary's string table has no separators and no type
+    # information: `zed::About` appears as `zed::AboutOpens`, and a Rust module
+    # path like `zed_edit_prediction_delegate::ZedEditPredictionDelegate` is
+    # indistinguishable from an action name. An exhaustive absence check over
+    # that is noise, and a noisy gate gets deleted. The absence rule is enforced
+    # on the source, where a declaration can actually be read; what the package
+    # can prove is that the labels the source declares are the labels that were
+    # built. 0.2.0-rc11 carries `zed::About` and not `omega::About`, so this
+    # rejects it, and a package built from a reverted tree fails the same way.
+    required = ACTIONS["required_actions"]
+    if not required:
+        fail("OMEGA-DELTA-0022: actions.required_actions is empty; check vacuous")
+    for label in required:
+        if label.encode() not in data:
+            fail(
+                f"OMEGA-DELTA-0022: packaged Omega does not carry the action "
+                f"label {label!r}. The package was built from a tree that still "
+                "declares a competitor's namespace, whatever the source scan "
+                "above says about this checkout."
+            )
+
+
 check_info_plist_fragments()
 check_icon_inventory()
+check_embedded_assets()
+check_asset_name_enums()
+check_action_labels()
 if APP is not None:
     if not APP.is_dir():
         fail(f"packaged application is missing: {APP}")
     else:
         check_packaged_info_plist(APP)
         check_packaged_icons(APP)
+        check_packaged_assets_and_actions(APP)
 
 if failures:
     print("Omega brand gate FAILED:", file=sys.stderr)

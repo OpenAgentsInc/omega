@@ -37,7 +37,7 @@ See [the configuration docs](../reference/all-settings.md) for more information.
 
 For example, if you have Prettier installed and on your `PATH`, you can use it to format JavaScript files.
 
-Configure formatting in Settings ({#kb zed::OpenSettings}) under Languages > JavaScript, or add to your settings file:
+Configure formatting in Settings ({#kb omega::OpenSettings}) under Languages > JavaScript, or add to your settings file:
 
 ```json [settings]
 {
@@ -69,7 +69,7 @@ Zed uses [tree-sitter/tree-sitter-jsdoc](https://github.com/tree-sitter/tree-sit
 
 You can configure Zed to format code using `eslint --fix` by running the ESLint code action when formatting.
 
-Configure code actions on format in Settings ({#kb zed::OpenSettings}) under Languages > JavaScript, or add to your settings file:
+Configure code actions on format in Settings ({#kb omega::OpenSettings}) under Languages > JavaScript, or add to your settings file:
 
 ```json [settings]
 {
@@ -113,7 +113,7 @@ You can also only execute a single ESLint rule when using `fixAll`:
 
 If you **only** want to run ESLint on save, you can configure code actions as the formatter.
 
-Configure in Settings ({#kb zed::OpenSettings}) under Languages > JavaScript, or add to your settings file:
+Configure in Settings ({#kb omega::OpenSettings}) under Languages > JavaScript, or add to your settings file:
 
 ```json [settings]
 {

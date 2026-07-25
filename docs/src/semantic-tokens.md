@@ -150,7 +150,7 @@ Zed's default semantic token rules map standard LSP token types to common theme 
 - `class` → `type.class`, `class`, or `type` style (first found)
 - `comment` with `documentation` modifier → `comment.documentation` or `comment.doc` style
 
-The full default configuration can be shown in Zed with the {#action zed::ShowDefaultSemanticTokenRules} command.
+The full default configuration can be shown in Zed with the {#action omega::ShowDefaultSemanticTokenRules} command.
 
 ## Standard Token Types
 

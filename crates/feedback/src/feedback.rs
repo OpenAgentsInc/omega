@@ -7,14 +7,16 @@ use gpui::{App, ClipboardItem, PromptLevel, actions};
 use system_specs::{CopySystemSpecsIntoClipboard, SystemSpecs};
 use util::ResultExt;
 use workspace::Workspace;
-use zed_actions::feedback::{EmailZed, FileBugReport, RequestFeature};
+use zed_actions::feedback::{EmailOpenAgents, FileBugReport, RequestFeature};
 
 actions!(
-    zed,
+    omega,
     [
         /// Opens the Omega repository on GitHub.
-        OpenZedRepo,
+        #[action(deprecated_aliases = ["zed::OpenZedRepo"])]
+        OpenRepository,
         /// Copies installed extensions to the clipboard for bug reports.
+        #[action(deprecated_aliases = ["zed::CopyInstalledExtensionsIntoClipboard"])]
         CopyInstalledExtensionsIntoClipboard
     ]
 );
@@ -90,7 +92,7 @@ pub fn init(cx: &mut App) {
                 })
                 .detach();
             })
-            .register_action(move |_, _: &EmailZed, window, cx| {
+            .register_action(move |_, _: &EmailOpenAgents, window, cx| {
                 let specs =
                     SystemSpecs::new(window, cx, telemetry::os_name(), telemetry::os_version());
                 cx.spawn_in(window, async move |_, cx| {
@@ -102,7 +104,7 @@ pub fn init(cx: &mut App) {
                 })
                 .detach();
             })
-            .register_action(move |_, _: &OpenZedRepo, _, cx| {
+            .register_action(move |_, _: &OpenRepository, _, cx| {
                 cx.open_url(PRODUCT_REPOSITORY_URL);
             });
     })

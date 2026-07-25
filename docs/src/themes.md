@@ -15,7 +15,7 @@ Navigating through the theme list by moving up and down will change the theme in
 
 ## Installing New Themes
 
-You can find hundreds of different theme options in Zed's extensions store, which you can access via the command palette with {#action zed::Extensions} or the [Zed website](https://zed.dev/extensions?filter=themes).
+You can find hundreds of different theme options in Zed's extensions store, which you can access via the command palette with {#action omega::Extensions} or the [Zed website](https://zed.dev/extensions?filter=themes).
 
 Many popular themes have been ported to Zed, and if you're struggling to choose one, visit [zed-themes.com](https://zed-themes.com), a third-party gallery with visible previews for many of them.
 
@@ -29,7 +29,7 @@ You can then export the JSON for [local use](./themes.md#local-themes) or for [p
 ## Configuring a Theme
 
 Your selected theme is stored in your settings file.
-You can open your settings file from the command palette with {#action zed::OpenSettingsFile} (bound to {#kb zed::OpenSettingsFile}).
+You can open your settings file from the command palette with {#action omega::OpenSettingsFile} (bound to {#kb omega::OpenSettingsFile}).
 
 By default, Zed maintains two themes: one for light mode and one for dark mode.
 You can set the mode to `"dark"` or `"light"` to ignore the current system mode.

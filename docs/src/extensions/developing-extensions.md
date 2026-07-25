@@ -28,9 +28,9 @@ Extensions that provide grammars additionally require the [wasi-sdk](https://git
 
 When developing an extension, you can use it in Zed without needing to publish it by installing it as a _dev extension_.
 
-From the extensions page, click the `Install Dev Extension` button (or the {#action zed::InstallDevExtension} action) and select the directory containing your extension.
+From the extensions page, click the `Install Dev Extension` button (or the {#action omega::InstallDevExtension} action) and select the directory containing your extension.
 
-If you need to troubleshoot, check Zed.log ({#action zed::OpenLog}) for additional output. For debug output, close and relaunch Zed from the command line with `zed --foreground`, which shows more verbose INFO-level logs.
+If you need to troubleshoot, check Zed.log ({#action omega::OpenLog}) for additional output. For debug output, close and relaunch Zed from the command line with `zed --foreground`, which shows more verbose INFO-level logs.
 
 If you already have the published version of the extension installed, the published version will be uninstalled prior to the installation of the dev extension. After successful installation, the `Extensions` page will indicate that the upstream extension is "Overridden by dev extension".
 

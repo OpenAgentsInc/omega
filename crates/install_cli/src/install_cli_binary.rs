@@ -1,4 +1,4 @@
-use super::register_zed_scheme;
+use super::register_app_scheme;
 use anyhow::Result;
 use gpui::{AppContext as _, AsyncApp, Context, PromptLevel, Window, actions};
 use release_channel::ReleaseChannel;
@@ -137,7 +137,7 @@ pub fn install_cli_binary(window: &mut Window, cx: &mut Context<Workspace>) {
                 cx,
             )
         })?;
-        register_zed_scheme(cx).await.log_err();
+        register_app_scheme(cx).await.log_err();
         Ok(())
     })
     .detach_and_prompt_err("Cannot install the Omega CLI", window, cx, |_, _, _| None);

@@ -15,12 +15,12 @@ Navigating through the icon theme list by moving up and down will change the ico
 
 ## Installing more Icon Themes
 
-More icon themes are available from the Extensions page, which you can access via the command palette with {#action zed::Extensions} or the [Zed website](https://zed.dev/extensions?filter=icon-themes).
+More icon themes are available from the Extensions page, which you can access via the command palette with {#action omega::Extensions} or the [Zed website](https://zed.dev/extensions?filter=icon-themes).
 
 ## Configuring Icon Themes
 
 Your selected icon theme is stored in your settings file.
-You can open your settings file from the command palette with {#action zed::OpenSettingsFile} (bound to {#kb zed::OpenSettingsFile}).
+You can open your settings file from the command palette with {#action omega::OpenSettingsFile} (bound to {#kb omega::OpenSettingsFile}).
 
 Just like with themes, Zed allows for configuring different icon themes for light and dark mode.
 You can set the mode to `"light"` or `"dark"` to ignore the current system mode.

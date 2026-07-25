@@ -815,7 +815,7 @@ impl KeymapEditor {
 
     fn process_bindings(
         json_language: Arc<Language>,
-        zed_keybind_context_language: Arc<Language>,
+        keybind_context_language: Arc<Language>,
         humanized_action_names: &HumanizedActionNameCache,
         cx: &mut App,
     ) -> (
@@ -859,7 +859,7 @@ impl KeymapEditor {
                 .map(|predicate| {
                     KeybindContextString::Local(
                         predicate.to_string().into(),
-                        zed_keybind_context_language.clone(),
+                        keybind_context_language.clone(),
                     )
                 })
                 .unwrap_or(KeybindContextString::Global);
@@ -919,14 +919,14 @@ impl KeymapEditor {
         let workspace = self.workspace.clone();
         cx.spawn_in(window, async move |this, cx| {
             let json_language = load_json_language(workspace.clone(), cx).await;
-            let zed_keybind_context_language =
+            let keybind_context_language =
                 load_keybind_context_language(workspace.clone(), cx).await;
 
             let (action_query, keystroke_query) = this.update(cx, |this, cx| {
                 let (key_bindings, string_match_candidates, actions_with_schemas) =
                     Self::process_bindings(
                         json_language,
-                        zed_keybind_context_language,
+                        keybind_context_language,
                         &this.humanized_action_names,
                         cx,
                     );
@@ -3585,21 +3585,21 @@ async fn load_keybind_context_language(
                 .project()
                 .read(cx)
                 .languages()
-                .language_for_name("Zed Keybind Context")
+                .language_for_name("Keybind Context")
         })
-        .context("Failed to load Zed Keybind Context language")
+        .context("Failed to load Keybind Context language")
         .log_err();
     let language = match language_task {
         Some(task) => task
             .await
-            .context("Failed to load Zed Keybind Context language")
+            .context("Failed to load Keybind Context language")
             .log_err(),
         None => None,
     };
     language.unwrap_or_else(|| {
         Arc::new(Language::new(
             LanguageConfig {
-                name: "Zed Keybind Context".into(),
+                name: "Keybind Context".into(),
                 ..Default::default()
             },
             Some(tree_sitter_rust::LANGUAGE.into()),
@@ -4104,12 +4104,12 @@ mod tests {
         let keymap_content = r#"[
     {
         "bindings": {
-            "alt-cmd-shift-c": "zed::OpenKeymap"
+            "alt-cmd-shift-c": "omega::OpenKeymap"
         }
     },
     {
         "bindings": {
-            "alt-cmd-shift-c": "zed::OpenKeymap"
+            "alt-cmd-shift-c": "omega::OpenKeymap"
         }
     }
 ]"#;
@@ -4117,7 +4117,7 @@ mod tests {
         let cx = &mut cx;
 
         let rows = keymap_editor.read_with(cx, |editor, _| {
-            visible_rows_for_action(editor, "zed::OpenKeymap")
+            visible_rows_for_action(editor, "omega::OpenKeymap")
         });
         assert_eq!(
             rows.len(),
@@ -4143,7 +4143,7 @@ mod tests {
         cx.run_until_parked();
 
         let rows = keymap_editor.read_with(cx, |editor, _| {
-            visible_rows_for_action(editor, "zed::OpenKeymap")
+            visible_rows_for_action(editor, "omega::OpenKeymap")
         });
         assert_eq!(rows.len(), 1, "expected one row remaining after deletion");
     }

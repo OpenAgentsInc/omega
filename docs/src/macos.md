@@ -142,7 +142,7 @@ Zed uses Metal for rendering. If you experience graphical glitches:
 
 If Zed uses more resources than expected:
 
-1. Check for runaway language servers in the terminal output ({#action zed::OpenLog})
+1. Check for runaway language servers in the terminal output ({#action omega::OpenLog})
 2. Try disabling extensions one by one to identify conflicts
 3. For large projects, consider using [project settings](./reference/all-settings.md#file-scan-exclusions) to exclude unnecessary folders from indexing
 

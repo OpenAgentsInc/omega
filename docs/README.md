@@ -61,7 +61,7 @@ When referencing keybindings or actions, use the following formats:
 
 ### Keybindings
 
-{#kb scope::Action} - e.g., {#kb zed::OpenSettings}.
+{#kb scope::Action} - e.g., {#kb omega::OpenSettings}.
 
 This will output a code element like: `<code>Cmd + , | Ctrl + ,</code>`. We then use a client-side plugin to show the actual keybinding based on the user's platform.
 
@@ -77,7 +77,7 @@ Supported overlays: `jetbrains`.
 
 ### Actions
 
-{#action scope::Action} - e.g., {#action zed::OpenSettings}.
+{#action scope::Action} - e.g., {#action omega::OpenSettings}.
 
 This will render a human-readable version of the action name, e.g., "zed: open settings", and will allow us to implement things like additional context on hover, etc.
 

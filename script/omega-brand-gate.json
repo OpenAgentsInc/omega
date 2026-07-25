@@ -1,14 +1,23 @@
 {
   "_comment": [
-    "Single source of truth for the Omega brand gate (OMEGA-DELTA-0017 and",
-    "OMEGA-DELTA-0018). Read by crates/omega_deltas on the source tree and by",
-    "script/verify-omega-brand on the packaged application, so the two sides",
-    "cannot drift apart on what counts as a competitor's name.",
+    "Single source of truth for the Omega brand gate (OMEGA-DELTA-0017,",
+    "OMEGA-DELTA-0018 and OMEGA-DELTA-0022). Read by crates/omega_deltas on the",
+    "source tree and by script/verify-omega-brand on the packaged application,",
+    "so the two sides cannot drift apart on what counts as a competitor's name.",
     "",
     "Do not add an entry to third_party_allowances to make a build pass. An",
     "allowance means the asset identifies somebody else's product the way",
     "ai_anthropic.svg identifies Anthropic, not that Omega presents itself as",
-    "that product."
+    "that product.",
+    "",
+    "Read the scoping note on OMEGA-DELTA-0022 before adding a section. Three",
+    "times running, a gate scoped to a directory or a list reported green about",
+    "that directory and said nothing about the product: rc6 scanned the binary",
+    "for three identity literals, rc10 added assets/icons and the packaged",
+    "Info.plist, and rc11 still shipped Zed artwork out of assets/images and a",
+    "user-facing 'zed:' command namespace, because neither was in any list. A",
+    "new section belongs here only if its inventory is derived from the thing",
+    "that decides what ships."
   ],
   "brand": {
     "_comment": [
@@ -17,8 +26,13 @@
       "word here on purpose: it is a substring of 'authorized', 'organized' and",
       "'normalized', and a gate that cries wolf gets deleted."
     ],
-    "words": ["Zed"],
-    "substrings": ["zed.dev", "zed industries"]
+    "words": [
+      "Zed"
+    ],
+    "substrings": [
+      "zed.dev",
+      "zed industries"
+    ]
   },
   "info_plist": {
     "_comment": [
@@ -37,14 +51,23 @@
       "crates/icons test_all_icons_exist and test_no_dangling_icons, so",
       "scanning both is a complete inventory of every icon that can ship.",
       "",
+      "This section is OMEGA-DELTA-0018 and is now a special case of",
+      "OMEGA-DELTA-0022 below, which scans every file under assets/ and every",
+      "enum that names one. It is kept because the icon set is where the marks",
+      "are pinned and because a narrower failure message is easier to act on.",
+      "",
       "reviewed_marks pins the bytes of the Omega artwork. The name rules",
       "cannot see a logo; the digests can. Changing one of these files is a",
       "deliberate artwork change and has to update this pin in the same commit."
     ],
     "asset_dir": "assets/icons",
     "enum_source": "crates/icons/src/icons.rs",
-    "forbidden_stem_tokens": ["zed"],
-    "forbidden_variant_tokens": ["Zed"],
+    "forbidden_stem_tokens": [
+      "zed"
+    ],
+    "forbidden_variant_tokens": [
+      "Zed"
+    ],
     "third_party_allowances": {
       "ai_zed": "Identifies the Zed editor's base-keymap preset (next to VS Code, JetBrains and Sublime Text) and Zed's own hosted model provider, exactly as ai_anthropic.svg identifies Anthropic. Naming somebody else's product is not Omega presenting itself as that product."
     },
@@ -56,7 +79,95 @@
       "assets/icons/omega_predict_disabled.svg": "f37b0b528f47bf9db512d4482e5742cbdd8c2a6f43200da88309c6a968f60e7a",
       "assets/icons/omega_predict_down.svg": "5ebbcf41039b30f35745d7e4bac18b7cf7fc505aa001d2d27eb82f8b5a6f5b85",
       "assets/icons/omega_predict_error.svg": "bd55454ff5b74f168958473f8cc3504b5bf7f49b37f394beb0adc198799a6e9a",
-      "assets/icons/omega_predict_up.svg": "9136685248fac925d2666996df01cfb2629911c701988f1ed02dce4490d48a4b"
+      "assets/icons/omega_predict_up.svg": "9136685248fac925d2666996df01cfb2629911c701988f1ed02dce4490d48a4b",
+      "assets/images/omega_logo.svg": "08407ddf29386a50617aa758b69c86199c84a6fbcc3cd3e18440c6d18c9374c0"
     }
+  },
+  "embedded_assets": {
+    "_comment": [
+      "OMEGA-DELTA-0022. Every file rust-embed can ship: the asset tree plus every",
+      "directory any #[folder = ...] in the repository points at. Not a list of",
+      "asset directories -- rust-embed ships whole directories, so the directories",
+      "it names are the inventory, and a list of the ones somebody remembered is",
+      "how assets/images/zed_logo.svg and zed_x_copilot.svg reached a signed,",
+      "notarized 0.2.0-rc11 while OMEGA-DELTA-0018 reported assets/icons/ clean,",
+      "truthfully.",
+      "",
+      "The roots are derived from the embed declarations rather than written here,",
+      "so a rust-embed folder added tomorrow is inside the gate the day it is",
+      "added instead of being outside it until somebody notices. If the discovery",
+      "finds no declarations at all, the gate fails rather than passing over an",
+      "empty inventory."
+    ],
+    "asset_root": "assets",
+    "embed_declaration_root": "crates",
+    "forbidden_path_tokens": [
+      "zed"
+    ],
+    "minimum_inventory": 300,
+    "third_party_allowances": {
+      "assets/icons/ai_zed.svg": "Identifies the Zed editor's base-keymap preset (next to VS Code, JetBrains and Sublime Text) and Zed's own hosted model provider, exactly as ai_anthropic.svg identifies Anthropic. Naming somebody else's product is not Omega presenting itself as that product."
+    }
+  },
+  "asset_name_enums": {
+    "_comment": [
+      "OMEGA-DELTA-0022. The enums that turn a Rust identifier into an embedded",
+      "asset path are discovered from the source, not listed here.",
+      "",
+      "OMEGA-DELTA-0018 named crates/icons/src/icons.rs in this file. VectorName",
+      "in crates/ui/src/components/image.rs does exactly the same job for",
+      "assets/images/ and was outside the gate, so VectorName::ZedLogo and",
+      "VectorName::ZedXCopilot survived rc11. Any enum whose impl builds an",
+      "asset path with format!(\"<dir>/{...}\") is found the same way, whichever",
+      "crate it is added to.",
+      "",
+      "required_discoveries is the anti-vacuity guard: if the discovery stops",
+      "finding these, the parser broke and the check is reporting green about",
+      "nothing."
+    ],
+    "search_root": "crates",
+    "required_discoveries": [
+      "IconName",
+      "VectorName"
+    ],
+    "minimum_variants": 2,
+    "forbidden_variant_tokens": [
+      "Zed"
+    ],
+    "third_party_allowances": {
+      "IconName::AiZed": "Renders assets/icons/ai_zed.svg, allowed above for the same reason."
+    }
+  },
+  "actions": {
+    "_comment": [
+      "OMEGA-DELTA-0022. Every gpui action in the repository, because the",
+      "command palette shows 'namespace: action name' for all of them and there",
+      "are exactly two ways to declare one: actions!(namespace, [...]) and",
+      "#[action(namespace = ...)] on a derive. Scanning both over the whole",
+      "crates tree is the complete set of labels the palette can display.",
+      "",
+      "rc11's palette offered 'zed: about', 'zed: quit' and 'zed: get merch'",
+      "while the compatibility allow-list recorded the zed namespace as 'not",
+      "user-facing product copy'. The targets were already correct; the label",
+      "was the defect. Nothing had ever read an action declaration.",
+      "",
+      "deprecated_aliases are exempt: an alias exists to name the OLD action so",
+      "an existing user keymap keeps resolving, and is never shown in the",
+      "palette."
+    ],
+    "search_root": "crates",
+    "forbidden_namespace_tokens": [
+      "zed"
+    ],
+    "forbidden_name_tokens": [
+      "Zed"
+    ],
+    "minimum_inventory": 1000,
+    "required_actions": [
+      "omega::About",
+      "omega::Quit",
+      "omega::GetMerch"
+    ],
+    "third_party_allowances": {}
   }
 }

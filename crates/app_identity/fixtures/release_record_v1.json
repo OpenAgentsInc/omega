@@ -30,11 +30,16 @@
   "notarization": {
     "attempted": false,
     "stapled": false,
+    "app_stapled": false,
     "status": "not_attempted"
   },
   "legal": {
     "commercial_terms_attached": false,
-    "notices": ["LICENSE-GPL", "LICENSE-APACHE", "assets/licenses.md"]
+    "notices": [
+      "LICENSE-GPL",
+      "LICENSE-APACHE",
+      "assets/licenses.md"
+    ]
   },
   "publication": {
     "repository": "OpenAgentsInc/omega",

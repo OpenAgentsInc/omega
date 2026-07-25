@@ -37,7 +37,7 @@ This opens the current directory in Zed.
 
 If you're coming from WebStorm, the fastest way to feel at home is to use the JetBrains keymap. During onboarding, you can select it as your base keymap. If you missed that step, you can change it anytime:
 
-1. Open Settings with {#kb zed::OpenSettings}
+1. Open Settings with {#kb omega::OpenSettings}
 2. Search for `Base Keymap`
 3. Select `JetBrains`
 
@@ -45,7 +45,7 @@ This maps familiar shortcuts like {#kb:jetbrains project_symbols::Toggle} for Go
 
 ## Set Up Editor Preferences
 
-You can configure most settings in the Settings Editor ({#kb zed::OpenSettings}). For advanced settings, run {#action zed::OpenSettingsFile} from the Command Palette to edit your settings file directly.
+You can configure most settings in the Settings Editor ({#kb omega::OpenSettings}). For advanced settings, run {#action omega::OpenSettingsFile} from the Command Palette to edit your settings file directly.
 
 Settings WebStorm users typically configure first:
 
@@ -118,7 +118,7 @@ If you chose the JetBrains keymap during onboarding, most of your shortcuts shou
 ### How to Customize Keybindings
 
 - Open the Command Palette ({#kb:jetbrains command_palette::Toggle})
-- Run {#action zed::OpenKeymap}
+- Run {#action omega::OpenKeymap}
 
 This opens a list of all available bindings. You can override individual shortcuts or remove conflicts.
 
@@ -182,7 +182,7 @@ What this means in practice:
 **How to adapt:**
 
 - Create a `.zed/settings.json` in your project root for project-specific settings
-- Define common commands in `tasks.json` (open via Command Palette: {#action zed::OpenTasks}):
+- Define common commands in `tasks.json` (open via Command Palette: {#action omega::OpenTasks}):
 
 ```json
 [
@@ -351,7 +351,7 @@ If you're used to AI assistants in WebStorm (like GitHub Copilot, JetBrains AI A
 
 ### Configuring GitHub Copilot
 
-1. Open Settings with {#kb zed::OpenSettings}
+1. Open Settings with {#kb omega::OpenSettings}
 2. Navigate to **AI → Edit Predictions**
 3. Click **Configure** next to "Configure Providers"
 4. Under **GitHub Copilot**, click **Sign in to GitHub**

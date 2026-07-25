@@ -30,7 +30,7 @@ def fib(n):
 
 Zed supports using Prettier to automatically re-format Markdown documents. You can trigger this manually via the {#action editor::Format} action or via the {#kb editor::Format} keyboard shortcut. Alternately, you can enable format on save.
 
-Configure formatting in Settings ({#kb zed::OpenSettings}) under Languages > Markdown, or add to your settings file:
+Configure formatting in Settings ({#kb omega::OpenSettings}) under Languages > Markdown, or add to your settings file:
 
 ```json [settings]
   "languages": {
@@ -50,7 +50,7 @@ Zed automatically continues lists when you press Enter at the end of a list item
 
 Pressing Enter on an empty list item removes the marker and exits the list.
 
-To disable this behavior, configure in Settings ({#kb zed::OpenSettings}) under Languages > Markdown, or add to your settings file:
+To disable this behavior, configure in Settings ({#kb omega::OpenSettings}) under Languages > Markdown, or add to your settings file:
 
 ```json [settings]
   "languages": {
@@ -64,7 +64,7 @@ To disable this behavior, configure in Settings ({#kb zed::OpenSettings}) under 
 
 Zed indents list items when you press Tab while the cursor is on a line containing only a list marker. This allows you to quickly create nested lists.
 
-To disable this behavior, configure in Settings ({#kb zed::OpenSettings}) under Languages > Markdown, or add to your settings file:
+To disable this behavior, configure in Settings ({#kb omega::OpenSettings}) under Languages > Markdown, or add to your settings file:
 
 ```json [settings]
   "languages": {
@@ -78,7 +78,7 @@ To disable this behavior, configure in Settings ({#kb zed::OpenSettings}) under 
 
 By default Zed will remove trailing whitespace on save. If you rely on invisible trailing whitespace being converted to `<br />` in Markdown files you can disable this behavior.
 
-Configure in Settings ({#kb zed::OpenSettings}) under Languages > Markdown, or add to your settings file:
+Configure in Settings ({#kb omega::OpenSettings}) under Languages > Markdown, or add to your settings file:
 
 ```json [settings]
   "languages": {

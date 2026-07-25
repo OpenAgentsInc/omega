@@ -47,6 +47,15 @@ struct DigestsSection {
 struct NotarizationSection {
     attempted: bool,
     stapled: bool,
+    /// OMEGA-DELTA-0023. Whether the ticket is stapled to `Omega.app` itself.
+    ///
+    /// Kept separate from `stapled`, which covers the disk image. A DMG ticket
+    /// does not travel with the application that ends up in `/Applications`,
+    /// so conflating the two is how a candidate could claim Gatekeeper
+    /// acceptance while `stapler validate /Applications/Omega.app` reported no
+    /// ticket and offline first start was unprovable.
+    #[serde(default)]
+    app_stapled: bool,
     status: String,
 }
 
@@ -113,6 +122,7 @@ fn release_record_fixture_matches_rc_contract() {
     assert!(!record.legal.commercial_terms_attached);
     assert!(!record.notarization.attempted);
     assert!(!record.notarization.stapled);
+    assert!(!record.notarization.app_stapled);
     assert_eq!(record.notarization.status, "not_attempted");
     assert_eq!(record.publication.repository, "OpenAgentsInc/omega");
     assert_eq!(record.publication.tag, "v0.2.0-rc2");

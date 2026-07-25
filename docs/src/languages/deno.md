@@ -13,7 +13,7 @@ Deno support is available through the [Deno extension](https://github.com/zed-ex
 
 To use the Deno Language Server with TypeScript and TSX files, you will likely wish to disable the default language servers and enable Deno.
 
-Configure language servers and formatters in Settings ({#kb zed::OpenSettings}) under Languages > JavaScript/TypeScript/TSX, or add to your settings file:
+Configure language servers and formatters in Settings ({#kb omega::OpenSettings}) under Languages > JavaScript/TypeScript/TSX, or add to your settings file:
 
 ```json [settings]
 {

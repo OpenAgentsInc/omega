@@ -3408,6 +3408,7 @@ dependencies = [
  "assets",
  "client",
  "collections",
+ "command_palette_hooks",
  "component",
  "db",
  "editor",

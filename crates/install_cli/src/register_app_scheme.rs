@@ -5,11 +5,12 @@ actions!(
     cli,
     [
         /// Registers the current Omega URL scheme handler.
-        RegisterZedScheme
+        #[action(deprecated_aliases = ["cli::RegisterZedScheme"])]
+        RegisterAppScheme
     ]
 );
 
-pub async fn register_zed_scheme(cx: &AsyncApp) -> anyhow::Result<()> {
+pub async fn register_app_scheme(cx: &AsyncApp) -> anyhow::Result<()> {
     let scheme = cx.update(|cx| ReleaseChannel::global(cx).protocol_scheme());
     cx.update(|cx| cx.register_url_scheme(scheme)).await
 }

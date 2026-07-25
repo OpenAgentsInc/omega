@@ -106,7 +106,7 @@ use workspace::{
 use workspace::{Pane, notifications::DetachAndPromptErr};
 use zed_actions::{
     About, GetMerch, OpenAccountSettings, OpenBrowser, OpenDocs, OpenProjectTasks,
-    OpenServerSettings, OpenSettingsFile, OpenStatusPage, OpenZedUrl, Quit,
+    OpenServerSettings, OpenSettingsFile, OpenStatusPage, OpenAppUrl, Quit,
 };
 
 const DOCS_URL: &str = app_identity::PRODUCT_DOCS_URL;
@@ -118,37 +118,52 @@ pub struct CrashHandler(pub Arc<crashes::Client>);
 impl gpui::Global for CrashHandler {}
 
 actions!(
-    zed,
+    omega,
     [
         /// Opens the element inspector for debugging UI.
+        #[action(deprecated_aliases = ["zed::DebugElements"])]
         DebugElements,
         /// Hides the application window.
+        #[action(deprecated_aliases = ["zed::Hide"])]
         Hide,
         /// Hides all other application windows.
+        #[action(deprecated_aliases = ["zed::HideOthers"])]
         HideOthers,
         /// Minimizes the current window.
+        #[action(deprecated_aliases = ["zed::Minimize"])]
         Minimize,
         /// Opens the default settings file.
+        #[action(deprecated_aliases = ["zed::OpenDefaultSettings"])]
         OpenDefaultSettings,
         /// Opens project-specific settings file.
+        #[action(deprecated_aliases = ["zed::OpenProjectSettingsFile"])]
         OpenProjectSettingsFile,
         /// Opens the tasks panel.
+        #[action(deprecated_aliases = ["zed::OpenTasks"])]
         OpenTasks,
         /// Opens debug tasks configuration.
+        #[action(deprecated_aliases = ["zed::OpenDebugTasks"])]
         OpenDebugTasks,
         /// Shows the default semantic token rules (read-only).
+        #[action(deprecated_aliases = ["zed::ShowDefaultSemanticTokenRules"])]
         ShowDefaultSemanticTokenRules,
         /// Resets the application database.
+        #[action(deprecated_aliases = ["zed::ResetDatabase"])]
         ResetDatabase,
         /// Shows all hidden windows.
+        #[action(deprecated_aliases = ["zed::ShowAll"])]
         ShowAll,
         /// Toggles fullscreen mode.
+        #[action(deprecated_aliases = ["zed::ToggleFullScreen"])]
         ToggleFullScreen,
         /// Zooms the window.
+        #[action(deprecated_aliases = ["zed::Zoom"])]
         Zoom,
         /// Triggers a test panic for debugging.
+        #[action(deprecated_aliases = ["zed::TestPanic"])]
         TestPanic,
         /// Triggers a hard crash for debugging.
+        #[action(deprecated_aliases = ["zed::TestCrash"])]
         TestCrash,
     ]
 );
@@ -1000,7 +1015,7 @@ fn register_actions(
         .register_action(|_, _: &ToggleFullScreen, window, _| {
             window.toggle_fullscreen();
         })
-        .register_action(|_, action: &OpenZedUrl, _, cx| {
+        .register_action(|_, action: &OpenAppUrl, _, cx| {
             OpenListener::global(cx).open(RawOpenRequest {
                 urls: vec![String::from(&*action.url)],
                 ..Default::default()
@@ -1232,15 +1247,15 @@ fn register_actions(
                 }
             }
         })
-        .register_action(|_, _: &install_cli::RegisterZedScheme, window, cx| {
+        .register_action(|_, _: &install_cli::RegisterAppScheme, window, cx| {
             cx.spawn_in(window, async move |workspace, cx| {
-                install_cli::register_zed_scheme(cx).await?;
+                install_cli::register_app_scheme(cx).await?;
                 workspace.update_in(cx, |workspace, _, cx| {
-                    struct RegisterZedScheme;
+                    struct RegisterAppScheme;
 
                     workspace.show_toast(
                         Toast::new(
-                            NotificationId::unique::<RegisterZedScheme>(),
+                            NotificationId::unique::<RegisterAppScheme>(),
                             format!(
                                 "{}:// links will now open in {}.",
                                 ReleaseChannel::global(cx).protocol_scheme(),
@@ -5705,7 +5720,7 @@ mod tests {
                 "worktree_picker",
                 "zed",
                 "zed_actions",
-                "zed_predict_onboarding",
+                "omega_predict_onboarding",
                 "zeta",
             ];
             assert_eq!(

@@ -15,7 +15,7 @@ Telemetry falls into two categories:
 ## Configuring Telemetry Settings
 
 You have full control over what data is sent out by Zed.
-To enable or disable some or all telemetry types, open Settings ({#kb zed::OpenSettings}) and search for "telemetry", or add the following to your settings file:
+To enable or disable some or all telemetry types, open Settings ({#kb omega::OpenSettings}) and search for "telemetry", or add the following to your settings file:
 
 ```json [settings]
 "telemetry": {
@@ -54,7 +54,7 @@ This data does not include your code or sensitive project details. Events are se
 
 Usage data is tied to a random telemetry ID. If you've authenticated, this ID may be linked to your email so Zed can analyze patterns over time and reach out for feedback.
 
-To audit what Zed has reported, run {#action zed::OpenTelemetryLog} from the command palette or click `Help > View Telemetry Log`.
+To audit what Zed has reported, run {#action omega::OpenTelemetryLog} from the command palette or click `Help > View Telemetry Log`.
 
 For the full list of event types, see the `Event` enum in [telemetry_events.rs](https://github.com/zed-industries/zed/blob/main/crates/telemetry_events/src/telemetry_events.rs).
 

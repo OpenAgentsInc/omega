@@ -428,10 +428,11 @@ mod no_action {
     use serde::Deserialize;
 
     actions!(
-        zed,
+        omega,
         [
             /// Action with special handling which unbinds the keybinding this is associated with,
             /// if it is the highest precedence match.
+            #[action(deprecated_aliases = ["zed::NoAction"])]
             NoAction
         ]
     );
@@ -441,9 +442,9 @@ mod no_action {
     ///
     /// In keymap JSON this is written as:
     ///
-    /// `["zed::Unbind", "editor::NewLine"]`
+    /// `["omega::Unbind", "editor::NewLine"]`
     #[derive(Clone, Debug, PartialEq, Deserialize, JsonSchema, gpui::Action)]
-    #[action(namespace = zed)]
+    #[action(namespace = omega, deprecated_aliases = ["zed::Unbind"])]
     pub struct Unbind(pub gpui::SharedString);
 
     /// Returns whether or not this action represents a removed key binding.

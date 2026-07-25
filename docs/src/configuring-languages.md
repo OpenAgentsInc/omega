@@ -395,7 +395,7 @@ Zed allows you to run both formatting and linting on save. Here's an example tha
 
 If you encounter issues with formatting or linting:
 
-1. Check Zed's log file for error messages (Use the command palette: {#action zed::OpenLog})
+1. Check Zed's log file for error messages (Use the command palette: {#action omega::OpenLog})
 2. Ensure external tools (formatters, linters) are correctly installed and in your PATH
 3. Verify configurations in both Zed settings and language-specific config files (e.g., `.eslintrc`, `.prettierrc`)
 
@@ -443,7 +443,7 @@ Create custom themes by creating a JSON file in `~/.config/zed/themes/`. Zed wil
 
 ### Using Theme Extensions
 
-Zed supports theme extensions. Browse and install theme extensions from the Extensions panel ({#kb zed::Extensions}).
+Zed supports theme extensions. Browse and install theme extensions from the Extensions panel ({#kb omega::Extensions}).
 
 To create your own theme extension, refer to the [Developing Theme Extensions](./extensions/themes.md) guide.
 

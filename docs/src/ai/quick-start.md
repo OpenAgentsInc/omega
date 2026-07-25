@@ -55,8 +55,8 @@ Provider keys saved through Zed are stored in the system keychain, not in `setti
 | If you want to...                                                           | Go to                                                                    |
 | --------------------------------------------------------------------------- | ------------------------------------------------------------------------ |
 | Configure LLM providers, External Agents, or MCP servers                    | [Agent Settings](./agent-settings.md) with {#action agent::OpenSettings} |
-| Disable AI, configure tool permissions, or set up edit prediction providers | Settings Editor with {#action zed::OpenSettings}                         |
-| Edit advanced JSON-only settings                                            | Settings file with {#action zed::OpenSettingsFile}                       |
+| Disable AI, configure tool permissions, or set up edit prediction providers | Settings Editor with {#action omega::OpenSettings}                         |
+| Edit advanced JSON-only settings                                            | Settings file with {#action omega::OpenSettingsFile}                       |
 
 For general settings mechanics, see [Configuring Zed](../configuring-zed.md).
 
@@ -79,7 +79,7 @@ For general settings mechanics, see [Configuring Zed](../configuring-zed.md).
 
 ## Turn AI Off {#turn-ai-off}
 
-Open the Settings Editor with {#action zed::OpenSettings}, search for `Disable AI`, and enable it.
+Open the Settings Editor with {#action omega::OpenSettings}, search for `Disable AI`, and enable it.
 
 You can also add this to your settings file:
 

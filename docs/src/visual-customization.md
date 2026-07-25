@@ -5,13 +5,13 @@ description: "Various aspects of Zed's visual layout can be configured in the Se
 
 # Visual Customization
 
-Various aspects of Zed's visual layout can be configured in the Settings Editor ({#kb zed::OpenSettings}) or in your settings file ({#kb zed::OpenSettingsFile}).
+Various aspects of Zed's visual layout can be configured in the Settings Editor ({#kb omega::OpenSettings}) or in your settings file ({#kb omega::OpenSettingsFile}).
 
 See [All Settings](./reference/all-settings.md) for additional information and other non-visual settings.
 
 ## Themes
 
-You can install many [themes](./themes.md) and [icon themes](./icon-themes.md) in form of extensions by running {#action zed::Extensions} from the command palette.
+You can install many [themes](./themes.md) and [icon themes](./icon-themes.md) in form of extensions by running {#action omega::Extensions} from the command palette.
 
 You can preview/choose amongst your installed themes and icon themes with {#action theme_selector::Toggle} ({#kb theme_selector::Toggle}) and {#action icon_theme_selector::Toggle} which will modify the following settings:
 

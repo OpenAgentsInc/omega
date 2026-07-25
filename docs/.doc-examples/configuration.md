@@ -27,12 +27,12 @@ For visual customization (themes, fonts, icons), see [Appearance](./appearance.m
 
 ## Settings Editor {#settings-editor}
 
-The **Settings Editor** ({#kb zed::OpenSettings}) is the primary way to configure Zed. It provides a searchable interface where you can browse available settings, see their current values, and make changes.
+The **Settings Editor** ({#kb omega::OpenSettings}) is the primary way to configure Zed. It provides a searchable interface where you can browse available settings, see their current values, and make changes.
 
 To open it:
 
-- Press {#kb zed::OpenSettings}
-- Or run {#action zed::OpenSettings} from the command palette
+- Press {#kb omega::OpenSettings}
+- Or run {#action omega::OpenSettings} from the command palette
 
 As you type in the search box, matching settings appear with descriptions and controls to modify them. Changes save automatically to your settings file.
 
@@ -42,7 +42,7 @@ As you type in the search box, matching settings appear with descriptions and co
 
 ### User Settings {#user-settings}
 
-Your user settings apply globally across all projects. Open the file with {#kb zed::OpenSettingsFile} or run {#action zed::OpenSettingsFile} from the command palette.
+Your user settings apply globally across all projects. Open the file with {#kb omega::OpenSettingsFile} or run {#action omega::OpenSettingsFile} from the command palette.
 
 The file is located at:
 
@@ -54,11 +54,11 @@ The syntax is JSON with support for `//` comments.
 
 ### Default Settings {#default-settings}
 
-To see all available settings with their default values, run {#action zed::OpenDefaultSettings} from the command palette. This opens a read-only reference you can use when editing your own settings.
+To see all available settings with their default values, run {#action omega::OpenDefaultSettings} from the command palette. This opens a read-only reference you can use when editing your own settings.
 
 ### Project Settings {#project-settings}
 
-Override user settings for a specific project by creating a `.zed/settings.json` file in your project root. Run {#action zed::OpenProjectSettings} to create this file.
+Override user settings for a specific project by creating a `.zed/settings.json` file in your project root. Run {#action omega::OpenProjectSettings} to create this file.
 
 Project settings take precedence over user settings for that project only.
 

@@ -12,9 +12,10 @@ use util::ResultExt;
 use workspace::{ModalView, Workspace, ui::HighlightedLabel};
 
 actions!(
-    zed,
+    omega,
     [
         /// Toggles the base keymap selector modal.
+        #[action(deprecated_aliases = ["zed::ToggleBaseKeymapSelector"])]
         ToggleBaseKeymapSelector
     ]
 );

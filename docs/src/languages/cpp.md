@@ -99,7 +99,7 @@ See [Clang-Format Style Options](https://clang.llvm.org/docs/ClangFormatStyleOpt
 
 You can trigger formatting via {#kb editor::Format} or the {#action editor::Format} action from the command palette or by enabling format on save.
 
-Configure formatting in Settings ({#kb zed::OpenSettings}) under Languages > C++, or add to your settings file:
+Configure formatting in Settings ({#kb omega::OpenSettings}) under Languages > C++, or add to your settings file:
 
 ```json [settings]
   "languages": {

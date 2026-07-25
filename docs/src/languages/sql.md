@@ -26,7 +26,7 @@ which sql-formatter
 sql-formatter --version
 ```
 
-3. Configure formatting in Settings ({#kb zed::OpenSettings}) under Languages > SQL, or add to your settings file:
+3. Configure formatting in Settings ({#kb omega::OpenSettings}) under Languages > SQL, or add to your settings file:
 
 ```json [settings]
   "languages": {

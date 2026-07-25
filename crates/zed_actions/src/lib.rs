@@ -14,72 +14,87 @@ pub fn init() {}
 
 /// Opens a URL in the system's default web browser.
 #[derive(Clone, PartialEq, Deserialize, JsonSchema, Action)]
-#[action(namespace = zed)]
+#[action(namespace = omega, deprecated_aliases = ["zed::OpenBrowser"])]
 #[serde(deny_unknown_fields)]
 pub struct OpenBrowser {
     pub url: Arc<str>,
 }
 
-/// Opens a zed:// URL within the application.
+/// Opens an application URL — the Omega channel scheme, or the legacy
+/// `zed://` scheme kept for compatibility with existing links.
 #[derive(Clone, PartialEq, Deserialize, JsonSchema, Action)]
-#[action(namespace = zed)]
+#[action(namespace = omega, deprecated_aliases = ["zed::OpenZedUrl"])]
 #[serde(deny_unknown_fields)]
-pub struct OpenZedUrl {
+pub struct OpenAppUrl {
     pub url: Arc<str>,
 }
 
 /// Opens the keymap to either add a keybinding or change an existing one
 #[derive(PartialEq, Clone, Default, Action, JsonSchema, Serialize, Deserialize)]
-#[action(namespace = zed, no_json, no_register)]
+#[action(namespace = omega, no_json, no_register, deprecated_aliases = ["zed::ChangeKeybinding"])]
 pub struct ChangeKeybinding {
     pub action: String,
 }
 
 actions!(
-    zed,
+    omega,
     [
         /// Opens the settings editor.
-        #[action(deprecated_aliases = ["zed_actions::OpenSettingsEditor"])]
+        #[action(deprecated_aliases = ["zed::OpenSettings", "zed_actions::OpenSettingsEditor"])]
         OpenSettings,
         /// Opens the settings JSON file.
-        #[action(deprecated_aliases = ["zed_actions::OpenSettings"])]
+        #[action(deprecated_aliases = ["zed::OpenSettingsFile", "zed_actions::OpenSettings"])]
         OpenSettingsFile,
         /// Opens project-specific settings.
-        #[action(deprecated_aliases = ["zed_actions::OpenProjectSettings"])]
+        #[action(deprecated_aliases = ["zed::OpenProjectSettings", "zed_actions::OpenProjectSettings"])]
         OpenProjectSettings,
         /// Opens the project tasks configuration.
+        #[action(deprecated_aliases = ["zed::OpenProjectTasks"])]
         OpenProjectTasks,
         /// Opens the project tasks configuration with worktree setup guidance.
+        #[action(deprecated_aliases = ["zed::OpenWorktreeSetupTasks"])]
         OpenWorktreeSetupTasks,
         /// Opens the default keymap file.
+        #[action(deprecated_aliases = ["zed::OpenDefaultKeymap"])]
         OpenDefaultKeymap,
         /// Opens the user keymap file.
-        #[action(deprecated_aliases = ["zed_actions::OpenKeymap"])]
+        #[action(deprecated_aliases = ["zed::OpenKeymapFile", "zed_actions::OpenKeymap"])]
         OpenKeymapFile,
         /// Opens the keymap editor.
-        #[action(deprecated_aliases = ["zed_actions::OpenKeymapEditor"])]
+        #[action(deprecated_aliases = ["zed::OpenKeymap", "zed_actions::OpenKeymapEditor"])]
         OpenKeymap,
         /// Opens account settings.
+        #[action(deprecated_aliases = ["zed::OpenAccountSettings"])]
         OpenAccountSettings,
         /// Opens server settings.
+        #[action(deprecated_aliases = ["zed::OpenServerSettings"])]
         OpenServerSettings,
         /// Quits the application.
+        #[action(deprecated_aliases = ["zed::Quit"])]
         Quit,
-        /// Shows information about Zed.
+        /// Shows information about Omega.
+        #[action(deprecated_aliases = ["zed::About"])]
         About,
         /// Opens the documentation website.
+        #[action(deprecated_aliases = ["zed::OpenDocs"])]
         OpenDocs,
         /// Views open source licenses.
+        #[action(deprecated_aliases = ["zed::OpenLicenses"])]
         OpenLicenses,
-        /// Opens the Zed status page.
+        /// Opens the Omega status page.
+        #[action(deprecated_aliases = ["zed::OpenStatusPage"])]
         OpenStatusPage,
-        /// Opens the Zed merch store.
+        /// Opens the Omega merch store.
+        #[action(deprecated_aliases = ["zed::GetMerch"])]
         GetMerch,
         /// Opens the telemetry log.
+        #[action(deprecated_aliases = ["zed::OpenTelemetryLog"])]
         OpenTelemetryLog,
         /// Opens the performance profiler.
+        #[action(deprecated_aliases = ["zed::OpenPerformanceProfiler"])]
         OpenPerformanceProfiler,
         /// Shows the auto-update notification for testing.
+        #[action(deprecated_aliases = ["zed::ShowUpdateNotification"])]
         ShowUpdateNotification,
     ]
 );
@@ -120,7 +135,7 @@ pub enum ExtensionCategoryFilter {
 
 /// Opens the extensions management interface.
 #[derive(PartialEq, Clone, Default, Debug, Deserialize, JsonSchema, Action)]
-#[action(namespace = zed)]
+#[action(namespace = omega, deprecated_aliases = ["zed::Extensions"])]
 #[serde(deny_unknown_fields)]
 pub struct Extensions {
     /// Filters the extensions page down to extensions that are in the specified category.
@@ -133,7 +148,7 @@ pub struct Extensions {
 
 /// Opens the ACP registry.
 #[derive(PartialEq, Clone, Default, Debug, Deserialize, JsonSchema, Action)]
-#[action(namespace = zed)]
+#[action(namespace = omega, deprecated_aliases = ["zed::AcpRegistry"])]
 #[serde(deny_unknown_fields)]
 pub struct AcpRegistry;
 
@@ -145,7 +160,7 @@ pub struct ShowCallStats;
 
 /// Decreases the font size in the editor buffer.
 #[derive(PartialEq, Clone, Default, Debug, Deserialize, JsonSchema, Action)]
-#[action(namespace = zed)]
+#[action(namespace = omega, deprecated_aliases = ["zed::DecreaseBufferFontSize"])]
 #[serde(deny_unknown_fields)]
 pub struct DecreaseBufferFontSize {
     #[serde(default)]
@@ -154,7 +169,7 @@ pub struct DecreaseBufferFontSize {
 
 /// Increases the font size in the editor buffer.
 #[derive(PartialEq, Clone, Default, Debug, Deserialize, JsonSchema, Action)]
-#[action(namespace = zed)]
+#[action(namespace = omega, deprecated_aliases = ["zed::IncreaseBufferFontSize"])]
 #[serde(deny_unknown_fields)]
 pub struct IncreaseBufferFontSize {
     #[serde(default)]
@@ -163,7 +178,7 @@ pub struct IncreaseBufferFontSize {
 
 /// Opens the settings editor at a specific path.
 #[derive(PartialEq, Clone, Debug, Deserialize, JsonSchema, Action)]
-#[action(namespace = zed)]
+#[action(namespace = omega, deprecated_aliases = ["zed::OpenSettingsAt"])]
 #[serde(deny_unknown_fields)]
 pub struct OpenSettingsAt {
     /// A path to a specific setting (e.g. `theme.mode`)
@@ -175,7 +190,7 @@ pub struct OpenSettingsAt {
 }
 
 #[derive(PartialEq, Clone, Debug, Deserialize, JsonSchema, Action)]
-#[action(namespace = zed)]
+#[action(namespace = omega, deprecated_aliases = ["zed::OpenSettingsPage"])]
 #[serde(deny_unknown_fields)]
 pub struct OpenSettingsPage {
     /// A settings page title (e.g. `AI`).
@@ -202,7 +217,7 @@ pub enum OpenSettingsAtTarget {
 
 /// Resets the buffer font size to the default value.
 #[derive(PartialEq, Clone, Default, Debug, Deserialize, JsonSchema, Action)]
-#[action(namespace = zed)]
+#[action(namespace = omega, deprecated_aliases = ["zed::ResetBufferFontSize"])]
 #[serde(deny_unknown_fields)]
 pub struct ResetBufferFontSize {
     #[serde(default)]
@@ -211,7 +226,7 @@ pub struct ResetBufferFontSize {
 
 /// Decreases the font size of the user interface.
 #[derive(PartialEq, Clone, Default, Debug, Deserialize, JsonSchema, Action)]
-#[action(namespace = zed)]
+#[action(namespace = omega, deprecated_aliases = ["zed::DecreaseUiFontSize"])]
 #[serde(deny_unknown_fields)]
 pub struct DecreaseUiFontSize {
     #[serde(default)]
@@ -220,7 +235,7 @@ pub struct DecreaseUiFontSize {
 
 /// Increases the font size of the user interface.
 #[derive(PartialEq, Clone, Default, Debug, Deserialize, JsonSchema, Action)]
-#[action(namespace = zed)]
+#[action(namespace = omega, deprecated_aliases = ["zed::IncreaseUiFontSize"])]
 #[serde(deny_unknown_fields)]
 pub struct IncreaseUiFontSize {
     #[serde(default)]
@@ -229,7 +244,7 @@ pub struct IncreaseUiFontSize {
 
 /// Resets the UI font size to the default value.
 #[derive(PartialEq, Clone, Default, Debug, Deserialize, JsonSchema, Action)]
-#[action(namespace = zed)]
+#[action(namespace = omega, deprecated_aliases = ["zed::ResetUiFontSize"])]
 #[serde(deny_unknown_fields)]
 pub struct ResetUiFontSize {
     #[serde(default)]
@@ -238,7 +253,7 @@ pub struct ResetUiFontSize {
 
 /// Resets all zoom levels (UI and buffer font sizes, including in the agent panel) to their default values.
 #[derive(PartialEq, Clone, Default, Debug, Deserialize, JsonSchema, Action)]
-#[action(namespace = zed)]
+#[action(namespace = omega, deprecated_aliases = ["zed::ResetAllZoom"])]
 #[serde(deny_unknown_fields)]
 pub struct ResetAllZoom {
     #[serde(default)]
@@ -337,7 +352,7 @@ pub enum NewWorktreeBranchTarget {
 #[action(namespace = git)]
 #[serde(deny_unknown_fields)]
 pub struct CreateWorktree {
-    /// When this is None, Zed will randomly generate a worktree name.
+    /// When this is None, Omega will randomly generate a worktree name.
     pub worktree_name: Option<String>,
     pub branch_target: NewWorktreeBranchTarget,
 }
@@ -452,7 +467,8 @@ pub mod feedback {
         feedback,
         [
             /// Opens email client to send feedback to OpenAgents support.
-            EmailZed,
+            #[action(deprecated_aliases = ["feedback::EmailZed"])]
+            EmailOpenAgents,
             /// Opens the bug report form.
             FileBugReport,
             /// Opens the feature request form.
@@ -801,10 +817,11 @@ pub mod outline {
 }
 
 actions!(
-    zed_predict_onboarding,
+    omega_predict_onboarding,
     [
-        /// Opens the Zed Predict onboarding modal.
-        OpenZedPredictOnboarding
+        /// Opens the Omega Predict onboarding modal.
+        #[action(deprecated_aliases = ["zed_predict_onboarding::OpenZedPredictOnboarding"])]
+        OpenOmegaPredictOnboarding
     ]
 );
 actions!(

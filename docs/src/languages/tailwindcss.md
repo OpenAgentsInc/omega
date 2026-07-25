@@ -48,7 +48,7 @@ Refer to [the Tailwind CSS language server settings docs](https://github.com/tai
 ### Using Tailwind CSS Mode in CSS Files
 
 Zed includes support for the Tailwind CSS language mode, which provides full CSS IntelliSense support even when using Tailwind-specific at-rules like `@apply`, `@layer`, and `@theme`.
-Configure language servers in Settings ({#kb zed::OpenSettings}) under Languages > CSS, or add to your settings file:
+Configure language servers in Settings ({#kb omega::OpenSettings}) under Languages > CSS, or add to your settings file:
 
 ```json [settings]
 {

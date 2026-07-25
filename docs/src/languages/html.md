@@ -24,7 +24,7 @@ This extension is automatically installed, but if you do not want to use it, you
 
 By default Zed uses [Prettier](https://prettier.io/) for formatting HTML.
 
-Configure formatting in Settings ({#kb zed::OpenSettings}) under Languages > HTML, or add to your settings file:
+Configure formatting in Settings ({#kb omega::OpenSettings}) under Languages > HTML, or add to your settings file:
 
 ```json [settings]
   "languages": {
@@ -38,7 +38,7 @@ You can still trigger formatting manually with {#kb editor::Format} or by openin
 
 ### LSP Formatting
 
-To use the `vscode-html-language-server` language server auto-formatting instead of Prettier, configure the formatter in Settings ({#kb zed::OpenSettings}) under Languages > HTML, or add to your settings file:
+To use the `vscode-html-language-server` language server auto-formatting instead of Prettier, configure the formatter in Settings ({#kb omega::OpenSettings}) under Languages > HTML, or add to your settings file:
 
 ```json [settings]
   "languages": {

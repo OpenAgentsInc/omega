@@ -41,7 +41,7 @@ The remote machine must be able to run Zed's server. The following platforms sho
 
 ## Configuration
 
-The list of remote servers is stored in your settings file {#kb zed::OpenSettings}. You can edit this list using the Remote Projects dialog {#kb projects::OpenRemote}, which provides some robustness - for example it checks that the connection can be established before writing it to the settings file.
+The list of remote servers is stored in your settings file {#kb omega::OpenSettings}. You can edit this list using the Remote Projects dialog {#kb projects::OpenRemote}, which provides some robustness - for example it checks that the connection can be established before writing it to the settings file.
 
 ```json [settings]
 {

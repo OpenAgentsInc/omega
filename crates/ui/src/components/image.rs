@@ -20,8 +20,6 @@ pub enum VectorName {
     ProTrialStamp,
     ProUserStamp,
     StudentStamp,
-    ZedLogo,
-    ZedXCopilot,
 }
 
 impl VectorName {
@@ -123,7 +121,7 @@ impl Component for Vector {
                     vec![
                         single_example(
                             "Default",
-                            Vector::square(VectorName::ZedLogo, size).into_any_element(),
+                            Vector::square(VectorName::OmegaLogo, size).into_any_element(),
                         ),
                         single_example(
                             "Custom Size",
@@ -131,7 +129,7 @@ impl Component for Vector {
                                 .h(rems_from_px(120.))
                                 .justify_center()
                                 .child(Vector::new(
-                                    VectorName::ZedLogo,
+                                    VectorName::OmegaLogo,
                                     rems_from_px(120.),
                                     rems_from_px(200.),
                                 ))
@@ -144,13 +142,13 @@ impl Component for Vector {
                     vec![
                         single_example(
                             "Accent Color",
-                            Vector::square(VectorName::ZedLogo, size)
+                            Vector::square(VectorName::OmegaLogo, size)
                                 .color(Color::Accent)
                                 .into_any_element(),
                         ),
                         single_example(
                             "Error Color",
-                            Vector::square(VectorName::ZedLogo, size)
+                            Vector::square(VectorName::OmegaLogo, size)
                                 .color(Color::Error)
                                 .into_any_element(),
                         ),
@@ -159,9 +157,8 @@ impl Component for Vector {
                 example_group_with_title(
                     "Different Vectors",
                     vec![single_example(
-                        "Zed X Copilot",
-                        Vector::square(VectorName::ZedXCopilot, rems_from_px(100.))
-                            .into_any_element(),
+                        "Grid",
+                        Vector::square(VectorName::Grid, rems_from_px(100.)).into_any_element(),
                     )],
                 ),
             ])
@@ -175,10 +172,29 @@ mod tests {
 
     #[test]
     fn vector_path() {
-        assert_eq!(VectorName::ZedLogo.path().as_ref(), "images/zed_logo.svg");
         assert_eq!(
             VectorName::OmegaLogo.path().as_ref(),
             "images/omega_logo.svg"
         );
+        assert_eq!(VectorName::Grid.path().as_ref(), "images/grid.svg");
+    }
+
+    /// OMEGA-DELTA-0022. `assets/images/` was outside every brand gate, so
+    /// `zed_logo.svg` and `zed_x_copilot.svg` were embedded in the signed
+    /// `0.2.0-rc11` binary and the Zed `Z` rendered through this component in
+    /// the release command palette. Neither the artwork nor a name to restore
+    /// it under may come back.
+    #[test]
+    fn no_vector_name_carries_a_competitor_name() {
+        use strum::IntoEnumIterator as _;
+
+        for vector in VectorName::iter() {
+            let path = vector.path();
+            let name: &'static str = vector.into();
+            assert!(
+                !path.contains("zed"),
+                "VectorName::{name:?} resolves to a competitor-named asset: {path}"
+            );
+        }
     }
 }

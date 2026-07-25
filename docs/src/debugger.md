@@ -64,7 +64,7 @@ Zed will also load debug configurations from `.vscode/launch.json`, and show the
 
 #### Global debug configurations
 
-If you run the same launch profiles across multiple projects, you can store them once in your user configuration. Invoke {#action zed::OpenDebugTasks} from the command palette to open the global `debug.json` file; Zed creates it next to your user `settings.json` and keeps it in sync with the debugger UI. The file lives at:
+If you run the same launch profiles across multiple projects, you can store them once in your user configuration. Invoke {#action omega::OpenDebugTasks} from the command palette to open the global `debug.json` file; Zed creates it next to your user `settings.json` and keeps it in sync with the debugger UI. The file lives at:
 
 - **macOS:** `~/Library/Application Support/Zed/debug.json`
 - **Linux/BSD:** `$XDG_CONFIG_HOME/zed/debug.json` (falls back to `~/.config/zed/debug.json`)

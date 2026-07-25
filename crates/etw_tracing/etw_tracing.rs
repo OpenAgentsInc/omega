@@ -15,15 +15,19 @@ use workspace::notifications::{NotificationId, show_app_notification};
 use wprcontrol::*;
 
 actions!(
-    zed,
+    omega,
     [
         /// Starts recording an ETW (Event Tracing for Windows) trace.
+        #[action(deprecated_aliases = ["zed::RecordEtwTrace"])]
         RecordEtwTrace,
         /// Starts recording an ETW (Event Tracing for Windows) trace with heap tracing.
+        #[action(deprecated_aliases = ["zed::RecordEtwTraceWithHeapTracing"])]
         RecordEtwTraceWithHeapTracing,
         /// Saves an in-progress ETW trace to disk.
+        #[action(deprecated_aliases = ["zed::SaveEtwTrace"])]
         SaveEtwTrace,
         /// Cancels an in-progress ETW trace without saving.
+        #[action(deprecated_aliases = ["zed::CancelEtwTrace"])]
         CancelEtwTrace,
     ]
 );

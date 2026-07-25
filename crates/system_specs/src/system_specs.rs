@@ -8,9 +8,10 @@ use std::{env, fmt::Display};
 use sysinfo::{MemoryRefreshKind, RefreshKind, System};
 
 actions!(
-    zed,
+    omega,
     [
         /// Copies system specifications to the clipboard for bug reports.
+        #[action(deprecated_aliases = ["zed::CopySystemSpecsIntoClipboard"])]
         CopySystemSpecsIntoClipboard,
     ]
 );

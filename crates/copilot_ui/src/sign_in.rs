@@ -11,7 +11,7 @@ use gpui::{
 use project::project_settings::ProjectSettings;
 use release_channel::ReleaseChannel;
 use settings::Settings as _;
-use ui::{ButtonLike, CommonAnimationExt, ConfiguredApiCard, Vector, VectorName, prelude::*};
+use ui::{ButtonLike, CommonAnimationExt, ConfiguredApiCard, prelude::*};
 use util::ResultExt as _;
 use workspace::{AppState, Toast, Workspace, notifications::NotificationId};
 
@@ -70,7 +70,7 @@ fn open_copilot_code_verification_window(copilot: &Entity<Copilot>, window: &Win
             is_resizable: false,
             is_movable: true,
             titlebar: Some(gpui::TitlebarOptions {
-                title: Some("Use GitHub Copilot in Zed".into()),
+                title: Some("Use GitHub Copilot in Omega".into()),
                 appears_transparent: true,
                 ..Default::default()
             }),
@@ -252,7 +252,7 @@ impl CopilotCodeVerification {
             .gap_2p5()
             .items_center()
             .text_center()
-            .child(Headline::new("Use GitHub Copilot in Zed").size(HeadlineSize::Large))
+            .child(Headline::new("Use GitHub Copilot in Omega").size(HeadlineSize::Large))
             .child(
                 Label::new("Using Copilot requires an active subscription on GitHub.")
                     .color(Color::Muted),
@@ -459,7 +459,11 @@ impl Render for CopilotCodeVerification {
                 window.focus(&this.focus_handle, cx);
             }))
             .child(
-                Vector::new(VectorName::ZedXCopilot, rems(8.), rems(4.))
+                // OMEGA-DELTA-0022: this was the Zed x Copilot lockup, which
+                // drew a competitor's mark at the top of a modal Omega opens.
+                // The Copilot integration is retained; the co-branding is not.
+                Icon::new(IconName::Copilot)
+                    .size(IconSize::Custom(rems(4.)))
                     .color(Color::Custom(cx.theme().colors().icon)),
             )
             .child(prompt)
@@ -670,7 +674,7 @@ impl ConfigurationView {
     }
 
     fn render_for_chat(&self) -> impl IntoElement {
-        let start_label = "To use Zed's agent with GitHub Copilot, you need to be logged in to GitHub. Note that your GitHub account must have an active Copilot Chat subscription.";
+        let start_label = "To use Omega's agent with GitHub Copilot, you need to be logged in to GitHub. Note that your GitHub account must have an active Copilot Chat subscription.";
         let no_status_label = "Copilot Chat requires an active GitHub Copilot subscription. Please ensure Copilot is configured and try again, or use a different LLM provider.";
 
         let (label, button) = if let Some(msg) = self.loading_message() {

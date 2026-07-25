@@ -212,7 +212,7 @@ Add an extension here with `false` to pin it to its currently installed version.
 ```
 
 Selecting **Install Another Version…** from an extension's `⋯` menu on the Extensions
-page ({#action zed::Extensions}) does this automatically.
+page ({#action omega::Extensions}) does this automatically.
 
 ## Autosave
 
@@ -3302,7 +3302,7 @@ If you wish to exclude certain hosts from using the proxy, set the `NO_PROXY` en
 
 ### Performance Profiler
 
-- Description: Collects timing data for foreground and background executor tasks so they can be inspected via the {#action zed::OpenPerformanceProfiler} action. Enabling this may lead to increased memory usage, hence it's disabled by default for regular builds.
+- Description: Collects timing data for foreground and background executor tasks so they can be inspected via the {#action omega::OpenPerformanceProfiler} action. Enabling this may lead to increased memory usage, hence it's disabled by default for regular builds.
 - Setting: `instrumentation.performance_profiler.enabled`
 - Default: `false`
 

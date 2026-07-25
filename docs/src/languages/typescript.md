@@ -19,7 +19,7 @@ TBD: Document the difference between Language servers
 ## Language servers
 
 By default Zed uses [vtsls](https://github.com/yioneko/vtsls) for TypeScript, TSX, and JavaScript files.
-Configure language servers in Settings ({#kb zed::OpenSettings}) under Languages > TypeScript/TSX/JavaScript, or add to your settings file:
+Configure language servers in Settings ({#kb omega::OpenSettings}) under Languages > TypeScript/TSX/JavaScript, or add to your settings file:
 
 ```json [settings]
 {
@@ -37,7 +37,7 @@ Configure language servers in Settings ({#kb zed::OpenSettings}) under Languages
 }
 ```
 
-Prettier will also be used for TypeScript files by default. To disable this, configure in Settings ({#kb zed::OpenSettings}) under Languages > TypeScript, or add to your settings file:
+Prettier will also be used for TypeScript files by default. To disable this, configure in Settings ({#kb omega::OpenSettings}) under Languages > TypeScript, or add to your settings file:
 
 ```json [settings]
 {

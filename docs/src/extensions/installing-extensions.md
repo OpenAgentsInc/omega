@@ -7,7 +7,7 @@ description: "Browse, install, and manage extensions from the Zed Extension Gall
 
 Extensions add functionality to Zed, including languages, themes, and AI tools. Browse and install them from the Extension Gallery.
 
-Open the Extension Gallery with {#kb zed::Extensions}, or select "Zed > Extensions" from the menu bar.
+Open the Extension Gallery with {#kb omega::Extensions}, or select "Zed > Extensions" from the menu bar.
 
 ## Installation Location
 

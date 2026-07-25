@@ -1726,7 +1726,7 @@ mod tests {
                 [
                     {
                         "unbind": {
-                            "ctrl-a": ["zed::Unbind", "test_keymap_file::StringAction"]
+                            "ctrl-a": ["omega::Unbind", "test_keymap_file::StringAction"]
                         }
                     }
                 ]
@@ -1741,7 +1741,7 @@ mod tests {
                 assert!(
                     error_message
                         .0
-                        .contains("can't use `\"zed::Unbind\"` as an unbind target.")
+                        .contains("can't use `\"omega::Unbind\"` as an unbind target.")
                 );
             }
             other => panic!("expected SomeFailedToLoad, got {other:?}"),

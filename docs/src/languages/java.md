@@ -24,7 +24,7 @@ Or manually download and install [OpenJDK 23](https://jdk.java.net/23/).
 
 ## Extension Install
 
-You can install by opening {#action zed::Extensions}({#kb zed::Extensions}) and searching for `java`.
+You can install by opening {#action omega::Extensions}({#kb omega::Extensions}) and searching for `java`.
 
 ## Quick start and configuration
 

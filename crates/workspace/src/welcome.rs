@@ -31,9 +31,10 @@ pub struct OpenRecentProject {
 }
 
 actions!(
-    zed,
+    omega,
     [
         /// Show the Omega welcome screen
+        #[action(deprecated_aliases = ["zed::ShowWelcome"])]
         ShowWelcome
     ]
 );

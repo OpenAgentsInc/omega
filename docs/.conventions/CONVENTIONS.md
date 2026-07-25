@@ -291,7 +291,7 @@ When documenting settings:
 
 Example:
 
-> Configure inline blame in Settings ({#kb zed::OpenSettings}) by searching for "inline blame", or add to your settings file:
+> Configure inline blame in Settings ({#kb omega::OpenSettings}) by searching for "inline blame", or add to your settings file:
 >
 > ```json [settings]
 > {

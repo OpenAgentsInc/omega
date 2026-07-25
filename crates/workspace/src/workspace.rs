@@ -9756,7 +9756,7 @@ actions!(
         /// Use `collab_panel::OpenSelectedChannelNotes` to open the channel notes for the selected
         /// channel in the collab panel.
         ///
-        /// If you want to open a specific channel, use `zed::OpenZedUrl` with a channel notes URL -
+        /// If you want to open a specific channel, use `omega::OpenAppUrl` with a channel notes URL -
         /// can be copied via "Copy link to section" in the context menu of the channel notes
         /// buffer. These URLs look like `https://zed.dev/channel/channel-name-CHANNEL_ID/notes`.
         OpenChannelNotes,
@@ -9784,11 +9784,13 @@ pub struct OpenChannelNotesById {
 }
 
 actions!(
-    zed,
+    omega,
     [
-        /// Opens the Zed log file.
+        /// Opens the Omega log file.
+        #[action(deprecated_aliases = ["zed::OpenLog"])]
         OpenLog,
-        /// Reveals the Zed log file in the system file manager.
+        /// Reveals the Omega log file in the system file manager.
+        #[action(deprecated_aliases = ["zed::RevealLogInFileManager"])]
         RevealLogInFileManager
     ]
 );

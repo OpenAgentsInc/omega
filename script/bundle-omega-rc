@@ -541,6 +541,16 @@ if not isinstance(owner_blockers, list) or not all(
 ):
     raise SystemExit("owner_blockers must be a list of non-empty strings")
 notarization = record["notarization"]
+# OMEGA-DELTA-0023. A stapled disk image whose application carries no ticket is
+# the 0.2.0-rc11 shape: Gatekeeper acceptance of the installed product would
+# rest on an online lookup and offline first start could not be proven.
+if "app_stapled" not in notarization:
+    raise SystemExit("notarization.app_stapled is required")
+if notarization.get("stapled") is True and notarization.get("app_stapled") is not True:
+    raise SystemExit(
+        "the disk image is stapled but Omega.app is not; offline first start "
+        "cannot be proven from this candidate"
+    )
 if notarization.get("stapled") is True and any(
     "notarization" in blocker.lower() for blocker in owner_blockers
 ):
@@ -772,6 +782,7 @@ write_release_record() {
   local notarization_status="$2"
   local notarization_attempted="$3"
   local notarization_stapled="$4"
+  local app_stapled="$5"
   local package_digest
   if [[ "${DRY_RUN}" == "true" ]]; then
     package_digest=""
@@ -854,6 +865,7 @@ write_release_record() {
   OMEGA_RC_NOTARIZATION_STATUS="${notarization_status}" \
   OMEGA_RC_NOTARIZATION_ATTEMPTED="${notarization_attempted}" \
   OMEGA_RC_NOTARIZATION_STAPLED="${notarization_stapled}" \
+  OMEGA_RC_NOTARIZATION_APP_STAPLED="${app_stapled}" \
   OMEGA_RC_PACKAGE_PATH="${package_path}" \
   python3 <<'PY'
 import json
@@ -985,6 +997,7 @@ record = {
     "notarization": {
         "attempted": notarization_attempted,
         "stapled": notarization_stapled,
+        "app_stapled": os.environ["OMEGA_RC_NOTARIZATION_APP_STAPLED"] == "true",
         "status": os.environ["OMEGA_RC_NOTARIZATION_STATUS"],
     },
     "legal": {
@@ -1278,10 +1291,54 @@ if [[ -z "${OMEGA_BINARY_DIGEST}" || -z "${CLI_BINARY_DIGEST}" || -z "${IDENTITY
   exit 1
 fi
 
+# OMEGA-DELTA-0023. Staple the APPLICATION, before the disk image is built.
+#
+# This script used to staple the DMG only. A DMG ticket covers the disk image
+# the owner throws away; it does not travel with the application that ends up
+# in /Applications, so `stapler validate /Applications/Omega.app` reported no
+# ticket and Gatekeeper acceptance of the installed product could rest on an
+# online lookup with Apple. omega#16 requires OFFLINE first start, which that
+# cannot prove. The app is submitted and stapled here so the disk image below
+# is assembled from an already-stapled application.
+app_stapled="false"
+if [[ -n "${APPLE_NOTARIZATION_KEY:-}" && -n "${APPLE_NOTARIZATION_KEY_ID:-}" && -n "${APPLE_NOTARIZATION_ISSUER_ID:-}" ]]; then
+  echo "Submitting Omega.app for notarization (owner secrets present)..."
+  prepare_notarization_key_file "${APPLE_NOTARIZATION_KEY}"
+  xcode_bin_dir_path="$(xcode-select -p)/usr/bin"
+  app_notarization_zip="${OUTPUT_DIR}/omega-app-notarization.zip"
+  rm -f "${app_notarization_zip}"
+  # notarytool takes an archive, not a bundle directory. ditto --keepParent
+  # preserves the .app wrapper and its extended attributes.
+  /usr/bin/ditto -c -k --keepParent "${app_path}" "${app_notarization_zip}"
+  if "${xcode_bin_dir_path}/notarytool" submit --wait \
+    --key "${NOTARIZATION_KEY_FILE}" \
+    --key-id "${APPLE_NOTARIZATION_KEY_ID}" \
+    --issuer "${APPLE_NOTARIZATION_ISSUER_ID}" \
+    "${app_notarization_zip}"; then
+    "${xcode_bin_dir_path}/stapler" staple "${app_path}"
+    if "${xcode_bin_dir_path}/stapler" validate "${app_path}"; then
+      app_stapled="true"
+      echo "Stapled and validated ${app_path}"
+    else
+      echo "error: ${app_path} has no valid notarization ticket after stapling." >&2
+      exit 1
+    fi
+  else
+    echo "warning: app notarization submit failed; Omega.app remains signed but unstapled." >&2
+    echo "         offline first start cannot be proven from this candidate." >&2
+  fi
+  rm -f "${app_notarization_zip}"
+  cleanup_notarization_key_file
+else
+  echo "Notarization secrets absent; Omega.app is signed but not stapled."
+  echo "Offline first start cannot be proven from this candidate."
+fi
+
 dmg_source_directory="${OUTPUT_DIR}/dmg-src"
 rm -rf "${dmg_source_directory}"
 mkdir -p "${dmg_source_directory}"
 mv "${app_path}" "${dmg_source_directory}/"
+stapled_app_path="${dmg_source_directory}/$(basename "${app_path}")"
 ln -s /Applications "${dmg_source_directory}/Applications"
 cp LICENSE-GPL LICENSE-APACHE "${dmg_source_directory}/"
 if [[ -f assets/licenses.md ]]; then
@@ -1312,8 +1369,20 @@ if [[ -n "${APPLE_NOTARIZATION_KEY:-}" && -n "${APPLE_NOTARIZATION_KEY_ID:-}" &&
     --issuer "${APPLE_NOTARIZATION_ISSUER_ID}" \
     "${DMG_PATH}"; then
     "${xcode_bin_dir_path}/stapler" staple "${DMG_PATH}"
+    if ! "${xcode_bin_dir_path}/stapler" validate "${DMG_PATH}"; then
+      echo "error: ${DMG_PATH} has no valid notarization ticket after stapling." >&2
+      exit 1
+    fi
     notarization_status="submitted_and_stapled"
     notarization_stapled="true"
+    # OMEGA-DELTA-0023. Both artifacts are validated, and the app ticket is
+    # re-validated through its staged path so a stapled bundle cannot be
+    # reported on the strength of the DMG's ticket alone.
+    if ! "${xcode_bin_dir_path}/stapler" validate "${stapled_app_path}"; then
+      echo "error: the staged Omega.app inside the disk image has no ticket." >&2
+      exit 1
+    fi
+    echo "Stapled and validated ${DMG_PATH} and ${stapled_app_path}"
   else
     notarization_status="submit_failed"
     echo "warning: notarization submit failed; DMG remains signed but unstapled." >&2
@@ -1324,11 +1393,14 @@ else
   echo "Release record will set notarization.status=not_attempted."
 fi
 
-write_release_record "${DMG_PATH}" "${notarization_status}" "${notarization_attempted}" "${notarization_stapled}"
+write_release_record "${DMG_PATH}" "${notarization_status}" "${notarization_attempted}" "${notarization_stapled}" "${app_stapled}"
 
 echo "Omega RC package ready:"
 echo "  ${DMG_PATH}"
 echo "  ${RELEASE_RECORD_PATH}"
 if [[ "${notarization_stapled}" != "true" ]]; then
   echo "Note: notarization was not completed in this run."
+fi
+if [[ "${app_stapled}" != "true" ]]; then
+  echo "Note: Omega.app is not stapled, so offline first start is not proven."
 fi

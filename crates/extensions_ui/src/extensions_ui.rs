@@ -46,16 +46,17 @@ use crate::extension_version_selector::{
 };
 
 actions!(
-    zed,
+    omega,
     [
         /// Installs an extension from a local directory for development.
+        #[action(deprecated_aliases = ["zed::InstallDevExtension"])]
         InstallDevExtension,
     ]
 );
 
 /// Rebuilds an installed dev extension.
 #[derive(Clone, Debug, Default, PartialEq, Deserialize, JsonSchema, gpui::Action)]
-#[action(namespace = zed)]
+#[action(namespace = omega, deprecated_aliases = ["zed::RebuildDevExtension"])]
 #[serde(deny_unknown_fields)]
 pub struct RebuildDevExtension {
     /// The ID of the dev extension to rebuild.
