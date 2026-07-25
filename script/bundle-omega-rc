@@ -13,7 +13,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-readonly OMEGA_RC_VERSION="0.2.0-rc11"
+readonly OMEGA_RC_VERSION="0.2.0-rc12"
 readonly OMEGA_RC_SEMVER="0.2.0"
 readonly OMEGA_RC_CHANNEL="preview"
 readonly OMEGA_RC_DISPLAY_CHANNEL="rc"
