@@ -495,27 +495,7 @@ impl DebugPanel {
                 this.serialize_layout(window, cx);
             });
         });
-        let session_id = session.update(cx, |this, cx| this.session_id(cx));
-        let should_prompt = self
-            .project
-            .update(cx, |this, cx| {
-                let session = this.dap_store().read(cx).session_by_id(session_id);
-                session.map(|session| !session.read(cx).is_terminated())
-            })
-            .unwrap_or_default();
-
         cx.spawn_in(window, async move |this, cx| {
-            if should_prompt {
-                let response = cx.prompt(
-                    gpui::PromptLevel::Warning,
-                    "This Debug Session is still running. Are you sure you want to terminate it?",
-                    None,
-                    &["Yes", "No"],
-                );
-                if response.await == Ok(1) {
-                    return;
-                }
-            }
             session.update(cx, |session, cx| session.shutdown(cx));
             this.update(cx, |this, cx| {
                 this.retain_sessions(&|other: &Entity<DebugSession>| {

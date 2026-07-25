@@ -78,8 +78,6 @@ fn high_risk_public_files_forbid_zed_product_phrases() {
         "crates/onboarding/src/basics_page.rs",
         "crates/onboarding/src/multibuffer_hint.rs",
         "crates/ai_onboarding/src/ai_onboarding.rs",
-        "crates/ai_onboarding/src/plan_definitions.rs",
-        "crates/ai_onboarding/src/young_account_banner.rs",
         "crates/settings_ui/src/settings_ui.rs",
         "crates/settings_ui/src/page_data.rs",
         "crates/workspace/src/notifications.rs",
@@ -88,7 +86,6 @@ fn high_risk_public_files_forbid_zed_product_phrases() {
         "crates/title_bar/src/collab.rs",
         "crates/extensions_ui/src/extensions_ui.rs",
         "crates/auto_update_helper/src/dialog.rs",
-        "crates/zed/src/zed/move_to_applications.rs",
         "crates/edit_prediction/src/edit_prediction.rs",
         "crates/edit_prediction/src/zeta.rs",
     ];

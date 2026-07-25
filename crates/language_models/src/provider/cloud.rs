@@ -1,4 +1,3 @@
-use ai_onboarding::YoungAccountBanner;
 use anyhow::{Result, anyhow};
 use client::{
     Client, RefreshLlmTokenListener, TelemetrySettings, UserStore, global_llm_token, zed_urls,
@@ -541,7 +540,7 @@ impl RenderOnce for ZedAiConfiguration {
             .when(!self.compact, |this| this.w_full())
             .map(|this| {
                 if self.account_too_young {
-                    this.child(YoungAccountBanner).child(
+                    this.child(
                         Button::new("upgrade", "Upgrade to Pro")
                             .style(ui::ButtonStyle::Tinted(ui::TintColor::Accent))
                             .when(!self.compact, |this| this.full_width())

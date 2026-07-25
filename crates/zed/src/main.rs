@@ -585,7 +585,6 @@ fn main() {
 
         zed::init(cx);
         #[cfg(target_os = "macos")]
-        zed::move_to_applications::init(cx);
         project::Project::init(&client, cx);
         debugger_ui::init(cx);
         omega_effectd::init_openagents_session(cx);

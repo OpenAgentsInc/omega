@@ -1,4 +1,3 @@
-mod dev_container_suggest;
 pub mod disconnected_overlay;
 mod remote_connections;
 mod remote_servers;
@@ -539,34 +538,6 @@ pub fn init(cx: &mut App) {
         });
     });
 
-    // Subscribe to worktree additions to suggest opening the project in a dev container
-    cx.observe_new(
-        |workspace: &mut Workspace, window: Option<&mut Window>, cx: &mut Context<Workspace>| {
-            let Some(window) = window else {
-                return;
-            };
-            cx.subscribe_in(
-                workspace.project(),
-                window,
-                move |workspace, project, event, window, cx| {
-                    if let project::Event::WorktreeUpdatedEntries(worktree_id, updated_entries) =
-                        event
-                    {
-                        dev_container_suggest::suggest_on_worktree_updated(
-                            workspace,
-                            *worktree_id,
-                            updated_entries,
-                            project,
-                            window,
-                            cx,
-                        );
-                    }
-                },
-            )
-            .detach();
-        },
-    )
-    .detach();
 }
 
 #[cfg(target_os = "windows")]

@@ -2,16 +2,12 @@ mod agent_api_keys_onboarding;
 mod agent_panel_onboarding_card;
 mod agent_panel_onboarding_content;
 mod edit_prediction_onboarding_content;
-mod plan_definitions;
-mod young_account_banner;
 
 pub use agent_api_keys_onboarding::{ApiKeysWithProviders, ApiKeysWithoutProviders};
 pub use agent_panel_onboarding_card::AgentPanelOnboardingCard;
 pub use agent_panel_onboarding_content::AgentPanelOnboarding;
 use cloud_api_types::Plan;
 pub use edit_prediction_onboarding_content::EditPredictionOnboarding;
-pub use plan_definitions::PlanDefinitions;
-pub use young_account_banner::YoungAccountBanner;
 
 use std::sync::Arc;
 

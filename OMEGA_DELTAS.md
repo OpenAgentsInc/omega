@@ -108,3 +108,45 @@ cargo test -p omega_deltas
 - **Note:** these values already matched, and are locked for the same reason as
   `OMEGA-DELTA-0003`.
 - **Enforced by:** `telemetry_stays_off`.
+
+### OMEGA-DELTA-0005 — No hosted-plan or trial surfaces
+
+- **Upstream Zed:** ships subscription plan definitions (Free / Pro / Business /
+  VIP / Student), a trial-ended upsell that covers the agent panel and calls
+  `block_mouse_except_scroll`, and a banner explaining that GitHub accounts
+  under 30 days old cannot start a Pro trial.
+- **Omega:** these files are deleted —
+  `crates/ai_onboarding/src/plan_definitions.rs`,
+  `crates/ai_onboarding/src/young_account_banner.rs`, and
+  `crates/agent_ui/src/ui/end_trial_upsell.rs`.
+- **Why:** Omega does not sell a hosted AI service, so these advertise a product
+  that does not exist here, and they present Zed as the vendor, which omega#16
+  forbids. The upsell also blocked operator input to show an advertisement.
+- **Enforced by:** `removed_surfaces_stay_removed`.
+
+### OMEGA-DELTA-0006 — Nothing nags from ambient state
+
+- **Upstream Zed:** suggests installing an extension when a file's language is
+  unrecognised, suggests reopening in a dev container based on repository
+  contents, and asks to move the application into `/Applications` at startup —
+  the last with a "Don't ask me again" button, which is an admission that it is
+  a nag.
+- **Omega:** all three are deleted, along with the subscriptions that drove them.
+- **Why:** none responds to anything the operator did. They interrupt because
+  the editor noticed something. An interruption has to be earned by a user
+  action or by preventing irreversible loss.
+- **Enforced by:** `removed_surfaces_stay_removed`.
+
+### OMEGA-DELTA-0007 — Terminating a debug session does not ask
+
+- **Upstream Zed:** prompts "This Debug Session is still running. Are you sure
+  you want to terminate it?".
+- **Omega:** terminates immediately.
+- **Why:** terminating a debug session loses the session and nothing else. The
+  operator asked for it.
+- **Not covered:** the restart confirmation at
+  `crates/workspace/src/workspace.rs` is left in place. It is gated on
+  `confirm_quit`, which `OMEGA-DELTA-0003` already locks to `false`, so it is
+  unreachable in Omega. Deleting it would mean surgery on the shutdown path for
+  no behavioural change.
+- **Enforced by:** `debug_terminate_never_prompts`.

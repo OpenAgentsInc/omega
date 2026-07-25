@@ -27,6 +27,24 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0002",
     "OMEGA-DELTA-0003",
     "OMEGA-DELTA-0004",
+    "OMEGA-DELTA-0005",
+    "OMEGA-DELTA-0006",
+    "OMEGA-DELTA-0007",
+];
+
+/// Files deleted from the fork, checked by absence.
+///
+/// A deletion is the easiest kind of delta for a rebase to undo, because the
+/// file simply reappears and nothing else references it yet.
+pub const REMOVED_FILES: &[&str] = &[
+    // OMEGA-DELTA-0005
+    "crates/ai_onboarding/src/plan_definitions.rs",
+    "crates/ai_onboarding/src/young_account_banner.rs",
+    "crates/agent_ui/src/ui/end_trial_upsell.rs",
+    // OMEGA-DELTA-0006
+    "crates/extensions_ui/src/extension_suggest.rs",
+    "crates/recent_projects/src/dev_container_suggest.rs",
+    "crates/zed/src/zed/move_to_applications.rs",
 ];
 
 /// Read a repository file relative to the workspace root.
@@ -273,6 +291,33 @@ mod tests {
                 .and_then(serde_json::Value::as_bool),
             Some(false),
             "the lookup used by the delta check must observe an upstream revert"
+        );
+    }
+
+    /// OMEGA-DELTA-0005 and 0006. Deleted surfaces stay deleted.
+    #[test]
+    fn removed_surfaces_stay_removed() {
+        for relative in REMOVED_FILES {
+            let path = repository_path(relative);
+            assert!(
+                !path.exists(),
+                "{relative} was deleted from Omega and has come back. If a \
+                 rebase restored it, delete it again rather than editing this \
+                 test; see OMEGA_DELTAS.md."
+            );
+        }
+    }
+
+    /// OMEGA-DELTA-0007. Terminating a debug session must not ask first.
+    #[test]
+    fn debug_terminate_never_prompts() {
+        let path = repository_path("crates/debugger_ui/src/debugger_panel.rs");
+        let source = std::fs::read_to_string(&path).expect("debugger panel is readable");
+        assert!(
+            !source.contains("Are you sure you want to terminate it?"),
+            "OMEGA-DELTA-0007: the debug-session terminate confirmation has \
+             returned to {}",
+            path.display()
         );
     }
 
