@@ -6,11 +6,19 @@
 //!
 //! `workroom_ui` (OMEGA-SW-03) consumes these types when wiring the pane.
 
+mod issue31_host;
 mod public_ref;
 mod receipt;
 mod render;
 mod room_header;
 
+pub use issue31_host::{
+    decode_issue31_host_adjunct, Issue31CommandState, Issue31Gap, Issue31HostAdjunct,
+    Issue31HostAdjunctError, Issue31HostProjection, Issue31ProjectionCapability,
+    Issue31ProjectionSource, Issue31Role, Issue31RoleKind, Issue31RoleStatus,
+    Issue31SourceKind, Issue31TerminalState, ProjectionFreshness,
+    ISSUE31_HOST_ADJUNCT_SCHEMA, MAX_ISSUE31_PROJECTION_REFS, MAX_ISSUE31_TIMESTAMP_MS,
+};
 pub use public_ref::{is_public_safe_ref, sanitize_public_ref, PublicRef, PUBLIC_REF_MAX_LEN};
 pub use receipt::{
     AuthorityBlockJson, AuthorityReceiptDetail, AuthorityStatus, RawAuthorityBlock, RefusalDetail,

@@ -101,6 +101,14 @@ fn looks_like_private_path(value: &str) -> bool {
 
 fn looks_like_secret_or_token(value: &str) -> bool {
     let lower = value.to_ascii_lowercase();
+    if lower.starts_with("npub1")
+        && lower.len() == 63
+        && lower[5..]
+            .chars()
+            .all(|character| "023456789acdefghjklmnpqrstuvwxyz".contains(character))
+    {
+        return false;
+    }
     if lower.contains("bearer ")
         || lower.contains("authorization:")
         || lower.starts_with("sk-")
@@ -109,6 +117,8 @@ fn looks_like_secret_or_token(value: &str) -> bool {
         || lower.starts_with("gho_")
         || lower.starts_with("github_pat_")
         || lower.starts_with("xox")
+        || lower.starts_with("nsec1")
+        || lower.starts_with("ncryptsec1")
         || lower.contains("api_key")
         || lower.contains("apikey")
         || lower.contains("access_token")
@@ -170,6 +180,15 @@ mod tests {
         ));
         assert!(!is_public_safe_ref(
             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        ));
+        assert!(!is_public_safe_ref(
+            "nsec1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq"
+        ));
+        assert!(!is_public_safe_ref(
+            "ncryptsec1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq"
+        ));
+        assert!(is_public_safe_ref(
+            "npub1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq"
         ));
     }
 

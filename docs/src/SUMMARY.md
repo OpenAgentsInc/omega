@@ -228,6 +228,7 @@
   - [Omega Full Auto GPUI launcher](./development/omega-full-auto-gpui-launcher.md)
   - [Omega Full Auto routing and liveness](./development/omega-full-auto-routing-liveness.md)
   - [Omega Full Auto reports, Sync, and mobile](./development/omega-full-auto-reports-sync-mobile.md)
+  - [Omega issue 31 mobile host adjunct](./development/omega-issue31-mobile-host-adjunct.md)
   - [Omega RC release](./development/omega-rc-release.md)
   - [Omega RC installed proof](./development/omega-rc-installed-proof.md)
   - [macOS](./development/macos.md)
