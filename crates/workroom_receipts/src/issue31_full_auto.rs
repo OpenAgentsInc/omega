@@ -72,13 +72,8 @@ const FORBIDDEN_TEXT_PREFIXES: [&str; 8] = [
     "ncryptsec1",
 ];
 
-const FORBIDDEN_PATH_FRAGMENTS: [&str; 5] = [
-    "/users/",
-    "/home/",
-    "/var/folders/",
-    "/private/tmp/",
-    "~/",
-];
+const FORBIDDEN_PATH_FRAGMENTS: [&str; 5] =
+    ["/users/", "/home/", "/var/folders/", "/private/tmp/", "~/"];
 
 /// True when bounded owner-facing text carries no credential or private-path
 /// shape. The provider boundary in omega#47 is absolute: the phone never sees a
@@ -120,6 +115,10 @@ pub enum Issue31FullAutoLifecycle {
     Pausing,
     Paused,
     Stopping,
+    /// Omega's Full Auto panel distinguishes these from a healthy run.
+    /// Collapsing them into `Running` would show a stalled run as progressing.
+    Retrying,
+    Stalled,
     Succeeded,
     Failed,
     Stopped,
@@ -335,7 +334,9 @@ impl std::fmt::Display for Issue31FullAutoAdjunctError {
             Self::InvalidControlBinding => {
                 "issue 31 full auto adjunct binds a control to a stale run generation"
             }
-            Self::InvalidAccountState => "issue 31 full auto adjunct confuses a lane with an account",
+            Self::InvalidAccountState => {
+                "issue 31 full auto adjunct confuses a lane with an account"
+            }
             Self::InvalidHandoffState => "issue 31 full auto adjunct handoff state is invalid",
             Self::InvalidEvidenceChain => "issue 31 full auto adjunct evidence chain is invalid",
             Self::UnknownReference => "issue 31 full auto adjunct points at an unknown record",
@@ -459,7 +460,11 @@ pub fn decode_issue31_full_auto_adjunct(input: &str) -> AdjunctResult<Issue31Ful
     let host_ref = public_ref(raw.host_ref)?;
     let snapshot_ref = public_ref(raw.snapshot_ref)?;
 
-    let runs = raw.runs.into_iter().map(project_run).collect::<AdjunctResult<Vec<_>>>()?;
+    let runs = raw
+        .runs
+        .into_iter()
+        .map(project_run)
+        .collect::<AdjunctResult<Vec<_>>>()?;
     let accounts = raw
         .accounts
         .into_iter()
@@ -819,8 +824,14 @@ mod tests {
                 .expect_err("negative fixture must be refused");
             assert_eq!(error, expected, "fixture {name}");
             let rendered = error.to_string();
-            assert!(!rendered.contains("Bearer"), "fixture {name} echoed a token");
-            assert!(!rendered.contains("/Users/"), "fixture {name} echoed a path");
+            assert!(
+                !rendered.contains("Bearer"),
+                "fixture {name} echoed a token"
+            );
+            assert!(
+                !rendered.contains("/Users/"),
+                "fixture {name} echoed a path"
+            );
         }
     }
 
@@ -855,6 +866,497 @@ mod tests {
         assert!(is_issue31_public_text(
             "3 files changed, 214 insertions, 6 deletions",
             MAX_PUBLIC_TEXT
+        ));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Emitter
+// ---------------------------------------------------------------------------
+
+/// Build the adjunct from the same host records the Full Auto panels read.
+///
+/// The panels in `full_auto_ui` parse these values into display rows. This
+/// produces the headless contract from the identical source, so the phone and
+/// the panel cannot disagree about what the host said.
+///
+/// It deliberately builds a JSON document and hands it to
+/// `decode_issue31_full_auto_adjunct` rather than constructing the typed value
+/// directly. There is then exactly one place where the issue's boundaries are
+/// enforced, and the emitter cannot produce anything the reader would refuse.
+pub fn build_issue31_full_auto_adjunct(
+    host_ref: &str,
+    snapshot_ref: &str,
+    generated_at_ms: u64,
+    runs: &serde_json::Value,
+    accounts: &serde_json::Value,
+    handoffs: &serde_json::Value,
+    evidence: &[(serde_json::Value, serde_json::Value)],
+) -> AdjunctResult<Issue31FullAutoAdjunct> {
+    let document = serde_json::json!({
+        "schema": ISSUE31_FULL_AUTO_ADJUNCT_SCHEMA,
+        "hostRef": host_ref,
+        "snapshotRef": snapshot_ref,
+        "generatedAtMs": generated_at_ms,
+        "runs": build_runs(runs, generated_at_ms)?,
+        "accounts": build_accounts(accounts)?,
+        "handoffs": handoffs.get("handoffs").cloned().unwrap_or_else(|| serde_json::json!([])),
+        "evidence": build_evidence(evidence),
+    });
+    let serialized =
+        serde_json::to_string(&document).map_err(|_| Issue31FullAutoAdjunctError::InvalidJson)?;
+    decode_issue31_full_auto_adjunct(&serialized)
+}
+
+/// Map an Omega Full Auto panel state onto the contract lifecycle.
+///
+/// Unknown states are refused rather than folded into `running`. A state this
+/// build does not understand is not evidence that a run is healthy.
+fn lifecycle_from_state(state: &str) -> Option<&'static str> {
+    Some(match state {
+        "queued" => "queued",
+        "running" => "running",
+        "pausing" => "pausing",
+        "paused" => "paused",
+        "stopping" => "stopping",
+        "retrying" => "retrying",
+        "stalled" => "stalled",
+        "succeeded" | "completed" => "succeeded",
+        "failed" => "failed",
+        "stopped" | "cancelled" => "stopped",
+        "expired" => "expired",
+        _ => return None,
+    })
+}
+
+fn is_terminal_state(lifecycle: &str) -> bool {
+    matches!(lifecycle, "succeeded" | "failed" | "stopped" | "expired")
+}
+
+fn build_runs(
+    runs: &serde_json::Value,
+    generated_at_ms: u64,
+) -> AdjunctResult<Vec<serde_json::Value>> {
+    let mut built = Vec::new();
+    for run in runs
+        .get("runs")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let state = run
+            .get("state")
+            .and_then(serde_json::Value::as_str)
+            .ok_or(Issue31FullAutoAdjunctError::InvalidRunState)?;
+        let lifecycle =
+            lifecycle_from_state(state).ok_or(Issue31FullAutoAdjunctError::InvalidRunState)?;
+        let terminal = is_terminal_state(lifecycle);
+        let generation = run
+            .get("generation")
+            .and_then(serde_json::Value::as_u64)
+            .ok_or(Issue31FullAutoAdjunctError::InvalidRunState)?;
+        let run_ref = run
+            .get("runRef")
+            .and_then(serde_json::Value::as_str)
+            .ok_or(Issue31FullAutoAdjunctError::UnsafeReference)?;
+
+        // Measured from the host's own start time, never re-derived downstream.
+        let unattended_ms = run
+            .get("startedAtMs")
+            .and_then(serde_json::Value::as_u64)
+            .map_or(0, |started| generated_at_ms.saturating_sub(started));
+
+        let mut entry = serde_json::json!({
+            "runRef": run_ref,
+            "objective": run.get("objective").cloned().unwrap_or(serde_json::Value::Null),
+            "laneRef": run.get("laneRef").or_else(|| run.get("lane")).cloned().unwrap_or(serde_json::Value::Null),
+            "lifecycle": lifecycle,
+            "generation": generation,
+            "unattendedMs": unattended_ms,
+            "controls": build_controls(run, generation, terminal),
+        });
+        let object = entry
+            .as_object_mut()
+            .ok_or(Issue31FullAutoAdjunctError::InvalidJson)?;
+        if terminal {
+            // The contract requires a reason on a finished run, and a run that
+            // ended without the host recording why is a gap the owner should
+            // see rather than a blank.
+            let reason = run
+                .get("terminalReasonRef")
+                .cloned()
+                .unwrap_or_else(|| serde_json::json!("reason.full-auto.unrecorded"));
+            object.insert("terminalReasonRef".into(), reason);
+        } else if let Some(live) = run.get("liveWorkRef").cloned() {
+            object.insert("liveWorkRef".into(), live);
+        }
+        built.push(entry);
+    }
+    Ok(built)
+}
+
+/// A control the host is willing to accept, bound to this exact generation.
+fn build_controls(
+    run: &serde_json::Value,
+    generation: u64,
+    terminal: bool,
+) -> Vec<serde_json::Value> {
+    if terminal {
+        return Vec::new();
+    }
+    let run_ref = run
+        .get("runRef")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("run");
+    run.get("permittedControls")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(serde_json::Value::as_str)
+        .filter(|kind| matches!(*kind, "pause" | "resume" | "stop"))
+        .map(|kind| {
+            serde_json::json!({
+                "actionRef": format!("action.full-auto.{kind}"),
+                "kind": kind,
+                "runGeneration": generation,
+                "idempotencyRef": format!("idem.{run_ref}.{kind}.{generation}"),
+            })
+        })
+        .collect()
+}
+
+fn build_accounts(accounts: &serde_json::Value) -> AdjunctResult<Vec<serde_json::Value>> {
+    let mut built = Vec::new();
+    for account in accounts
+        .get("accounts")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        built.push(serde_json::json!({
+            "accountRef": account.get("accountRef").cloned().unwrap_or(serde_json::Value::Null),
+            "provider": account.get("provider").cloned().unwrap_or(serde_json::Value::Null),
+            "label": account.get("label").cloned().unwrap_or(serde_json::Value::Null),
+            "readiness": normalize_readiness(account.get("state").and_then(serde_json::Value::as_str)),
+            "quota": normalize_quota(account.get("quotaState").and_then(serde_json::Value::as_str)),
+            // The panel calls this `lane`. The contract insists an account
+            // states its lane, so a missing one becomes an explicit decode
+            // failure rather than a silently unmapped account row.
+            "laneRef": account.get("laneRef").or_else(|| account.get("lane")).cloned().unwrap_or(serde_json::Value::Null),
+        }));
+    }
+    Ok(built)
+}
+
+fn normalize_readiness(state: Option<&str>) -> &'static str {
+    match state {
+        Some("ready") => "ready",
+        Some("busy") => "busy",
+        Some("exhausted") => "exhausted",
+        Some("rate_limited") => "rate_limited",
+        Some("revoked") => "revoked",
+        _ => "unknown",
+    }
+}
+
+fn normalize_quota(state: Option<&str>) -> &'static str {
+    match state {
+        Some("available") => "available",
+        Some("cooling") => "cooling",
+        Some("depleted") => "depleted",
+        _ => "unknown",
+    }
+}
+
+/// Project each (report, receipt) pair through the same rules the omega#43
+/// inspector uses, and fail closed to `unavailable` when the pair does not
+/// form one complete chain.
+fn build_evidence(pairs: &[(serde_json::Value, serde_json::Value)]) -> Vec<serde_json::Value> {
+    pairs
+        .iter()
+        .map(|(report, receipt)| {
+            let run_ref = report
+                .get("runRef")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("run.unknown");
+            match complete_chain(report, receipt) {
+                Some(chain) => chain,
+                None => serde_json::json!({
+                    "completeness": "unavailable",
+                    "runRef": run_ref,
+                    "reasonClass": unavailable_reason(report, receipt),
+                }),
+            }
+        })
+        .collect()
+}
+
+fn unavailable_reason(report: &serde_json::Value, receipt: &serde_json::Value) -> &'static str {
+    if report.get("evidence").is_none() {
+        return "hop_missing";
+    }
+    if report.get("runRef") != receipt.get("runRef") {
+        return "hop_mismatched";
+    }
+    if report
+        .get("evidence")
+        .and_then(|evidence| evidence.get("hostExecuted"))
+        .and_then(serde_json::Value::as_bool)
+        != Some(true)
+    {
+        return "self_reported";
+    }
+    "hop_missing"
+}
+
+fn complete_chain(
+    report: &serde_json::Value,
+    receipt: &serde_json::Value,
+) -> Option<serde_json::Value> {
+    let run_ref = report.get("runRef")?.as_str()?;
+    if receipt.get("runRef")?.as_str()? != run_ref {
+        return None;
+    }
+    let evidence = report.get("evidence")?;
+    if evidence
+        .get("hostExecuted")
+        .and_then(serde_json::Value::as_bool)
+        != Some(true)
+    {
+        return None;
+    }
+    // The receipt must agree with the report on every shared hop, or the chain
+    // is two stories rather than one.
+    for field in ["objectiveRef", "turnRef", "changeRef", "verificationRef"] {
+        if receipt.get(field)? != evidence.get(field)? {
+            return None;
+        }
+    }
+    let hop = |kind: &str, value: Option<&serde_json::Value>| -> Option<serde_json::Value> {
+        Some(serde_json::json!({ "kind": kind, "ref": value?.as_str()? }))
+    };
+    let detailed =
+        |kind: &str, value: Option<&serde_json::Value>, detail: Option<&serde_json::Value>| {
+            let mut entry = serde_json::json!({ "kind": kind, "ref": value?.as_str()? });
+            if let Some(detail) = detail.and_then(serde_json::Value::as_str) {
+                entry
+                    .as_object_mut()?
+                    .insert("detail".into(), serde_json::json!(detail));
+            }
+            Some(entry)
+        };
+
+    let hops = vec![
+        hop("objective", evidence.get("objectiveRef"))?,
+        hop("turn", evidence.get("turnRef"))?,
+        detailed(
+            "change",
+            evidence.get("changeRef"),
+            evidence.get("diffSummary"),
+        )?,
+        hop("project_generation", evidence.get("projectGeneration"))?,
+        detailed(
+            "test",
+            evidence
+                .get("testRef")
+                .or_else(|| evidence.get("verificationRef")),
+            evidence.get("testCommand"),
+        )?,
+        hop("typed_outcome", evidence.get("testOutcome"))?,
+        hop("host_verification", evidence.get("verificationRef"))?,
+        hop("authority_decision", receipt.get("decisionRef"))?,
+        hop("receipt", receipt.get("authorityReceiptRef"))?,
+    ];
+
+    Some(serde_json::json!({
+        "completeness": "complete",
+        "runRef": run_ref,
+        "hostExecuted": true,
+        "authorityAllowed": receipt.get("allowed").and_then(serde_json::Value::as_bool)?,
+        "hops": hops,
+    }))
+}
+
+#[cfg(test)]
+mod emitter_tests {
+    use super::*;
+    use serde_json::json;
+
+    const NOW: u64 = 1_784_894_400_000;
+
+    fn runs() -> serde_json::Value {
+        json!({"runs": [
+            {
+                "runRef": "run.full-auto.run-01",
+                "objective": "Finish the issue 31 mobile workroom.",
+                "lane": "lane.codex-local",
+                "state": "running",
+                "generation": 7,
+                "startedAtMs": NOW - 5_400_000,
+                "liveWorkRef": "work.run-01.unit-14",
+                "permittedControls": ["pause", "stop"]
+            }
+        ]})
+    }
+
+    fn accounts() -> serde_json::Value {
+        json!({"accounts": [
+            {"accountRef":"account.codex.1","provider":"openai","label":"ChatGPT Personal","state":"busy","quotaState":"available","lane":"lane.codex-local"}
+        ]})
+    }
+
+    fn build(
+        runs: &serde_json::Value,
+        accounts: &serde_json::Value,
+        evidence: &[(serde_json::Value, serde_json::Value)],
+    ) -> AdjunctResult<Issue31FullAutoAdjunct> {
+        build_issue31_full_auto_adjunct(
+            "host.omega.device-alpha",
+            "snapshot.omega.issue31.000042",
+            NOW,
+            runs,
+            accounts,
+            &json!({}),
+            evidence,
+        )
+    }
+
+    #[test]
+    fn builds_from_the_same_records_the_panels_read() {
+        let adjunct = build(&runs(), &accounts(), &[]).expect("emits a valid adjunct");
+        assert_eq!(adjunct.runs.len(), 1);
+        let run = &adjunct.runs[0];
+        assert_eq!(run.lifecycle, Issue31FullAutoLifecycle::Running);
+        assert_eq!(run.unattended_ms, 5_400_000);
+        assert_eq!(run.controls.len(), 2);
+        assert!(
+            run.controls
+                .iter()
+                .all(|control| control.run_generation == 7)
+        );
+        assert_eq!(adjunct.accounts[0].lane_ref.as_str(), "lane.codex-local");
+    }
+
+    #[test]
+    fn refuses_a_state_this_build_does_not_understand() {
+        let mut value = runs();
+        value["runs"][0]["state"] = json!("vibing");
+        // Folding an unknown state into `running` would report a run as healthy
+        // on the strength of a string nobody has defined.
+        assert_eq!(
+            build(&value, &accounts(), &[]).expect_err("must refuse"),
+            Issue31FullAutoAdjunctError::InvalidRunState
+        );
+    }
+
+    #[test]
+    fn a_stalled_run_is_not_reported_as_running() {
+        let mut value = runs();
+        value["runs"][0]["state"] = json!("stalled");
+        let adjunct = build(&value, &accounts(), &[]).expect("stalled is a known state");
+        assert_eq!(adjunct.runs[0].lifecycle, Issue31FullAutoLifecycle::Stalled);
+        assert!(!adjunct.runs[0].lifecycle.is_terminal());
+    }
+
+    #[test]
+    fn a_finished_run_loses_its_controls_and_gains_a_reason() {
+        let mut value = runs();
+        value["runs"][0]["state"] = json!("succeeded");
+        let adjunct = build(&value, &accounts(), &[]).expect("emits");
+        let run = &adjunct.runs[0];
+        assert!(run.controls.is_empty());
+        assert!(run.live_work_ref.is_none());
+        assert_eq!(
+            run.terminal_reason_ref.as_ref().map(PublicRef::as_str),
+            Some("reason.full-auto.unrecorded")
+        );
+    }
+
+    #[test]
+    fn an_account_without_a_lane_is_refused_rather_than_shown_unmapped() {
+        let mut value = accounts();
+        value["accounts"][0]
+            .as_object_mut()
+            .expect("object")
+            .remove("lane");
+        assert!(build(&runs(), &value, &[]).is_err());
+    }
+
+    #[test]
+    fn a_credential_shaped_label_cannot_be_emitted() {
+        let mut value = accounts();
+        value["accounts"][0]["label"] = json!("Bearer sk-live-abc");
+        assert_eq!(
+            build(&runs(), &value, &[]).expect_err("must refuse"),
+            Issue31FullAutoAdjunctError::UnsafeText
+        );
+    }
+
+    fn evidence_pair() -> (serde_json::Value, serde_json::Value) {
+        (
+            json!({
+                "runRef": "run.full-auto.run-01",
+                "evidence": {
+                    "objectiveRef": "objective.run-01",
+                    "turnRef": "turn.run-01.11",
+                    "changeRef": "change.run-01.11",
+                    "projectGeneration": "generation.project.00219",
+                    "verificationRef": "verification.run-01.11",
+                    "testOutcome": "outcome.test.passed",
+                    "testCommand": "cargo test -p workroom_receipts",
+                    "diffSummary": "3 files changed",
+                    "hostExecuted": true
+                }
+            }),
+            json!({
+                "runRef": "run.full-auto.run-01",
+                "objectiveRef": "objective.run-01",
+                "turnRef": "turn.run-01.11",
+                "changeRef": "change.run-01.11",
+                "verificationRef": "verification.run-01.11",
+                "decisionRef": "decision.run-01.11",
+                "authorityReceiptRef": "receipt.run-01.11",
+                "allowed": true
+            }),
+        )
+    }
+
+    #[test]
+    fn projects_one_complete_chain_in_the_normative_order() {
+        let adjunct = build(&runs(), &accounts(), &[evidence_pair()]).expect("emits");
+        match &adjunct.evidence[0] {
+            Issue31EvidenceChain::Complete { hops, .. } => {
+                let kinds: Vec<Issue31EvidenceHopKind> = hops.iter().map(|hop| hop.kind).collect();
+                assert_eq!(kinds, ISSUE31_EVIDENCE_HOPS.to_vec());
+            }
+            Issue31EvidenceChain::Unavailable { .. } => panic!("expected a complete chain"),
+        }
+    }
+
+    #[test]
+    fn a_self_reported_chain_fails_closed_to_unavailable() {
+        let (mut report, receipt) = evidence_pair();
+        report["evidence"]["hostExecuted"] = json!(false);
+        let adjunct = build(&runs(), &accounts(), &[(report, receipt)]).expect("emits");
+        match &adjunct.evidence[0] {
+            Issue31EvidenceChain::Unavailable { reason, .. } => {
+                assert_eq!(*reason, Issue31EvidenceUnavailableReason::SelfReported);
+            }
+            Issue31EvidenceChain::Complete { .. } => {
+                panic!("a run reporting its own success is not verified")
+            }
+        }
+    }
+
+    #[test]
+    fn a_receipt_that_disagrees_with_the_report_fails_closed() {
+        let (report, mut receipt) = evidence_pair();
+        receipt["changeRef"] = json!("change.someone-elses-work");
+        let adjunct = build(&runs(), &accounts(), &[(report, receipt)]).expect("emits");
+        // Two stories about one run is not a chain.
+        assert!(matches!(
+            adjunct.evidence[0],
+            Issue31EvidenceChain::Unavailable { .. }
         ));
     }
 }
