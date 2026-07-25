@@ -1536,6 +1536,98 @@ mod tests {
 
     use super::*;
 
+    /// Live proof against the deployed OpenAgents relay (OMEGA-MOB-31-01).
+    ///
+    /// Opt-in, because it needs the network and a real relay:
+    ///
+    /// ```sh
+    /// OMEGA_LIVE_RELAY_URL=wss://openagents-nostr-relay-ezxz4mgdsq-uc.a.run.app \
+    /// OMEGA_LIVE_RELAY_AUTH_URL=wss://relay.openagents.com \
+    ///   cargo test -p omega_effectd --lib live_relay -- --ignored --nocapture
+    /// ```
+    ///
+    /// `OMEGA_LIVE_RELAY_AUTH_URL` exists because the relay binds
+    /// `RELAY_PUBLIC_URL` and refuses a NIP-42 auth event whose `relay` tag
+    /// names any other host with `invalid: relay URL mismatch`. A client may
+    /// therefore connect through one hostname and still has to tag the
+    /// canonical one.
+    ///
+    /// This exercises the real `WebSocketRelayAdapter` rather than
+    /// `MockRelayAdapter`: connect, NIP-42 challenge, sign, authenticate,
+    /// publish a durable turn record, and read it back by conversation ref.
+    #[test]
+    #[ignore = "requires a live relay; set OMEGA_LIVE_RELAY_URL"]
+    fn live_relay_round_trip() {
+        let Ok(url) = std::env::var("OMEGA_LIVE_RELAY_URL") else {
+            eprintln!("OMEGA_LIVE_RELAY_URL unset; skipping");
+            return;
+        };
+        let auth_url = std::env::var("OMEGA_LIVE_RELAY_AUTH_URL").unwrap_or_else(|_| url.clone());
+
+        let keys = Keys::generate();
+        let mut relay = WebSocketRelayAdapter::new_for_keys(vec![url.clone()], keys.clone())
+            .expect("adapter for live relay");
+
+        relay.connect().expect("connect to live relay");
+        // A relay is not reported healthy on socket open alone. `healthy_relays`
+        // is populated by a successful publish or query, so the state is
+        // deliberately Degraded until an operation proves the relay works.
+        assert_ne!(relay.connection_state(), ConnectionState::Disconnected);
+
+        let conversation_ref = format!("sarah.live.{}", &keys.public_key().to_hex()[..16]);
+        let record = EventBuilder::new(Kind::Custom(SARAH_TURN_RECORD_KIND), "live round trip")
+            .tag(nostr::Tag::parse(["conversation", conversation_ref.as_str()]).expect("conversation tag"))
+            .sign_with_keys(&keys)
+            .expect("signed turn record");
+
+        // Mirror `SarahConversationClient::publish_with_auth`. The adapter does
+        // not read the relay's proactive AUTH frame during connect, so the
+        // challenge only becomes visible once an operation meets it.
+        match relay.publish(&record) {
+            Ok(()) => {}
+            Err(SarahConversationError::IdentityRequired) => {
+                let challenge = relay
+                    .auth_challenge()
+                    .expect("relay must expose a challenge after refusing the publish");
+                let auth_event = EventBuilder::new(Kind::Custom(22242), "")
+                    .tag(nostr::Tag::parse(["relay", auth_url.as_str()]).expect("relay tag"))
+                    .tag(
+                        nostr::Tag::parse(["challenge", challenge.challenge.as_str()])
+                            .expect("challenge tag"),
+                    )
+                    .sign_with_keys(&keys)
+                    .expect("signed auth event");
+                relay.authenticate(&auth_event).expect("NIP-42 authenticate");
+                assert!(relay.is_authenticated(), "relay must accept our auth");
+                relay.publish(&record).expect("publish after authenticating");
+            }
+            Err(error) => panic!("unexpected publish error: {error}"),
+        }
+        assert!(
+            relay.publication_complete(&record.id.to_hex()),
+            "relay must acknowledge the publication"
+        );
+
+        let page = relay
+            .query(&conversation_ref, None, 10)
+            .expect("query the live relay");
+        assert!(
+            page.events.iter().any(|event| event.event_id == record.id.to_hex()),
+            "published event must read back from the live relay"
+        );
+        assert_eq!(page.gap_state, GapState::None, "no gap on a fresh conversation");
+
+        // Only now, with a publish and a query both acknowledged, is the relay
+        // proven healthy rather than merely reachable.
+        assert_eq!(relay.connection_state(), ConnectionState::Connected);
+        assert_eq!(relay.connected_relays(), vec![url.clone()]);
+        eprintln!(
+            "live relay OK: published {} and read it back from {}",
+            &record.id.to_hex()[..16],
+            url
+        );
+    }
+
     #[test]
     fn relay_urls_are_bounded_deduplicated_and_secret_free() {
         let keys = Keys::generate();
