@@ -264,6 +264,12 @@ fn main() {
         return;
     }
 
+    if args.demo_workroom {
+        unsafe {
+            std::env::set_var(workroom_ui::PUBLIC_DEMO_ENV, "1");
+        }
+    }
+
     // Set custom data directory.
     if let Some(dir) = &args.user_data_dir {
         paths::set_custom_data_dir(dir);
@@ -1675,6 +1681,13 @@ struct Args {
     ///
     /// URLs can use `file://`, the current Omega channel scheme, or the legacy `zed://` scheme.
     paths_or_urls: Vec<String>,
+
+    /// Opens the explicitly fictional, offline-safe public demo workroom.
+    ///
+    /// A custom user data directory is required so the demo cannot read or
+    /// modify the normal Omega profile.
+    #[arg(long, requires = "user_data_dir")]
+    demo_workroom: bool,
 
     /// Pairs of file paths to diff. Can be specified multiple times.
     /// When directories are provided, recurses into them and shows all changed files in a single multi-diff view.

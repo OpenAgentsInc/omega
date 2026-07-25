@@ -804,8 +804,17 @@ fn initialize_panels(window: &mut Window, cx: &mut Context<Workspace>) -> Task<a
             add_panel_when_ready(debug_panel, workspace_handle.clone(), cx.clone()),
             add_panel_when_ready(agent_computer_panel, workspace_handle.clone(), cx.clone()),
             add_panel_when_ready(sarah_workroom_panel, workspace_handle.clone(), cx.clone()),
-            initialize_agent_panel(workspace_handle, cx.clone()).map(|r| r.log_err()),
+            initialize_agent_panel(workspace_handle.clone(), cx.clone()).map(|r| r.log_err()),
         );
+
+        if workroom_ui::public_demo_mode() {
+            workspace_handle
+                .update_in(cx, |workspace, window, cx| {
+                    workspace.open_panel::<ProjectPanel>(window, cx);
+                    workspace.open_panel::<SarahWorkroomPanel>(window, cx);
+                })
+                .log_err();
+        }
 
         anyhow::Ok(())
     })

@@ -217,6 +217,7 @@
 # Developing Zed
 
 - [Developing Zed](./development.md)
+  - [Capture the Omega public demo](./development/omega-public-demo.md)
   - [Omega application identity](./development/omega-application-identity.md)
   - [The native Zed Agent in Omega](./development/omega-native-agent.md)
   - [Omega Full Auto contract freeze](./development/omega-full-auto-contract-freeze.md)

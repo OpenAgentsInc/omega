@@ -25,6 +25,12 @@ mod interaction;
 mod panel;
 mod projections;
 
+pub const PUBLIC_DEMO_ENV: &str = "OMEGA_PUBLIC_DEMO";
+
+pub fn public_demo_mode() -> bool {
+    std::env::var(PUBLIC_DEMO_ENV).as_deref() == Ok("1")
+}
+
 pub use attention::{
     autonomous_tick_enabled, compute_room_attention, count_unread, empty_room_is_honest,
     is_attention_role, proactive_turn_as_transcript_row, row_raises_attention,
@@ -77,6 +83,25 @@ mod tests {
         assert_eq!(p.receipts.meta.gap, GapState::Unavailable);
         assert_eq!(p.run_state.meta.gap, GapState::Unavailable);
         assert_eq!(p.run_state.interrupt_intent, InterruptIntentState::None);
+    }
+
+    #[test]
+    fn public_demo_projection_is_explicitly_fictional_and_complete() {
+        let projection = WorkroomProjection::public_demo();
+        assert_eq!(
+            projection.room.detail.as_deref(),
+            Some("Fictional public demo data")
+        );
+        assert_eq!(projection.transcript.meta.gap, GapState::None);
+        assert_eq!(projection.activity.meta.gap, GapState::None);
+        assert_eq!(projection.run_state.phase, RunPhase::Finished);
+        assert!(
+            projection
+                .transcript
+                .rows
+                .iter()
+                .all(|row| row.ack == MessageAck::Confirmed)
+        );
     }
 
     #[test]

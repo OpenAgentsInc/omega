@@ -445,6 +445,96 @@ impl WorkroomProjection {
         }
     }
 
+    pub fn public_demo() -> Self {
+        let transcript = TranscriptProjection {
+            meta: ProjectionMeta::fresh("fictional public demo fixture"),
+            rows: vec![
+                TranscriptRow {
+                    message_ref: "demo.message.001".into(),
+                    role: "You".into(),
+                    text: "Add keyboard navigation to the command palette and verify the empty state.".into(),
+                    ack: MessageAck::Confirmed,
+                },
+                TranscriptRow {
+                    message_ref: "demo.message.002".into(),
+                    role: "Sarah · Product Engineer".into(),
+                    text: "Implemented the focus loop, added coverage, and updated the accessible status copy.".into(),
+                    ack: MessageAck::Confirmed,
+                },
+                TranscriptRow {
+                    message_ref: "demo.message.003".into(),
+                    role: "You".into(),
+                    text: "Looks good. Keep the changes scoped to the palette component.".into(),
+                    ack: MessageAck::Confirmed,
+                },
+            ],
+            cursor: None,
+            truncated: false,
+        };
+        let activity = ActivityProjection {
+            meta: ProjectionMeta::fresh("fictional public demo fixture"),
+            rows: vec![
+                ActivityRow {
+                    event_ref: "demo.activity.001".into(),
+                    kind: "read".into(),
+                    summary: "Inspected command palette state and keyboard handlers".into(),
+                    turn_ref: Some("demo.turn.001".into()),
+                },
+                ActivityRow {
+                    event_ref: "demo.activity.002".into(),
+                    kind: "edit".into(),
+                    summary: "Updated src/commandPalette.ts".into(),
+                    turn_ref: Some("demo.turn.001".into()),
+                },
+                ActivityRow {
+                    event_ref: "demo.activity.003".into(),
+                    kind: "test".into(),
+                    summary: "12 checks passed".into(),
+                    turn_ref: Some("demo.turn.001".into()),
+                },
+            ],
+            cursor: None,
+            truncated: false,
+        };
+        let mut projection = Self {
+            room: RoomProjection {
+                meta: ProjectionMeta::fresh("fictional public demo fixture"),
+                principal_ref: Some("demo.agent.sarah".into()),
+                display_name: Some("Orbit Notes launch room".into()),
+                role: Some("Product engineering".into()),
+                thread_ref: Some("demo.thread.orbit-notes".into()),
+                authority_profile: Some("demo-safe".into()),
+                authority_revision: Some("1".into()),
+                detail: Some("Fictional public demo data".into()),
+            },
+            transcript,
+            activity,
+            receipts: ReceiptsProjection {
+                meta: ProjectionMeta::fresh("fictional public demo fixture"),
+                rows: vec![ReceiptRow {
+                    receipt_ref: "demo.receipt.001".into(),
+                    allowed: Some(true),
+                    decision_ref: Some("demo.decision.scoped-edit".into()),
+                    tool_ref: Some("editor.apply_patch".into()),
+                }],
+                detail: Some("Fictional scoped edit approval".into()),
+            },
+            run_state: RunStateProjection {
+                meta: ProjectionMeta::fresh("fictional public demo fixture"),
+                phase: RunPhase::Finished,
+                reason: Some("Completed with 12 checks passing".into()),
+                turn_ref: Some("demo.turn.001".into()),
+                interrupt_intent: InterruptIntentState::None,
+            },
+            attention: crate::attention::RoomAttention::honest_empty(),
+            connection_detail: Some(
+                "Public demo mode · offline fixture · no account or service connection".into(),
+            ),
+        };
+        projection.mark_room_read();
+        projection
+    }
+
     pub fn mark_effectd_unavailable(&mut self, detail: impl Into<String>) {
         let detail = detail.into();
         self.connection_detail = Some(detail.clone());

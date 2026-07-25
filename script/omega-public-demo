@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+repository_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+fixture_root="${repository_root}/assets/demo-workroom"
+active_source="${fixture_root}/src/commandPalette.ts"
+profile_root="$(mktemp -d "${TMPDIR:-/tmp}/omega-public-demo.XXXXXX")"
+
+echo "Omega public demo profile: ${profile_root}"
+echo "Omega public demo fixture: ${fixture_root}"
+
+if [[ -n "${OMEGA_DEMO_BINARY:-}" ]]; then
+    exec "${OMEGA_DEMO_BINARY}" \
+        --demo-workroom \
+        --user-data-dir "${profile_root}" \
+        "${fixture_root}" \
+        "${active_source}"
+fi
+
+cd "${repository_root}"
+exec cargo run --profile release-fast -- \
+    --demo-workroom \
+    --user-data-dir "${profile_root}" \
+    "${fixture_root}" \
+    "${active_source}"

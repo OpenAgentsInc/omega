@@ -117,6 +117,7 @@ pub struct SarahWorkroomPanel {
     nostr_records: NostrRecordsProjection,
     grant_busy: Option<String>,
     _refresh: Option<Task<()>>,
+    public_demo: bool,
 }
 
 pub fn init(cx: &mut App) {
@@ -165,12 +166,17 @@ impl SarahWorkroomPanel {
     }
 
     fn new(workspace: WeakEntity<Workspace>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let public_demo = crate::public_demo_mode();
         let composer = cx.new(|cx| {
             let mut editor = Editor::multi_line(window, cx);
             editor.set_placeholder_text("Message Sarah (text only).", window, cx);
             editor
         });
-        let binding = try_openagents_binding(cx);
+        let binding = if public_demo {
+            None
+        } else {
+            try_openagents_binding(cx)
+        };
         let binding_projection = binding
             .as_ref()
             .map(|binding| binding.load_projection())
@@ -179,11 +185,19 @@ impl SarahWorkroomPanel {
             _workspace: workspace,
             focus_handle: cx.focus_handle(),
             composer,
-            projection: WorkroomProjection::honest_unsubscribed(),
+            projection: if public_demo {
+                WorkroomProjection::public_demo()
+            } else {
+                WorkroomProjection::honest_unsubscribed()
+            },
             community: CommunityRoomProjection::honest_unsubscribed(),
             active_room: RoomKind::OwnerPrivate,
             interaction: InteractionState::new(),
-            status: binding_projection.state.status_line().into(),
+            status: if public_demo {
+                "Public demo · fictional data · isolated profile".into()
+            } else {
+                binding_projection.state.status_line().into()
+            },
             supervisor: None,
             binding,
             binding_projection,
@@ -200,10 +214,13 @@ impl SarahWorkroomPanel {
             ),
             grant_busy: None,
             _refresh: None,
+            public_demo,
         };
-        panel.ensure_supervisor(cx);
-        panel.refresh_from_effectd(cx);
-        panel.schedule_refresh(cx);
+        if !public_demo {
+            panel.ensure_supervisor(cx);
+            panel.refresh_from_effectd(cx);
+            panel.schedule_refresh(cx);
+        }
         panel
     }
 
@@ -1320,13 +1337,62 @@ impl Panel for SarahWorkroomPanel {
     }
 
     fn activation_priority(&self) -> u32 {
-        8
+        10
     }
 }
 
 impl Render for SarahWorkroomPanel {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = &self.projection;
+        if self.public_demo {
+            return v_flex()
+                .id("sarah-workroom-panel")
+                .size_full()
+                .track_focus(&self.focus_handle)
+                .gap_3()
+                .p_3()
+                .child(
+                    h_flex()
+                        .justify_between()
+                        .child(Label::new("Sarah").size(LabelSize::Large))
+                        .child(
+                            Label::new("PUBLIC DEMO")
+                                .color(Color::Accent)
+                                .size(LabelSize::Small),
+                        ),
+                )
+                .child(Label::new(self.status.clone()).color(Color::Muted))
+                .child(Label::new("Orbit Notes launch room").size(LabelSize::Large))
+                .child(
+                    Label::new("Product engineering · completed · 12 checks passed")
+                        .color(Color::Success),
+                )
+                .child(Label::new("Conversation").color(Color::Muted))
+                .child(
+                    v_flex()
+                        .id("sarah-workroom-transcript")
+                        .border_1()
+                        .border_color(cx.theme().colors().border)
+                        .rounded_md()
+                        .p_2()
+                        .child(transcript_body(&p.transcript)),
+                )
+                .child(Label::new("Recent activity").color(Color::Muted))
+                .child(
+                    v_flex()
+                        .id("sarah-workroom-activity")
+                        .border_1()
+                        .border_color(cx.theme().colors().border)
+                        .rounded_md()
+                        .p_2()
+                        .child(activity_body(&p.activity)),
+                )
+                .child(
+                    Label::new("Offline fixture · no account, secret, or private path")
+                        .color(Color::Muted)
+                        .size(LabelSize::Small),
+                );
+        }
         let community = &self.community;
         let active = self.active_room;
         let showing_community = active.is_community();
