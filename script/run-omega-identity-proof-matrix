@@ -262,6 +262,17 @@ class FakeDriver:
                 return self.outcome("forged-request-rejected", {"typed_error": "rejected"})
             if name == "probe-stale":
                 return self.outcome("stale-request-rejected", {"typed_error": "rejected"})
+            if name == "simulate-safe":
+                scenario = command[command.index("--scenario") + 1]
+                return self.outcome(
+                    "safe-scenario-simulated",
+                    {
+                        "scenario": scenario,
+                        "mode": "deterministic-no-keychain-simulation",
+                        "expected_outcome": "typed-rejection",
+                        "production_locator_access": "rejected-by-construction",
+                    },
+                )
             if name == "reset":
                 state["reset_pending"] = True
                 if expected_crash:
@@ -422,6 +433,35 @@ class Matrix:
             if safety.get("facts", {}).get("production_locator_access") != "rejected-by-construction":
                 raise ProofError("production_locator_not_rejected")
             self.record("disposable-namespace-safety", safety)
+
+            safe_scenarios = (
+                "conflict-custody",
+                "lost-custody",
+                "locked-custody",
+                "symlink-refusal",
+                "weak-permission-refusal",
+                "keychain-unavailable",
+                "corrupt-keychain",
+                "malformed-event-rejection",
+                "unadmitted-purpose-rejection",
+                "conflicting-recovery-selection",
+                "late-completion-fencing",
+                "signer-crash-before-completion",
+            )
+            for scenario in safe_scenarios:
+                result = self.driver.invoke(
+                    root, ["simulate-safe", "--scenario", scenario]
+                )
+                facts = result.get("facts", {})
+                if (
+                    result.get("outcome") != "safe-scenario-simulated"
+                    or facts.get("scenario") != scenario
+                    or facts.get("mode") != "deterministic-no-keychain-simulation"
+                    or facts.get("production_locator_access")
+                    != "rejected-by-construction"
+                ):
+                    raise ProofError("safe_scenario_result_invalid")
+                self.record(f"simulated-{scenario}", result)
 
             identity = self.create(root, "matrix-create")
             inspected = self.driver.invoke(root, ["inspect"])
@@ -626,6 +666,18 @@ def self_test() -> None:
         "crash-after-reset-marker",
         "crash-after-reset-commit",
         "crash-after-relaunch-acknowledge",
+        "simulated-conflict-custody",
+        "simulated-lost-custody",
+        "simulated-locked-custody",
+        "simulated-symlink-refusal",
+        "simulated-weak-permission-refusal",
+        "simulated-keychain-unavailable",
+        "simulated-corrupt-keychain",
+        "simulated-malformed-event-rejection",
+        "simulated-unadmitted-purpose-rejection",
+        "simulated-conflicting-recovery-selection",
+        "simulated-late-completion-fencing",
+        "simulated-signer-crash-before-completion",
     }
     if {case["case"] for case in cases} != expected_cases:
         raise ProofError("matrix_case_coverage_incomplete")

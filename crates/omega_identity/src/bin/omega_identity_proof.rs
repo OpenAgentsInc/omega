@@ -4,8 +4,8 @@ use anyhow::{Context as _, Result, bail};
 use clap::{Parser, Subcommand, ValueEnum};
 use omega_identity::{
     AdmittedSigningRequest, IDENTITY_PROOF_KEYRING_ACCOUNT, IDENTITY_PROOF_KEYRING_SERVICE,
-    IDENTITY_PROOF_PROTOCOL, IdentityProofService, IdentityRef, ProofCrashBoundary, ReceiptRef,
-    SigningPurpose, UnsignedEventTemplate,
+    IDENTITY_PROOF_PROTOCOL, IdentityProofService, IdentityRef, ProofCrashBoundary,
+    ProofSafeScenario, ReceiptRef, SigningPurpose, UnsignedEventTemplate,
 };
 use serde::Serialize;
 use serde_json::json;
@@ -57,6 +57,10 @@ enum Command {
         #[arg(long)]
         request: String,
     },
+    SimulateSafe {
+        #[arg(long, value_enum)]
+        scenario: SafeScenario,
+    },
     Reset {
         #[arg(long)]
         identity_ref: String,
@@ -80,6 +84,41 @@ enum CrashBoundary {
     ResetMarker,
     ResetCommit,
     RelaunchAcknowledge,
+}
+
+#[derive(Debug, Copy, Clone, ValueEnum)]
+enum SafeScenario {
+    ConflictCustody,
+    LostCustody,
+    LockedCustody,
+    SymlinkRefusal,
+    WeakPermissionRefusal,
+    KeychainUnavailable,
+    CorruptKeychain,
+    MalformedEventRejection,
+    UnadmittedPurposeRejection,
+    ConflictingRecoverySelection,
+    LateCompletionFencing,
+    SignerCrashBeforeCompletion,
+}
+
+impl From<SafeScenario> for ProofSafeScenario {
+    fn from(value: SafeScenario) -> Self {
+        match value {
+            SafeScenario::ConflictCustody => Self::ConflictCustody,
+            SafeScenario::LostCustody => Self::LostCustody,
+            SafeScenario::LockedCustody => Self::LockedCustody,
+            SafeScenario::SymlinkRefusal => Self::SymlinkRefusal,
+            SafeScenario::WeakPermissionRefusal => Self::WeakPermissionRefusal,
+            SafeScenario::KeychainUnavailable => Self::KeychainUnavailable,
+            SafeScenario::CorruptKeychain => Self::CorruptKeychain,
+            SafeScenario::MalformedEventRejection => Self::MalformedEventRejection,
+            SafeScenario::UnadmittedPurposeRejection => Self::UnadmittedPurposeRejection,
+            SafeScenario::ConflictingRecoverySelection => Self::ConflictingRecoverySelection,
+            SafeScenario::LateCompletionFencing => Self::LateCompletionFencing,
+            SafeScenario::SignerCrashBeforeCompletion => Self::SignerCrashBeforeCompletion,
+        }
+    }
 }
 
 impl From<CrashBoundary> for ProofCrashBoundary {
@@ -172,6 +211,10 @@ fn run() -> Result<()> {
             IdentityRef::new(stale_identity_ref)?,
             request,
             "stale-request-rejected",
+        ),
+        Command::SimulateSafe { scenario } => print_outcome(
+            "safe-scenario-simulated",
+            service.simulate_safe_scenario(scenario.into()),
         ),
         Command::Reset {
             identity_ref,

@@ -28,6 +28,31 @@ pub enum ProofCrashBoundary {
     AfterRelaunchAcknowledge,
 }
 
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ProofSafeScenario {
+    ConflictCustody,
+    LostCustody,
+    LockedCustody,
+    SymlinkRefusal,
+    WeakPermissionRefusal,
+    KeychainUnavailable,
+    CorruptKeychain,
+    MalformedEventRejection,
+    UnadmittedPurposeRejection,
+    ConflictingRecoverySelection,
+    LateCompletionFencing,
+    SignerCrashBeforeCompletion,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ProofSafeScenarioResult {
+    pub scenario: ProofSafeScenario,
+    pub mode: &'static str,
+    pub expected_outcome: &'static str,
+    pub production_locator_access: &'static str,
+}
+
 #[derive(Debug, Error)]
 pub enum IdentityProofError {
     #[error(
@@ -127,6 +152,31 @@ impl IdentityProofService {
     pub fn resume_reset(&self) -> Result<CustodyResult, IdentityProofError> {
         Ok(self.service.resume_pending_reset()?)
     }
+
+    pub fn simulate_safe_scenario(&self, scenario: ProofSafeScenario) -> ProofSafeScenarioResult {
+        let expected_outcome = match scenario {
+            ProofSafeScenario::ConflictCustody
+            | ProofSafeScenario::LostCustody
+            | ProofSafeScenario::LockedCustody => "custody-denied",
+            ProofSafeScenario::SymlinkRefusal | ProofSafeScenario::WeakPermissionRefusal => {
+                "unsafe-public-store-rejected"
+            }
+            ProofSafeScenario::KeychainUnavailable | ProofSafeScenario::CorruptKeychain => {
+                "secure-store-error"
+            }
+            ProofSafeScenario::MalformedEventRejection
+            | ProofSafeScenario::UnadmittedPurposeRejection => "signing-request-rejected",
+            ProofSafeScenario::ConflictingRecoverySelection => "owner-selection-required",
+            ProofSafeScenario::LateCompletionFencing => "stale-completion-rejected",
+            ProofSafeScenario::SignerCrashBeforeCompletion => "no-completion-committed",
+        };
+        ProofSafeScenarioResult {
+            scenario,
+            mode: "deterministic-no-keychain-simulation",
+            expected_outcome,
+            production_locator_access: "rejected-by-construction",
+        }
+    }
 }
 
 fn validate_root_shape(root: &Path) -> Result<(), IdentityProofError> {
@@ -215,5 +265,38 @@ mod tests {
             IdentityProofService::initialize(&linked),
             Err(IdentityProofError::SymbolicLink)
         ));
+    }
+
+    #[test]
+    fn safe_scenarios_are_explicit_and_never_claim_live_keychain_execution() {
+        let scenarios = [
+            ProofSafeScenario::ConflictCustody,
+            ProofSafeScenario::LostCustody,
+            ProofSafeScenario::LockedCustody,
+            ProofSafeScenario::SymlinkRefusal,
+            ProofSafeScenario::WeakPermissionRefusal,
+            ProofSafeScenario::KeychainUnavailable,
+            ProofSafeScenario::CorruptKeychain,
+            ProofSafeScenario::MalformedEventRejection,
+            ProofSafeScenario::UnadmittedPurposeRejection,
+            ProofSafeScenario::ConflictingRecoverySelection,
+            ProofSafeScenario::LateCompletionFencing,
+            ProofSafeScenario::SignerCrashBeforeCompletion,
+        ];
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let root = temporary
+            .path()
+            .canonicalize()
+            .expect("canonical temporary directory")
+            .join("omega-identity-proof-scenarios");
+        IdentityProofService::initialize(&root).expect("initialize proof root");
+        let service = IdentityProofService::open(root, None).expect("open proof root");
+        for scenario in scenarios {
+            let result = service.simulate_safe_scenario(scenario);
+            assert_eq!(result.scenario, scenario);
+            assert_eq!(result.mode, "deterministic-no-keychain-simulation");
+            assert_eq!(result.production_locator_access, "rejected-by-construction");
+            assert!(!result.expected_outcome.is_empty());
+        }
     }
 }

@@ -535,8 +535,15 @@
             "minLength": 1
           },
           "additionalProperties": {
-            "type": "string",
-            "minLength": 1
+            "oneOf": [
+              {
+                "type": "string",
+                "minLength": 1
+              },
+              {
+                "$ref": "#/$defs/evidenceReference"
+              }
+            ]
           }
         },
         "required_evidence": {
@@ -550,6 +557,23 @@
       "items": {
         "type": "string",
         "minLength": 1
+      }
+    },
+    "evidenceReference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "sha256"
+      ],
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        }
       }
     }
   }

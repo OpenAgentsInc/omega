@@ -21,6 +21,13 @@ from pathlib import Path
 from typing import Any
 from xml.parsers.expat import ExpatError
 
+from omega_identity_evidence import (
+    IdentityEvidenceError,
+    resolve_evidence_reference,
+    validate_identity_matrix,
+    validate_installed_tripwires,
+)
+
 
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_APP = Path("/Applications/Omega.app")
@@ -493,6 +500,38 @@ def validate_identity_evidence(
     ):
         raise ProofError("identity owner and independent verifier must be distinct named attestors")
     return digest, owner, independent
+
+
+def validate_identity_receipt_references(
+    evidence: dict[str, Any],
+    evidence_root: Path,
+    matrix_digest: str,
+    tripwire_digest: str,
+) -> None:
+    if not evidence_root.is_dir() or evidence_root.is_symlink():
+        raise ProofError("identity evidence root is missing or unsafe")
+    expected = {
+        "custody_scenarios": matrix_digest,
+        "forged_request_rejection": matrix_digest,
+        "stale_task_fencing": matrix_digest,
+        "installed_secret_tripwires": tripwire_digest,
+    }
+    for gate_name, expected_digest in expected.items():
+        gate = evidence.get("gates", {}).get(gate_name, {})
+        references = gate.get("evidence")
+        if not isinstance(references, dict) or not references:
+            raise ProofError(f"identity evidence gate {gate_name} has no receipt references")
+        try:
+            resolved = [
+                resolve_evidence_reference(reference, evidence_root)
+                for reference in references.values()
+            ]
+        except IdentityEvidenceError as error:
+            raise ProofError(str(error)) from error
+        if any(digest != expected_digest for _path, digest in resolved):
+            raise ProofError(
+                f"identity evidence gate {gate_name} substitutes another receipt"
+            )
 
 
 def validate_manual_evidence(
@@ -1299,6 +1338,8 @@ def pending_checks() -> dict[str, dict[str, str]]:
         "packaged_effectd_initialize_health": {"status": "pending"},
         "installed_effectd_initialize_health": {"status": "pending"},
         "identity_candidate_admission": {"status": "pending"},
+        "identity_matrix_binding": {"status": "pending"},
+        "installed_tripwire_binding": {"status": "pending"},
         "full_auto_candidate_assurance": {"status": "pending"},
         "manual_evidence_binding": {"status": "pending"},
         "network_capture_binding": {"status": "pending"},
@@ -1363,6 +1404,8 @@ def prove(arguments: argparse.Namespace) -> int:
         "artifact": arguments.artifact,
         "installed_app": arguments.app,
         "identity_evidence": arguments.identity_evidence,
+        "identity_matrix": arguments.identity_matrix,
+        "installed_tripwires": arguments.installed_tripwires,
         "full_auto_evidence": arguments.full_auto_evidence,
         "manual_evidence": arguments.manual_evidence,
         "network_evidence": arguments.network_evidence,
@@ -1385,6 +1428,10 @@ def prove(arguments: argparse.Namespace) -> int:
                 checks["packaged_installed_bundle_match"] = {"status": "blocked"}
             elif name == "identity_evidence":
                 checks["identity_candidate_admission"] = {"status": "blocked"}
+            elif name == "identity_matrix":
+                checks["identity_matrix_binding"] = {"status": "blocked"}
+            elif name == "installed_tripwires":
+                checks["installed_tripwire_binding"] = {"status": "blocked"}
             elif name == "full_auto_evidence":
                 checks["full_auto_candidate_assurance"] = {"status": "blocked"}
             elif name == "manual_evidence":
@@ -1490,9 +1537,11 @@ def prove(arguments: argparse.Namespace) -> int:
 
     identity_owner: str | None = None
     identity_independent: str | None = None
+    identity_evidence: dict[str, Any] | None = None
     if arguments.identity_evidence.is_file():
         try:
             evidence = load_json(arguments.identity_evidence, "identity candidate evidence")
+            identity_evidence = evidence
             candidate_digest = validate_identity_evidence_binding(
                 evidence, record, arguments.release_record, arguments.artifact
             )
@@ -1503,6 +1552,55 @@ def prove(arguments: argparse.Namespace) -> int:
         except ProofError as error:
             blockers.append(str(error))
             checks["identity_candidate_admission"] = {"status": "blocked", "reason": str(error)}
+
+    if candidate_digest and arguments.identity_matrix.is_file():
+        try:
+            digest = validate_identity_matrix(arguments.identity_matrix, candidate_digest)
+            checks["identity_matrix_binding"] = {
+                "status": "passed",
+                "sha256": digest,
+            }
+        except IdentityEvidenceError as error:
+            blockers.append(str(error))
+            checks["identity_matrix_binding"] = {
+                "status": "blocked",
+                "reason": str(error),
+            }
+
+    if candidate_digest and arguments.installed_tripwires.is_file():
+        try:
+            digest = validate_installed_tripwires(
+                arguments.installed_tripwires, candidate_digest
+            )
+            checks["installed_tripwire_binding"] = {
+                "status": "passed",
+                "sha256": digest,
+            }
+        except IdentityEvidenceError as error:
+            blockers.append(str(error))
+            checks["installed_tripwire_binding"] = {
+                "status": "blocked",
+                "reason": str(error),
+            }
+
+    if (
+        identity_evidence is not None
+        and checks["identity_matrix_binding"].get("status") == "passed"
+        and checks["installed_tripwire_binding"].get("status") == "passed"
+    ):
+        try:
+            validate_identity_receipt_references(
+                identity_evidence,
+                arguments.evidence_root,
+                checks["identity_matrix_binding"]["sha256"],
+                checks["installed_tripwire_binding"]["sha256"],
+            )
+        except ProofError as error:
+            blockers.append(str(error))
+            checks["identity_candidate_admission"] = {
+                "status": "blocked",
+                "reason": str(error),
+            }
 
     if (
         arguments.manual_evidence.is_file()
@@ -2280,6 +2378,9 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--artifact", type=Path)
     parser.add_argument("--app", type=Path, default=DEFAULT_APP)
     parser.add_argument("--identity-evidence", type=Path)
+    parser.add_argument("--identity-matrix", type=Path)
+    parser.add_argument("--installed-tripwires", type=Path)
+    parser.add_argument("--evidence-root", type=Path)
     parser.add_argument("--full-auto-evidence", type=Path)
     parser.add_argument("--manual-evidence", type=Path)
     parser.add_argument("--network-evidence", type=Path)
@@ -2294,6 +2395,9 @@ def parse_arguments() -> argparse.Namespace:
             "release_record",
             "artifact",
             "identity_evidence",
+            "identity_matrix",
+            "installed_tripwires",
+            "evidence_root",
             "full_auto_evidence",
             "manual_evidence",
             "network_evidence",

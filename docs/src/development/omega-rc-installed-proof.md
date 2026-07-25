@@ -30,6 +30,9 @@ script/prove-omega-rc-install \
   --artifact target/omega-rc/Omega-v0.2.0-rc2-macos-arm64.dmg \
   --app /Applications/Omega.app \
   --identity-evidence target/omega-identity-evidence/candidate-evidence.json \
+  --identity-matrix target/omega-identity-proof/matrix-evidence.json \
+  --installed-tripwires target/omega-identity-proof/installed-secret-tripwires.json \
+  --evidence-root target/omega-identity-proof \
   --full-auto-evidence target/omega-full-auto-evidence/candidate-evidence.json \
   --manual-evidence target/omega-rc-proof/manual-evidence.json \
   --network-evidence target/omega-rc-proof/network-evidence.json \
@@ -49,7 +52,11 @@ public vector, reviewed Buzz source, and native package versions:
 script/generate-omega-identity-candidate-evidence \
   --release-record target/omega-rc/omega-v0.2.0-rc2-macos-arm64.release.json \
   --artifact target/omega-rc/Omega-v0.2.0-rc2-macos-arm64.dmg \
-  --cargo-lock-snapshot target/omega-rc/Cargo.lock.omega-v0.2.0-rc2
+  --cargo-lock-snapshot target/omega-rc/Cargo.lock.omega-v0.2.0-rc2 \
+  --identity-matrix target/omega-identity-proof/matrix-evidence.json \
+  --installed-tripwires target/omega-identity-proof/installed-secret-tripwires.json \
+  --evidence-root target/omega-identity-proof \
+  --attestations-dir target/omega-identity-proof/attestations
 ```
 
 The command writes
@@ -107,9 +114,13 @@ rerun with `--attestations-dir DIR`. Each file must contain exactly:
 ```
 
 The `evidence` object keys must exactly match that gate's
-`required_evidence` strings in the pending record, and every value must be a
-nonempty candidate-bound reference or recorded result. One generic evidence
-reference cannot pass a multi-requirement gate.
+`required_evidence` strings in the pending record. Custody, forged-request,
+stale-task, and installed-tripwire attestations use exact
+`{"path":"relative/file.json","sha256":"..."}` references beneath
+`--evidence-root`; the generator rejects traversal, symlinks, missing files,
+digest mismatch, and substitution of another receipt. Other gates retain
+nonempty candidate-bound results where a file receipt is not applicable. One
+generic evidence key cannot pass a multi-requirement gate.
 
 Only a record with every required gate validly attested sets
 `candidate_admitted: true`, reports `status: "admitted"`, and exits zero.
@@ -213,7 +224,12 @@ driver itself fixes the Keychain locator to
 The matrix covers creation and read-back, process restart, signing,
 same-receipt double creation, distinct-receipt rejection, concurrent creation
 and process start, forged and stale requests, reset and relaunch, and every
-exposed crash checkpoint. It resets the disposable entry between cases and
+exposed crash checkpoint. It also records explicit deterministic, no-Keychain
+simulations for conflict/lost/locked custody, unsafe public stores,
+unavailable/corrupt secure storage, malformed or unadmitted signing requests,
+conflicting recovery selection, late completion, and signer crash. Simulation
+receipts are labeled as such and do not claim live Keychain execution. It
+resets the disposable entry between live cases and
 fails if final cleanup cannot be proved. Evidence contains candidate and
 component digests, case states, and hashes of public driver outcomes; it does
 not retain identities, secrets, command output, temporary paths, or error
@@ -391,12 +407,10 @@ OMEGA_PRIVATE_PROOF_DIR="$(mktemp -d)"
 chmod 700 "$OMEGA_PRIVATE_PROOF_DIR"
 
 script/scan-omega-secret-tripwires \
+  --candidate-digest "<exact candidate digest>" \
   --needle-fd 3 \
   --surface "logs=$OMEGA_PROOF_USER_ROOT/Library/Logs/omega-rc" \
-  --surface "data=$OMEGA_PROOF_USER_ROOT/Library/Application Support/Omega RC" \
-  --surface "cache=$OMEGA_PROOF_USER_ROOT/Library/Caches/omega-rc" \
-  --surface "state=$OMEGA_PROOF_USER_ROOT/.local/state/omega-rc" \
-  --surface "config=$OMEGA_PROOF_USER_ROOT/.config/omega-rc" \
+  --surface "telemetry=$OMEGA_PRIVATE_PROOF_DIR/telemetry" \
   --surface "accessibility=$OMEGA_PRIVATE_PROOF_DIR/accessibility.json" \
   --surface "clipboard=$OMEGA_PRIVATE_PROOF_DIR/clipboard.bin" \
   --surface "diagnostics=$OMEGA_PRIVATE_PROOF_DIR/diagnostics" \
@@ -405,7 +419,9 @@ script/scan-omega-secret-tripwires \
   3<"$OMEGA_PRIVATE_PROOF_DIR/disposable-canary"
 ```
 
-An absent optional crash or diagnostics surface is recorded as `absent`, not
+The candidate generator and installed prover directly reload this receipt,
+require the exact six-surface inventory, and rehash it. An absent optional
+crash or diagnostics surface is recorded as `absent`, not
 silently treated as scanned. The independent reviewer must decide whether each
 absence is expected for the exercised journey before admitting the attestation.
 

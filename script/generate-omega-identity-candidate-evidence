@@ -17,6 +17,13 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterator
 
+from omega_identity_evidence import (
+    IdentityEvidenceError,
+    resolve_evidence_reference,
+    validate_identity_matrix,
+    validate_installed_tripwires,
+)
+
 
 ROOT = Path(__file__).resolve().parent.parent
 CONTRACT_PATH = Path("crates/omega_identity/src/contract.rs")
@@ -116,6 +123,12 @@ GATE_REQUIREMENTS = {
         "uninstall and reinstall result",
         "identity continuity and Zed-isolation result",
     ],
+}
+STRUCTURED_RECEIPT_GATES = {
+    "custody_scenarios": "identity_matrix",
+    "forged_request_rejection": "identity_matrix",
+    "stale_task_fencing": "identity_matrix",
+    "installed_secret_tripwires": "installed_tripwires",
 }
 
 
@@ -500,7 +513,11 @@ def valid_observed_at(value: Any) -> bool:
 
 
 def ingest_attestations(
-    attestations_dir: Path | None, candidate_digest: str
+    attestations_dir: Path | None,
+    candidate_digest: str,
+    *,
+    evidence_root: Path | None = None,
+    required_receipts: dict[str, str] | None = None,
 ) -> tuple[dict[str, dict[str, Any]], dict[str, str]]:
     gates = {
         name: pending_gate(requirements)
@@ -555,18 +572,42 @@ def ingest_attestations(
             errors[gate_name] = "observed_at must be an ISO-8601 timestamp with timezone"
             continue
         evidence = attestation["evidence"]
-        if (
-            not isinstance(evidence, dict)
-            or set(evidence) != set(gate["required_evidence"])
-            or any(
-                not isinstance(reference, str) or not reference.strip()
-                for reference in evidence.values()
-            )
-        ):
+        if not isinstance(evidence, dict) or set(evidence) != set(gate["required_evidence"]):
             errors[gate_name] = (
-                "evidence keys must exactly match required_evidence and every value "
-                "must be a non-empty reference or result"
+                "evidence keys must exactly match required_evidence"
             )
+            continue
+        receipt_name = STRUCTURED_RECEIPT_GATES.get(gate_name)
+        if receipt_name is not None and required_receipts is not None:
+            if evidence_root is None:
+                errors[gate_name] = "structured evidence requires --evidence-root"
+                continue
+            try:
+                resolved = [
+                    resolve_evidence_reference(reference, evidence_root)
+                    for reference in evidence.values()
+                ]
+            except IdentityEvidenceError as error:
+                errors[gate_name] = str(error)
+                continue
+            expected_digest = required_receipts.get(receipt_name)
+            if expected_digest is None or any(
+                digest != expected_digest for _path, digest in resolved
+            ):
+                errors[gate_name] = (
+                    f"every evidence reference must bind the validated {receipt_name} receipt"
+                )
+                continue
+        elif any(
+            not (
+                isinstance(reference, str)
+                and reference.strip()
+                or receipt_name is not None
+                and isinstance(reference, dict)
+            )
+            for reference in evidence.values()
+        ):
+            errors[gate_name] = "evidence values must be non-empty references or results"
             continue
         gate.update(
             {
@@ -640,6 +681,9 @@ def build_record(
     *,
     allow_dirty: bool,
     attestations_dir: Path | None,
+    identity_matrix_path: Path | None = None,
+    installed_tripwires_path: Path | None = None,
+    evidence_root: Path | None = None,
     verify_signatures: bool = True,
 ) -> dict[str, Any]:
     contract_path = ROOT / CONTRACT_PATH
@@ -810,9 +854,37 @@ def build_record(
         },
     }
     candidate_digest = canonical_digest(candidate)
+    required_receipts: dict[str, str] | None = None
+    machine_evidence_errors: dict[str, str] = {}
+    if verify_signatures:
+        required_receipts = {}
+        if identity_matrix_path is None:
+            machine_evidence_errors["_identity_matrix"] = "--identity-matrix is required"
+        else:
+            try:
+                required_receipts["identity_matrix"] = validate_identity_matrix(
+                    identity_matrix_path, candidate_digest
+                )
+            except IdentityEvidenceError as error:
+                machine_evidence_errors["_identity_matrix"] = str(error)
+        if installed_tripwires_path is None:
+            machine_evidence_errors["_installed_tripwires"] = (
+                "--installed-tripwires is required"
+            )
+        else:
+            try:
+                required_receipts["installed_tripwires"] = validate_installed_tripwires(
+                    installed_tripwires_path, candidate_digest
+                )
+            except IdentityEvidenceError as error:
+                machine_evidence_errors["_installed_tripwires"] = str(error)
     gates, attestation_errors = ingest_attestations(
-        attestations_dir, candidate_digest
+        attestations_dir,
+        candidate_digest,
+        evidence_root=evidence_root,
+        required_receipts=required_receipts,
     )
+    attestation_errors.update(machine_evidence_errors)
     if dirty:
         attestation_errors["_dirty_source"] = (
             "development-only dirty source binding cannot be admitted"
@@ -1102,6 +1174,47 @@ def self_test() -> None:
         coverage_path.write_text(
             json.dumps(incomplete_coverage) + "\n", encoding="utf-8"
         )
+        receipt_path = temp / "machine-receipt.json"
+        receipt_path.write_text('{"status":"passed"}\n', encoding="utf-8")
+        receipt_digest = sha256_file(receipt_path)
+        for gate_name in STRUCTURED_RECEIPT_GATES:
+            attestation_path = attestations / f"{gate_name}.json"
+            attestation = json.loads(attestation_path.read_text(encoding="utf-8"))
+            attestation["evidence"] = {
+                requirement: {
+                    "path": receipt_path.name,
+                    "sha256": receipt_digest,
+                }
+                for requirement in GATE_REQUIREMENTS[gate_name]
+            }
+            attestation_path.write_text(json.dumps(attestation) + "\n", encoding="utf-8")
+        structured_gates, structured_errors = ingest_attestations(
+            attestations,
+            pending["candidate_digest"]["value"],
+            evidence_root=temp,
+            required_receipts={
+                "identity_matrix": receipt_digest,
+                "installed_tripwires": receipt_digest,
+            },
+        )
+        if structured_errors or any(
+            structured_gates[name]["status"] != "passed"
+            for name in STRUCTURED_RECEIPT_GATES
+        ):
+            raise EvidenceError("valid structured machine evidence was rejected")
+        receipt_path.write_text('{"status":"tampered"}\n', encoding="utf-8")
+        _, tampered_errors = ingest_attestations(
+            attestations,
+            pending["candidate_digest"]["value"],
+            evidence_root=temp,
+            required_receipts={
+                "identity_matrix": receipt_digest,
+                "installed_tripwires": receipt_digest,
+            },
+        )
+        if not all(name in tampered_errors for name in STRUCTURED_RECEIPT_GATES):
+            raise EvidenceError("tampered structured machine evidence was accepted")
+        receipt_path.write_text('{"status":"passed"}\n', encoding="utf-8")
         fully_attested = build_record(
             release_record_path,
             artifact_path,
@@ -1182,6 +1295,9 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--artifact", type=Path)
     parser.add_argument("--cargo-lock-snapshot", type=Path)
     parser.add_argument("--attestations-dir", type=Path)
+    parser.add_argument("--identity-matrix", type=Path)
+    parser.add_argument("--installed-tripwires", type=Path)
+    parser.add_argument("--evidence-root", type=Path)
     parser.add_argument(
         "--output",
         type=Path,
@@ -1207,6 +1323,9 @@ def main() -> int:
                     arguments.artifact,
                     arguments.cargo_lock_snapshot,
                     arguments.attestations_dir,
+                    arguments.identity_matrix,
+                    arguments.installed_tripwires,
+                    arguments.evidence_root,
                 )
             ):
                 raise EvidenceError("--self-test does not accept candidate inputs")
@@ -1229,6 +1348,17 @@ def main() -> int:
                 None
                 if arguments.attestations_dir is None
                 else arguments.attestations_dir.resolve()
+            ),
+            identity_matrix_path=(
+                None if arguments.identity_matrix is None else arguments.identity_matrix.resolve()
+            ),
+            installed_tripwires_path=(
+                None
+                if arguments.installed_tripwires is None
+                else arguments.installed_tripwires.resolve()
+            ),
+            evidence_root=(
+                None if arguments.evidence_root is None else arguments.evidence_root.resolve()
             ),
         )
         write_record(arguments.output.resolve(), record)
