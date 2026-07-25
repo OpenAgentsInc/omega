@@ -1988,6 +1988,130 @@ mod tests {
         );
     }
 
+    /// Exit: "Duplicate, reordered, missing, and STALE events converge or show
+    /// an exact gap." The sibling test above covers duplicate, reordered and
+    /// missing. This covers stale.
+    ///
+    /// A pairing request that had already expired when it was written is
+    /// published to the live relay, stored by it, and served back to the host.
+    /// The relay is transport and storage, so it neither knows nor cares that
+    /// the record is dead. The host must refuse it for being expired — not for
+    /// being malformed and not for having been seen before — and must issue
+    /// neither a challenge nor a grant.
+    #[test]
+    #[ignore = "requires a live relay; set OMEGA_LIVE_RELAY_URL"]
+    fn live_relay_stale_records_are_refused_rather_than_acted_on() {
+        let Some((url, auth_url)) = live_relay_env() else {
+            eprintln!("OMEGA_LIVE_RELAY_URL unset; skipping");
+            return;
+        };
+        let host_keys = Keys::generate();
+        let device_keys = Keys::generate();
+        let host_public_key_hex = host_keys.public_key().to_hex();
+        let device_public_key_hex = device_keys.public_key().to_hex();
+        let configuration = Issue31HostConfiguration {
+            host_ref: "omega.host.stale".into(),
+            host_public_key_hex: host_public_key_hex.clone(),
+            sarah_public_key_hex: Keys::generate().public_key().to_hex(),
+            conversation: format!("sarah.{}", &host_public_key_hex[..24]),
+            display_name: "Live Omega".into(),
+            relay_urls: vec![url.clone()],
+            generation: 1,
+        };
+        let mut controller = Issue31HostController::new(configuration.clone()).expect("controller");
+        controller
+            .set_admitted_device_policy(
+                vec![device_public_key_hex.clone()],
+                vec![Issue31PairingScope::ControlFullAuto],
+            )
+            .expect("admit device");
+
+        // Issued and expired well before now. The device is admitted and the
+        // record is otherwise perfectly well formed, so staleness is the only
+        // thing that can refuse it.
+        let now = nostr::Timestamp::now().as_secs();
+        let stale = Issue31PairingRecord::PairingRequest {
+            schema: ISSUE31_PAIRING_SCHEMA.into(),
+            host_ref: configuration.host_ref.clone(),
+            host_public_key_hex: host_public_key_hex.clone(),
+            device_public_key_hex,
+            issued_at: now - 7_200,
+            pairing_request_ref: "pairing_request.live.stale".into(),
+            requested_scopes: vec![Issue31PairingScope::ControlFullAuto],
+            expires_at: now - 3_600,
+        };
+
+        let mut device_relay = live_authenticated_adapter(vec![url.clone()], &device_keys);
+        let host_public_key = PublicKey::from_hex(&host_public_key_hex).expect("host key");
+        let rumor = EventBuilder::new(
+            Kind::PrivateDirectMessage,
+            serde_json::to_string(&stale).expect("record json"),
+        )
+        .tag(nostr::Tag::parse(["p", host_public_key_hex.as_str()]).expect("p tag"))
+        .build(device_keys.public_key());
+        let gift_wrap = smol::block_on(EventBuilder::gift_wrap(
+            &device_keys,
+            &host_public_key,
+            rumor,
+            [],
+        ))
+        .expect("gift wrap");
+        live_publish(&mut device_relay, &auth_url, &device_keys, &gift_wrap)
+            .expect("the relay must store a stale record; staleness is not its business");
+
+        let mut host_relay = live_authenticated_adapter(vec![url.clone()], &host_keys);
+        live_publish(
+            &mut host_relay,
+            &auth_url,
+            &host_keys,
+            &live_turn_record(&host_keys, &configuration.conversation, "host online", now),
+        )
+        .expect("host authenticates");
+        let page = host_relay
+            .query(&configuration.conversation, None, 32)
+            .expect("query");
+        let served = page
+            .events
+            .iter()
+            .filter_map(|event| {
+                Issue31PairingRecord::decode(event.content_summary.as_bytes())
+                    .ok()
+                    .map(|record| (event.event_id.clone(), record))
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            served.len(),
+            1,
+            "the relay must actually serve the stale record back, or this proves nothing"
+        );
+
+        for (event_id, record) in served {
+            assert!(
+                !controller.pairing_event_was_processed(&event_id),
+                "the stale record must arrive under an id the host has never seen, so that \
+                 de-duplication is not what refuses it"
+            );
+            let refusal = controller
+                .handle_pairing_event(Issue31PairingEvent { event_id, record }, now)
+                .expect_err("a stale pairing record must be refused");
+            assert!(
+                matches!(&refusal, Issue31NostrError::Invalid(message)
+                    if message.contains("expired")),
+                "the refusal must be staleness, not dedup or shape: {refusal:?}"
+            );
+        }
+        assert!(
+            controller
+                .grant_projections(now)
+                .expect("grants")
+                .is_empty(),
+            "a stale request must not produce a grant"
+        );
+        eprintln!(
+            "live relay OK: a stale pairing record stored by {url} was refused and granted nothing"
+        );
+    }
+
     /// Exit: "A revoked device cannot restore its grant from old relay events."
     ///
     /// Proven end to end through relay storage rather than in memory. The device
@@ -2002,19 +2126,16 @@ mod tests {
     /// standing between a revoked device and a brand-new `control_full_auto`
     /// grant is the revocation itself.
     ///
-    /// BLOCKED on the deployed relay, and deliberately left failing rather than
-    /// weakened into something that passes. `relay.openagents.com` cannot serve
-    /// any filter carrying a `#p` tag: it answers
-    /// `["NOTICE","error: Handler error: StorageError"]` and never terminates
-    /// the subscription. Every NIP-17/44/59 private record is addressed by `#p`,
-    /// so the whole owner-private lane — pairing, grants, revocations, command
-    /// intents and results, owner projections — is unreadable from the deployed
-    /// relay today. Kind and author filters are unaffected, which is why the
-    /// durable turn-record proofs above pass. Tracked in
-    /// OpenAgentsInc/nostr-effect#170. The revocation law itself is proven
-    /// without the network in `issue31_nostr`.
+    /// This was previously blocked: `relay.openagents.com` answered any filter
+    /// carrying a `#p` tag with `["NOTICE","error: Handler error: StorageError"]`
+    /// and never terminated the subscription, and every NIP-17/44/59 private
+    /// record is `#p`-addressed. That was a double-JSON-encoding defect on both
+    /// the query and the INSERT paths, fixed in nostr-effect#170 and deployed as
+    /// `openagents-nostr-relay-00006-7wf`. This test now passes against
+    /// `wss://relay.openagents.com`. The revocation law itself is additionally
+    /// proven without the network in `issue31_nostr`.
     #[test]
-    #[ignore = "requires a live relay; blocked by nostr-effect#170 (#p StorageError)"]
+    #[ignore = "requires a live relay; set OMEGA_LIVE_RELAY_URL"]
     fn live_relay_replay_cannot_restore_a_revoked_device_grant() {
         let Some((url, auth_url)) = live_relay_env() else {
             eprintln!("OMEGA_LIVE_RELAY_URL unset; skipping");
