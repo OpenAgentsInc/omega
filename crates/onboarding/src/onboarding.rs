@@ -13,9 +13,9 @@ use project::{AgentRegistryStore, agent_server_store::AllAgentServersSettings};
 use schemars::JsonSchema;
 use serde::Deserialize;
 use settings::{SettingsStore, VsCodeSettingsSource};
-use std::sync::Arc;
 #[cfg(not(debug_assertions))]
 use std::any::TypeId;
+use std::sync::Arc;
 use ui::{
     Divider, KeyBinding, ParentElement as _, StatefulInteractiveElement, Vector, VectorName,
     WithScrollbar as _, prelude::*, rems_from_px,
@@ -69,6 +69,7 @@ const EDITOR_ONBOARDING_COMPLETION_KEY: &str = "omega_editor_onboarding_completi
 const EDITOR_ONBOARDING_COMPLETION_SCHEMA: &str =
     "openagents.omega.editor-onboarding-completion.v1";
 
+#[cfg(any(debug_assertions, test))]
 fn onboarding_completion_keys() -> &'static [&'static str] {
     &[
         IDENTITY_ONBOARDING_COMPLETION_KEY,
@@ -229,6 +230,7 @@ fn open_editor_onboarding(cx: &mut App) {
     });
 }
 
+#[cfg(debug_assertions)]
 fn reset_onboarding_completion_records(cx: &mut App) {
     let kvp = KeyValueStore::global(cx);
     let keys = onboarding_completion_keys()
@@ -523,11 +525,12 @@ impl Onboarding {
         cx.open_url(&zed_urls::account_url(cx))
     }
 
-    fn render_page(&mut self, cx: &mut Context<Self>) -> AnyElement {
+    fn render_page(&mut self, compact: bool, cx: &mut Context<Self>) -> AnyElement {
         crate::basics_page::render_basics_page(
             &self.user_store,
             &self.identity_section,
             self.mode.journey().basics_page_mode(),
+            compact,
             cx,
         )
         .into_any_element()
@@ -536,6 +539,7 @@ impl Onboarding {
 
 impl Render for Onboarding {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let compact = window.viewport_size().width < px(560.);
         div()
             .image_cache(gpui::retain_all("onboarding-page"))
             .key_context({
@@ -570,13 +574,18 @@ impl Render for Onboarding {
                             .max_w(rems_from_px(780.))
                             .w_full()
                             .mx_auto()
-                            .p_12()
+                            .when_else(compact, |this| this.p_4(), |this| this.p_12())
                             .gap_6()
                             .child(
-                                h_flex()
+                                div()
+                                    .flex()
                                     .w_full()
                                     .gap_4()
-                                    .justify_between()
+                                    .when_else(
+                                        compact,
+                                        |this| this.flex_col().items_stretch(),
+                                        |this| this.flex_row().items_center().justify_between(),
+                                    )
                                     .child(
                                         h_flex()
                                             .gap_4()
@@ -598,12 +607,21 @@ impl Render for Onboarding {
                                     .child(
                                         v_flex()
                                             .gap_1()
-                                            .items_end()
+                                            .when_else(
+                                                compact,
+                                                |this| this.items_stretch(),
+                                                |this| this.items_end(),
+                                            )
                                             .child({
                                                 Button::new("finish_setup", "Finish Setup")
                                                     .style(ButtonStyle::Filled)
                                                     .size(ButtonSize::Medium)
-                                                    .width(rems_from_px(200.))
+                                                    .tab_index(1000_isize)
+                                                    .when_else(
+                                                        compact,
+                                                        |this| this.full_width(),
+                                                        |this| this.width(rems_from_px(200.)),
+                                                    )
                                                     .disabled(
                                                         self.finish_task.is_some()
                                                             || !self
@@ -633,7 +651,7 @@ impl Render for Onboarding {
                                     ),
                             )
                             .child(Divider::horizontal().color(ui::DividerColor::BorderVariant))
-                            .child(self.render_page(cx)),
+                            .child(self.render_page(compact, cx)),
                     )
                     .track_scroll(&self.scroll_handle),
             )

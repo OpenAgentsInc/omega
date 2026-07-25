@@ -1,5 +1,5 @@
 use crate::prelude::*;
-use gpui::{ClickEvent, SharedString};
+use gpui::{ClickEvent, Role, SharedString};
 
 #[derive(IntoElement, RegisterComponent)]
 pub struct AgentSetupButton {
@@ -7,6 +7,8 @@ pub struct AgentSetupButton {
     icon: Option<Icon>,
     name: Option<SharedString>,
     state: Option<AnyElement>,
+    aria_label: Option<SharedString>,
+    tab_index: Option<isize>,
     disabled: bool,
     on_click: Option<Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>>,
 }
@@ -18,6 +20,8 @@ impl AgentSetupButton {
             icon: None,
             name: None,
             state: None,
+            aria_label: None,
+            tab_index: None,
             disabled: false,
             on_click: None,
         }
@@ -35,6 +39,16 @@ impl AgentSetupButton {
 
     pub fn state(mut self, element: impl IntoElement) -> Self {
         self.state = Some(element.into_any_element());
+        self
+    }
+
+    pub fn aria_label(mut self, label: impl Into<SharedString>) -> Self {
+        self.aria_label = Some(label.into());
+        self
+    }
+
+    pub fn tab_index(mut self, tab_index: isize) -> Self {
+        self.tab_index = Some(tab_index);
         self
     }
 
@@ -104,15 +118,27 @@ impl RenderOnce for AgentSetupButton {
 
         v_flex()
             .id(self.id)
+            .role(if is_clickable {
+                Role::Button
+            } else {
+                Role::Label
+            })
+            .when_some(self.aria_label, |this, label| this.aria_label(label))
+            .when_some(
+                self.tab_index.filter(|_| is_clickable),
+                |this, tab_index| this.tab_index(tab_index),
+            )
             .border_1()
             .border_color(cx.theme().colors().border_variant)
             .rounded_sm()
             .when(is_clickable, |this| {
-                this.cursor_pointer().hover(|style| {
-                    style
-                        .bg(cx.theme().colors().element_hover)
-                        .border_color(cx.theme().colors().border)
-                })
+                this.cursor_pointer()
+                    .focus_visible(|style| style.border_color(cx.theme().colors().border_focused))
+                    .hover(|style| {
+                        style
+                            .bg(cx.theme().colors().element_hover)
+                            .border_color(cx.theme().colors().border)
+                    })
             })
             .when_some(top_section, |this, section| this.child(section))
             .when_some(bottom_section, |this, section| this.child(section))

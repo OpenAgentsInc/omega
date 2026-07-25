@@ -57,7 +57,7 @@ fn get_theme_family_themes(theme_name: &str) -> Option<(&'static str, &'static s
     None
 }
 
-fn render_theme_section(tab_index: &mut isize, cx: &mut App) -> impl IntoElement {
+fn render_theme_section(tab_index: &mut isize, compact: bool, cx: &mut App) -> impl IntoElement {
     let theme_selection = ThemeSettings::get_global(cx).theme.clone();
     let system_appearance = theme::SystemAppearance::global(cx);
 
@@ -71,45 +71,63 @@ fn render_theme_section(tab_index: &mut isize, cx: &mut App) -> impl IntoElement
     return v_flex()
         .gap_2()
         .child(
-            h_flex().justify_between().child(Label::new("Theme")).child(
-                ToggleButtonGroup::single_row(
-                    "theme-selector-onboarding-dark-light",
-                    [
-                        ThemeAppearanceMode::Light,
-                        ThemeAppearanceMode::Dark,
-                        ThemeAppearanceMode::System,
-                    ]
-                    .map(|mode| {
-                        const MODE_NAMES: [SharedString; 3] = [
-                            SharedString::new_static("Light"),
-                            SharedString::new_static("Dark"),
-                            SharedString::new_static("System"),
-                        ];
-                        ToggleButtonSimple::new(
-                            MODE_NAMES[mode as usize].clone(),
-                            move |_, _, cx| {
-                                write_mode_change(mode, cx);
-
-                                telemetry::event!(
-                                    "Welcome Theme mode Changed",
-                                    from = theme_mode,
-                                    to = mode
-                                );
-                            },
-                        )
-                    }),
+            div()
+                .flex()
+                .gap_2()
+                .when_else(
+                    compact,
+                    |this| this.flex_col().items_stretch(),
+                    |this| this.flex_row().items_center().justify_between(),
                 )
-                .size(ToggleButtonGroupSize::Medium)
-                .tab_index(tab_index)
-                .selected_index(theme_mode as usize)
-                .style(ui::ToggleButtonGroupStyle::Outlined)
-                .width(rems_from_px(3. * 64.)),
-            ),
+                .child(Label::new("Theme"))
+                .child(
+                    ToggleButtonGroup::single_row(
+                        "theme-selector-onboarding-dark-light",
+                        [
+                            ThemeAppearanceMode::Light,
+                            ThemeAppearanceMode::Dark,
+                            ThemeAppearanceMode::System,
+                        ]
+                        .map(|mode| {
+                            const MODE_NAMES: [SharedString; 3] = [
+                                SharedString::new_static("Light"),
+                                SharedString::new_static("Dark"),
+                                SharedString::new_static("System"),
+                            ];
+                            ToggleButtonSimple::new(
+                                MODE_NAMES[mode as usize].clone(),
+                                move |_, _, cx| {
+                                    write_mode_change(mode, cx);
+
+                                    telemetry::event!(
+                                        "Welcome Theme mode Changed",
+                                        from = theme_mode,
+                                        to = mode
+                                    );
+                                },
+                            )
+                        }),
+                    )
+                    .size(ToggleButtonGroupSize::Medium)
+                    .tab_index(tab_index)
+                    .selected_index(theme_mode as usize)
+                    .style(ui::ToggleButtonGroupStyle::Outlined)
+                    .when_else(
+                        compact,
+                        |this| this.full_width(),
+                        |this| this.width(rems_from_px(3. * 64.)),
+                    ),
+                ),
         )
         .child(
-            h_flex()
+            div()
+                .flex()
                 .gap_2()
-                .justify_between()
+                .when_else(
+                    compact,
+                    |this| this.flex_col(),
+                    |this| this.flex_row().justify_between(),
+                )
                 .children(render_theme_previews(tab_index, &theme_selection, cx)),
         );
 
@@ -155,6 +173,9 @@ fn render_theme_section(tab_index: &mut isize, cx: &mut App) -> impl IntoElement
                 .child(
                     h_flex()
                         .id(name)
+                        .role(gpui::Role::RadioButton)
+                        .aria_label(format!("{} theme", FAMILY_NAMES[index]))
+                        .aria_selected(is_selected)
                         .relative()
                         .w_full()
                         .border_2()
@@ -583,6 +604,7 @@ fn render_registry_agent_button(
     name: SharedString,
     icon_path: Option<SharedString>,
     installed: bool,
+    tab_index: isize,
     cx: &mut App,
 ) -> impl IntoElement {
     let element_id = format!("{}-onboarding", agent_id);
@@ -608,10 +630,18 @@ fn render_registry_agent_button(
             .into_any_element()
     };
 
+    let aria_label = if installed {
+        format!("{name} installed")
+    } else {
+        format!("Install {name}")
+    };
+
     AgentSetupButton::new(element_id)
         .icon(icon)
         .name(name)
         .state(state_element)
+        .aria_label(aria_label)
+        .tab_index(tab_index)
         .disabled(installed)
         .on_click(move |_, window, cx| {
             telemetry::event!("Welcome Agent Install Clicked", agent = agent_id);
@@ -637,7 +667,7 @@ fn render_registry_agent_button(
         })
 }
 
-fn render_ai_section(cx: &mut App) -> impl IntoElement {
+fn render_ai_section(tab_index: &mut isize, compact: bool, cx: &mut App) -> impl IntoElement {
     let registry_agents = AgentRegistryStore::try_global(cx)
         .map(|store| store.read(cx).agents().to_vec())
         .unwrap_or_default();
@@ -647,7 +677,11 @@ fn render_ai_section(cx: &mut App) -> impl IntoElement {
         .get::<AllAgentServersSettings>(None)
         .clone();
 
-    let column_count = FEATURED_AGENTS.len() as u16;
+    let column_count = if compact {
+        1
+    } else {
+        FEATURED_AGENTS.len() as u16
+    };
 
     let grid = FEATURED_AGENTS.iter().fold(
         div()
@@ -657,6 +691,8 @@ fn render_ai_section(cx: &mut App) -> impl IntoElement {
             .grid_cols(column_count)
             .gap_2(),
         |grid, featured_agent| {
+            let agent_tab_index = *tab_index;
+            *tab_index += 1;
             let registry_agent = registry_agents
                 .iter()
                 .find(|agent| agent.id().as_ref() == featured_agent.id);
@@ -670,6 +706,7 @@ fn render_ai_section(cx: &mut App) -> impl IntoElement {
                 name,
                 icon_path,
                 is_installed,
+                agent_tab_index,
                 cx,
             ))
         },
@@ -686,6 +723,7 @@ pub(crate) fn render_basics_page(
     _user_store: &Entity<UserStore>,
     identity_section: &Entity<IdentitySection>,
     mode: BasicsPageMode,
+    compact: bool,
     cx: &mut App,
 ) -> impl IntoElement {
     let mut tab_index = 0;
@@ -699,9 +737,9 @@ pub(crate) fn render_basics_page(
             mode.identity_presentation(),
             cx,
         ))
-        .child(render_theme_section(&mut tab_index, cx))
+        .child(render_theme_section(&mut tab_index, compact, cx))
         .child(render_base_keymap_section(&mut tab_index, cx))
-        .child(render_ai_section(cx))
+        .child(render_ai_section(&mut tab_index, compact, cx))
         .child(render_import_settings_section(&mut tab_index, cx))
         .child(render_vim_mode_switch(&mut tab_index, cx))
         .child(render_worktree_auto_trust_switch(&mut tab_index, cx))
