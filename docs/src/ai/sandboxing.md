@@ -1,11 +1,11 @@
 ---
 title: Sandboxing
-description: Zed Agent tool calls can run in an OS-level sandbox to restrict certain operations.
+description: Omega Agent tool calls can run in an OS-level sandbox to restrict certain operations.
 ---
 
 # Sandboxing
 
-You can restrict what operations the [Zed Agent](./zed-agent.md) can run in multiple ways. One way to restrict them is
+You can restrict what operations the [Omega Agent](./zed-agent.md) can run in multiple ways. One way to restrict them is
 [Tool Permissions](./tool-permissions.md), but these are of limited use when the agent wants to do things like run a
 complicated script in a terminal.
 
@@ -20,12 +20,12 @@ sandbox?](#trust) for more details.
 - Tool permissions restrict the agent's ability to run certain tool actions in the first place
 - Once a tool action is actually running, sandboxing restricts what it can do
 
-Sandboxing applies only to Zed Agent. It does not sandbox Zed itself, language servers, extensions, tasks, your normal
+Sandboxing applies only to Omega Agent. It does not sandbox Zed itself, language servers, extensions, tasks, your normal
 terminal tabs, [External Agents](./external-agents.md), or [Terminal Threads](./terminal-threads.md).
 
 ## Sandboxed Tools {#sandboxed-tools}
 
-Zed Agent sandboxing currently applies to the `terminal` and `fetch` tools.
+Omega Agent sandboxing currently applies to the `terminal` and `fetch` tools.
 
 | Tool       | What sandboxing limits                                                                                |
 | ---------- | ----------------------------------------------------------------------------------------------------- |
@@ -50,7 +50,7 @@ The `fetch` tool has no extra requirements on any platform.
 
 ## Default Access {#default-access}
 
-By default, sandboxed Zed Agent tool actions have these restrictions:
+By default, sandboxed Omega Agent tool actions have these restrictions:
 
 | Access type         | Default behavior                                                                                                                                                                       |
 | ------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -167,7 +167,7 @@ The available options are:
 | `allow_all_hosts`    | Allow sandboxed tools to reach any host without prompting.                                                        |
 | `write_paths`        | Directory subtrees that sandboxed terminal commands may write to without prompting. Paths are absolute.           |
 | `allow_fs_write_all` | Allow sandboxed terminal commands to write anywhere except protected Git metadata without prompting.              |
-| `allow_unsandboxed`  | Turn sandboxing off entirely for Zed Agent terminal commands. The fetch tool will have no restrictions.           |
+| `allow_unsandboxed`  | Turn sandboxing off entirely for Omega Agent terminal commands. The fetch tool will have no restrictions.           |
 
 Prefer narrow grants, such as a specific host or write path, over `allow_all_hosts`, `allow_fs_write_all`, or
 `allow_unsandboxed`.
@@ -277,11 +277,11 @@ sudo apparmor_parser -r /etc/apparmor.d/bwrap-userns-restrict
 
 ### Windows {#windows}
 
-On Windows, Zed Agent sandboxing is supported only when the agent action runs inside WSL.
+On Windows, Omega Agent sandboxing is supported only when the agent action runs inside WSL.
 
 Zed uses the Linux Bubblewrap sandbox inside WSL because WSL provides the Linux process and filesystem primitives that
 Bubblewrap needs. Native Windows processes do not currently have the same sandbox integration in Zed, so a native Windows
-command cannot be confined by Zed Agent's OS sandbox in the same way.
+command cannot be confined by Omega Agent's OS sandbox in the same way.
 
 When running inside WSL, the Linux sandboxing behavior applies, including the requirement that `bwrap` not be setuid-root:
 

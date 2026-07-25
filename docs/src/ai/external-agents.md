@@ -40,7 +40,7 @@ For company-specific setup paths, including Claude, Codex, Gemini, OpenCode, Cop
 
 Use Claude Agent when you want Claude running as an ACP-integrated External Agent in Zed.
 
-Install Claude Agent from the [ACP Registry](#registry), then start a Claude Agent thread from the Agent Panel or Threads Sidebar. Claude Agent owns its own authentication and billing. An Anthropic API key configured for [Zed Agent](./zed-agent.md) does not automatically configure Claude Agent.
+Install Claude Agent from the [ACP Registry](#registry), then start a Claude Agent thread from the Agent Panel or Threads Sidebar. Claude Agent owns its own authentication and billing. An Anthropic API key configured for [Omega Agent](./zed-agent.md) does not automatically configure Claude Agent.
 
 To choose your billing method, open a Claude Agent thread, run `/login`, and authenticate with an API key or with Claude Code where supported. Claude-specific files such as `CLAUDE.md` may be read by Claude Agent directly.
 
@@ -64,13 +64,13 @@ If `GEMINI_API_KEY` or `GOOGLE_AI_API_KEY` is available to the agent process, Ge
 
 Use OpenCode when you want OpenCode running as an ACP-integrated External Agent in Zed.
 
-Install OpenCode from the [ACP Registry](#registry), then start an OpenCode thread from the Agent Panel or Threads Sidebar. OpenCode owns its own auth, model selection, and subscription behavior. To use OpenCode models in Zed Agent instead, configure [OpenCode API access](./use-api-access.md#opencode).
+Install OpenCode from the [ACP Registry](#registry), then start an OpenCode thread from the Agent Panel or Threads Sidebar. OpenCode owns its own auth, model selection, and subscription behavior. To use OpenCode models in Omega Agent instead, configure [OpenCode API access](./use-api-access.md#opencode).
 
 ## Copilot {#copilot}
 
 Use Copilot External Agents where available when you want Copilot running as an ACP-integrated External Agent in Zed.
 
-Copilot agent auth is owned by the Copilot integration. To use Copilot Chat models in Zed Agent or Copilot for edit prediction, see [Use an Existing Subscription](./use-an-existing-subscription.md#github-copilot).
+Copilot agent auth is owned by the Copilot integration. To use Copilot Chat models in Omega Agent or Copilot for edit prediction, see [Use an Existing Subscription](./use-an-existing-subscription.md#github-copilot).
 
 ## Cursor {#cursor}
 
@@ -98,14 +98,14 @@ External Agents run as separate processes that communicate with Zed over ACP. Th
 | -------------------------------- | ------------------------------------------------------------------------------------------ |
 | Model/provider config            | Usually owned by the External Agent                                                        |
 | Auth/API keys/subscriptions      | Usually owned by the External Agent                                                        |
-| Zed Agent profiles               | Do not apply unless the integration says otherwise                                         |
+| Omega Agent profiles               | Do not apply unless the integration says otherwise                                         |
 | Zed Skills                       | Do not apply as Zed Skills                                                                 |
 | Native agent skills/instructions | Depends on the agent                                                                       |
 | Zed MCP servers                  | May be forwarded over ACP                                                                  |
 | Native MCP config                | May also be read by the agent                                                              |
 | Tool permissions                 | Zed ACP/tool forwarding permissions may apply; native tool permissions depend on the agent |
 
-For Zed's native agent configuration, see [Zed Agent](./zed-agent.md).
+For Zed's native agent configuration, see [Omega Agent](./zed-agent.md).
 
 ## Agent-Specific Auth and Config {#agent-auth-config}
 

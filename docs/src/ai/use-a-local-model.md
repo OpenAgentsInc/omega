@@ -17,7 +17,7 @@ Use local models when you run the model on your machine or on infrastructure you
 
 ## llama.cpp {#llama-cpp}
 
-Use [llama.cpp](https://llama.app) and its built-in server for local models with Zed Agent, Inline Assistant, and similar model-backed Zed AI features.
+Use [llama.cpp](https://llama.app) and its built-in server for local models with Omega Agent, Inline Assistant, and similar model-backed Zed AI features.
 
 1. Install llama.cpp from [llama.app](https://llama.app).
 2. Start the server in [router mode](https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md):
@@ -74,7 +74,7 @@ If your llama.cpp server requires a key, enter it in the provider UI or set `LLA
 
 ## Ollama {#ollama}
 
-Use Ollama for local models with Zed Agent, Inline Assistant, and similar model-backed Zed AI features.
+Use Ollama for local models with Omega Agent, Inline Assistant, and similar model-backed Zed AI features.
 
 1. Download and install Ollama from [ollama.com/download](https://ollama.com/download).
 2. Pull a model:
@@ -136,7 +136,7 @@ If your Ollama server requires a key, enter the key in the provider UI or set `O
 
 ## LM Studio {#lm-studio}
 
-Use LM Studio for local models with Zed Agent, Inline Assistant, and similar model-backed Zed AI features.
+Use LM Studio for local models with Omega Agent, Inline Assistant, and similar model-backed Zed AI features.
 
 1. Download and install [LM Studio](https://lmstudio.ai/download).
 2. Download at least one model in LM Studio, or use the LM Studio CLI:

@@ -7,15 +7,15 @@ description: Choose the right Zed AI setup path for agents, models, subscription
 
 Use this page to choose the right AI setup path in Zed. If you already know the company, subscription, model provider, agent, or CLI you want to use, start with [AI by Company](./by-company.md).
 
-## Use the Zed Agent {#zed-agent}
+## Use the Omega Agent {#zed-agent}
 
-Use [Zed Agent](./zed-agent.md) when you want Zed's native agent to read, edit, search, and run code in your project.
+Use [Omega Agent](./zed-agent.md) when you want Zed's native agent to read, edit, search, and run code in your project.
 
-Zed Agent uses Zed-configured models from [LLM Providers](./llm-providers.md). It also uses Zed's built-in tools, [Agent Profiles](./agent-profiles.md), [Skills](./skills.md), [Instructions](./instructions.md), and [MCP servers](./mcp.md).
+Omega Agent uses Zed-configured models from [LLM Providers](./llm-providers.md). It also uses Zed's built-in tools, [Agent Profiles](./agent-profiles.md), [Skills](./skills.md), [Instructions](./instructions.md), and [MCP servers](./mcp.md).
 
 Start in the [Agent Panel](./agent-panel.md) to prompt the agent, add context, review changes, and manage threads.
 
-### Configure the Zed Agent {#configure-zed-agent}
+### Configure the Omega Agent {#configure-zed-agent}
 
 | If you want to...                         | Use                                       |
 | ----------------------------------------- | ----------------------------------------- |
@@ -36,9 +36,9 @@ Use this path for Claude, Codex, OpenCode, Copilot, Cursor, Pi Coding Agent, Gem
 
 External Agents and Terminal Threads usually own their own auth, model configuration, subscriptions, tools, instructions, and MCP configuration.
 
-## Choose Which Models the Zed Agent Uses {#model-access}
+## Choose Which Models the Omega Agent Uses {#model-access}
 
-The Zed Agent and other model-backed Zed AI features use models configured through [LLM Providers](./llm-providers.md).
+The Omega Agent and other model-backed Zed AI features use models configured through [LLM Providers](./llm-providers.md).
 
 | If you want to...                                                             | Use                                                               |
 | ----------------------------------------------------------------------------- | ----------------------------------------------------------------- |

@@ -20,7 +20,7 @@ Zed also handles the `notifications/tools/list_changed` notification from MCP se
 
 | Agent path                                | MCP behavior                                                                            |
 | ----------------------------------------- | --------------------------------------------------------------------------------------- |
-| [Zed Agent](./zed-agent.md)               | Uses Zed-configured MCP servers directly                                                |
+| [Omega Agent](./zed-agent.md)               | Uses Zed-configured MCP servers directly                                                |
 | [External Agents](./external-agents.md)   | Zed can forward configured MCP servers over ACP; agents may also read native MCP config |
 | [Terminal Threads](./terminal-threads.md) | Native CLIs/TUIs read their own MCP configuration                                       |
 

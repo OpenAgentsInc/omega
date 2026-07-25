@@ -88,6 +88,12 @@ fn high_risk_public_files_forbid_zed_product_phrases() {
         "crates/auto_update_helper/src/dialog.rs",
         "crates/edit_prediction/src/edit_prediction.rs",
         "crates/edit_prediction/src/zeta.rs",
+        "crates/agent/src/agent.rs",
+        "crates/agent_ui/src/agent_ui.rs",
+        "crates/agent_ui/src/agent_panel.rs",
+        "crates/sidebar/src/sidebar.rs",
+        "crates/ui/src/components/ai/agent_setup_button.rs",
+        "crates/eval_cli/src/headless.rs",
     ];
 
     let forbidden = [

@@ -1,9 +1,10 @@
-# The Native Zed Agent in Omega
+# The Native Omega Agent in Omega
 
-Omega inherits Zed's first-party agent runtime. The current source and UI call
-it **Zed Agent**. It is present in Omega, but Omega disables the Agent Panel by
-default. It therefore does not appear in the Command Palette on a fresh
-installation.
+Omega Agent is the admitted first-party orchestrator identity. Its first
+executor is the inherited native Rust runtime described here; the rename does
+not make the native loop the router, a service identity, or a new run
+authority. The Agent Panel is present in Omega but disabled by default, so it
+does not appear in the Command Palette on a fresh installation.
 
 This page explains how to expose the current implementation, what it does, and
 where it fits in Omega's architecture.
@@ -28,7 +29,7 @@ Agent Panel button, but it does not expose `agent.enabled`.
 
 3. Open the Command Palette and run {#action agent::NewThread}, or choose
    **View → Agent Panel**.
-4. Open the new-thread menu in the panel and choose **Zed Agent**.
+4. Open the new-thread menu in the panel and choose **Omega Agent**.
 
 `agent.button` only controls the status-bar button. Setting it to `true`
 without also setting `agent.enabled` does not enable the panel.
@@ -42,7 +43,7 @@ also disables the Agent Panel and removes its actions.
 
 ## Configure a Model {#configure-a-model}
 
-Zed Agent is an agent runtime, not a model. It needs a language model configured
+Omega Agent is an agent runtime, not a model. It needs a language model configured
 through Omega's inherited LLM provider support.
 
 Omega's default native-agent selection is `google/gemini-3.6-flash`. It needs a
@@ -60,12 +61,12 @@ Omega deliberately does not provide Zed-hosted models:
   credential storage path.
 
 An External Agent such as Codex ACP is a different choice in the same
-new-thread menu. It does not supply a model to Zed Agent. The external agent
+new-thread menu. It does not supply a model to Omega Agent. The external agent
 owns its own runtime, authentication, model selection, tools, and sessions.
 
-## What Zed Agent Is {#what-it-is}
+## What Omega Agent Is {#what-it-is}
 
-Zed Agent is the in-process, project-aware coding-agent engine inherited from
+Omega Agent is the in-process, project-aware coding-agent engine inherited from
 Zed. It combines:
 
 - a selected `LanguageModel`
@@ -78,14 +79,15 @@ Zed. It combines:
 - local thread persistence
 - Agent Panel, Threads Sidebar, diff review, and checkpoint projections
 
-The name is currently fixed by `ZED_AGENT_ID` as `Zed Agent`. The implementation
-is `NativeAgent`; `NativeAgentServer` constructs it inside the Omega process and
-wraps it in `NativeAgentConnection`.
+The user-facing identity is fixed by the compatibility symbol `ZED_AGENT_ID`
+as `Omega Agent`. The implementation remains `NativeAgent`;
+`NativeAgentServer` constructs it inside the Omega process and wraps it in
+`NativeAgentConnection`.
 
 The connection implements the same `AgentConnection` interface used by the
-Agent Panel for ACP-backed agents. That shared interface does not make Zed Agent
+Agent Panel for ACP-backed agents. That shared interface does not make Omega Agent
 an external ACP process. No agent executable is launched and no ACP transport
-is crossed for a native Zed Agent thread.
+is crossed for a native Omega Agent thread.
 
 ## How a Turn Works {#turn-flow}
 
@@ -159,7 +161,7 @@ boundary for the specific run.
 
 ## What It Is Not {#what-it-is-not}
 
-Zed Agent is not:
+Omega Agent is not:
 
 - a language model or provider
 - Codex, Claude, Hermes, or another external agent
@@ -179,7 +181,7 @@ systems without owning their durable state.
 
 | Path               | Runtime owner                                             | Configuration owner                                           | Durable authority                                  | Omega UI role                               |
 | ------------------ | --------------------------------------------------------- | ------------------------------------------------------------- | -------------------------------------------------- | ------------------------------------------- |
-| Zed Agent          | Omega's in-process Rust runtime                           | Omega provider, profile, skill, instruction, and MCP settings | Local native thread history only                   | Execute and review local coding turns       |
+| Omega Agent         | Omega's in-process Rust runtime                           | Omega provider, profile, skill, instruction, and MCP settings | Local native thread history only                   | Execute and review local coding turns       |
 | External ACP agent | The external agent process or endpoint                    | The external agent                                            | The external agent, where supported                | Project an ACP session                      |
 | Terminal Thread    | The selected CLI or TUI                                   | The CLI or TUI                                                | The CLI or its service                             | Host a terminal-backed session              |
 | Full Auto          | Released OpenAgents engine under `omega-effectd`          | OpenAgents Full Auto contracts and provider bindings          | OpenAgents work, run, outcome, and receipt records | Launch, observe, review, and intervene      |
@@ -231,8 +233,7 @@ Omega should not:
 - treat Nostr relay acceptance as permission to run a local tool
 - infer capabilities from an agent or provider name
 - claim hosted Zed AI support
-- present the inherited `telemetry_id` or `Zed Agent` label as an OpenAgents
-  service identity
+- present the inherited `telemetry_id` as an OpenAgents service identity
 - silently substitute another provider or model when the selected one is
   unavailable
 
@@ -248,10 +249,9 @@ The implementation exists, but its Omega product contract is unfinished.
 
 1. Add an Omega-owned enablement and provider setup flow. Do not require a
    JSON-only switch.
-2. Decide the user-facing name and icon. The current planning corpus explicitly
-   says not to relabel the Zed Agent tile as **Omega Agent** without an admitted
-   Omega service and product contract.
-3. Remove or rewrite remaining Zed-specific copy in the native-agent journey.
+2. Complete the admitted router and typed-disclosure packets. The identity
+   rename does not by itself implement routing, receipts, or a public claim.
+3. Keep remaining Zed-specific copy out of the native-agent journey.
 4. Show the exact runtime, provider, model, profile, and effective permission
    policy in each thread.
 5. Keep hosted Zed plans, trials, account state, feedback upload, and service
@@ -263,8 +263,9 @@ The implementation exists, but its Omega product contract is unfinished.
 8. Bind any release claim to an installed Omega candidate. A source test or
    fixture pass does not prove the packaged journey.
 
-Until that work lands, **Zed Agent** in Omega means “the inherited local native
-coding runtime,” not an OpenAgents-hosted agent product.
+Until the router packets land, **Omega Agent** in the reachable UI selects the
+inherited local native executor. It does not claim an OpenAgents-hosted agent
+service or change the native thread's authority boundary.
 
 ## Implementation Map {#implementation-map}
 

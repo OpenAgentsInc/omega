@@ -32,7 +32,7 @@ Zed supports these first-class API providers for model-backed Zed AI features:
 
 ## What API Access Applies To {#support}
 
-Use API access for the Zed Agent, Inline Assistant, Git commit generation,
+Use API access for the Omega Agent, Inline Assistant, Git commit generation,
 thread summaries, and similar Zed-owned AI features.
 
 External Agents and Terminal Threads usually configure model access in the
@@ -374,7 +374,7 @@ By default, models from all OpenCode subscription types are shown. You can hide 
 
 #### Custom OpenCode Models {#opencode-custom-models}
 
-The Zed Agent comes preconfigured with OpenCode models. Add custom OpenCode models when you need newer models, limited-time Free models, or models with custom endpoints.
+The Omega Agent comes preconfigured with OpenCode models. Add custom OpenCode models when you need newer models, limited-time Free models, or models with custom endpoints.
 
 Add custom models in your settings file:
 

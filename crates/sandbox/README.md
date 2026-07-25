@@ -107,7 +107,7 @@ Consider the following case:
 
 ```mermaid
 sequenceDiagram
-    participant Agent as Zed Agent
+    participant Agent as Omega Agent
     participant S1 as Subagent 1 swapper
     participant S2 as Subagent 2 writer
     participant Zed as Zed path validation
