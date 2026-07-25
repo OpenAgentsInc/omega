@@ -1,25 +1,20 @@
 use std::sync::Arc;
 
-use client::{Client, UserStore};
-use cloud_api_types::Plan;
 use gpui::{Entity, IntoElement, ParentElement};
 use language_model::{LanguageModelRegistry, ZED_CLOUD_PROVIDER_ID};
 use ui::prelude::*;
 
-use crate::{AgentPanelOnboardingCard, ApiKeysWithoutProviders, ZedAiOnboarding};
+use crate::{AgentPanelOnboardingCard, ApiKeysWithProviders, ApiKeysWithoutProviders};
 
 pub struct AgentPanelOnboarding {
-    user_store: Entity<UserStore>,
-    client: Arc<Client>,
     has_configured_providers: bool,
-    continue_with_zed_ai: Arc<dyn Fn(&mut Window, &mut App)>,
+    configured_providers: Entity<ApiKeysWithProviders>,
+    continue_to_agent: Arc<dyn Fn(&mut Window, &mut App)>,
 }
 
 impl AgentPanelOnboarding {
     pub fn new(
-        user_store: Entity<UserStore>,
-        client: Arc<Client>,
-        continue_with_zed_ai: impl Fn(&mut Window, &mut App) + 'static,
+        continue_to_agent: impl Fn(&mut Window, &mut App) + 'static,
         cx: &mut Context<Self>,
     ) -> Self {
         cx.subscribe(
@@ -37,10 +32,9 @@ impl AgentPanelOnboarding {
         .detach();
 
         Self {
-            user_store,
-            client,
             has_configured_providers: Self::has_configured_providers(cx),
-            continue_with_zed_ai: Arc::new(continue_with_zed_ai),
+            configured_providers: cx.new(ApiKeysWithProviders::new),
+            continue_to_agent: Arc::new(continue_to_agent),
         }
     }
 
@@ -53,38 +47,30 @@ impl AgentPanelOnboarding {
 }
 
 impl Render for AgentPanelOnboarding {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let enrolled_in_trial = self
-            .user_store
-            .read(cx)
-            .plan()
-            .is_some_and(|plan| plan == Plan::ZedProTrial);
-
-        let is_pro_user = self
-            .user_store
-            .read(cx)
-            .plan()
-            .is_some_and(|plan| plan == Plan::ZedPro);
-
-        let onboarding = ZedAiOnboarding::new(
-            self.client.clone(),
-            &self.user_store,
-            self.continue_with_zed_ai.clone(),
-            cx,
-        )
-        .with_dismiss({
-            let callback = self.continue_with_zed_ai.clone();
-            move |window, cx| callback(window, cx)
-        });
-
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         AgentPanelOnboardingCard::new()
-            .child(onboarding)
-            .map(|this| {
-                if enrolled_in_trial || is_pro_user || self.has_configured_providers {
-                    this
-                } else {
-                    this.child(ApiKeysWithoutProviders::new())
-                }
+            .child(
+                v_flex()
+                    .gap_1()
+                    .child(Headline::new("Connect an AI provider"))
+                    .child(
+                        Label::new(
+                            "Omega uses providers and credentials you configure directly. Choose an existing provider or add one in Agent Settings.",
+                        )
+                        .color(Color::Muted),
+                    ),
+            )
+            .when(self.has_configured_providers, |this| {
+                let continue_to_agent = self.continue_to_agent.clone();
+                this.child(self.configured_providers.clone()).child(
+                    Button::new("continue-to-agent", "Continue")
+                        .full_width()
+                        .style(ButtonStyle::Filled)
+                        .on_click(move |_, window, cx| continue_to_agent(window, cx)),
+                )
+            })
+            .when(!self.has_configured_providers, |this| {
+                this.child(ApiKeysWithoutProviders::new())
             })
     }
 }

@@ -195,3 +195,14 @@ cargo test -p omega_deltas
   A visible control must not send the owner to a browser error page, and local
   Omega identity is the product's actual account boundary.
 - **Enforced by:** `title_bar_identity_entry_opens_onboarding`.
+
+### OMEGA-DELTA-0011 — AI onboarding configures providers, not a hosted plan
+
+- **Upstream Zed:** agent and edit-prediction onboarding inspect the Zed account
+  plan, offer hosted sign-in, and promote hosted AI tiers.
+- **Omega:** agent onboarding lists directly configured providers and opens
+  Agent Settings for provider credentials. Edit-prediction onboarding only
+  configures its retained GitHub Copilot provider.
+- **Why:** provider setup is a local Omega capability. Zed account status,
+  trials, hosted-plan callbacks, and hosted sign-in are not.
+- **Enforced by:** `ai_onboarding_is_provider_only`.

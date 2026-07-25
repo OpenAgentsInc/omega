@@ -15,13 +15,8 @@ path = "src/ai_onboarding.rs"
 default = []
 
 [dependencies]
-client.workspace = true
-cloud_api_types.workspace = true
-component.workspace = true
 gpui.workspace = true
 language_model.workspace = true
-serde.workspace = true
 smallvec.workspace = true
-telemetry.workspace = true
 ui.workspace = true
 zed_actions.workspace = true

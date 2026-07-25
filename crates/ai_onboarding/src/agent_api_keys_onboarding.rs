@@ -15,7 +15,8 @@ impl ApiKeysWithProviders {
                 | language_model::Event::AddedProvider(_)
                 | language_model::Event::RemovedProvider(_)
                 | language_model::Event::ProvidersChanged => {
-                    this.configured_providers = Self::compute_configured_providers(cx)
+                    this.configured_providers = Self::compute_configured_providers(cx);
+                    cx.notify();
                 }
                 _ => {}
             },
@@ -69,7 +70,8 @@ impl Render for ApiKeysWithProviders {
             .border_color(cx.theme().colors().border.opacity(0.5))
             .bg(cx.theme().colors().background.alpha(0.5))
             .shadow(vec![
-                gpui::BoxShadow::new(px(1.), px(-1.), gpui::black().opacity(0.15)).blur_radius(px(3.)),
+                gpui::BoxShadow::new(px(1.), px(-1.), gpui::black().opacity(0.15))
+                    .blur_radius(px(3.)),
             ])
             .child(
                 h_flex()
@@ -90,18 +92,15 @@ impl Render for ApiKeysWithProviders {
                             .child(
                                 Icon::new(IconName::Info)
                                     .size(IconSize::XSmall)
-                                    .color(Color::Muted)
+                                    .color(Color::Muted),
                             )
                             .child(
-                                div()
-                                    .w_full()
-                                    .child(
-                                        Label::new("Start now using API keys from your environment for the following providers:")
-                                            .color(Color::Muted)
-                                    )
-                            )
+                                div().w_full().child(
+                                    Label::new("Configured AI providers:").color(Color::Muted),
+                                ),
+                            ),
                     )
-                    .children(configured_providers_list)
+                    .children(configured_providers_list),
             )
     }
 }
@@ -132,7 +131,7 @@ impl RenderOnce for ApiKeysWithoutProviders {
                     .child(Divider::horizontal()),
             )
             .child(List::new().child(ListBulletItem::new(
-                "Add your own keys to use AI without signing in.",
+                "Configure a provider or API key directly in Omega.",
             )))
             .child(
                 Button::new("configure-providers", "Configure Providers")

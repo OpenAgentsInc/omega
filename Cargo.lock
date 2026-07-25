@@ -635,14 +635,9 @@ dependencies = [
 name = "ai_onboarding"
 version = "0.1.0"
 dependencies = [
- "client",
- "cloud_api_types",
- "component",
  "gpui",
  "language_model",
- "serde",
  "smallvec",
- "telemetry",
  "ui",
  "zed_actions",
 ]

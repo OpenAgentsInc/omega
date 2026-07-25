@@ -33,6 +33,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0008",
     "OMEGA-DELTA-0009",
     "OMEGA-DELTA-0010",
+    "OMEGA-DELTA-0011",
 ];
 
 /// Files deleted from the fork, checked by absence.
@@ -445,6 +446,59 @@ mod tests {
                 && !source.contains(".sign_in_with_optional_connect(true"),
             "OMEGA-DELTA-0010: the title bar must not restore hosted account sign-in"
         );
+    }
+
+    /// OMEGA-DELTA-0011. Agent onboarding keeps direct provider setup and
+    /// excludes the inherited hosted account and plan path.
+    #[test]
+    fn ai_onboarding_is_provider_only() {
+        let crate_root = repository_path("crates/ai_onboarding");
+        let mut source = String::new();
+        for relative_path in [
+            "src/ai_onboarding.rs",
+            "src/agent_api_keys_onboarding.rs",
+            "src/agent_panel_onboarding_content.rs",
+            "src/edit_prediction_onboarding_content.rs",
+            "Cargo.toml",
+        ] {
+            let path = crate_root.join(relative_path);
+            source.push_str(
+                &std::fs::read_to_string(&path)
+                    .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display())),
+            );
+        }
+        let agent_panel_path = repository_path("crates/agent_ui/src/agent_panel.rs");
+        source.push_str(
+            &std::fs::read_to_string(&agent_panel_path).unwrap_or_else(|error| {
+                panic!("cannot read {}: {error}", agent_panel_path.display())
+            }),
+        );
+
+        for forbidden in [
+            "ZedAiOnboarding",
+            "Plan::Zed",
+            "sign_in_with_optional_connect",
+            "Hosted agent plans",
+            "client.workspace = true",
+            "cloud_api_types.workspace = true",
+        ] {
+            assert!(
+                !source.contains(forbidden),
+                "OMEGA-DELTA-0011: hosted onboarding path returned: {forbidden:?}"
+            );
+        }
+        for required in [
+            "Connect an AI provider",
+            "Configure Providers",
+            "zed_actions::agent::OpenSettings",
+            "Configure edit predictions",
+            "Configure Copilot",
+        ] {
+            assert!(
+                source.contains(required),
+                "OMEGA-DELTA-0011: required provider setup disappeared: {required:?}"
+            );
+        }
     }
 
     /// The registry and the checks must agree, in both directions.
