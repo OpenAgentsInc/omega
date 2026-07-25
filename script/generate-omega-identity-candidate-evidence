@@ -21,6 +21,7 @@ from omega_identity_evidence import (
     IdentityEvidenceError,
     resolve_evidence_reference,
     validate_identity_matrix,
+    validate_installed_observations,
     validate_installed_tripwires,
 )
 
@@ -129,6 +130,8 @@ STRUCTURED_RECEIPT_GATES = {
     "forged_request_rejection": "identity_matrix",
     "stale_task_fencing": "identity_matrix",
     "installed_secret_tripwires": "installed_tripwires",
+    "manual_journey": "installed_observations",
+    "accessibility": "installed_observations",
 }
 
 
@@ -683,6 +686,7 @@ def build_record(
     attestations_dir: Path | None,
     identity_matrix_path: Path | None = None,
     installed_tripwires_path: Path | None = None,
+    installed_observations_path: Path | None = None,
     evidence_root: Path | None = None,
     verify_signatures: bool = True,
 ) -> dict[str, Any]:
@@ -878,6 +882,23 @@ def build_record(
                 )
             except IdentityEvidenceError as error:
                 machine_evidence_errors["_installed_tripwires"] = str(error)
+        if installed_observations_path is None:
+            machine_evidence_errors["_installed_observations"] = (
+                "--installed-observations is required"
+            )
+        elif evidence_root is None:
+            machine_evidence_errors["_installed_observations"] = (
+                "--installed-observations requires --evidence-root"
+            )
+        else:
+            try:
+                required_receipts["installed_observations"] = (
+                    validate_installed_observations(
+                        installed_observations_path, candidate_digest, evidence_root
+                    )
+                )
+            except IdentityEvidenceError as error:
+                machine_evidence_errors["_installed_observations"] = str(error)
     gates, attestation_errors = ingest_attestations(
         attestations_dir,
         candidate_digest,
@@ -1195,6 +1216,7 @@ def self_test() -> None:
             required_receipts={
                 "identity_matrix": receipt_digest,
                 "installed_tripwires": receipt_digest,
+                "installed_observations": receipt_digest,
             },
         )
         if structured_errors or any(
@@ -1210,6 +1232,7 @@ def self_test() -> None:
             required_receipts={
                 "identity_matrix": receipt_digest,
                 "installed_tripwires": receipt_digest,
+                "installed_observations": receipt_digest,
             },
         )
         if not all(name in tampered_errors for name in STRUCTURED_RECEIPT_GATES):
@@ -1297,6 +1320,7 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--attestations-dir", type=Path)
     parser.add_argument("--identity-matrix", type=Path)
     parser.add_argument("--installed-tripwires", type=Path)
+    parser.add_argument("--installed-observations", type=Path)
     parser.add_argument("--evidence-root", type=Path)
     parser.add_argument(
         "--output",
@@ -1325,6 +1349,7 @@ def main() -> int:
                     arguments.attestations_dir,
                     arguments.identity_matrix,
                     arguments.installed_tripwires,
+                    arguments.installed_observations,
                     arguments.evidence_root,
                 )
             ):
@@ -1357,8 +1382,13 @@ def main() -> int:
                 if arguments.installed_tripwires is None
                 else arguments.installed_tripwires.resolve()
             ),
+            installed_observations_path=(
+                None
+                if arguments.installed_observations is None
+                else arguments.installed_observations.absolute()
+            ),
             evidence_root=(
-                None if arguments.evidence_root is None else arguments.evidence_root.resolve()
+                None if arguments.evidence_root is None else arguments.evidence_root.absolute()
             ),
         )
         write_record(arguments.output.resolve(), record)

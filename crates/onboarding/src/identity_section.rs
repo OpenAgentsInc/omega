@@ -235,6 +235,12 @@ struct IdentityPresentation {
     actions: Vec<IdentityAction>,
 }
 
+impl IdentityPresentation {
+    fn accessibility_label(&self) -> String {
+        format!("{}: {}", self.title, self.description)
+    }
+}
+
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 enum RecoveryMode {
     Choose,
@@ -1522,6 +1528,7 @@ impl IdentitySection {
 
     fn render_full(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let presentation = self.presentation();
+        let accessibility_label = presentation.accessibility_label();
         let public_identities = self.public_identities();
         let error_message = self.error_message();
         let actions = presentation.actions;
@@ -1542,6 +1549,9 @@ impl IdentitySection {
             )
             .child(
                 v_flex()
+                    .id("omega-identity-status")
+                    .role(gpui::Role::Status)
+                    .aria_label(accessibility_label)
                     .min_w_0()
                     .gap_2()
                     .child(
@@ -1619,12 +1629,16 @@ impl IdentitySection {
 
     fn render_compact(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let presentation = self.presentation();
+        let accessibility_label = presentation.accessibility_label();
         let public_identities = self.public_identities();
         let error_message = self.error_message();
         let recovery_protection = self.compact_recovery_protection();
         let actions = presentation.actions;
 
         v_flex()
+            .id("omega-identity-status-compact")
+            .role(gpui::Role::Status)
+            .aria_label(accessibility_label)
             .min_w_0()
             .gap_2()
             .child(
@@ -1770,10 +1784,11 @@ mod tests {
             (CustodyState::RelaunchRequired, "Relaunch required"),
         ];
         for (state, title) in cases {
-            assert_eq!(
-                IdentitySection::durable_presentation(&inspection(state)).title,
-                title
-            );
+            let presentation = IdentitySection::durable_presentation(&inspection(state));
+            assert_eq!(presentation.title, title);
+            let accessibility_label = presentation.accessibility_label();
+            assert!(accessibility_label.starts_with(title));
+            assert!(!accessibility_label.contains("nsec"));
         }
     }
 

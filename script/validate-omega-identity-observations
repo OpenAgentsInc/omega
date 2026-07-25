@@ -1,0 +1,83 @@
+#!/usr/bin/env python3
+
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from pathlib import Path
+
+from omega_identity_evidence import (
+    IdentityEvidenceError,
+    self_test,
+    validate_installed_observations,
+)
+
+
+def parse_arguments() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Validate candidate-bound installed Omega identity observations"
+    )
+    parser.add_argument("--input", type=Path)
+    parser.add_argument("--candidate-digest")
+    parser.add_argument("--evidence-root", type=Path)
+    parser.add_argument("--self-test", action="store_true")
+    return parser.parse_args()
+
+
+def main() -> int:
+    arguments = parse_arguments()
+    try:
+        if arguments.self_test:
+            if any(
+                value is not None
+                for value in (
+                    arguments.input,
+                    arguments.candidate_digest,
+                    arguments.evidence_root,
+                )
+            ):
+                raise IdentityEvidenceError("--self-test does not accept observation inputs")
+            self_test()
+            return 0
+        if (
+            arguments.input is None
+            or arguments.candidate_digest is None
+            or arguments.evidence_root is None
+        ):
+            raise IdentityEvidenceError(
+                "--input, --candidate-digest, and --evidence-root are required"
+            )
+        digest = validate_installed_observations(
+            arguments.input.absolute(),
+            arguments.candidate_digest,
+            arguments.evidence_root.absolute(),
+        )
+        print(
+            json.dumps(
+                {
+                    "schema": "openagents.omega.identity-installed-observations-validation.v1",
+                    "status": "passed",
+                    "receipt_sha256": digest,
+                },
+                sort_keys=True,
+            )
+        )
+        return 0
+    except (IdentityEvidenceError, OSError) as error:
+        print(
+            json.dumps(
+                {
+                    "schema": "openagents.omega.identity-installed-observations-validation.v1",
+                    "status": "failed",
+                    "reason": str(error),
+                },
+                sort_keys=True,
+            ),
+            file=sys.stderr,
+        )
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

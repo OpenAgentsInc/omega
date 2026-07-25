@@ -25,6 +25,7 @@ from omega_identity_evidence import (
     IdentityEvidenceError,
     resolve_evidence_reference,
     validate_identity_matrix,
+    validate_installed_observations,
     validate_installed_tripwires,
 )
 
@@ -507,6 +508,7 @@ def validate_identity_receipt_references(
     evidence_root: Path,
     matrix_digest: str,
     tripwire_digest: str,
+    observation_digest: str,
 ) -> None:
     if not evidence_root.is_dir() or evidence_root.is_symlink():
         raise ProofError("identity evidence root is missing or unsafe")
@@ -515,6 +517,8 @@ def validate_identity_receipt_references(
         "forged_request_rejection": matrix_digest,
         "stale_task_fencing": matrix_digest,
         "installed_secret_tripwires": tripwire_digest,
+        "manual_journey": observation_digest,
+        "accessibility": observation_digest,
     }
     for gate_name, expected_digest in expected.items():
         gate = evidence.get("gates", {}).get(gate_name, {})
@@ -1340,6 +1344,7 @@ def pending_checks() -> dict[str, dict[str, str]]:
         "identity_candidate_admission": {"status": "pending"},
         "identity_matrix_binding": {"status": "pending"},
         "installed_tripwire_binding": {"status": "pending"},
+        "installed_identity_observations_binding": {"status": "pending"},
         "full_auto_candidate_assurance": {"status": "pending"},
         "manual_evidence_binding": {"status": "pending"},
         "network_capture_binding": {"status": "pending"},
@@ -1406,6 +1411,7 @@ def prove(arguments: argparse.Namespace) -> int:
         "identity_evidence": arguments.identity_evidence,
         "identity_matrix": arguments.identity_matrix,
         "installed_tripwires": arguments.installed_tripwires,
+        "installed_identity_observations": arguments.installed_identity_observations,
         "full_auto_evidence": arguments.full_auto_evidence,
         "manual_evidence": arguments.manual_evidence,
         "network_evidence": arguments.network_evidence,
@@ -1432,6 +1438,8 @@ def prove(arguments: argparse.Namespace) -> int:
                 checks["identity_matrix_binding"] = {"status": "blocked"}
             elif name == "installed_tripwires":
                 checks["installed_tripwire_binding"] = {"status": "blocked"}
+            elif name == "installed_identity_observations":
+                checks["installed_identity_observations_binding"] = {"status": "blocked"}
             elif name == "full_auto_evidence":
                 checks["full_auto_candidate_assurance"] = {"status": "blocked"}
             elif name == "manual_evidence":
@@ -1583,10 +1591,29 @@ def prove(arguments: argparse.Namespace) -> int:
                 "reason": str(error),
             }
 
+    if candidate_digest and arguments.installed_identity_observations.is_file():
+        try:
+            digest = validate_installed_observations(
+                arguments.installed_identity_observations,
+                candidate_digest,
+                arguments.evidence_root,
+            )
+            checks["installed_identity_observations_binding"] = {
+                "status": "passed",
+                "sha256": digest,
+            }
+        except IdentityEvidenceError as error:
+            blockers.append(str(error))
+            checks["installed_identity_observations_binding"] = {
+                "status": "blocked",
+                "reason": str(error),
+            }
+
     if (
         identity_evidence is not None
         and checks["identity_matrix_binding"].get("status") == "passed"
         and checks["installed_tripwire_binding"].get("status") == "passed"
+        and checks["installed_identity_observations_binding"].get("status") == "passed"
     ):
         try:
             validate_identity_receipt_references(
@@ -1594,6 +1621,7 @@ def prove(arguments: argparse.Namespace) -> int:
                 arguments.evidence_root,
                 checks["identity_matrix_binding"]["sha256"],
                 checks["installed_tripwire_binding"]["sha256"],
+                checks["installed_identity_observations_binding"]["sha256"],
             )
         except ProofError as error:
             blockers.append(str(error))
@@ -2380,6 +2408,7 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--identity-evidence", type=Path)
     parser.add_argument("--identity-matrix", type=Path)
     parser.add_argument("--installed-tripwires", type=Path)
+    parser.add_argument("--installed-identity-observations", type=Path)
     parser.add_argument("--evidence-root", type=Path)
     parser.add_argument("--full-auto-evidence", type=Path)
     parser.add_argument("--manual-evidence", type=Path)
@@ -2397,6 +2426,7 @@ def parse_arguments() -> argparse.Namespace:
             "identity_evidence",
             "identity_matrix",
             "installed_tripwires",
+            "installed_identity_observations",
             "evidence_root",
             "full_auto_evidence",
             "manual_evidence",

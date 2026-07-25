@@ -36,6 +36,7 @@ script/prove-omega-rc-install \
   --identity-evidence target/omega-identity-evidence/candidate-evidence.json \
   --identity-matrix target/omega-identity-proof/matrix-evidence.json \
   --installed-tripwires target/omega-identity-proof/installed-secret-tripwires.json \
+  --installed-identity-observations target/omega-identity-proof/installed-observations.json \
   --evidence-root target/omega-identity-proof \
   --full-auto-evidence target/omega-full-auto-evidence/candidate-evidence.json \
   --manual-evidence target/omega-rc-proof/manual-evidence.json \
@@ -59,6 +60,7 @@ script/generate-omega-identity-candidate-evidence \
   --cargo-lock-snapshot target/omega-rc/Cargo.lock.omega-v0.2.0-rc3 \
   --identity-matrix target/omega-identity-proof/matrix-evidence.json \
   --installed-tripwires target/omega-identity-proof/installed-secret-tripwires.json \
+  --installed-observations target/omega-identity-proof/installed-observations.json \
   --evidence-root target/omega-identity-proof \
   --attestations-dir target/omega-identity-proof/attestations
 ```
@@ -122,9 +124,43 @@ The `evidence` object keys must exactly match that gate's
 stale-task, and installed-tripwire attestations use exact
 `{"path":"relative/file.json","sha256":"..."}` references beneath
 `--evidence-root`; the generator rejects traversal, symlinks, missing files,
-digest mismatch, and substitution of another receipt. Other gates retain
+digest mismatch, and substitution of another receipt. Manual-journey and
+accessibility attestations use the same reference shape and must bind the
+validated installed-observations receipt described below. Other gates retain
 nonempty candidate-bound results where a file receipt is not applicable. One
 generic evidence key cannot pass a multi-requirement gate.
+
+Validate the installed manual and accessibility packet independently before
+generation:
+
+```sh
+script/validate-omega-identity-observations \
+  --input target/omega-identity-proof/installed-observations.json \
+  --candidate-digest "<candidate-sha256>" \
+  --evidence-root "$PWD/target/omega-identity-proof"
+```
+
+The packet uses schema
+`openagents.omega.identity-installed-observations.v1` and contains exact
+`manual_journey` and `accessibility` arrays. Every entry has only `check`,
+`status`, `observed_at`, typed `facts`, and one or more content-addressed
+`evidence_refs`. The manual inventory is identity-first first run, the
+preserved Aiur/Ayu/Gruvbox Theme families with visible Agent Setup, and equal
+before/after Zed digests. The accessibility inventory is forward and reverse
+keyboard traversal with visible focus and keyboard activation; named
+screen-reader output with labeled controls, announced identity status, and no
+secret value; exact 360-pixel width without overflow; UI font size of at least
+18 pixels without clipping; light and dark legibility; system increased
+contrast; and system reduced motion with no motion required for completion.
+
+The validator rejects missing or extra checks and facts, non-passed status,
+timestamps without timezones, duplicate references, absolute or parent paths,
+symbolic links in any referenced path, digest mismatch, stale candidate
+binding, changed Zed state, and an invalid internal packet digest. It does not
+capture or infer screen-reader, screenshot, setting, or visible results.
+Omega's `dev: dump accessibility tree` action supplies structured
+assistive-technology corroboration after the platform accessibility adapter is
+active; an operator still records the visible and screen-reader observations.
 
 Only a record with every required gate validly attested sets
 `candidate_admitted: true`, reports `status: "admitted"`, and exits zero.
