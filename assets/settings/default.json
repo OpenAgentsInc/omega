@@ -1060,7 +1060,7 @@
     // Omega ships this on. It was turned off by the Zed service-isolation
     // sweep, which was correct for the hosted-model path and wrong for the
     // agent as a whole: the agent runtime, its tools, and every local
-    // provider are Omega's own. See OMEGA-DELTA-0011.
+    // provider are Omega's own. See OMEGA-DELTA-0013.
     "enabled": true,
     // Whether to show the agent panel button in the status bar.
     "button": true,

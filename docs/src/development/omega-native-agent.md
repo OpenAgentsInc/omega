@@ -45,10 +45,10 @@ also disables the Agent Panel and removes its actions.
 Zed Agent is an agent runtime, not a model. It needs a language model configured
 through Omega's inherited LLM provider support.
 
-Omega's default native-agent selection is `ollama/llama3.1`. It only works when
-that model is available from a running Ollama installation. You can instead
-configure another direct provider, an OpenAI-compatible endpoint, or another
-supported local provider in Agent Settings.
+Omega's default native-agent selection is `google/gemini-3.6-flash`. It needs a
+Google API key, which you enter in Agent Settings. You can instead configure
+another direct provider, an OpenAI-compatible endpoint, or a local provider
+such as Ollama in Agent Settings.
 
 Omega deliberately does not provide Zed-hosted models:
 

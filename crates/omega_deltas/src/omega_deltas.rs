@@ -786,6 +786,43 @@ mod tests {
         }
     }
 
+    /// OMEGA-DELTA-0013. The shipped default model is pinned by name.
+    ///
+    /// The service-isolation test asserts only that the default provider is
+    /// `google`, because what it protects is that the default never points at
+    /// a Zed service. That leaves the model string free: a rebase could swap
+    /// `gemini-3.6-flash` for any other Google model and every existing check
+    /// would still pass. The owner chose this model specifically, so it is
+    /// pinned here by name.
+    ///
+    /// Changing the default model is a real decision. Update this constant and
+    /// the `OMEGA-DELTA-0013` entry together, so the registry never disagrees
+    /// with what ships.
+    #[test]
+    fn the_default_model_is_pinned() {
+        const EXPECTED_PROVIDER: &str = "google";
+        const EXPECTED_MODEL: &str = "gemini-3.6-flash";
+
+        let settings = default_settings().expect("default settings parse");
+        let default_model = default_setting(&settings, "agent.default_model")
+            .expect("agent.default_model must be present in the shipped defaults");
+
+        for (key, expected) in [
+            ("provider", EXPECTED_PROVIDER),
+            ("model", EXPECTED_MODEL),
+        ] {
+            assert_eq!(
+                default_model.get(key).and_then(serde_json::Value::as_str),
+                Some(expected),
+                "OMEGA-DELTA-0013: agent.default_model.{key} must be \
+                 {expected:?}. The owner selected {EXPECTED_PROVIDER}/\
+                 {EXPECTED_MODEL} deliberately; the service-isolation test \
+                 pins only the provider, so without this the model can change \
+                 silently."
+            );
+        }
+    }
+
     /// OMEGA-DELTA-0014. A protected recovery must not present a control whose
     /// label claims the protection has not happened.
     ///

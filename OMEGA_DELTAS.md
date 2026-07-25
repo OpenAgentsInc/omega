@@ -274,11 +274,20 @@ cargo test -p omega_deltas
 - **`cmd-shift-a` / `ctrl-shift-a`** now opens a new agent thread globally.
   `agent::NewThread` previously existed only in panel-scoped contexts bound to
   `cmd-n`, so it could not start a thread unless the panel already had focus.
-- **Known limitation, not hidden:** `agent.default_model` is still
-  `ollama/llama3.1`, so out of the box the agent needs Ollama running locally.
-  Changing that default is a separate decision, and the service-isolation test
-  asserts the current value (`service_isolation.rs:113`).
-- **Enforced by:** `the_agent_ships_enabled`.
+- **The default model is `google/gemini-3.6-flash`.** An earlier revision of
+  this entry recorded `ollama/llama3.1` and said the agent needed a local
+  Ollama to work out of the box. That stopped being true when the owner set the
+  Google default, and this text is corrected rather than left to mislead.
+  The agent now needs a Google API key, not a local model server.
+- **Why the isolation test alone was not enough.** The service-isolation test
+  asserts only that the default provider is `google`
+  (`crates/app_identity/src/service_isolation.rs`), because what it protects is
+  that the default never points at a *Zed* service. That is the right scope for
+  that test, but it leaves the model string unpinned: a rebase could change
+  `gemini-3.6-flash` to any other Google model and every check would stay
+  green.
+- **Enforced by:** `the_agent_ships_enabled` and
+  `the_default_model_is_pinned`.
 
 ### OMEGA-DELTA-0014 — A protected recovery offers replacement, not protection
 
