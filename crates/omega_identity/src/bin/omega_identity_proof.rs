@@ -1,11 +1,11 @@
-use std::{path::PathBuf, process::ExitCode};
+use std::{io::Read as _, path::PathBuf, process::ExitCode};
 
 use anyhow::{Context as _, Result, bail};
 use clap::{Parser, Subcommand, ValueEnum};
 use omega_identity::{
     AdmittedSigningRequest, IDENTITY_PROOF_KEYRING_ACCOUNT, IDENTITY_PROOF_KEYRING_SERVICE,
     IDENTITY_PROOF_PROTOCOL, IdentityProofService, IdentityRef, ProofCrashBoundary,
-    ProofSafeScenario, ReceiptRef, SigningPurpose, UnsignedEventTemplate,
+    ProofSafeScenario, ReceiptRef, RecoveryPassword, SigningPurpose, UnsignedEventTemplate,
 };
 use serde::Serialize;
 use serde_json::json;
@@ -60,6 +60,26 @@ enum Command {
     SimulateSafe {
         #[arg(long, value_enum)]
         scenario: SafeScenario,
+    },
+    ProtectRecovery {
+        #[arg(long)]
+        identity_ref: String,
+        #[arg(long)]
+        password_fd: i32,
+    },
+    Recover {
+        #[arg(long)]
+        receipt: String,
+        #[arg(long)]
+        password_fd: i32,
+    },
+    ProbeWrongRecovery {
+        #[arg(long)]
+        password_fd: i32,
+    },
+    ProbeCorruptRecovery {
+        #[arg(long)]
+        password_fd: i32,
     },
     Reset {
         #[arg(long)]
@@ -216,6 +236,34 @@ fn run() -> Result<()> {
             "safe-scenario-simulated",
             service.simulate_safe_scenario(scenario.into()),
         ),
+        Command::ProtectRecovery {
+            identity_ref,
+            password_fd,
+        } => print_outcome(
+            "recovery-protected",
+            service.protect_recovery(
+                &IdentityRef::new(identity_ref)?,
+                read_recovery_password(password_fd)?,
+            )?,
+        ),
+        Command::Recover {
+            receipt,
+            password_fd,
+        } => print_outcome(
+            "recovery-complete",
+            service.recover(
+                read_recovery_password(password_fd)?,
+                ReceiptRef::new(receipt)?,
+            )?,
+        ),
+        Command::ProbeWrongRecovery { password_fd } => print_outcome(
+            "wrong-recovery-password-rejected",
+            service.probe_wrong_recovery_password(read_recovery_password(password_fd)?)?,
+        ),
+        Command::ProbeCorruptRecovery { password_fd } => print_outcome(
+            "corrupt-recovery-artifact-rejected",
+            service.probe_corrupt_recovery_artifact(read_recovery_password(password_fd)?)?,
+        ),
         Command::Reset {
             identity_ref,
             receipt,
@@ -233,6 +281,36 @@ fn run() -> Result<()> {
                 "production_locator_access": "rejected-by-construction",
             }),
         ),
+    }
+}
+
+fn read_recovery_password(file_descriptor: i32) -> Result<RecoveryPassword> {
+    if file_descriptor < 3 {
+        bail!("recovery password requires a protected file descriptor");
+    }
+    #[cfg(unix)]
+    {
+        use std::fs::File;
+        use std::os::fd::FromRawFd as _;
+        use zeroize::Zeroizing;
+
+        let mut file = unsafe { File::from_raw_fd(file_descriptor) };
+        let mut bytes = Zeroizing::new(Vec::with_capacity(1_025));
+        file.by_ref().take(1_025).read_to_end(&mut bytes)?;
+        if bytes.len() > 1_024 {
+            bail!("recovery password exceeds the proof-driver limit");
+        }
+        let mut password = Zeroizing::new(
+            String::from_utf8(std::mem::take(&mut *bytes))
+                .map_err(|_| anyhow::anyhow!("recovery password is not UTF-8"))?,
+        );
+        return RecoveryPassword::new(std::mem::take(&mut *password))
+            .map_err(|error| anyhow::anyhow!(error));
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = file_descriptor;
+        bail!("protected password file descriptors are unsupported on this platform");
     }
 }
 

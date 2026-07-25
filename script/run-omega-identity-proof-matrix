@@ -6,8 +6,10 @@ import argparse
 import concurrent.futures
 import hashlib
 import json
+import os
 import plistlib
 import re
+import secrets
 import subprocess
 import sys
 import tempfile
@@ -178,14 +180,45 @@ class Driver:
         self.binary = binary
 
     def invoke(
-        self, root: Path, command: list[str], expected_crash: bool = False
+        self,
+        root: Path,
+        command: list[str],
+        expected_crash: bool = False,
+        offline: bool = False,
+        password: bytearray | None = None,
     ) -> dict[str, Any]:
-        process = subprocess.run(
-            [str(self.binary), "--root", str(root), *command],
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
+        arguments = [str(self.binary), "--root", str(root), *command]
+        read_descriptor: int | None = None
+        write_descriptor: int | None = None
+        try:
+            if password is not None:
+                read_descriptor, write_descriptor = os.pipe()
+                os.write(write_descriptor, password)
+                os.close(write_descriptor)
+                write_descriptor = None
+                arguments.extend(["--password-fd", str(read_descriptor)])
+            if offline:
+                sandbox = Path("/usr/bin/sandbox-exec")
+                if not sandbox.is_file():
+                    raise ProofError("deny_network_sandbox_unavailable")
+                arguments = [
+                    str(sandbox),
+                    "-p",
+                    "(version 1) (allow default) (deny network*)",
+                    *arguments,
+                ]
+            process = subprocess.run(
+                arguments,
+                capture_output=True,
+                text=True,
+                timeout=60,
+                pass_fds=() if read_descriptor is None else (read_descriptor,),
+            )
+        finally:
+            if write_descriptor is not None:
+                os.close(write_descriptor)
+            if read_descriptor is not None:
+                os.close(read_descriptor)
         if expected_crash:
             if process.returncode not in (-9, 137):
                 raise ProofError("expected_crash_not_observed")
@@ -219,13 +252,24 @@ class FakeDriver:
         self.keychain_access = False
 
     def invoke(
-        self, root: Path, command: list[str], expected_crash: bool = False
+        self,
+        root: Path,
+        command: list[str],
+        expected_crash: bool = False,
+        offline: bool = False,
+        password: bytearray | None = None,
     ) -> dict[str, Any]:
         with self.lock:
             key = str(root)
             name = command[0]
             if name == "initialize":
-                self.states[key] = {"state": "absent", "identity": None, "receipt": None}
+                self.states[key] = {
+                    "state": "absent",
+                    "identity": None,
+                    "receipt": None,
+                    "recovery_identity": None,
+                    "password_digest": None,
+                }
                 return self.outcome(
                     "initialized",
                     {
@@ -273,6 +317,47 @@ class FakeDriver:
                         "production_locator_access": "rejected-by-construction",
                     },
                 )
+            if name == "protect-recovery":
+                if not offline or password is None:
+                    raise ProofError("fake_recovery_boundary_missing")
+                state["recovery_identity"] = state["identity"]
+                state["password_digest"] = digest_bytes(password)
+                return self.custody("recovery-protected", state)
+            if name == "probe-wrong-recovery":
+                if not offline or password is None:
+                    raise ProofError("fake_recovery_boundary_missing")
+                if digest_bytes(password) == state["password_digest"]:
+                    raise ProofError("fake_wrong_password_not_wrong")
+                return self.outcome(
+                    "wrong-recovery-password-rejected",
+                    {
+                        "scenario": "wrong-password",
+                        "expected_outcome": "recovery-decryption-rejected",
+                        "production_locator_access": "rejected-by-construction",
+                    },
+                )
+            if name == "probe-corrupt-recovery":
+                if not offline or password is None:
+                    raise ProofError("fake_recovery_boundary_missing")
+                return self.outcome(
+                    "corrupt-recovery-artifact-rejected",
+                    {
+                        "scenario": "corrupt-artifact",
+                        "expected_outcome": "invalid-recovery-artifact-rejected",
+                        "production_locator_access": "rejected-by-construction",
+                    },
+                )
+            if name == "recover":
+                if not offline or password is None:
+                    raise ProofError("fake_recovery_boundary_missing")
+                if digest_bytes(password) != state["password_digest"]:
+                    raise ProofError("fake_recovery_password_invalid")
+                state.update(
+                    state="ready",
+                    identity=state["recovery_identity"],
+                    receipt=command[command.index("--receipt") + 1],
+                )
+                return self.custody("recovery-complete", state)
             if name == "reset":
                 state["reset_pending"] = True
                 if expected_crash:
@@ -374,14 +459,20 @@ class Matrix:
             {"case": name, "status": "passed", "evidence_sha256": canonical_digest(facts)}
         )
 
-    def create(self, root: Path, receipt: str, crash: str | None = None) -> str:
+    def create(
+        self,
+        root: Path,
+        receipt: str,
+        crash: str | None = None,
+        offline: bool = False,
+    ) -> str:
         command = ["create", "--receipt", receipt]
         if crash:
             command.extend(["--crash-after", crash])
-            self.driver.invoke(root, command, expected_crash=True)
+            self.driver.invoke(root, command, expected_crash=True, offline=offline)
             created = self.driver.invoke(root, ["resume-create"])
         else:
-            created = self.driver.invoke(root, command)
+            created = self.driver.invoke(root, command, offline=offline)
         identity = find_identity(created)
         self.active = (root, identity)
         return identity
@@ -433,6 +524,72 @@ class Matrix:
             if safety.get("facts", {}).get("production_locator_access") != "rejected-by-construction":
                 raise ProofError("production_locator_not_rejected")
             self.record("disposable-namespace-safety", safety)
+
+            recovery_password = bytearray(secrets.token_urlsafe(48).encode("ascii"))
+            wrong_password = bytearray(secrets.token_urlsafe(48).encode("ascii"))
+            try:
+                root = self.root()
+                recovery_identity = self.create(
+                    root,
+                    "matrix-offline-recovery-create",
+                    offline=True,
+                )
+                protected = self.driver.invoke(
+                    root,
+                    ["protect-recovery", "--identity-ref", recovery_identity],
+                    offline=True,
+                    password=recovery_password,
+                )
+                wrong = self.driver.invoke(
+                    root,
+                    ["probe-wrong-recovery"],
+                    offline=True,
+                    password=wrong_password,
+                )
+                corrupt = self.driver.invoke(
+                    root,
+                    ["probe-corrupt-recovery"],
+                    offline=True,
+                    password=recovery_password,
+                )
+                if (
+                    wrong.get("outcome") != "wrong-recovery-password-rejected"
+                    or wrong.get("facts", {}).get("scenario") != "wrong-password"
+                    or corrupt.get("outcome") != "corrupt-recovery-artifact-rejected"
+                    or corrupt.get("facts", {}).get("scenario") != "corrupt-artifact"
+                ):
+                    raise ProofError("recovery_rejection_result_invalid")
+                self.record(
+                    "offline-create-and-encrypted-recovery-protection",
+                    {"network_policy": "deny-network", "outcome": protected},
+                )
+                self.record("wrong-recovery-password-rejection", wrong)
+                self.record("corrupt-recovery-artifact-rejection", corrupt)
+                self.cleanup()
+                recovered = self.driver.invoke(
+                    root,
+                    ["recover", "--receipt", "matrix-offline-recovery-adopt"],
+                    offline=True,
+                    password=recovery_password,
+                )
+                if find_identity(recovered) != recovery_identity:
+                    raise ProofError("recovery_changed_identity")
+                self.active = (root, recovery_identity)
+                restarted = self.driver.invoke(root, ["process-start"])
+                if find_identity(restarted) != recovery_identity:
+                    raise ProofError("recovery_restart_changed_identity")
+                self.record(
+                    "encrypted-recovery-and-restart-continuity",
+                    {
+                        "network_policy": "deny-network",
+                        "recovery": recovered,
+                        "restart": restarted,
+                    },
+                )
+                self.cleanup()
+            finally:
+                recovery_password[:] = b"\0" * len(recovery_password)
+                wrong_password[:] = b"\0" * len(wrong_password)
 
             safe_scenarios = (
                 "conflict-custody",
@@ -678,6 +835,10 @@ def self_test() -> None:
         "simulated-conflicting-recovery-selection",
         "simulated-late-completion-fencing",
         "simulated-signer-crash-before-completion",
+        "offline-create-and-encrypted-recovery-protection",
+        "wrong-recovery-password-rejection",
+        "corrupt-recovery-artifact-rejection",
+        "encrypted-recovery-and-restart-continuity",
     }
     if {case["case"] for case in cases} != expected_cases:
         raise ProofError("matrix_case_coverage_incomplete")

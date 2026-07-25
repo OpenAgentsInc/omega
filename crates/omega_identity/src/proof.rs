@@ -8,7 +8,7 @@ use thiserror::Error;
 
 use crate::{
     AdmittedSigningRequest, CustodyError, CustodyResult, IdentityInspection, IdentityRef,
-    IdentityService, ReceiptRef, SigningResult,
+    IdentityService, ReceiptRef, RecoveryPassword, SigningResult,
 };
 
 pub const IDENTITY_PROOF_PROTOCOL: &str = "openagents.omega.identity-proof.v1";
@@ -16,6 +16,8 @@ pub const IDENTITY_PROOF_KEYRING_SERVICE: &str = "com.openagents.omega.identity-
 pub const IDENTITY_PROOF_KEYRING_ACCOUNT: &str = "disposable-proof-only";
 pub const IDENTITY_PROOF_ROOT_PREFIX: &str = "omega-identity-proof-";
 const PROOF_SENTINEL: &str = ".omega-identity-proof-v1.json";
+const PROOF_RECOVERY_ARTIFACT: &str = "disposable-recovery.ncryptsec";
+const PROOF_CORRUPT_RECOVERY_ARTIFACT: &str = "disposable-corrupt-recovery.ncryptsec";
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -53,6 +55,20 @@ pub struct ProofSafeScenarioResult {
     pub production_locator_access: &'static str,
 }
 
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ProofRecoveryRejection {
+    WrongPassword,
+    CorruptArtifact,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ProofRecoveryRejectionResult {
+    pub scenario: ProofRecoveryRejection,
+    pub expected_outcome: &'static str,
+    pub production_locator_access: &'static str,
+}
+
 #[derive(Debug, Error)]
 pub enum IdentityProofError {
     #[error(
@@ -65,6 +81,8 @@ pub enum IdentityProofError {
     MissingSentinel,
     #[error("proof root initialization failed")]
     Io(#[from] std::io::Error),
+    #[error("a recovery input expected to be rejected was admitted")]
+    UnexpectedRecoveryAdmission,
     #[error(transparent)]
     Custody(#[from] CustodyError),
 }
@@ -78,6 +96,7 @@ struct ProofSentinel {
 }
 
 pub struct IdentityProofService {
+    root: PathBuf,
     service: IdentityService,
 }
 
@@ -114,7 +133,8 @@ impl IdentityProofService {
             return Err(IdentityProofError::MissingSentinel);
         }
         Ok(Self {
-            service: IdentityService::for_disposable_proof(root, crash_boundary),
+            service: IdentityService::for_disposable_proof(root.clone(), crash_boundary),
+            root,
         })
     }
 
@@ -153,6 +173,74 @@ impl IdentityProofService {
         Ok(self.service.resume_pending_reset()?)
     }
 
+    pub fn protect_recovery(
+        &self,
+        identity: &IdentityRef,
+        password: RecoveryPassword,
+    ) -> Result<IdentityInspection, IdentityProofError> {
+        self.service.export_recovery_artifact(
+            identity,
+            &self.root.join(PROOF_RECOVERY_ARTIFACT),
+            password,
+        )?;
+        Ok(self.service.inspect_details()?)
+    }
+
+    pub fn recover(
+        &self,
+        password: RecoveryPassword,
+        receipt: ReceiptRef,
+    ) -> Result<IdentityInspection, IdentityProofError> {
+        let candidate = self
+            .service
+            .discover_recovery_artifact(self.root.join(PROOF_RECOVERY_ARTIFACT))?;
+        let prepared = self
+            .service
+            .prepare_recovery_artifact(&candidate, password)?;
+        let candidate_ref = prepared.candidate_ref().clone();
+        let selected = self
+            .service
+            .select_recovery(vec![prepared], &candidate_ref)?;
+        self.service.adopt(selected, receipt)?;
+        Ok(self.service.inspect_details()?)
+    }
+
+    pub fn probe_wrong_recovery_password(
+        &self,
+        password: RecoveryPassword,
+    ) -> Result<ProofRecoveryRejectionResult, IdentityProofError> {
+        let candidate = self
+            .service
+            .discover_recovery_artifact(self.root.join(PROOF_RECOVERY_ARTIFACT))?;
+        match self.service.prepare_recovery_artifact(&candidate, password) {
+            Err(CustodyError::RecoveryDecryptionFailed) => Ok(ProofRecoveryRejectionResult {
+                scenario: ProofRecoveryRejection::WrongPassword,
+                expected_outcome: "recovery-decryption-rejected",
+                production_locator_access: "rejected-by-construction",
+            }),
+            Err(error) => Err(error.into()),
+            Ok(_) => Err(IdentityProofError::UnexpectedRecoveryAdmission),
+        }
+    }
+
+    pub fn probe_corrupt_recovery_artifact(
+        &self,
+        password: RecoveryPassword,
+    ) -> Result<ProofRecoveryRejectionResult, IdentityProofError> {
+        let path = self.root.join(PROOF_CORRUPT_RECOVERY_ARTIFACT);
+        write_corrupt_recovery_artifact(&path)?;
+        let candidate = self.service.discover_recovery_artifact(path)?;
+        match self.service.prepare_recovery_artifact(&candidate, password) {
+            Err(CustodyError::InvalidRecoveryArtifact) => Ok(ProofRecoveryRejectionResult {
+                scenario: ProofRecoveryRejection::CorruptArtifact,
+                expected_outcome: "invalid-recovery-artifact-rejected",
+                production_locator_access: "rejected-by-construction",
+            }),
+            Err(error) => Err(error.into()),
+            Ok(_) => Err(IdentityProofError::UnexpectedRecoveryAdmission),
+        }
+    }
+
     pub fn simulate_safe_scenario(&self, scenario: ProofSafeScenario) -> ProofSafeScenarioResult {
         let expected_outcome = match scenario {
             ProofSafeScenario::ConflictCustody
@@ -177,6 +265,22 @@ impl IdentityProofService {
             production_locator_access: "rejected-by-construction",
         }
     }
+}
+
+fn write_corrupt_recovery_artifact(path: &Path) -> Result<(), std::io::Error> {
+    use std::io::Write as _;
+
+    let mut options = fs::OpenOptions::new();
+    options.create_new(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+
+        options.mode(0o600).custom_flags(libc::O_CLOEXEC);
+    }
+    let mut file = options.open(path)?;
+    file.write_all(b"not-a-valid-nip49-recovery-artifact\n")?;
+    file.sync_all()
 }
 
 fn validate_root_shape(root: &Path) -> Result<(), IdentityProofError> {

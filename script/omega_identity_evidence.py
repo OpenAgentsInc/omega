@@ -38,6 +38,10 @@ MATRIX_CASES = {
     "simulated-conflicting-recovery-selection",
     "simulated-late-completion-fencing",
     "simulated-signer-crash-before-completion",
+    "offline-create-and-encrypted-recovery-protection",
+    "wrong-recovery-password-rejection",
+    "corrupt-recovery-artifact-rejection",
+    "encrypted-recovery-and-restart-continuity",
 }
 TRIPWIRE_SURFACES = {
     "logs",

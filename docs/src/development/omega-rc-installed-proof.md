@@ -234,7 +234,20 @@ unavailable/corrupt secure storage, malformed or unadmitted signing requests,
 conflicting recovery selection, late completion, and signer crash. Simulation
 receipts are labeled as such and do not claim live Keychain execution. It
 resets the disposable entry between live cases and
-fails if final cleanup cannot be proved. Evidence contains candidate and
+fails if final cleanup cannot be proved.
+
+The installed runner also creates a separate proof-only identity under a
+deny-network sandbox, generates an ephemeral recovery password, and passes the
+password to the signed driver only through an inherited file descriptor. The
+driver writes a fixed encrypted artifact inside the internally generated proof
+root. The runner exercises recovery protection, wrong-password rejection,
+corrupt-artifact rejection, recovery adoption, and process-restart identity
+continuity before proving final Keychain cleanup. The password, artifact path,
+identity, and command output are not retained in the public receipt. Downgrade
+and rollback continuity remains a separate real install-lifecycle observation;
+the disposable recovery case does not stand in for that candidate journey.
+
+Evidence contains candidate and
 component digests, case states, and hashes of public driver outcomes; it does
 not retain identities, secrets, command output, temporary paths, or error
 details from the driver.
