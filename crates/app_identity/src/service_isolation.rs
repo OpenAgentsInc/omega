@@ -112,6 +112,9 @@ fn default_settings_enable_registry_acp_without_enabling_zed_production() {
     assert_eq!(settings["edit_predictions"]["provider"], "none");
     assert_eq!(settings["auto_install_extensions"], serde_json::json!({}));
     assert!(!text.contains("\"server_url\": \"https://zed.dev\""));
-    assert_eq!(settings["agent"]["default_model"]["provider"], "ollama");
+    // A direct provider, not a Zed-hosted one. What this assertion protects is
+    // that the default never points at a Zed service; it is not a claim about
+    // which direct provider the owner prefers.
+    assert_eq!(settings["agent"]["default_model"]["provider"], "google");
     assert!(!super::zed_production_services_enabled());
 }

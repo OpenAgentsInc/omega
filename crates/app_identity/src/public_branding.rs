@@ -136,9 +136,23 @@ fn omega_hosted_ai_and_external_agent_copy_is_honest() {
     let ai_onboarding =
         std::fs::read_to_string(workspace_root.join("crates/ai_onboarding/src/ai_onboarding.rs"))
             .expect("read ai_onboarding");
-    assert!(ai_onboarding.contains("not available in Omega"));
-    assert!(!ai_onboarding.contains("Welcome to Zed AI"));
-    assert!(!ai_onboarding.contains("Try Zed Pro for Free"));
+    // This used to require the disclaimer "not available in Omega". omega#60
+    // removed the hosted-AI onboarding surface entirely, so there is nothing
+    // left to disclaim — the file is now a module list. A disclaimer about a
+    // surface that no longer exists is not honesty, it is residue.
+    //
+    // What still matters is that the Zed-cloud copy cannot come back.
+    for forbidden in [
+        "Welcome to Zed AI",
+        "Try Zed Pro for Free",
+        "Zed Pro",
+        "zed.dev",
+    ] {
+        assert!(
+            !ai_onboarding.contains(forbidden),
+            "ai_onboarding must not carry Zed hosted-service copy: {forbidden:?}"
+        );
+    }
 
     let basics =
         std::fs::read_to_string(workspace_root.join("crates/onboarding/src/basics_page.rs"))

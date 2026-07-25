@@ -3,9 +3,10 @@ use std::{collections::BTreeMap, fs, path::PathBuf};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
-const PINNED_PNG_SHA256: &str = "4dc74a8507669f77118a82791a8bf6e85773e1d31a4b16816b46bc2066e452d8";
+const PINNED_PNG_SHA256: &str =
+    "1f80f8d36d459e2bf62c3d1fcb05f42cf6c2a26b84aeb320eb89bedbb489d551";
 const PINNED_ICNS_SHA256: &str =
-    "779a545acbf626c7e319d0dacf106e2e69eb0caf2d506dabe14c343a1925563f";
+    "f6d748c1765161ec785f55137afd548cf1ff23de12d2de14383e8a01c697654d";
 
 #[derive(Debug, Deserialize)]
 struct Manifest {

@@ -1085,10 +1085,12 @@
     "max_content_width": 850,
     // The default model to use when creating new threads.
     "default_model": {
-      // No hosted Omega model is registered yet. Local providers can be chosen
-      // after AI features are re-enabled.
-      "provider": "ollama",
-      "model": "llama3.1",
+      // Owner direction 2026-07-25. Google is a direct provider and reaches no
+      // Zed host, so this does not weaken the service isolation the ollama
+      // default was protecting. It needs a Gemini API key, entered once in the
+      // agent panel, rather than a local model server.
+      "provider": "google",
+      "model": "gemini-3.6-flash",
       "enable_thinking": false,
     },
     // Additional parameters for language model requests. When making a request to a model, parameters will be taken
