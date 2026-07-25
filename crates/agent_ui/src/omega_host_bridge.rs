@@ -28,6 +28,8 @@ const CODEX_AGENT_ID: &str = "codex-acp";
 const CLAUDE_AGENT_ID: &str = "claude-acp";
 const THREAD_CONNECT_ATTEMPTS: usize = 100;
 const THREAD_CONNECT_INTERVAL: Duration = Duration::from_millis(100);
+const CLAUDE_TURN_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+const ACP_CANCEL_GRACE_PERIOD: Duration = Duration::from_secs(10);
 const MAX_ASSISTANT_TEXT_BYTES: usize = 24 * 1024;
 const MAX_EVIDENCE_TURNS: usize = 48;
 const MAX_TOTAL_ASSISTANT_TEXT_BYTES: usize = 6 * 1024;
@@ -66,6 +68,13 @@ struct HostTurn {
     disposition: Option<String>,
     created_at: String,
     updated_at: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HostTurnOutcome {
+    Completed,
+    Failed,
+    TimedOut,
 }
 
 struct HostBridgeState {
@@ -506,6 +515,7 @@ async fn dispatch_turn(
         Ok((thread.entries().len(), thread.session_id().0.to_string()))
     })?;
     validate_ref(&provider_session_ref, "providerSessionRef")?;
+    let turn_timeout = turn_timeout_for_lane(&lane);
     let now = Utc::now().to_rfc3339();
     {
         let mut bridge = state.borrow_mut();
@@ -550,17 +560,55 @@ async fn dispatch_turn(
     let state_for_completion = state.clone();
     let thread_for_completion = thread.clone();
     cx.spawn(async move |cx| {
-        let result = send.await;
+        let outcome = if let Some(timeout) = turn_timeout {
+            let timer = cx.background_executor().timer(timeout);
+            match futures::future::select(send, timer).await {
+                futures::future::Either::Left((result, _)) => {
+                    if result.is_ok() {
+                        HostTurnOutcome::Completed
+                    } else {
+                        HostTurnOutcome::Failed
+                    }
+                }
+                futures::future::Either::Right(((), _)) => {
+                    log::warn!("Omega Full Auto Claude turn exceeded its host deadline");
+                    let cancel = cx.update(|cx| {
+                        thread_for_completion.update(cx, |thread, cx| {
+                            (thread.status() == ThreadStatus::Generating).then(|| thread.cancel(cx))
+                        })
+                    });
+                    if let Some(cancel) = cancel {
+                        let cancel_deadline =
+                            cx.background_executor().timer(ACP_CANCEL_GRACE_PERIOD);
+                        if matches!(
+                            futures::future::select(cancel, cancel_deadline).await,
+                            futures::future::Either::Right(_)
+                        ) {
+                            log::warn!(
+                                "Omega Full Auto Claude cancellation exceeded its grace period"
+                            );
+                        }
+                    }
+                    HostTurnOutcome::TimedOut
+                }
+            }
+        } else if send.await.is_ok() {
+            HostTurnOutcome::Completed
+        } else {
+            HostTurnOutcome::Failed
+        };
         let (end_entry_index, had_error) = cx.update(|cx| {
             let thread = thread_for_completion.read(cx);
             (thread.entries().len(), thread.had_error())
         });
-        if let Err(error) = record_turn_completion(
-            &state_for_completion,
-            &turn_ref,
-            end_entry_index,
-            result.is_ok() && !had_error,
-        ) {
+        let outcome = if outcome == HostTurnOutcome::Completed && had_error {
+            HostTurnOutcome::Failed
+        } else {
+            outcome
+        };
+        if let Err(error) =
+            record_turn_completion(&state_for_completion, &turn_ref, end_entry_index, outcome)
+        {
             log::error!("failed to persist Omega Full Auto host correlation: {error:#}");
         }
     })
@@ -670,6 +718,11 @@ fn refresh_evidence(
                 "state": "blocked",
                 "turnRef": turn.turn_ref,
                 "reason": "agent_turn_failed",
+            }),
+            Some("timed_out") => json!({
+                "state": "blocked",
+                "turnRef": turn.turn_ref,
+                "reason": "provider_turn_timed_out",
             }),
             Some("owner_interrupted") => json!({
                 "state": "blocked",
@@ -969,7 +1022,7 @@ fn record_turn_completion(
     state: &Rc<RefCell<HostBridgeState>>,
     turn_ref: &str,
     end_entry_index: usize,
-    succeeded: bool,
+    outcome: HostTurnOutcome,
 ) -> anyhow::Result<()> {
     {
         let mut bridge = state.borrow_mut();
@@ -984,12 +1037,19 @@ fn record_turn_completion(
                 .find(|turn| turn.turn_ref == turn_ref)
             {
                 if turn.disposition.is_none() {
-                    if succeeded {
-                        turn.phase = "completed".to_string();
-                        turn.disposition = Some("completed".to_string());
-                    } else {
-                        turn.phase = "failed".to_string();
-                        turn.disposition = Some("failed".to_string());
+                    match outcome {
+                        HostTurnOutcome::Completed => {
+                            turn.phase = "completed".to_string();
+                            turn.disposition = Some("completed".to_string());
+                        }
+                        HostTurnOutcome::Failed => {
+                            turn.phase = "failed".to_string();
+                            turn.disposition = Some("failed".to_string());
+                        }
+                        HostTurnOutcome::TimedOut => {
+                            turn.phase = "failed".to_string();
+                            turn.disposition = Some("timed_out".to_string());
+                        }
                     }
                     turn.end_entry_index = Some(end_entry_index);
                     turn.updated_at = Utc::now().to_rfc3339();
@@ -1006,6 +1066,10 @@ fn record_turn_completion(
         }
     }
     persist_correlation_journal(&state.borrow())
+}
+
+fn turn_timeout_for_lane(lane: &str) -> Option<Duration> {
+    (lane == CLAUDE_LOCAL_LANE).then_some(CLAUDE_TURN_TIMEOUT)
 }
 
 fn persist_correlation_journal(state: &HostBridgeState) -> anyhow::Result<()> {
@@ -1322,7 +1386,8 @@ mod tests {
             load_error: None,
         }));
 
-        record_turn_completion(&state, "turn.full-auto.1", 7, true).expect("record completed turn");
+        record_turn_completion(&state, "turn.full-auto.1", 7, HostTurnOutcome::Completed)
+            .expect("record completed turn");
 
         let restored = load_correlation_journal(&path).expect("load correlation journal");
         let turn = &restored[0].turns[0];
@@ -1330,6 +1395,62 @@ mod tests {
         assert_eq!(turn.phase, "completed");
         assert_eq!(turn.disposition.as_deref(), Some("completed"));
         assert_eq!(turn.end_entry_index, Some(7));
+    }
+
+    #[test]
+    fn claude_turns_have_a_bounded_host_deadline() {
+        assert_eq!(
+            turn_timeout_for_lane(CLAUDE_LOCAL_LANE),
+            Some(CLAUDE_TURN_TIMEOUT)
+        );
+        assert_eq!(turn_timeout_for_lane(CODEX_LOCAL_LANE), None);
+    }
+
+    #[test]
+    fn timed_out_turn_is_persisted_as_a_terminal_failure() {
+        let directory = tempdir().expect("tempdir");
+        let path = directory.path().join(CORRELATION_FILE);
+        let thread_id = ThreadId::new();
+        let state = Rc::new(RefCell::new(HostBridgeState {
+            workspace: None,
+            threads: vec![HostThread {
+                workspace_ref: "workspace.omega.supervised".to_string(),
+                lane: CLAUDE_LOCAL_LANE.to_string(),
+                operation_ref: "operation.full-auto.timeout".to_string(),
+                thread_id,
+                conversation: None,
+                turns: vec![HostTurn {
+                    turn_ref: "turn.full-auto.timeout".to_string(),
+                    lane: CLAUDE_LOCAL_LANE.to_string(),
+                    account_ref: None,
+                    model: None,
+                    provider_session_ref: "session.native.timeout".to_string(),
+                    start_entry_index: 2,
+                    end_entry_index: None,
+                    phase: "streaming".to_string(),
+                    disposition: None,
+                    created_at: "2026-07-24T12:00:00Z".to_string(),
+                    updated_at: "2026-07-24T12:00:00Z".to_string(),
+                }],
+                revision: 1,
+            }],
+            correlation_path: path.clone(),
+            load_error: None,
+        }));
+
+        record_turn_completion(
+            &state,
+            "turn.full-auto.timeout",
+            5,
+            HostTurnOutcome::TimedOut,
+        )
+        .expect("record timed-out turn");
+
+        let restored = load_correlation_journal(&path).expect("load correlation journal");
+        let turn = &restored[0].turns[0];
+        assert_eq!(turn.phase, "failed");
+        assert_eq!(turn.disposition.as_deref(), Some("timed_out"));
+        assert_eq!(turn.end_entry_index, Some(5));
     }
 
     #[test]

@@ -21,11 +21,11 @@ GPUI is not run authority.
 | Pack SHA-256 | `4cc1cb2e5d71ff8af6f730248871ee779488a991f21a848880e885331ef31831` |
 | Protocol | `openagents.omega.effectd.v1` |
 | Omega crate | `crates/omega_effectd` |
-| Runtime release | `omega-effectd-v0.1.0-rc.6` |
-| macOS arm64 archive SHA-256 | `b55f703229ff9299923a84b0843f9c926fbd75b08e787f5d6e79744fd114c836` |
-| Runtime manifest asset SHA-256 | `13f0e094c5d120426f4ede3afedd24f04abec71e29abcd7700c0fd2e36037953` |
-| Runtime source commit | `5bb31ac857b917b14c6455a7df268825cfbf773f` |
-| Runtime source tree | `ce9d37bb3a59ae7e2c807e2d524c196af17484ed` |
+| Runtime release | `omega-effectd-v0.1.0-rc.8` |
+| macOS arm64 archive SHA-256 | `01d11597b054d009296d0381b6cd6ed3d31c83b93e75a58845f2ae47bf33226a` |
+| Runtime manifest asset SHA-256 | `74f7eb1043de6662f490351d6587a4e85fb50d65e95aac792b4b32c315081f94` |
+| Runtime source commit | `509ae747f00f6f7ebb413809ff5bd6ea123e1c1c` |
+| Runtime source tree | `063f456be4e196b5eb6eff18f9a14453a52599fc` |
 
 ## Supervisor laws
 
@@ -76,9 +76,9 @@ Installed proof launches both the mounted and installed copies through framed
 `initialize` and `health` requests. The packaged runtime also advertises and
 passes the framed `handoff` contract.
 
-RC.6 projects current run reports into the configured Sync directory, accepts
-authenticated mobile Pause, Resume, and Stop commands with typed outcomes, and
-enforces each run's configured maximum turn count.
+RC.8 retains authenticated Sync/mobile controls and configured turn caps,
+settles `pausing` after a provider turn finishes, and requests host
+interruption on Stop even when the post-restart evidence cache is empty.
 
 Omega registers the reverse-host handler when it creates the shared supervisor.
 The handler stays on GPUI's foreground executor and delegates to the active
@@ -110,6 +110,11 @@ its mutable correlation-state guard, then atomically persists the completed or
 failed disposition. Evidence refresh and owner interruption follow the same
 borrow-before-persist boundary so an ACP completion cannot be left durably as
 `streaming` by a `RefCell` borrow panic.
+Native Claude Full Auto turns have a 10-minute host deadline. On expiry, Omega
+invokes ACP cancellation, waits at most 10 seconds for provider acknowledgement,
+and persists the strict `timed_out` disposition and public-safe
+`provider_turn_timed_out` cause. Codex keeps its existing provider-owned
+completion behavior.
 
 `append_system_note` remains typed `unavailable`. The current `AcpThread`
 entry model contains user messages, assistant messages, tool calls,
