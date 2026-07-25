@@ -548,6 +548,8 @@ impl WebSocketRelayAdapter {
 
         let mut admitted = Vec::new();
         let mut admission_truncated = false;
+        let mut notice: Option<String> = None;
+        let mut closed_reason: Option<String> = None;
         let query_result = loop {
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
@@ -591,12 +593,55 @@ impl WebSocketRelayAdapter {
                         {
                             break query_gap_after_eose(admitted.len(), admission_truncated);
                         }
+                        // NIP-01: the relay has ended our subscription. There is
+                        // no EOSE coming, so waiting out the deadline would only
+                        // turn a clear answer into an opaque timeout.
+                        Some("CLOSED")
+                            if array.get(1).and_then(Value::as_str)
+                                == Some(subscription_id.as_str()) =>
+                        {
+                            closed_reason = array
+                                .get(2)
+                                .and_then(Value::as_str)
+                                .map(str::to_owned)
+                                .or_else(|| Some("relay closed the subscription".into()));
+                            break GapState::Possible;
+                        }
+                        // A NOTICE is not subscription-scoped, so it does not end
+                        // the read. But if this query goes on to time out, the
+                        // relay's own words are a better explanation than a
+                        // generic deadline message.
+                        Some("NOTICE") => {
+                            notice = array
+                                .get(1)
+                                .and_then(Value::as_str)
+                                .map(|text| text.chars().take(200).collect::<String>());
+                        }
                         _ => {}
                     }
                 }
             }
         };
-        self.send_json_until(json!(["CLOSE", subscription_id]), deadline)?;
+        if let Some(reason) = closed_reason {
+            return Err(SarahConversationError::Relay(format!(
+                "relay closed the query subscription: {reason}"
+            )));
+        }
+        // Closing is courtesy. A relay that has stopped answering must not turn
+        // a completed read into an error, and a query that timed out already
+        // carries its own gap state — reporting a write failure instead would
+        // hide the gap behind a transport message.
+        if self
+            .send_json_until(json!(["CLOSE", subscription_id]), deadline)
+            .is_err()
+            && admitted.is_empty()
+            && query_result != GapState::None
+            && let Some(notice) = notice
+        {
+            return Err(SarahConversationError::Relay(format!(
+                "relay query failed: {notice}"
+            )));
+        }
 
         for event in admitted {
             self.events.entry(event.event_id.clone()).or_insert(event);
@@ -1565,9 +1610,30 @@ fn bounded_summary(content: &str) -> String {
 mod tests {
     use nostr::EventBuilder;
 
+    use crate::issue31_nostr::{
+        Issue31HostConfiguration, Issue31HostController, Issue31NostrError, Issue31PairingEvent,
+        Issue31PairingScope,
+    };
     use crate::sarah_conversation::SARAH_TURN_RECORD_KIND;
 
     use super::*;
+
+    // Live proofs against the deployed OpenAgents relay (OMEGA-MOB-31-01).
+    //
+    // These four ran green against `wss://relay.openagents.com` on 2026-07-25,
+    // driving the real `WebSocketRelayAdapter` through connect, NIP-42,
+    // publish, and read-back. The relay then degraded mid-session: it now
+    // answers any `REQ` carrying a `#p` filter with
+    // `["NOTICE","error: Handler error: StorageError"]`, sends no EOSE, and —
+    // because one bad filter poisons the whole `REQ` — returns nothing for the
+    // other filters in the same subscription either. Every Omega query includes
+    // a gift-wrap `#p` filter, so every read is currently blind and the three
+    // read-dependent proofs below no longer reproduce. The publish-side proof
+    // still passes. Tracked in OpenAgentsInc/nostr-effect#170.
+    //
+    // Worth considering once that lands: issuing one subscription per filter,
+    // so a filter the relay cannot serve degrades that record family alone
+    // instead of blinding the client to everything.
 
     /// Live proof against the deployed OpenAgents relay (OMEGA-MOB-31-01).
     ///
@@ -1919,6 +1985,196 @@ mod tests {
         eprintln!(
             "live relay OK: {} records converged, ordered, and the unknown cursor reported an exact gap on {url}",
             page.events.len()
+        );
+    }
+
+    /// Exit: "A revoked device cannot restore its grant from old relay events."
+    ///
+    /// Proven end to end through relay storage rather than in memory. The device
+    /// re-publishes the two records it authors — the pairing request and the
+    /// pairing response — to the live relay, the host reads them back out of
+    /// relay storage, and the host must still refuse.
+    ///
+    /// Two things make this sharp. The replayed records arrive under the rumor
+    /// ids the relay returns, so the host's processed-event de-duplication is
+    /// not what refuses them. And they carry fresh, unexpired timestamps, so the
+    /// liveness check is not what refuses them either. The only thing left
+    /// standing between a revoked device and a brand-new `control_full_auto`
+    /// grant is the revocation itself.
+    ///
+    /// BLOCKED on the deployed relay, and deliberately left failing rather than
+    /// weakened into something that passes. `relay.openagents.com` cannot serve
+    /// any filter carrying a `#p` tag: it answers
+    /// `["NOTICE","error: Handler error: StorageError"]` and never terminates
+    /// the subscription. Every NIP-17/44/59 private record is addressed by `#p`,
+    /// so the whole owner-private lane — pairing, grants, revocations, command
+    /// intents and results, owner projections — is unreadable from the deployed
+    /// relay today. Kind and author filters are unaffected, which is why the
+    /// durable turn-record proofs above pass. Tracked in
+    /// OpenAgentsInc/nostr-effect#170. The revocation law itself is proven
+    /// without the network in `issue31_nostr`.
+    #[test]
+    #[ignore = "requires a live relay; blocked by nostr-effect#170 (#p StorageError)"]
+    fn live_relay_replay_cannot_restore_a_revoked_device_grant() {
+        let Some((url, auth_url)) = live_relay_env() else {
+            eprintln!("OMEGA_LIVE_RELAY_URL unset; skipping");
+            return;
+        };
+        let host_keys = Keys::generate();
+        let device_keys = Keys::generate();
+        let host_public_key_hex = host_keys.public_key().to_hex();
+        let device_public_key_hex = device_keys.public_key().to_hex();
+        let configuration = Issue31HostConfiguration {
+            host_ref: "omega.host.live".into(),
+            host_public_key_hex: host_public_key_hex.clone(),
+            sarah_public_key_hex: Keys::generate().public_key().to_hex(),
+            conversation: format!("sarah.{}", &host_public_key_hex[..24]),
+            display_name: "Live Omega".into(),
+            relay_urls: vec![url.clone()],
+            generation: 1,
+        };
+        let mut controller = Issue31HostController::new(configuration.clone()).expect("controller");
+        controller
+            .set_admitted_device_policy(
+                vec![device_public_key_hex.clone()],
+                vec![Issue31PairingScope::ControlFullAuto],
+            )
+            .expect("admit device");
+
+        let now = nostr::Timestamp::now().as_secs();
+        let request = Issue31PairingRecord::PairingRequest {
+            schema: ISSUE31_PAIRING_SCHEMA.into(),
+            host_ref: configuration.host_ref.clone(),
+            host_public_key_hex: host_public_key_hex.clone(),
+            device_public_key_hex: device_public_key_hex.clone(),
+            issued_at: now,
+            pairing_request_ref: "pairing_request.live.replay".into(),
+            requested_scopes: vec![Issue31PairingScope::ControlFullAuto],
+            expires_at: now + 600,
+        };
+
+        // Pair for real, then have the owner revoke the grant.
+        let challenge = controller
+            .handle_pairing_event(
+                Issue31PairingEvent {
+                    event_id: "a".repeat(64),
+                    record: request.clone(),
+                },
+                now,
+            )
+            .expect("request")
+            .expect("challenge");
+        let challenge_value = match &challenge {
+            Issue31PairingRecord::PairingChallenge { challenge, .. } => challenge.clone(),
+            _ => panic!("challenge"),
+        };
+        controller
+            .record_emitted_pairing("b".repeat(64), challenge)
+            .expect("record challenge");
+        let response = Issue31PairingRecord::PairingResponse {
+            schema: ISSUE31_PAIRING_SCHEMA.into(),
+            host_ref: configuration.host_ref.clone(),
+            host_public_key_hex: host_public_key_hex.clone(),
+            device_public_key_hex,
+            issued_at: now,
+            pairing_response_ref: "pairing_response.live.replay".into(),
+            pairing_challenge_event_id: "b".repeat(64),
+            challenge: challenge_value,
+            expires_at: now + 600,
+        };
+        let grant = controller
+            .handle_pairing_event(
+                Issue31PairingEvent {
+                    event_id: "c".repeat(64),
+                    record: response.clone(),
+                },
+                now,
+            )
+            .expect("response")
+            .expect("grant");
+        let grant_ref = match &grant {
+            Issue31PairingRecord::ScopedGrant { grant_ref, .. } => grant_ref.clone(),
+            _ => panic!("grant"),
+        };
+        controller
+            .record_emitted_pairing("d".repeat(64), grant)
+            .expect("record grant");
+        let revocation = controller
+            .revoke_grant(&grant_ref, now + 1, Some("reason.omega.owner_revoked".into()))
+            .expect("revoke");
+        controller
+            .record_emitted_pairing("e".repeat(64), revocation)
+            .expect("record revocation");
+
+        // The device replays what it authored, through the real relay.
+        let mut device_relay = live_authenticated_adapter(vec![url.clone()], &device_keys);
+        let host_public_key = PublicKey::from_hex(&host_public_key_hex).expect("host key");
+        for record in [&request, &response] {
+            let rumor = EventBuilder::new(
+                Kind::PrivateDirectMessage,
+                serde_json::to_string(record).expect("record json"),
+            )
+            .tag(nostr::Tag::parse(["p", host_public_key_hex.as_str()]).expect("p tag"))
+            .build(device_keys.public_key());
+            let gift_wrap = smol::block_on(EventBuilder::gift_wrap(
+                &device_keys,
+                &host_public_key,
+                rumor,
+                [],
+            ))
+            .expect("gift wrap");
+            live_publish(&mut device_relay, &auth_url, &device_keys, &gift_wrap)
+                .expect("publish the replayed pairing record");
+        }
+
+        // The host reads them back out of relay storage. A publish first, so the
+        // NIP-42 handshake is settled before the query's own deadline starts.
+        let mut host_relay = live_authenticated_adapter(vec![url.clone()], &host_keys);
+        live_publish(
+            &mut host_relay,
+            &auth_url,
+            &host_keys,
+            &live_turn_record(&host_keys, &configuration.conversation, "host online", now),
+        )
+        .expect("host authenticates");
+        let page = host_relay
+            .query(&configuration.conversation, None, 32)
+            .expect("query");
+        let replayed = page
+            .events
+            .iter()
+            .filter_map(|event| {
+                Issue31PairingRecord::decode(event.content_summary.as_bytes())
+                    .ok()
+                    .map(|record| (event.event_id.clone(), record))
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            replayed.len(),
+            2,
+            "the relay must actually return both replayed records, or this proves nothing"
+        );
+
+        for (event_id, record) in replayed {
+            assert!(
+                !controller.pairing_event_was_processed(&event_id),
+                "the replay must arrive under an id the host has never seen, so that \
+                 de-duplication is not what refuses it"
+            );
+            let refusal = controller
+                .handle_pairing_event(Issue31PairingEvent { event_id, record }, now + 2)
+                .expect_err("a revoked device must be refused, however its records arrive");
+            assert!(
+                matches!(&refusal, Issue31NostrError::Invalid(message)
+                    if message.contains("device admission was revoked")),
+                "the refusal must be the revocation, not liveness or dedup: {refusal:?}"
+            );
+        }
+        let projections = controller.grant_projections(now + 2).expect("grants");
+        assert_eq!(projections.len(), 1, "no new grant may exist");
+        assert_eq!(projections[0].status, "revoked");
+        eprintln!(
+            "live relay OK: replayed pairing records from {url} could not restore the revoked grant"
         );
     }
 
