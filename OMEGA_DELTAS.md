@@ -234,3 +234,34 @@ cargo test -p omega_deltas
   list. They die with the feature rather than separately, which is what that
   entry asked for.
 - **Enforced by:** `removed_surfaces_stay_removed`.
+
+### OMEGA-DELTA-0011 — The agent is on by default
+
+- **Upstream Zed:** ships the agent enabled.
+- **Omega, before this:** `agent.enabled` and `agent.button` were both `false`
+  in `assets/settings/default.json`, turned off by commit `9e585569cb`
+  ("Isolate Omega from Zed production services").
+- **Omega now:** both `true`.
+- **Why the original change went too far.** The isolation sweep was right about
+  the hosted-model path — `language_models_cloud` is still gated behind
+  `OMEGA_ALLOW_ZED_SERVICES`, and it stays gated. But it disabled the *agent*,
+  which is not a Zed service. The runtime (`crates/agent`), the thread
+  abstraction (`crates/acp_thread`), the tools, and eighteen local and direct
+  providers are Omega's own and reach no Zed host.
+- **What the owner saw.** With `enabled: false`, `agent_ui` also removes the
+  `agent`, `agents`, and `assistant` namespaces from the command palette
+  (`crates/agent_ui/src/agent_ui.rs:836-840`), and the panel reports
+  `enabled() == false` (`agent_panel.rs:5035`). So the feature was not merely
+  off — it was unreachable, and the Settings UI exposes only `agent.button`,
+  never `agent.enabled`. There was no in-product way to turn it on.
+- **Nothing structural was removed**, which is why this is two booleans: the
+  panel is constructed, the actions are registered, and roughly thirty
+  `agent::*` keybindings already existed and were simply unreachable.
+- **`cmd-shift-a` / `ctrl-shift-a`** now opens a new agent thread globally.
+  `agent::NewThread` previously existed only in panel-scoped contexts bound to
+  `cmd-n`, so it could not start a thread unless the panel already had focus.
+- **Known limitation, not hidden:** `agent.default_model` is still
+  `ollama/llama3.1`, so out of the box the agent needs Ollama running locally.
+  Changing that default is a separate decision, and the service-isolation test
+  asserts the current value (`service_isolation.rs:113`).
+- **Enforced by:** `the_agent_ships_enabled`.

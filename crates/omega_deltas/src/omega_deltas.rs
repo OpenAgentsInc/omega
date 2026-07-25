@@ -33,6 +33,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0008",
     "OMEGA-DELTA-0009",
     "OMEGA-DELTA-0010",
+    "OMEGA-DELTA-0011",
     "OMEGA-DELTA-0010",
     "OMEGA-DELTA-0011",
 ];
@@ -548,6 +549,25 @@ mod tests {
              startup:\n{}",
             offenders.join("\n")
         );
+    }
+
+    /// OMEGA-DELTA-0011. The agent ships reachable.
+    ///
+    /// `enabled: false` also strips the agent namespaces from the command
+    /// palette, and the Settings UI exposes only `agent.button`, so a
+    /// regression here makes the feature unreachable rather than merely off.
+    #[test]
+    fn the_agent_ships_enabled() {
+        let settings = default_settings().expect("default settings parse");
+        for key in ["agent.enabled", "agent.button"] {
+            assert_eq!(
+                default_setting(&settings, key).and_then(serde_json::Value::as_bool),
+                Some(true),
+                "OMEGA-DELTA-0011: {key} must default to true. With it false the \
+                 agent is not reachable from the command palette or the panel, \
+                 and no Settings control turns it back on."
+            );
+        }
     }
 
     /// The registry and the checks must agree, in both directions.

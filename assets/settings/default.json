@@ -1056,9 +1056,14 @@
     // in the prompt when generating git commit messages.
     "commit_message_include_project_rules": true,
     // Whether the agent is enabled.
-    "enabled": false,
+    //
+    // Omega ships this on. It was turned off by the Zed service-isolation
+    // sweep, which was correct for the hosted-model path and wrong for the
+    // agent as a whole: the agent runtime, its tools, and every local
+    // provider are Omega's own. See OMEGA-DELTA-0011.
+    "enabled": true,
     // Whether to show the agent panel button in the status bar.
-    "button": false,
+    "button": true,
     // Where to dock the agent panel. Can be 'left', 'right' or 'bottom'.
     "dock": "left",
     // Whether the agent panel should use flexible (proportional) sizing.

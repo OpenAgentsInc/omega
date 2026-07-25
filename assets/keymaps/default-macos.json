@@ -706,6 +706,7 @@
       "cmd-k s": "workspace::SaveWithoutFormat",
       "alt-shift-enter": "toast::RunAction",
       "cmd-shift-s": "workroom::OpenPanel",
+      "cmd-shift-a": "agent::NewThread",
       "cmd-shift-n": "workspace::NewWindow",
       "ctrl-`": "terminal_panel::Toggle",
       "cmd-1": ["workspace::ActivatePane", 0],
