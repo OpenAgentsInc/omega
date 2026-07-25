@@ -46,6 +46,8 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0016",
     "OMEGA-DELTA-0017",
     "OMEGA-DELTA-0018",
+    "OMEGA-DELTA-0019",
+    "OMEGA-DELTA-0020",
 ];
 
 /// Files deleted from the fork, checked by absence.
@@ -1522,6 +1524,181 @@ mod tests {
     /// invisible to it. Two lanes allocating numbers at the same time produced
     /// exactly that: two `OMEGA-DELTA-0010` entries and two `0011` entries,
     /// which shipped uncaught.
+    /// OMEGA-DELTA-0019. Upstream Zed answers an empty window with
+    /// `Editor::new_file`. Omega answers it with the agent.
+    ///
+    /// Checked in both directions, because either half alone is weak: the
+    /// absence of `Editor::new_file` would also pass if somebody deleted the
+    /// startup path entirely, and the presence of `open_front_door` would also
+    /// pass if it were added beside the buffer rather than instead of it.
+    #[test]
+    fn a_fresh_window_opens_on_the_agent() {
+        let path = repository_path("crates/zed/src/main.rs");
+        let source = std::fs::read_to_string(&path).expect("zed main is readable");
+
+        assert!(
+            !source.contains("Editor::new_file("),
+            "{} calls Editor::new_file again. Upstream Zed opens an empty \
+             untitled buffer on a window with nothing to restore; Omega opens \
+             the agent front door (OMEGA-DELTA-0019).",
+            path.display()
+        );
+
+        let openings = source.matches("AgentPanel::open_front_door(").count();
+        assert_eq!(
+            openings,
+            2,
+            "{} reaches the front door {openings} time(s); \
+             restore_or_create_workspace has two no-restorable-session paths \
+             and both must land there (OMEGA-DELTA-0019).",
+            path.display()
+        );
+
+        // The launchpad behaviour opens no content at all upstream, and Omega
+        // does not override a setting the user set.
+        assert!(
+            source.contains("RestoreOnStartupBehavior::Launchpad => {}"),
+            "{} no longer leaves the launchpad startup behaviour alone \
+             (OMEGA-DELTA-0019).",
+            path.display()
+        );
+    }
+
+    /// OMEGA-DELTA-0020. Full Auto is a surface of the chat panel now.
+    ///
+    /// The owner asked for the dock panel to go. The failure this guards is a
+    /// rebase or a well-meaning cleanup putting it back — or, worse, removing
+    /// the dock panel without moving its two actions, which would silently
+    /// break a user keybinding rather than fail anything.
+    #[test]
+    fn full_auto_is_folded_into_the_chat_panel() {
+        let zed_path = repository_path("crates/zed/src/zed.rs");
+        let zed = std::fs::read_to_string(&zed_path).expect("zed.rs is readable");
+        assert!(
+            !zed.contains("FullAutoPanel"),
+            "{} registers a Full Auto dock panel again. The owner asked for \
+             Full Auto to be folded into the Omega chat UI \
+             (OMEGA-DELTA-0020).",
+            zed_path.display()
+        );
+
+        let panel_path = repository_path("crates/agent_ui/src/agent_panel.rs");
+        let panel = std::fs::read_to_string(&panel_path).expect("agent panel is readable");
+        assert!(
+            panel.contains("FullAutoPanel::new("),
+            "{} no longer constructs the Full Auto surface. Folding it in is \
+             what makes the dock panel's removal a move rather than a deletion \
+             (OMEGA-DELTA-0020).",
+            panel_path.display()
+        );
+
+        // Both actions outlived their panel on purpose: a user keymap may name
+        // them, and the fold moves where Full Auto lives without taking a
+        // binding away. An unanswered action is a silent no-op, not an error,
+        // which is exactly why this needs a test.
+        for action in ["OpenLauncher", "ToggleFullAutoFocus"] {
+            assert!(
+                panel.contains(&format!("_: &{action},")),
+                "{} does not answer the {action} action. It was answered by \
+                 the retired full_auto_ui::init, so dropping it here makes a \
+                 keybinding silently do nothing (OMEGA-DELTA-0020).",
+                panel_path.display()
+            );
+        }
+
+        let lib_path = repository_path("crates/full_auto_ui/src/full_auto_ui.rs");
+        let lib = std::fs::read_to_string(&lib_path).expect("full_auto_ui is readable");
+        assert!(
+            !lib.contains("pub use panel::{init"),
+            "{} exports a panel init again; there is no dock panel to \
+             register (OMEGA-DELTA-0020).",
+            lib_path.display()
+        );
+    }
+
+    /// OMEGA-DELTA-0020, and owner gate 8 behind it.
+    ///
+    /// Only an explicit human action may start Full Auto authority. Folding
+    /// the surface into chat moves where that action lives; it must not add a
+    /// second way to reach it. The strongest mechanical form of that is a call
+    /// count: `start_run` is reached from exactly one place in the GPUI tree,
+    /// and that place is a click handler.
+    ///
+    /// This deliberately scans every crate rather than the one file, because
+    /// the failure worth catching is a *new* caller somewhere else — a tool, a
+    /// slash command, a restored draft — not a change to the known one.
+    ///
+    /// Two distinct calls are counted, because they are two distinct hazards.
+    /// `guard.start_run(` is the supervisor call that creates run authority; a
+    /// second one of those means a second way to create a run. `this.start_run(`
+    /// is the UI entry into it; a second one of those means a second gesture
+    /// can reach the first.
+    #[test]
+    fn only_a_click_listener_starts_a_full_auto_run() {
+        let crates = repository_path("crates");
+        let mut authority: Vec<(String, String)> = Vec::new();
+        let mut entries: Vec<(String, String)> = Vec::new();
+        for_each_source_file(&crates, &["rs"], |path, source| {
+            // `repository_path` yields `…/crates/omega_deltas/../../crates/x`,
+            // so a plain `contains` would see `omega_deltas` in every path.
+            // The crate-relative tail is what identifies the file.
+            let display = path
+                .display()
+                .to_string()
+                .rsplit("crates/")
+                .next()
+                .unwrap_or_default()
+                .to_owned();
+            // `omega_effectd` declares and transports the call; it does not
+            // decide to make one. This file is the check itself, and matching
+            // its own needles would make the count meaningless.
+            if display.starts_with("omega_effectd/") || display.starts_with("omega_deltas/") {
+                return;
+            }
+            for line in source.lines() {
+                let line = line.trim();
+                if line.contains("guard.start_run(") {
+                    authority.push((display.clone(), line.to_owned()));
+                } else if line.contains(".start_run(") {
+                    entries.push((display.clone(), line.to_owned()));
+                }
+            }
+        });
+
+        assert_eq!(
+            authority.len(),
+            1,
+            "Full Auto run authority is created from {} place(s): \
+             {authority:#?}. `omega-effectd` is the sole run authority and the \
+             launch surface is the sole way to ask it for a run \
+             (OMEGA-DELTA-0020).",
+            authority.len()
+        );
+        assert!(
+            authority[0].0.ends_with("full_auto_ui/src/panel.rs"),
+            "Full Auto's run-start moved to {}. It belongs on the launch \
+             surface (OMEGA-DELTA-0020).",
+            authority[0].0
+        );
+
+        assert_eq!(
+            entries.len(),
+            1,
+            "Full Auto's run-start is reachable from {} place(s): {entries:#?}. \
+             Owner gate 8 admits exactly one, and it is a human clicking Start \
+             (OMEGA-DELTA-0020).",
+            entries.len()
+        );
+        assert_eq!(
+            entries[0].1, ".on_click(cx.listener(|this, _, _, cx| this.start_run(cx))),",
+            "Full Auto's run-start is no longer behind a click. Reaching the \
+             launch surface is one human act and starting the run is a second; \
+             collapsing them, or moving the start behind an action, a timer, or \
+             a message handler, is what owner gate 8 forbids \
+             (OMEGA-DELTA-0020)."
+        );
+    }
+
     #[test]
     fn delta_ids_are_unique() {
         let mut seen = std::collections::BTreeSet::new();

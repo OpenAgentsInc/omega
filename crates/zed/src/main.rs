@@ -20,7 +20,6 @@ use client::{Client, ProxySettings, RefreshLlmTokenListener, UserStore, parse_ze
 use collections::HashMap;
 use crashes::InitCrashHandler;
 use db::kvp::{GlobalKeyValueStore, KeyValueStore};
-use editor::Editor;
 use extension::ExtensionHostProxy;
 use fs::{Fs, RealFs};
 use futures::{StreamExt, channel::oneshot};
@@ -64,9 +63,7 @@ use util::{ResultExt, maybe};
 use uuid::Uuid;
 use workspace::{
     AppState, MultiWorkspace, SerializedWorkspaceLocation, SessionWorkspace, Toast,
-    WorkspaceSettings, WorkspaceStore,
-    notifications::NotificationId,
-    restore_multiworkspace,
+    WorkspaceSettings, WorkspaceStore, notifications::NotificationId, restore_multiworkspace,
 };
 use zed::{
     OpenListener, OpenRequest, RawOpenRequest, app_menus, build_window_options,
@@ -589,7 +586,6 @@ fn main() {
         omega_effectd::init_openagents_session(cx);
         omega_effectd::init_openagents_binding(cx);
         omega_effectd::init_with_host_handler(Some(agent_ui::omega_effectd_host_handler(cx)), cx);
-        full_auto_ui::init(cx);
         agent_computer_ui::init(cx);
         workroom_ui::init(cx);
         debugger_tools::init(cx);
@@ -1515,13 +1511,19 @@ pub(crate) async fn restore_or_create_workspace(
                     Default::default(),
                     app_state.clone(),
                     cx,
-                    |workspace, window, cx| {
+                    |_workspace, window, cx| {
                         let restore_on_startup =
                             WorkspaceSettings::get_global(cx).restore_on_startup;
                         match restore_on_startup {
+                            // OMEGA-DELTA-0019. The launchpad behaviour opens
+                            // no content, and overriding it would be Omega
+                            // ignoring a setting the user set.
                             workspace::RestoreOnStartupBehavior::Launchpad => {}
+                            // OMEGA-DELTA-0019. Upstream Zed opens an empty
+                            // untitled buffer here. Omega opens its front
+                            // door: the New Agent Thread surface, focused.
                             _ => {
-                                Editor::new_file(workspace, &Default::default(), window, cx);
+                                agent_ui::AgentPanel::open_front_door(window, cx);
                             }
                         }
                     },
@@ -1535,12 +1537,14 @@ pub(crate) async fn restore_or_create_workspace(
                 Default::default(),
                 app_state,
                 cx,
-                |workspace, window, cx| {
+                |_workspace, window, cx| {
                     let restore_on_startup = WorkspaceSettings::get_global(cx).restore_on_startup;
                     match restore_on_startup {
+                        // OMEGA-DELTA-0019. See above: the launchpad choice
+                        // stands, and the empty buffer becomes the front door.
                         workspace::RestoreOnStartupBehavior::Launchpad => {}
                         _ => {
-                            Editor::new_file(workspace, &Default::default(), window, cx);
+                            agent_ui::AgentPanel::open_front_door(window, cx);
                         }
                     }
                 },

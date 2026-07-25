@@ -145,6 +145,7 @@ members = [
     "crates/ollama",
     "crates/omega_identity",
     "crates/omega_deltas",
+    "crates/omega_front_door",
     "crates/omega_effectd",
     "crates/full_auto_ui",
     "crates/agent_computer_ui",
@@ -416,6 +417,7 @@ oauth_callback_server = { path = "crates/oauth_callback_server" }
 ollama = { path = "crates/ollama" }
 omega_identity = { path = "crates/omega_identity" }
 omega_deltas = { path = "crates/omega_deltas" }
+omega_front_door = { path = "crates/omega_front_door" }
 omega_effectd = { path = "crates/omega_effectd" }
 full_auto_ui = { path = "crates/full_auto_ui" }
 agent_computer_ui = { path = "crates/agent_computer_ui" }

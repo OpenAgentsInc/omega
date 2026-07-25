@@ -99,7 +99,6 @@ db.workspace = true
 debug_adapter_extension.workspace = true
 debugger_tools.workspace = true
 debugger_ui.workspace = true
-full_auto_ui.workspace = true
 agent_computer_ui.workspace = true
 workroom_ui.workspace = true
 omega_effectd.workspace = true

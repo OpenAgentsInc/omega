@@ -22,7 +22,6 @@ use assets::Assets;
 
 use agent_computer_ui::AgentComputerPanel;
 use breadcrumbs::Breadcrumbs;
-use workroom_ui::SarahWorkroomPanel;
 use client::zed_urls;
 use collections::VecDeque;
 use debugger_ui::debugger_panel::DebugPanel;
@@ -30,7 +29,6 @@ use editor::{Editor, MultiBuffer};
 use extension_host::ExtensionStore;
 use feature_flags::{FeatureFlagAppExt as _, PanicFeatureFlag};
 use fs::Fs;
-use full_auto_ui::FullAutoPanel;
 use futures::FutureExt as _;
 use futures::{StreamExt, channel::mpsc, select_biased};
 use git_ui::branch_diff::BranchDiffToolbar;
@@ -76,6 +74,7 @@ use settings::{
     initial_project_settings_content, initial_tasks_content, update_settings_file,
 };
 use sidebar::Sidebar;
+use workroom_ui::SarahWorkroomPanel;
 #[cfg(debug_assertions)]
 use workspace::workspace_error::{ErrorAction, ErrorSeverity, WorkspaceError};
 
@@ -779,7 +778,6 @@ fn initialize_panels(window: &mut Window, cx: &mut Context<Workspace>) -> Task<a
         let terminal_panel = TerminalPanel::load(workspace_handle.clone(), cx.clone());
         let git_panel = GitPanel::load(workspace_handle.clone(), cx.clone());
         let debug_panel = DebugPanel::load(workspace_handle.clone(), cx);
-        let full_auto_panel = FullAutoPanel::load(workspace_handle.clone(), cx.clone());
         let agent_computer_panel = AgentComputerPanel::load(workspace_handle.clone(), cx.clone());
         let sarah_workroom_panel = SarahWorkroomPanel::load(workspace_handle.clone(), cx.clone());
 
@@ -804,7 +802,6 @@ fn initialize_panels(window: &mut Window, cx: &mut Context<Workspace>) -> Task<a
             add_panel_when_ready(terminal_panel, workspace_handle.clone(), cx.clone()),
             add_panel_when_ready(git_panel, workspace_handle.clone(), cx.clone()),
             add_panel_when_ready(debug_panel, workspace_handle.clone(), cx.clone()),
-            add_panel_when_ready(full_auto_panel, workspace_handle.clone(), cx.clone()),
             add_panel_when_ready(agent_computer_panel, workspace_handle.clone(), cx.clone()),
             add_panel_when_ready(sarah_workroom_panel, workspace_handle.clone(), cx.clone()),
             initialize_agent_panel(workspace_handle, cx.clone()).map(|r| r.log_err()),
@@ -5926,7 +5923,6 @@ mod tests {
                 Some(agent_ui::omega_effectd_host_handler(cx)),
                 cx,
             );
-            full_auto_ui::init(cx);
             agent_computer_ui::init(cx);
             workroom_ui::init(cx);
             initialize_workspace(app_state.clone(), cx);

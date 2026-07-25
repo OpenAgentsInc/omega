@@ -497,3 +497,77 @@ cargo test -p omega_deltas
   `crates/zed/resources/` are unchecked. And no name is forbidden unless it is
   written down in `script/omega-brand-gate.json`. Rendered review of a
   candidate is still an owner step, not a mechanical one.
+
+### OMEGA-DELTA-0019 — A window with nothing to restore opens on the agent
+
+- **Upstream Zed:** `restore_or_create_workspace` in `crates/zed/src/main.rs`
+  answers a window with no restorable session by calling
+  `Editor::new_file(...)`, so the first thing a new user meets is an empty
+  untitled buffer. The only exception is `restore_on_startup: "launchpad"`,
+  which opens no content at all.
+- **Omega:** the same two call sites call
+  `agent_ui::AgentPanel::open_front_door(window, cx)`, which focuses the agent
+  panel and activates a new thread. The launchpad behaviour is untouched —
+  overriding it would be Omega ignoring a setting the user set, which is a
+  different bug from the one this fixes.
+- **Why:** owner UX direction on omega#76 — *"`cmd-shift-a` opens the main New
+  Agent Thread screen, and the app defaults to showing that screen — welcome as
+  new agent chat, standard chat input, typing immediately."* Omega is an agent
+  product that inherited a text editor's front door. A blank buffer asks the
+  user to already know what they came to do.
+- **Enforced by:** `crates/omega_deltas/src/omega_deltas.rs`,
+  `a_fresh_window_opens_on_the_agent`, and the typed rule it mirrors in
+  `crates/omega_front_door`, `launch_surface`.
+- **What this delta does not yet deliver.** Landing on the agent panel is not
+  the same as landing on a focused composer. `AgentPanel::activate_new_thread`
+  returns early when no project is open (`has_open_project`, one of seventeen
+  such guards), and the no-restorable-session path is by definition the
+  no-project case, so a genuinely fresh install lands on the agent panel's
+  "Open Project / Clone Repository" state rather than on a composer. Making a
+  thread bind to a project lazily, on its first workspace-touching action, is
+  the remaining half of omega#76 and is not claimed here. A window that
+  restores a project reaches the composer.
+
+### OMEGA-DELTA-0020 — Full Auto is a surface of the chat panel, not a panel of its own
+
+- **Omega, before this:** `FullAutoPanel` was a dock panel in its own right,
+  registered in `initialize_panels` in `crates/zed/src/zed.rs`, with
+  `DockPosition::Right`, a 520px default width, its own Ω dock button
+  tooltipped "Full Auto", `activation_priority` 8, and its own
+  `full_auto_ui::init` registering `full_auto_panel::ToggleFocus` and
+  `full_auto_panel::OpenLauncher` against it. The agent panel's new-thread menu
+  held a "Full Auto" item that dispatched the user out of chat and into that
+  panel.
+- **Omega now:** `agent_ui::AgentPanel` owns a retained `FullAutoPanel` entity
+  and renders it as one of its own surfaces. The dock registration is gone,
+  and both `full_auto_panel::` actions are answered by the agent panel, so a
+  keymap or command-palette invocation that worked before still works. The
+  views themselves did not change: `crates/full_auto_ui` still renders every
+  control it rendered, under a new parent.
+- **Why:** owner direction, 2026-07-25 — *"I don't actually want a Full Auto
+  panel, it should be folded into whatever the chat UI for Omega is - you can
+  decide how to handle this."* Full Auto is one of the three admitted executor
+  classes, so a user starting a lane from chat is the router doing its job.
+  Two destinations for agent work made the user choose a destination before
+  choosing a task.
+- **Why not a composer mode flag.** That is the obvious way to fold a surface
+  into a composer and it is the wrong one. A flag is a boolean the send path
+  reads, so anything able to set it can start a run: a slash command, a
+  restored draft, a model-authored composer insertion. Owner gate 8 says only
+  an explicit human action may start Full Auto authority. The fold therefore
+  keeps a dedicated entry and a dedicated Start button — two human gestures —
+  and moves only where the entry lives. `full_auto_is_not_a_composer_mode_flag`
+  in `crates/full_auto_ui` states the surviving half of that law and now
+  actually checks it.
+- **What the fold costs.** Every *control* survives, which
+  `every_full_auto_affordance_is_mapped` in `crates/omega_front_door` proves
+  against the source rather than against its author's memory. Two capabilities
+  that were not controls do not survive, and are recorded in `FOLD_COSTS`:
+  independent dock placement, and reading a run's full detail beside a chat
+  thread at the same time. Active runs still list on the monitor rail, so
+  noticing a run is preserved; reading one in full alongside a thread is not.
+- **The `Panel` implementation is deliberately kept** on `FullAutoPanel`, so a
+  re-dock is a registration line rather than a rewrite.
+- **Enforced by:** `crates/omega_deltas/src/omega_deltas.rs`,
+  `full_auto_is_folded_into_the_chat_panel` and
+  `only_a_click_listener_starts_a_full_auto_run`.

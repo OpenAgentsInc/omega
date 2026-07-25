@@ -1,4 +1,10 @@
-//! Dedicated Full Auto GPUI panel — launcher + concurrent monitor.
+//! The Full Auto launcher and concurrent run monitor.
+//!
+//! `OMEGA-DELTA-0020`: this was a dock panel of its own until the owner asked
+//! for Full Auto to be folded into the Omega chat UI. The views below did not
+//! change; `agent_ui::AgentPanel` renders them instead of the dock. Reaching
+//! this surface is still a dedicated entry rather than a composer flag,
+//! because reaching it is not the same act as starting a run.
 //!
 //! Mutations go through `omega_effectd`. There is no ordinary composer here.
 
@@ -8,9 +14,9 @@ use agent_settings::AgentSettings;
 use anyhow::{Result, anyhow};
 use editor::Editor;
 use gpui::{
-    Action, AnyWindowHandle, App, AsyncWindowContext, Context, Entity, EventEmitter, FocusHandle,
-    Focusable, InteractiveElement, IntoElement, ParentElement, Render, SharedString, Styled, Task,
-    WeakEntity, Window, div, px,
+    Action, AnyWindowHandle, App, Context, Entity, EventEmitter, FocusHandle, Focusable,
+    InteractiveElement, IntoElement, ParentElement, Render, SharedString, Styled, Task, WeakEntity,
+    Window, div, px,
 };
 use omega_effectd::{
     AttentionDecision, OpenAgentsSession, OpenAgentsSessionPhase, SharedOmegaEffectdSupervisor,
@@ -25,7 +31,7 @@ use workspace::{
     dock::{DockPosition, Panel, PanelEvent},
     notifications::{NotificationId, simple_message_notification::MessageNotification},
 };
-use zed_actions::full_auto_panel::{OpenLauncher, ToggleFocus};
+use zed_actions::full_auto_panel::ToggleFocus;
 
 use crate::draft::{
     DEFAULT_DONE_CONDITION, DEFAULT_TURN_CAP, FULL_AUTO_ACTIVE_LIMIT, FULL_AUTO_WORKSPACE_REF,
@@ -115,36 +121,22 @@ pub struct FullAutoPanel {
     _refresh: Option<Task<()>>,
 }
 
-pub fn init(cx: &mut App) {
-    cx.observe_new(|workspace: &mut Workspace, _, _| {
-        workspace
-            .register_action(|workspace, _: &ToggleFocus, window, cx| {
-                workspace.toggle_panel_focus::<FullAutoPanel>(window, cx);
-            })
-            .register_action(|workspace, _: &OpenLauncher, window, cx| {
-                if let Some(panel) = workspace.panel::<FullAutoPanel>(cx) {
-                    panel.update(cx, |panel, cx| panel.open_launcher(cx));
-                }
-                workspace.focus_panel::<FullAutoPanel>(window, cx);
-            });
-    })
-    .detach();
-}
-
 impl FullAutoPanel {
-    pub fn load(
+    /// Build the Full Auto surface.
+    ///
+    /// `OMEGA-DELTA-0020`. This used to be private, reached only through
+    /// `load` from the dock-panel registration in `crates/zed`. The owner
+    /// asked for Full Auto to be folded into the Omega chat UI, so the agent
+    /// panel constructs it directly and hosts it as one of its surfaces.
+    ///
+    /// The `Panel` implementation below is deliberately kept. It is what a
+    /// re-dock would need, and deleting it would make the fold expensive to
+    /// reverse.
+    pub fn new(
         workspace: WeakEntity<Workspace>,
-        cx: AsyncWindowContext,
-    ) -> Task<Result<Entity<Self>>> {
-        cx.spawn(async move |cx| {
-            let workspace_for_panel = workspace.clone();
-            workspace.update_in(cx, |_workspace, window, cx| {
-                Ok(cx.new(|cx| Self::new(workspace_for_panel, window, cx)))
-            })?
-        })
-    }
-
-    fn new(workspace: WeakEntity<Workspace>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let objective_editor = cx.new(|cx| {
             let mut editor = Editor::multi_line(window, cx);
             editor.set_placeholder_text(

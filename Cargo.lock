@@ -518,6 +518,7 @@ dependencies = [
  "feature_flags",
  "file_icons",
  "fs",
+ "full_auto_ui",
  "futures 0.3.32",
  "fuzzy",
  "git",
@@ -11964,6 +11965,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "omega_front_door"
+version = "0.1.0"
+
+[[package]]
 name = "omega_identity"
 version = "0.1.0"
 dependencies = [
@@ -22324,7 +22329,6 @@ dependencies = [
  "feedback",
  "file_finder",
  "fs",
- "full_auto_ui",
  "futures 0.3.32",
  "git",
  "git_hosting_providers",

@@ -28,12 +28,12 @@ use zed_actions::{
         ResetAgentZoom, ResetOnboarding, ResolveConflictedFilesWithAgent,
         ResolveConflictsWithAgent, ReviewBranchDiff, SelectAgent,
     },
+    agent_computer::OpenPanel as OpenAgentComputerPanel,
     assistant::{
         FocusAgent, ManageSkills, OpenGlobalAgentsMdRules, OpenProjectAgentsMdRules, Toggle,
         ToggleFocus,
     },
-    full_auto_panel::OpenLauncher,
-    agent_computer::OpenPanel as OpenAgentComputerPanel,
+    full_auto_panel::{OpenLauncher, ToggleFocus as ToggleFullAutoFocus},
     workroom::OpenPanel as OpenSarahWorkroomPanel,
 };
 
@@ -72,6 +72,7 @@ use extension_host::ExtensionStore;
 use feature_flags::{CreateThreadToolFeatureFlag, FeatureFlagAppExt as _};
 
 use fs::Fs;
+use full_auto_ui::FullAutoPanel;
 use futures::FutureExt as _;
 use gpui::{
     Action, Anchor, Animation, AnimationExt, AnyElement, App, AsyncWindowContext, ClipboardItem,
@@ -391,6 +392,22 @@ pub fn init(cx: &mut App) {
                                 cx,
                             )
                         });
+                        workspace.focus_panel::<AgentPanel>(window, cx);
+                    }
+                })
+                // `OMEGA-DELTA-0020`. Both Full Auto actions used to be
+                // answered by `full_auto_ui::init` against a dock panel that
+                // no longer exists. They are answered here now, so a keymap or
+                // command-palette invocation that worked before still works.
+                .register_action(|workspace, _: &OpenLauncher, window, cx| {
+                    if let Some(panel) = workspace.panel::<AgentPanel>(cx) {
+                        panel.update(cx, |panel, cx| panel.open_full_auto(true, window, cx));
+                        workspace.focus_panel::<AgentPanel>(window, cx);
+                    }
+                })
+                .register_action(|workspace, _: &ToggleFullAutoFocus, window, cx| {
+                    if let Some(panel) = workspace.panel::<AgentPanel>(cx) {
+                        panel.update(cx, |panel, cx| panel.toggle_full_auto(window, cx));
                         workspace.focus_panel::<AgentPanel>(window, cx);
                     }
                 })
@@ -1186,6 +1203,20 @@ pub struct AgentPanel {
     last_context_source: Option<AgentContextSource>,
 
     is_active: bool,
+
+    /// The Full Auto launch and run surface, folded in from its retired dock
+    /// panel. `OMEGA-DELTA-0020`.
+    ///
+    /// Created on first use and then retained, because the dock panel it
+    /// replaces kept its draft text and selected run across a visit to a chat
+    /// thread. Dropping it on every hide would be a capability regression
+    /// wearing the costume of a cleanup.
+    full_auto: Option<Entity<FullAutoPanel>>,
+    /// Whether the Full Auto surface is the one currently on screen.
+    ///
+    /// Separate from `full_auto` for the reason above: hidden and absent are
+    /// different states.
+    showing_full_auto: bool,
 }
 
 impl AgentPanel {
@@ -1584,6 +1615,8 @@ impl AgentPanel {
             _thread_metadata_store_subscription,
             last_context_source: None,
             is_active: false,
+            full_auto: None,
+            showing_full_auto: false,
         };
 
         panel.ensure_native_agent_connection(cx);
@@ -2915,6 +2948,82 @@ impl AgentPanel {
         self.project.read(cx).visible_worktrees(cx).next().is_some()
     }
 
+    /// Open Omega's front door on a window that has nothing else to show.
+    ///
+    /// `OMEGA-DELTA-0019`. Upstream Zed answers an empty window with
+    /// `Editor::new_file`, so the first thing a new user meets is an untitled
+    /// buffer. Omega answers it with the agent.
+    ///
+    /// The wait is a bounded poll rather than a subscription because the agent
+    /// panel is added to the dock by an async task in `crates/zed`, this runs
+    /// from `Workspace::new_local`'s init callback, and `Workspace` emits no
+    /// "panel added" event to subscribe to. It gives up after a second instead
+    /// of holding a task for the window's lifetime: a window with no agent
+    /// panel a second after opening has AI disabled, and the front door is not
+    /// the right thing to force on it.
+    pub fn open_front_door(window: &mut Window, cx: &mut Context<Workspace>) {
+        cx.spawn_in(window, async move |workspace, cx| {
+            for _ in 0..40 {
+                let opened = workspace.update_in(cx, |workspace, window, cx| {
+                    let Some(panel) = workspace.panel::<Self>(cx) else {
+                        return false;
+                    };
+                    workspace.focus_panel::<Self>(window, cx);
+                    panel.update(cx, |panel, cx| {
+                        panel.activate_new_thread(true, AgentThreadSource::AgentPanel, window, cx);
+                    });
+                    true
+                })?;
+                if opened {
+                    return anyhow::Ok(());
+                }
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(25))
+                    .await;
+            }
+            anyhow::Ok(())
+        })
+        .detach();
+    }
+
+    /// Show the Full Auto launch surface inside this panel.
+    ///
+    /// `OMEGA-DELTA-0020`. The owner asked for Full Auto to be folded into the
+    /// Omega chat UI rather than living in its own dock panel, so this is
+    /// where `full_auto_panel::OpenLauncher` now lands.
+    ///
+    /// Showing the launch surface is not starting a run: the draft arrives
+    /// unsent and "Start Full Auto" is a second, separate human act. Owner
+    /// gate 8 — only an explicit human action may start Full Auto authority —
+    /// is why the fold adds an entry and not a composer mode flag.
+    pub fn open_full_auto(&mut self, focus: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if self.full_auto.is_none() {
+            let workspace = self.workspace.clone();
+            self.full_auto = Some(cx.new(|cx| FullAutoPanel::new(workspace, window, cx)));
+        }
+        self.showing_full_auto = true;
+        if focus {
+            self.focus_handle(cx).focus(window, cx);
+        }
+        cx.notify();
+    }
+
+    /// Toggle the Full Auto surface, for `full_auto_panel::ToggleFocus`.
+    ///
+    /// The retired dock panel answered that action with
+    /// `toggle_panel_focus::<FullAutoPanel>`. Keeping the action working is
+    /// deliberate: a user keymap may already name it, and the fold is meant to
+    /// move where Full Auto lives, not to take a binding away.
+    pub fn toggle_full_auto(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.showing_full_auto {
+            self.showing_full_auto = false;
+            self.focus_handle(cx).focus(window, cx);
+            cx.notify();
+        } else {
+            self.open_full_auto(true, window, cx);
+        }
+    }
+
     fn ensure_native_agent_connection(&self, cx: &mut Context<Self>) {
         if !self.has_open_project(cx) {
             return;
@@ -4213,6 +4322,12 @@ impl AgentPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Opening a thread or terminal leaves the Full Auto surface. The run
+        // itself keeps going — `omega-effectd` owns it, not this panel — and
+        // the surface is retained, so returning to it restores the draft and
+        // the selected run.
+        self.showing_full_auto = false;
+
         let old_view = std::mem::replace(&mut self.base_view, new_view);
         self.retain_running_thread(old_view, cx);
 
@@ -4919,6 +5034,13 @@ impl agent::SiblingThreadHost for AgentPanelSiblingHost {
 
 impl Focusable for AgentPanel {
     fn focus_handle(&self, cx: &App) -> FocusHandle {
+        // The Full Auto surface owns focus while it is showing, so its
+        // objective editor is what a keystroke reaches. `OMEGA-DELTA-0020`.
+        if self.showing_full_auto
+            && let Some(full_auto) = &self.full_auto
+        {
+            return full_auto.focus_handle(cx);
+        }
         match self.visible_surface() {
             VisibleSurface::Uninitialized => self.focus_handle.clone(),
             VisibleSurface::AgentThread(conversation_view) => conversation_view.focus_handle(cx),
@@ -5017,7 +5139,8 @@ impl Panel for AgentPanel {
     }
 
     fn icon(&self, _window: &Window, cx: &App) -> Option<IconName> {
-        (self.enabled(cx) && AgentSettings::get_global(cx).button).then_some(IconName::OmegaAssistant)
+        (self.enabled(cx) && AgentSettings::get_global(cx).button)
+            .then_some(IconName::OmegaAssistant)
     }
 
     fn icon_tooltip(&self, _window: &Window, _cx: &App) -> Option<&'static str> {
@@ -5058,6 +5181,15 @@ impl Panel for AgentPanel {
 
 impl AgentPanel {
     fn ensure_thread_initialized(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // `OMEGA-DELTA-0020`. A user who opened Full Auto as the first thing
+        // in a fresh panel leaves `base_view` uninitialized, so re-activating
+        // the panel would create a thread here, and `set_base_view` would
+        // clear `showing_full_auto` and bounce them out of the surface they
+        // were looking at. Initializing a thread can wait until they ask for
+        // one.
+        if self.showing_full_auto {
+            return;
+        }
         if matches!(self.base_view, BaseView::Uninitialized) {
             if self.pending_terminal_spawn.is_some() {
                 return;
@@ -5308,14 +5440,21 @@ impl AgentPanel {
     }
 
     fn should_show_title_edit(&self, window: &Window, cx: &Context<Self>) -> bool {
-        matches!(
-            self.visible_surface(),
-            VisibleSurface::AgentThread(_) | VisibleSurface::Terminal(_)
-        ) && self.has_open_project(cx)
+        // A Full Auto run's title is edited on its own launch surface, so the
+        // toolbar's thread-title editor must not appear over it.
+        !self.showing_full_auto
+            && matches!(
+                self.visible_surface(),
+                VisibleSurface::AgentThread(_) | VisibleSurface::Terminal(_)
+            )
+            && self.has_open_project(cx)
             && !self.is_title_editor_focused(window, cx)
     }
 
     fn render_title_view(&self, window: &mut Window, cx: &Context<Self>) -> AnyElement {
+        if self.showing_full_auto {
+            return Label::new("Full Auto").truncate().into_any_element();
+        }
         let content = match self.visible_surface() {
             VisibleSurface::AgentThread(conversation_view) => {
                 let server_view_ref = conversation_view.read(cx);
@@ -5847,10 +5986,8 @@ impl AgentPanel {
                                 .icon_color(Color::Accent)
                                 .handler({
                                     move |window, cx| {
-                                        window.dispatch_action(
-                                            Box::new(OpenAgentComputerPanel),
-                                            cx,
-                                        );
+                                        window
+                                            .dispatch_action(Box::new(OpenAgentComputerPanel), cx);
                                     }
                                 }),
                         )
@@ -5860,10 +5997,8 @@ impl AgentPanel {
                                 .icon_color(Color::Accent)
                                 .handler({
                                     move |window, cx| {
-                                        window.dispatch_action(
-                                            Box::new(OpenSarahWorkroomPanel),
-                                            cx,
-                                        );
+                                        window
+                                            .dispatch_action(Box::new(OpenSarahWorkroomPanel), cx);
                                     }
                                 }),
                         )
@@ -6432,41 +6567,50 @@ impl Render for AgentPanel {
             }))
             .child(self.render_toolbar(window, cx))
             .children(self.render_new_user_onboarding(window, cx))
-            .map(|parent| match self.visible_surface() {
-                VisibleSurface::Uninitialized if !self.has_open_project(cx) => {
-                    parent.child(self.render_no_project_state(cx))
+            .map(|parent| {
+                // Full Auto is a surface of this panel, not a destination
+                // beside it. `OMEGA-DELTA-0020`.
+                if self.showing_full_auto
+                    && let Some(full_auto) = self.full_auto.clone()
+                {
+                    return parent.child(full_auto);
                 }
-                VisibleSurface::Uninitialized => parent,
-                VisibleSurface::AgentThread(conversation_view) => parent
-                    .child(conversation_view.clone())
-                    .child(self.render_drag_target(cx)),
-                VisibleSurface::Terminal(terminal_view) => {
-                    let search_bar = self
-                        .active_terminal_id()
-                        .and_then(|terminal_id| self.terminals.get(&terminal_id))
-                        .and_then(|terminal| terminal.search_bar.clone());
-                    let terminal_content = v_flex()
-                        .size_full()
-                        .when_some(search_bar, |this, search_bar| {
-                            this.when(!search_bar.read(cx).is_dismissed(), |this| {
-                                this.child(
-                                    v_flex()
-                                        .group("toolbar")
-                                        .relative()
-                                        .py(DynamicSpacing::Base06.rems(cx))
-                                        .px(DynamicSpacing::Base08.rems(cx))
-                                        .border_b_1()
-                                        .border_color(cx.theme().colors().border_variant)
-                                        .bg(cx.theme().colors().toolbar_background)
-                                        .child(search_bar),
-                                )
+                match self.visible_surface() {
+                    VisibleSurface::Uninitialized if !self.has_open_project(cx) => {
+                        parent.child(self.render_no_project_state(cx))
+                    }
+                    VisibleSurface::Uninitialized => parent,
+                    VisibleSurface::AgentThread(conversation_view) => parent
+                        .child(conversation_view.clone())
+                        .child(self.render_drag_target(cx)),
+                    VisibleSurface::Terminal(terminal_view) => {
+                        let search_bar = self
+                            .active_terminal_id()
+                            .and_then(|terminal_id| self.terminals.get(&terminal_id))
+                            .and_then(|terminal| terminal.search_bar.clone());
+                        let terminal_content = v_flex()
+                            .size_full()
+                            .when_some(search_bar, |this, search_bar| {
+                                this.when(!search_bar.read(cx).is_dismissed(), |this| {
+                                    this.child(
+                                        v_flex()
+                                            .group("toolbar")
+                                            .relative()
+                                            .py(DynamicSpacing::Base06.rems(cx))
+                                            .px(DynamicSpacing::Base08.rems(cx))
+                                            .border_b_1()
+                                            .border_color(cx.theme().colors().border_variant)
+                                            .bg(cx.theme().colors().toolbar_background)
+                                            .child(search_bar),
+                                    )
+                                })
                             })
-                        })
-                        .child(terminal_view.clone());
+                            .child(terminal_view.clone());
 
-                    parent
-                        .child(terminal_content)
-                        .child(self.render_drag_target(cx))
+                        parent
+                            .child(terminal_content)
+                            .child(self.render_drag_target(cx))
+                    }
                 }
             });
 

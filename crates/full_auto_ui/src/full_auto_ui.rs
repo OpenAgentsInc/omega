@@ -19,7 +19,7 @@ pub use issue31_adjunct::{
     Issue31HostPublication,
     project_issue31_full_auto_adjunct, Issue31FullAutoLiveSources, Issue31FullAutoProjectionError,
 };
-pub use panel::{init, FullAutoPanel};
+pub use panel::FullAutoPanel;
 pub use provider_roster::{parse_provider_accounts, ProviderAccountRow};
 
 #[cfg(test)]
@@ -35,12 +35,37 @@ mod tests {
         assert!(validate_launcher_draft(&draft).ok);
     }
 
+    /// Product law, restated for `OMEGA-DELTA-0020`.
+    ///
+    /// The owner asked for Full Auto to be folded into the Omega chat UI, so
+    /// "dedicated panel" is no longer the right half of this law. The half
+    /// that survives is the one with teeth: Full Auto authority is a dedicated
+    /// *entry*, never a flag on a chat draft. A flag is a boolean the send
+    /// path reads, so anything that can set it can start a run — a slash
+    /// command, a restored draft, a model-authored composer insertion. Owner
+    /// gate 8 forbids exactly that.
+    ///
+    /// The earlier version of this test asserted `module_path!()` contains
+    /// `full_auto_ui`, which is true of any test in this crate and therefore
+    /// checked nothing. It is replaced with a check that can fail: the draft
+    /// carries no field the send path could read as "run this automatically".
     #[test]
     fn full_auto_is_not_a_composer_mode_flag() {
-        // Product law: Full Auto authority is a dedicated panel/entry, not a
-        // chat draft flag. This module exposes no composer_toggle API.
-        let names = module_path!();
-        assert!(names.contains("full_auto_ui"));
+        let draft = format!("{:?}", FullAutoLauncherDraft::default());
+        for flag in [
+            "full_auto: ",
+            "auto: true",
+            "autonomous",
+            "composer_mode",
+            "send_starts_run",
+        ] {
+            assert!(
+                !draft.contains(flag),
+                "FullAutoLauncherDraft grew {flag:?}: {draft}. Full Auto is \
+                 reached by a dedicated entry and started by a dedicated \
+                 button, never by a flag a send path reads."
+            );
+        }
         assert_eq!(FULL_AUTO_ACTIVE_LIMIT, 8);
     }
 }

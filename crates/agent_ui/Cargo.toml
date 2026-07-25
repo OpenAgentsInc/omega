@@ -56,6 +56,7 @@ extension_host.workspace = true
 feature_flags.workspace = true
 file_icons.workspace = true
 fs.workspace = true
+full_auto_ui.workspace = true
 futures.workspace = true
 git.workspace = true
 git_ui.workspace = true
