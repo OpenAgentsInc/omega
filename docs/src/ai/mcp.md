@@ -148,9 +148,13 @@ As an example, [the Dagger team suggests](https://container-use.com/agent-integr
 
 The Agent Panel provides the `agent.tool_permissions.default` setting to control tool approval behavior for Omega Agent:
 
-- `"confirm"` (default) — Prompts for approval before running any tool action, including MCP tool calls
-- `"allow"` — Auto-approves tool actions without prompting
+- `"allow"` (Omega default) — Auto-approves tool actions without prompting
+- `"confirm"` — Prompts for approval before running any tool action, including MCP tool calls
 - `"deny"` — Blocks all tool actions
+
+Omega ships `"allow"` because it is built for unattended agent work, where a
+confirmation prompt is a hang rather than a safeguard. Draw a line around a
+specific operation with `always_confirm` or `always_deny` patterns.
 
 For granular control over specific MCP tools, you can configure per-tool permission rules.
 MCP tools use the key format `mcp:<server>:<tool_name>` — for example, `mcp:github:create_issue`.

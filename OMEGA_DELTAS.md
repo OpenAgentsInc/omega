@@ -22,6 +22,13 @@ together.
   it, not what the commit did.
 - **Removing a delta is a policy change**, and needs the same care as adding
   one: delete the entry, the check, and the test together.
+- **An inherited test that contradicts a live delta loses.** A rebase can bring
+  back an upstream test asserting the pre-Omega value, which makes the tree
+  self-contradictory: two tests, one value, neither able to pass. The delta is
+  the policy record, so update the inherited assertion to the Omega value and
+  name the delta ID in a comment beside it. Do not delete the test to reach
+  green — establish what else it covered and keep that coverage under a fixture
+  that does not depend on the shipped default.
 - **An ID names exactly one entry, and IDs are never reused.**
   `OMEGA-DELTA-0012` and `OMEGA-DELTA-0013` were originally landed as second
   uses of `0010` and `0011` by two lanes allocating numbers at the same time,
@@ -93,6 +100,16 @@ cargo test -p omega_deltas
 - **Known tradeoff, stated plainly:** an agent can now run a destructive command
   without asking. That is the requested behaviour, not an oversight.
 - **Enforced by:** `agent_tool_permissions_default_to_allow`.
+- **Inherited test reconciled, 2026-07-25 (omega#73).**
+  `agent_settings::test_default_json_tool_permissions_parse` reads the shipped
+  `default.json` and still asserted the upstream `Confirm`, so the tree
+  contained two tests asserting opposite things about one value and neither
+  could pass. That test arrived with an upstream rebase and was never
+  reconciled with this delta. It now asserts `Allow` and cites this ID, and the
+  `"confirm"` parse coverage it used to provide incidentally was moved to an
+  explicit fixture in `test_tool_permissions_explicit_global_default` rather
+  than deleted — the parser must still understand `"confirm"`, because that is
+  how an operator draws the line back.
 
 ### OMEGA-DELTA-0003 — Quitting is never confirmed
 

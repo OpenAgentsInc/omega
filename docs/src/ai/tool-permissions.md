@@ -85,7 +85,7 @@ For model-invoked [Skills](./skills.md), use the `skill` tool. A user-invoked `/
 
 | Option           | Description                                                                    |
 | ---------------- | ------------------------------------------------------------------------------ |
-| `default`        | Fallback when no patterns match: `"confirm"` (default), `"allow"`, or `"deny"` |
+| `default`        | Fallback when no patterns match: `"allow"` (Omega default), `"confirm"`, or `"deny"` |
 | `always_allow`   | Patterns that auto-approve (unless deny or confirm also matches)               |
 | `always_deny`    | Patterns that block immediately—highest priority, cannot be overridden         |
 | `always_confirm` | Patterns that always prompt, even when `tool_permissions.default` is `"allow"` |

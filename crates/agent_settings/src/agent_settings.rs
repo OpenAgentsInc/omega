@@ -1558,7 +1558,21 @@ mod tests {
             serde_json_lenient::from_value(tool_permissions_value.clone()).unwrap();
         let permissions = compile_tool_permissions(Some(content));
 
-        assert_eq!(permissions.default, ToolPermissionMode::Confirm);
+        // OMEGA-DELTA-0002: Omega ships "allow" here; upstream Zed ships
+        // "confirm". Omega runs agents unattended, where a confirmation prompt
+        // is a hang rather than a safeguard, so the shipped default does not
+        // ask before every tool action. Do not "fix" this back to Confirm to
+        // match upstream — the divergence is deliberate and is independently
+        // enforced by omega_deltas::agent_tool_permissions_default_to_allow.
+        // Parsing of the "confirm" mode itself stays covered by
+        // test_tool_permissions_explicit_global_default.
+        assert_eq!(
+            permissions.default,
+            ToolPermissionMode::Allow,
+            "OMEGA-DELTA-0002: the shipped agent.tool_permissions.default must \
+             be \"allow\". If a rebase restored upstream's \"confirm\", fix \
+             assets/settings/default.json rather than this assertion."
+        );
 
         assert!(
             permissions.tools.is_empty(),
@@ -1582,6 +1596,17 @@ mod tests {
         let content: ToolPermissionsContent = serde_json::from_value(json_deny).unwrap();
         let permissions = compile_tool_permissions(Some(content));
         assert_eq!(permissions.default, ToolPermissionMode::Deny);
+
+        // "confirm" used to be covered only by reading the shipped
+        // default.json, which under OMEGA-DELTA-0002 now says "allow". The
+        // parser still has to understand "confirm", because that is how an
+        // operator draws the line back, so it gets an explicit fixture here.
+        let json_confirm = json!({
+            "default": "confirm"
+        });
+        let content: ToolPermissionsContent = serde_json::from_value(json_confirm).unwrap();
+        let permissions = compile_tool_permissions(Some(content));
+        assert_eq!(permissions.default, ToolPermissionMode::Confirm);
     }
 
     #[gpui::test]

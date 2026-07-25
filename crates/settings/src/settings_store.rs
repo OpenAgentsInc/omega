@@ -1842,9 +1842,17 @@ mod tests {
         store.register_setting::<ItemSettings>();
         store.register_setting::<DefaultLanguageSettings>();
 
+        // Omega ships `auto_update: false`; upstream Zed ships `true`. The
+        // Omega value is asserted by app_identity's
+        // `default_settings_enable_registry_acp_without_enabling_zed_production`.
+        // What this test is actually about is settings layering, so the user
+        // and local values below were flipped with it: each layer still has to
+        // change the value it inherits, or the layering proves nothing.
         assert_eq!(
             store.get::<AutoUpdateSetting>(None),
-            &AutoUpdateSetting { auto_update: true }
+            &AutoUpdateSetting {
+                auto_update: false
+            }
         );
         assert_eq!(
             store.get::<ItemSettings>(None).close_position,
@@ -1854,7 +1862,7 @@ mod tests {
         store
             .set_user_settings(
                 r#"{
-                    "auto_update": false,
+                    "auto_update": true,
                     "tabs": {
                       "close_position": "left"
                     }
@@ -1863,9 +1871,10 @@ mod tests {
             )
             .unwrap();
 
+        // User settings override the default.
         assert_eq!(
             store.get::<AutoUpdateSetting>(None),
-            &AutoUpdateSetting { auto_update: false }
+            &AutoUpdateSetting { auto_update: true }
         );
         assert_eq!(
             store.get::<ItemSettings>(None).close_position,
@@ -1896,7 +1905,7 @@ mod tests {
                 WorktreeId::from_usize(1),
                 LocalSettingsPath::InWorktree(rel_path("root2").into()),
                 LocalSettingsKind::Settings,
-                Some(r#"{ "tab_size": 9, "auto_update": true}"#),
+                Some(r#"{ "tab_size": 9, "auto_update": false}"#),
                 cx,
             )
             .unwrap();
@@ -1931,12 +1940,17 @@ mod tests {
                 tab_size: 9.try_into().unwrap(),
             }
         );
+        // `auto_update` is not a project-local setting, so the `false` written
+        // into root2's local settings above is ignored and the user value
+        // stands. This is the assertion the flip above had to keep meaningful:
+        // the local value must differ from the user value, or a local setting
+        // silently winning would look identical to it being ignored.
         assert_eq!(
             store.get::<AutoUpdateSetting>(Some(SettingsLocation {
                 worktree_id: WorktreeId::from_usize(1),
                 path: rel_path("root2/something")
             })),
-            &AutoUpdateSetting { auto_update: false }
+            &AutoUpdateSetting { auto_update: true }
         );
     }
 
