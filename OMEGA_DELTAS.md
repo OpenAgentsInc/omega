@@ -184,3 +184,14 @@ cargo test -p omega_deltas
 - **Enforced by:** `removed_surfaces_stay_removed`,
   `no_zed_product_copy_survives_anywhere`, and
   `restricted_mode_ui_and_shortcuts_are_absent`.
+
+### OMEGA-DELTA-0010 — The title-bar identity entry stays local
+
+- **Upstream Zed:** the title-bar *Sign In* button starts the hosted-account
+  browser flow.
+- **Omega:** the title bar presents *Omega Identity* and opens the local
+  identity-first onboarding journey.
+- **Why:** Omega's inherited service endpoint is intentionally non-routable.
+  A visible control must not send the owner to a browser error page, and local
+  Omega identity is the product's actual account boundary.
+- **Enforced by:** `title_bar_identity_entry_opens_onboarding`.

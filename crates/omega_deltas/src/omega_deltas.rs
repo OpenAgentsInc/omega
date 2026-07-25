@@ -32,6 +32,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0007",
     "OMEGA-DELTA-0008",
     "OMEGA-DELTA-0009",
+    "OMEGA-DELTA-0010",
 ];
 
 /// Files deleted from the fork, checked by absence.
@@ -424,6 +425,25 @@ mod tests {
             offenders.is_empty(),
             "OMEGA-DELTA-0009 Restricted Mode UI or shortcuts returned:\n{}",
             offenders.join("\n")
+        );
+    }
+
+    /// OMEGA-DELTA-0010. The title-bar identity entry stays local instead of
+    /// invoking the inherited hosted-account sign-in flow.
+    #[test]
+    fn title_bar_identity_entry_opens_onboarding() {
+        let path = repository_path("crates/title_bar/src/title_bar.rs");
+        let source = std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
+        assert!(
+            source.contains("Button::new(\"omega_identity\", \"Omega Identity\")")
+                && source.contains("dispatch_action(OpenOnboarding.boxed_clone()"),
+            "OMEGA-DELTA-0010: the title-bar identity entry must dispatch local Omega onboarding"
+        );
+        assert!(
+            !source.contains("Button::new(\"sign_in\", \"Sign In\")")
+                && !source.contains(".sign_in_with_optional_connect(true"),
+            "OMEGA-DELTA-0010: the title bar must not restore hosted account sign-in"
         );
     }
 

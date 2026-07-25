@@ -51,12 +51,9 @@ use ui::{
 };
 use update_version::UpdateVersion;
 use util::ResultExt;
-use workspace::{
-    AccessibleMode, MultiWorkspace, Workspace,
-    notifications::{NotifyResultExt, NotifyTaskExt as _},
-};
+use workspace::{AccessibleMode, MultiWorkspace, Workspace, notifications::NotifyTaskExt as _};
 
-use zed_actions::OpenRemote;
+use zed_actions::{OpenOnboarding, OpenRemote};
 
 pub use onboarding_banner::restore_banner;
 
@@ -1157,22 +1154,11 @@ impl TitleBar {
     }
 
     pub fn render_sign_in_button(&mut self, _: &mut Context<Self>) -> Button {
-        let client = self.client.clone();
-        let workspace = self.workspace.clone();
-        Button::new("sign_in", "Sign In")
+        Button::new("omega_identity", "Omega Identity")
             .label_size(LabelSize::Small)
             .tab_index(0isize)
-            .on_click(move |_, window, cx| {
-                let client = client.clone();
-                let workspace = workspace.clone();
-                window
-                    .spawn(cx, async move |mut cx| {
-                        client
-                            .sign_in_with_optional_connect(true, cx)
-                            .await
-                            .notify_workspace_async_err(workspace, &mut cx);
-                    })
-                    .detach();
+            .on_click(|_, window, cx| {
+                window.dispatch_action(OpenOnboarding.boxed_clone(), cx);
             })
     }
 
