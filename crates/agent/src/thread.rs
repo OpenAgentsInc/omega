@@ -804,7 +804,7 @@ pub struct SiblingThreadRequest {
     pub title: SharedString,
     /// The initial prompt to send to the new thread.
     pub prompt: String,
-    /// Optional agent ID to use. Defaults to the native Zed agent.
+    /// Optional agent ID to use. Defaults to the native Omega Agent executor.
     pub agent_id: Option<String>,
     /// Optional model override, as `provider/model-id`.
     /// Defaults to the user's configured default model for the agent.
@@ -1473,7 +1473,7 @@ impl Thread {
         }
 
         let temp_dir = tempfile::Builder::new()
-            .prefix("zed-agent-terminal-")
+            .prefix("omega-agent-terminal-")
             .tempdir()
             .context("failed to create sandboxed terminal temp directory")?;
         let temp_dir = temp_dir.keep();

@@ -807,14 +807,44 @@ cargo test -p omega_deltas
   `Zed Agent`.
 - **Omega now:** those reachable surfaces identify the admitted first-party
   orchestrator as **Omega Agent** and use the reviewed `OmegaAgent` icon. The
-  compatibility symbol `ZED_AGENT_ID` remains internal so this packet does not
-  turn a product rename into broad implementation churn.
+  identity symbol is `OMEGA_AGENT_ID`, renamed along with the value it holds:
+  the icon rename already paid for the lesson that renaming only the string
+  leaves the next upstream rebase an obvious name to restore the old identity
+  under.
 - **Boundary:** this delta renames the identity projected by the inherited
   native executor. It does not turn `NativeAgent` into the router, make the
   inherited `telemetry_id` an OpenAgents service identity, change run
   authority, or claim that the later routing and receipt packets exist.
-- **Docs:** reachable agent documentation names Omega Agent while retaining
-  the existing `zed-agent.md` path as a stable link.
-- **Enforced by:** `the_first_party_agent_identity_is_omega_agent` in
+- **Telemetry:** `NativeAgentConnection::telemetry_id` still reports the
+  inherited `"zed"` key, because it keys an analytics series and rewriting it
+  would break the series without renaming anything a user sees. The rule is
+  that it stays out of the identity path, and it is now asserted rather than
+  assumed.
+- **Docs:** reachable agent documentation names Omega Agent, and the page
+  moved from `docs/src/ai/zed-agent.md` to `docs/src/ai/omega-agent.md`. The
+  file *name* is checked as well as the contents: falsifying this delta found
+  that restoring the old name passed every check, because a renamed file reads
+  as clean either way.
+- **Kept on purpose:** `assets/icons/ai_zed.svg` still labels Zed's
+  base-keymap preset and Zed's hosted model provider, `zed_urls.rs` still
+  links Zed's own docs, and `gpui_macros` still records that upstream
+  generated a file with Zed's agent. Removing Zed as *our* identity is not
+  erasing Zed as a thing that exists; the allowances in
+  `script/omega-brand-gate.json` name each one with a reason.
+- **Enforced by:** `the_first_party_agent_identity_is_omega_agent`,
+  `no_phrasing_presents_zed_as_the_first_party_agent`, and
+  `the_inherited_telemetry_id_is_not_the_product_identity` in
   `crates/omega_deltas`, plus the existing high-risk public-branding scan in
   `crates/app_identity`.
+- **Not covered:** all three checks read the source tree. None of them opens a
+  packaged application, so nothing here proves the shipped `.app` is clean —
+  that is the packaged brand gate's job (OMEGA-DELTA-0017/0018), and it scans
+  `brand.words`, not this phrase family. The phrase list is a fixed set of
+  substrings: a new way of writing the same claim passes until somebody adds
+  it, exactly as `0.2.0-rc10`'s three-literal scan passed. The scan reaches
+  only the roots and file extensions named in the policy, which is how a
+  `.py` file in the eval harness kept saying "the Zed agent's" through a
+  first pass of this delta. Files outside `scan_roots` — `.github/`,
+  `crates/zed/resources/` — are unread here. And no check looks at a rendered
+  pixel, so a label that is correct in source and truncated, mis-cased, or
+  absent on screen still passes.

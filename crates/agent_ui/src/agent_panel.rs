@@ -995,7 +995,7 @@ pub struct CreateThreadOptions {
     /// Agent to use. Defaults to the panel's selected agent.
     pub agent: Option<Agent>,
     /// Model override, as `provider/model-id`. Only applied when the thread
-    /// uses the native Zed agent.
+    /// uses the native Omega Agent executor.
     pub model: Option<String>,
     /// Working directories to attach to the new thread (e.g., the path of a
     /// freshly-created sibling worktree). When `None`, the thread inherits
@@ -4829,7 +4829,7 @@ impl agent::SiblingThreadHost for AgentPanelSiblingHost {
         cx.spawn(async move |cx| {
             let agent_choice = match request.agent_id.as_deref() {
                 None => None,
-                Some(id) if id == agent::ZED_AGENT_ID.as_ref() => Some(Agent::NativeAgent),
+                Some(id) if id == agent::OMEGA_AGENT_ID.as_ref() => Some(Agent::NativeAgent),
                 Some(id) => {
                     // Reject unknown agent ids up front so the model gets a
                     // structured error pointing at `list_agents_and_models`,
@@ -4978,7 +4978,7 @@ impl agent::SiblingThreadHost for AgentPanelSiblingHost {
 
         let mut agents = Vec::new();
 
-        // Native Zed agent — always available, and we can enumerate models
+        // Native Omega Agent executor — always available, and we can enumerate models
         // directly from the language model registry.
         let native_models = {
             let registry = LanguageModelRegistry::read_global(cx);
@@ -5005,7 +5005,7 @@ impl agent::SiblingThreadHost for AgentPanelSiblingHost {
             models
         };
         agents.push(agent::AvailableAgent {
-            id: agent::ZED_AGENT_ID.to_string(),
+            id: agent::OMEGA_AGENT_ID.to_string(),
             name: Agent::NativeAgent.label(),
             is_native: true,
             models: native_models,
@@ -7019,7 +7019,7 @@ mod tests {
 
     impl AgentConnection for SessionTrackingConnection {
         fn agent_id(&self) -> AgentId {
-            agent::ZED_AGENT_ID.clone()
+            agent::OMEGA_AGENT_ID.clone()
         }
 
         fn telemetry_id(&self) -> SharedString {
@@ -12705,7 +12705,7 @@ mod tests {
 
     impl AgentConnection for DisassociationTrackingConnection {
         fn agent_id(&self) -> AgentId {
-            agent::ZED_AGENT_ID.clone()
+            agent::OMEGA_AGENT_ID.clone()
         }
 
         fn telemetry_id(&self) -> SharedString {

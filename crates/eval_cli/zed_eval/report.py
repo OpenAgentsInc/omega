@@ -12,7 +12,7 @@ The per-trial record has two sources, one canonical each, with no fallbacks:
   - The verdict (pass/fail/errored) comes from the harness' own trial result
     (verifier rewards) — rubric judge for SWE-Atlas, test scripts for
     Terminal-Bench and DeepSWE.
-  - Resource usage (tokens / steps / tool calls) comes from the Zed agent's
+  - Resource usage (tokens / steps / tool calls) comes from Omega Agent's
     `result.json`, which eval-cli emits identically on every harness. There is
     deliberately no secondary parser: if a metric isn't in `result.json`, it's
     reported as absent rather than reconstructed from another file.

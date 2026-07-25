@@ -44,7 +44,7 @@ The implementations are highly platform-specific:
 Note that WSL shells can be used on all Windows projects, regardless of whether
 the files are stored in the Linux filesystem or not.
 
-Though not defined in this crate, the default grants provided by the Zed agent is:
+Though not defined in this crate, the default grants provided by Omega Agent is:
 - read-only access to all files
 - read/write access to current project directories
   - read-only access to any Git metadata, including those in project directories
@@ -299,7 +299,7 @@ mixture of Codex and Chromium's rules.
 Some of the denied services are somewhat questionable (i.e.
 `com.apple.FontObjectsServer`) - there are legitimate uses for an application to
 use this, but on the other hand, fonts can contain executable code, and have
-historically been exploited to achieve RCE. Given that, in the Zed agent, it is
+historically been exploited to achieve RCE. Given that, in Omega Agent, it is
 easy to opt-out of the sandbox, denying seems like a good choice. But we may
 want to revisit this.
 

@@ -405,7 +405,7 @@ fn save_thread_metadata(
         let metadata = ThreadMetadata {
             thread_id,
             session_id: Some(session_id),
-            agent_id: agent::ZED_AGENT_ID.clone(),
+            agent_id: agent::OMEGA_AGENT_ID.clone(),
             title,
             title_override: None,
             updated_at,
@@ -441,7 +441,7 @@ fn save_thread_metadata_with_main_paths(
     let metadata = ThreadMetadata {
         thread_id,
         session_id: Some(session_id),
-        agent_id: agent::ZED_AGENT_ID.clone(),
+        agent_id: agent::OMEGA_AGENT_ID.clone(),
         title: Some(title),
         title_override: None,
         updated_at,
@@ -468,7 +468,7 @@ fn save_draft_metadata_with_main_paths(
     let metadata = ThreadMetadata {
         thread_id,
         session_id: None,
-        agent_id: agent::ZED_AGENT_ID.clone(),
+        agent_id: agent::OMEGA_AGENT_ID.clone(),
         title,
         title_override: None,
         updated_at,
@@ -1096,7 +1096,7 @@ async fn test_visible_entries_as_strings(cx: &mut TestAppContext) {
                 metadata: ThreadMetadata {
                     thread_id: ThreadId::new(),
                     session_id: Some(acp::SessionId::new(Arc::from("t-1"))),
-                    agent_id: AgentId::new("zed-agent"),
+                    agent_id: AgentId::new("custom-agent"),
                     worktree_paths: WorktreePaths::default(),
                     title: Some("Completed thread".into()),
                     title_override: None,
@@ -1123,7 +1123,7 @@ async fn test_visible_entries_as_strings(cx: &mut TestAppContext) {
                 metadata: ThreadMetadata {
                     thread_id: ThreadId::new(),
                     session_id: Some(acp::SessionId::new(Arc::from("t-2"))),
-                    agent_id: AgentId::new("zed-agent"),
+                    agent_id: AgentId::new("custom-agent"),
                     worktree_paths: WorktreePaths::default(),
                     title: Some("Running thread".into()),
                     title_override: None,
@@ -1150,7 +1150,7 @@ async fn test_visible_entries_as_strings(cx: &mut TestAppContext) {
                 metadata: ThreadMetadata {
                     thread_id: ThreadId::new(),
                     session_id: Some(acp::SessionId::new(Arc::from("t-3"))),
-                    agent_id: AgentId::new("zed-agent"),
+                    agent_id: AgentId::new("custom-agent"),
                     worktree_paths: WorktreePaths::default(),
                     title: Some("Error thread".into()),
                     title_override: None,
@@ -1178,7 +1178,7 @@ async fn test_visible_entries_as_strings(cx: &mut TestAppContext) {
                 metadata: ThreadMetadata {
                     thread_id: ThreadId::new(),
                     session_id: Some(acp::SessionId::new(Arc::from("t-4"))),
-                    agent_id: AgentId::new("zed-agent"),
+                    agent_id: AgentId::new("custom-agent"),
                     worktree_paths: WorktreePaths::default(),
                     title: Some("Waiting thread".into()),
                     title_override: None,
@@ -1206,7 +1206,7 @@ async fn test_visible_entries_as_strings(cx: &mut TestAppContext) {
                 metadata: ThreadMetadata {
                     thread_id: notified_thread_id,
                     session_id: Some(acp::SessionId::new(Arc::from("t-5"))),
-                    agent_id: AgentId::new("zed-agent"),
+                    agent_id: AgentId::new("custom-agent"),
                     worktree_paths: WorktreePaths::default(),
                     title: Some("Notified thread".into()),
                     title_override: None,
@@ -7456,7 +7456,7 @@ async fn test_sidebar_keeps_multi_root_thread_with_stale_main_paths(cx: &mut Tes
                 ThreadMetadata {
                     thread_id,
                     session_id: Some(session_id.clone()),
-                    agent_id: agent::ZED_AGENT_ID.clone(),
+                    agent_id: agent::OMEGA_AGENT_ID.clone(),
                     title: Some("Stale Multi-Root Thread".into()),
                     title_override: None,
                     updated_at: Utc::now(),
@@ -7537,7 +7537,7 @@ async fn test_activate_archived_thread_with_saved_paths_activates_matching_works
             ThreadMetadata {
                 thread_id: ThreadId::new(),
                 session_id: Some(session_id.clone()),
-                agent_id: agent::ZED_AGENT_ID.clone(),
+                agent_id: agent::OMEGA_AGENT_ID.clone(),
                 title: Some("Archived Thread".into()),
                 title_override: None,
                 updated_at: Utc::now(),
@@ -7607,7 +7607,7 @@ async fn test_activate_archived_thread_cwd_fallback_with_matching_workspace(
             ThreadMetadata {
                 thread_id: ThreadId::new(),
                 session_id: Some(acp::SessionId::new(Arc::from("unknown-session"))),
-                agent_id: agent::ZED_AGENT_ID.clone(),
+                agent_id: agent::OMEGA_AGENT_ID.clone(),
                 title: Some("CWD Thread".into()),
                 title_override: None,
                 updated_at: Utc::now(),
@@ -7675,7 +7675,7 @@ async fn test_activate_archived_thread_no_paths_no_cwd_uses_active_workspace(
             ThreadMetadata {
                 thread_id: ThreadId::new(),
                 session_id: Some(acp::SessionId::new(Arc::from("no-context-session"))),
-                agent_id: agent::ZED_AGENT_ID.clone(),
+                agent_id: agent::OMEGA_AGENT_ID.clone(),
                 title: Some("Contextless Thread".into()),
                 title_override: None,
                 updated_at: Utc::now(),
@@ -7733,7 +7733,7 @@ async fn test_activate_archived_thread_saved_paths_opens_new_workspace(cx: &mut 
             ThreadMetadata {
                 thread_id: ThreadId::new(),
                 session_id: Some(session_id.clone()),
-                agent_id: agent::ZED_AGENT_ID.clone(),
+                agent_id: agent::OMEGA_AGENT_ID.clone(),
                 title: Some("New WS Thread".into()),
                 title_override: None,
                 updated_at: Utc::now(),
@@ -7790,7 +7790,7 @@ async fn test_activate_archived_thread_reuses_workspace_in_another_window(cx: &m
             ThreadMetadata {
                 thread_id: ThreadId::new(),
                 session_id: Some(session_id.clone()),
-                agent_id: agent::ZED_AGENT_ID.clone(),
+                agent_id: agent::OMEGA_AGENT_ID.clone(),
                 title: Some("Cross Window Thread".into()),
                 title_override: None,
                 updated_at: Utc::now(),
@@ -7869,7 +7869,7 @@ async fn test_activate_archived_thread_reuses_workspace_in_another_window_with_t
     let metadata = ThreadMetadata {
         thread_id: ThreadId::new(),
         session_id: Some(session_id.clone()),
-        agent_id: agent::ZED_AGENT_ID.clone(),
+        agent_id: agent::OMEGA_AGENT_ID.clone(),
         title: Some("Cross Window Thread".into()),
         title_override: None,
         updated_at: Utc::now(),
@@ -7952,7 +7952,7 @@ async fn test_activate_archived_thread_prefers_current_window_for_matching_paths
     let metadata = ThreadMetadata {
         thread_id: ThreadId::new(),
         session_id: Some(session_id.clone()),
-        agent_id: agent::ZED_AGENT_ID.clone(),
+        agent_id: agent::OMEGA_AGENT_ID.clone(),
         title: Some("Current Window Thread".into()),
         title_override: None,
         updated_at: Utc::now(),
@@ -8897,7 +8897,7 @@ async fn test_archive_last_worktree_thread_not_blocked_by_remote_thread_at_same_
         let metadata = ThreadMetadata {
             thread_id: ThreadId::new(),
             session_id: Some(acp::SessionId::new(Arc::from("remote-wt-thread"))),
-            agent_id: agent::ZED_AGENT_ID.clone(),
+            agent_id: agent::OMEGA_AGENT_ID.clone(),
             title: Some("Remote Worktree Thread".into()),
             title_override: None,
             updated_at: chrono::TimeZone::with_ymd_and_hms(&Utc, 2024, 1, 1, 0, 0, 0).unwrap(),
@@ -9712,7 +9712,7 @@ async fn test_unarchive_first_thread_in_group_does_not_create_spurious_draft(
                 ThreadMetadata {
                     thread_id,
                     session_id: Some(session_id.clone()),
-                    agent_id: agent::ZED_AGENT_ID.clone(),
+                    agent_id: agent::OMEGA_AGENT_ID.clone(),
                     title: Some("Unarchived Thread".into()),
                     title_override: None,
                     updated_at: Utc::now(),
@@ -9806,7 +9806,7 @@ async fn test_unarchive_into_new_workspace_does_not_create_duplicate_real_thread
                 ThreadMetadata {
                     thread_id: original_thread_id,
                     session_id: Some(session_id.clone()),
-                    agent_id: agent::ZED_AGENT_ID.clone(),
+                    agent_id: agent::OMEGA_AGENT_ID.clone(),
                     title: Some("Unarchived Thread".into()),
                     title_override: None,
                     updated_at: Utc::now(),
@@ -10033,7 +10033,7 @@ async fn test_unarchive_into_inactive_existing_workspace_does_not_leave_active_d
                 ThreadMetadata {
                     thread_id,
                     session_id: Some(session_id.clone()),
-                    agent_id: agent::ZED_AGENT_ID.clone(),
+                    agent_id: agent::OMEGA_AGENT_ID.clone(),
                     title: Some("Restored In Inactive Workspace".into()),
                     title_override: None,
                     updated_at: Utc::now(),
@@ -10884,7 +10884,7 @@ async fn test_unarchive_linked_worktree_thread_into_project_group_shows_only_res
                 ThreadMetadata {
                     thread_id: original_thread_id,
                     session_id: Some(session_id.clone()),
-                    agent_id: agent::ZED_AGENT_ID.clone(),
+                    agent_id: agent::OMEGA_AGENT_ID.clone(),
                     title: Some("Unarchived Linked Thread".into()),
                     title_override: None,
                     updated_at: Utc::now(),
@@ -11435,7 +11435,7 @@ async fn test_legacy_thread_with_canonical_path_opens_main_repo_workspace(cx: &m
         let metadata = ThreadMetadata {
             thread_id: ThreadId::new(),
             session_id: Some(legacy_session.clone()),
-            agent_id: agent::ZED_AGENT_ID.clone(),
+            agent_id: agent::OMEGA_AGENT_ID.clone(),
             title: Some("Legacy Main Thread".into()),
             title_override: None,
             updated_at: chrono::TimeZone::with_ymd_and_hms(&Utc, 2024, 1, 1, 0, 0, 0).unwrap(),
@@ -12425,7 +12425,7 @@ mod property_test {
         let metadata = ThreadMetadata {
             thread_id: ThreadId::new(),
             session_id: Some(session_id),
-            agent_id: agent::ZED_AGENT_ID.clone(),
+            agent_id: agent::OMEGA_AGENT_ID.clone(),
             title: Some(title),
             title_override: None,
             updated_at,
@@ -13361,7 +13361,7 @@ async fn test_remote_project_integration_does_not_briefly_render_as_separate_pro
         let metadata = ThreadMetadata {
             thread_id: ThreadId::new(),
             session_id: Some(remote_thread_id.clone()),
-            agent_id: agent::ZED_AGENT_ID.clone(),
+            agent_id: agent::OMEGA_AGENT_ID.clone(),
             title: Some("Worktree Thread".into()),
             title_override: None,
             updated_at: chrono::TimeZone::with_ymd_and_hms(&Utc, 2024, 1, 1, 0, 0, 1).unwrap(),
@@ -14325,7 +14325,7 @@ async fn test_remote_archive_thread_with_active_connection(
         let metadata = ThreadMetadata {
             thread_id: ThreadId::new(),
             session_id: Some(wt_thread_id.clone()),
-            agent_id: agent::ZED_AGENT_ID.clone(),
+            agent_id: agent::OMEGA_AGENT_ID.clone(),
             title: Some("Worktree Thread".into()),
             title_override: None,
             updated_at: chrono::TimeZone::with_ymd_and_hms(&chrono::Utc, 2024, 1, 1, 0, 0, 0)
@@ -14467,7 +14467,7 @@ async fn test_remote_linked_worktree_workspace_to_remove_uses_remote_connection(
         let metadata = ThreadMetadata {
             thread_id: worktree_thread_id,
             session_id: Some(worktree_session_id.clone()),
-            agent_id: agent::ZED_AGENT_ID.clone(),
+            agent_id: agent::OMEGA_AGENT_ID.clone(),
             title: Some("Remote Worktree Thread".into()),
             title_override: None,
             updated_at: chrono::TimeZone::with_ymd_and_hms(&Utc, 2024, 1, 1, 0, 0, 0).unwrap(),

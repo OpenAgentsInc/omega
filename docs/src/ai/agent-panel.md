@@ -12,7 +12,7 @@ Open it with {#action agent::NewThread} from [the Command Palette](../command-pa
 
 ## Getting Started {#getting-started}
 
-If you're using the Agent Panel for the first time, configure either a model for the [Omega Agent](./zed-agent.md) or an [External Agent](./external-agents.md).
+If you're using the Agent Panel for the first time, configure either a model for the [Omega Agent](./omega-agent.md) or an [External Agent](./external-agents.md).
 
 - Use [LLM Providers](./llm-providers.md) for Zed-hosted models, API access, subscriptions, gateways, and local models.
 - Use [External Agents](./external-agents.md) for ACP-integrated agents.
@@ -31,7 +31,7 @@ The sections below cover what you can do from here.
 
 ### Creating New Threads {#new-thread}
 
-By default, the Agent Panel uses Zed's first-party agent.
+By default, the Agent Panel uses Omega Agent, Omega's first-party agent.
 
 Start a new thread with {#kb agent::NewThread}, or open the "New Thread…" menu using the agent selector button on the left (in the empty state) or the `+` icon in the top-right of the panel toolbar. You can also open that menu with {#kb agent::ToggleNewThreadMenu}.
 
@@ -207,7 +207,7 @@ You can rate agent responses to help improve Zed's system prompt and tools.
 > See [Feedback and Training Data](./ai-improvement.md) and
 > [AI Privacy](./privacy-and-security.md) for more information.
 > **_If you don't want data persisted on Zed's servers, don't rate_**.
-> We will not collect data for improving Zed's agent experience without you
+> We will not collect data for improving the agent experience without you
 > explicitly rating responses.
 
 To help improve Zed's system prompt and tools, rate responses with the thumbs up/down controls at the end of each response.

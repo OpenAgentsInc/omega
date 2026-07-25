@@ -632,7 +632,7 @@ impl ThreadsArchiveView {
                     .upgrade()
                     .and_then(|store| store.read(cx).agent_icon(&thread.agent_id));
 
-                let icon = if thread.agent_id.as_ref() == agent::ZED_AGENT_ID.as_ref() {
+                let icon = if thread.agent_id.as_ref() == agent::OMEGA_AGENT_ID.as_ref() {
                     IconName::OmegaAgent
                 } else {
                     IconName::Sparkle

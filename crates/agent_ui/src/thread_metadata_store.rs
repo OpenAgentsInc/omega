@@ -3,7 +3,7 @@ use std::{
     sync::Arc,
 };
 
-use agent::{ThreadStore, ZED_AGENT_ID};
+use agent::{ThreadStore, OMEGA_AGENT_ID};
 use agent_client_protocol::schema::v1 as acp;
 use anyhow::Context as _;
 use chrono::{DateTime, Utc};
@@ -132,7 +132,7 @@ fn migrate_thread_metadata(cx: &mut App) -> Task<anyhow::Result<()>> {
                     Some(ThreadMetadata {
                         thread_id: ThreadId::new(),
                         session_id: Some(entry.id),
-                        agent_id: ZED_AGENT_ID.clone(),
+                        agent_id: OMEGA_AGENT_ID.clone(),
                         title: if entry.title.is_empty()
                             || entry.title.as_ref() == DEFAULT_THREAD_TITLE
                         {
@@ -1501,7 +1501,7 @@ impl ThreadMetadataDb {
     /// then flow through this same upsert path.
     pub async fn save(&self, row: ThreadMetadata) -> anyhow::Result<()> {
         let session_id = row.session_id.as_ref().map(|s| s.0.clone());
-        let agent_id = if row.agent_id.as_ref() == ZED_AGENT_ID.as_ref() {
+        let agent_id = if row.agent_id.as_ref() == OMEGA_AGENT_ID.as_ref() {
             None
         } else {
             Some(row.agent_id.to_string())
@@ -1729,7 +1729,7 @@ impl Column for ThreadMetadata {
 
         let agent_id = agent_id
             .map(|id| AgentId::new(id))
-            .unwrap_or(ZED_AGENT_ID.clone());
+            .unwrap_or(OMEGA_AGENT_ID.clone());
 
         let updated_at = DateTime::parse_from_rfc3339(&updated_at_str)?.with_timezone(&Utc);
         let created_at = created_at_str
@@ -1870,7 +1870,7 @@ mod tests {
             thread_id: ThreadId::new(),
             archived: false,
             session_id: Some(acp::SessionId::new(session_id)),
-            agent_id: agent::ZED_AGENT_ID.clone(),
+            agent_id: agent::OMEGA_AGENT_ID.clone(),
             title: if title.is_empty() {
                 None
             } else {
@@ -2167,7 +2167,7 @@ mod tests {
         let moved_metadata = ThreadMetadata {
             thread_id: session1_thread_id,
             session_id: Some(acp::SessionId::new("session-1")),
-            agent_id: agent::ZED_AGENT_ID.clone(),
+            agent_id: agent::OMEGA_AGENT_ID.clone(),
             title: Some("First Thread".into()),
             title_override: None,
             updated_at: updated_time,
@@ -2252,7 +2252,7 @@ mod tests {
         let existing_metadata = ThreadMetadata {
             thread_id: ThreadId::new(),
             session_id: Some(acp::SessionId::new("a-session-0")),
-            agent_id: agent::ZED_AGENT_ID.clone(),
+            agent_id: agent::OMEGA_AGENT_ID.clone(),
             title: Some("Existing Metadata".into()),
             title_override: None,
             updated_at: now - chrono::Duration::seconds(10),
@@ -2327,7 +2327,7 @@ mod tests {
         assert_eq!(list.len(), 4);
         assert!(
             list.iter()
-                .all(|metadata| metadata.agent_id.as_ref() == agent::ZED_AGENT_ID.as_ref())
+                .all(|metadata| metadata.agent_id.as_ref() == agent::OMEGA_AGENT_ID.as_ref())
         );
 
         let existing_metadata = list
@@ -2378,7 +2378,7 @@ mod tests {
         let existing_metadata = ThreadMetadata {
             thread_id: ThreadId::new(),
             session_id: Some(acp::SessionId::new("existing-session")),
-            agent_id: agent::ZED_AGENT_ID.clone(),
+            agent_id: agent::OMEGA_AGENT_ID.clone(),
             title: Some("Existing Metadata".into()),
             title_override: None,
             updated_at: existing_updated_at,
@@ -3123,7 +3123,7 @@ mod tests {
             thread_id: ThreadId::new(),
             archived: false,
             session_id: Some(acp::SessionId::new("local-linked")),
-            agent_id: agent::ZED_AGENT_ID.clone(),
+            agent_id: agent::OMEGA_AGENT_ID.clone(),
             title: Some("Local Linked".into()),
             title_override: None,
             updated_at: now,
@@ -3137,7 +3137,7 @@ mod tests {
             thread_id: ThreadId::new(),
             archived: false,
             session_id: Some(acp::SessionId::new("remote-linked")),
-            agent_id: agent::ZED_AGENT_ID.clone(),
+            agent_id: agent::OMEGA_AGENT_ID.clone(),
             title: Some("Remote Linked".into()),
             title_override: None,
             updated_at: now - chrono::Duration::seconds(1),

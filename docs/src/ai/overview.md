@@ -19,7 +19,7 @@ Start with [AI Quick Start](./quick-start.md) if you know what you want to do. U
 
 Agent paths decide how agentic work runs in Zed.
 
-- [Omega Agent](./zed-agent.md): Zed's native agent. It can use models configured through [LLM Providers](./llm-providers.md), including Zed-hosted models, provider API keys, supported subscriptions, gateways, and local models. It also uses built-in tools, profiles, skills, instructions, and MCP servers.
+- [Omega Agent](./omega-agent.md): Omega's first-party agent. It can use models configured through [LLM Providers](./llm-providers.md), including Zed-hosted models, provider API keys, supported subscriptions, gateways, and local models. It also uses built-in tools, profiles, skills, instructions, and MCP servers.
 - [External Agents](./external-agents.md): ACP-integrated agents that run through their own process and configuration.
 - [Terminal Threads](./terminal-threads.md): terminal-backed threads for running an agent CLI or TUI directly in Zed.
 

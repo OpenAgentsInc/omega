@@ -5,7 +5,7 @@ description: Choose how Zed gets language models: Zed-hosted models, API access,
 
 # LLM Providers
 
-Use this page to choose which models power [the Omega Agent](./zed-agent.md) and
+Use this page to choose which models power [the Omega Agent](./omega-agent.md) and
 other Zed-owned AI features, including [Inline Assistant](./inline-assistant.md),
 Git commit generation, thread summaries, and similar model-backed features.
 

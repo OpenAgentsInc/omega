@@ -7,15 +7,15 @@ description: Choose the right Zed AI setup path for agents, models, subscription
 
 Use this page to choose the right AI setup path in Zed. If you already know the company, subscription, model provider, agent, or CLI you want to use, start with [AI by Company](./by-company.md).
 
-## Use the Omega Agent {#zed-agent}
+## Use the Omega Agent {#omega-agent}
 
-Use [Omega Agent](./zed-agent.md) when you want Zed's native agent to read, edit, search, and run code in your project.
+Use [Omega Agent](./omega-agent.md) when you want Omega's first-party agent to read, edit, search, and run code in your project.
 
 Omega Agent uses Zed-configured models from [LLM Providers](./llm-providers.md). It also uses Zed's built-in tools, [Agent Profiles](./agent-profiles.md), [Skills](./skills.md), [Instructions](./instructions.md), and [MCP servers](./mcp.md).
 
 Start in the [Agent Panel](./agent-panel.md) to prompt the agent, add context, review changes, and manage threads.
 
-### Configure the Omega Agent {#configure-zed-agent}
+### Configure the Omega Agent {#configure-omega-agent}
 
 | If you want to...                         | Use                                       |
 | ----------------------------------------- | ----------------------------------------- |

@@ -55,7 +55,7 @@ The Threads Sidebar can hold different thread types:
 
 | Thread type                                   | Configuration                                                                   |
 | --------------------------------------------- | ------------------------------------------------------------------------------- |
-| [Omega Agent thread](./zed-agent.md)            | Uses Omega Agent settings, profiles, tools, Skills, Instructions, and MCP         |
+| [Omega Agent thread](./omega-agent.md)            | Uses Omega Agent settings, profiles, tools, Skills, Instructions, and MCP         |
 | [External Agent thread](./external-agents.md) | Uses the ACP integration and the agent's native configuration                   |
 | [Terminal Thread](./terminal-threads.md)      | Runs a CLI/TUI in a terminal-backed thread; the CLI owns auth and configuration |
 

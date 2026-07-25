@@ -2,7 +2,7 @@ mod thread_switcher;
 
 use acp_thread::ThreadStatus;
 use action_log::DiffStats;
-use agent::{ThreadStore, ZED_AGENT_ID};
+use agent::{ThreadStore, OMEGA_AGENT_ID};
 use agent_client_protocol::schema::v1 as acp;
 use agent_settings::AgentSettings;
 use agent_ui::terminal_thread_metadata_store::{
@@ -6527,7 +6527,7 @@ impl Sidebar {
             ThreadEntryWorkspace::Closed { .. } => None,
         };
 
-        let is_zed_thread = thread.metadata.agent_id.as_ref() == ZED_AGENT_ID.as_ref();
+        let is_zed_thread = thread.metadata.agent_id.as_ref() == OMEGA_AGENT_ID.as_ref();
         let can_open_as_markdown = thread.is_live || is_zed_thread;
         let folder_paths = thread.metadata.folder_paths().clone();
 

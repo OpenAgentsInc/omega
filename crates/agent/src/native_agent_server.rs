@@ -22,7 +22,7 @@ impl NativeAgentServer {
 
 impl AgentServer for NativeAgentServer {
     fn agent_id(&self) -> AgentId {
-        crate::ZED_AGENT_ID.clone()
+        crate::OMEGA_AGENT_ID.clone()
     }
 
     fn logo(&self) -> ui::IconName {

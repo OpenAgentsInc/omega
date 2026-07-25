@@ -1,6 +1,6 @@
 # eval-cli
 
-Headless Rust binary for running Zed's agent in evaluation and benchmark
+Headless Rust binary for running Omega Agent in evaluation and benchmark
 environments. It is designed for containerized harnesses such as
 [Harbor](https://harborframework.com/) and Pier, where the repository is already
 checked out and model API keys are provided via environment variables.

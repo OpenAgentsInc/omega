@@ -440,7 +440,7 @@ pub enum Agent {
 
 impl From<AgentId> for Agent {
     fn from(id: AgentId) -> Self {
-        if id.as_ref() == agent::ZED_AGENT_ID.as_ref() {
+        if id.as_ref() == agent::OMEGA_AGENT_ID.as_ref() {
             return Self::NativeAgent;
         }
         #[cfg(any(test, feature = "test-support"))]
@@ -454,7 +454,7 @@ impl From<AgentId> for Agent {
 impl Agent {
     pub fn id(&self) -> AgentId {
         match self {
-            Self::NativeAgent => agent::ZED_AGENT_ID.clone(),
+            Self::NativeAgent => agent::OMEGA_AGENT_ID.clone(),
             Self::Custom { id } => id.clone(),
             #[cfg(any(test, feature = "test-support"))]
             Self::Stub => "stub".into(),

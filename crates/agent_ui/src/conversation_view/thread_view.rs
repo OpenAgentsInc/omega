@@ -5600,13 +5600,13 @@ impl ThreadView {
         let following = self.is_following(cx);
 
         let tooltip_label = if following {
-            if self.agent_id.as_ref() == agent::ZED_AGENT_ID.as_ref() {
+            if self.agent_id.as_ref() == agent::OMEGA_AGENT_ID.as_ref() {
                 format!("Stop Following the {}", self.agent_id)
             } else {
                 format!("Stop Following {}", self.agent_id)
             }
         } else {
-            if self.agent_id.as_ref() == agent::ZED_AGENT_ID.as_ref() {
+            if self.agent_id.as_ref() == agent::OMEGA_AGENT_ID.as_ref() {
                 format!("Follow the {}", self.agent_id)
             } else {
                 format!("Follow {}", self.agent_id)

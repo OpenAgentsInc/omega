@@ -5507,8 +5507,8 @@ mod tests {
             .decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==")
             .expect("decode png");
         let file_name = match extension {
-            Some(extension) => format!("zed-agent-ui-test-{}.{}", uuid::Uuid::new_v4(), extension),
-            None => format!("zed-agent-ui-test-{}", uuid::Uuid::new_v4()),
+            Some(extension) => format!("omega-agent-ui-test-{}.{}", uuid::Uuid::new_v4(), extension),
+            None => format!("omega-agent-ui-test-{}", uuid::Uuid::new_v4()),
         };
         let path = std::env::temp_dir().join(file_name);
         std::fs::write(&path, bytes).expect("write temp png");

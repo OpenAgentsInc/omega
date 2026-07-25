@@ -40,7 +40,7 @@ For company-specific setup paths, including Claude, Codex, Gemini, OpenCode, Cop
 
 Use Claude Agent when you want Claude running as an ACP-integrated External Agent in Zed.
 
-Install Claude Agent from the [ACP Registry](#registry), then start a Claude Agent thread from the Agent Panel or Threads Sidebar. Claude Agent owns its own authentication and billing. An Anthropic API key configured for [Omega Agent](./zed-agent.md) does not automatically configure Claude Agent.
+Install Claude Agent from the [ACP Registry](#registry), then start a Claude Agent thread from the Agent Panel or Threads Sidebar. Claude Agent owns its own authentication and billing. An Anthropic API key configured for [Omega Agent](./omega-agent.md) does not automatically configure Claude Agent.
 
 To choose your billing method, open a Claude Agent thread, run `/login`, and authenticate with an API key or with Claude Code where supported. Claude-specific files such as `CLAUDE.md` may be read by Claude Agent directly.
 
@@ -105,7 +105,7 @@ External Agents run as separate processes that communicate with Zed over ACP. Th
 | Native MCP config                | May also be read by the agent                                                              |
 | Tool permissions                 | Zed ACP/tool forwarding permissions may apply; native tool permissions depend on the agent |
 
-For Zed's native agent configuration, see [Omega Agent](./zed-agent.md).
+For Omega Agent configuration, see [Omega Agent](./omega-agent.md).
 
 ## Agent-Specific Auth and Config {#agent-auth-config}
 

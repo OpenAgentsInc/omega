@@ -20,7 +20,7 @@ Zed also handles the `notifications/tools/list_changed` notification from MCP se
 
 | Agent path                                | MCP behavior                                                                            |
 | ----------------------------------------- | --------------------------------------------------------------------------------------- |
-| [Omega Agent](./zed-agent.md)               | Uses Zed-configured MCP servers directly                                                |
+| [Omega Agent](./omega-agent.md)               | Uses Zed-configured MCP servers directly                                                |
 | [External Agents](./external-agents.md)   | Zed can forward configured MCP servers over ACP; agents may also read native MCP config |
 | [Terminal Threads](./terminal-threads.md) | Native CLIs/TUIs read their own MCP configuration                                       |
 
@@ -146,7 +146,7 @@ As an example, [the Dagger team suggests](https://container-use.com/agent-integr
 > **Note:** In Zed v0.224.0 and above, tool approval is controlled by `agent.tool_permissions.default`.
 > In earlier versions, it was controlled by the `agent.always_allow_tool_actions` boolean (default `false`).
 
-Zed's Agent Panel provides the `agent.tool_permissions.default` setting to control tool approval behavior for the native Zed agent:
+The Agent Panel provides the `agent.tool_permissions.default` setting to control tool approval behavior for Omega Agent:
 
 - `"confirm"` (default) — Prompts for approval before running any tool action, including MCP tool calls
 - `"allow"` — Auto-approves tool actions without prompting

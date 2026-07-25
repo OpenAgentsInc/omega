@@ -5,7 +5,7 @@ description: Omega Agent tool calls can run in an OS-level sandbox to restrict c
 
 # Sandboxing
 
-You can restrict what operations the [Omega Agent](./zed-agent.md) can run in multiple ways. One way to restrict them is
+You can restrict what operations the [Omega Agent](./omega-agent.md) can run in multiple ways. One way to restrict them is
 [Tool Permissions](./tool-permissions.md), but these are of limited use when the agent wants to do things like run a
 complicated script in a terminal.
 
@@ -85,7 +85,7 @@ provide a `reason`, which is displayed in the prompt. Read it, and decide
 whether it makes sense before approving.
 
 Also, sandboxing restricts **only** what the `terminal` and `fetch` tools in the
-Zed agent can do. It has **no effect** on other parts of Zed, including:
+Omega Agent can do. It has **no effect** on other parts of Zed, including:
 
 - Language servers
 - The built-in git client

@@ -34,6 +34,58 @@
       "zed industries"
     ]
   },
+  "first_party_agent": {
+    "_comment": [
+      "OMEGA-DELTA-0024. The admitted first-party agent identity, and the",
+      "phrasings that would present somebody else's as ours.",
+      "",
+      "phrases are matched case-insensitively as substrings, because the leak",
+      "that shipped in 0.2.0-rc10 was not a variant of a checked string, it was",
+      "a neighbour of one. A gate that knows exactly one literal finds exactly",
+      "one literal: 'Zed Agent' was checked and clean while 'Zed's agent' sat",
+      "in a rendered Label in three provider settings pages.",
+      "",
+      "symbols forbids the identifier as well as the value it holds. Renaming",
+      "only the string leaves the next upstream rebase an obvious symbol to",
+      "restore the old identity under, which is the lesson the icon rename",
+      "already paid for.",
+      "",
+      "An allowance is not an exemption for our own copy. It means the text",
+      "names Zed's product or Zed's history, the way ai_zed.svg labels Zed's",
+      "own keymap preset and model provider. Do not add one to make a build",
+      "pass."
+    ],
+    "identity": "Omega Agent",
+    "symbol": "OMEGA_AGENT_ID",
+    "phrases": [
+      "zed agent",
+      "zed's agent",
+      "zed's native agent",
+      "zed's first-party agent",
+      "zed's own agent",
+      "zed-agent-terminal-"
+    ],
+    "symbols": ["ZED_AGENT_ID"],
+    "_forbidden_path_stems_comment": [
+      "A file name is a surface too. The docs page moved from zed-agent.md to",
+      "omega-agent.md, and a content scan cannot see the difference — the",
+      "renamed file says 'Omega Agent' either way. Falsifying this delta found",
+      "exactly that hole: restoring the old file name passed every check.",
+      "",
+      "Matched against the file stem, case-insensitively, so it does not fire",
+      "on crates/zed or on a directory named zed_eval."
+    ],
+    "forbidden_path_stems": ["zed-agent", "zed_agent"],
+    "scan_roots": ["crates", "docs/src", "assets", "script"],
+    "extensions": ["rs", "md", "json", "toml", "py", "sh", "yml", "yaml"],
+    "allowances": {
+      "crates/gpui_macros/src/derive_inspector_reflection.rs": "States which agent generated this upstream file ('generated using Zed Agent with Claude Opus 4'). Historical provenance of somebody else's authorship, not Omega presenting itself.",
+      "crates/gpui_macros/tests/derive_inspector_reflection.rs": "Same provenance note on the companion test file.",
+      "crates/omega_deltas/src/omega_deltas.rs": "Names the forbidden phrases in order to forbid them.",
+      "crates/app_identity/src/public_branding.rs": "Names the forbidden phrases in order to forbid them.",
+      "script/omega-brand-gate.json": "This policy file."
+    }
+  },
   "info_plist": {
     "_comment": [
       "Every file in fragment_dir is merged into the packaged Info.plist by",

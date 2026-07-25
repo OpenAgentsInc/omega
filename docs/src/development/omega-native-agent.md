@@ -79,10 +79,11 @@ Zed. It combines:
 - local thread persistence
 - Agent Panel, Threads Sidebar, diff review, and checkpoint projections
 
-The user-facing identity is fixed by the compatibility symbol `ZED_AGENT_ID`
-as `Omega Agent`. The implementation remains `NativeAgent`;
-`NativeAgentServer` constructs it inside the Omega process and wraps it in
-`NativeAgentConnection`.
+The user-facing identity is fixed by `OMEGA_AGENT_ID` as `Omega Agent`. The
+symbol was renamed along with the value it holds, so an upstream rebase that
+restores the old identity has no familiar name to restore it under. The
+implementation remains `NativeAgent`; `NativeAgentServer` constructs it inside
+the Omega process and wraps it in `NativeAgentConnection`.
 
 The connection implements the same `AgentConnection` interface used by the
 Agent Panel for ACP-backed agents. That shared interface does not make Omega Agent

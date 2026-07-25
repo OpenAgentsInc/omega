@@ -5,7 +5,7 @@ description: Configure Omega Agent profiles for model selection, built-in tool a
 
 # Agent Profiles
 
-Agent profiles control how the [Omega Agent](./zed-agent.md) behaves in a thread. A profile can set a default model and choose which built-in tools and MCP tools are available.
+Agent profiles control how the [Omega Agent](./omega-agent.md) behaves in a thread. A profile can set a default model and choose which built-in tools and MCP tools are available.
 
 Profiles do not decide whether a tool call is allowed automatically. Use [Tool Permissions](./tool-permissions.md) to control allow, deny, and confirm behavior.
 

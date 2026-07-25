@@ -69,7 +69,7 @@ pub fn skills_docs(cx: &App) -> String {
     format!("{docs_url}/ai/skills", docs_url = docs_url(cx))
 }
 
-/// Returns the URL to Zed's Agent sandboxing documentation.
+/// Returns the URL to the upstream Zed sandboxing documentation.
 ///
 /// Pass `section` to deep-link to a specific section anchor on the page (for
 /// example, `Some("installing-bubblewrap")`); pass `None` to link to the top of

@@ -20,7 +20,7 @@ Use Omega Agent when you want the agent to:
 - use Omega [Skills](./skills.md) and [Instructions](./instructions.md)
 - show changes in Omega's review UI
 
-## What Omega Agent Uses {#what-zed-agent-uses}
+## What Omega Agent Uses {#what-omega-agent-uses}
 
 | Capability                 | Source of truth                           |
 | -------------------------- | ----------------------------------------- |
@@ -37,7 +37,7 @@ Use Omega Agent when you want the agent to:
 
 | Agent path                                | Main difference                                                                              |
 | ----------------------------------------- | -------------------------------------------------------------------------------------------- |
-| [Omega Agent](./zed-agent.md)             | Uses Omega's model, tool, profile, skill, instruction, and MCP configuration                 |
+| [Omega Agent](./omega-agent.md)             | Uses Omega's model, tool, profile, skill, instruction, and MCP configuration                 |
 | [External Agents](./external-agents.md)   | Use an ACP integration and often own auth, model, tool, and native instruction configuration |
 | [Terminal Threads](./terminal-threads.md) | Run a CLI/TUI in a terminal-backed thread; the CLI owns auth and configuration               |
 

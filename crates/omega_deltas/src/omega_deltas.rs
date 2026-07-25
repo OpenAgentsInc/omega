@@ -2366,19 +2366,152 @@ mod tests {
             );
         }
 
-        let mut stale_docs = Vec::new();
-        for root in ["docs/src", "crates/agent_skills"] {
-            for_each_source_file(&repository_path(root), &["md"], |path, source| {
-                if source.contains("Zed Agent") {
-                    stale_docs.push(path.display().to_string());
+        // Read from the policy rather than spelling the symbol here. A
+        // tree-wide rename would rewrite this test's own literal along with
+        // the code it guards, and the check would rename itself into
+        // agreement. That is not hypothetical: it is what happened the first
+        // time this arm was falsified.
+        let policy = brand_policy().expect("brand gate policy parses");
+        let symbol = policy["first_party_agent"]["symbol"]
+            .as_str()
+            .expect("first_party_agent.symbol is a string");
+        assert!(
+            agent_source.contains(&format!("pub static {symbol}")),
+            "OMEGA-DELTA-0024: the identity symbol must be {symbol}. Renaming \
+             only the string it holds leaves the next upstream rebase an \
+             obvious symbol to restore Zed's identity under"
+        );
+    }
+
+    /// OMEGA-DELTA-0024. No phrasing of the first-party agent names Zed.
+    ///
+    /// Separate from the pins above because it is a different kind of failure.
+    /// Those say the identity is present; this says the old one is gone, which
+    /// is the half that `0.2.0-rc10` got wrong: an evidence table truthfully
+    /// reported a clean binary while 13 Zed strings shipped in the signed
+    /// `Info.plist`, because the scan knew exactly three literals.
+    ///
+    /// So this matches a phrase family from `script/omega-brand-gate.json`,
+    /// not one string, and the references we deliberately keep are named there
+    /// with a reason rather than skipped silently. Zed still exists; it is
+    /// just not us.
+    #[test]
+    fn no_phrasing_presents_zed_as_the_first_party_agent() {
+        let policy = brand_policy().expect("brand gate policy parses");
+        let phrases = policy_strings(&policy, "first_party_agent", "phrases");
+        let symbols = policy_strings(&policy, "first_party_agent", "symbols");
+        let roots = policy_strings(&policy, "first_party_agent", "scan_roots");
+        let extensions = policy_strings(&policy, "first_party_agent", "extensions");
+        assert!(
+            !phrases.is_empty() && !symbols.is_empty() && !roots.is_empty(),
+            "OMEGA-DELTA-0024: {BRAND_GATE_POLICY_PATH} declares no phrases, \
+             symbols, or roots, so this gate checks nothing"
+        );
+
+        let allowances = policy["first_party_agent"]["allowances"]
+            .as_object()
+            .expect("first_party_agent.allowances is an object");
+        for relative in allowances.keys() {
+            assert!(
+                repository_path(relative).exists(),
+                "OMEGA-DELTA-0024: allowance for {relative} outlived the file. \
+                 A stale allowance is a hole nobody is watching"
+            );
+        }
+
+        let stems = policy_strings(&policy, "first_party_agent", "forbidden_path_stems");
+        assert!(
+            !stems.is_empty(),
+            "OMEGA-DELTA-0024: no forbidden path stems, so a file could carry \
+             the old identity in its name"
+        );
+
+        let extensions: Vec<&str> = extensions.iter().map(String::as_str).collect();
+        let repository_root = repository_path(".");
+        let mut offenders: Vec<String> = Vec::new();
+        for root in &roots {
+            for_each_source_file(&repository_path(root), &extensions, |path, source| {
+                let relative = path
+                    .strip_prefix(&repository_root)
+                    .unwrap_or(path)
+                    .display()
+                    .to_string();
+
+                // The name before the contents. A renamed file reads as clean
+                // either way, so a content scan cannot tell `zed-agent.md`
+                // from `omega-agent.md`. Falsifying this delta found exactly
+                // that: restoring the old file name passed everything.
+                let stem = path
+                    .file_stem()
+                    .and_then(std::ffi::OsStr::to_str)
+                    .unwrap_or_default()
+                    .to_lowercase();
+                for forbidden in &stems {
+                    if stem.contains(&forbidden.to_lowercase()) {
+                        offenders.push(format!("{relative}: file name {forbidden:?}"));
+                    }
+                }
+
+                if allowances.contains_key(&relative) {
+                    return;
+                }
+                let lowercased = source.to_lowercase();
+                for phrase in &phrases {
+                    if lowercased.contains(&phrase.to_lowercase()) {
+                        offenders.push(format!("{relative}: {phrase:?}"));
+                    }
+                }
+                for symbol in &symbols {
+                    if source.contains(symbol) {
+                        offenders.push(format!("{relative}: {symbol:?}"));
+                    }
                 }
             });
         }
+
         assert!(
-            stale_docs.is_empty(),
-            "OMEGA-DELTA-0024: reachable docs still present Zed Agent as the \
-             first-party identity:\n{}",
-            stale_docs.join("\n")
+            offenders.is_empty(),
+            "OMEGA-DELTA-0024: Zed is presented as the first-party agent \
+             again. Rename it, or — only if the text names Zed's own product \
+             or Zed's history the way ai_zed.svg does — add an allowance with \
+             a reason to {BRAND_GATE_POLICY_PATH}:\n{}",
+            offenders.join("\n")
+        );
+    }
+
+    /// OMEGA-DELTA-0024. The inherited telemetry id is not a product identity.
+    ///
+    /// `NativeAgentConnection::telemetry_id` still reports `"zed"`, because it
+    /// keys inherited analytics and rewriting it would silently break the
+    /// series rather than rename anything a user sees. The rule that matters
+    /// is that it stays out of the identity path: the product name comes from
+    /// `OMEGA_AGENT_ID`, and the two are not allowed to become the same value.
+    #[test]
+    fn the_inherited_telemetry_id_is_not_the_product_identity() {
+        let policy = brand_policy().expect("brand gate policy parses");
+        let identity = policy["first_party_agent"]["identity"]
+            .as_str()
+            .expect("first_party_agent.identity is a string");
+
+        let path = repository_path("crates/agent/src/agent.rs");
+        let source = std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
+        let telemetry_body = source
+            .split_once("fn telemetry_id(&self) -> SharedString {")
+            .map(|(_, rest)| rest.split_once('}').map_or(rest, |(body, _)| body))
+            .expect("the native connection reports a telemetry id");
+
+        assert!(
+            telemetry_body.contains(r#""zed""#),
+            "OMEGA-DELTA-0024: the native telemetry id is no longer the \
+             inherited \"zed\" key. Changing it breaks the analytics series \
+             without renaming anything a user sees"
+        );
+        assert!(
+            !telemetry_body.contains(identity),
+            "OMEGA-DELTA-0024: the inherited telemetry id now reports \
+             {identity:?}, which presents an inherited analytics key as an \
+             OpenAgents service identity"
         );
     }
 
