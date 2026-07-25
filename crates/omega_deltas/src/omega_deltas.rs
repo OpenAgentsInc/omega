@@ -33,6 +33,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0008",
     "OMEGA-DELTA-0009",
     "OMEGA-DELTA-0010",
+    "OMEGA-DELTA-0010",
     "OMEGA-DELTA-0011",
 ];
 
@@ -51,6 +52,9 @@ pub const REMOVED_FILES: &[&str] = &[
     "crates/zed/src/zed/move_to_applications.rs",
     // OMEGA-DELTA-0009
     "crates/workspace/src/security_modal.rs",
+    // OMEGA-DELTA-0010
+    "crates/collab_ui/src/collab_panel.rs",
+    "crates/collab/Cargo.toml",
 ];
 
 /// Strings that must not appear anywhere under `crates/`.

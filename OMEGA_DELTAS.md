@@ -206,3 +206,31 @@ cargo test -p omega_deltas
 - **Why:** provider setup is a local Omega capability. Zed account status,
   trials, hosted-plan callbacks, and hosted sign-in are not.
 - **Enforced by:** `ai_onboarding_is_provider_only`.
+
+### OMEGA-DELTA-0010 — Zed collab is retired
+
+- **Upstream Zed:** ships a collaboration product — a collab panel with a
+  nested channel tree, contacts, calls, channel notes, and a `collab` server
+  crate behind it.
+- **Omega:** `crates/collab_ui` and `crates/collab` are deleted, along with the
+  panel registration, the `Collab Panel` menu item, the `ToggleFocus` action,
+  and the `open_channel_notes` CLI path.
+- **Why:** owner direction, 2026-07-25. Collab is not an Omega product surface.
+  Omega never ran the collab server, and nothing else in the workspace depended
+  on it. The Buzz parity ledger states the replacement direction explicitly:
+  workrooms are "native GPUI panes over the Nostr workroom log" and people and
+  agents are "signed Nostr identity, profile, membership, and presence events".
+  Carrying Zed's channel and contact model forward would fight that.
+- **Harvested first.** The owner asked for retirement *unless* something was
+  worth keeping for Buzz parity, and the GPUI panel shapes were: the nested
+  channel tree with expand/collapse and drag reparenting, per-row context
+  menus, unread and mention indicators, the fuzzy roster picker, and the
+  membership modal. Those map onto the Workrooms and People-and-agents parity
+  rows and are recorded in
+  `docs/buzz/2026-07-25-collab-ui-harvest-before-retirement.md` in the
+  openagents repository, with recovery instructions. The code is gone; the map
+  is not.
+- **This also removes** the three collab confirmation prompts on omega#54's
+  list. They die with the feature rather than separately, which is what that
+  entry asked for.
+- **Enforced by:** `removed_surfaces_stay_removed`.
