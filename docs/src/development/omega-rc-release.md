@@ -27,7 +27,7 @@ Keep these off the repository and out of commit messages:
 | Secret | Purpose |
 | --- | --- |
 | OpenAgents Developer ID certificate / keychain access | `codesign` |
-| `APPLE_NOTARIZATION_KEY` | App Store Connect API key PEM |
+| `APPLE_NOTARIZATION_KEY` | App Store Connect API key as inline PEM contents or a readable PEM file path (for example, `ASC_API_PRIVATE_KEY_PATH`) |
 | `APPLE_NOTARIZATION_KEY_ID` | Key id |
 | `APPLE_NOTARIZATION_ISSUER_ID` | Issuer id |
 | GitHub release token with `contents: write` on `OpenAgentsInc/omega` | Prerelease upload |
@@ -53,6 +53,20 @@ Full package attempt:
 
 ```sh
 script/bundle-omega-rc
+```
+
+When local signing secrets expose the App Store Connect key as
+`ASC_API_PRIVATE_KEY_PATH`, pass that path directly without reading or printing
+the key:
+
+```sh
+APPLE_NOTARIZATION_KEY="$ASC_API_PRIVATE_KEY_PATH" script/bundle-omega-rc
+```
+
+Validate both supported key input forms without contacting Apple:
+
+```sh
+script/bundle-omega-rc --self-test-notarization-key
 ```
 
 The command temporarily sets the preview channel and package version `0.2.0`,

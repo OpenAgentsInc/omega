@@ -36,6 +36,7 @@ readonly OMEGA_EFFECTD_DOWNLOAD_URL="https://github.com/OpenAgentsInc/openagents
 
 DRY_RUN=false
 SKIP_BUILD=false
+SELF_TEST_NOTARIZATION_KEY=false
 TARGET_TRIPLE="aarch64-apple-darwin"
 OUTPUT_DIR="${ROOT}/target/omega-rc"
 RELEASE_RECORD_PATH=""
@@ -54,11 +55,14 @@ OMEGA_EFFECTD_WRAPPER_SHA256=""
 OMEGA_EFFECTD_BUNDLE_SHA256=""
 OMEGA_EFFECTD_SOURCE_NODE_SHA256=""
 OMEGA_EFFECTD_PACKAGED_NODE_SHA256=""
+NOTARIZATION_KEY_FILE=""
+NOTARIZATION_KEY_FILE_IS_TEMPORARY=false
 PACKAGED_BINDINGS_JSON=""
 
 usage() {
   cat <<EOF
 Usage: ${0##*/} [--dry-run] [--skip-build] [--output-dir DIR] [--release-record PATH]
+                       [--self-test-notarization-key]
 
 Owned Omega RC packaging for macOS arm64.
 
@@ -71,13 +75,17 @@ Options:
   --output-dir DIR       Directory for the DMG and release record
                          (default: target/omega-rc).
   --release-record PATH  Explicit release-record JSON path.
+  --self-test-notarization-key
+                         Verify path and inline PEM input normalization without
+                         compiling, signing, or notarizing.
   -h, --help             Show this help.
 
 Environment (owner secrets; never commit):
   MACOS_CERTIFICATE / MACOS_CERTIFICATE_PASSWORD
       Optional keychain import path (same shape as script/bundle-mac).
   APPLE_NOTARIZATION_KEY / APPLE_NOTARIZATION_KEY_ID / APPLE_NOTARIZATION_ISSUER_ID
-      Required only when notarization should be attempted after signing.
+      Required only when notarization should be attempted after signing. The
+      key may be inline PEM contents or a path to a readable PEM file.
 EOF
 }
 
@@ -93,6 +101,7 @@ while [[ $# -gt 0 ]]; do
       RELEASE_RECORD_PATH="$2"
       shift
       ;;
+    --self-test-notarization-key) SELF_TEST_NOTARIZATION_KEY=true ;;
     -h|--help)
       usage
       exit 0
@@ -111,6 +120,11 @@ if [[ "${DRY_RUN}" == "true" && "${SKIP_BUILD}" == "true" ]]; then
   exit 2
 fi
 
+if [[ "${SELF_TEST_NOTARIZATION_KEY}" == "true" && ( "${DRY_RUN}" == "true" || "${SKIP_BUILD}" == "true" ) ]]; then
+  echo "error: --self-test-notarization-key cannot be combined with build modes." >&2
+  exit 2
+fi
+
 mkdir -p "${OUTPUT_DIR}"
 BUILD_LOCK_SNAPSHOT_PATH="${OUTPUT_DIR}/${OMEGA_BUILD_LOCK_SNAPSHOT_NAME}"
 if [[ -z "${RELEASE_RECORD_PATH}" ]]; then
@@ -124,6 +138,70 @@ sha256_file() {
     return 0
   fi
   shasum -a 256 "${path}" | awk '{print $1}'
+}
+
+prepare_notarization_key_file() {
+  local key_input="$1"
+
+  NOTARIZATION_KEY_FILE=""
+  NOTARIZATION_KEY_FILE_IS_TEMPORARY=false
+
+  if [[ -f "${key_input}" && -r "${key_input}" ]]; then
+    NOTARIZATION_KEY_FILE="${key_input}"
+    return 0
+  fi
+
+  if [[ "${key_input}" != *"-----BEGIN PRIVATE KEY-----"* ]]; then
+    echo "error: APPLE_NOTARIZATION_KEY must be inline PEM contents or a readable file path." >&2
+    return 1
+  fi
+
+  NOTARIZATION_KEY_FILE="$(mktemp)"
+  NOTARIZATION_KEY_FILE_IS_TEMPORARY=true
+  chmod 600 "${NOTARIZATION_KEY_FILE}"
+  printf '%s\n' "${key_input}" > "${NOTARIZATION_KEY_FILE}"
+}
+
+cleanup_notarization_key_file() {
+  if [[ "${NOTARIZATION_KEY_FILE_IS_TEMPORARY}" == "true" && -n "${NOTARIZATION_KEY_FILE}" ]]; then
+    rm -f "${NOTARIZATION_KEY_FILE}"
+  fi
+  NOTARIZATION_KEY_FILE=""
+  NOTARIZATION_KEY_FILE_IS_TEMPORARY=false
+}
+
+self_test_notarization_key() {
+  local test_directory
+  local path_key
+  local inline_key
+  local expected_digest
+  local observed_digest
+
+  test_directory="$(mktemp -d)"
+  path_key="${test_directory}/AuthKey_TEST.p8"
+  inline_key=$'-----BEGIN PRIVATE KEY-----\ndeterministic-test-value\n-----END PRIVATE KEY-----'
+  printf '%s\n' "${inline_key}" > "${path_key}"
+
+  prepare_notarization_key_file "${path_key}"
+  if [[ "${NOTARIZATION_KEY_FILE}" != "${path_key}" || "${NOTARIZATION_KEY_FILE_IS_TEMPORARY}" != "false" ]]; then
+    echo "error: notarization key path normalization self-test failed." >&2
+    rm -rf "${test_directory}"
+    return 1
+  fi
+
+  prepare_notarization_key_file "${inline_key}"
+  expected_digest="$(printf '%s\n' "${inline_key}" | shasum -a 256 | awk '{print $1}')"
+  observed_digest="$(sha256_file "${NOTARIZATION_KEY_FILE}")"
+  if [[ "${expected_digest}" != "${observed_digest}" || "${NOTARIZATION_KEY_FILE_IS_TEMPORARY}" != "true" ]]; then
+    echo "error: inline notarization key normalization self-test failed." >&2
+    cleanup_notarization_key_file
+    rm -rf "${test_directory}"
+    return 1
+  fi
+
+  cleanup_notarization_key_file
+  rm -rf "${test_directory}"
+  echo "notarization key normalization self-test passed."
 }
 
 prepare_omega_effectd_archive() {
@@ -975,6 +1053,7 @@ maybe_import_certificate() {
 
 cleanup() {
   restore_channel_and_version || true
+  cleanup_notarization_key_file
   if [[ "${_OMEGA_RC_KEYCHAIN_CREATED:-0}" == "1" ]]; then
     security default-keychain -s login.keychain || true
     security delete-keychain omega-rc.keychain || true
@@ -982,6 +1061,11 @@ cleanup() {
 }
 
 trap cleanup EXIT
+
+if [[ "${SELF_TEST_NOTARIZATION_KEY}" == "true" ]]; then
+  self_test_notarization_key
+  exit 0
+fi
 
 require_arm64_host_or_target
 require_clean_checkout
@@ -1141,11 +1225,10 @@ notarization_stapled="false"
 if [[ -n "${APPLE_NOTARIZATION_KEY:-}" && -n "${APPLE_NOTARIZATION_KEY_ID:-}" && -n "${APPLE_NOTARIZATION_ISSUER_ID:-}" ]]; then
   notarization_attempted="true"
   echo "Submitting DMG for notarization (owner secrets present)..."
-  notarization_key_file="$(mktemp)"
-  echo "${APPLE_NOTARIZATION_KEY}" > "${notarization_key_file}"
+  prepare_notarization_key_file "${APPLE_NOTARIZATION_KEY}"
   xcode_bin_dir_path="$(xcode-select -p)/usr/bin"
   if "${xcode_bin_dir_path}/notarytool" submit --wait \
-    --key "${notarization_key_file}" \
+    --key "${NOTARIZATION_KEY_FILE}" \
     --key-id "${APPLE_NOTARIZATION_KEY_ID}" \
     --issuer "${APPLE_NOTARIZATION_ISSUER_ID}" \
     "${DMG_PATH}"; then
@@ -1156,7 +1239,7 @@ if [[ -n "${APPLE_NOTARIZATION_KEY:-}" && -n "${APPLE_NOTARIZATION_KEY_ID:-}" &&
     notarization_status="submit_failed"
     echo "warning: notarization submit failed; DMG remains signed but unstapled." >&2
   fi
-  rm -f "${notarization_key_file}"
+  cleanup_notarization_key_file
 else
   echo "Notarization secrets absent; leaving DMG signed but not notarized."
   echo "Release record will set notarization.status=not_attempted."

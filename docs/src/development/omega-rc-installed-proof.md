@@ -24,6 +24,10 @@ After `script/bundle-omega-rc` produces the signed and notarized DMG, generate
 the admitted identity-candidate record, install that exact candidate, collect
 the candidate-bound manual evidence described below, then:
 
+`APPLE_NOTARIZATION_KEY` accepts either inline PEM contents or a readable PEM
+file path, so an owner secret exported as `ASC_API_PRIVATE_KEY_PATH` can be
+passed directly. The bundle script does not print the input or resolved path.
+
 ```sh
 script/prove-omega-rc-install \
   --release-record target/omega-rc/omega-v0.2.0-rc3-macos-arm64.release.json \
