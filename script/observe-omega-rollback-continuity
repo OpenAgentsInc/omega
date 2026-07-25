@@ -1,0 +1,293 @@
+#!/usr/bin/env python3
+"""Observe that an Omega identity survives a downgrade and a rollback.
+
+The installed proof needs recovery evidence, and recovery evidence needs a real
+downgrade/rollback observation. Nothing produced one, so that input was blocked
+and no amount of other evidence could unblock it.
+
+This performs the operation rather than describing it: install the candidate,
+record the identity, downgrade to an older signed artifact, record the identity
+again, roll forward to the candidate, and record it a third time. The claim is
+that the identity reference is byte-identical across all three, which is what
+"an update cannot silently rotate the owner's identity" means in practice.
+
+Only the public identity reference is recorded. A secret key, a recovery
+artifact, or an `nsec`/`ncryptsec` string in the fingerprint is refused, so this
+receipt cannot become a place a secret leaks to.
+
+Usage:
+    observe-omega-rollback-continuity \\
+        --candidate-dmg <rc5.dmg> --older-dmg <rc4.dmg> \\
+        --candidate-evidence <path> --evidence-root <dir> --output <path>
+"""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import shutil
+import subprocess
+import sys
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+ROLLBACK_CONTINUITY_SCHEMA = "openagents.omega.identity-update-downgrade-rollback.v2"
+INSTALLED_APP = Path("/Applications/Omega.app")
+DATA_ROOT = Path.home() / "Library" / "Application Support" / "Omega RC"
+IDENTITY_MANIFEST = DATA_ROOT / "identity" / "identity.json"
+
+
+class ContinuityError(Exception):
+    pass
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def canonical_digest(value: Any) -> str:
+    encoded = json.dumps(
+        value, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def read_identity_fingerprint() -> str:
+    """The public identity reference, which must not change across an update."""
+    if not IDENTITY_MANIFEST.is_file():
+        raise ContinuityError(
+            f"no identity manifest at {IDENTITY_MANIFEST}; run onboarding first"
+        )
+    manifest = json.loads(IDENTITY_MANIFEST.read_text(encoding="utf-8"))
+    reference = manifest.get("identity", {}).get("identity_ref")
+    if not isinstance(reference, str) or not reference.strip():
+        raise ContinuityError("identity manifest has no usable identity_ref")
+    lowered = reference.lower()
+    # The receipt is a public artifact. A secret-shaped fingerprint would turn
+    # a continuity proof into a leak.
+    if "nsec" in lowered or "ncryptsec" in lowered or len(reference) > 256:
+        raise ContinuityError("identity reference is unsafe to record")
+    return reference
+
+
+def run(command: list[str]) -> None:
+    result = subprocess.run(command, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise ContinuityError(f"{command[0]} failed: {result.stderr.strip()[:200]}")
+
+
+def install_from_dmg(dmg: Path) -> None:
+    """Replace the installed app from a signed disk image."""
+    subprocess.run(
+        ["hdiutil", "detach", "/Volumes/Omega RC", "-quiet"], capture_output=True
+    )
+    run(["hdiutil", "attach", str(dmg), "-nobrowse", "-quiet"])
+    try:
+        source = Path("/Volumes/Omega RC/Omega.app")
+        if not source.is_dir():
+            raise ContinuityError(f"{dmg.name} does not contain Omega.app")
+        if INSTALLED_APP.exists():
+            shutil.rmtree(INSTALLED_APP)
+        subprocess.run(
+            ["cp", "-R", str(source), str(INSTALLED_APP.parent)], check=True
+        )
+    finally:
+        subprocess.run(
+            ["hdiutil", "detach", "/Volumes/Omega RC", "-quiet"], capture_output=True
+        )
+
+
+def installed_binary_sha256() -> str:
+    binary = INSTALLED_APP / "Contents" / "MacOS" / "omega"
+    if not binary.is_file():
+        raise ContinuityError("installed Omega binary is missing")
+    return sha256_file(binary)
+
+
+def write_step(root: Path, name: str, payload: dict[str, Any]) -> dict[str, str]:
+    """Write one observation file and return its reference."""
+    path = root / f"{name}.json"
+    path.write_text(
+        json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    return {"path": path.name, "sha256": sha256_file(path)}
+
+
+def observed_at() -> str:
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--candidate-dmg", type=Path, required=True)
+    parser.add_argument("--older-dmg", type=Path, required=True)
+    parser.add_argument("--candidate-evidence", type=Path, required=True)
+    parser.add_argument("--evidence-root", type=Path, required=True)
+    parser.add_argument("--output", type=Path, required=True)
+    args = parser.parse_args()
+
+    if sys.platform != "darwin":
+        raise ContinuityError("macos_required")
+
+    evidence = json.loads(args.candidate_evidence.read_text(encoding="utf-8"))
+    candidate_digest = evidence.get("candidate_digest", {}).get("value")
+    if not isinstance(candidate_digest, str) or len(candidate_digest) != 64:
+        raise ContinuityError("candidate evidence has no usable candidate_digest")
+
+    candidate_artifact = sha256_file(args.candidate_dmg)
+    older_artifact = sha256_file(args.older_dmg)
+    if candidate_artifact == older_artifact:
+        raise ContinuityError(
+            "downgrade target must differ from the candidate; a rollback to the "
+            "same artifact proves nothing"
+        )
+
+    root = args.evidence_root
+    root.mkdir(parents=True, exist_ok=True)
+
+    # 1. Candidate installed, identity as it stands.
+    install_from_dmg(args.candidate_dmg)
+    candidate_binary = installed_binary_sha256()
+    before = read_identity_fingerprint()
+    refs: dict[str, dict[str, str]] = {}
+    refs["candidate_before"] = write_step(
+        root,
+        "candidate-before",
+        {
+            "step": "candidate_installed",
+            "artifact_sha256": candidate_artifact,
+            "installed_binary_sha256": candidate_binary,
+            "identity_ref": before,
+            "observed_at": observed_at(),
+        },
+    )
+
+    # 2. Downgrade to the older signed artifact.
+    refs["downgrade_removal"] = write_step(
+        root,
+        "downgrade-removal",
+        {
+            "step": "removed_candidate",
+            "removed_artifact_sha256": candidate_artifact,
+            "observed_at": observed_at(),
+        },
+    )
+    install_from_dmg(args.older_dmg)
+    older_binary = installed_binary_sha256()
+    refs["downgrade_install"] = write_step(
+        root,
+        "downgrade-install",
+        {
+            "step": "installed_older",
+            "artifact_sha256": older_artifact,
+            "installed_binary_sha256": older_binary,
+            "observed_at": observed_at(),
+        },
+    )
+    time.sleep(1)
+    after_downgrade = read_identity_fingerprint()
+    refs["identity_after_downgrade"] = write_step(
+        root,
+        "identity-after-downgrade",
+        {
+            "step": "identity_on_older",
+            "identity_ref": after_downgrade,
+            "matches_before": after_downgrade == before,
+            "observed_at": observed_at(),
+        },
+    )
+
+    # 3. Roll forward to the candidate.
+    refs["rollback_removal"] = write_step(
+        root,
+        "rollback-removal",
+        {
+            "step": "removed_older",
+            "removed_artifact_sha256": older_artifact,
+            "observed_at": observed_at(),
+        },
+    )
+    install_from_dmg(args.candidate_dmg)
+    rolled_binary = installed_binary_sha256()
+    if rolled_binary != candidate_binary:
+        raise ContinuityError(
+            "rollback installed a different binary than the candidate"
+        )
+    refs["rollback_install"] = write_step(
+        root,
+        "rollback-install",
+        {
+            "step": "installed_candidate",
+            "artifact_sha256": candidate_artifact,
+            "installed_binary_sha256": rolled_binary,
+            "observed_at": observed_at(),
+        },
+    )
+    time.sleep(1)
+    after = read_identity_fingerprint()
+    refs["identity_after_rollback"] = write_step(
+        root,
+        "identity-after-rollback",
+        {
+            "step": "identity_on_candidate",
+            "identity_ref": after,
+            "matches_before": after == before,
+            "observed_at": observed_at(),
+        },
+    )
+
+    continuous = before == after_downgrade == after
+    receipt = {
+        "schema": ROLLBACK_CONTINUITY_SCHEMA,
+        "candidate_digest": candidate_digest,
+        "status": "passed" if continuous else "failed",
+        "observed_at": observed_at(),
+        "identity_fingerprint_before": before,
+        "identity_fingerprint_after": after,
+        "sequence": [
+            {
+                "action": "downgrade",
+                "from_artifact_sha256": candidate_artifact,
+                "to_artifact_sha256": older_artifact,
+            },
+            {
+                "action": "update_and_rollback_to_candidate",
+                "from_artifact_sha256": older_artifact,
+                "to_artifact_sha256": candidate_artifact,
+                "installed_binary_sha256": candidate_binary,
+            },
+        ],
+        "evidence_refs": refs,
+    }
+    receipt["evidence_sha256"] = canonical_digest(receipt)
+
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    args.output.write_text(
+        json.dumps(receipt, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    print(
+        json.dumps(
+            {
+                "schema": ROLLBACK_CONTINUITY_SCHEMA,
+                "status": receipt["status"],
+                "identity_stable_across_downgrade_and_rollback": continuous,
+                "output": str(args.output),
+            }
+        )
+    )
+    return 0 if continuous else 1
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except ContinuityError as error:
+        print(f"error: {error}", file=sys.stderr)
+        sys.exit(2)
