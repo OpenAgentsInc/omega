@@ -62,6 +62,28 @@ pub const FORBIDDEN_SOURCE_STRINGS: &[(&str, &str)] = &[
     ("OMEGA-DELTA-0009", "Review .zed/settings.json"),
 ];
 
+/// Restricted Mode UI and key bindings removed by OMEGA-DELTA-0009.
+pub const FORBIDDEN_RESTRICTED_MODE_UI: &[(&str, &str)] = &[
+    ("crates/agent_ui/src/profile_selector.rs", "Restricted Mode"),
+    ("crates/language_tools/src/lsp_button.rs", "Restricted Mode"),
+    (
+        "crates/workspace/src/workspace.rs",
+        "ToggleWorktreeSecurity",
+    ),
+    (
+        "assets/keymaps/default-linux.json",
+        "workspace::ToggleWorktreeSecurity",
+    ),
+    (
+        "assets/keymaps/default-macos.json",
+        "workspace::ToggleWorktreeSecurity",
+    ),
+    (
+        "assets/keymaps/default-windows.json",
+        "workspace::ToggleWorktreeSecurity",
+    ),
+];
+
 /// Read a repository file relative to the workspace root.
 ///
 /// `CARGO_MANIFEST_DIR` is `crates/omega_deltas`, so the root is two levels up.
@@ -381,6 +403,26 @@ mod tests {
         assert!(
             offenders.is_empty(),
             "forbidden Zed product copy has returned:\n{}",
+            offenders.join("\n")
+        );
+    }
+
+    /// OMEGA-DELTA-0009. Restricted Mode cannot return through a surviving
+    /// profile selector, language-server status, workspace action, or key binding.
+    #[test]
+    fn restricted_mode_ui_and_shortcuts_are_absent() {
+        let mut offenders = Vec::new();
+        for (relative_path, needle) in FORBIDDEN_RESTRICTED_MODE_UI {
+            let path = repository_path(relative_path);
+            let source = std::fs::read_to_string(&path)
+                .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
+            if source.contains(needle) {
+                offenders.push(format!("{needle:?} in {}", path.display()));
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "OMEGA-DELTA-0009 Restricted Mode UI or shortcuts returned:\n{}",
             offenders.join("\n")
         );
     }

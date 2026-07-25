@@ -174,16 +174,13 @@ cargo test -p omega_deltas
 - **Omega:** `crates/workspace/src/security_modal.rs` is deleted, along with
   `show_worktree_trust_security_modal`, the auto-show on project open, the
   `ToggleWorktreeSecurity` handler, the title-bar badge, the settings banner,
-  and the component-gallery sample that carried
-  *"Review .zed/settings.json"*.
+  the profile-selector and language-server Restricted Mode affordances, the
+  default Restricted Mode key bindings, and the component-gallery sample that
+  carried *"Review .zed/settings.json"*.
 - **Why:** `OMEGA-DELTA-0001` stopped the modal appearing but left it compiled
   in, which an adversarial review flagged and a binary scan confirmed — the
   `.zed/settings.json` identifier was still shipping in `0.2.0-rc4`.
   Unreachable code that a rebase can revive is not a removal.
-- **Known remainder:** two dead render blocks still mention "Restricted Mode"
-  (`crates/agent_ui/src/profile_selector.rs`,
-  `crates/language_tools/src/lsp_button.rs`). They are gated on state that can
-  no longer be true, and "Restricted Mode" is a feature name rather than a Zed
-  product identifier, so they are not an omega#16 violation. Tracked on
-  omega#64 rather than claimed as done.
-- **Enforced by:** `removed_surfaces_stay_removed`, `no_zed_product_copy_survives_anywhere`.
+- **Enforced by:** `removed_surfaces_stay_removed`,
+  `no_zed_product_copy_survives_anywhere`, and
+  `restricted_mode_ui_and_shortcuts_are_absent`.

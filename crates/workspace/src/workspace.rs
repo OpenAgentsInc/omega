@@ -346,9 +346,6 @@ actions!(
         ZoomIn,
         /// Zooms out of the active pane.
         ZoomOut,
-        /// If any worktrees are in restricted mode, shows a modal with possible actions.
-        /// If the modal is shown already, closes it without trusting any worktree.
-        ToggleWorktreeSecurity,
         /// Clears all trusted worktrees, placing them in restricted mode on next open.
         /// Requires restart to take effect on already opened projects.
         ClearTrustedWorktrees,

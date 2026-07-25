@@ -44,7 +44,6 @@
       "ctrl-cmd-i": "edit_prediction::ToggleMenu",
       "ctrl-cmd-l": "lsp_tool::ToggleMenu",
       "ctrl-cmd-c": "editor::DisplayCursorNames",
-      "ctrl-cmd-s": "workspace::ToggleWorktreeSecurity",
     },
   },
   {
