@@ -12,7 +12,7 @@ must be installed beside Zed and exercised.
 ## Prerequisites
 
 1. A release record from `script/bundle-omega-rc` for
-   `Omega-v0.2.0-rc2-macos-arm64.dmg`.
+   `Omega-v0.2.0-rc3-macos-arm64.dmg`.
 2. Matching package digest in that record.
 3. OpenAgents signing / notarization evidence when distribution requires it.
 4. A clean user profile that already has Zed installed for the side-by-side
@@ -26,8 +26,8 @@ the candidate-bound manual evidence described below, then:
 
 ```sh
 script/prove-omega-rc-install \
-  --release-record target/omega-rc/omega-v0.2.0-rc2-macos-arm64.release.json \
-  --artifact target/omega-rc/Omega-v0.2.0-rc2-macos-arm64.dmg \
+  --release-record target/omega-rc/omega-v0.2.0-rc3-macos-arm64.release.json \
+  --artifact target/omega-rc/Omega-v0.2.0-rc3-macos-arm64.dmg \
   --app /Applications/Omega.app \
   --identity-evidence target/omega-identity-evidence/candidate-evidence.json \
   --identity-matrix target/omega-identity-proof/matrix-evidence.json \
@@ -50,9 +50,9 @@ public vector, reviewed Buzz source, and native package versions:
 
 ```sh
 script/generate-omega-identity-candidate-evidence \
-  --release-record target/omega-rc/omega-v0.2.0-rc2-macos-arm64.release.json \
-  --artifact target/omega-rc/Omega-v0.2.0-rc2-macos-arm64.dmg \
-  --cargo-lock-snapshot target/omega-rc/Cargo.lock.omega-v0.2.0-rc2 \
+  --release-record target/omega-rc/omega-v0.2.0-rc3-macos-arm64.release.json \
+  --artifact target/omega-rc/Omega-v0.2.0-rc3-macos-arm64.dmg \
+  --cargo-lock-snapshot target/omega-rc/Cargo.lock.omega-v0.2.0-rc3 \
   --identity-matrix target/omega-identity-proof/matrix-evidence.json \
   --installed-tripwires target/omega-identity-proof/installed-secret-tripwires.json \
   --evidence-root target/omega-identity-proof \
@@ -146,8 +146,8 @@ ProductSpec:
 
 ```sh
 script/generate-omega-full-auto-candidate-evidence \
-  --release-record target/omega-rc/omega-v0.2.0-rc2-macos-arm64.release.json \
-  --artifact target/omega-rc/Omega-v0.2.0-rc2-macos-arm64.dmg \
+  --release-record target/omega-rc/omega-v0.2.0-rc3-macos-arm64.release.json \
+  --artifact target/omega-rc/Omega-v0.2.0-rc3-macos-arm64.dmg \
   --identity-evidence target/omega-identity-evidence/candidate-evidence.json \
   --observations target/omega-full-auto-evidence/observations.json \
   --evidence-root "$PWD/target/omega-full-auto-evidence/observed" \
@@ -208,8 +208,8 @@ After installing the exact signed candidate, exercise its packaged
 
 ```sh
 script/run-omega-identity-proof-matrix \
-  --release-record "$PWD/target/omega-rc/omega-v0.2.0-rc2-macos-arm64.release.json" \
-  --artifact "$PWD/target/omega-rc/Omega-v0.2.0-rc2-macos-arm64.dmg" \
+  --release-record "$PWD/target/omega-rc/omega-v0.2.0-rc3-macos-arm64.release.json" \
+  --artifact "$PWD/target/omega-rc/Omega-v0.2.0-rc3-macos-arm64.dmg" \
   --candidate-evidence "$PWD/target/omega-identity-evidence/candidate-evidence.json" \
   --output "$PWD/target/omega-identity-proof/matrix-evidence.json"
 ```
