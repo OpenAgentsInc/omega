@@ -20,7 +20,7 @@ For general settings mechanics, see [Configuring Zed](../configuring-zed.md).
 
 ## LLM Providers {#llm-providers}
 
-The `LLM Providers` section configures model providers for Zed AI features, including Zed Agent, Inline Assistant, Git commit generation, thread summaries, and similar model-backed features.
+The `LLM Providers` section configures model providers for Zed AI features, including Omega Agent, Inline Assistant, Git commit generation, thread summaries, and similar model-backed features.
 
 Use this section to:
 
@@ -57,7 +57,7 @@ For feature-specific model examples, see [Feature-specific Models](#feature-spec
 
 ## Automatic Compaction {#automatic-compaction}
 
-Zed Agent can automatically compact long threads before they reach the selected model's context window. Compaction summarizes earlier messages and keeps the conversation usable without starting a new thread.
+Omega Agent can automatically compact long threads before they reach the selected model's context window. Compaction summarizes earlier messages and keeps the conversation usable without starting a new thread.
 
 Automatic compaction is enabled by default and runs when the thread reaches `90%` of the model's context window. You can change the threshold or disable automatic compaction in `settings.json`:
 
@@ -82,7 +82,7 @@ The `threshold` value can be one of:
 
 `0` is not a valid threshold. If the threshold is invalid, Zed falls back to `90%`.
 
-You can compact a Zed Agent thread manually at any time by typing `/compact` in the Agent Panel message editor. For more on thread token usage and compaction behavior, see [Token Usage and Compaction](./agent-panel.md#token-usage).
+You can compact an Omega Agent thread manually at any time by typing `/compact` in the Agent Panel message editor. For more on thread token usage and compaction behavior, see [Token Usage and Compaction](./agent-panel.md#token-usage).
 
 ## Compaction Model {#compaction-model}
 
@@ -142,7 +142,7 @@ Some AI settings are not configured on the AI settings pages:
 
 | Task                                                         | Go to                                          |
 | ------------------------------------------------------------ | ---------------------------------------------- |
-| Choose which tools are available in a Zed Agent thread       | [Agent Profiles](./agent-profiles.md)          |
+| Choose which tools are available in an Omega Agent thread      | [Agent Profiles](./agent-profiles.md)          |
 | Control whether tool calls are allowed, denied, or confirmed | [Tool Permissions](./tool-permissions.md)      |
 | Configure reusable task instructions                         | [Skills](./skills.md)                          |
 | Configure always-on personal or project instructions         | [Instructions](./instructions.md)              |

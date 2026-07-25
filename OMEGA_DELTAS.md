@@ -799,3 +799,22 @@ cargo test -p omega_deltas
 - **Enforced by:** `the_packaging_path_staples_the_application` in
   `crates/omega_deltas/`, which fails if the bundle script stops stapling or
   stops validating the `.app`.
+
+### OMEGA-DELTA-0024 — Omega Agent is the first-party agent identity
+
+- **Upstream Zed:** the native `AgentConnection`, selector label, component
+  preview, thread placeholder, and evaluation client identify the runtime as
+  `Zed Agent`.
+- **Omega now:** those reachable surfaces identify the admitted first-party
+  orchestrator as **Omega Agent** and use the reviewed `OmegaAgent` icon. The
+  compatibility symbol `ZED_AGENT_ID` remains internal so this packet does not
+  turn a product rename into broad implementation churn.
+- **Boundary:** this delta renames the identity projected by the inherited
+  native executor. It does not turn `NativeAgent` into the router, make the
+  inherited `telemetry_id` an OpenAgents service identity, change run
+  authority, or claim that the later routing and receipt packets exist.
+- **Docs:** reachable agent documentation names Omega Agent while retaining
+  the existing `zed-agent.md` path as a stable link.
+- **Enforced by:** `the_first_party_agent_identity_is_omega_agent` in
+  `crates/omega_deltas`, plus the existing high-risk public-branding scan in
+  `crates/app_identity`.

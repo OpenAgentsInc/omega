@@ -51,6 +51,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0021",
     "OMEGA-DELTA-0022",
     "OMEGA-DELTA-0023",
+    "OMEGA-DELTA-0024",
 ];
 
 /// OMEGA-DELTA-0021. The file that holds the executor-disclosure record.
@@ -2314,6 +2315,70 @@ mod tests {
             parsed["notarization"].get("app_stapled").is_some(),
             "OMEGA-DELTA-0023: the release record must carry app_stapled \
              separately from stapled, or the two get conflated again"
+        );
+    }
+
+    /// OMEGA-DELTA-0024. The first-party identity is Omega Agent everywhere a
+    /// user can select, configure, or inspect the native executor.
+    #[test]
+    fn the_first_party_agent_identity_is_omega_agent() {
+        let agent_path = repository_path("crates/agent/src/agent.rs");
+        let agent_source = std::fs::read_to_string(&agent_path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", agent_path.display()));
+        assert!(
+            agent_source.contains(r#"AgentId::new("Omega Agent")"#),
+            "OMEGA-DELTA-0024: the native AgentId must be Omega Agent"
+        );
+
+        let agent_ui_path = repository_path("crates/agent_ui/src/agent_ui.rs");
+        let agent_ui_source = std::fs::read_to_string(&agent_ui_path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", agent_ui_path.display()));
+        for required in [
+            r#"Self::NativeAgent => "Omega Agent".into()"#,
+            "Self::NativeAgent => Some(IconName::OmegaAgent)",
+        ] {
+            assert!(
+                agent_ui_source.contains(required),
+                "OMEGA-DELTA-0024: the native Agent projection lost {required:?}"
+            );
+        }
+
+        for (relative_path, required) in [
+            (
+                "crates/agent_ui/src/agent_panel.rs",
+                r#"ContextMenuEntry::new("Omega Agent")"#,
+            ),
+            (
+                "crates/ui/src/components/ai/agent_setup_button.rs",
+                r#".name("Omega Agent")"#,
+            ),
+            (
+                "crates/eval_cli/src/headless.rs",
+                r#""Omega Agent CLI/{} ({}; {})""#,
+            ),
+        ] {
+            let path = repository_path(relative_path);
+            let source = std::fs::read_to_string(&path)
+                .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
+            assert!(
+                source.contains(required),
+                "OMEGA-DELTA-0024: {relative_path} lost {required:?}"
+            );
+        }
+
+        let mut stale_docs = Vec::new();
+        for root in ["docs/src", "crates/agent_skills"] {
+            for_each_source_file(&repository_path(root), &["md"], |path, source| {
+                if source.contains("Zed Agent") {
+                    stale_docs.push(path.display().to_string());
+                }
+            });
+        }
+        assert!(
+            stale_docs.is_empty(),
+            "OMEGA-DELTA-0024: reachable docs still present Zed Agent as the \
+             first-party identity:\n{}",
+            stale_docs.join("\n")
         );
     }
 
