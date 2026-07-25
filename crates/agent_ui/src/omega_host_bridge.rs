@@ -77,6 +77,26 @@ fn republish_engine_lane_runs(threads: &[HostThread]) {
     }
 }
 
+/// Publish one lane correlation, for a harness that has no engine to run.
+///
+/// `OMEGA-DELTA-0021`'s engine-lane disclosure is normally reached only by a
+/// real `omega-effectd` run, which a rendering harness cannot start. This is
+/// the seam that lets the *rendered* engine-lane line be captured without
+/// weakening the production path: it is behind `test-support`, so no shipped
+/// build can reach it, and it writes the same index the correlation journal
+/// writes.
+#[cfg(any(test, feature = "test-support"))]
+pub fn publish_engine_lane_run_for_tests(thread_id: ThreadId, operation_ref: String) {
+    match ENGINE_LANE_RUNS.lock() {
+        Ok(mut index) => {
+            index.insert(thread_id, operation_ref);
+        }
+        Err(poisoned) => {
+            poisoned.into_inner().insert(thread_id, operation_ref);
+        }
+    }
+}
+
 /// The `omega-effectd` lane run this thread belongs to, if it is one.
 ///
 /// Returns `None` for every thread the user started themselves, which is what

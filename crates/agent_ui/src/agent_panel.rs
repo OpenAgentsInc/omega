@@ -1217,6 +1217,14 @@ pub struct AgentPanel {
     /// Separate from `full_auto` for the reason above: hidden and absent are
     /// different states.
     showing_full_auto: bool,
+    /// `OMEGA-DELTA-0035`. The poll that feeds the router the engine's framed
+    /// `get_capacity` answer.
+    ///
+    /// Held so it dies with the panel. It writes nothing to the engine and
+    /// keeps no run state: `omega-effectd` remains the sole run authority and
+    /// this only lets the router know whether an engine-lane pin is honourable
+    /// before it decides.
+    _engine_capacity_poll: Option<Task<()>>,
 }
 
 impl AgentPanel {
@@ -1617,10 +1625,66 @@ impl AgentPanel {
             is_active: false,
             full_auto: None,
             showing_full_auto: false,
+            _engine_capacity_poll: None,
         };
 
+        let mut panel = panel;
         panel.ensure_native_agent_connection(cx);
+        panel.observe_engine_capacity(cx);
         panel
+    }
+
+    /// `OMEGA-DELTA-0035`. Keep the router's view of the engine current.
+    ///
+    /// omega#78 built `observe_capacity` and nothing called it, so the router
+    /// decided every engine-lane pin against `NotRunning` regardless of what
+    /// `omega-effectd` was actually doing. This is the feed: the same framed
+    /// `get_capacity` call the Full Auto roster makes, on the same three-second
+    /// cadence, handed to the router as a snapshot.
+    ///
+    /// The direction is one-way by construction. `observe_capacity` takes an
+    /// answer and stores it; there is no path from here back into the engine,
+    /// and a decision already recorded is never re-derived when a later answer
+    /// arrives — `a_later_engine_answer_does_not_rewrite_a_recorded_decision`
+    /// asserts that at the dispatch layer, not only in the journal.
+    ///
+    /// An engine that cannot be reached is reported as unreachable rather than
+    /// left at its last good answer. A router that kept believing a stale
+    /// "available" would route a pin onto a lane that had gone away, and the
+    /// user would see a pin honoured that was not.
+    fn observe_engine_capacity(&mut self, cx: &mut Context<Self>) {
+        let executor = cx.background_executor().clone();
+        let supervisor = omega_effectd::shared_supervisor(cx).ok();
+        self._engine_capacity_poll = Some(cx.spawn(async move |this, cx| {
+            loop {
+                let observed = match &supervisor {
+                    Some(supervisor) => {
+                        let mut guard = supervisor.lock().await;
+                        guard.get_capacity().await.ok()
+                    }
+                    None => None,
+                };
+                // Reached through the panel entity so the loop ends with the
+                // panel rather than outliving the window it belongs to.
+                let alive = this
+                    .update(cx, |_panel, _cx| {
+                        let Some(router) = crate::omega_router::active_router() else {
+                            return;
+                        };
+                        match &observed {
+                            Some(capacity) => router.observe_capacity(Ok(capacity)),
+                            None => router.observe_capacity(Err(
+                                omega_front_door::EngineUnreachable::NotRunning,
+                            )),
+                        }
+                    })
+                    .is_ok();
+                if !alive {
+                    break;
+                }
+                executor.timer(std::time::Duration::from_secs(3)).await;
+            }
+        }));
     }
 
     pub fn toggle_focus(
@@ -1773,11 +1837,16 @@ impl AgentPanel {
         cx.notify();
     }
 
+    /// `OMEGA-DELTA-0034`. A new thread does not require an open project.
+    ///
+    /// Upstream refused this (`agent_ui: Require an open project for agent
+    /// panel`, "a bit brute force, but it works"). Omega's front door is the
+    /// agent, and a fresh install *is* the no-project case, so refusing here
+    /// refuses the front door to every new user. `new_thread_with_workspace`
+    /// still asks `should_create_terminal_for_new_entry`, which requires an
+    /// open project — a terminal genuinely needs a working directory, so with
+    /// no project this falls through to a thread.
     pub fn new_thread(&mut self, _action: &NewThread, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.has_open_project(cx) {
-            return;
-        }
-
         self.new_thread_with_workspace(None, window, cx);
     }
 
@@ -1794,6 +1863,15 @@ impl AgentPanel {
         }
     }
 
+    /// `OMEGA-DELTA-0034`. The front door's own entry point, project or no
+    /// project.
+    ///
+    /// `AgentPanel::open_front_door` calls this on a window with nothing to
+    /// restore, and a window with nothing to restore is by definition a window
+    /// with no project. The guard that used to stand here is why omega#76's
+    /// exit — *typing starts a real thread* — did not hold on a fresh install:
+    /// landing worked, and the composer the user was supposed to type into was
+    /// never built.
     pub fn activate_new_thread(
         &mut self,
         focus: bool,
@@ -1801,10 +1879,6 @@ impl AgentPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.has_open_project(cx) {
-            return;
-        }
-
         self.set_last_created_entry_kind_from_user_action(AgentPanelEntryKind::Thread, cx);
 
         // If the user is viewing a *parked* draft and the ephemeral
@@ -2027,9 +2101,19 @@ impl AgentPanel {
         self.has_open_project(cx) && self.project.read(cx).supports_terminal(cx)
     }
 
+    /// `OMEGA-DELTA-0034`. A terminal entry still requires an open project.
+    ///
+    /// This asks `supports_terminal` rather than `project.supports_terminal`
+    /// because the latter is `true` for *any* local project, worktree or not.
+    /// Before the front-door guards moved, `new_thread`'s own
+    /// `has_open_project` check was what stopped that: a fresh window whose
+    /// persisted `last_created_entry_kind` was `Terminal` would otherwise open
+    /// a terminal with no working directory instead of the composer. That is
+    /// what those guards were protecting, and it is protected here now, where
+    /// the requirement actually is.
     pub fn should_create_terminal_for_new_entry(&self, cx: &App) -> bool {
         self.last_created_entry_kind == AgentPanelEntryKind::Terminal
-            && self.project.read(cx).supports_terminal(cx)
+            && self.supports_terminal(cx)
     }
 
     fn set_last_created_entry_kind_from_user_action(
@@ -3024,11 +3108,17 @@ impl AgentPanel {
         }
     }
 
+    /// `OMEGA-DELTA-0034`. Connect the native agent, project or no project.
+    ///
+    /// This was the guard that had to be understood before any of the others
+    /// could move, because it is the one that could plausibly have been
+    /// protecting something. It is not: `NativeAgentServer::connect` takes the
+    /// project as `_project` and never reads it, and `NativeAgent::new_session`
+    /// builds a thread from the project entity without requiring a visible
+    /// worktree. What the guard actually bought was not spinning up an agent
+    /// connection for a window that upstream had decided would never show the
+    /// agent — a resource choice, on a premise Omega does not share.
     fn ensure_native_agent_connection(&self, cx: &mut Context<Self>) {
-        if !self.has_open_project(cx) {
-            return;
-        }
-
         let fs = self.fs.clone();
         let thread_store = self.thread_store.clone();
         self.connection_store.update(cx, |store, cx| {
@@ -3040,6 +3130,7 @@ impl AgentPanel {
         });
     }
 
+    /// `OMEGA-DELTA-0034`. The composer, project or no project.
     pub fn activate_draft(
         &mut self,
         focus: bool,
@@ -3047,10 +3138,6 @@ impl AgentPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.has_open_project(cx) {
-            return;
-        }
-
         let draft = self.ensure_draft(source, window, cx);
         if let BaseView::AgentThread { conversation_view } = &self.base_view {
             if conversation_view.entity_id() == draft.entity_id() {
@@ -3627,9 +3714,10 @@ impl AgentPanel {
         let project = self.project.clone();
         cx.spawn(async move |_this, cx| -> Result<()> {
             let connected = connect_task.await?;
-            if let Some(native_connection) = connected
-                .connection
-                .downcast::<agent::NativeAgentConnection>()
+            // OMEGA-DELTA-0035. The store's connection is the router; the
+            // native loop is underneath it.
+            if let Some(native_connection) =
+                crate::omega_router::native_connection(&connected.connection)
             {
                 cx.update(|cx| native_connection.refresh_skills_for_project(project, cx));
             }
@@ -3663,16 +3751,14 @@ impl AgentPanel {
         self.agent_panel_menu_handle.toggle(window, cx);
     }
 
+    /// `OMEGA-DELTA-0034`. The new-thread menu, project or no project — it is
+    /// how the front door reaches Full Auto and the executor choices.
     pub fn toggle_new_thread_menu(
         &mut self,
         _: &ToggleNewThreadMenu,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.has_open_project(cx) {
-            return;
-        }
-
         self.new_thread_menu_handle.toggle(window, cx);
     }
 
@@ -4647,10 +4733,10 @@ impl AgentPanel {
 
         let server = server_override
             .unwrap_or_else(|| agent.server(self.fs.clone(), self.thread_store.clone()));
-        let thread_store = server
-            .clone()
-            .downcast::<agent::NativeAgentServer>()
-            .is_some()
+        // OMEGA-DELTA-0035. Wrapped or bare, the native agent gets the thread
+        // store; a bare downcast here would silently hand the router `None` and
+        // lose native thread persistence.
+        let thread_store = crate::omega_router::is_native_agent_server(&server)
             .then(|| self.thread_store.clone());
 
         let connection_store = self.connection_store.clone();
@@ -5442,12 +5528,13 @@ impl AgentPanel {
     fn should_show_title_edit(&self, window: &Window, cx: &Context<Self>) -> bool {
         // A Full Auto run's title is edited on its own launch surface, so the
         // toolbar's thread-title editor must not appear over it.
+        // OMEGA-DELTA-0034. A project-optional thread has a title like any
+        // other, so editing it does not wait for a worktree.
         !self.showing_full_auto
             && matches!(
                 self.visible_surface(),
                 VisibleSurface::AgentThread(_) | VisibleSurface::Terminal(_)
             )
-            && self.has_open_project(cx)
             && !self.is_title_editor_focused(window, cx)
     }
 
@@ -5902,7 +5989,11 @@ impl AgentPanel {
 
         let focus_handle = self.focus_handle(cx);
 
-        let can_create_entries = self.has_open_project(cx);
+        // OMEGA-DELTA-0034. A thread is creatable with no project open, so the
+        // toolbar's create controls are live on the front door. A leftover
+        // `has_open_project` here would leave the composer typable and the `+`
+        // beside it disabled.
+        let can_create_entries = true;
         let supports_terminal = self.supports_terminal(cx);
         let showing_terminal = matches!(self.visible_surface(), VisibleSurface::Terminal(_));
 
@@ -8946,8 +9037,21 @@ mod tests {
         });
     }
 
+    /// `OMEGA-DELTA-0034`. An empty workspace opens the front door — and still
+    /// refuses the things that genuinely need a worktree.
+    ///
+    /// This test used to assert the opposite, because it encoded upstream's
+    /// policy: `agent_ui: Require an open project for agent panel` (#56577) put
+    /// a `has_open_project` guard in front of every panel entry, and this test
+    /// pinned it. Omega's front door *is* the agent, and a window with nothing
+    /// to restore is by definition a window with no project, so that policy
+    /// refused a composer to every new user — omega#76's exit, failing.
+    ///
+    /// The clauses that were still true are kept and still asserted: an
+    /// external ACP agent and a terminal both need a working directory, and
+    /// neither is created here.
     #[gpui::test]
-    async fn test_empty_workspace_does_not_create_agent_entries(cx: &mut TestAppContext) {
+    async fn test_empty_workspace_opens_the_front_door(cx: &mut TestAppContext) {
         init_test(cx);
         cx.update(|cx| {
             agent::ThreadStore::init_global(cx);
@@ -8955,6 +9059,11 @@ mod tests {
         });
 
         let fs = FakeFs::new(cx.executor());
+        // The global filesystem is what a *created* thread reaches for. This
+        // test used to assert that no thread was created, so it never needed
+        // one; now it asserts the opposite.
+        cx.update(|cx| <dyn fs::Fs>::set_global(fs.clone(), cx));
+        // Still no worktree: this is the fresh-install state under test.
         let project = Project::test(fs.clone(), [], cx).await;
         let multi_workspace =
             cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
@@ -8973,18 +9082,47 @@ mod tests {
 
         panel.read_with(cx, |panel, cx| {
             assert_eq!(
+                panel.project.read(cx).visible_worktrees(cx).count(),
+                0,
+                "this test is about the projectless case; a worktree here \
+                 would make every assertion below prove something else"
+            );
+            assert_ne!(
                 panel
                     .connection_store()
                     .read(cx)
                     .connection_status(&Agent::NativeAgent, cx),
                 crate::agent_connection_store::AgentConnectionStatus::Disconnected,
-                "empty workspaces should not start the native agent connection"
+                "an empty workspace must start the native agent connection; \
+                 NativeAgentServer::connect never reads the project, and \
+                 refusing here is what left omega#76's front door with no \
+                 composer to type into"
             );
         });
 
         panel.update_in(cx, |panel, window, cx| {
             panel.new_thread(&NewThread, window, cx);
-            panel.activate_draft(true, AgentThreadSource::AgentPanel, window, cx);
+        });
+        cx.run_until_parked();
+
+        panel.read_with(cx, |panel, _cx| {
+            assert!(
+                panel.active_conversation_view().is_some(),
+                "an empty workspace must reach a thread; this is omega#76's \
+                 exit — a fresh launch lands on the agent and typing starts a \
+                 real thread"
+            );
+            assert!(
+                panel.draft_thread.is_some(),
+                "an empty workspace must have a draft to type into"
+            );
+        });
+
+        // The parts that genuinely need a worktree still refuse. Removing
+        // *these* guards would not be project-optional threads; it would be
+        // threads that fail later and less legibly.
+        let before_external = panel.read_with(cx, |panel, _cx| panel.selected_agent.clone());
+        panel.update_in(cx, |panel, window, cx| {
             panel.new_external_agent_thread(
                 &NewExternalAgentThread {
                     agent: AgentId::new("external-agent"),
@@ -8994,19 +9132,11 @@ mod tests {
             );
         });
         cx.run_until_parked();
-
-        panel.read_with(cx, |panel, cx| {
-            assert!(
-                panel.active_conversation_view().is_none(),
-                "empty workspaces should not create agent threads"
-            );
-            assert!(
-                panel.draft_thread.is_none(),
-                "empty workspaces should not create draft threads"
-            );
-            assert!(
-                panel.terminals(cx).is_empty(),
-                "empty workspaces should not create agent panel terminals"
+        panel.read_with(cx, |panel, _cx| {
+            assert_eq!(
+                panel.selected_agent, before_external,
+                "an empty workspace must not start an external ACP agent, \
+                 which has no working directory to run in"
             );
         });
 
@@ -9021,15 +9151,15 @@ mod tests {
         panel.read_with(cx, |panel, cx| {
             assert!(
                 panel.terminals(cx).is_empty(),
-                "empty workspaces should not create terminals after the terminal feature is enabled"
+                "an empty workspace must not create a terminal; a terminal \
+                 needs a working directory"
             );
-            assert_eq!(
-                panel
-                    .connection_store()
-                    .read(cx)
-                    .connection_status(&Agent::NativeAgent, cx),
-                crate::agent_connection_store::AgentConnectionStatus::Disconnected,
-                "empty workspace actions should not start the native agent connection"
+            assert!(
+                !panel.should_create_terminal_for_new_entry(cx),
+                "with no project, a new entry must be a thread and not a \
+                 terminal — project.supports_terminal() is true for any local \
+                 project, worktree or not, so this has to be checked on the \
+                 panel's own wrapper"
             );
         });
     }

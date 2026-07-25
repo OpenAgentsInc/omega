@@ -52,7 +52,16 @@ crates/docs_preprocessor/actions.json
 # Visual test baseline images (these will be stored outside
 # the repo in the future, but we don't haven't decided exactly
 # where yet, so for now they get generated into a gitignored dir.)
-/crates/zed/test_fixtures/visual_tests/
+#
+# OMEGA-DELTA-0034/0035: Omega's own baselines are committed. Upstream leaves
+# these uncommitted pending a decision on where to keep them, which is why
+# `zed_visual_test_runner` shipped with no baselines and no invocation and
+# every Omega packet that needed rendered evidence had none. A baseline nobody
+# committed cannot fail, and three lanes in a row reported "no check here looks
+# at a rendered pixel". Only the `omega_*` captures are re-included; the
+# inherited suite keeps upstream's arrangement.
+/crates/zed/test_fixtures/visual_tests/*
+!/crates/zed/test_fixtures/visual_tests/omega_*.png
 
 # Local documentation audit files
 /december-2025-releases.md

@@ -298,6 +298,55 @@ pub const fn origin_starts_a_run(_origin: LaunchOrigin) -> bool {
 }
 
 // -------------------------------------------------------------------------
+// Who may pin an executor
+// -------------------------------------------------------------------------
+
+/// Every gesture that may set a thread's executor pin.
+///
+/// A pin is the only way a thread reaches anything but the native loop, and
+/// [`ExecutorClass::EngineLane`] *is* Full Auto authority. So owner gate 8 —
+/// *no model-initiated path can start Full Auto authority; only an explicit
+/// human action can* — reaches the pin as directly as it reaches the Start
+/// button. omega#76 rejected a composer mode flag for Full Auto because a
+/// boolean the send path reads can be set by a slash command, a restored
+/// draft, or a model-authored insertion. A pin is the same construct wearing a
+/// different name, and it gets the same treatment.
+///
+/// The mechanism is a *required argument*, not a convention. `pin_session` and
+/// `pin_next_session` in `crates/agent_ui/src/omega_router.rs` take a
+/// `PinGesture`, so there is no way to set a pin without naming the gesture
+/// that set it, and `omega_deltas` asserts every call site passes a literal
+/// variant rather than a value it was handed. A tool call, a slash command, a
+/// restored draft, an agent turn, and a composer mode flag each have no
+/// variant here, and `pin_gestures_are_all_human_gestures` fails if one
+/// appears.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PinGesture {
+    /// A click on an entry of the executor pin menu, on the thread's own
+    /// disclosure line.
+    ExecutorPinMenuItem,
+    /// A click on the "unpin" entry of the same menu, clearing the pin.
+    ExecutorPinCleared,
+}
+
+impl PinGesture {
+    /// Every admitted gesture, in declaration order.
+    #[must_use]
+    pub const fn all() -> &'static [Self] {
+        &[Self::ExecutorPinMenuItem, Self::ExecutorPinCleared]
+    }
+
+    /// The stable token this gesture is logged under.
+    #[must_use]
+    pub const fn token(self) -> &'static str {
+        match self {
+            Self::ExecutorPinMenuItem => "executor_pin_menu_item",
+            Self::ExecutorPinCleared => "executor_pin_cleared",
+        }
+    }
+}
+
+// -------------------------------------------------------------------------
 // The affordance ledger
 // -------------------------------------------------------------------------
 
@@ -736,6 +785,25 @@ mod tests {
              operates. A tool call, a slash command, a restored draft, an agent \
              turn, or a composer mode flag is not one. If you are adding an \
              origin, prove it is a human gesture before you edit this list."
+        );
+    }
+
+    /// Owner gate 8, at the pin. An engine lane is Full Auto authority and a
+    /// pin is the only door to one, so the set of gestures that may set a pin
+    /// is closed for the same reason the set of launch origins is.
+    #[test]
+    fn pin_gestures_are_all_human_gestures() {
+        let tokens: Vec<&str> = PinGesture::all().iter().map(|g| g.token()).collect();
+        assert_eq!(
+            tokens,
+            ["executor_pin_menu_item", "executor_pin_cleared"],
+            "every executor pin gesture must be a visible control a person \
+             operates. A tool call, a slash command, a restored draft, an \
+             agent turn, or a composer mode flag is not one — and a pin \
+             reaches engine-lane authority, so admitting one of those here is \
+             owner gate 8 broken through a door nobody flagged. If you are \
+             adding a gesture, prove it is a human one before you edit this \
+             list."
         );
     }
 

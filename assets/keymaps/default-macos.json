@@ -750,7 +750,11 @@
       "cmd-shift-b": "outline_panel::ToggleFocus",
       "ctrl-shift-g": "git_panel::ToggleFocus",
       "cmd-shift-d": "debug_panel::ToggleFocus",
-      "cmd-?": "agent::ToggleFocus",
+      // OMEGA-DELTA-0034. `cmd-?` is macOS's reserved Help chord (the Help
+      // menu's search field), so binding the agent panel there fought the
+      // system for a keystroke Omega could not win. `ctrl-cmd-a` is free, is
+      // not system-reserved, and sits on the same letter as `cmd-shift-a`.
+      "ctrl-cmd-a": "agent::ToggleFocus",
       "cmd-alt-s": "workspace::SaveAll",
       "cmd-k n": "encoding_selector::Toggle",
       "cmd-k m": "language_selector::Toggle",

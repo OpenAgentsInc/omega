@@ -103,6 +103,7 @@ debugger_ui.workspace = true
 agent_computer_ui.workspace = true
 workroom_ui.workspace = true
 omega_effectd.workspace = true
+omega_front_door.workspace = true
 dev_container.workspace = true
 diagnostics.workspace = true
 editor.workspace = true

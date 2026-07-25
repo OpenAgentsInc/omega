@@ -24,7 +24,7 @@ mod mode_selector;
 mod model_selector;
 mod model_selector_popover;
 pub mod omega_executor_disclosure;
-mod omega_host_bridge;
+pub mod omega_host_bridge;
 pub mod omega_router;
 pub mod omega_send_queue;
 mod profile_selector;
@@ -491,7 +491,27 @@ impl Agent {
         thread_store: Entity<agent::ThreadStore>,
     ) -> Rc<dyn agent_servers::AgentServer> {
         match self {
-            Self::NativeAgent => Rc::new(agent::NativeAgentServer::new(fs, thread_store)),
+            // OMEGA-DELTA-0035. The native agent, behind Omega Agent's router.
+            // Every new first-party session is routed on purpose and the
+            // decision is written to the route journal before the turn exists.
+            // The thread still carries the executor's connection, so omega#77's
+            // disclosure classifies the executor and not the router.
+            Self::NativeAgent => Rc::new(crate::omega_router::OmegaRouterServer::new(
+                agent::NativeAgentServer::new(fs, thread_store),
+                // `ZED_STATELESS` means "do not persist this run", and a
+                // rendering harness or a debug session sets it. Writing route
+                // decisions into the owner's real Omega data directory from a
+                // harness would put sessions nobody started into a record an
+                // operator reads. The choice is made here rather than inside
+                // the router, because the router is not allowed to read the
+                // environment — see `RouteJournal::data_dir_path`.
+                if std::env::var("ZED_STATELESS").is_ok() {
+                    std::env::temp_dir()
+                        .join(format!("omega-route-journal-{}.json", std::process::id()))
+                } else {
+                    crate::omega_router::RouteJournal::data_dir_path()
+                },
+            )),
             Self::Custom { id: name } => {
                 Rc::new(agent_servers::CustomAgentServer::new(name.clone()))
             }

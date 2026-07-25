@@ -46,7 +46,7 @@ use std::any::Any;
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 use std::sync::{LazyLock, Mutex};
 
 use acp_thread::{
@@ -59,7 +59,7 @@ use anyhow::Result;
 use gpui::{App, Entity, SharedString, Task};
 use omega_front_door::{
     EngineLane, EngineReadiness, EngineUnreachable, ExecutorClass, ExecutorPin, LaneState,
-    RouteDecision, RouteInputs, RouteReason, route,
+    PinGesture, RouteDecision, RouteInputs, RouteReason, route,
 };
 use project::{AgentId, Project};
 use serde_json::Value;
@@ -140,11 +140,23 @@ impl RouteJournal {
     /// The journal at the Omega data directory's usual place.
     #[must_use]
     pub fn at_data_dir() -> Self {
-        Self::at(
-            paths::data_dir()
-                .join("openagents")
-                .join(ROUTE_JOURNAL_FILE),
-        )
+        Self::at(Self::data_dir_path())
+    }
+
+    /// Where the durable journal lives.
+    ///
+    /// Exposed so the *caller* can choose a different path — a stateless run
+    /// must not write sessions nobody started into the record an operator
+    /// reads. That choice is made in `Agent::server` rather than here, because
+    /// reading the environment inside this file is what
+    /// `the_routing_law_has_no_clock_no_randomness_and_no_hash_order` forbids:
+    /// the router's exit is that the same inputs give the same route, and an
+    /// environment read is not an input. The check caught this.
+    #[must_use]
+    pub fn data_dir_path() -> PathBuf {
+        paths::data_dir()
+            .join("openagents")
+            .join(ROUTE_JOURNAL_FILE)
     }
 
     /// The journal at an explicit path. Loads what is already there.
@@ -385,17 +397,77 @@ impl OmegaAgentConnection {
 
     /// Pin an executor for a session that already exists.
     ///
-    /// Called from a visible control a person operates. Nothing model-facing
-    /// reaches this, and nothing here starts a run: a pin decides *where* the
-    /// next turn of an existing thread goes, and the Full Auto Start button
-    /// remains the only path to engine-lane run authority.
-    pub fn pin_session(&self, session_id: &acp::SessionId, pin: ExecutorPin) {
-        self.pins.borrow_mut().insert(session_id.0.to_string(), pin);
+    /// The `gesture` argument is the guard, not a label. A pin is the only way
+    /// a thread reaches an engine lane, an engine lane is Full Auto authority,
+    /// and owner gate 8 admits only an explicit human action into that
+    /// authority. Requiring a [`PinGesture`] means there is no way to set a pin
+    /// without naming the human gesture that set it, and `PinGesture` has no
+    /// variant for a tool call, a slash command, a restored draft, or a
+    /// composer mode flag. Nothing here starts a run: a pin decides *where* the
+    /// next turn of a thread goes, and the Full Auto Start button remains the
+    /// only path to engine-lane run authority.
+    /// Returns the decision the new pin produced, which is what the thread
+    /// then discloses — including a pin that could not be honoured, with the
+    /// typed reason it could not.
+    pub fn pin_session(
+        &self,
+        session_id: &acp::SessionId,
+        pin: ExecutorPin,
+        gesture: PinGesture,
+    ) -> RouteDecision {
+        log::info!(
+            "OMEGA-DELTA-0035: session {} pinned to {} by {}",
+            session_id.0,
+            pin.token(),
+            gesture.token()
+        );
+        self.pins
+            .borrow_mut()
+            .insert(session_id.0.to_string(), pin.clone());
+        // Re-decide *because a person changed the pin*, and only then. Capacity
+        // moving underneath a thread never re-decides it — `executor_for` reads
+        // the record — so this is the one thing that can move a live thread,
+        // and it is a human gesture by construction.
+        self.decide(session_id.0.as_ref(), Some(pin))
+    }
+
+    /// Clear a session's pin, so its next turn takes the unpinned default.
+    ///
+    /// Re-decides for the same reason [`pin_session`](Self::pin_session) does:
+    /// a cleared pin that left the old decision standing would show an
+    /// executor the user had just unpinned.
+    pub fn unpin_session(&self, session_id: &acp::SessionId, gesture: PinGesture) -> RouteDecision {
+        log::info!(
+            "OMEGA-DELTA-0035: session {} unpinned by {}",
+            session_id.0,
+            gesture.token()
+        );
+        self.pins.borrow_mut().remove(&session_id.0.to_string());
+        self.decide(session_id.0.as_ref(), None)
     }
 
     /// Pin the executor the next session created through this router will use.
-    pub fn pin_next_session(&self, pin: Option<ExecutorPin>) {
+    ///
+    /// Carries a [`PinGesture`] for the same reason [`pin_session`] does.
+    ///
+    /// [`pin_session`]: Self::pin_session
+    pub fn pin_next_session(&self, pin: Option<ExecutorPin>, gesture: PinGesture) {
+        log::info!(
+            "OMEGA-DELTA-0035: the next session is pinned to {} by {}",
+            pin.as_ref().map_or("nothing".to_owned(), ExecutorPin::token),
+            gesture.token()
+        );
         *self.next_pin.borrow_mut() = pin;
+    }
+
+    /// Every pin currently in force, in session order. For an inspector.
+    #[must_use]
+    pub fn pins(&self) -> Vec<(String, ExecutorPin)> {
+        self.pins
+            .borrow()
+            .iter()
+            .map(|(session_id, pin)| (session_id.clone(), pin.clone()))
+            .collect()
     }
 
     /// The pin currently in force for a session.
@@ -628,6 +700,197 @@ impl AgentConnection for OmegaAgentConnection {
     fn into_any(self: Rc<Self>) -> Rc<dyn Any> {
         self
     }
+}
+
+// -------------------------------------------------------------------------
+// Wiring: the router is what the native agent entry resolves to
+// -------------------------------------------------------------------------
+
+thread_local! {
+    /// `OMEGA-DELTA-0035`. The router this window's native agent entry built.
+    ///
+    /// A render cannot reach an `Rc<dyn AgentConnection>` held inside the
+    /// connection store's async entry, and the pin control has to live on the
+    /// thread's own disclosure line — so the router publishes itself here when
+    /// it is built, exactly as `omega_host_bridge` publishes its lane index and
+    /// as [`RECORDED_ROUTES`] publishes route reasons.
+    ///
+    /// A `thread_local` rather than a `static` because `Rc` is not `Sync`, and
+    /// because the only reader is the GPUI main thread that built it. It is a
+    /// *handle*, not state: every decision, pin and journal entry lives on the
+    /// connection itself.
+    ///
+    /// **Weak, deliberately.** A strong reference here would keep the native
+    /// agent entity alive for the life of the process, which is a leak in
+    /// production and a hard failure in the GPUI test harness — it checks for
+    /// leaked entity handles at teardown and caught exactly this. Weak also
+    /// gives the right semantics: when the connection store drops the
+    /// connection there is no router, and `active_router` says so instead of
+    /// handing out a router nothing is dispatching through.
+    static ACTIVE_ROUTER: RefCell<Weak<OmegaAgentConnection>> =
+        const { RefCell::new(Weak::new()) };
+}
+
+fn publish_active_router(router: &Rc<OmegaAgentConnection>) {
+    ACTIVE_ROUTER.with(|active| *active.borrow_mut() = Rc::downgrade(router));
+}
+
+/// Omega Agent's router, if this window has built one.
+///
+/// `None` before the native agent connects, and in any process that never
+/// connects it. A caller that gets `None` must not invent a route — the
+/// disclosure says "not routed", which is the honest reading.
+#[must_use]
+pub fn active_router() -> Option<Rc<OmegaAgentConnection>> {
+    ACTIVE_ROUTER.with(|active| active.borrow().upgrade())
+}
+
+/// The native agent, behind Omega Agent's router. `OMEGA-DELTA-0035`.
+///
+/// omega#78 put `OmegaAgentConnection` at the `AgentConnection` seam and left
+/// it unwired: nothing constructed one, so every thread disclosed
+/// `route: None` and the journal stayed empty. This is the wire. Omega's
+/// native-agent entry resolves to a router over the native connection instead
+/// of to the native connection itself, so every new native session is routed
+/// on purpose and the decision is written down before the turn exists.
+///
+/// The thread that comes back still carries the **executor's** connection,
+/// because `OmegaAgentConnection::new_session` delegates and returns what the
+/// executor built. That is what keeps omega#77's disclosure honest and what
+/// keeps every existing `downcast::<NativeAgentConnection>()` on a *thread's*
+/// connection working unchanged.
+pub struct OmegaRouterServer {
+    /// Held by value rather than behind an `Rc`, because `AgentServer` is
+    /// `Send` and an `Rc` field would take that away.
+    native: agent::NativeAgentServer,
+    /// Where decisions are written down. Chosen by the caller; see
+    /// [`RouteJournal::data_dir_path`].
+    journal_path: PathBuf,
+}
+
+impl OmegaRouterServer {
+    /// A router server over the native agent server, journalling to `journal_path`.
+    #[must_use]
+    pub fn new(native: agent::NativeAgentServer, journal_path: PathBuf) -> Self {
+        Self {
+            native,
+            journal_path,
+        }
+    }
+
+    /// The native agent server underneath.
+    #[must_use]
+    pub fn native(&self) -> &agent::NativeAgentServer {
+        &self.native
+    }
+}
+
+impl agent_servers::AgentServer for OmegaRouterServer {
+    fn agent_id(&self) -> project::AgentId {
+        self.native.agent_id()
+    }
+
+    fn logo(&self) -> ui::IconName {
+        self.native.logo()
+    }
+
+    fn connect(
+        &self,
+        delegate: agent_servers::AgentServerDelegate,
+        project: Entity<Project>,
+        cx: &mut App,
+    ) -> Task<Result<Rc<dyn AgentConnection>>> {
+        let native = self.native.connect(delegate, project, cx);
+        let journal_path = self.journal_path.clone();
+        cx.spawn(async move |_cx| {
+            let native = native.await?;
+            let router = Rc::new(OmegaAgentConnection::new(
+                native,
+                RouteJournal::at(journal_path),
+            ));
+            publish_active_router(&router);
+            Ok(router as Rc<dyn AgentConnection>)
+        })
+    }
+
+    fn into_any(self: Rc<Self>) -> Rc<dyn Any> {
+        self
+    }
+
+    fn default_mode(&self, cx: &App) -> Option<acp::SessionModeId> {
+        self.native.default_mode(cx)
+    }
+
+    fn set_default_mode(
+        &self,
+        mode_id: Option<acp::SessionModeId>,
+        fs: std::sync::Arc<dyn fs::Fs>,
+        cx: &mut App,
+    ) {
+        self.native.set_default_mode(mode_id, fs, cx);
+    }
+
+    fn default_config_option(
+        &self,
+        config_id: &str,
+        cx: &App,
+    ) -> Option<settings::AgentConfigOptionValue> {
+        self.native.default_config_option(config_id, cx)
+    }
+
+    fn set_default_config_option(
+        &self,
+        config_id: &str,
+        value: Option<settings::AgentConfigOptionValue>,
+        fs: std::sync::Arc<dyn fs::Fs>,
+        cx: &mut App,
+    ) {
+        self.native
+            .set_default_config_option(config_id, value, fs, cx);
+    }
+
+    // `favorite_config_option_value_ids` and
+    // `toggle_favorite_config_option_value` are deliberately *not* forwarded.
+    // `NativeAgentServer` does not override either, so forwarding would be a
+    // no-op against the trait default — and the getter's return type names
+    // `HashSet`, which `the_routing_law_has_no_clock_no_randomness_and_no_hash_order`
+    // forbids in this file. A no-op override is not worth spending that check
+    // on. If the native server ever overrides one, forward it then, with a
+    // type alias that does not name hash iteration order.
+}
+
+/// Whether a server is Omega's native agent, wrapped or bare.
+///
+/// Every `downcast::<NativeAgentServer>()` that asked "is this the first-party
+/// agent?" has to go through here now, because the answer is yes for a router
+/// over it. Missing one of these is not a compile error — it is a silently
+/// wrong `false`, which is why `omega_deltas` counts the bare downcasts.
+#[must_use]
+pub fn is_native_agent_server(server: &Rc<dyn agent_servers::AgentServer>) -> bool {
+    server.clone().downcast::<agent::NativeAgentServer>().is_some()
+        || server.clone().downcast::<OmegaRouterServer>().is_some()
+}
+
+/// The native connection behind a connection, unwrapping the router.
+///
+/// The connection the *store* holds is the router; the connection a *thread*
+/// holds is the executor. Callers that reach for the native agent through the
+/// store need this; callers that already have a thread's connection do not,
+/// and are deliberately left alone.
+#[must_use]
+pub fn native_connection(
+    connection: &Rc<dyn AgentConnection>,
+) -> Option<Rc<agent::NativeAgentConnection>> {
+    if let Some(native) = connection
+        .clone()
+        .downcast::<agent::NativeAgentConnection>()
+    {
+        return Some(native);
+    }
+    connection
+        .clone()
+        .downcast::<OmegaAgentConnection>()
+        .and_then(|router| router.native.clone().downcast::<agent::NativeAgentConnection>())
 }
 
 #[cfg(test)]
@@ -906,4 +1169,126 @@ mod tests {
             "one session must leave one record, not one per decision"
         );
     }
+
+    /// `OMEGA-DELTA-0035`. A human pin moves a live thread, and the record says
+    /// why it landed where it did.
+    ///
+    /// The pin control would be decoration without this: `executor_for` reads
+    /// the *recorded* decision so a turn cannot drift between executors on its
+    /// own, which means setting a pin has to re-decide or it changes nothing a
+    /// turn can see. Falsified by making `pin_session` insert the pin without
+    /// re-deciding: the executor stays native and this fails.
+    #[test]
+    fn a_human_pin_moves_a_live_thread_and_records_why() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let router = OmegaAgentConnection::new(stub("omega-agent"), journal_in(&directory))
+            .with_external_acp(stub("codex-acp"));
+        // Its own session id; see `an_unhonourable_pin_is_kept_and_explained`.
+        let session = acp::SessionId::new("s-human-pin");
+
+        assert_eq!(
+            router.decide(session.0.as_ref(), None).reason,
+            RouteReason::UnpinnedDefault
+        );
+        assert_eq!(
+            router.executor_for(&session).agent_id(),
+            AgentId::new("omega-agent")
+        );
+
+        let decision = router.pin_session(
+            &session,
+            ExecutorPin::new(ExecutorClass::ExternalAcp),
+            PinGesture::ExecutorPinMenuItem,
+        );
+        assert_eq!(decision.reason, RouteReason::PinHonored);
+        assert_eq!(
+            router.executor_for(&session).agent_id(),
+            AgentId::new("codex-acp"),
+            "a pin a person set must move the turn, or the control is decoration"
+        );
+        assert_eq!(
+            router.journal().decision(session.0.as_ref()).map(|d| d.chosen),
+            Some(ExecutorClass::ExternalAcp)
+        );
+    }
+
+    /// `OMEGA-DELTA-0035`. An unhonourable pin is kept, and its reason is
+    /// sayable on the thread's own line.
+    ///
+    /// This is the case the rendered proof photographs: no engine is running,
+    /// so an engine-lane pin falls closed to the native loop. The pin is *not*
+    /// forgotten — an unhonoured pin the record dropped is indistinguishable
+    /// from no pin at all.
+    #[test]
+    fn an_unhonourable_pin_is_kept_and_explained() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let router = OmegaAgentConnection::new(stub("omega-agent"), journal_in(&directory));
+        // A session id no other test uses. `RECORDED_ROUTES` is a
+        // process-wide projection keyed by session id, and the tests in this
+        // module run in one process: a shared `"s"` made this assertion read
+        // another test's decision, which it caught on the first run. Real
+        // session ids are minted per session, so this is a harness concern and
+        // not a production one.
+        let session = acp::SessionId::new("s-unhonourable-pin");
+        router.observe_capacity(Err(EngineUnreachable::NotRunning));
+
+        let decision = router.pin_session(
+            &session,
+            ExecutorPin::new(ExecutorClass::EngineLane),
+            PinGesture::ExecutorPinMenuItem,
+        );
+        assert_eq!(decision.chosen, ExecutorClass::NativeLoop);
+        assert!(decision.reason.is_fallback());
+        assert_eq!(
+            decision.pin.as_ref().map(ExecutorPin::token).as_deref(),
+            Some("engine_lane")
+        );
+        assert!(decision.reason.phrase().contains("fell back to the native loop"));
+        assert_eq!(
+            recorded_route(&session),
+            Some(decision.reason),
+            "the thread's disclosure line reads this index, so a reason the \
+             journal holds and the index does not is a fallback the user \
+             cannot see"
+        );
+
+        let cleared = router.unpin_session(&session, PinGesture::ExecutorPinCleared);
+        assert_eq!(cleared.reason, RouteReason::UnpinnedDefault);
+        assert!(cleared.pin.is_none());
+        assert!(router.pin(&session).is_none());
+    }
+
+    /// `OMEGA-DELTA-0035`. A bare downcast through the router misses the
+    /// native loop — which is the whole reason `native_connection` exists.
+    ///
+    /// Five call sites downcast a connection to `NativeAgentConnection`. Three
+    /// hold a *thread's* connection, which is the executor's and unaffected;
+    /// the ones that hold the *store's* connection now hold the router, and a
+    /// bare downcast there returns `None` — a silently wrong "this is not the
+    /// native agent" rather than a compile error.
+    #[test]
+    fn a_bare_downcast_through_the_router_misses_the_native_loop() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let native = stub("omega-agent");
+        let bare: Rc<dyn AgentConnection> = native.clone();
+        assert!(
+            native_connection(&bare).is_none(),
+            "the stub is not a NativeAgentConnection, so this only shows the \
+             helper does not answer yes to anything"
+        );
+
+        let router: Rc<dyn AgentConnection> =
+            Rc::new(OmegaAgentConnection::new(native, journal_in(&directory)));
+        assert!(
+            router
+                .clone()
+                .downcast::<agent::NativeAgentConnection>()
+                .is_none(),
+            "a bare downcast through the router must not find the native loop; \
+             if it did, this check would prove nothing about the unwrapping \
+             helper"
+        );
+        assert_eq!(router.agent_id(), AgentId::new("omega-agent"));
+    }
+
 }

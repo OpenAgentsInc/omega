@@ -61,6 +61,8 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0031",
     "OMEGA-DELTA-0032",
     "OMEGA-DELTA-0033",
+    "OMEGA-DELTA-0034",
+    "OMEGA-DELTA-0035",
 ];
 
 /// OMEGA-DELTA-0025. The file that declares the measured digest.
@@ -235,6 +237,47 @@ pub const ROUTE_DECISION_PATH: &str = "crates/omega_front_door/src/router.rs";
 /// OMEGA-DELTA-0029. The dispatch half of the router.
 pub const ROUTER_DISPATCH_PATH: &str = "crates/agent_ui/src/omega_router.rs";
 
+/// OMEGA-DELTA-0034. The panel that owns the front door.
+pub const AGENT_PANEL_PATH: &str = "crates/agent_ui/src/agent_panel.rs";
+
+/// OMEGA-DELTA-0034. Front-door entry points that must work with no project.
+///
+/// Each of these stood between a fresh install and a composer. The check is on
+/// the *function body*, not the file, because a `has_open_project` line
+/// elsewhere in a six-thousand-line panel is fine and one of these is not.
+pub const PROJECT_OPTIONAL_FRONT_DOOR_FNS: &[&str] = &[
+    "activate_new_thread",
+    "activate_draft",
+    "new_thread",
+    "ensure_native_agent_connection",
+    "toggle_new_thread_menu",
+];
+
+/// OMEGA-DELTA-0034. Paths that must keep requiring a project.
+///
+/// Removing the guard from these would not be project-optional threads; it
+/// would be threads that fail later and less legibly. Asserted in the opposite
+/// direction from `PROJECT_OPTIONAL_FRONT_DOOR_FNS` so a blanket deletion of
+/// every guard fails as loudly as restoring one.
+pub const PROJECT_REQUIRED_FNS: &[&str] = &[
+    "restore_new_draft",
+    "new_external_agent_thread",
+    "refresh_skills",
+    "load_thread_from_clipboard",
+    "initialize_from_source_workspace_if_needed",
+    // Not `should_create_terminal_for_new_entry`: it asks `supports_terminal`,
+    // which is where the requirement lives. `project.supports_terminal` is
+    // `true` for any local project, worktree or not, so the check has to be on
+    // the panel's wrapper.
+    "supports_terminal",
+];
+
+/// OMEGA-DELTA-0035. Where the native agent entry is built.
+pub const AGENT_SERVER_FACTORY_PATH: &str = "crates/agent_ui/src/agent_ui.rs";
+
+/// OMEGA-DELTA-0035. The pin-setting methods that must name a human gesture.
+pub const PIN_SETTING_CALLS: &[&str] = &["pin_session(", "unpin_session(", "pin_next_session("];
+
 /// OMEGA-DELTA-0029. Vocabulary that would make a route irreproducible.
 ///
 /// The packet's exit is a *deterministic* router, and determinism is not a
@@ -369,6 +412,17 @@ pub const REQUIRED_KEYMAP_BINDINGS: &[RequiredKeymapBinding] = &[
         keymap: "assets/keymaps/default-macos.json",
         keystroke: "cmd-shift-s",
         action: "workroom::OpenPanel",
+        declared_in: "crates/zed_actions/src/lib.rs",
+    },
+    // OMEGA-DELTA-0034. `cmd-?` is macOS's reserved Help chord, so the agent
+    // panel's toggle was bound to a keystroke Omega cannot win. Checked here
+    // rather than only moved, because a rebase that restores upstream's
+    // `cmd-?` line would otherwise be invisible.
+    RequiredKeymapBinding {
+        delta: "OMEGA-DELTA-0034",
+        keymap: "assets/keymaps/default-macos.json",
+        keystroke: "ctrl-cmd-a",
+        action: "agent::ToggleFocus",
         declared_in: "crates/zed_actions/src/lib.rs",
     },
     RequiredKeymapBinding {
@@ -559,7 +613,15 @@ pub fn default_setting<'a>(
 pub fn declared_actions(source: &str) -> std::collections::BTreeSet<String> {
     let stripped: String = source
         .lines()
-        .filter(|line| !line.trim_start().starts_with("//"))
+        // Attribute lines are dropped as well as comments. An `#[action(...)]`
+        // attribute may carry a bracketed list — `deprecated_aliases = [..]` —
+        // and the `]` that closes it would otherwise end the `actions!` body
+        // early, hiding every action declared after it. `agent::ToggleFocus` was
+        // exactly that: declared, and invisible to this parser.
+        .filter(|line| {
+            let line = line.trim_start();
+            !line.starts_with("//") && !line.starts_with("#[")
+        })
         .collect::<Vec<_>>()
         .join("\n");
 
@@ -3653,7 +3715,7 @@ mod tests {
             let floor = prose[key].as_u64().unwrap_or(u64::MAX) as usize;
             assert!(
                 actual >= floor,
-                "OMEGA-DELTA-0031: only {actual} {label} were read, below the \
+                "OMEGA-DELTA-0034: only {actual} {label} were read, below the \
                  {floor} floor in {BRAND_GATE_POLICY_PATH}. That parser broke, \
                  and a check that reads nothing reports green about nothing."
             );
@@ -3664,21 +3726,21 @@ mod tests {
             .expect("prose.classified is an object");
         assert!(
             classified.len() >= 20,
-            "OMEGA-DELTA-0031: only {} prose literals are classified, so this \
+            "OMEGA-DELTA-0034: only {} prose literals are classified, so this \
              registry is not a record of anybody having read the tree",
             classified.len()
         );
         for (text, entry) in classified {
             assert!(
                 entry["class"].is_string() && entry["reason"].is_string(),
-                "OMEGA-DELTA-0031: prose.classified[{text:?}] needs a class and \
+                "OMEGA-DELTA-0034: prose.classified[{text:?}] needs a class and \
                  a reason. An entry is a record that somebody read the sentence \
                  and decided it names somebody else rather than us."
             );
             let class = entry["class"].as_str().unwrap_or_default();
             assert!(
                 prose["classes"].get(class).is_some(),
-                "OMEGA-DELTA-0031: prose.classified[{text:?}] uses class \
+                "OMEGA-DELTA-0034: prose.classified[{text:?}] uses class \
                  {class:?}, which prose.classes does not define"
             );
         }
@@ -3692,7 +3754,7 @@ mod tests {
         for relative in &corpus {
             assert!(
                 repository_path(relative).is_file(),
-                "OMEGA-DELTA-0031: exempt corpus file {relative} does not exist, \
+                "OMEGA-DELTA-0034: exempt corpus file {relative} does not exist, \
                  so the exemption is hiding nothing and should be deleted"
             );
         }
@@ -3716,7 +3778,7 @@ mod tests {
         unclassified.dedup();
         assert!(
             unclassified.is_empty(),
-            "OMEGA-DELTA-0031: brand-bearing prose that nobody has classified. \
+            "OMEGA-DELTA-0034: brand-bearing prose that nobody has classified. \
              Substitute our own name: if the sentence stays true with 'Omega' \
              in it, the brand was standing where our product's name belongs, so \
              rewrite it. If it becomes false, it names somebody else's product \
@@ -3738,7 +3800,7 @@ mod tests {
         stale.sort();
         assert!(
             stale.is_empty(),
-            "OMEGA-DELTA-0031: these classified literals are no longer anywhere \
+            "OMEGA-DELTA-0034: these classified literals are no longer anywhere \
              in the tree. Either the sentence went and the entry should go with \
              it, or a scanner stopped reading the stream that used to find it — \
              which is what this assertion exists to catch.\n{}",
@@ -4596,6 +4658,268 @@ mod tests {
         );
     }
 
+    /// Read one `fn` body out of a Rust source file, by brace depth.
+    ///
+    /// A `contains` over the whole file cannot answer "does *this* function
+    /// still refuse a projectless window", because the panel legitimately
+    /// checks `has_open_project` in a dozen other places. Depth counting is
+    /// crude but honest: it stops at the closing brace of the function it
+    /// started on, and the test asserts it found a plausible body rather than
+    /// an empty string, so a parse that silently matched nothing fails instead
+    /// of passing.
+    fn function_body<'a>(source: &'a str, name: &str) -> Option<&'a str> {
+        let needle = format!(" fn {name}(");
+        let start = source.find(&needle)? + needle.len();
+        let open = source[start..].find('{')? + start;
+        let mut depth = 0usize;
+        for (offset, character) in source[open..].char_indices() {
+            match character {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(&source[open..open + offset]);
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
+    /// OMEGA-DELTA-0034. The front door works with no project open.
+    ///
+    /// Checked in both directions. Upstream's guard restored on a front-door
+    /// path is the omega#76 defect coming back — a fresh install lands on the
+    /// agent and has no composer to type into. A guard *removed* from a
+    /// workspace-touching path is the opposite mistake: a terminal with no
+    /// working directory, or a clipboard thread with nowhere to put its files,
+    /// failing later and less legibly than a refusal would have.
+    #[test]
+    fn the_front_door_does_not_require_an_open_project() {
+        let path = repository_path(AGENT_PANEL_PATH);
+        let source = std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
+
+        for name in PROJECT_OPTIONAL_FRONT_DOOR_FNS {
+            let body = function_body(&source, name).unwrap_or_else(|| {
+                panic!(
+                    "OMEGA-DELTA-0034: {} no longer has a `{name}` to check. \
+                     If it was renamed, rename it here too; a check that \
+                     cannot find its subject passes for the wrong reason.",
+                    path.display()
+                )
+            });
+            assert!(
+                !body.contains("has_open_project"),
+                "OMEGA-DELTA-0034: `{name}` in {} refuses a window with no \
+                 project again. A window with nothing to restore is by \
+                 definition a window with no project, so this is omega#76's \
+                 exit failing: the front door opens and there is no composer \
+                 to type into.",
+                path.display()
+            );
+        }
+
+        for name in PROJECT_REQUIRED_FNS {
+            let body = function_body(&source, name).unwrap_or_else(|| {
+                panic!(
+                    "OMEGA-DELTA-0034: {} no longer has a `{name}` to check.",
+                    path.display()
+                )
+            });
+            assert!(
+                body.contains("has_open_project"),
+                "OMEGA-DELTA-0034: `{name}` in {} stopped requiring an open \
+                 project. Project-optional *threads* is the delta; a terminal \
+                 with no working directory, a resumed draft with no worktree, \
+                 or a clipboard import with nowhere to land is not.",
+                path.display()
+            );
+        }
+    }
+
+    /// OMEGA-DELTA-0035. The router is what the native agent entry resolves to.
+    ///
+    /// omega#78 shipped the router unwired, which is the failure this guards:
+    /// every piece present, tested, and reachable by nobody. Three facts, and
+    /// each one alone is weak — the server could be built and never connected,
+    /// the poll could exist and feed nothing, the pin could exist and be
+    /// unreachable.
+    #[test]
+    fn the_router_is_wired_into_the_native_agent_entry() {
+        let factory_path = repository_path(AGENT_SERVER_FACTORY_PATH);
+        let factory = std::fs::read_to_string(&factory_path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", factory_path.display()));
+        assert!(
+            factory.contains("omega_router::OmegaRouterServer::new("),
+            "OMEGA-DELTA-0035: {} builds the native agent server directly \
+             again, so nothing constructs an OmegaAgentConnection and every \
+             thread discloses `route: None` with an empty journal — the state \
+             omega#78 shipped in.",
+            factory_path.display()
+        );
+
+        let panel_path = repository_path(AGENT_PANEL_PATH);
+        let panel = std::fs::read_to_string(&panel_path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", panel_path.display()));
+        assert!(
+            panel.contains("observe_capacity(Ok(capacity))")
+                && panel.contains("get_capacity()"),
+            "OMEGA-DELTA-0035: {} no longer feeds the engine's framed \
+             get_capacity answer into the router. Without it every engine-lane \
+             pin is decided against a default of \"not running\" whatever \
+             omega-effectd is actually doing.",
+            panel_path.display()
+        );
+
+        let disclosure_path = repository_path(THREAD_VIEW_PATH);
+        let disclosure = std::fs::read_to_string(&disclosure_path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", disclosure_path.display()));
+        assert!(
+            disclosure.contains("\"omega-executor-pin\""),
+            "OMEGA-DELTA-0035: {} no longer renders the executor pin control. \
+             A pin is the only way a thread reaches anything but the native \
+             loop, so with no control there is no route to honour.",
+            disclosure_path.display()
+        );
+    }
+
+    /// OMEGA-DELTA-0035, and owner gate 8 behind it.
+    ///
+    /// A pin is the only door to an engine lane and an engine lane *is* Full
+    /// Auto authority, so the gate reaches the pin as directly as it reaches
+    /// the Start button. The guard is the argument type: every pin-setting call
+    /// must pass a literal `PinGesture::` variant, so a caller cannot launder
+    /// a gesture it was handed by something model-facing.
+    ///
+    /// Scanned across every crate rather than the one file, because the failure
+    /// worth catching is a *new* caller somewhere else.
+    #[test]
+    fn only_a_named_human_gesture_can_pin_an_executor() {
+        let crates = repository_path("crates");
+        let mut calls: Vec<(String, String)> = Vec::new();
+        for_each_source_file(&crates, &["rs"], |path, source| {
+            let display = path
+                .display()
+                .to_string()
+                .rsplit("crates/")
+                .next()
+                .unwrap_or_default()
+                .to_owned();
+            // This file is the check itself; matching its own needles would
+            // make the count meaningless.
+            if display.starts_with("omega_deltas/") {
+                return;
+            }
+            for (index, line) in source.lines().enumerate() {
+                let trimmed = line.trim();
+                // The declarations are not calls. `fn pin_session(` and a
+                // doc-comment mentioning it are both skipped here so the scan
+                // counts callers only.
+                if trimmed.starts_with("//")
+                    || trimmed.starts_with("pub fn ")
+                    || trimmed.starts_with("fn ")
+                {
+                    continue;
+                }
+                if !PIN_SETTING_CALLS.iter().any(|call| trimmed.contains(call)) {
+                    continue;
+                }
+                // Reassemble the whole call, because rustfmt puts the arguments
+                // of a nested call on their own lines. Walking forward to the
+                // line whose parens balance is what makes this a check on the
+                // *argument list* rather than on one line of it — the earlier
+                // draft accepted any line ending in `(` or `,`, which passed
+                // for every multi-line call regardless of its arguments.
+                let mut statement = String::new();
+                let mut depth = 0i32;
+                for following in source.lines().skip(index) {
+                    statement.push_str(following.trim());
+                    statement.push(' ');
+                    for character in following.chars() {
+                        match character {
+                            '(' => depth += 1,
+                            ')' => depth -= 1,
+                            _ => {}
+                        }
+                    }
+                    if depth <= 0 {
+                        break;
+                    }
+                }
+                calls.push((display.clone(), statement));
+            }
+        });
+
+        assert!(
+            !calls.is_empty(),
+            "OMEGA-DELTA-0035: no pin-setting call was found anywhere. Either \
+             the pin control is gone or this scan stopped matching, and both \
+             make the gate vacuous."
+        );
+
+        for (file, statement) in &calls {
+            assert!(
+                statement.contains("PinGesture::"),
+                "OMEGA-DELTA-0035: {file} sets a pin without naming a literal \
+                 PinGesture: {statement:?}. Owner gate 8 admits only an \
+                 explicit human action into Full Auto authority, a pin is the \
+                 only door to an engine lane, and a gesture the caller was \
+                 *handed* is exactly the laundering the literal forbids."
+            );
+        }
+    }
+
+    /// OMEGA-DELTA-0035. Nothing asks "is this the native agent?" with a bare
+    /// downcast.
+    ///
+    /// The first-party agent is a router over the native server now. A bare
+    /// `downcast::<NativeAgentServer>()` on it returns `None`, which reads as
+    /// "this is an external agent" — a silently wrong `false`, not a compile
+    /// error. The two call sites that ask this question go through
+    /// `is_native_agent_server`, and this fails if a third appears.
+    #[test]
+    fn nothing_asks_for_the_native_agent_with_a_bare_downcast() {
+        let crates = repository_path("crates");
+        let mut bare: Vec<(String, String)> = Vec::new();
+        for_each_source_file(&crates, &["rs"], |path, source| {
+            let display = path
+                .display()
+                .to_string()
+                .rsplit("crates/")
+                .next()
+                .unwrap_or_default()
+                .to_owned();
+            if display.starts_with("omega_deltas/")
+                // The unwrapping helpers are where the bare downcast belongs.
+                || display.starts_with("agent_ui/src/omega_router.rs")
+                // omega#77's disclosure classifies a *thread's* connection,
+                // which is the executor's and never the router's.
+                || display.starts_with("agent_ui/src/omega_executor_disclosure.rs")
+            {
+                return;
+            }
+            for line in source.lines() {
+                let line = line.trim();
+                if line.contains("downcast::<agent::NativeAgentServer>()")
+                    || line.contains("downcast::<NativeAgentServer>()")
+                {
+                    bare.push((display.clone(), line.to_owned()));
+                }
+            }
+        });
+        assert!(
+            bare.is_empty(),
+            "OMEGA-DELTA-0035: {} place(s) still ask for the native agent \
+             server with a bare downcast: {bare:#?}. The native agent is \
+             wrapped by the router, so this answers `false` for the \
+             first-party agent instead of failing to compile. Use \
+             `omega_router::is_native_agent_server`.",
+            bare.len()
+        );
+    }
+
     /// The parser has to actually strip comments, or every check reads `None`
     /// and silently passes.
     #[test]
@@ -4630,13 +4954,13 @@ mod tests {
         for token in SEND_LAW_EXECUTOR_TOKENS {
             assert!(
                 source.contains(&format!("ExecutorClass::{token}")),
-                "OMEGA-DELTA-0032: {} does not answer for ExecutorClass::{token}.                  A class the law does not name has no declared behaviour, which                  is the state this delta replaces.",
+                "OMEGA-DELTA-0035: {} does not answer for ExecutorClass::{token}.                  A class the law does not name has no declared behaviour, which                  is the state this delta replaces.",
                 path.display()
             );
         }
         assert!(
             source.contains("pub const fn disposition("),
-            "OMEGA-DELTA-0032: the law must be a const fn of its inputs. A              disposition that can read anything else is not reproducible from a              journal."
+            "OMEGA-DELTA-0035: the law must be a const fn of its inputs. A              disposition that can read anything else is not reproducible from a              journal."
         );
     }
 
@@ -4658,7 +4982,7 @@ mod tests {
             for (why, token) in NON_DETERMINISTIC_QUEUE_TOKENS {
                 assert!(
                     !production.contains(token),
-                    "OMEGA-DELTA-0032: {} reads {why} (`{token}`). The queue is                      replayed from a journal, and a decision that depends on                      {why} does not replay.",
+                    "OMEGA-DELTA-0035: {} reads {why} (`{token}`). The queue is                      replayed from a journal, and a decision that depends on                      {why} does not replay.",
                     path.display()
                 );
             }
@@ -4679,16 +5003,16 @@ mod tests {
         let source = std::fs::read_to_string(&path).expect("the composer is readable");
         assert!(
             source.contains("omega_front_door::disposition("),
-            "OMEGA-DELTA-0032: {} no longer calls the send law. Deciding a              mid-turn send in the view is the upstream behaviour this delta              replaces.",
+            "OMEGA-DELTA-0035: {} no longer calls the send law. Deciding a              mid-turn send in the view is the upstream behaviour this delta              replaces.",
             path.display()
         );
         assert!(
             source.contains("SendDisposition::SteerAtMessageBoundary"),
-            "OMEGA-DELTA-0032: the boundary flag must be set from the law's              own answer, not from a steer flag the other two classes never see."
+            "OMEGA-DELTA-0035: the boundary flag must be set from the law's              own answer, not from a steer flag the other two classes never see."
         );
         assert!(
             source.contains(".reaches_running_turn()"),
-            "OMEGA-DELTA-0032: {} must gate its cancel on whether this              executor's declared answer reaches the running turn. An              unconditional cancel turns a refused steer into an interrupted              turn.",
+            "OMEGA-DELTA-0035: {} must gate its cancel on whether this              executor's declared answer reaches the running turn. An              unconditional cancel turns a refused steer into an interrupted              turn.",
             path.display()
         );
     }
@@ -4706,16 +5030,16 @@ mod tests {
         let source = std::fs::read_to_string(&path).expect("the journal is readable");
         assert!(
             source.contains("openagents.omega.agent_send_queue.v1"),
-            "OMEGA-DELTA-0032: the durable queue must carry a schema, so a              foreign document is refused rather than adopted."
+            "OMEGA-DELTA-0035: the durable queue must carry a schema, so a              foreign document is refused rather than adopted."
         );
         assert!(
             source.contains("std::fs::rename(&temporary, &self.path)"),
-            "OMEGA-DELTA-0032: {} must rewrite atomically. A crash mid-write              must leave the previous queue, not a truncated one.",
+            "OMEGA-DELTA-0035: {} must rewrite atomically. A crash mid-write              must leave the previous queue, not a truncated one.",
             path.display()
         );
         assert!(
             !source.contains("Entity<MessageEditor>"),
-            "OMEGA-DELTA-0032: a live GPUI handle cannot be a durable fact.              That is exactly what made the upstream queue renderer-only."
+            "OMEGA-DELTA-0035: a live GPUI handle cannot be a durable fact.              That is exactly what made the upstream queue renderer-only."
         );
     }
 

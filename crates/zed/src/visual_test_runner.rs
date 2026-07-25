@@ -405,6 +405,38 @@ fn run_visual_tests(project_path: PathBuf, update_baseline: bool) -> Result<()> 
     let mut failed = 0;
     let mut updated = 0;
 
+    // `OMEGA_VISUAL_ONLY=1` runs Omega's own suite and nothing else.
+    //
+    // This runner has no committed baselines for any of the inherited Zed
+    // tests, so a plain run reports "Baseline not found" for every one of them
+    // and Omega's result is buried in the noise. Generating baselines for all
+    // of them would be committing a large set of images nobody has looked at,
+    // which is the opposite of the point. So the Omega suite gets its own
+    // invocation, `script/omega-visual-proof`, and the inherited tests keep the
+    // status they already had: present, and not standing up.
+    #[cfg(feature = "visual-tests")]
+    if std::env::var("OMEGA_VISUAL_ONLY").is_ok() {
+        println!("\n--- Omega: front door, executor disclosure, route pin ---");
+        let outcome = run_omega_agent_visual_tests(app_state.clone(), &mut cx, update_baseline);
+        // The shared window this function opened above is torn down here as
+        // well as at the end of the full run. Returning early without it left
+        // the sample project's buffers alive, GPUI's leaked-handle check
+        // panicked at drop, and a green suite exited 101 — a script reporting
+        // failure on a run where every capture matched.
+        teardown_shared_window(workspace_window, &mut cx);
+        return match outcome {
+            Ok(TestResult::Passed) => {
+                println!("\u{2713} omega_agent_surfaces: PASSED");
+                Ok(())
+            }
+            Ok(TestResult::BaselineUpdated(_)) => {
+                println!("\u{2713} omega_agent_surfaces: Baselines updated");
+                Ok(())
+            }
+            Err(error) => Err(error.context("omega_agent_surfaces")),
+        };
+    }
+
     // Run Test 1: Project Panel (with project panel visible)
     println!("\n--- Test 1: project_panel ---");
     match run_visual_test(
@@ -507,6 +539,28 @@ fn run_visual_tests(project_path: PathBuf, update_baseline: bool) -> Result<()> 
         Err(e) => {
             eprintln!("✗ error_message_wrapping: FAILED - {}", e);
             failed += 1;
+        }
+    }
+
+    // Omega's own rendered proofs: the front door with no project, typing
+    // starting a thread, the executor line on three thread kinds, and a pin
+    // that could not be honoured. omega#76, #77, #78.
+    #[cfg(feature = "visual-tests")]
+    {
+        println!("\n--- Omega: front door, executor disclosure, route pin ---");
+        match run_omega_agent_visual_tests(app_state.clone(), &mut cx, update_baseline) {
+            Ok(TestResult::Passed) => {
+                println!("\u{2713} omega_agent_surfaces: PASSED");
+                passed += 1;
+            }
+            Ok(TestResult::BaselineUpdated(_)) => {
+                println!("\u{2713} omega_agent_surfaces: Baselines updated");
+                updated += 1;
+            }
+            Err(e) => {
+                eprintln!("\u{2717} omega_agent_surfaces: FAILED - {}", e);
+                failed += 1;
+            }
         }
     }
 
@@ -656,35 +710,7 @@ fn run_visual_tests(project_path: PathBuf, update_baseline: bool) -> Result<()> 
 
     // Clean up the main workspace's worktree to stop background scanning tasks
     // This prevents "root path could not be canonicalized" errors when main() drops temp_dir
-    workspace_window
-        .update(&mut cx, |workspace, _window, cx| {
-            let project = workspace.project().clone();
-            project.update(cx, |project, cx| {
-                let worktree_ids: Vec<_> =
-                    project.worktrees(cx).map(|wt| wt.read(cx).id()).collect();
-                for id in worktree_ids {
-                    project.remove_worktree(id, cx);
-                }
-            });
-        })
-        .log_err();
-
-    cx.run_until_parked();
-
-    // Close the main window
-    cx.update_window(workspace_window.into(), |_, window, _cx| {
-        window.remove_window();
-    })
-    .log_err();
-
-    // Run until all cleanup tasks complete
-    cx.run_until_parked();
-
-    // Give background tasks time to finish, including scrollbar hide timers (1 second)
-    for _ in 0..15 {
-        cx.advance_clock(Duration::from_millis(100));
-        cx.run_until_parked();
-    }
+    teardown_shared_window(workspace_window, &mut cx);
 
     // Print summary
     println!("\n=== Test Summary ===");
@@ -782,6 +808,46 @@ fn run_visual_test(
             comparison.match_percentage * 100.0,
             MATCH_THRESHOLD * 100.0
         ))
+    }
+}
+
+/// Tear down the shared workspace window this runner opens for the inherited
+/// tests.
+///
+/// Extracted so the `OMEGA_VISUAL_ONLY` early return runs it too. GPUI checks
+/// for leaked entity handles when the app drops, and skipping this left the
+/// sample project's buffers alive — a green suite that exited 101.
+#[cfg(target_os = "macos")]
+fn teardown_shared_window(
+    workspace_window: WindowHandle<Workspace>,
+    cx: &mut VisualTestAppContext,
+) {
+    workspace_window
+        .update(cx, |workspace, _window, cx| {
+            let project = workspace.project().clone();
+            project.update(cx, |project, cx| {
+                let worktree_ids: Vec<_> =
+                    project.worktrees(cx).map(|wt| wt.read(cx).id()).collect();
+                for id in worktree_ids {
+                    project.remove_worktree(id, cx);
+                }
+            });
+        })
+        .log_err();
+
+    cx.run_until_parked();
+
+    cx.update_window(workspace_window.into(), |_, window, _cx| {
+        window.remove_window();
+    })
+    .log_err();
+
+    cx.run_until_parked();
+
+    // Background tasks, including scrollbar hide timers (1 second).
+    for _ in 0..15 {
+        cx.advance_clock(Duration::from_millis(100));
+        cx.run_until_parked();
     }
 }
 
@@ -1991,6 +2057,474 @@ import { AiPaneTabContext } from 'context';
             TestResult::BaselineUpdated(p) => TestResult::BaselineUpdated(p.clone()),
         });
     Ok(result)
+}
+
+/// Omega's own rendered proofs. `OMEGA-DELTA-0034`, `OMEGA-DELTA-0035`,
+/// omega#76, omega#77 and omega#78.
+///
+/// # Why this exists at all
+///
+/// omega#76, #77 and #78 each landed with a source-level suite and no rendered
+/// evidence, and each said so plainly. Three lanes in a row reported "no check
+/// here looks at a rendered pixel". That gap is what this function closes: it
+/// draws the real widget tree through Metal and writes the frame to a PNG, so
+/// a claim about what the user sees is answered by a picture rather than by a
+/// `contains` over a source file.
+///
+/// # Why it is in-process
+///
+/// The obvious alternative — drive the packaged app and screenshot the window
+/// — has a hazard that has already bitten this workspace: macOS routes
+/// synthesized keystrokes to the **frontmost application**, not to the process
+/// named on the command line, so a harness can type into somebody else's
+/// window and record the reply as the app's. `VisualTestAppContext` dispatches
+/// keystrokes into this process's own GPUI window and captures that window's
+/// texture directly, so there is no frontmost app to get wrong and no other
+/// window that can answer.
+///
+/// # The threshold, stated
+///
+/// Comparison is `MATCH_THRESHOLD` (0.99): at least 99% of pixels must match
+/// the committed baseline. Exact equality is not usable even here — font
+/// rasterisation and theme colour rounding differ by a pixel or two between
+/// machines — and a threshold nobody states is worse than a loose one.
+/// Baselines were generated on Apple Silicon with the Metal renderer; this is
+/// a local gate, and a materially different GPU may need `UPDATE_BASELINE=1`
+/// and a human looking at the result before trusting it.
+#[cfg(all(target_os = "macos", feature = "visual-tests"))]
+fn run_omega_agent_visual_tests(
+    app_state: Arc<AppState>,
+    cx: &mut VisualTestAppContext,
+    update_baseline: bool,
+) -> Result<TestResult> {
+    // The window is torn down whatever happens. Without this, an early `Err`
+    // leaves the panel's editor buffer alive, GPUI's leaked-handle check panics
+    // at drop, and the panic *replaces* the error that actually explains the
+    // failure — which is exactly how the first run of this test reported
+    // "Visual tests panicked" and nothing else.
+    let outcome = run_omega_agent_visual_tests_inner(app_state, cx, update_baseline);
+    cx.run_until_parked();
+    outcome
+}
+
+#[cfg(all(target_os = "macos", feature = "visual-tests"))]
+fn run_omega_agent_visual_tests_inner(
+    app_state: Arc<AppState>,
+    cx: &mut VisualTestAppContext,
+    update_baseline: bool,
+) -> Result<TestResult> {
+    use agent_ui::AgentPanel;
+
+    // A project with **no worktree**. This is the whole point of the first two
+    // captures: a window with nothing to restore is by definition a window with
+    // no project, so this is the state a fresh install actually reaches.
+    let project = cx.update(|cx| {
+        project::Project::local(
+            app_state.client.clone(),
+            app_state.node_runtime.clone(),
+            app_state.user_store.clone(),
+            app_state.languages.clone(),
+            app_state.fs.clone(),
+            None,
+            project::LocalProjectFlags {
+                init_worktree_trust: false,
+                ..Default::default()
+            },
+            cx,
+        )
+    });
+
+    let window_size = size(px(900.0), px(720.0));
+    let bounds = Bounds {
+        origin: point(px(0.0), px(0.0)),
+        size: window_size,
+    };
+    let workspace_window: WindowHandle<Workspace> = cx
+        .update(|cx| {
+            cx.open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(bounds)),
+                    focus: false,
+                    show: false,
+                    ..Default::default()
+                },
+                |window, cx| {
+                    cx.new(|cx| Workspace::new(None, project.clone(), app_state.clone(), window, cx))
+                },
+            )
+        })
+        .context("Failed to open the Omega front door window")?;
+
+    cx.run_until_parked();
+
+    // The window really has no project. Asserted rather than assumed, because
+    // every claim these captures make rests on it — a capture taken with a
+    // worktree quietly present would prove the opposite of what it says.
+    let visible_worktrees = workspace_window
+        .update(cx, |workspace, _window, cx| {
+            workspace.project().read(cx).visible_worktrees(cx).count()
+        })
+        .context("Failed to read the project's worktrees")?;
+    anyhow::ensure!(
+        visible_worktrees == 0,
+        "the front door capture needs a projectless window; found {visible_worktrees} worktree(s)"
+    );
+
+    let (weak_workspace, async_window_cx) = workspace_window
+        .update(cx, |workspace, window, cx| {
+            (workspace.weak_handle(), window.to_async(cx))
+        })
+        .context("Failed to get workspace handle")?;
+
+    cx.background_executor.allow_parking();
+    let panel = cx
+        .foreground_executor
+        .block_test(AgentPanel::load(weak_workspace, async_window_cx))
+        .context("Failed to load AgentPanel")?;
+    cx.background_executor.forbid_parking();
+
+    workspace_window
+        .update(cx, |workspace, window, cx| {
+            workspace.add_panel(panel.clone(), window, cx);
+            workspace.open_panel::<AgentPanel>(window, cx);
+        })
+        .context("Failed to add the agent panel")?;
+
+    cx.run_until_parked();
+
+    // The shipped front door, called the way `crates/zed/src/main.rs` calls it
+    // on a window with nothing to restore. Not a hand-rolled approximation of
+    // it: `open_front_door` is the entry `OMEGA-DELTA-0019` added, and driving
+    // anything else here would photograph a path no user takes.
+    workspace_window
+        .update(cx, |_workspace, window, cx| {
+            AgentPanel::open_front_door(window, cx);
+        })
+        .context("Failed to open the front door")?;
+
+    cx.run_until_parked();
+
+    // The panel must actually be the focused, visible dock surface. A capture
+    // taken with the panel absent shows the launchpad and would read as a
+    // perfectly plausible screenshot of something else entirely — which is what
+    // the first run of this test produced, and how it was caught.
+    let panel_is_open = workspace_window
+        .update(cx, |workspace, _window, cx| {
+            workspace
+                .panel::<AgentPanel>(cx)
+                .is_some_and(|panel| panel.read(cx).active_thread_id(cx).is_some())
+        })
+        .unwrap_or(false);
+    anyhow::ensure!(
+        panel_is_open,
+        "the agent panel is not the open surface; the capture would show the \
+         launchpad rather than the front door"
+    );
+
+    // omega#76's exit, first half. Before this delta the panel answered a
+    // projectless window with "Open Project / Clone Repository" and there was
+    // nothing to type into.
+    let thread_id = cx
+        .read(|cx| panel.read(cx).active_thread_id(cx))
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "the front door produced no thread on a projectless window — \
+                 this is the omega#76 defect, and the capture below would show \
+                 the empty-project state"
+            )
+        })?;
+
+    let front_door = run_visual_test(
+        "omega_front_door_no_project",
+        workspace_window.into(),
+        cx,
+        update_baseline,
+    )?;
+
+    // omega#76's exit, second half: **typing starts a real thread**. The
+    // keystrokes go into this window through GPUI's own dispatch, so nothing
+    // depends on which application macOS thinks is frontmost.
+    cx.simulate_input(workspace_window.into(), "route this thread on purpose");
+    cx.run_until_parked();
+
+    let typed = cx
+        .read(|cx| {
+            panel
+                .read(cx)
+                .active_thread_view_for_tests()
+                .and_then(|conversation| conversation.read(cx).root_thread_view())
+                .map(|view| view.read(cx).message_editor.read(cx).text(cx))
+        })
+        .unwrap_or_default();
+    anyhow::ensure!(
+        typed.contains("route this thread on purpose"),
+        "typing on the front door did not reach the thread's composer; the \
+         editor holds {typed:?}"
+    );
+
+    let typing = run_visual_test(
+        "omega_front_door_typing",
+        workspace_window.into(),
+        cx,
+        update_baseline,
+    )?;
+
+    // Zoom the panel for the disclosure captures. The executor line is long by
+    // design — class, agent, model, run, and route reason — and a dock-width
+    // capture truncates it with an ellipsis, which would make a picture of a
+    // *truncated* line the evidence that the line renders.
+    cx.update_window(workspace_window.into(), |_, window, cx| {
+        panel.update(cx, |panel, cx| {
+            use workspace::dock::Panel as _;
+            panel.set_zoomed(true, window, cx);
+        });
+    })
+    .log_err();
+    cx.run_until_parked();
+
+    // omega#77: the executor line, on the native thread the front door just
+    // built. This thread was routed by `OmegaAgentConnection`, so its line also
+    // carries omega#78's route reason.
+    let native_line = cx
+        .read(|cx| omega_executor_line(&panel, cx))
+        .ok_or_else(|| anyhow::anyhow!("the native thread has no executor disclosure"))?;
+    anyhow::ensure!(
+        native_line.starts_with("native_loop"),
+        "the front door's own thread must disclose the native loop, not {native_line:?}"
+    );
+    anyhow::ensure!(
+        native_line.contains("routed:"),
+        "omega#78's wiring is not reaching the rendered line: {native_line:?}"
+    );
+    println!("  native executor line: {native_line}");
+
+    let native_disclosure = run_visual_test(
+        "omega_executor_disclosure_native",
+        workspace_window.into(),
+        cx,
+        update_baseline,
+    )?;
+
+    // omega#78, first exit clause: **a pinned executor is always honoured.**
+    // The native loop is the one executor this build has registered on the
+    // router, so it is the one honourable pin — and pinning it is not a no-op:
+    // the line changes from `routed: unpinned` to `routed: pinned`, which is
+    // the difference between "nobody chose this" and "a person did".
+    let session_for_pin = cx
+        .read(|cx| {
+            panel
+                .read(cx)
+                .active_thread_view_for_tests()
+                .and_then(|conversation| conversation.read(cx).root_thread_view())
+                .map(|view| view.read(cx).thread.read(cx).session_id().clone())
+        })
+        .ok_or_else(|| anyhow::anyhow!("no session to pin"))?;
+    let router_for_pin = agent_ui::omega_router::active_router().ok_or_else(|| {
+        anyhow::anyhow!(
+            "no router was built for the native agent entry — omega#78's \
+             wiring is the thing under test and it is absent"
+        )
+    })?;
+    let honoured = router_for_pin.pin_session(
+        &session_for_pin,
+        omega_front_door::ExecutorPin::new(omega_front_door::ExecutorClass::NativeLoop),
+        omega_front_door::PinGesture::ExecutorPinMenuItem,
+    );
+    anyhow::ensure!(
+        honoured.reason == omega_front_door::RouteReason::PinHonored,
+        "a pin to the fail-closed target must be honoured, not {:?}",
+        honoured.reason
+    );
+    cx.update_window(workspace_window.into(), |_, window, _cx| {
+        window.refresh();
+    })?;
+    cx.run_until_parked();
+
+    let honoured_line = cx
+        .read(|cx| omega_executor_line(&panel, cx))
+        .ok_or_else(|| anyhow::anyhow!("the pinned thread has no executor disclosure"))?;
+    anyhow::ensure!(
+        honoured_line.contains("routed: pinned"),
+        "an honoured pin must say so on the thread's own line: {honoured_line:?}"
+    );
+    println!("  honoured-pin executor line: {honoured_line}");
+
+    let pin_honoured = run_visual_test(
+        "omega_route_pin_honoured",
+        workspace_window.into(),
+        cx,
+        update_baseline,
+    )?;
+
+    // omega#78: a pin that cannot be honoured, rendered. No engine is running
+    // under this harness, so an engine-lane pin falls closed to the native loop
+    // and the line has to say so — a fallback the user cannot see is the defect
+    // this packet exists to avoid.
+    let session_id = cx
+        .read(|cx| {
+            panel
+                .read(cx)
+                .active_thread_view_for_tests()
+                .and_then(|conversation| conversation.read(cx).root_thread_view())
+                .map(|view| view.read(cx).thread.read(cx).session_id().clone())
+        })
+        .ok_or_else(|| anyhow::anyhow!("no session to pin"))?;
+    let router = agent_ui::omega_router::active_router().ok_or_else(|| {
+        anyhow::anyhow!(
+            "no router was built for the native agent entry — omega#78's \
+             wiring is the thing under test and it is absent"
+        )
+    })?;
+    let decision = router.pin_session(
+        &session_id,
+        omega_front_door::ExecutorPin::new(omega_front_door::ExecutorClass::EngineLane),
+        omega_front_door::PinGesture::ExecutorPinMenuItem,
+    );
+    anyhow::ensure!(
+        decision.reason.is_fallback(),
+        "an engine-lane pin with no engine must fall back, not report {:?}",
+        decision.reason
+    );
+
+    cx.update_window(workspace_window.into(), |_, window, _cx| {
+        window.refresh();
+    })?;
+    cx.run_until_parked();
+
+    let pinned_line = cx
+        .read(|cx| omega_executor_line(&panel, cx))
+        .ok_or_else(|| anyhow::anyhow!("the pinned thread has no executor disclosure"))?;
+    anyhow::ensure!(
+        pinned_line.contains("fell back to the native loop"),
+        "the unhonoured pin is not visible on the thread's line: {pinned_line:?}"
+    );
+    println!("  unhonoured-pin executor line: {pinned_line}");
+
+    let pin_fallback = run_visual_test(
+        "omega_route_pin_not_honoured",
+        workspace_window.into(),
+        cx,
+        update_baseline,
+    )?;
+
+    // omega#77: the external-ACP kind, on a second thread in the same panel.
+    let stub: Rc<dyn AgentServer> = Rc::new(StubAgentServer::new(StubAgentConnection::new()));
+    cx.update_window(workspace_window.into(), |_, window, cx| {
+        panel.update(cx, |panel, cx| {
+            panel.open_external_thread_with_server(stub.clone(), window, cx);
+        });
+    })?;
+    cx.run_until_parked();
+
+    let external_line = cx
+        .read(|cx| omega_executor_line(&panel, cx))
+        .ok_or_else(|| anyhow::anyhow!("the external thread has no executor disclosure"))?;
+    anyhow::ensure!(
+        external_line.starts_with("external_acp"),
+        "a thread on a connection Omega did not build must not be disclosed as \
+         first-party output: {external_line:?}"
+    );
+    println!("  external-acp executor line: {external_line}");
+
+    let external_disclosure = run_visual_test(
+        "omega_executor_disclosure_external_acp",
+        workspace_window.into(),
+        cx,
+        update_baseline,
+    )?;
+
+    // omega#77: the engine-lane kind, on that same external thread.
+    //
+    // Deliberately *this* thread and not the front door's own. A lane run is a
+    // `codex-acp` process the host bridge drives, so the honest record is "this
+    // run delegated to this agent" — and it is a thread the router did not
+    // route, so its `route` part is absent. Publishing a lane run onto a
+    // *routed* thread instead would produce a record `is_coherent` rejects: a
+    // route reason that says the router fell back to the native loop, on a line
+    // that claims an engine lane. The coherence assertions below are what
+    // caught that while this test was being written.
+    let external_thread_id = cx
+        .read(|cx| panel.read(cx).active_thread_id(cx))
+        .ok_or_else(|| anyhow::anyhow!("the external thread has no id"))?;
+    anyhow::ensure!(
+        external_thread_id != thread_id,
+        "the external thread must be a second thread, not the front door's own"
+    );
+    agent_ui::omega_host_bridge::publish_engine_lane_run_for_tests(
+        external_thread_id,
+        "operation.full-auto.visual".to_string(),
+    );
+    cx.update_window(workspace_window.into(), |_, window, _cx| {
+        window.refresh();
+    })?;
+    cx.run_until_parked();
+
+    let lane_line = cx
+        .read(|cx| omega_executor_line(&panel, cx))
+        .ok_or_else(|| anyhow::anyhow!("the lane thread has no executor disclosure"))?;
+    anyhow::ensure!(
+        lane_line.starts_with("engine_lane") && lane_line.contains("operation.full-auto.visual"),
+        "a thread bound to a lane run must disclose the run: {lane_line:?}"
+    );
+    println!("  engine-lane executor line: {lane_line}");
+
+    let lane_disclosure = run_visual_test(
+        "omega_executor_disclosure_engine_lane",
+        workspace_window.into(),
+        cx,
+        update_baseline,
+    )?;
+
+    cx.update_window(workspace_window.into(), |_, window, _cx| {
+        window.remove_window();
+    })
+    .log_err();
+    cx.run_until_parked();
+
+    // Six captures, and `run_visual_test` returns `Err` on a mismatch, so
+    // reaching here means every one of them matched its baseline or wrote one.
+    // The aggregate reports "baseline updated" if any capture wrote one, so an
+    // `UPDATE_BASELINE=1` run is never reported as a pass.
+    let results = [
+        front_door,
+        typing,
+        native_disclosure,
+        pin_honoured,
+        pin_fallback,
+        lane_disclosure,
+        external_disclosure,
+    ];
+    for result in &results {
+        if let TestResult::BaselineUpdated(path) = result {
+            return Ok(TestResult::BaselineUpdated(path.clone()));
+        }
+    }
+    Ok(TestResult::Passed)
+}
+
+/// The executor line the agent panel's active thread would render.
+///
+/// Read through the same `ThreadView::executor_disclosure` the render calls, so
+/// the assertion and the pixels cannot disagree about what the line says.
+#[cfg(all(target_os = "macos", feature = "visual-tests"))]
+fn omega_executor_line(panel: &Entity<agent_ui::AgentPanel>, cx: &App) -> Option<String> {
+    let disclosure = panel
+        .read(cx)
+        .active_thread_view_for_tests()?
+        .read(cx)
+        .root_thread_view()?
+        .read(cx)
+        .executor_disclosure(cx);
+    // Every captured line is asserted coherent, not merely non-empty. A record
+    // can render a perfectly readable line while claiming two contradictory
+    // things — an engine lane and a route reason that says the router fell back
+    // to the native loop is exactly that, and it is what an earlier draft of
+    // this test was about to photograph and call proof.
+    assert!(
+        disclosure.is_coherent(),
+        "the rendered executor record is incoherent: {disclosure:?}"
+    );
+    Some(disclosure.label())
 }
 
 /// A stub AgentServer for visual testing that returns a pre-programmed connection.

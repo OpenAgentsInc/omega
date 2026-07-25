@@ -7,7 +7,7 @@ use acp_thread::{
 };
 use acp_thread::{AgentConnection, Plan};
 use action_log::{ActionLog, ActionLogTelemetry, DiffStats};
-use agent::{NativeAgentServer, NoModelConfiguredError, ThreadStore};
+use agent::{NoModelConfiguredError, ThreadStore};
 use agent_client_protocol::schema::v1 as acp;
 #[cfg(test)]
 use agent_servers::AgentServerDelegate;
@@ -1022,9 +1022,11 @@ impl ConversationView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> ServerState {
-        if project.read(cx).is_via_collab()
-            && agent.clone().downcast::<NativeAgentServer>().is_none()
-        {
+        // OMEGA-DELTA-0035. The first-party agent is the router over the native
+        // server now, so "is this the native agent?" cannot be a bare downcast:
+        // a wrapped native agent would read as external and be refused in a
+        // shared project.
+        if project.read(cx).is_via_collab() && !crate::omega_router::is_native_agent_server(&agent) {
             return ServerState::LoadError {
                 error: LoadError::Other(
                     "External agents are not yet supported in shared projects.".into(),

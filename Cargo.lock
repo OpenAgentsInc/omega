@@ -22385,6 +22385,7 @@ dependencies = [
  "node_runtime",
  "notifications",
  "omega_effectd",
+ "omega_front_door",
  "onboarding",
  "outline",
  "outline_panel",

@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+#
+# Omega's rendered proof for the agent surfaces. omega#76, #77, #78.
+#
+# Draws the real widget tree through Metal in this process and writes each frame
+# to a PNG, then compares it against the committed baseline at the runner's
+# stated threshold (99% of pixels). Nothing here synthesizes a system keystroke,
+# so nothing here can type into another application's window by mistake.
+#
+#   script/omega-visual-proof              compare against the baselines
+#   script/omega-visual-proof --update     rewrite the baselines
+#
+# Baselines live in crates/zed/test_fixtures/visual_tests/ and were generated on
+# Apple Silicon with the Metal renderer. A materially different GPU may need
+# --update and a human looking at the result before the new baselines are
+# trusted.
+set -euo pipefail
+
+if [[ "${1:-}" == "--update" ]]; then
+  export UPDATE_BASELINE=1
+fi
+
+export OMEGA_VISUAL_ONLY=1
+exec cargo run --release -p zed --bin zed_visual_test_runner --features visual-tests

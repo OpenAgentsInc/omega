@@ -1188,15 +1188,12 @@ cargo test -p omega_deltas
   `the_route_decision_is_a_record_that_round_trips` in `crates/omega_deltas`;
   the routing-law suite in `crates/omega_front_door/src/router.rs`; and the
   dispatch and journal suite in `crates/agent_ui/src/omega_router.rs`.
-- **Not covered.** The router is **not yet wired into the agent panel**: nothing
-  in the shipped app constructs an `OmegaAgentConnection`, and there is no pin
-  control on any surface, so in `0.2.0-rc13` the journal stays empty and every
-  thread still discloses `route: None`. The routing law, the dispatch seam, the
-  fail-closed behaviour, and the record are all real and tested; the *user* has
-  no way to reach them yet. That wiring — a pin affordance, the panel building
-  the router, and the `get_capacity` poll feeding `observe_capacity` — is the
-  next packet, and until it lands the exit properties hold in the router and not
-  in the product. Separately, the router can decide an engine-lane route it
+- **Not covered.** The wiring this entry once listed as missing landed in
+  `OMEGA-DELTA-0035`: the native agent entry now resolves to an
+  `OmegaAgentConnection`, the panel polls `get_capacity` into
+  `observe_capacity`, and a pin menu sits on every thread's disclosure line. Read
+  `OMEGA-DELTA-0035` for what that wiring does and does not reach. Separately,
+  the router can decide an engine-lane route it
   cannot itself dispatch, because engine lanes are started by a person on the
   Full Auto surface and driven by the host bridge rather than through
   `AgentConnection::prompt`; that gap is the named `engine_lane_not_connected`
@@ -1589,3 +1586,143 @@ than it sounds, because the harness omega#81's acceptance sentence names —
   `crates/omega_deltas`; plus the suites in
   `crates/omega_harness/src/front_door.rs` and
   `crates/project/tests/integration/harness_maintenance.rs`.
+
+### OMEGA-DELTA-0034 — The front door works with no project open
+
+- **Upstream Zed:** the agent panel requires an open project. `agent_ui: Require
+  an open project for agent panel` (#56577, "a bit brute force, but it works")
+  put a `has_open_project` early return in front of every entry to the panel, so
+  a window with no worktree shows "Open a Project" and nothing else. That is
+  coherent for an editor whose agent is an accessory to a project.
+- **Omega, before this:** `OMEGA-DELTA-0019` made a window with nothing to
+  restore open on the agent instead of on an untitled buffer, and
+  `OMEGA-DELTA-0020` folded Full Auto into that panel. Both landed. The exit
+  omega#76 actually asked for — *fresh launch lands on the surface **and typing
+  starts a thread*** — did not: a window with nothing to restore is by
+  definition a window with no project, so the front door opened onto
+  "Open Project / Clone Repository" and there was no composer to type into. The
+  landing half shipped and the typing half did not, and the two were reported
+  together.
+- **Omega now:** the guards on the front door's own path are gone.
+  `activate_new_thread`, `activate_draft`, `new_thread`,
+  `ensure_native_agent_connection` and `toggle_new_thread_menu` no longer refuse
+  a projectless window, the toolbar's create controls are live, and a thread's
+  title is editable. Typing on a fresh install starts a real thread.
+- **What the guards protected, checked rather than assumed.** The one that could
+  plausibly have been load-bearing was `ensure_native_agent_connection`, and it
+  is not: `NativeAgentServer::connect` takes the project as `_project` and never
+  reads it, and `NativeAgent::new_session` builds a thread from the project
+  entity without requiring a visible worktree. What the guard bought was not
+  spinning up a connection for a window upstream had decided would never show
+  the agent — a resource choice resting on a premise Omega does not share.
+- **The workspace-touching guards stay.** A terminal genuinely needs a working
+  directory, so `should_create_terminal_for_new_entry` keeps its check and a
+  projectless `new_thread` falls through to a thread rather than a terminal.
+  Loading a thread from the clipboard, resuming a persisted draft, refreshing
+  skills, initialising from a source workspace, and starting an external ACP
+  agent all still require a project. Removing *those* would not be
+  project-optional threads; it would be threads that fail later and less
+  legibly.
+- **`cmd-?` gave the agent panel back to macOS.** `agent::ToggleFocus` was bound
+  to `cmd-?`, which is macOS's reserved Help chord — the Help menu's search
+  field. Omega cannot win that keystroke, so the binding was a keybinding that
+  looked present and did not work. It is `ctrl-cmd-a` now: free, not
+  system-reserved, and on the same letter as `cmd-shift-a`. Linux (`ctrl-?`) and
+  Windows (`ctrl-shift-/`) are untouched, because neither is reserved there and
+  changing them would be churn with no defect behind it.
+- **The rendered proof, and why the runner needed standing up.**
+  `zed_visual_test_runner` was already in the fork — macOS headless Metal
+  capture, no Screen Recording permission, no window to get frontmost — and it
+  had no committed baselines and no invocation, so no Omega packet had ever
+  used it. `script/omega-visual-proof` is the invocation, `OMEGA_VISUAL_ONLY=1`
+  runs Omega's suite alone, and the `omega_*` baselines are re-included in
+  `.gitignore` and committed. A baseline nobody committed cannot fail. The
+  suite asserts the rendered line's text through the same method the render
+  calls and asserts the record is coherent *before* each capture, so a picture
+  can never be the only thing standing behind a claim.
+- **Enforced by:** `the_front_door_does_not_require_an_open_project` and
+  `required_keymap_bindings_resolve` in `crates/omega_deltas`;
+  `test_empty_workspace_opens_the_front_door` in `crates/agent_ui`; the rendered
+  proofs `omega_front_door_no_project` and `omega_front_door_typing` in
+  `crates/zed/src/visual_test_runner.rs`.
+- **What this does not cover.** A **first-ever** launch still lands on the
+  Onboarding tab, not on the agent — observed on a packaged build with a fresh
+  `--user-data-dir`, where the front door is behind onboarding and the agent
+  dock is closed until it is dismissed. Every launch after that lands on the
+  agent. So omega#76's exit holds for its second half (typing starts a real
+  thread) and for every launch but the first; the first-run ordering is a
+  separate, untouched surface. A projectless thread is also not yet *bound* to a
+  project on its first workspace-touching action, which is the rest of omega#76's
+  project-optional deliverable. Today it simply has no worktree: file mentions
+  find nothing and a tool that needs a path fails the way it would in any
+  worktree-less window. The `cmd-shift-a` editor-context collision and the
+  shadowed lower-priority bindings named in omega#76 are also untouched; the
+  two `cmd-shift-a` bindings that remain are inside modal pickers
+  (`ToolchainSelector`, `RecentProjects`) and fire only while those are open.
+
+### OMEGA-DELTA-0035 — The router is wired, and a pin is a gesture
+
+- **Upstream Zed:** there is one agent connection per thread and no routing, so
+  there is nothing to wire and nothing to pin.
+- **Omega, before this:** `OMEGA-DELTA-0029` built the routing law and the
+  dispatch seam and wired neither. Nothing in the shipped app constructed an
+  `OmegaAgentConnection`, `observe_capacity` had no caller, and no surface could
+  set a pin — so the route journal stayed empty and every thread disclosed
+  `route: None`. The exit properties held in the router and not in the product.
+- **Omega now:** `Agent::NativeAgent.server(..)` returns an
+  `omega_router::OmegaRouterServer`, whose `connect` builds an
+  `OmegaAgentConnection` over the native connection and publishes it. Every new
+  first-party session is routed on purpose and its decision is written to the
+  route journal before the turn exists. The agent panel polls the engine's
+  framed `get_capacity` answer on the same three-second cadence the Full Auto
+  roster uses and hands it to `observe_capacity`, so an engine-lane pin is
+  decided against what `omega-effectd` is actually doing rather than against a
+  default of "not running".
+- **A pin is a gesture, enforced by the argument type.** `pin_session`,
+  `unpin_session` and `pin_next_session` each require an
+  `omega_front_door::PinGesture`, every variant of which is a control a person
+  operates. There is no `PinGesture::ToolCall`, no `SlashCommand`, no
+  `RestoredDraft` and no `ComposerMode`, and `pin_gestures_are_all_human_gestures`
+  fails if one appears. This is the same construction owner gate 8 already uses
+  for `LaunchOrigin`, applied at the pin because a pin is the only door to an
+  engine lane and an engine lane *is* Full Auto authority. omega#76 rejected a
+  composer mode flag for Full Auto because a boolean the send path reads can be
+  set by a slash command, a restored draft, or a model-authored insertion; a pin
+  stored as a mode would be the same construct wearing a different name.
+- **Engine lanes are still reachable only through a pin.** The unpinned default
+  is the native loop, always. Nothing here auto-prefers a ready lane, and
+  `an_unpinned_thread_never_reaches_an_engine_lane` in
+  `crates/omega_front_door/src/router.rs` fails if the law changes.
+- **A human pin re-decides; capacity moving does not.** Setting or clearing a
+  pin re-runs the decision for that session and records it, so an unhonourable
+  pin appears on the thread's own line as a fallback with its typed reason
+  instead of silently doing nothing. A later engine answer never re-decides a
+  recorded session, so a turn does not move executors mid-thread because
+  capacity changed.
+- **The thread carries the executor, not the router.**
+  `OmegaAgentConnection::new_session` delegates and returns what the executor
+  built, so `OMEGA-DELTA-0021`'s disclosure keeps classifying the executor. The
+  two places that asked "is this the native agent?" by downcasting — the
+  shared-project refusal and the native thread-store hand-off — go through
+  `is_native_agent_server` now, because a wrapped native agent reading as
+  external is a silently wrong `false` rather than a compile error.
+- **Enforced by:** `the_router_is_wired_into_the_native_agent_entry`,
+  `only_a_named_human_gesture_can_pin_an_executor` and
+  `nothing_asks_for_the_native_agent_with_a_bare_downcast` in
+  `crates/omega_deltas`; `pin_gestures_are_all_human_gestures` in
+  `crates/omega_front_door`; the dispatch and journal suite in
+  `crates/agent_ui/src/omega_router.rs`; and the rendered proofs
+  `omega_executor_disclosure_*` and `omega_route_pin_not_honoured` in
+  `crates/zed/src/visual_test_runner.rs`.
+- **What this does not cover.** No external ACP agent or engine-lane executor is
+  registered on the router in this build, so a pin to either fails closed to the
+  native loop with `external_acp_unavailable` or `engine_lane_not_connected` —
+  which is the honest answer and is what the rendered proof shows. The honoured
+  pin the rendered proof shows is therefore a pin to the native loop, which is
+  a real honoured pin (`routed: pinned`, not `routed: unpinned`) but not an
+  honoured *engine-lane* pin; that path is exercised only in tests. Turns still reach
+  the executor through the thread's own connection rather than through
+  `OmegaAgentConnection::prompt`, because the thread carries the executor; the
+  router decides per session, not per turn. And the pin menu is rendered on the
+  thread's disclosure line, so a surface with no thread on it has no pin
+  control.
