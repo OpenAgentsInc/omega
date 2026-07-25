@@ -3,21 +3,21 @@
   "channel_badges_note": "All four channels reuse the unbadged OpenAgents Desktop icon until OpenAgents approves channel badges.",
   "pinned_source": {
     "png_path": "icon_family/source/openagents-icon.png",
-    "png_sha256": "4dc74a8507669f77118a82791a8bf6e85773e1d31a4b16816b46bc2066e452d8",
-    "png_source_commit": "b9f41580fb2a1d536a67d970e08dec9125612931",
+    "png_sha256": "1f80f8d36d459e2bf62c3d1fcb05f42cf6c2a26b84aeb320eb89bedbb489d551",
+    "png_source_commit": "owner-supplied-2026-07-25-omega-hd4-kontext-1k",
     "png_pixels": [
       1024,
       1024
     ],
     "icns_path": "icon_family/source/openagents-icon.icns",
-    "icns_sha256": "779a545acbf626c7e319d0dacf106e2e69eb0caf2d506dabe14c343a1925563f",
-    "icns_source_commit": "e3600a5c326fa1e33e5be9d13363ff902ea57f4d",
+    "icns_sha256": "f6d748c1765161ec785f55137afd548cf1ff23de12d2de14383e8a01c697654d",
+    "icns_source_commit": "generated-2026-07-25-from-omega-hd4-kontext-1k",
     "upstream_png": "apps/openagents-desktop/resources/openagents-icon.png",
     "upstream_icns": "apps/openagents-desktop/resources/openagents-icon.icns"
   },
   "outputs": {
     "app-icon.png": {
-      "sha256": "97e1f300a25f5dd0ea946b7dc4f8b04b51b6f7f505cff5089c6f0ab862c274b1",
+      "sha256": "8a8e4bce6c9def7cc9bc5408df11e785c8c15d5f439c3c3677012736789ede22",
       "pixels": [
         512,
         512
@@ -26,7 +26,7 @@
       "derived_from": "icon_family/source/openagents-icon.png"
     },
     "app-icon@2x.png": {
-      "sha256": "d678210078cfc7ffae9bb84142d47b5fd07441a480d03cdbc394261ecd19f11c",
+      "sha256": "de518935991f3b14a00d3a8b1100df97cd713248c58d45fc616611bc372f97f4",
       "pixels": [
         1024,
         1024
@@ -35,7 +35,7 @@
       "derived_from": "icon_family/source/openagents-icon.png"
     },
     "app-icon-dev.png": {
-      "sha256": "97e1f300a25f5dd0ea946b7dc4f8b04b51b6f7f505cff5089c6f0ab862c274b1",
+      "sha256": "8a8e4bce6c9def7cc9bc5408df11e785c8c15d5f439c3c3677012736789ede22",
       "pixels": [
         512,
         512
@@ -44,7 +44,7 @@
       "derived_from": "icon_family/source/openagents-icon.png"
     },
     "app-icon-dev@2x.png": {
-      "sha256": "d678210078cfc7ffae9bb84142d47b5fd07441a480d03cdbc394261ecd19f11c",
+      "sha256": "de518935991f3b14a00d3a8b1100df97cd713248c58d45fc616611bc372f97f4",
       "pixels": [
         1024,
         1024
@@ -53,7 +53,7 @@
       "derived_from": "icon_family/source/openagents-icon.png"
     },
     "app-icon-nightly.png": {
-      "sha256": "97e1f300a25f5dd0ea946b7dc4f8b04b51b6f7f505cff5089c6f0ab862c274b1",
+      "sha256": "8a8e4bce6c9def7cc9bc5408df11e785c8c15d5f439c3c3677012736789ede22",
       "pixels": [
         512,
         512
@@ -62,7 +62,7 @@
       "derived_from": "icon_family/source/openagents-icon.png"
     },
     "app-icon-nightly@2x.png": {
-      "sha256": "d678210078cfc7ffae9bb84142d47b5fd07441a480d03cdbc394261ecd19f11c",
+      "sha256": "de518935991f3b14a00d3a8b1100df97cd713248c58d45fc616611bc372f97f4",
       "pixels": [
         1024,
         1024
@@ -71,7 +71,7 @@
       "derived_from": "icon_family/source/openagents-icon.png"
     },
     "app-icon-preview.png": {
-      "sha256": "97e1f300a25f5dd0ea946b7dc4f8b04b51b6f7f505cff5089c6f0ab862c274b1",
+      "sha256": "8a8e4bce6c9def7cc9bc5408df11e785c8c15d5f439c3c3677012736789ede22",
       "pixels": [
         512,
         512
@@ -80,7 +80,7 @@
       "derived_from": "icon_family/source/openagents-icon.png"
     },
     "app-icon-preview@2x.png": {
-      "sha256": "d678210078cfc7ffae9bb84142d47b5fd07441a480d03cdbc394261ecd19f11c",
+      "sha256": "de518935991f3b14a00d3a8b1100df97cd713248c58d45fc616611bc372f97f4",
       "pixels": [
         1024,
         1024
@@ -89,13 +89,13 @@
       "derived_from": "icon_family/source/openagents-icon.png"
     },
     "Document.icns": {
-      "sha256": "779a545acbf626c7e319d0dacf106e2e69eb0caf2d506dabe14c343a1925563f",
+      "sha256": "f6d748c1765161ec785f55137afd548cf1ff23de12d2de14383e8a01c697654d",
       "format": "icns",
       "derived_from": "icon_family/source/openagents-icon.icns",
       "note": "Document associations reuse the OpenAgents app icon until a distinct document glyph is designed."
     },
     "windows/app-icon.ico": {
-      "sha256": "b5661fbcc5a0bec7e1149fa0bde74303b7eaf71bd99c099df5f19cf0f8f14aa5",
+      "sha256": "bb094b2114dde5757d101233cda7ab8c001a5edeb00059b5abe6cdf86cc6be70",
       "format": "ico",
       "sizes": [
         16,
@@ -106,7 +106,7 @@
       "derived_from": "icon_family/source/openagents-icon.png"
     },
     "windows/app-icon-dev.ico": {
-      "sha256": "b5661fbcc5a0bec7e1149fa0bde74303b7eaf71bd99c099df5f19cf0f8f14aa5",
+      "sha256": "bb094b2114dde5757d101233cda7ab8c001a5edeb00059b5abe6cdf86cc6be70",
       "format": "ico",
       "sizes": [
         16,
@@ -117,7 +117,7 @@
       "derived_from": "icon_family/source/openagents-icon.png"
     },
     "windows/app-icon-nightly.ico": {
-      "sha256": "b5661fbcc5a0bec7e1149fa0bde74303b7eaf71bd99c099df5f19cf0f8f14aa5",
+      "sha256": "bb094b2114dde5757d101233cda7ab8c001a5edeb00059b5abe6cdf86cc6be70",
       "format": "ico",
       "sizes": [
         16,
@@ -128,7 +128,7 @@
       "derived_from": "icon_family/source/openagents-icon.png"
     },
     "windows/app-icon-preview.ico": {
-      "sha256": "b5661fbcc5a0bec7e1149fa0bde74303b7eaf71bd99c099df5f19cf0f8f14aa5",
+      "sha256": "bb094b2114dde5757d101233cda7ab8c001a5edeb00059b5abe6cdf86cc6be70",
       "format": "ico",
       "sizes": [
         16,

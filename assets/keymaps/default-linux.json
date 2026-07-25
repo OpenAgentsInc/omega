@@ -893,12 +893,6 @@
     },
   },
   {
-    "context": "!Terminal",
-    "bindings": {
-      "ctrl-shift-c": "collab_panel::ToggleFocus",
-    },
-  },
-  {
     "context": "!AcpThread > Editor && mode == full",
     "bindings": {
       "alt-enter": "editor::OpenExcerpts",
@@ -1147,29 +1141,7 @@
   {
     "context": "CollabPanel && not_editing",
     "bindings": {
-      "ctrl-backspace": "collab_panel::Remove",
       "space": "menu::Confirm",
-    },
-  },
-  {
-    "context": "CollabPanel",
-    "bindings": {
-      "alt-up": "collab_panel::MoveChannelUp",
-      "alt-down": "collab_panel::MoveChannelDown",
-      "alt-enter": "collab_panel::OpenSelectedChannelNotes",
-      "shift-enter": "collab_panel::ToggleSelectedChannelFavorite",
-    },
-  },
-  {
-    "context": "(CollabPanel && editing) > Editor",
-    "bindings": {
-      "space": "collab_panel::InsertSpace",
-    },
-  },
-  {
-    "context": "ChannelModal",
-    "bindings": {
-      "tab": "channel_modal::ToggleMode",
     },
   },
   {
@@ -1184,12 +1156,6 @@
       // ToggleActionsMenu) live in keymaps/specific-overrides.json, which is
       // loaded after the base keymap so they win over conflicting base-keymap
       // Editor bindings.
-    },
-  },
-  {
-    "context": "ChannelModal > Picker > Editor",
-    "bindings": {
-      "tab": "channel_modal::ToggleMode",
     },
   },
   {

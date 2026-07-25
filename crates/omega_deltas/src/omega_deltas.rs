@@ -62,6 +62,18 @@ pub const REMOVED_FILES: &[&str] = &[
 /// These are checked across the whole source tree rather than in one file,
 /// because the last two both survived a source-level review and were caught
 /// only by scanning the packaged binary.
+/// Action namespaces whose crates Omega deleted.
+///
+/// A keybinding naming one of these is not a cosmetic leftover: the built-in
+/// keymap is loaded and unwrapped at startup, so an unresolvable action is a
+/// hard panic before any window opens. `cargo check --workspace` passes
+/// happily, because keymaps are runtime assets rather than compiled code.
+/// This was shipped once, in 0.2.0-rc6.
+pub const FORBIDDEN_KEYMAP_NAMESPACES: &[(&str, &str)] = &[
+    ("OMEGA-DELTA-0010", "collab_panel::"),
+    ("OMEGA-DELTA-0010", "channel_modal::"),
+];
+
 pub const FORBIDDEN_SOURCE_STRINGS: &[(&str, &str)] = &[
     ("OMEGA-DELTA-0008", "Zed\u{27}s hosted models"),
     ("OMEGA-DELTA-0008", "14 day free trial"),
@@ -503,6 +515,39 @@ mod tests {
                 "OMEGA-DELTA-0011: required provider setup disappeared: {required:?}"
             );
         }
+    }
+
+    /// A deleted crate must not leave keybindings behind.
+    ///
+    /// The built-in keymap is loaded and unwrapped during startup, so a
+    /// binding naming an action whose crate is gone panics before any window
+    /// opens. The workspace still compiles, which is exactly why this needs
+    /// its own check rather than trusting the build.
+    #[test]
+    fn keymaps_name_no_deleted_action() {
+        let mut offenders: Vec<String> = Vec::new();
+        for keymap in [
+            "assets/keymaps/default-macos.json",
+            "assets/keymaps/default-linux.json",
+            "assets/keymaps/default-windows.json",
+        ] {
+            let path = repository_path(keymap);
+            let Ok(source) = std::fs::read_to_string(&path) else {
+                offenders.push(format!("{keymap} is unreadable"));
+                continue;
+            };
+            for (delta, namespace) in FORBIDDEN_KEYMAP_NAMESPACES {
+                if source.contains(namespace) {
+                    offenders.push(format!("{delta}: {namespace:?} still bound in {keymap}"));
+                }
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "a deleted crate left keybindings behind, which panics Omega at \
+             startup:\n{}",
+            offenders.join("\n")
+        );
     }
 
     /// The registry and the checks must agree, in both directions.
