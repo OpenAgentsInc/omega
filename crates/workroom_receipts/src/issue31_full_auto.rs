@@ -900,7 +900,7 @@ pub fn build_issue31_full_auto_adjunct(
         "generatedAtMs": generated_at_ms,
         "runs": build_runs(runs, generated_at_ms)?,
         "accounts": build_accounts(accounts)?,
-        "handoffs": handoffs.get("handoffs").cloned().unwrap_or_else(|| serde_json::json!([])),
+        "handoffs": build_handoffs(handoffs)?,
         "evidence": build_evidence(evidence),
     });
     let serialized =
@@ -961,10 +961,18 @@ fn build_runs(
             .ok_or(Issue31FullAutoAdjunctError::UnsafeReference)?;
 
         // Measured from the host's own start time, never re-derived downstream.
-        let unattended_ms = run
+        // A run whose start the host never recorded has no known unattended
+        // duration, and `0` would read on the phone as "just started" — a claim
+        // nothing supports. The exact duration is part of this issue's outcome,
+        // so its absence is a refusal rather than a zero.
+        let started_at_ms = run
             .get("startedAtMs")
             .and_then(serde_json::Value::as_u64)
-            .map_or(0, |started| generated_at_ms.saturating_sub(started));
+            .ok_or(Issue31FullAutoAdjunctError::InvalidRunState)?;
+        if started_at_ms > generated_at_ms {
+            return Err(Issue31FullAutoAdjunctError::InvalidTimestamp);
+        }
+        let unattended_ms = generated_at_ms - started_at_ms;
 
         let mut entry = serde_json::json!({
             "runRef": run_ref,
@@ -1048,6 +1056,43 @@ fn build_accounts(accounts: &serde_json::Value) -> AdjunctResult<Vec<serde_json:
     Ok(built)
 }
 
+/// Project each host-owned provider connection handoff onto the contract.
+///
+/// The handoff record on the host side carries the isolated provider home, the
+/// browser or device login it drove, and whatever the provider returned. Only
+/// the fields named here are copied, so a private path or an authorization
+/// response present on the host record cannot reach the phone even by accident,
+/// and cannot make the whole projection unreadable through an unknown field
+/// either.
+fn build_handoffs(handoffs: &serde_json::Value) -> AdjunctResult<Vec<serde_json::Value>> {
+    let mut built = Vec::new();
+    for handoff in handoffs
+        .get("handoffs")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let mut entry = serde_json::json!({
+            "handoffRef": handoff.get("handoffRef").cloned().unwrap_or(serde_json::Value::Null),
+            "provider": handoff.get("provider").cloned().unwrap_or(serde_json::Value::Null),
+            "state": handoff.get("state").cloned().unwrap_or(serde_json::Value::Null),
+            "requestedAtMs": handoff.get("requestedAtMs").cloned().unwrap_or(serde_json::Value::Null),
+        });
+        let object = entry
+            .as_object_mut()
+            .ok_or(Issue31FullAutoAdjunctError::InvalidJson)?;
+        for field in ["accountRef", "reasonClass", "outcomeRef", "receiptRef"] {
+            if let Some(value) = handoff.get(field)
+                && !value.is_null()
+            {
+                object.insert(field.into(), value.clone());
+            }
+        }
+        built.push(entry);
+    }
+    Ok(built)
+}
+
 fn normalize_readiness(state: Option<&str>) -> &'static str {
     match state {
         Some("ready") => "ready",
@@ -1091,22 +1136,53 @@ fn build_evidence(pairs: &[(serde_json::Value, serde_json::Value)]) -> Vec<serde
         .collect()
 }
 
+/// The hops the omega#43 report and the authority receipt both carry. They must
+/// agree on all of them for the pair to be one chain.
+const SHARED_EVIDENCE_HOP_FIELDS: [&str; 4] =
+    ["objectiveRef", "turnRef", "changeRef", "verificationRef"];
+
 fn unavailable_reason(report: &serde_json::Value, receipt: &serde_json::Value) -> &'static str {
-    if report.get("evidence").is_none() {
+    let Some(evidence) = report.get("evidence") else {
         return "hop_missing";
-    }
-    if report.get("runRef") != receipt.get("runRef") {
+    };
+    // Disagreement on any hop the two records share is two stories about one
+    // run, not a hop the host failed to produce. Checking only `runRef` here
+    // would report a contradicted chain as merely incomplete.
+    if report.get("runRef") != receipt.get("runRef")
+        || SHARED_EVIDENCE_HOP_FIELDS.iter().any(|field| {
+            let reported = evidence.get(field);
+            let received = receipt.get(field);
+            reported.is_some() && received.is_some() && reported != received
+        })
+    {
         return "hop_mismatched";
     }
-    if report
-        .get("evidence")
-        .and_then(|evidence| evidence.get("hostExecuted"))
+    if evidence
+        .get("hostExecuted")
         .and_then(serde_json::Value::as_bool)
         != Some(true)
     {
         return "self_reported";
     }
+    // A hop the host recorded but cannot show publicly is not a missing hop.
+    // Naming it `hop_private` keeps the owner's two situations distinct: the
+    // host never produced this step, versus the host produced it and this
+    // surface is not allowed to carry it.
+    if carries_private_hop(evidence) || carries_private_hop(receipt) {
+        return "hop_private";
+    }
     "hop_missing"
+}
+
+/// True when any owner-facing hop value on this record would be refused by the
+/// contract's public-text rule.
+fn carries_private_hop(record: &serde_json::Value) -> bool {
+    record
+        .as_object()
+        .into_iter()
+        .flatten()
+        .filter_map(|(_, value)| value.as_str())
+        .any(|value| !is_issue31_public_text(value, MAX_PUBLIC_TEXT))
 }
 
 fn complete_chain(
@@ -1125,9 +1201,15 @@ fn complete_chain(
     {
         return None;
     }
+    // A private hop makes this one chain unavailable. Letting it through to the
+    // decoder instead would abort the whole projection, so a single unshowable
+    // detail would hide every other run the owner is entitled to see.
+    if carries_private_hop(evidence) || carries_private_hop(receipt) {
+        return None;
+    }
     // The receipt must agree with the report on every shared hop, or the chain
     // is two stories rather than one.
-    for field in ["objectiveRef", "turnRef", "changeRef", "verificationRef"] {
+    for field in SHARED_EVIDENCE_HOP_FIELDS {
         if receipt.get(field)? != evidence.get(field)? {
             return None;
         }
@@ -1358,5 +1440,139 @@ mod emitter_tests {
             adjunct.evidence[0],
             Issue31EvidenceChain::Unavailable { .. }
         ));
+    }
+
+    fn unavailable_reason_of(adjunct: &Issue31FullAutoAdjunct) -> Issue31EvidenceUnavailableReason {
+        match &adjunct.evidence[0] {
+            Issue31EvidenceChain::Unavailable { reason, .. } => *reason,
+            Issue31EvidenceChain::Complete { .. } => {
+                panic!("a broken chain must never render as complete")
+            }
+        }
+    }
+
+    /// Falsification of every way omega#47 says a chain can be a story rather
+    /// than a proof. Each is watched refusing: a fail-closed path nobody saw
+    /// refuse is not proven to fail closed.
+    #[test]
+    fn each_broken_evidence_hop_is_refused_with_its_own_reason() {
+        let (mut report, receipt) = evidence_pair();
+        report["evidence"]
+            .as_object_mut()
+            .expect("evidence object")
+            .remove("turnRef");
+        let missing = build(&runs(), &accounts(), &[(report, receipt)]).expect("emits");
+        assert_eq!(
+            unavailable_reason_of(&missing),
+            Issue31EvidenceUnavailableReason::HopMissing
+        );
+
+        let (report, mut receipt) = evidence_pair();
+        receipt["turnRef"] = json!("turn.some-other-run.3");
+        let mismatched = build(&runs(), &accounts(), &[(report, receipt)]).expect("emits");
+        assert_eq!(
+            unavailable_reason_of(&mismatched),
+            Issue31EvidenceUnavailableReason::HopMismatched
+        );
+
+        let (mut report, receipt) = evidence_pair();
+        report["evidence"]["testCommand"] = json!("cat /Users/owner/.codex/auth.json");
+        let private = build(&runs(), &accounts(), &[(report, receipt)]).expect("emits");
+        assert_eq!(
+            unavailable_reason_of(&private),
+            Issue31EvidenceUnavailableReason::HopPrivate
+        );
+
+        let (mut report, receipt) = evidence_pair();
+        report["evidence"]["hostExecuted"] = json!(false);
+        let self_reported = build(&runs(), &accounts(), &[(report, receipt)]).expect("emits");
+        assert_eq!(
+            unavailable_reason_of(&self_reported),
+            Issue31EvidenceUnavailableReason::SelfReported
+        );
+    }
+
+    #[test]
+    fn one_unshowable_hop_never_hides_the_runs_beside_it() {
+        let (mut report, receipt) = evidence_pair();
+        report["evidence"]["diffSummary"] = json!("wrote /Users/owner/.codex/auth.json");
+        let adjunct = build(&runs(), &accounts(), &[(report, receipt)]).expect(
+            "a private hop makes one chain unavailable, it does not abort the whole projection",
+        );
+        assert_eq!(adjunct.runs.len(), 1);
+        assert_eq!(
+            unavailable_reason_of(&adjunct),
+            Issue31EvidenceUnavailableReason::HopPrivate
+        );
+    }
+
+    #[test]
+    fn a_run_whose_start_the_host_never_recorded_is_refused_not_shown_as_zero() {
+        let mut value = runs();
+        value["runs"][0]
+            .as_object_mut()
+            .expect("run object")
+            .remove("startedAtMs");
+        // The exact unattended duration is part of this issue's outcome. Zero
+        // would read on the phone as "just started".
+        assert_eq!(
+            build(&value, &accounts(), &[]).expect_err("must refuse"),
+            Issue31FullAutoAdjunctError::InvalidRunState
+        );
+    }
+
+    #[test]
+    fn a_terminal_handoff_without_a_host_outcome_cannot_be_emitted() {
+        let handoffs = json!({"handoffs": [{
+            "handoffRef": "handoff.codex.1",
+            "provider": "openai",
+            "state": "completed",
+            "requestedAtMs": NOW - 60_000,
+            "accountRef": "account.codex.1"
+        }]});
+        let error = build_issue31_full_auto_adjunct(
+            "host.omega.device-alpha",
+            "snapshot.omega.issue31.000042",
+            NOW,
+            &runs(),
+            &accounts(),
+            &handoffs,
+            &[],
+        )
+        .expect_err("a completed handoff with no host outcome is a claim the host never made");
+        assert_eq!(error, Issue31FullAutoAdjunctError::InvalidHandoffState);
+    }
+
+    #[test]
+    fn a_private_field_on_a_host_handoff_record_never_reaches_the_contract() {
+        let handoffs = json!({"handoffs": [{
+            "handoffRef": "handoff.codex.1",
+            "provider": "openai",
+            "state": "completed",
+            "requestedAtMs": NOW - 60_000,
+            "accountRef": "account.codex.1",
+            "outcomeRef": "outcome.handoff.linked",
+            // The host record legitimately holds these. The phone never may.
+            "providerHome": "/Users/owner/.pylon/accounts/codex/codex-2",
+            "authorizationResponse": "Bearer sk-live-0000"
+        }]});
+        let adjunct = build_issue31_full_auto_adjunct(
+            "host.omega.device-alpha",
+            "snapshot.omega.issue31.000042",
+            NOW,
+            &runs(),
+            &accounts(),
+            &handoffs,
+            &[],
+        )
+        .expect("admitted fields are projected, private ones are not carried");
+        assert_eq!(adjunct.handoffs.len(), 1);
+        let encoded = serde_json::to_string(&serde_json::json!({
+            "handoffRef": adjunct.handoffs[0].handoff_ref.as_str(),
+            "outcomeRef": adjunct.handoffs[0].outcome_ref.as_ref().map(PublicRef::as_str),
+        }))
+        .expect("encodes");
+        assert!(!encoded.contains("/Users/"));
+        assert!(!encoded.contains("Bearer"));
     }
 }

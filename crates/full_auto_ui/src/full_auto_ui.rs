@@ -5,6 +5,7 @@
 
 mod draft;
 mod evidence_chain;
+mod issue31_adjunct;
 mod panel;
 mod provider_roster;
 
@@ -13,6 +14,9 @@ pub use draft::{
     DEFAULT_TURN_CAP, FULL_AUTO_ACTIVE_LIMIT, FULL_AUTO_WORKSPACE_REF,
 };
 pub use evidence_chain::FullAutoEvidenceView;
+pub use issue31_adjunct::{
+    project_issue31_full_auto_adjunct, Issue31FullAutoLiveSources, Issue31FullAutoProjectionError,
+};
 pub use panel::{init, FullAutoPanel};
 pub use provider_roster::{parse_provider_accounts, ProviderAccountRow};
 
