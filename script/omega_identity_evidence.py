@@ -13,7 +13,7 @@ from typing import Any
 
 MATRIX_SCHEMA = "openagents.omega.identity-proof-matrix.v1"
 TRIPWIRE_SCHEMA = "openagents.omega.installed-secret-tripwires.v1"
-INSTALLED_OBSERVATIONS_SCHEMA = "openagents.omega.identity-installed-observations.v1"
+INSTALLED_OBSERVATIONS_SCHEMA = "openagents.omega.identity-installed-observations.v2"
 RECOVERY_EVIDENCE_SCHEMA = "openagents.omega.identity-recovery-evidence.v1"
 ROLLBACK_CONTINUITY_SCHEMA = (
     "openagents.omega.identity-update-downgrade-rollback.v2"
@@ -71,6 +71,11 @@ ACCESSIBILITY_CHECKS = {
     "high-contrast",
     "reduced-motion",
 }
+#: The only checks an owner waiver may cover. A waiver is a record that an
+#: observation *did not happen*, so the set has to stay as small as the thing
+#: that is genuinely unobservable. Every other check is performable on a GPUI
+#: application under ordinary rendering conditions and must be performed.
+WAIVABLE_CHECKS = {"screen-reader-output"}
 ROLLBACK_EVIDENCE_REFS = {
     "candidate_before",
     "downgrade_removal",
@@ -279,27 +284,47 @@ def validate_installed_observations(path: Path, candidate_digest: str, evidence_
         "status",
         "manual_journey",
         "accessibility",
+        "waivers",
         "evidence_sha256",
     }:
         raise IdentityEvidenceError("installed identity observation keys are not exact")
     if (
         report.get("schema") != INSTALLED_OBSERVATIONS_SCHEMA
         or report.get("candidate_digest") != candidate_digest
-        or report.get("status") != "passed"
+        or report.get("status") not in {"passed", "passed_with_waivers"}
     ):
         raise IdentityEvidenceError(
             "installed identity observations are not passed or candidate-bound"
         )
-    validate_observation_group(
+    waived = validate_observation_group(
         report.get("manual_journey"),
         MANUAL_JOURNEY_CHECKS,
         evidence_root,
-    )
-    validate_observation_group(
+    ) | validate_observation_group(
         report.get("accessibility"),
         ACCESSIBILITY_CHECKS,
         evidence_root,
     )
+    declared = report.get("waivers")
+    if not isinstance(declared, list) or any(
+        not isinstance(name, str) for name in declared
+    ):
+        raise IdentityEvidenceError("installed observation waiver list is invalid")
+    # A waived check must be declared at the top level, and a declared waiver
+    # must correspond to a waived entry. Without both directions a reader could
+    # see a summary that omits the waiver, or a waiver that hides a pass.
+    if set(declared) != waived or len(declared) != len(set(declared)):
+        raise IdentityEvidenceError(
+            "installed observation waiver list differs from the waived entries"
+        )
+    # The anti-promotion invariant. `waived` never rolls up into a green
+    # status, and a report carrying a waiver can never call itself `passed`.
+    expected_status = "passed_with_waivers" if waived else "passed"
+    if report.get("status") != expected_status:
+        raise IdentityEvidenceError(
+            f"installed observations claim {report.get('status')!r} with "
+            f"{len(waived)} waived check(s); a waiver is not a pass"
+        )
     claimed = require_sha256(
         report.get("evidence_sha256"), "installed observation evidence digest"
     )
@@ -480,26 +505,47 @@ def validate_observation_group(
     observations: Any,
     expected_checks: set[str],
     evidence_root: Path,
-) -> None:
+) -> set[str]:
+    """Validate one observation group and return the checks it waived."""
     if not isinstance(observations, list) or len(observations) != len(expected_checks):
         raise IdentityEvidenceError("installed observation check inventory is incomplete")
     observed: set[str] = set()
+    waived: set[str] = set()
     for observation in observations:
-        if not isinstance(observation, dict) or set(observation) != {
-            "check",
-            "status",
-            "observed_at",
-            "facts",
-            "evidence_refs",
-        }:
+        if not isinstance(observation, dict):
             raise IdentityEvidenceError("installed observation entry is not exact")
         check = observation.get("check")
         if check in observed or check not in expected_checks:
             raise IdentityEvidenceError("installed observation check is invalid")
-        if observation.get("status") != "passed":
+        status = observation.get("status")
+        if status not in {"passed", "waived"}:
             raise IdentityEvidenceError(f"installed observation {check} is not passed")
+        # A waived entry carries a waiver and no facts; a passed entry carries
+        # facts and no waiver. The two shapes are disjoint, so a waived entry
+        # cannot be relabelled `passed` without also inventing the facts the
+        # observation would have produced.
+        if status == "waived":
+            if set(observation) != {
+                "check",
+                "status",
+                "observed_at",
+                "waiver",
+                "evidence_refs",
+            }:
+                raise IdentityEvidenceError("installed observation entry is not exact")
+            validate_observation_waiver(check, observation.get("waiver"))
+            waived.add(check)
+        else:
+            if set(observation) != {
+                "check",
+                "status",
+                "observed_at",
+                "facts",
+                "evidence_refs",
+            }:
+                raise IdentityEvidenceError("installed observation entry is not exact")
+            validate_observation_facts(check, observation.get("facts"))
         require_timestamp(observation.get("observed_at"), f"installed observation {check}")
-        validate_observation_facts(check, observation.get("facts"))
         references = observation.get("evidence_refs")
         if not isinstance(references, list) or not references:
             raise IdentityEvidenceError(
@@ -513,6 +559,54 @@ def validate_observation_group(
         observed.add(check)
     if observed != expected_checks:
         raise IdentityEvidenceError("installed observation check inventory differs")
+    return waived
+
+
+def validate_observation_waiver(check: str, waiver: Any) -> None:
+    """Validate one recorded owner waiver.
+
+    A waiver says an observation was never made. It therefore has to name the
+    owner direction that permits the omission, the date of that direction, and
+    the upstream parity that the direction is conditioned on, so a later reader
+    can re-check the condition rather than trust the word `waived`.
+    """
+    if check not in WAIVABLE_CHECKS:
+        raise IdentityEvidenceError(
+            f"installed observation {check} may not be waived; it is performable"
+        )
+    if not isinstance(waiver, dict) or set(waiver) != {
+        "owner_quote",
+        "owner_direction_date",
+        "basis",
+        "upstream_parity",
+        "issue",
+    }:
+        raise IdentityEvidenceError(f"installed observation {check} waiver is not exact")
+    for field in ("owner_quote", "basis", "issue"):
+        value = waiver.get(field)
+        if not isinstance(value, str) or not value.strip():
+            raise IdentityEvidenceError(
+                f"installed observation {check} waiver has no {field}"
+            )
+    require_timestamp(
+        waiver.get("owner_direction_date"), f"installed observation {check} waiver"
+    )
+    parity = waiver.get("upstream_parity")
+    if not isinstance(parity, dict) or set(parity) != {
+        "product",
+        "version",
+        "method",
+        "observed",
+    }:
+        raise IdentityEvidenceError(
+            f"installed observation {check} waiver has no upstream parity record"
+        )
+    for field in ("product", "version", "method", "observed"):
+        value = parity.get(field)
+        if not isinstance(value, str) or not value.strip():
+            raise IdentityEvidenceError(
+                f"installed observation {check} waiver parity has no {field}"
+            )
 
 
 def validate_observation_facts(check: str, facts: Any) -> None:
@@ -769,6 +863,7 @@ def self_test() -> None:
                 }
                 for check in sorted(ACCESSIBILITY_CHECKS)
             ],
+            "waivers": [],
         }
         observations["evidence_sha256"] = canonical_digest(observations)
         observations_path = root / "installed-observations.json"

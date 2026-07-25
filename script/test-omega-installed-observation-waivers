@@ -1,0 +1,271 @@
+#!/usr/bin/env python3
+"""Assert that a waived installed observation can never become a pass.
+
+A waiver records that an observation was *not* made. The failure this guards
+against is quiet and late: somebody edits `waived` to `passed`, or rolls a
+report with waivers up into a green status, and a proof record then claims an
+observation nobody performed. That is the exact class of claim the falsifier on
+omega#16 exists to prevent, so it is checked mechanically rather than by
+review.
+
+Run: `script/test-omega-installed-observation-waivers`
+"""
+
+from __future__ import annotations
+
+import json
+import sys
+import tempfile
+from copy import deepcopy
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from omega_identity_evidence import (  # noqa: E402
+    ACCESSIBILITY_CHECKS,
+    INSTALLED_OBSERVATIONS_SCHEMA,
+    IdentityEvidenceError,
+    MANUAL_JOURNEY_CHECKS,
+    WAIVABLE_CHECKS,
+    canonical_digest,
+    sha256_file,
+    validate_installed_observations,
+)
+
+CANDIDATE = "a" * 64
+WAIVED_CHECK = "screen-reader-output"
+
+FACTS: dict[str, dict[str, object]] = {
+    "identity-first-first-run": {
+        "identity_presented_before_editor_setup": True,
+        "identity_ready": True,
+    },
+    "theme-and-agent-setup-baseline": {
+        "theme_families": ["Aiur", "Ayu", "Gruvbox"],
+        "agent_setup_visible": True,
+    },
+    "zed-data-before-after-isolation": {
+        "zed_before_sha256": "b" * 64,
+        "zed_after_sha256": "b" * 64,
+        "unchanged": True,
+    },
+    "keyboard-focus-traversal": {
+        "all_controls_reachable": True,
+        "reverse_traversal": True,
+        "focus_visible": True,
+        "keyboard_activation": True,
+    },
+    "screen-reader-output": {
+        "assistive_technology": "macOS AXUIElement accessibility tree",
+        "identity_status_announced": True,
+        "controls_named": True,
+        "secret_value_exposed": False,
+    },
+    "viewport-360-pixels": {
+        "viewport_width_pixels": 360,
+        "horizontal_overflow": False,
+        "completion_action_visible": True,
+    },
+    "larger-ui-font": {
+        "ui_font_size_pixels": 24,
+        "content_clipped": False,
+        "completion_action_visible": True,
+    },
+    "light-theme": {"appearance": "light", "content_legible": True},
+    "dark-theme": {"appearance": "dark", "content_legible": True},
+    "high-contrast": {
+        "system_increase_contrast": True,
+        "content_legible": True,
+        "focus_indicator_visible": True,
+    },
+    "reduced-motion": {
+        "system_reduce_motion": True,
+        "motion_required_for_completion": False,
+    },
+}
+
+WAIVER = {
+    "owner_quote": "WE ARE NOT ADDING ASSISTIVE TECHNOLOGY AT THIS TIME IF ZED DOESNT HAVE IT",
+    "owner_direction_date": "2026-07-25T00:00:00Z",
+    "basis": "The candidate publishes no application accessibility tree.",
+    "upstream_parity": {
+        "product": "Zed",
+        "version": "1.12.0",
+        "method": "System Events AXUIElement read of the front window",
+        "observed": "entire contents = 0; direct children = close button",
+    },
+    "issue": "https://github.com/OpenAgentsInc/omega/issues/71",
+}
+
+
+def build_report(reference: dict[str, str], waive: bool) -> dict[str, object]:
+    def entry(check: str) -> dict[str, object]:
+        if waive and check == WAIVED_CHECK:
+            return {
+                "check": check,
+                "status": "waived",
+                "observed_at": "2026-07-25T12:00:00Z",
+                "waiver": deepcopy(WAIVER),
+                "evidence_refs": [dict(reference)],
+            }
+        return {
+            "check": check,
+            "status": "passed",
+            "observed_at": "2026-07-25T12:00:00Z",
+            "facts": deepcopy(FACTS[check]),
+            "evidence_refs": [dict(reference)],
+        }
+
+    report: dict[str, object] = {
+        "schema": INSTALLED_OBSERVATIONS_SCHEMA,
+        "candidate_digest": CANDIDATE,
+        "status": "passed_with_waivers" if waive else "passed",
+        "manual_journey": [entry(check) for check in sorted(MANUAL_JOURNEY_CHECKS)],
+        "accessibility": [entry(check) for check in sorted(ACCESSIBILITY_CHECKS)],
+        "waivers": [WAIVED_CHECK] if waive else [],
+    }
+    report["evidence_sha256"] = canonical_digest(report)
+    return report
+
+
+def check(root: Path, name: str, report: dict[str, object]) -> None:
+    path = root / f"{name}.json"
+    path.write_text(json.dumps(report), encoding="utf-8")
+    validate_installed_observations(path, CANDIDATE, root)
+
+
+def refuses(root: Path, name: str, report: dict[str, object], why: str) -> None:
+    report = deepcopy(report)
+    report.pop("evidence_sha256", None)
+    report["evidence_sha256"] = canonical_digest(report)
+    try:
+        check(root, name, report)
+    except IdentityEvidenceError:
+        return
+    raise AssertionError(f"the validator accepted {why}")
+
+
+def accepts(root: Path, name: str, report: dict[str, object], why: str) -> None:
+    try:
+        check(root, name, report)
+    except IdentityEvidenceError as error:
+        raise AssertionError(f"the validator refused {why}: {error}") from error
+
+
+def main() -> int:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        evidence = root / "observation.txt"
+        evidence.write_text("installed observation fixture", encoding="utf-8")
+        reference = {"path": evidence.name, "sha256": sha256_file(evidence)}
+
+        clean = build_report(reference, waive=False)
+        accepts(root, "clean", clean, "a fully performed observation set")
+
+        waived = build_report(reference, waive=True)
+        accepts(root, "waived", waived, "a correctly recorded waiver")
+
+        # The whole point. A waived entry relabelled `passed` has no facts, so
+        # the shape check refuses it.
+        promoted = deepcopy(waived)
+        promoted["accessibility"] = [
+            {**entry, "status": "passed"} if entry["check"] == WAIVED_CHECK else entry
+            for entry in promoted["accessibility"]  # type: ignore[union-attr]
+        ]
+        refuses(root, "promoted", promoted, "a waived entry relabelled as passed")
+
+        # And relabelled *with* invented facts, which is the same lie told more
+        # carefully. The top-level waiver list still names the check.
+        fabricated = deepcopy(waived)
+        fabricated["accessibility"] = [
+            {
+                "check": WAIVED_CHECK,
+                "status": "passed",
+                "observed_at": entry["observed_at"],
+                "facts": deepcopy(FACTS[WAIVED_CHECK]),
+                "evidence_refs": entry["evidence_refs"],
+            }
+            if entry["check"] == WAIVED_CHECK
+            else entry
+            for entry in fabricated["accessibility"]  # type: ignore[union-attr]
+        ]
+        refuses(
+            root,
+            "fabricated",
+            fabricated,
+            "a waived entry rewritten as a pass with invented facts",
+        )
+
+        # A waiver may never roll up into a green status.
+        green = deepcopy(waived)
+        green["status"] = "passed"
+        refuses(root, "green", green, "a report with a waiver claiming `passed`")
+
+        # A waiver hidden from the summary is worse than a visible one.
+        hidden = deepcopy(waived)
+        hidden["waivers"] = []
+        refuses(root, "hidden", hidden, "a waiver missing from the summary list")
+
+        # A declared waiver with no waived entry would let a reader think a
+        # check was skipped when it was silently passed.
+        phantom = deepcopy(clean)
+        phantom["waivers"] = [WAIVED_CHECK]
+        phantom["status"] = "passed_with_waivers"
+        refuses(root, "phantom", phantom, "a declared waiver with no waived entry")
+
+        # A waived entry that also carries facts is neither shape.
+        both = deepcopy(waived)
+        both["accessibility"] = [
+            {**entry, "facts": deepcopy(FACTS[WAIVED_CHECK])}
+            if entry["check"] == WAIVED_CHECK
+            else entry
+            for entry in both["accessibility"]  # type: ignore[union-attr]
+        ]
+        refuses(root, "both", both, "a waived entry that also carries facts")
+
+        # Only checks that are genuinely unobservable may be waived. A
+        # 360-pixel viewport and a larger UI font are ordinary rendering
+        # conditions, so the waiver must not become a shortcut for them.
+        for check_name in sorted(ACCESSIBILITY_CHECKS - WAIVABLE_CHECKS):
+            shortcut = deepcopy(clean)
+            shortcut["accessibility"] = [
+                {
+                    "check": check_name,
+                    "status": "waived",
+                    "observed_at": entry["observed_at"],
+                    "waiver": deepcopy(WAIVER),
+                    "evidence_refs": entry["evidence_refs"],
+                }
+                if entry["check"] == check_name
+                else entry
+                for entry in shortcut["accessibility"]  # type: ignore[union-attr]
+            ]
+            shortcut["waivers"] = [check_name]
+            shortcut["status"] = "passed_with_waivers"
+            refuses(root, f"shortcut-{check_name}", shortcut, f"a waiver of {check_name}")
+
+        # An incomplete run must never validate, waiver or not.
+        incomplete = deepcopy(waived)
+        incomplete["status"] = "incomplete"
+        refuses(root, "incomplete", incomplete, "an incomplete observation set")
+
+        # A waiver with no upstream parity record cannot support the owner
+        # direction it cites, because the direction is conditioned on parity.
+        unbased = deepcopy(waived)
+        unbased["accessibility"] = [
+            {
+                **entry,
+                "waiver": {k: v for k, v in WAIVER.items() if k != "upstream_parity"},
+            }
+            if entry["check"] == WAIVED_CHECK
+            else entry
+            for entry in unbased["accessibility"]  # type: ignore[union-attr]
+        ]
+        refuses(root, "unbased", unbased, "a waiver with no upstream parity record")
+
+    print("ok: a waived installed observation cannot be promoted to passed")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

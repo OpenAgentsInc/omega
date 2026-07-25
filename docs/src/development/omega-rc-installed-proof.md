@@ -614,9 +614,84 @@ crash or diagnostics surface is recorded as `absent`, not
 silently treated as scanned. The independent reviewer must decide whether each
 absence is expected for the exercised journey before admitting the attestation.
 
+## Installed observations
+
+`script/collect-omega-installed-observations` performs the eleven installed
+observations. It performs them; it does not accept them as assertions. A check
+it cannot perform on the host records `blocked` and the run exits nonzero,
+because an observation nobody made is worse than a missing one. It looks like
+evidence.
+
+Run the upstream parity probe first, then capture the Zed data digest, then
+install and exercise the candidate, then collect:
+
+```sh
+script/observe-upstream-accessibility-parity \
+  --output target/omega-identity-proof/upstream-parity.json
+
+script/collect-omega-installed-observations \
+  --app /Applications/Omega.app \
+  --candidate-evidence target/omega-identity-evidence/candidate-evidence.json \
+  --evidence-root target/omega-identity-proof \
+  --upstream-parity target/omega-identity-proof/upstream-parity.json \
+  --zed-before "<digest captured after the parity probe>" \
+  --output target/omega-identity-proof/installed-observations.json
+```
+
+The parity probe is a separate command because it starts upstream Zed, and
+Zed's own writes must fall outside the window the isolation check measures.
+
+Every keystroke the collector sends brings the candidate to the front first and
+refuses if it is not there. macOS routes a synthesized key to whichever
+application is frontmost, not to the process the script names, so an unchecked
+keystroke lands in whatever window happens to be in front. In an earlier pass
+this opened a Page Setup sheet in the operator's terminal, and that sheet was
+very nearly recorded as the candidate responding to the keyboard.
+
+### Waivers
+
+A check the owner has directed us not to build for may record `waived`. A
+waiver is not a pass. It is a record that an observation *did not happen*.
+
+A `waived` entry carries no `facts`. It carries a `waiver` with the owner's
+own words, the date of the direction, the basis, the issue, and the upstream
+parity the direction is conditioned on. A `passed` entry carries facts and no
+waiver. The two shapes are disjoint, so a waived entry cannot be relabelled
+`passed` without also inventing the facts the observation would have produced,
+and `validate_observation_group` refuses either shape in the other's place.
+
+Three further rules keep a waiver visible:
+
+- The report status is `passed_with_waivers`, never `passed`. A reader can see
+  at a glance that something was not observed.
+- The top-level `waivers` list and the waived entries must agree in both
+  directions. A waiver cannot be dropped from the summary, and a summary
+  cannot name a waiver that no entry records.
+- `WAIVABLE_CHECKS` holds only `screen-reader-output`. A 360-pixel viewport
+  and a larger UI font are ordinary rendering conditions that a GPUI
+  application can be observed under, so they are performed, not waived. The
+  validator refuses a waiver of any other check.
+
+`script/test-omega-installed-observation-waivers` asserts all of this, so the
+waiver cannot quietly become a green claim later.
+
+The screen-reader waiver rests on the owner direction of 2026-07-25, which
+permits omitting assistive technology **only where upstream Zed omits it too**.
+That is a condition, not a blanket exemption, so the parity probe observes it
+against the installed upstream build rather than assuming it. No parity record
+means no waiver.
+
 ## Pass rule
 
 All acceptance criteria in issue #16 must be true for the exact candidate.
 If any step is blocked (missing DMG, missing secrets, missing owner sign-off),
 the proof record must mark that step `blocked` and the GitHub issue must stay
 open.
+
+A candidate that fails a brand check fails this proof. Scanning the compiled
+executable is not sufficient. `script/bundle-omega-rc` scans the packaged
+application for three identity literals only, so no packaging gate reads
+`Contents/Info.plist`, and no string scan of any kind can see a logo. Both
+gaps produced real misses on `0.2.0-rc10`, which are recorded in
+`docs/omega/2026-07-25-omega-rc10-installed-observation-proof.md` in the
+openagents repository.

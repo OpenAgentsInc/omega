@@ -1,0 +1,160 @@
+#!/usr/bin/env python3
+"""Observe whether upstream Zed publishes an application accessibility tree.
+
+The owner direction of 2026-07-25 permits omitting assistive technology from
+this release *only where upstream Zed omits it too*. That is a condition, not a
+blanket exemption, so it has to be observed against a real installed upstream
+build before any waiver may cite it.
+
+This is a separate command on purpose. It launches upstream Zed, which writes
+to Zed's own data directory, and the installed-observation collector proves
+that Omega leaves that directory untouched. Running the probe inside the
+collector would put the harness's own writes inside the window the isolation
+check measures. Run this first, then capture the Zed data digest, then install
+and exercise the candidate.
+
+Usage:
+    observe-upstream-accessibility-parity --output <path>
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import subprocess
+import sys
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+
+PARITY_SCHEMA = "openagents.omega.upstream-accessibility-parity.v1"
+
+#: macOS supplies these window-frame controls itself. A window whose only
+#: direct children are these publishes no application accessibility tree.
+WINDOW_FRAME_CONTROLS = {"close button", "full screen button", "minimize button"}
+
+
+class ParityError(Exception):
+    pass
+
+
+def now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def osascript(script: str, timeout: int = 90) -> tuple[bool, str]:
+    try:
+        result = subprocess.run(
+            ["osascript", "-e", script], capture_output=True, text=True, timeout=timeout
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False, ""
+    return result.returncode == 0, result.stdout.strip()
+
+
+def ax_children(process: str) -> tuple[bool, int, list[str]]:
+    script = f"""
+    tell application "System Events"
+        if not (exists process "{process}") then return "NOPROC"
+        tell process "{process}"
+            if (count of windows) is 0 then return "NOWINDOW"
+            set w to window 1
+            set out to ""
+            try
+                set out to out & "contents=" & (count of (entire contents of w)) & linefeed
+            on error
+                set out to out & "contents=-1" & linefeed
+            end try
+            try
+                repeat with e in UI elements of w
+                    set out to out & "child=" & (role description of e) & linefeed
+                end repeat
+            end try
+            return out
+        end tell
+    end tell
+    """
+    ok, output = osascript(script)
+    if not ok or output in {"NOPROC", "NOWINDOW"}:
+        return False, -1, []
+    contents = -1
+    children: list[str] = []
+    for line in output.split("\n"):
+        line = line.strip()
+        if line.startswith("contents="):
+            try:
+                contents = int(line.split("=", 1)[1])
+            except ValueError:
+                contents = -1
+        elif line.startswith("child="):
+            children.append(line.split("=", 1)[1])
+    return True, contents, children
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--app", type=Path, default=Path("/Applications/Zed.app"))
+    parser.add_argument("--process", default="zed")
+    parser.add_argument("--output", type=Path, required=True)
+    args = parser.parse_args()
+
+    if not args.app.is_dir():
+        raise ParityError(f"{args.app} is not installed, so parity cannot be observed")
+    version = subprocess.run(
+        [
+            "defaults",
+            "read",
+            str(args.app / "Contents" / "Info.plist"),
+            "CFBundleShortVersionString",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=20,
+    )
+    if version.returncode != 0 or not version.stdout.strip():
+        raise ParityError("the upstream build has no readable version")
+
+    running = subprocess.run(
+        ["pgrep", "-f", f"{args.app}/Contents/MacOS/"], capture_output=True
+    )
+    already_running = running.returncode == 0
+    if not already_running:
+        subprocess.run(["open", "-a", str(args.app)], check=True, timeout=30)
+        time.sleep(15)
+    reachable, contents, children = ax_children(args.process)
+    if not already_running:
+        osascript(f'tell application "{args.app.stem}" to quit')
+        time.sleep(4)
+    if not reachable:
+        raise ParityError("the upstream window could not be read")
+
+    publishes = contents > 0 or any(
+        child not in WINDOW_FRAME_CONTROLS for child in children
+    )
+    record = {
+        "schema": PARITY_SCHEMA,
+        "observed_at": now(),
+        "product": "Zed",
+        "version": version.stdout.strip(),
+        "method": (
+            "System Events AXUIElement read of the front window: the size of "
+            "`entire contents` and the role description of every direct child"
+        ),
+        "observed": (
+            f"entire contents = {contents}; direct children = "
+            f"{', '.join(children) if children else 'none'}"
+        ),
+        "publishes_accessibility_tree": publishes,
+    }
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    args.output.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    print(json.dumps(record, indent=2, sort_keys=True))
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except (ParityError, subprocess.SubprocessError, OSError) as error:
+        print(f"error: {error}", file=sys.stderr)
+        sys.exit(2)
