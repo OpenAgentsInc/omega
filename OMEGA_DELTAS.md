@@ -22,6 +22,12 @@ together.
   it, not what the commit did.
 - **Removing a delta is a policy change**, and needs the same care as adding
   one: delete the entry, the check, and the test together.
+- **An ID names exactly one entry, and IDs are never reused.**
+  `OMEGA-DELTA-0012` and `OMEGA-DELTA-0013` were originally landed as second
+  uses of `0010` and `0011` by two lanes allocating numbers at the same time,
+  which made four entries uncitable. They were renumbered on 2026-07-25.
+  `delta_ids_are_unique` now fails on a repeat, in both the registry headings
+  and `ENFORCED_DELTAS`, so the collision cannot recur silently.
 
 Run the checks with:
 
@@ -207,8 +213,10 @@ cargo test -p omega_deltas
   trials, hosted-plan callbacks, and hosted sign-in are not.
 - **Enforced by:** `ai_onboarding_is_provider_only`.
 
-### OMEGA-DELTA-0010 — Zed collab is retired
+### OMEGA-DELTA-0012 — Zed collab is retired
 
+- **Renumbered 2026-07-25.** This entry landed as a second `OMEGA-DELTA-0010`.
+  Cite `0012`.
 - **Upstream Zed:** ships a collaboration product — a collab panel with a
   nested channel tree, contacts, calls, channel notes, and a `collab` server
   crate behind it.
@@ -235,8 +243,14 @@ cargo test -p omega_deltas
   entry asked for.
 - **Enforced by:** `removed_surfaces_stay_removed`.
 
-### OMEGA-DELTA-0011 — The agent is on by default
+### OMEGA-DELTA-0013 — The agent is on by default
 
+- **Renumbered 2026-07-25.** This entry landed as a second `OMEGA-DELTA-0011`.
+  Cite `0013`. The comment at `assets/settings/default.json:1063` still reads
+  *"See OMEGA-DELTA-0011"* and now points at the AI-onboarding entry instead of
+  this one. That file is owned by another lane this session, so the correction
+  is deferred rather than made here; it is a stale citation, not a behaviour
+  change.
 - **Upstream Zed:** ships the agent enabled.
 - **Omega, before this:** `agent.enabled` and `agent.button` were both `false`
   in `assets/settings/default.json`, turned off by commit `9e585569cb`
@@ -265,3 +279,128 @@ cargo test -p omega_deltas
   Changing that default is a separate decision, and the service-isolation test
   asserts the current value (`service_isolation.rs:113`).
 - **Enforced by:** `the_agent_ships_enabled`.
+
+### OMEGA-DELTA-0014 — A protected recovery offers replacement, not protection
+
+- **Upstream Zed:** has no equivalent. The onboarding Identity section is an
+  Omega surface, so what this entry locks is a divergence from Omega's own
+  earlier behaviour. It is registered here because a refactor of that branch
+  reverts it as silently as a rebase would.
+- **Omega, before this:** the `CustodyState::Ready` branch of
+  `crates/onboarding/src/identity_section.rs` switched the description and the
+  colour on `RecoveryProtectionState`, then emitted
+  `actions: vec![IdentityAction::Protect]` unconditionally. A protected
+  identity therefore read *"Recovery protected"* in green with a **Protect
+  recovery** button directly beneath it.
+- **Omega now:** the branch selects the action from the same state it already
+  used for the copy — `Protect` when protection is needed, `ReplaceRecovery`
+  ("Replace recovery file") when it is not.
+- **Why:** owner report, omega#68, 2026-07-25. A control whose label denies the
+  status line above it reads as *"this did not work"*, which for a custody
+  surface is a confidence defect rather than a cosmetic one.
+- **Rotation was kept deliberately.** Hiding the control when protected was the
+  simpler option and was not taken. Replacing a recovery file is a real
+  journey, so the control stays reachable and is relabelled — option 2 on the
+  issue. Dropping it silently is exactly what that issue's falsifier forbids.
+- **What the check catches:** a `Ready` branch that emits a constant action
+  again. It asserts the `ReplaceRecovery` variant and its label still exist,
+  that the branch is state-conditional rather than a literal
+  `actions: vec![IdentityAction::Protect],`, and that the crate-local
+  regression test keeps its `assert_ne!` on the two states — so deleting the
+  behavioural test is caught here too.
+- **Enforced by:** `crates/omega_deltas/src/omega_deltas.rs`,
+  `protected_recovery_offers_a_different_action`.
+
+### OMEGA-DELTA-0015 — `cmd-shift-s` opens the Sarah workroom
+
+- **Upstream Zed:** binds the chord to `workspace::SaveAs` in all three default
+  keymaps, and has no workroom.
+- **Omega:** all three default keymaps bind `workroom::OpenPanel` —
+  `cmd-shift-s` on macOS, `ctrl-shift-s` on Linux and Windows — in the
+  `Workspace` context section, once each.
+- **Why:** owner direction, 2026-07-25 (omega#69). The action already existed
+  and both focused the panel and marked the room read (OMEGA-SW-06), but no
+  keymap named it, so the workroom was reachable only through the command
+  palette. Opening the workroom must not depend on whether an editor, a
+  terminal, or a panel happens to hold focus — a focus-dependent binding is
+  that issue's stated falsifier.
+- **`Workspace`, not a context-free section — deliberately, and not what the
+  issue's text asked for.** omega#69 said "the top-level section with no
+  context predicate". The binding landed in the `Workspace` section instead,
+  which is the root context of the window tree: it matches from an editor, a
+  terminal, or any panel, so the Exit holds. It is also where every other
+  window-global Omega chord lives — `workspace::Save`, `workspace::NewWindow`,
+  and the `agent::NewThread` binding from `OMEGA-DELTA-0013`. A truly
+  context-free section is where the `menu::` bindings live and would have made
+  this chord fire inside menus and pickers too. The check therefore accepts
+  either no context or a context in `WINDOW_GLOBAL_KEYMAP_CONTEXTS`, and
+  rejects anything narrower.
+- **The Save As trade, stated plainly. A keystroke was taken, not shadowed.**
+  This is what omega#69 asked to confirm before landing. The chord did not go
+  to the workroom because it was free — it was **`workspace::SaveAs` in all
+  three default keymaps** and was overwritten
+  (`default-macos.json:708`, `default-linux.json:651`,
+  `default-windows.json:645` at `7b347cb9a4^`). After this delta:
+  - **macOS and Windows have no default Save As keystroke at all.**
+  - **Linux keeps only `shift-save`**, the hardware `save` media key, which
+    most keyboards do not have.
+  - Emacs-keymap users are unaffected: `ctrl-x ctrl-w` still saves as, in both
+    `macos/emacs.json` and `linux/emacs.json`.
+  - No other base keymap — VS Code, JetBrains, Sublime, Atom, Cursor,
+    TextMate — binds Save As at all, so none of them restores it.
+
+  **The mitigation is the File menu**, not the palette: `Save As…` remains at
+  `crates/zed/src/zed/app_menus.rs:129`, so the cost is discoverability rather
+  than capability. The check asserts that menu item still exists, because if a
+  later cleanup drops it, Save As becomes reachable only by knowing its command
+  name — and this entry would then be recording a mitigation that no longer
+  exists.
+- **Two narrower bindings overlap the chord and keep precedence**, so they are
+  not affected either way: `specific-overrides-macos.json` and
+  `specific-overrides.json` bind it to `picker::ToggleMultiSelect` in context
+  `Picker > Editor`, and `macos/textmate.json` binds `ctrl-shift-s` to
+  `search::SelectPreviousMatch` in `BufferSearchBar` — a different chord from
+  the macOS `cmd-shift-s`.
+- **Why the check is stronger than asserting the string is present.** In
+  `0.2.0-rc6` Omega hard-panicked before any window opened because 27 bindings
+  named actions whose crates had been deleted: the built-in keymap is loaded
+  and unwrapped at startup, and `cargo check --workspace` passes regardless
+  because keymaps are runtime assets. So the check parses each keymap, requires
+  exactly one binding of the chord — a second, narrower one would shadow the
+  global one depending on focus — requires its context to be window-global, and
+  resolves the action name back to a live `actions!` declaration in
+  `crates/zed_actions/src/lib.rs`. Renaming or deleting the action fails here
+  rather than at the owner's next launch.
+- **Enforced by:** `required_keymap_bindings_resolve`.
+
+### OMEGA-DELTA-0016 — Aiur is dark-only
+
+- **Upstream Zed:** ships no Aiur, and its own defaults (`One Dark` /
+  `One Light`) both name themes it ships.
+- **Omega, before this:** `assets/themes/aiur/aiur.json` declared two themes in
+  one family — `Aiur Dark` and `Aiur Light` — and `DEFAULT_LIGHT_THEME` pointed
+  at `Aiur Light`.
+- **Omega now:** the family declares exactly one theme, named `Aiur`,
+  appearance `dark`. `DEFAULT_DARK_THEME` is `Aiur` in both
+  `crates/theme/src/theme.rs` and `crates/settings_content/src/theme.rs`.
+  `DEFAULT_LIGHT_THEME` is `Ayu Light`, which `assets/themes/ayu/ayu.json`
+  ships.
+- **Why:** owner direction, 2026-07-25 (omega#70): *"aiur light looks like shit
+  and is not what i envisioned. its a dark mode theme only."* A family carrying
+  a variant the owner disowns is worse than a family with no variant, because
+  the appearance switch can select it without being asked.
+- **The Aiur card stays selectable in Light appearance**, resolving to `Aiur`:
+  `LIGHT_THEMES` and `DARK_THEMES` in `crates/onboarding/src/basics_page.rs`
+  both list `Aiur` first. Choosing the Aiur family gives Aiur in either
+  appearance rather than substituting a light theme the owner did not pick.
+  Hiding the card in Light mode was the alternative and was not taken, because
+  a family vanishing from a three-card selector reads as a bug.
+- **The check answers the issue's falsifier directly.** That falsifier is Light
+  appearance resolving to a missing theme because a default still names one
+  that no longer exists. So the check does not merely assert the constant's
+  text: it collects every theme name actually declared under `assets/themes/`
+  and asserts both defaults are in that set, and that the two independent
+  `DEFAULT_DARK_THEME` constants still agree. Deleting a variant without
+  repointing a default fails here rather than at first light-mode launch.
+- **Enforced by:** `aiur_is_a_single_dark_theme` and
+  `default_themes_exist_in_shipped_assets`.

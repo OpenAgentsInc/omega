@@ -22,6 +22,11 @@ pub const DELTA_REGISTRY_PATH: &str = "OMEGA_DELTAS.md";
 /// in the registry with no ID here fails too. An earlier version of this
 /// comment claimed a check that did not exist, which an adversarial review
 /// caught.
+///
+/// Uniqueness is a separate check. Two lanes once allocated `0010` and `0011`
+/// at the same time, so four entries shared two IDs and none of them could be
+/// cited; `delta_ids_are_unique` fails on a repeat rather than letting the set
+/// comparison above swallow it.
 pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0001",
     "OMEGA-DELTA-0002",
@@ -34,8 +39,11 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0009",
     "OMEGA-DELTA-0010",
     "OMEGA-DELTA-0011",
-    "OMEGA-DELTA-0010",
-    "OMEGA-DELTA-0011",
+    "OMEGA-DELTA-0012",
+    "OMEGA-DELTA-0013",
+    "OMEGA-DELTA-0014",
+    "OMEGA-DELTA-0015",
+    "OMEGA-DELTA-0016",
 ];
 
 /// Files deleted from the fork, checked by absence.
@@ -53,7 +61,7 @@ pub const REMOVED_FILES: &[&str] = &[
     "crates/zed/src/zed/move_to_applications.rs",
     // OMEGA-DELTA-0009
     "crates/workspace/src/security_modal.rs",
-    // OMEGA-DELTA-0010
+    // OMEGA-DELTA-0012
     "crates/collab_ui/src/collab_panel.rs",
     "crates/collab/Cargo.toml",
 ];
@@ -71,9 +79,81 @@ pub const REMOVED_FILES: &[&str] = &[
 /// happily, because keymaps are runtime assets rather than compiled code.
 /// This was shipped once, in 0.2.0-rc6.
 pub const FORBIDDEN_KEYMAP_NAMESPACES: &[(&str, &str)] = &[
-    ("OMEGA-DELTA-0010", "collab_panel::"),
-    ("OMEGA-DELTA-0010", "channel_modal::"),
+    ("OMEGA-DELTA-0012", "collab_panel::"),
+    ("OMEGA-DELTA-0012", "channel_modal::"),
 ];
+
+/// A keybinding Omega adds, checked by presence, scope, and resolvability.
+///
+/// The mirror image of `FORBIDDEN_KEYMAP_NAMESPACES`: that table catches
+/// bindings whose action was deleted, this one catches an added binding being
+/// dropped, rescoped, or pointed at an action that no longer exists.
+pub struct RequiredKeymapBinding {
+    /// Delta this binding belongs to.
+    pub delta: &'static str,
+    /// Keymap asset the binding must appear in.
+    pub keymap: &'static str,
+    /// Keystroke, exactly as written in the keymap.
+    pub keystroke: &'static str,
+    /// Fully qualified action name the keystroke must dispatch.
+    pub action: &'static str,
+    /// Source file whose `actions!` declaration must still define `action`.
+    ///
+    /// A keymap naming an undeclared action is a hard panic at startup, not a
+    /// compile error, so the binding is resolved back to its declaration here.
+    pub declared_in: &'static str,
+}
+
+/// Contexts that match from anywhere inside a window.
+///
+/// `Workspace` is the root context of the window tree, so a binding declared
+/// there fires from an editor, a terminal, or any panel — the same scope
+/// `workspace::Save` and `agent::NewThread` use. A section with no context at
+/// all is equally global and is also accepted. Anything narrower (`Editor`,
+/// `Terminal`, `Pane`) would make the binding depend on focus, which is what
+/// `REQUIRED_KEYMAP_BINDINGS` exists to forbid.
+pub const WINDOW_GLOBAL_KEYMAP_CONTEXTS: &[&str] = &["Workspace"];
+
+/// OMEGA-DELTA-0015. Opening the Sarah workroom must not depend on focus, so
+/// each of these is asserted to live in a window-global section.
+///
+/// Each of these chords was `workspace::SaveAs` upstream. Taking them is a
+/// real trade, and `SAVE_AS_MENU_ITEM` holds the mitigation in place.
+pub const REQUIRED_KEYMAP_BINDINGS: &[RequiredKeymapBinding] = &[
+    RequiredKeymapBinding {
+        delta: "OMEGA-DELTA-0015",
+        keymap: "assets/keymaps/default-macos.json",
+        keystroke: "cmd-shift-s",
+        action: "workroom::OpenPanel",
+        declared_in: "crates/zed_actions/src/lib.rs",
+    },
+    RequiredKeymapBinding {
+        delta: "OMEGA-DELTA-0015",
+        keymap: "assets/keymaps/default-linux.json",
+        keystroke: "ctrl-shift-s",
+        action: "workroom::OpenPanel",
+        declared_in: "crates/zed_actions/src/lib.rs",
+    },
+    RequiredKeymapBinding {
+        delta: "OMEGA-DELTA-0015",
+        keymap: "assets/keymaps/default-windows.json",
+        keystroke: "ctrl-shift-s",
+        action: "workroom::OpenPanel",
+        declared_in: "crates/zed_actions/src/lib.rs",
+    },
+];
+
+/// OMEGA-DELTA-0015. Where Save As went when the workroom took its chord.
+///
+/// `cmd-shift-s` / `ctrl-shift-s` was `workspace::SaveAs` in all three default
+/// keymaps, so macOS and Windows now have no Save As keystroke at all and
+/// Linux keeps only the `shift-save` media key. The File menu is the whole
+/// mitigation. If it goes, Save As is reachable only by knowing its command
+/// name, and this delta is recording a fallback that no longer exists.
+pub const SAVE_AS_MENU_ITEM: (&str, &str) = (
+    "crates/zed/src/zed/app_menus.rs",
+    "MenuItem::action(\"Save As…\", workspace::SaveAs)",
+);
 
 pub const FORBIDDEN_SOURCE_STRINGS: &[(&str, &str)] = &[
     ("OMEGA-DELTA-0008", "Zed\u{27}s hosted models"),
@@ -222,6 +302,142 @@ pub fn default_setting<'a>(
         cursor = cursor.get(segment)?;
     }
     Some(cursor)
+}
+
+/// Every action declared by an `actions!(namespace, [..])` macro in `source`,
+/// as fully qualified `namespace::Name` strings.
+///
+/// Textual rather than compiled on purpose: `omega_deltas` deliberately
+/// depends on nothing but `serde_json`, so that a check cannot be made to pass
+/// by a change to the crate it is checking. Doc comments are stripped before
+/// parsing, because a comma inside one would otherwise split an entry.
+#[must_use]
+pub fn declared_actions(source: &str) -> std::collections::BTreeSet<String> {
+    let stripped: String = source
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("//"))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let mut declared = std::collections::BTreeSet::new();
+    let mut rest = stripped.as_str();
+    while let Some(start) = rest.find("actions!(") {
+        rest = &rest[start + "actions!(".len()..];
+        let Some(close) = rest.find(']') else {
+            break;
+        };
+        let (body, remainder) = rest.split_at(close);
+        rest = remainder;
+        let Some((namespace, names)) = body.split_once('[') else {
+            continue;
+        };
+        let namespace = namespace.trim().trim_end_matches(',').trim();
+        if namespace.is_empty() {
+            continue;
+        }
+        for name in names.split(',').map(str::trim) {
+            // Guard against a stray fragment being read as an action name.
+            let is_identifier = name.starts_with(char::is_uppercase)
+                && name.chars().all(|c| c.is_alphanumeric() || c == '_');
+            if is_identifier {
+                declared.insert(format!("{namespace}::{name}"));
+            }
+        }
+    }
+    declared
+}
+
+/// Every theme name declared by the shipped theme families under
+/// `assets/themes/`.
+///
+/// # Errors
+///
+/// Returns an error when a shipped theme file cannot be read or parsed. A
+/// silent skip would make the default-theme check vacuous.
+pub fn shipped_theme_names() -> Result<std::collections::BTreeSet<String>, String> {
+    let root = repository_path("assets/themes");
+    let families = std::fs::read_dir(&root)
+        .map_err(|error| format!("cannot read {}: {error}", root.display()))?;
+    let mut names = std::collections::BTreeSet::new();
+    for family in families.flatten() {
+        let Ok(entries) = std::fs::read_dir(family.path()) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().is_none_or(|extension| extension != "json") {
+                continue;
+            }
+            let raw = std::fs::read_to_string(&path)
+                .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
+            let value: serde_json::Value = serde_json::from_str(&strip_jsonc(&raw))
+                .map_err(|error| format!("cannot parse {}: {error}", path.display()))?;
+            let themes = value
+                .get("themes")
+                .and_then(serde_json::Value::as_array)
+                .ok_or_else(|| format!("{} has no themes array", path.display()))?;
+            for theme in themes {
+                let name = theme
+                    .get("name")
+                    .and_then(serde_json::Value::as_str)
+                    .ok_or_else(|| format!("{} has an unnamed theme", path.display()))?;
+                names.insert(name.to_owned());
+            }
+        }
+    }
+    Ok(names)
+}
+
+/// Read the value of a `pub const NAME: &str = "value";` declaration.
+#[must_use]
+pub fn string_constant(source: &str, name: &str) -> Option<String> {
+    source
+        .lines()
+        .find(|line| line.contains(&format!("const {name}:")))
+        .and_then(|line| line.split_once('='))
+        .and_then(|(_, value)| value.split('"').nth(1))
+        .map(str::to_owned)
+}
+
+/// Visit every file under `root` whose extension is in `extensions`.
+///
+/// Symlinks and `target` directories are skipped, and unreadable or non-UTF-8
+/// files are ignored, matching the tree walk the Zed-copy check already uses.
+pub fn for_each_source_file(
+    root: &std::path::Path,
+    extensions: &[&str],
+    mut visit: impl FnMut(&std::path::Path, &str),
+) {
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(directory) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&directory) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_symlink() {
+                continue;
+            }
+            if path.is_dir() {
+                if path.file_name().is_some_and(|name| name == "target") {
+                    continue;
+                }
+                stack.push(path);
+                continue;
+            }
+            let matches = path
+                .extension()
+                .and_then(std::ffi::OsStr::to_str)
+                .is_some_and(|extension| extensions.contains(&extension));
+            if !matches {
+                continue;
+            }
+            let Ok(source) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            visit(&path, &source);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -551,7 +767,7 @@ mod tests {
         );
     }
 
-    /// OMEGA-DELTA-0011. The agent ships reachable.
+    /// OMEGA-DELTA-0013. The agent ships reachable.
     ///
     /// `enabled: false` also strips the agent namespaces from the command
     /// palette, and the Settings UI exposes only `agent.button`, so a
@@ -563,11 +779,298 @@ mod tests {
             assert_eq!(
                 default_setting(&settings, key).and_then(serde_json::Value::as_bool),
                 Some(true),
-                "OMEGA-DELTA-0011: {key} must default to true. With it false the \
+                "OMEGA-DELTA-0013: {key} must default to true. With it false the \
                  agent is not reachable from the command palette or the panel, \
                  and no Settings control turns it back on."
             );
         }
+    }
+
+    /// OMEGA-DELTA-0014. A protected recovery must not present a control whose
+    /// label claims the protection has not happened.
+    ///
+    /// The behavioural assertion lives in the `onboarding` crate, where the
+    /// presentation function is. This one is source-level so that it survives
+    /// a rebase of that crate, and it also pins the behavioural test in place,
+    /// because deleting the test is the cheapest way to revert the fix.
+    #[test]
+    fn protected_recovery_offers_a_different_action() {
+        let path = repository_path("crates/onboarding/src/identity_section.rs");
+        let source = std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
+
+        for required in [
+            "ReplaceRecovery,",
+            "\"Replace recovery file\"",
+            "actions: vec![if needs_recovery {",
+            "assert_ne!(protected.actions, needed.actions)",
+        ] {
+            assert!(
+                source.contains(required),
+                "OMEGA-DELTA-0014: the recovery-state split lost {required:?}. \
+                 A protected identity must offer replacement, not protection; \
+                 see omega#68."
+            );
+        }
+        assert!(
+            !source.contains("actions: vec![IdentityAction::Protect],"),
+            "OMEGA-DELTA-0014: the Ready branch emits a constant Protect \
+             action again, so a protected identity shows \"Protect recovery\" \
+             beneath \"Recovery protected\". That is the omega#68 defect."
+        );
+    }
+
+    /// OMEGA-DELTA-0015. The workroom binding exists, is unscoped, and names an
+    /// action that still exists.
+    ///
+    /// Presence alone would not be enough. A keymap naming an undeclared action
+    /// panics Omega before any window opens and compiles fine, which is how
+    /// 0.2.0-rc6 shipped 27 dead bindings, so the action is resolved back to
+    /// its declaration. The context is checked because a binding that only
+    /// fires from one pane is the falsifier omega#69 named.
+    #[test]
+    fn required_keymap_bindings_resolve() {
+        for binding in REQUIRED_KEYMAP_BINDINGS {
+            let RequiredKeymapBinding {
+                delta,
+                keymap,
+                keystroke,
+                action,
+                declared_in,
+            } = binding;
+
+            let path = repository_path(keymap);
+            let raw = std::fs::read_to_string(&path)
+                .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
+            let sections: serde_json::Value = serde_json::from_str(&strip_jsonc(&raw))
+                .unwrap_or_else(|error| panic!("cannot parse {}: {error}", path.display()));
+            let sections = sections
+                .as_array()
+                .unwrap_or_else(|| panic!("{keymap} is not an array of sections"));
+
+            let bound: Vec<(Option<&str>, &serde_json::Value)> = sections
+                .iter()
+                .filter_map(|section| {
+                    let binding = section.get("bindings")?.get(*keystroke)?;
+                    Some((
+                        section.get("context").and_then(serde_json::Value::as_str),
+                        binding,
+                    ))
+                })
+                .collect();
+            assert_eq!(
+                bound.len(),
+                1,
+                "{delta}: {keymap} must bind {keystroke:?} exactly once. A \
+                 second, narrower binding shadows the global one depending on \
+                 focus. Found: {bound:?}"
+            );
+            let (context, dispatched) = bound[0];
+            assert_eq!(
+                dispatched.as_str(),
+                Some(*action),
+                "{delta}: {keymap} must bind {keystroke:?} to {action:?}"
+            );
+            assert!(
+                context.is_none_or(|context| WINDOW_GLOBAL_KEYMAP_CONTEXTS.contains(&context)),
+                "{delta}: {keymap} binds {keystroke:?} in context {context:?}, \
+                 which is narrower than the window. The binding must fire from \
+                 an editor, a terminal, or any panel; a focus-dependent one is \
+                 the omega#69 falsifier. Window-global contexts: \
+                 {WINDOW_GLOBAL_KEYMAP_CONTEXTS:?}"
+            );
+
+            let declaration_path = repository_path(declared_in);
+            let declaration = std::fs::read_to_string(&declaration_path).unwrap_or_else(|error| {
+                panic!("cannot read {}: {error}", declaration_path.display())
+            });
+            assert!(
+                declared_actions(&declaration).contains(*action),
+                "{delta}: {keymap} binds {keystroke:?} to {action:?}, which is \
+                 no longer declared in {declared_in}. The built-in keymap is \
+                 unwrapped at startup, so this panics Omega before any window \
+                 opens — the 0.2.0-rc6 failure."
+            );
+        }
+
+        let (relative_path, menu_item) = SAVE_AS_MENU_ITEM;
+        let path = repository_path(relative_path);
+        let source = std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
+        assert!(
+            source.contains(menu_item),
+            "OMEGA-DELTA-0015: the workroom binding took the chord that was \
+             workspace::SaveAs in all three default keymaps, leaving the File \
+             menu as the only discoverable Save As on macOS and Windows. That \
+             menu item has gone from {relative_path}, so the trade this delta \
+             recorded is no longer the trade being made."
+        );
+    }
+
+    /// The action parser has to actually find actions, or the resolvability
+    /// check above passes on an empty set and proves nothing.
+    #[test]
+    fn the_action_parser_reaches_real_declarations() {
+        let declared = declared_actions(
+            "pub mod workroom {\n    use gpui::actions;\n    actions!(\n        workroom,\n \
+             [\n            /// Opens it, and then, having opened it, focuses.\n            \
+             OpenPanel,\n            FocusComposer\n        ]\n    );\n}",
+        );
+        assert!(declared.contains("workroom::OpenPanel"));
+        assert!(declared.contains("workroom::FocusComposer"));
+        assert!(
+            !declared.contains("workroom::Opens"),
+            "a doc comment must not be parsed as an action name"
+        );
+    }
+
+    /// OMEGA-DELTA-0016. Aiur is one dark theme, and no light variant can be
+    /// reintroduced without failing here.
+    #[test]
+    fn aiur_is_a_single_dark_theme() {
+        let path = repository_path("assets/themes/aiur/aiur.json");
+        let raw = std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
+        let family: serde_json::Value = serde_json::from_str(&strip_jsonc(&raw))
+            .unwrap_or_else(|error| panic!("cannot parse {}: {error}", path.display()));
+
+        assert_eq!(
+            family.get("name").and_then(serde_json::Value::as_str),
+            Some("Aiur"),
+            "OMEGA-DELTA-0016: the shipped family must be named Aiur"
+        );
+        let themes = family
+            .get("themes")
+            .and_then(serde_json::Value::as_array)
+            .expect("aiur.json declares a themes array");
+        assert_eq!(
+            themes.len(),
+            1,
+            "OMEGA-DELTA-0016: Aiur is dark-only, so it declares exactly one \
+             theme. A second variant has returned; see omega#70."
+        );
+        assert_eq!(
+            themes[0].get("name").and_then(serde_json::Value::as_str),
+            Some("Aiur"),
+            "OMEGA-DELTA-0016: the theme is named exactly Aiur, with no suffix"
+        );
+        assert_eq!(
+            themes[0]
+                .get("appearance")
+                .and_then(serde_json::Value::as_str),
+            Some("dark"),
+            "OMEGA-DELTA-0016: Aiur is a dark theme"
+        );
+
+        let mut offenders: Vec<String> = Vec::new();
+        for root in ["assets", "crates"] {
+            for_each_source_file(
+                &repository_path(root),
+                &["rs", "json", "toml", "md"],
+                |path, source| {
+                    // This crate names the strings in order to forbid them.
+                    if path.ends_with("omega_deltas.rs") {
+                        return;
+                    }
+                    for needle in ["Aiur Light", "Aiur Dark"] {
+                        if source.contains(needle) {
+                            offenders.push(format!("{needle:?} in {}", path.display()));
+                        }
+                    }
+                },
+            );
+        }
+        assert!(
+            offenders.is_empty(),
+            "OMEGA-DELTA-0016: a suffixed Aiur name has returned:\n{}",
+            offenders.join("\n")
+        );
+    }
+
+    /// OMEGA-DELTA-0016. Both appearance defaults must name a theme Omega
+    /// actually ships.
+    ///
+    /// This is omega#70's falsifier stated as a check: deleting a variant
+    /// without repointing the default that named it fails here rather than at
+    /// the owner's first light-mode launch.
+    #[test]
+    fn default_themes_exist_in_shipped_assets() {
+        let shipped = shipped_theme_names().expect("shipped themes parse");
+        assert!(
+            shipped.contains("Aiur"),
+            "OMEGA-DELTA-0016: Aiur must ship; found {shipped:?}"
+        );
+
+        let mut dark_defaults: Vec<(&str, String)> = Vec::new();
+        for (relative_path, constant) in [
+            ("crates/settings_content/src/theme.rs", "DEFAULT_LIGHT_THEME"),
+            ("crates/settings_content/src/theme.rs", "DEFAULT_DARK_THEME"),
+            ("crates/theme/src/theme.rs", "DEFAULT_DARK_THEME"),
+        ] {
+            let path = repository_path(relative_path);
+            let source = std::fs::read_to_string(&path)
+                .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
+            let value = string_constant(&source, constant).unwrap_or_else(|| {
+                panic!("{constant} is not declared as a string literal in {relative_path}")
+            });
+            assert!(
+                shipped.contains(&value),
+                "OMEGA-DELTA-0016: {constant} in {relative_path} names {value:?}, \
+                 which no shipped theme declares. Omega would fall back to a \
+                 missing theme on that appearance. Shipped: {shipped:?}"
+            );
+            if constant == "DEFAULT_DARK_THEME" {
+                dark_defaults.push((relative_path, value));
+            }
+        }
+
+        assert_eq!(
+            dark_defaults[0].1, dark_defaults[1].1,
+            "OMEGA-DELTA-0016: the two DEFAULT_DARK_THEME constants disagree \
+             ({dark_defaults:?}); they are read by different crates and must \
+             name the same theme."
+        );
+        assert_eq!(
+            dark_defaults[0].1, "Aiur",
+            "OMEGA-DELTA-0016: the dark default must be Aiur"
+        );
+    }
+
+    /// An ID that names two entries names none of them.
+    ///
+    /// `the_registry_and_the_checks_agree` compares sets, so a duplicate is
+    /// invisible to it. Two lanes allocating numbers at the same time produced
+    /// exactly that: two `OMEGA-DELTA-0010` entries and two `0011` entries,
+    /// which shipped uncaught.
+    #[test]
+    fn delta_ids_are_unique() {
+        let mut seen = std::collections::BTreeSet::new();
+        let repeated: Vec<&&str> = ENFORCED_DELTAS
+            .iter()
+            .filter(|id| !seen.insert(**id))
+            .collect();
+        assert!(
+            repeated.is_empty(),
+            "ENFORCED_DELTAS lists an ID more than once: {repeated:?}. \
+             Allocate the next free number instead of reusing one."
+        );
+
+        let path = repository_path(DELTA_REGISTRY_PATH);
+        let registry = std::fs::read_to_string(&path).expect("delta registry is readable");
+        let mut seen_headings = std::collections::BTreeSet::new();
+        let repeated_headings: Vec<String> = registry
+            .lines()
+            .filter_map(|line| line.strip_prefix("### "))
+            .filter_map(|heading| heading.split_whitespace().next())
+            .filter(|token| token.starts_with("OMEGA-DELTA-"))
+            .filter(|token| !seen_headings.insert((*token).to_owned()))
+            .map(str::to_owned)
+            .collect();
+        assert!(
+            repeated_headings.is_empty(),
+            "{} has more than one entry for: {repeated_headings:?}",
+            path.display()
+        );
     }
 
     /// The registry and the checks must agree, in both directions.
