@@ -74,7 +74,7 @@ impl std::error::Error for Issue31FullAutoProjectionError {}
 ///
 /// `draft` maps to `queued` because both mean the same thing to a viewer: this
 /// run exists and no work has begun. Every other pair is a rename.
-fn lifecycle_for_host_state(state: &str) -> Option<&'static str> {
+pub(crate) fn lifecycle_for_host_state(state: &str) -> Option<&'static str> {
     Some(match state {
         "draft" | "queued" => "queued",
         "running" => "running",

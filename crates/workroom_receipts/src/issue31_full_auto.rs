@@ -198,6 +198,29 @@ pub enum Issue31EvidenceHopKind {
     Receipt,
 }
 
+impl Issue31EvidenceHopKind {
+    /// The wire token for this hop.
+    ///
+    /// The same string the contract serialises, exposed so a renderer can
+    /// label a hop without re-deriving a name of its own.
+    /// `hop_tokens_are_the_wire_tokens` pins the two together, so a rename in
+    /// the contract cannot leave a surface labelling hops by an older name.
+    #[must_use]
+    pub const fn token(self) -> &'static str {
+        match self {
+            Self::Objective => "objective",
+            Self::Turn => "turn",
+            Self::Change => "change",
+            Self::ProjectGeneration => "project_generation",
+            Self::Test => "test",
+            Self::TypedOutcome => "typed_outcome",
+            Self::HostVerification => "host_verification",
+            Self::AuthorityDecision => "authority_decision",
+            Self::Receipt => "receipt",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Issue31EvidenceUnavailableReason {
@@ -206,6 +229,40 @@ pub enum Issue31EvidenceUnavailableReason {
     HopPrivate,
     SelfReported,
     HostUnavailable,
+}
+
+impl Issue31EvidenceUnavailableReason {
+    /// The wire token for this refusal.
+    ///
+    /// A reader must be told *why* a chain is unavailable, and the four
+    /// record-level reasons are not interchangeable: `hop_missing` says the
+    /// host never produced the step, `hop_mismatched` says two records tell
+    /// two stories about one run, `hop_private` says the host produced it and
+    /// this surface may not carry it, and `self_reported` says the run
+    /// vouched for itself. Collapsing them into one "unavailable" word is how
+    /// a contradicted chain gets read as merely incomplete.
+    #[must_use]
+    pub const fn token(self) -> &'static str {
+        match self {
+            Self::HopMissing => "hop_missing",
+            Self::HopMismatched => "hop_mismatched",
+            Self::HopPrivate => "hop_private",
+            Self::SelfReported => "self_reported",
+            Self::HostUnavailable => "host_unavailable",
+        }
+    }
+
+    /// Every admitted reason, in declaration order.
+    #[must_use]
+    pub const fn all() -> &'static [Self] {
+        &[
+            Self::HopMissing,
+            Self::HopMismatched,
+            Self::HopPrivate,
+            Self::SelfReported,
+            Self::HostUnavailable,
+        ]
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1136,6 +1193,52 @@ fn build_evidence(pairs: &[(serde_json::Value, serde_json::Value)]) -> Vec<serde
         .collect()
 }
 
+/// Project one `(get_report, get_receipt)` pair into the chain it forms.
+///
+/// The single-pair entry point to the producer `build_evidence` already runs,
+/// exposed so a surface that shows one run's chain — the desktop thread link
+/// in omega#80 — reads the same chain the phone reads instead of assembling a
+/// second opinion. There is deliberately no second implementation here: the
+/// body emits through `build_evidence` and reads the result back through
+/// `project_evidence`, which is the decoder the adjunct itself goes through.
+/// That is what makes the public-safety bound non-negotiable at this entry
+/// point too — a hop the decoder refuses cannot be returned as a chain.
+///
+/// `run_ref_override` is the reference the *caller already proved* public-safe,
+/// used when the pair is unavailable. `build_evidence` would otherwise echo the
+/// report's own `runRef`, and a report whose reference fails the bound would
+/// turn a reportable refusal into an undecodable one.
+///
+/// # Errors
+///
+/// Returns the decoder's error when the host produced a chain this surface is
+/// not allowed to carry — an unbounded detail, or a hop reference outside the
+/// public-reference character class. The caller's honest rendering of that is
+/// [`Issue31EvidenceUnavailableReason::HopPrivate`]: the host has the step and
+/// this surface may not show it.
+pub fn project_issue31_evidence_pair(
+    report: &serde_json::Value,
+    receipt: &serde_json::Value,
+    run_ref_override: Option<&str>,
+) -> AdjunctResult<Issue31EvidenceChain> {
+    let pair = [(report.clone(), receipt.clone())];
+    let mut emitted = build_evidence(&pair)
+        .pop()
+        .ok_or(Issue31FullAutoAdjunctError::InvalidEvidenceChain)?;
+    if let Some(run_ref) = run_ref_override
+        && emitted
+            .get("completeness")
+            .and_then(serde_json::Value::as_str)
+            == Some("unavailable")
+        && let Some(object) = emitted.as_object_mut()
+    {
+        object.insert("runRef".into(), serde_json::json!(run_ref));
+    }
+    let raw: RawEvidence = serde_json::from_value(emitted)
+        .map_err(|_| Issue31FullAutoAdjunctError::InvalidEvidenceChain)?;
+    project_evidence(raw)
+}
+
 /// The hops the omega#43 report and the authority receipt both carry. They must
 /// agree on all of them for the pair to be one chain.
 const SHARED_EVIDENCE_HOP_FIELDS: [&str; 4] =
@@ -1574,5 +1677,162 @@ mod emitter_tests {
         .expect("encodes");
         assert!(!encoded.contains("/Users/"));
         assert!(!encoded.contains("Bearer"));
+    }
+
+    /// The tokens a renderer labels hops with are the tokens the contract
+    /// serialises.
+    ///
+    /// A second name for the same hop is how a desktop surface and a phone
+    /// end up describing one chain differently, so the two are compared
+    /// rather than trusted to have been written consistently.
+    #[test]
+    fn hop_tokens_are_the_wire_tokens() {
+        for kind in ISSUE31_EVIDENCE_HOPS {
+            let wire = serde_json::to_value(kind).expect("hop kind serialises");
+            assert_eq!(wire.as_str(), Some(kind.token()), "{kind:?}");
+        }
+        for reason in Issue31EvidenceUnavailableReason::all() {
+            let wire = serde_json::to_value(reason).expect("reason serialises");
+            assert_eq!(wire.as_str(), Some(reason.token()), "{reason:?}");
+        }
+        assert_eq!(
+            Issue31EvidenceUnavailableReason::all().len(),
+            5,
+            "the reason vocabulary is byte-shared with packages/sarah. Adding \
+             a sixth reason is a contract change, not a rendering convenience."
+        );
+    }
+
+    /// One pair projects to the same chain through the single-pair entry point
+    /// as through the whole adjunct.
+    ///
+    /// The point of the entry point is that omega#80's thread link reads the
+    /// chain the phone reads. A second implementation would satisfy every
+    /// other test in this file and still disagree here.
+    #[test]
+    fn the_single_pair_entry_point_agrees_with_the_adjunct() {
+        let (report, receipt) = evidence_pair();
+        let through_adjunct = build(&runs(), &accounts(), &[(report.clone(), receipt.clone())])
+            .expect("emits")
+            .evidence
+            .remove(0);
+        let direct = project_issue31_evidence_pair(&report, &receipt, None).expect("projects");
+        assert_eq!(direct, through_adjunct);
+        assert!(matches!(direct, Issue31EvidenceChain::Complete { .. }));
+    }
+
+    /// Every refusal reason survives the single-pair entry point, named.
+    ///
+    /// Falsified one at a time: a surface that reports "unavailable" without
+    /// the reason has told the reader nothing they can act on, and a
+    /// contradicted chain reported as merely incomplete is the specific bug
+    /// this vocabulary exists to prevent.
+    #[test]
+    fn the_single_pair_entry_point_names_each_refusal() {
+        let reason_of = |report: &serde_json::Value, receipt: &serde_json::Value| {
+            match project_issue31_evidence_pair(report, receipt, None).expect("projects") {
+                Issue31EvidenceChain::Unavailable { reason, .. } => reason,
+                Issue31EvidenceChain::Complete { .. } => {
+                    panic!("a broken chain must never render as complete")
+                }
+            }
+        };
+
+        let (mut report, receipt) = evidence_pair();
+        report["evidence"]
+            .as_object_mut()
+            .expect("evidence object")
+            .remove("changeRef");
+        assert_eq!(
+            reason_of(&report, &receipt),
+            Issue31EvidenceUnavailableReason::HopMissing
+        );
+
+        let (report, mut receipt) = evidence_pair();
+        receipt["changeRef"] = json!("change.someone-elses-work");
+        assert_eq!(
+            reason_of(&report, &receipt),
+            Issue31EvidenceUnavailableReason::HopMismatched
+        );
+
+        let (mut report, receipt) = evidence_pair();
+        report["evidence"]["testCommand"] = json!("cat /Users/owner/.codex/auth.json");
+        assert_eq!(
+            reason_of(&report, &receipt),
+            Issue31EvidenceUnavailableReason::HopPrivate
+        );
+
+        let (mut report, receipt) = evidence_pair();
+        report["evidence"]["hostExecuted"] = json!(false);
+        assert_eq!(
+            reason_of(&report, &receipt),
+            Issue31EvidenceUnavailableReason::SelfReported
+        );
+    }
+
+    /// A report whose own `runRef` is not public-safe still produces a
+    /// reportable refusal, because the caller supplies the reference it
+    /// already proved.
+    ///
+    /// Without the override this pair decodes to nothing at all, and a surface
+    /// with nothing to render shows the reader an empty space where a refusal
+    /// belongs.
+    #[test]
+    fn an_unsafe_report_reference_still_yields_a_named_refusal() {
+        let (mut report, mut receipt) = evidence_pair();
+        // Both records agree on the reference, so this is not a mismatch. The
+        // host simply names the run in a way this surface may not repeat.
+        report["runRef"] = json!("/Users/owner/runs/17");
+        receipt["runRef"] = json!("/Users/owner/runs/17");
+        report["evidence"]["hostExecuted"] = json!(false);
+
+        assert_eq!(
+            project_issue31_evidence_pair(&report, &receipt, None),
+            Err(Issue31FullAutoAdjunctError::UnsafeReference),
+            "without a proven reference there is nothing safe to name the \
+             refusal after"
+        );
+
+        let named = project_issue31_evidence_pair(&report, &receipt, Some("run.full-auto.run-01"))
+            .expect("the caller's proven reference names the refusal");
+        match named {
+            Issue31EvidenceChain::Unavailable {
+                run_ref, reason, ..
+            } => {
+                assert_eq!(run_ref.as_str(), "run.full-auto.run-01");
+                assert_eq!(reason, Issue31EvidenceUnavailableReason::SelfReported);
+            }
+            Issue31EvidenceChain::Complete { .. } => panic!("self-reported is not complete"),
+        }
+    }
+
+    /// The override never rewrites a complete chain's identity.
+    ///
+    /// If it did, a chain proving one run could be relabelled as another
+    /// run's proof by the surface displaying it, which is the forgery the
+    /// whole hop-mismatch rule exists to catch.
+    #[test]
+    fn the_override_cannot_relabel_a_complete_chain() {
+        let (report, receipt) = evidence_pair();
+        let chain = project_issue31_evidence_pair(&report, &receipt, Some("run.some.other.run"))
+            .expect("projects");
+        assert_eq!(chain.run_ref().as_str(), "run.full-auto.run-01");
+    }
+
+    /// A chain the host produced but this surface may not carry is an error,
+    /// not a complete chain and not a silent drop.
+    ///
+    /// The detail bound at decode (256) is tighter than the record scan
+    /// (512), so a long-but-clean test command passes `carries_private_hop`
+    /// and is then refused by the decoder. The caller's honest rendering of
+    /// that error is `hop_private`.
+    #[test]
+    fn a_detail_past_the_carried_bound_is_refused_rather_than_shown() {
+        let (mut report, receipt) = evidence_pair();
+        report["evidence"]["testCommand"] = json!(format!("cargo test -p {}", "x".repeat(300)));
+        assert_eq!(
+            project_issue31_evidence_pair(&report, &receipt, Some("run.full-auto.run-01")),
+            Err(Issue31FullAutoAdjunctError::UnsafeText)
+        );
     }
 }

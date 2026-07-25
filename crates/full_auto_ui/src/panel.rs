@@ -22,7 +22,8 @@ use omega_effectd::{
     AttentionDecision, OpenAgentsSession, OpenAgentsSessionPhase, SharedOmegaEffectdSupervisor,
     openagents_session, shared_supervisor,
 };
-use serde_json::{Value, json};
+use omega_front_door::LaunchOrigin;
+use serde_json::Value;
 use settings::{NotifyWhenAgentWaiting, Settings as _};
 use ui::{Button, ButtonStyle, IconButton, IconName, Label, LabelSize, Tooltip, prelude::*};
 use util::ResultExt as _;
@@ -33,6 +34,7 @@ use workspace::{
 };
 use zed_actions::full_auto_panel::ToggleFocus;
 
+use crate::dispatch::FullAutoDispatch;
 use crate::draft::{
     DEFAULT_DONE_CONDITION, DEFAULT_TURN_CAP, FULL_AUTO_ACTIVE_LIMIT, FULL_AUTO_WORKSPACE_REF,
     FullAutoLauncherDraft, validate_launcher_draft,
@@ -101,6 +103,13 @@ pub struct FullAutoPanel {
     window: AnyWindowHandle,
     focus_handle: FocusHandle,
     mode: SurfaceMode,
+    /// The human gesture that opened the launch surface currently on screen.
+    ///
+    /// `OMEGA-DELTA-0030`. Recorded with the dispatch so a run says which
+    /// control a person operated to reach it. It is not a permission check:
+    /// the permission is the type of `FullAutoDispatch::from_validated`, which
+    /// cannot be called without one of these.
+    launch_origin: LaunchOrigin,
     draft: FullAutoLauncherDraft,
     objective_editor: Entity<Editor>,
     title_editor: Entity<Editor>,
@@ -167,6 +176,7 @@ impl FullAutoPanel {
             window: window.window_handle(),
             focus_handle: cx.focus_handle(),
             mode: SurfaceMode::Launcher,
+            launch_origin: LaunchOrigin::OpenLauncherAction,
             draft: FullAutoLauncherDraft::default(),
             objective_editor,
             title_editor,
@@ -191,7 +201,8 @@ impl FullAutoPanel {
         panel
     }
 
-    fn open_launcher(&mut self, cx: &mut Context<Self>) {
+    fn open_launcher(&mut self, origin: LaunchOrigin, cx: &mut Context<Self>) {
+        self.launch_origin = origin;
         self.mode = SurfaceMode::Launcher;
         self.active_run_ref = None;
         self.active_run = None;
@@ -409,21 +420,19 @@ impl FullAutoPanel {
             .log_err();
     }
 
+    /// Dispatch the drafted run to `omega-effectd`.
+    ///
+    /// `OMEGA-DELTA-0030`. The wire form is built by
+    /// [`FullAutoDispatch::params`] rather than inline here, so the start
+    /// request's shape is a type with tests rather than whatever this
+    /// expression happened to contain. In particular a start request has no
+    /// field for an `evidence` block, a `decisionRef`, or an
+    /// `authorityReceiptRef` — a requester that could name those could forge
+    /// them, and evidence is minted by the host at the completion-admission
+    /// gate.
     fn start_run(&mut self, cx: &mut Context<Self>) {
         self.sync_draft_from_editors(cx);
         let validation = validate_launcher_draft(&self.draft);
-        if !validation.ok {
-            self.draft.error = validation.message;
-            cx.notify();
-            return;
-        }
-        let Some(supervisor) = self.supervisor.clone() else {
-            self.draft.error = Some("omega-effectd is not connected.".into());
-            cx.notify();
-            return;
-        };
-        self.draft.submitting = true;
-        self.draft.error = None;
         let (project_ref, worktree_ref) = self
             .workspace
             .upgrade()
@@ -436,29 +445,43 @@ impl FullAutoPanel {
                     .next()
                     .map(|wt| wt.read(cx).id());
                 (
-                    format!("project.{project_id}"),
-                    worktree_id
-                        .map(|id| format!("worktree.{}", id.to_proto()))
-                        .unwrap_or_else(|| "worktree.missing".into()),
+                    Some(format!("project.{project_id}")),
+                    worktree_id.map(|id| format!("worktree.{}", id.to_proto())),
                 )
             })
-            .unwrap_or_else(|| ("project.missing".into(), "worktree.missing".into()));
-        if project_ref.ends_with("missing") || worktree_ref.ends_with("missing") {
-            self.draft.submitting = false;
-            self.draft.error = Some("Open a project worktree before starting Full Auto.".into());
+            .unwrap_or((None, None));
+        let dispatch = match FullAutoDispatch::from_validated(
+            self.launch_origin,
+            &self.draft,
+            &validation,
+            project_ref.as_deref(),
+            worktree_ref.as_deref(),
+        ) {
+            Ok(dispatch) => dispatch,
+            Err(refusal) => {
+                self.draft.submitting = false;
+                self.draft.error = Some(
+                    validation
+                        .message
+                        .clone()
+                        .unwrap_or_else(|| refusal.message().to_string()),
+                );
+                cx.notify();
+                return;
+            }
+        };
+        // Checked after the draft, so a person who has not written an
+        // objective is told that first. The engine being down is a second
+        // problem, and reporting it instead would send them looking at the
+        // wrong thing.
+        let Some(supervisor) = self.supervisor.clone() else {
+            self.draft.error = Some("omega-effectd is not connected.".into());
             cx.notify();
             return;
-        }
-        let params = json!({
-            "workspaceRef": self.draft.workspace_ref,
-            "title": validation.title,
-            "objective": validation.objective,
-            "doneCondition": validation.done_condition,
-            "lane": self.draft.lane,
-            "turnCap": validation.turn_cap,
-            "projectRef": project_ref,
-            "worktreeRef": worktree_ref,
-        });
+        };
+        self.draft.submitting = true;
+        self.draft.error = None;
+        let params = dispatch.params();
         cx.notify();
         cx.spawn(async move |this, cx| {
             let started = {
@@ -1070,7 +1093,10 @@ impl Render for FullAutoPanel {
                                             Button::new("full-auto-new", "New run")
                                                 .style(ButtonStyle::Subtle)
                                                 .on_click(cx.listener(|this, _, _, cx| {
-                                                    this.open_launcher(cx)
+                                                    this.open_launcher(
+                                                        LaunchOrigin::RunSurfaceNewRun,
+                                                        cx,
+                                                    )
                                                 })),
                                         ),
                                 )
@@ -1134,7 +1160,7 @@ impl Render for FullAutoPanel {
                             .child(
                                 IconButton::new("full-auto-monitor-new", IconName::Plus)
                                     .tooltip(Tooltip::text("New Full Auto run"))
-                                    .on_click(cx.listener(|this, _, _, cx| this.open_launcher(cx))),
+                                    .on_click(cx.listener(|this, _, _, cx| this.open_launcher(LaunchOrigin::RunMonitorNewRun, cx))),
                             ),
                     )
                     .children(self.runs.iter().enumerate().take(FULL_AUTO_ACTIVE_LIMIT + 6).map(|(index, run)| {

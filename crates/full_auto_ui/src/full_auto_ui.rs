@@ -3,12 +3,15 @@
 //! Full Auto is a dedicated run surface. It is never a composer toggle.
 //! Durable mutation goes only through supervised `omega_effectd`.
 
+mod dispatch;
 mod draft;
 mod evidence_chain;
 mod issue31_adjunct;
 mod panel;
 mod provider_roster;
+mod thread_run_link;
 
+pub use dispatch::{DispatchRefusal, FullAutoDispatch};
 pub use draft::{
     validate_launcher_draft, FullAutoLauncherDraft, LauncherValidation, DEFAULT_DONE_CONDITION,
     DEFAULT_TURN_CAP, FULL_AUTO_ACTIVE_LIMIT, FULL_AUTO_WORKSPACE_REF,
@@ -21,6 +24,9 @@ pub use issue31_adjunct::{
 };
 pub use panel::FullAutoPanel;
 pub use provider_roster::{parse_provider_accounts, ProviderAccountRow};
+pub use thread_run_link::{
+    project_thread_run_link, ThreadRunLink, ThreadRunRecords, THREAD_RUN_LINK_MAX_AGE_MS,
+};
 
 #[cfg(test)]
 mod tests {

@@ -31,6 +31,7 @@ use crate::ui::{
 use crate::unicode_confusables;
 
 use db::kvp::KeyValueStore;
+use full_auto_ui::{ThreadRunLink, ThreadRunRecords, project_thread_run_link};
 use gpui::List;
 use gpui::Stateful;
 use gpui::TaskExt;
@@ -645,6 +646,18 @@ pub struct ThreadView {
     dismissed_skill_loading_issues: HashSet<SkillLoadingIssue>,
     pub(crate) thread_search_bar: Option<Entity<super::thread_search_bar::ThreadSearchBar>>,
     pub(crate) thread_search_visible: bool,
+    /// `OMEGA-DELTA-0030`. The engine's own last answer about this thread's
+    /// linked run, and when it answered.
+    ///
+    /// Raw host records, never a projected view. The link is re-derived from
+    /// these on every draw, so the surface cannot hold an opinion about a run
+    /// that the engine does not currently support, and the reading expires:
+    /// past `full_auto_ui::THREAD_RUN_LINK_MAX_AGE_MS` it renders
+    /// `host_unavailable` rather than the last chain it saw.
+    omega_run_records: Option<ThreadRunRecords>,
+    /// `OMEGA-DELTA-0030`. Polls the engine for the linked run. Present only
+    /// on threads an engine lane executed.
+    _omega_run_link_task: Option<Task<()>>,
 }
 impl Focusable for ThreadView {
     fn focus_handle(&self, cx: &App) -> FocusHandle {
@@ -1024,6 +1037,8 @@ impl ThreadView {
             _save_task: None,
             _draft_resolve_task: None,
             _sandbox_status_refresh_task: None,
+            omega_run_records: None,
+            _omega_run_link_task: None,
             hovered_edited_file_buttons: None,
             in_flight_prompt: None,
             message_editor,
@@ -11939,6 +11954,115 @@ impl ThreadView {
         }
     }
 
+    /// OMEGA-DELTA-0030. This thread's linked engine run, projected.
+    ///
+    /// Derived on every call from the disclosure record and the engine's own
+    /// records. `None` for every thread that is not engine-lane work, which is
+    /// most of them: a native or external ACP thread owns no run, and drawing
+    /// an empty run panel on one would suggest otherwise.
+    pub fn omega_run_link(&self, cx: &App) -> Option<ThreadRunLink> {
+        project_thread_run_link(
+            &self.executor_disclosure(cx),
+            self.omega_run_records.as_ref(),
+            omega_now_ms(),
+        )
+    }
+
+    /// OMEGA-DELTA-0030. Keep the engine's answer about the linked run current.
+    ///
+    /// Started only for a thread an engine lane executed, and it asks the
+    /// engine rather than remembering: `omega-effectd` is the sole run
+    /// authority, so every field this surface shows has to come from a live
+    /// answer that expires.
+    fn ensure_omega_run_link_refresh(&mut self, cx: &mut Context<Self>) {
+        if self._omega_run_link_task.is_some() {
+            return;
+        }
+        let Some(run_ref) = self.executor_disclosure(cx).run_ref else {
+            return;
+        };
+        let Ok(supervisor) = omega_effectd::shared_supervisor(cx) else {
+            return;
+        };
+        let executor = cx.background_executor().clone();
+        self._omega_run_link_task = Some(cx.spawn(async move |this, cx| {
+            loop {
+                let (run, report, receipt) = {
+                    let mut guard = supervisor.lock().await;
+                    let run = guard.get_run(&run_ref).await.ok();
+                    let report = guard.get_report(&run_ref).await.ok();
+                    let receipt = guard.get_receipt(&run_ref).await.ok();
+                    (run, report, receipt)
+                };
+                // A read that reached the host is recorded whole, including
+                // the parts it could not answer. Keeping a previous report
+                // beside a fresh run record would let the thread show a chain
+                // the engine has stopped standing behind.
+                let records = ThreadRunRecords {
+                    read_at_ms: omega_now_ms(),
+                    run,
+                    report,
+                    receipt,
+                };
+                if this
+                    .update(cx, |this, cx| {
+                        this.omega_run_records = Some(records);
+                        cx.notify();
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+                executor.timer(std::time::Duration::from_secs(3)).await;
+            }
+        }));
+    }
+
+    /// OMEGA-DELTA-0030. The linked run and its receipt chain, in the thread.
+    ///
+    /// Rendered in the same label/value grammar as the receipt inspector, and
+    /// rendered *whatever* the chain says. An unavailable chain draws its
+    /// reason instead of drawing nothing: a surface that hides a broken chain
+    /// leaves the reader unable to tell an unverified run from a verified one.
+    ///
+    /// There is deliberately no control here. Pause, resume, stop and retry
+    /// live on the Full Auto surface, where each one is bound to the run
+    /// generation the host minted it for. A second set of buttons reading a
+    /// projection would be a second place that believes it can command a run.
+    fn render_omega_run_link(&self, cx: &App) -> Option<AnyElement> {
+        let link = self.omega_run_link(cx)?;
+        let receipted = link.is_receipted();
+        Some(
+            v_flex()
+                .id("omega-thread-run-link")
+                .w_full()
+                .px_2()
+                .py_1()
+                .gap_0p5()
+                .border_b_1()
+                .border_color(cx.theme().colors().border_variant)
+                .child(
+                    Label::new(if receipted {
+                        "Engine run · receipt chain complete"
+                    } else {
+                        "Engine run · receipt chain not resolvable"
+                    })
+                    .size(LabelSize::XSmall)
+                    .color(if receipted {
+                        Color::Muted
+                    } else {
+                        Color::Warning
+                    }),
+                )
+                .children(link.fields().into_iter().map(|field| {
+                    Label::new(field.line())
+                        .size(LabelSize::XSmall)
+                        .color(Color::Muted)
+                }))
+                .into_any_element(),
+        )
+    }
+
     /// The executor line, rendered from the record.
     ///
     /// Unconditional, and above the entries rather than beside them, because
@@ -11972,6 +12096,10 @@ impl Render for ThreadView {
         // current availability of feedback/sharing, which can change between
         // renders (settings, connection state, feature flags).
         self.sync_local_commands(cx);
+        // OMEGA-DELTA-0030. A thread an engine lane executed keeps asking the
+        // engine what its run is doing, because the engine is the only thing
+        // entitled to say.
+        self.ensure_omega_run_link_refresh(cx);
 
         let has_messages = self.list_state.item_count() > 0;
         let list_state = self.list_state.clone();
@@ -11979,6 +12107,8 @@ impl Render for ThreadView {
         let conversation = v_flex()
             // OMEGA-DELTA-0021. Before anything the thread produced.
             .child(self.render_executor_disclosure(cx))
+            // OMEGA-DELTA-0030. The run behind the line, where there is one.
+            .children(self.render_omega_run_link(cx))
             .when(self.resumed_without_history, |this| {
                 this.child(Self::render_resume_notice(cx))
             })
@@ -12816,4 +12946,17 @@ pub(crate) fn reset_fast_mode_warnings(cx: &mut App) {
             .log_err();
     })
     .detach();
+}
+
+/// Wall-clock milliseconds, for `OMEGA-DELTA-0030`'s freshness bound.
+///
+/// The same clock the engine's records are stamped against. A monotonic clock
+/// would be safer against wall-clock jumps but cannot be compared with a host
+/// timestamp, and the bound here is deliberately about "how long ago did the
+/// host answer *this process*", which is measured locally at both ends.
+fn omega_now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX))
+        .unwrap_or(0)
 }

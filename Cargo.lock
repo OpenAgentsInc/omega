@@ -6606,6 +6606,7 @@ dependencies = [
  "futures 0.3.32",
  "gpui",
  "omega_effectd",
+ "omega_front_door",
  "project",
  "serde",
  "serde_json",

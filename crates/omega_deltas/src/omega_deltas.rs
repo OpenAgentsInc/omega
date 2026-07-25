@@ -57,6 +57,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0027",
     "OMEGA-DELTA-0028",
     "OMEGA-DELTA-0029",
+    "OMEGA-DELTA-0030",
 ];
 
 /// OMEGA-DELTA-0025. The file that declares the measured digest.
@@ -155,10 +156,49 @@ pub const DEFAULT_ICON_THEME_SOURCE: &str = "crates/theme/src/icon_theme.rs";
 pub const EXECUTOR_DISCLOSURE_RECORD_PATH: &str = "crates/omega_front_door/src/omega_front_door.rs";
 
 /// OMEGA-DELTA-0021. The file that binds the record to a live thread.
-pub const EXECUTOR_DISCLOSURE_BINDING_PATH: &str = "crates/agent_ui/src/omega_executor_disclosure.rs";
+pub const EXECUTOR_DISCLOSURE_BINDING_PATH: &str =
+    "crates/agent_ui/src/omega_executor_disclosure.rs";
 
 /// OMEGA-DELTA-0021. The thread surface that has to render the line.
 pub const THREAD_VIEW_PATH: &str = "crates/agent_ui/src/conversation_view/thread_view.rs";
+
+/// OMEGA-DELTA-0030. The typed start command sent to `omega-effectd`.
+pub const FULL_AUTO_DISPATCH_PATH: &str = "crates/full_auto_ui/src/dispatch.rs";
+
+/// OMEGA-DELTA-0030. The thread's projection of its linked engine run.
+pub const THREAD_RUN_LINK_PATH: &str = "crates/full_auto_ui/src/thread_run_link.rs";
+
+/// OMEGA-DELTA-0030. Every field a start request is allowed to carry.
+///
+/// A closed list for the same reason as `EXECUTOR_DISCLOSURE_FIELDS`: the
+/// property that matters is "these parts and nothing else". A start request
+/// that could name an `evidence` block, a `decision_ref`, or an
+/// `authority_receipt_ref` would let a requester forge the very records the
+/// host mints at the completion-admission gate, and omega#47 watched a live
+/// engine ignore exactly that forgery. Here it cannot be written at all.
+pub const FULL_AUTO_DISPATCH_FIELDS: &[(&str, &str)] = &[
+    ("origin", "LaunchOrigin"),
+    ("workspace_ref", "PublicRef"),
+    ("project_ref", "PublicRef"),
+    ("worktree_ref", "PublicRef"),
+    ("lane", "String"),
+    ("title", "String"),
+    ("objective", "String"),
+    ("done_condition", "String"),
+    ("turn_cap", "u32"),
+];
+
+/// OMEGA-DELTA-0030. Crates allowed to name the Full Auto start command.
+///
+/// A dispatch is reachable only from the Full Auto surface and the panel that
+/// hosts it. A tool crate, a language-model crate, or a context-server crate
+/// appearing here would mean a model-authored path can reach run authority,
+/// which owner gate 8 forbids.
+///
+/// `omega_deltas` is listed because this file names the symbol in order to
+/// check for it. It declares no dependency on `full_auto_ui`, so naming the
+/// type here cannot build one.
+pub const FULL_AUTO_DISPATCH_CALLERS: &[&str] = &["full_auto_ui", "omega_deltas"];
 
 /// OMEGA-DELTA-0021. Every field the disclosure record is allowed to hold.
 ///
@@ -789,7 +829,9 @@ pub fn struct_fields(source: &str, name: &str) -> Vec<(String, String)> {
         .lines()
         .map(str::trim)
         .filter(|line| {
-            !line.is_empty() && !line.starts_with("///") && !line.starts_with("//")
+            !line.is_empty()
+                && !line.starts_with("///")
+                && !line.starts_with("//")
                 && !line.starts_with("#[")
         })
         .filter_map(|line| {
@@ -1064,9 +1106,7 @@ fn derived_actions(source: &str) -> Vec<(String, String)> {
             .map(|tail| {
                 tail.trim_start()
                     .chars()
-                    .take_while(|character| {
-                        character.is_ascii_alphanumeric() || *character == '_'
-                    })
+                    .take_while(|character| character.is_ascii_alphanumeric() || *character == '_')
                     .collect::<String>()
             })
             .filter(|namespace| !namespace.is_empty())
@@ -1084,9 +1124,7 @@ fn derived_actions(source: &str) -> Vec<(String, String)> {
                 }
                 let candidate: String = tail[at + keyword.len()..]
                     .chars()
-                    .take_while(|character| {
-                        character.is_ascii_alphanumeric() || *character == '_'
-                    })
+                    .take_while(|character| character.is_ascii_alphanumeric() || *character == '_')
                     .collect();
                 if !candidate.is_empty() && name.is_none() {
                     name = Some(candidate);
@@ -1114,7 +1152,9 @@ pub fn deprecated_action_aliases() -> std::collections::BTreeSet<String> {
         while let Some(at) = rest.find("deprecated_aliases") {
             let after = &rest[at..];
             rest = &rest[at + 1..];
-            let Some(open) = after.find('[') else { continue };
+            let Some(open) = after.find('[') else {
+                continue;
+            };
             let Some(close) = after[open..].find(']') else {
                 continue;
             };
@@ -1863,9 +1903,8 @@ mod tests {
 
         for settings_file in SHIPPED_THEME_SETTINGS_FILES {
             let settings_path = repository_path(settings_file);
-            let raw = std::fs::read_to_string(&settings_path).unwrap_or_else(|error| {
-                panic!("cannot read {}: {error}", settings_path.display())
-            });
+            let raw = std::fs::read_to_string(&settings_path)
+                .unwrap_or_else(|error| panic!("cannot read {}: {error}", settings_path.display()));
             let settings: serde_json::Value = serde_json::from_str(&strip_jsonc(&raw))
                 .unwrap_or_else(|error| {
                     panic!("cannot parse {}: {error}", settings_path.display())
@@ -2535,12 +2574,15 @@ mod tests {
             blocked.len()
         );
         assert!(
-            blocked.iter().any(|claim| claim == "Use GitHub Copilot in Zed"),
+            blocked
+                .iter()
+                .any(|claim| claim == "Use GitHub Copilot in Zed"),
             "OMEGA-DELTA-0022: the claim that shipped in rc11 must stay recorded \
              as blocked, or the next lane has no record that it was a defect"
         );
 
-        let corpus: std::collections::BTreeSet<&str> = BLOCKED_COPY_CORPUS.iter().copied().collect();
+        let corpus: std::collections::BTreeSet<&str> =
+            BLOCKED_COPY_CORPUS.iter().copied().collect();
         for relative in &corpus {
             assert!(
                 repository_path(relative).is_file(),
@@ -3488,9 +3530,9 @@ mod tests {
             // A one-line signature, or the return type on the following line.
             let returns_self = signature.contains("-> Self")
                 || signature.contains("-> MeasuredDigest")
-                || lines
-                    .peek()
-                    .is_some_and(|next| next.contains("-> Self") || next.contains("-> MeasuredDigest"));
+                || lines.peek().is_some_and(|next| {
+                    next.contains("-> Self") || next.contains("-> MeasuredDigest")
+                });
             if returns_self {
                 constructors.push(name.trim().to_owned());
             }
@@ -3579,13 +3621,15 @@ mod tests {
         let source = std::fs::read_to_string(&path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
 
-        let gate = source.find("authorize_installed_harness(").unwrap_or_else(|| {
-            panic!(
-                "OMEGA-DELTA-0025: {} no longer measures an installed harness \
+        let gate = source
+            .find("authorize_installed_harness(")
+            .unwrap_or_else(|| {
+                panic!(
+                    "OMEGA-DELTA-0025: {} no longer measures an installed harness \
                  before returning its command",
-                path.display()
-            )
-        });
+                    path.display()
+                )
+            });
         let prefetch_gate = source.find("authorize_version_fetch(").unwrap_or_else(|| {
             panic!(
                 "OMEGA-DELTA-0025: {} no longer consults the pin before fetching \
@@ -3671,6 +3715,215 @@ mod tests {
             code_only.contains("decide_maintenance("),
             "OMEGA-DELTA-0025: {} no longer consults the maintenance gate",
             path.display()
+        );
+    }
+
+    // ------------------------------------------------------ OMEGA-DELTA-0030
+
+    /// OMEGA-DELTA-0030. A start request cannot carry what the host mints.
+    ///
+    /// omega#47 watched a live engine refuse a start request that deliberately
+    /// carried a forged `evidence` block, a forged `decisionRef` and a forged
+    /// `authorityReceiptRef`. That proof is about the host. This one is about
+    /// the desktop: the request has no field to write the forgery into, so the
+    /// claim holds before anything reaches the wire.
+    #[test]
+    fn a_full_auto_dispatch_carries_no_evidence() {
+        let path = repository_path(FULL_AUTO_DISPATCH_PATH);
+        let source = std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
+
+        let fields = struct_fields(&source, "FullAutoDispatch");
+        assert!(
+            !fields.is_empty(),
+            "OMEGA-DELTA-0030: no FullAutoDispatch struct found in {}. The \
+             check would be vacuous, so it fails instead.",
+            path.display()
+        );
+        let found: Vec<(&str, &str)> = fields
+            .iter()
+            .map(|(name, type_name)| (name.as_str(), type_name.as_str()))
+            .collect();
+        assert_eq!(
+            found, FULL_AUTO_DISPATCH_FIELDS,
+            "OMEGA-DELTA-0030: FullAutoDispatch carries different parts than \
+             the ones recorded. Evidence is minted by the host at the \
+             completion-admission gate; a requester that can name it can forge \
+             it. If a genuine request field was added, record it here and say \
+             in the delta what the requester knows that the host does not."
+        );
+
+        // The origin is the whole of owner gate 8 at this layer: the only
+        // constructor takes one, and every variant is a human gesture.
+        assert!(
+            source.contains("origin: LaunchOrigin,"),
+            "OMEGA-DELTA-0030: a dispatch must record the human gesture that \
+             produced it, in {}",
+            path.display()
+        );
+        assert!(
+            source.contains("pub fn from_validated("),
+            "OMEGA-DELTA-0030: {} must expose exactly one constructor, so a \
+             dispatch without an origin is not expressible.",
+            path.display()
+        );
+    }
+
+    /// OMEGA-DELTA-0030. Only the Full Auto surface can dispatch a run.
+    ///
+    /// Owner gate 8 says only an explicit human action starts Full Auto
+    /// authority. The type enforces that a dispatch needs a `LaunchOrigin`;
+    /// this enforces that no tool, model, or context-server crate is in a
+    /// position to build one at all.
+    #[test]
+    fn no_model_callable_crate_can_dispatch_full_auto() {
+        let mut offenders = Vec::new();
+        let crates_root = repository_path("crates");
+        for entry in std::fs::read_dir(&crates_root).expect("crates directory is readable") {
+            let path = entry.expect("directory entry").path();
+            if !path.is_dir() {
+                continue;
+            }
+            let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            if FULL_AUTO_DISPATCH_CALLERS.contains(&name) {
+                continue;
+            }
+            let name = name.to_owned();
+            for_each_source_file(&path, &["rs"], |file, contents| {
+                if contents.contains("FullAutoDispatch") {
+                    offenders.push(format!("{name}: {}", file.display()));
+                }
+            });
+        }
+        assert!(
+            offenders.is_empty(),
+            "OMEGA-DELTA-0030: the Full Auto start command is reachable from \
+             crates that are not the Full Auto surface: {offenders:?}. Owner \
+             gate 8 allows only an explicit human action to start Full Auto \
+             authority, and a crate that can build the command is a crate that \
+             can start a run."
+        );
+    }
+
+    /// OMEGA-DELTA-0030. A thread shows the receipt chain of the run it names.
+    ///
+    /// omega#77 gave a thread its run reference. A reference the reader has to
+    /// go elsewhere to resolve is not accountability, so the chain renders in
+    /// the thread — and renders whatever it says, including a refusal.
+    #[test]
+    fn a_thread_renders_the_receipt_chain_of_its_linked_run() {
+        let path = repository_path(THREAD_VIEW_PATH);
+        let source = std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
+
+        assert!(
+            source.contains("fn render_omega_run_link("),
+            "OMEGA-DELTA-0030: {} must define the linked-run surface.",
+            path.display()
+        );
+        assert!(
+            source.contains(".children(self.render_omega_run_link(cx))"),
+            "OMEGA-DELTA-0030: {} must draw the linked run in the thread. \
+             Defining it without rendering it shows the reader nothing.",
+            path.display()
+        );
+        assert!(
+            source.contains("project_thread_run_link("),
+            "OMEGA-DELTA-0030: the linked run in {} must be projected from the \
+             engine's records on every draw, not read from a stored view.",
+            path.display()
+        );
+    }
+
+    /// OMEGA-DELTA-0030. The thread projects a run; it never owns one.
+    ///
+    /// omega#80's falsifier is "a run's source of truth ends up in a panel
+    /// entity". Two halves. The thread stores the engine's *records* and their
+    /// read time, never a projected link — a cached record can be re-derived
+    /// and can expire, a cached conclusion silently outlives its source. And
+    /// the projection module holds no state and no control: pause, resume and
+    /// stop live on the Full Auto surface, bound to the run generation the host
+    /// minted them for.
+    #[test]
+    fn the_thread_run_link_is_a_projection_and_not_a_second_authority() {
+        let thread_view_path = repository_path(THREAD_VIEW_PATH);
+        let thread_view = std::fs::read_to_string(&thread_view_path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", thread_view_path.display()));
+        assert!(
+            thread_view.contains("omega_run_records: Option<ThreadRunRecords>,"),
+            "OMEGA-DELTA-0030: {} must hold the engine's own records, so the \
+             link can be re-derived and can go stale.",
+            thread_view_path.display()
+        );
+        for stored_conclusion in [
+            "omega_run_link: Option<ThreadRunLink>",
+            "omega_run_state:",
+            "omega_run_chain:",
+        ] {
+            assert!(
+                !thread_view.contains(stored_conclusion),
+                "OMEGA-DELTA-0030: {} stores `{stored_conclusion}`. A cached \
+                 conclusion about a run is the panel entity becoming the \
+                 source of truth that omega#80 forbids.",
+                thread_view_path.display()
+            );
+        }
+
+        let link_path = repository_path(THREAD_RUN_LINK_PATH);
+        let link = std::fs::read_to_string(&link_path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", link_path.display()));
+        // Tests are excluded (they deliberately name refusals), and so are
+        // comments: an earlier version of this check passed after the
+        // constant was renamed, because the module documentation still
+        // mentioned the old name. A check a comment can satisfy is not a
+        // check.
+        let body: String = link
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap_or(&link)
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let body = body.as_str();
+        // `&'static str` is fine and common; a `static` *item* is process state.
+        for forbidden in [
+            "\nstatic ",
+            "\npub static ",
+            "thread_local!",
+            "LazyLock",
+            "Mutex",
+            "RefCell",
+            "supervisor",
+            "pause_run",
+            "stop_run",
+            "resume_run",
+            "start_run",
+        ] {
+            assert!(
+                !body.contains(forbidden),
+                "OMEGA-DELTA-0030: {} contains `{forbidden}`. The thread's run \
+                 link is a pure projection: state would let it disagree with \
+                 the engine, and a control would make it a second place that \
+                 believes it can command a run.",
+                link_path.display()
+            );
+        }
+        assert!(
+            body.contains("THREAD_RUN_LINK_MAX_AGE_MS"),
+            "OMEGA-DELTA-0030: {} must expire the engine's answer. A thread \
+             that keeps rendering the last chain it saw has outlived the \
+             authority it is projecting.",
+            link_path.display()
+        );
+        assert!(
+            body.contains("project_issue31_evidence_pair"),
+            "OMEGA-DELTA-0030: {} must read the chain through the omega#47 \
+             producer. A second chain implementation is a second opinion about \
+             one run, and the desktop and the phone would drift.",
+            link_path.display()
         );
     }
 

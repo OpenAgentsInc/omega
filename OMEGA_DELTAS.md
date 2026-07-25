@@ -1203,3 +1203,94 @@ cargo test -p omega_deltas
   fallback rather than a substitution. And no check here looks at a rendered
   pixel, so a route line that is correct in source and truncated or absent on
   screen still passes.
+
+### OMEGA-DELTA-0030 — A linked run shows its receipt chain in the thread
+
+- **Upstream Zed:** an agent thread shows the turns the agent produced. There
+  is no engine, no run authority, and nothing to link to, so there is nothing
+  upstream to revert to here — only something to quietly leave out.
+- **Omega, before this:** `OMEGA-DELTA-0021` gave every thread an executor
+  line, and a thread executed by an `omega-effectd` lane names its run in it.
+  Naming a run is not showing one. The reader was handed a reference and left
+  to go somewhere else to learn whether the work was host-verified, refused, or
+  merely claimed — and on the Full Auto surface, where the chain did render, a
+  broken chain rendered as one sentence: "Evidence chain unavailable or
+  cross-links did not verify." Four distinct situations, one word.
+- **Omega now:** a thread an engine lane executed renders, above its entries,
+  the run's reference, the agent the run delegated to, the run's lifecycle, and
+  its receipt chain — the nine omega#43 hops in normative order when the chain
+  is complete, and `chain: unavailable` with a named reason when it is not. The
+  rows use the same label/value grammar as the receipt inspector, so a chain in
+  a thread reads like a chain in the receipt pane rather than like a second
+  format.
+- **A refusal is shown, never hidden and never rounded up.** The four
+  record-level reasons are not interchangeable. `hop_missing` says the host
+  never produced the step; `hop_mismatched` says two records tell two stories
+  about one run; `hop_private` says the host produced it and this surface may
+  not carry it; `self_reported` says the run vouched for itself. Collapsing
+  them is how a *contradicted* chain gets read as merely *incomplete* — the
+  exact confusion omega#47's reason vocabulary was written to end. And a
+  broken chain still draws rows: a surface that renders nothing when it
+  cannot verify has told the reader nothing, and silence reads as "no run".
+  One malformed record must not blank the surface.
+- **The engine stays the sole run authority, and staleness is the proof.**
+  omega#80's falsifier is "a run's source of truth ends up in a panel entity".
+  The thread stores the engine's *records* and the instant it read them, never
+  a projected link, and re-derives the link on every draw. Past
+  `THREAD_RUN_LINK_MAX_AGE_MS` — five missed reads of a three-second poll — the
+  link renders `host_unavailable` instead of the last chain it saw. A cached
+  conclusion would have quietly outlived its source; a cached record with an
+  expiry cannot. A state the contract does not model is not translated into the
+  nearest one either: a run reporting `acknowledged` reports no state at all,
+  because a relay's acknowledgement is a statement about a message, not about
+  work.
+- **A terminal state is not a receipt.** `ThreadRunLink::is_receipted` requires
+  a complete chain *and* an allowing authority decision. A run whose engine
+  state is `succeeded` and whose chain is unavailable renders both facts and is
+  not claimed as receipted; a chain that resolves to `allowed: false` renders
+  complete and is still not receipted. Together those are the second half of
+  omega#80's falsifier.
+- **The chain comes from the omega#47 producer, not from a second
+  implementation.** `workroom_receipts::project_issue31_evidence_pair` is the
+  single-pair entry point to the same code the phone's projection is built
+  from, and it routes its output back through the adjunct's own decoder — so a
+  hop this surface may not carry is refused rather than shown, and the desktop
+  and the phone cannot hold two opinions about one run. Writing a second chain
+  reader would have passed every other check in this repository and still
+  drifted.
+- **Dispatch became a typed command.** The start request used to be a `json!`
+  blob built inline in the render file: its fields were whatever that
+  expression happened to contain, and the only proof it carried no evidence was
+  that nobody had added any. `FullAutoDispatch` is now the record, its field set
+  is asserted exactly, and it has no field for an `evidence` block, a
+  `decisionRef`, or an `authorityReceiptRef`. omega#47 watched a live engine
+  ignore all three, forged, in a real start request; this makes the same claim
+  one layer earlier, where the forgery cannot be written at all.
+- **Owner gate 8 is enforced by the argument type.** `FullAutoDispatch` has one
+  constructor and it takes an `omega_front_door::LaunchOrigin`, every variant of
+  which is a control a person operates. There is no `LaunchOrigin::ToolCall`, so
+  a model-authored path cannot produce a dispatch, and
+  `no_model_callable_crate_can_dispatch_full_auto` checks that no crate outside
+  the Full Auto surface can even name the command.
+- **The refusal that replaced a string test.** "No worktree" used to be decided
+  by testing whether a formatted reference ended in `"missing"`, which refused a
+  real project whose name ended that way and accepted an unsafe one. It is a
+  typed `DispatchRefusal` now, and the honest case is covered by a test.
+- **What this does not cover.** The thread's run link is read-only. Pause,
+  resume, stop and retry stay on the Full Auto surface, where each control is
+  bound to the run generation the host minted it for; a second set of buttons
+  reading a projection would be a second place that believes it can command a
+  run. The `NewThreadMenuItem` origin is not distinguished in practice, because
+  that menu entry dispatches the same `OpenLauncher` action as the command
+  palette, so both record `open_launcher_action`. Only threads the host bridge
+  correlated to a run carry a run reference at all, so a run a person watches
+  only on the Full Auto surface renders its chain there and not in a thread.
+  And no check here reads a rendered pixel: the rows are asserted to be built
+  and drawn, not to be legible.
+- **Enforced by:** `a_full_auto_dispatch_carries_no_evidence`,
+  `no_model_callable_crate_can_dispatch_full_auto`,
+  `a_thread_renders_the_receipt_chain_of_its_linked_run`, and
+  `the_thread_run_link_is_a_projection_and_not_a_second_authority` in
+  `crates/omega_deltas`; plus the falsification suites in
+  `crates/full_auto_ui` (`thread_run_link`, `dispatch`) and
+  `crates/workroom_receipts` (`the_single_pair_entry_point_names_each_refusal`).

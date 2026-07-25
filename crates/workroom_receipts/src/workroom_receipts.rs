@@ -22,7 +22,7 @@ pub use issue31_full_auto::{
     Issue31ProviderQuota, Issue31ProviderReadiness, MAX_ISSUE31_FULL_AUTO_ACCOUNTS,
     MAX_ISSUE31_FULL_AUTO_CONTROLS, MAX_ISSUE31_FULL_AUTO_HANDOFFS, MAX_ISSUE31_FULL_AUTO_RUNS,
     MAX_ISSUE31_UNATTENDED_MS, build_issue31_full_auto_adjunct, decode_issue31_full_auto_adjunct,
-    is_issue31_public_text,
+    is_issue31_public_text, project_issue31_evidence_pair,
 };
 pub use issue31_host::{
     ISSUE31_HOST_ADJUNCT_SCHEMA, Issue31AbsentGap, Issue31CommandState, Issue31CommandStateInput,
