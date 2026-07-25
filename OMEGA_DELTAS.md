@@ -865,3 +865,91 @@ cargo test -p omega_deltas
   `crates/zed/resources/` — are unread here. And no check looks at a rendered
   pixel, so a label that is correct in source and truncated, mis-cased, or
   absent on screen still passes.
+
+### OMEGA-DELTA-0025 — A wrapped harness runs only bytes Omega measured, and only if the pins admit them
+
+- **Upstream Zed:** `LocalRegistryArchiveAgent` resolves whichever version the
+  ACP registry document currently advertises, downloads it into a versioned
+  cache directory, and hands back the command. The registry's `sha256` is
+  checked at download time when the document supplies one, and then nothing is
+  recorded: no digest, no receipt, and no way for the owner to say *not that
+  version*. The extracted tree is not re-read on later launches at all, so a
+  file replaced after the download runs unnoticed. A registry agent runs with
+  the tool permissions of the thread that started it.
+- **Omega now:** two gates around the same path, both in
+  `crates/project/src/agent_server_store.rs`.
+  - Before anything is fetched, `authorize_version_fetch` reads the pin ledger
+    and refuses a version the owner froze out. This is a prefilter, and
+    `the_prefilter_never_admits_what_the_gate_refuses` proves it can only
+    refuse what the gate below would also refuse.
+  - After the tree is on disk and before the command is returned,
+    `authorize_installed_harness` hashes **every regular file in the installed
+    tree**, folds them into one digest bound to their paths, and refuses unless
+    the owner's pins admit that digest. It runs on every launch, not only on
+    install, so bytes replaced after an install receipt was written are caught.
+  Both write a receipt, permitted or refused.
+- **Why a digest and not a version.** A pin on a version string is satisfied by
+  a release re-tagged in place, which is precisely the substitution omega#81's
+  falsifier describes. `a_retagged_release_does_not_satisfy_a_pin` holds that
+  shut. The version is still compared, because a refusal has to name something
+  an owner recognises — but it is not what authorises the run.
+- **Why the receipt is a measurement.** `MeasuredDigest` has exactly two
+  constructors, `measure(bytes)` and `measure_tree` over already-measured
+  digests. There is no `From<String>`, no `FromStr`, and no `Deserialize`: a
+  value that arrived as text is not a measurement this host made, and giving it
+  the same type would erase the only distinction that matters. The `Applied`
+  receipt input takes a `MeasuredDigest` rather than a string, so a receipt
+  claiming an update was applied structurally cannot be written by a caller
+  that never hashed the bytes. `observedAtMs` is stamped from one `now_ms()`
+  reading taken where the action happened; nothing else that reaches the
+  receipt writer carries a time, so there is no path by which a registry
+  document or a settings file can supply one.
+- **No backfill.** A log record from a schema this build does not know decodes
+  to `ProvenanceUnavailable`, which has no digest field, and
+  `verify_installation` refuses it. An installation with no receipt at all —
+  every harness installed before this delta — is `Unattested` and stays that
+  way until a maintenance action measures it. The schema is read *before* the
+  strict decoder runs, because `deny_unknown_fields` would otherwise classify a
+  genuinely newer record as garbage, and a silent skip is the backfill this
+  contract refuses.
+- **Fails closed.** An unreadable pin ledger is not an unpinned machine:
+  `PinState::Unreadable` refuses every action, so truncating one file does not
+  unfreeze every harness. A tree that cannot be measured is refused whether or
+  not a pin exists, because a machine with no pin is not a machine that
+  consented to running unread bytes. Symlinks inside the tree are recorded by
+  path but not followed, so a link planted in the install directory cannot
+  attest bytes from elsewhere on the machine.
+- **Visible.** A refusal is an `anyhow` error carrying
+  `MaintenanceRefusal::reason()`, a sentence that names the pinned version, the
+  version that was refused, and what to do. `update_affordance` returns
+  `Disabled { reason }` with no way to build a disabled state without one —
+  `0.2.0-rc11` bound `appendSystemNote` to `() => {}` on the framed provider
+  path, so a refused handoff said nothing in the thread and a different model
+  spent the owner's budget with no trace. A blocked update nobody can see is
+  the same defect.
+- **Enforced by:** `a_measured_digest_cannot_be_built_from_a_string`,
+  `the_external_harness_launch_path_is_gated_on_a_measurement`, and
+  `the_enforcement_path_writes_receipts_only_from_decisions` in
+  `crates/omega_deltas`; 46 contract tests in `crates/omega_harness`; and 8
+  filesystem tests in `crates/project/tests/integration/harness_maintenance.rs`
+  that drive the real enforcement functions against a `FakeFs`.
+- **Falsified.** Each behaviour was reverted and the check watched to fail, then
+  restored: the tree measurement replaced with a single-file measurement (the
+  sidecar test goes red), `PinState::Unreadable` folded into `Unpinned` (the
+  corrupt-ledger tests go red), the digest comparison dropped so only versions
+  are compared (`a_retagged_release_does_not_satisfy_a_pin` goes red), the gate
+  moved below the command it gates (the delta check goes red), and
+  `impl From<String> for MeasuredDigest` added (the delta check goes red).
+- **What this does not cover.** `LocalRegistryNpxAgent` is **not** gated: an
+  npx-distributed harness resolves and caches inside the node runtime's own
+  cache, which Omega does not own a directory for, so there is no tree to
+  measure and no gate to hold. `LocalCustomAgent` — a command the user wrote in
+  settings — is not gated either, and should not be: the user named the binary.
+  Neither the ledger nor the receipt log is signed, so an attacker who can
+  write to `paths::external_agents_dir()` can rewrite both; this raises the bar
+  from *no record* to *a record that has to be forged*, and no further. There
+  is **no settings UI** for taking or removing a pin yet — the ledger is a file,
+  and `MaintenanceAffordance` is the typed state a front-door control will
+  render, not a rendered control. Nothing here verifies a publisher signature:
+  the digest says the bytes did not change since Omega measured them, not that
+  they are the bytes the publisher built.

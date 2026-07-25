@@ -7,6 +7,7 @@ mod context_server_store;
 mod debugger;
 mod dynamic_registration;
 mod git_store;
+mod harness_maintenance;
 mod image_store;
 mod lsp_command;
 mod lsp_store;

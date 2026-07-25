@@ -28,6 +28,10 @@ use util::{ResultExt as _, debug_panic};
 
 use crate::ProjectEnvironment;
 use crate::agent_registry_store::{AgentRegistryStore, RegistryAgent, RegistryTargetConfig};
+use crate::harness_maintenance::{
+    authorize_installed_harness, authorize_version_fetch, now_ms as harness_now_ms,
+};
+use omega_harness::MaintenanceAction;
 
 use crate::worktree_store::WorktreeStore;
 
@@ -403,6 +407,7 @@ impl AgentServerStore {
                                         installation_dir: paths::external_agents_dir()
                                             .join("registry")
                                             .join(sanitize_path_component(name)),
+                                        registry_id: Arc::from(name.as_str()),
                                         version: agent.metadata.version.clone(),
                                         targets: agent.targets.clone(),
                                         env: env.clone(),
@@ -1120,6 +1125,11 @@ struct LocalRegistryArchiveAgent {
     node_runtime: NodeRuntime,
     project_environment: Entity<ProjectEnvironment>,
     installation_dir: PathBuf,
+    /// The registry id, kept so maintenance receipts name the harness the way
+    /// the store and the settings file name it. `installation_dir` already
+    /// encodes it, but only after `sanitize_path_component`, and a receipt that
+    /// named a sanitized path component would not join up with anything.
+    registry_id: Arc<str>,
     version: SharedString,
     targets: HashMap<String, RegistryTargetConfig>,
     env: HashMap<String, String>,
@@ -1159,6 +1169,7 @@ impl ExternalAgentServer for LocalRegistryArchiveAgent {
         let node_runtime = self.node_runtime.clone();
         let project_environment = self.project_environment.downgrade();
         let installation_dir = self.installation_dir.clone();
+        let registry_id = self.registry_id.clone();
         let targets = self.targets.clone();
         let settings_env = self.env.clone();
         let version = self.version.clone();
@@ -1218,7 +1229,21 @@ impl ExternalAgentServer for LocalRegistryArchiveAgent {
                 target_config.sha256.as_deref(),
             );
 
-            if !fs.is_dir(&version_dir).await {
+            let already_installed = fs.is_dir(&version_dir).await;
+            if !already_installed {
+                // omega#81. The pin is consulted before any bytes move, so a
+                // frozen harness does not silently download the release the
+                // registry now advertises. This is a prefilter: the authority
+                // is the measured check below, which runs whether or not
+                // anything was downloaded.
+                authorize_version_fetch(
+                    fs.clone(),
+                    registry_id.as_ref(),
+                    version.as_ref(),
+                    harness_now_ms(),
+                )
+                .await?;
+
                 let mut loading_status_tx = loading_status_tx;
                 if let Some(tx) = loading_status_tx.as_mut() {
                     tx.send(Some(format!("Installing {}…", version.as_ref())))
@@ -1312,6 +1337,28 @@ impl ExternalAgentServer for LocalRegistryArchiveAgent {
                 }
             })
             .detach();
+
+            // omega#81, the enforcement point. The installed tree is hashed
+            // here, on every launch, and the command is only handed back if the
+            // owner's pins admit that hash. Measuring at install time and
+            // trusting it afterwards would leave the window this closes: the
+            // bytes can be replaced after the install receipt is written, and
+            // this harness is about to run with the thread's tool permissions.
+            //
+            // The receipt is written by this call, permitted or refused.
+            authorize_installed_harness(
+                fs.clone(),
+                registry_id.as_ref(),
+                version.as_ref(),
+                &version_dir,
+                if already_installed {
+                    MaintenanceAction::Verify
+                } else {
+                    MaintenanceAction::Install
+                },
+                harness_now_ms(),
+            )
+            .await?;
 
             let mut args = target_config.args.clone();
             args.extend(extra_args);
@@ -1738,6 +1785,7 @@ mod tests {
                 node_runtime: NodeRuntime::unavailable(),
                 project_environment,
                 installation_dir,
+                registry_id: Arc::from("test-agent"),
                 version: "1.0.0".into(),
                 targets,
                 env: HashMap::default(),

@@ -8,6 +8,7 @@ pub mod context_server_store;
 pub mod debounced_delay;
 pub mod debugger;
 pub mod git_store;
+pub mod harness_maintenance;
 pub mod image_store;
 pub mod lsp_command;
 pub mod lsp_store;

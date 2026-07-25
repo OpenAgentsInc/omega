@@ -11971,6 +11971,15 @@ name = "omega_front_door"
 version = "0.1.0"
 
 [[package]]
+name = "omega_harness"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
 name = "omega_identity"
 version = "0.1.0"
 dependencies = [
@@ -13806,6 +13815,7 @@ dependencies = [
  "lsp",
  "markdown",
  "node_runtime",
+ "omega_harness",
  "parking_lot",
  "path",
  "paths",

@@ -52,7 +52,26 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0022",
     "OMEGA-DELTA-0023",
     "OMEGA-DELTA-0024",
+    "OMEGA-DELTA-0025",
 ];
+
+/// OMEGA-DELTA-0025. The file that declares the measured digest.
+pub const MEASURED_DIGEST_PATH: &str = "crates/omega_harness/src/measured.rs";
+
+/// OMEGA-DELTA-0025. Every admitted way into `MeasuredDigest`.
+///
+/// A closed list, not a denylist. The invariant is "there is no path from a
+/// string into this type", and a denylist of `From<String>`, `FromStr`,
+/// `Deserialize` and `new` would be a list of the four ways somebody already
+/// thought of. Naming the admitted constructors instead makes a fifth one fail
+/// by existing.
+pub const MEASURED_DIGEST_CONSTRUCTORS: &[&str] = &["measure", "measure_tree"];
+
+/// OMEGA-DELTA-0025. The filesystem half of harness maintenance.
+pub const HARNESS_MAINTENANCE_PATH: &str = "crates/project/src/harness_maintenance.rs";
+
+/// OMEGA-DELTA-0025. The launch path the provenance gate sits in.
+pub const AGENT_SERVER_STORE_PATH: &str = "crates/project/src/agent_server_store.rs";
 
 /// OMEGA-DELTA-0021. The file that holds the executor-disclosure record.
 pub const EXECUTOR_DISCLOSURE_RECORD_PATH: &str = "crates/omega_front_door/src/omega_front_door.rs";
@@ -2882,6 +2901,244 @@ mod tests {
             offenders.is_empty(),
             "OMEGA-DELTA-0021: the disclosure record leaked into the shared \
              thread crate, which is the fork omega#77 forbids: {offenders:?}"
+        );
+    }
+
+    // ------------------------------------------------------ OMEGA-DELTA-0025
+
+    /// OMEGA-DELTA-0025. A digest is a measurement, never a parsed claim.
+    ///
+    /// The whole provenance packet rests on this. If a `MeasuredDigest` can be
+    /// built from a string, then a receipt saying "this update was applied at
+    /// this digest" can be written by code that read a registry document
+    /// instead of the bytes, and the receipt stops meaning anything a reader
+    /// could act on — while continuing to look identical on the wire.
+    ///
+    /// This is the kind of invariant a convenience constructor undoes in good
+    /// faith: `impl From<String>` to make a test fixture shorter, or a
+    /// `Deserialize` derive to reuse the type in the pin ledger. So the
+    /// admitted constructors are named, and anything that returns the type
+    /// another way fails.
+    #[test]
+    fn a_measured_digest_cannot_be_built_from_a_string() {
+        let path = repository_path(MEASURED_DIGEST_PATH);
+        let source = std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
+
+        let header = "impl MeasuredDigest {\n";
+        let start = source.find(header).unwrap_or_else(|| {
+            panic!(
+                "OMEGA-DELTA-0025: no `impl MeasuredDigest` block in {}. The \
+                 check would be vacuous, so it fails instead.",
+                path.display()
+            )
+        });
+        let body_start = start + header.len();
+        let end = source[body_start..]
+            .find("\n}")
+            .expect("the impl block closes");
+        let body = &source[body_start..body_start + end];
+
+        // Every associated function that hands back a `MeasuredDigest`.
+        let mut constructors: Vec<String> = Vec::new();
+        let mut lines = body.lines().peekable();
+        while let Some(line) = lines.next() {
+            let trimmed = line.trim();
+            let Some(rest) = trimmed
+                .strip_prefix("pub fn ")
+                .or_else(|| trimmed.strip_prefix("fn "))
+            else {
+                continue;
+            };
+            let Some((name, signature)) = rest.split_once('(') else {
+                continue;
+            };
+            // A one-line signature, or the return type on the following line.
+            let returns_self = signature.contains("-> Self")
+                || signature.contains("-> MeasuredDigest")
+                || lines
+                    .peek()
+                    .is_some_and(|next| next.contains("-> Self") || next.contains("-> MeasuredDigest"));
+            if returns_self {
+                constructors.push(name.trim().to_owned());
+            }
+        }
+        constructors.sort();
+        constructors.dedup();
+
+        let mut admitted: Vec<String> = MEASURED_DIGEST_CONSTRUCTORS
+            .iter()
+            .map(|name| (*name).to_owned())
+            .collect();
+        admitted.sort();
+        assert_eq!(
+            constructors,
+            admitted,
+            "OMEGA-DELTA-0025: {} declares a different set of ways to obtain a \
+             MeasuredDigest than the admitted one. Every entry has to take \
+             bytes or already-measured digests; a constructor that takes a \
+             digest string turns every receipt into a claim.",
+            path.display()
+        );
+
+        // The primitive constructor takes bytes. Without this the closed list
+        // above would still pass if `measure` were changed to take a `&str`
+        // digest.
+        assert!(
+            source.contains("pub fn measure(bytes: &[u8]) -> Self"),
+            "OMEGA-DELTA-0025: MeasuredDigest::measure no longer takes bytes in {}",
+            path.display()
+        );
+        assert!(
+            source.contains("pub fn measure_tree(files: &mut [(String, MeasuredDigest)]) -> Self"),
+            "OMEGA-DELTA-0025: MeasuredDigest::measure_tree no longer folds \
+             already-measured digests in {}",
+            path.display()
+        );
+
+        // A trait implementation is not a `fn` in the inherent block, so the
+        // closed list above cannot see one. These are the three that would
+        // reintroduce a string path.
+        //
+        // Read from the code only: this module's own documentation explains
+        // why `Deserialize` is absent, and a whole-file scan reads that
+        // explanation as the violation it describes. The first run of this
+        // check did exactly that.
+        let source: String = source
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        for forbidden in [
+            "impl From<String> for MeasuredDigest",
+            "impl From<&str> for MeasuredDigest",
+            "impl std::str::FromStr for MeasuredDigest",
+        ] {
+            assert!(
+                !source.contains(forbidden),
+                "OMEGA-DELTA-0025: {forbidden} reintroduces a path from a claim \
+                 into a measurement, in {}",
+                path.display()
+            );
+        }
+        assert!(
+            !source.contains("Deserialize"),
+            "OMEGA-DELTA-0025: MeasuredDigest became deserializable in {}. A \
+             value that arrived as text is not a measurement this host made.",
+            path.display()
+        );
+    }
+
+    /// OMEGA-DELTA-0025. An external harness does not run unmeasured.
+    ///
+    /// Upstream resolves whichever version the ACP registry advertises,
+    /// downloads it, and returns the command. A registry agent then runs with
+    /// the tool permissions of the thread that started it, which is exactly the
+    /// falsifier omega#81 names: a binary swapped under an auto-update path
+    /// with no verifiable provenance record.
+    ///
+    /// So the gate has to sit between the installed tree and the returned
+    /// command, and its refusal has to propagate. A gate whose result is logged
+    /// and dropped is the rc11 defect — `appendSystemNote` bound to `() => {}`
+    /// — in a different file.
+    #[test]
+    fn the_external_harness_launch_path_is_gated_on_a_measurement() {
+        let path = repository_path(AGENT_SERVER_STORE_PATH);
+        let source = std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
+
+        let gate = source.find("authorize_installed_harness(").unwrap_or_else(|| {
+            panic!(
+                "OMEGA-DELTA-0025: {} no longer measures an installed harness \
+                 before returning its command",
+                path.display()
+            )
+        });
+        let prefetch_gate = source.find("authorize_version_fetch(").unwrap_or_else(|| {
+            panic!(
+                "OMEGA-DELTA-0025: {} no longer consults the pin before fetching \
+                 a harness version",
+                path.display()
+            )
+        });
+
+        // The archive agent is the only registry path that installs a tree
+        // Omega controls, and its command construction must come after the
+        // gate.
+        let command = source[gate..]
+            .find("let command = AgentServerCommand {")
+            .map(|offset| gate + offset)
+            .unwrap_or_else(|| {
+                panic!(
+                    "OMEGA-DELTA-0025: no AgentServerCommand is constructed after \
+                     the provenance gate in {}. Either the gate moved below the \
+                     command it is supposed to gate, or the command moved out of \
+                     reach of this check.",
+                    path.display()
+                )
+            });
+        assert!(
+            gate < command,
+            "OMEGA-DELTA-0025: the provenance gate no longer precedes the \
+             command it gates in {}",
+            path.display()
+        );
+        assert!(
+            prefetch_gate < gate,
+            "OMEGA-DELTA-0025: the pin is consulted after the download rather \
+             than before it in {}",
+            path.display()
+        );
+
+        // The refusal has to be propagated, not logged. `.log_err()` on either
+        // call would leave the harness running.
+        for call in ["authorize_version_fetch(", "authorize_installed_harness("] {
+            let start = source.find(call).expect("call site located above");
+            let tail = &source[start..];
+            let end = tail.find(";").expect("the call statement ends");
+            assert!(
+                tail[..end].contains(".await?") || tail[..end].ends_with(".await?"),
+                "OMEGA-DELTA-0025: the result of {call} is not propagated in {}. \
+                 A refusal that does not stop the launch is not a refusal.",
+                path.display()
+            );
+        }
+    }
+
+    /// OMEGA-DELTA-0025. One decision, one receipt.
+    ///
+    /// `receipt_for_decision` takes the gate's own output, so a receipt cannot
+    /// describe an outcome the gate did not reach. Calling the lower-level
+    /// emitter from the enforcement path would reopen that gap: the receipt
+    /// would be assembled from whatever the caller believed, beside a decision
+    /// made somewhere else.
+    #[test]
+    fn the_enforcement_path_writes_receipts_only_from_decisions() {
+        let path = repository_path(HARNESS_MAINTENANCE_PATH);
+        let source = std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
+
+        assert!(
+            source.contains("receipt_for_decision("),
+            "OMEGA-DELTA-0025: {} no longer writes maintenance receipts",
+            path.display()
+        );
+        let code_only: String = source
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            !code_only.contains("build_harness_maintenance_receipt("),
+            "OMEGA-DELTA-0025: {} builds a receipt without a decision. The \
+             receipt and the enforcement would then be two answers to the same \
+             question, and nothing on the wire would say which one ran.",
+            path.display()
+        );
+        assert!(
+            code_only.contains("decide_maintenance("),
+            "OMEGA-DELTA-0025: {} no longer consults the maintenance gate",
+            path.display()
         );
     }
 

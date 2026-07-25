@@ -1,0 +1,21 @@
+[package]
+name = "omega_harness"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license = "GPL-3.0-or-later"
+description = "Omega harness maintenance: pins, measured provenance, receipts (OMEGA-AGENT-07)"
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/omega_harness.rs"
+doctest = false
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+
+[dev-dependencies]
