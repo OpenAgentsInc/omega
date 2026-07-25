@@ -354,8 +354,8 @@ impl LanguageModels {
                             // that we know are safe to ignore here, like what we do
                             // with `CredentialsNotFound` above.
                             match provider_id.0.as_ref() {
-                                "lmstudio" | "ollama" => {
-                                    // LM Studio and Ollama both make fetch requests to the local APIs to determine if they are "authenticated".
+                                "lmstudio" | "ollama" | "exo" => {
+                                    // LM Studio, Ollama, and exo all make fetch requests to the local APIs to determine if they are "authenticated".
                                     //
                                     // These fail noisily, so we don't log them.
                                 }

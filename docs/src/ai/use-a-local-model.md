@@ -155,6 +155,49 @@ Use LM Studio for local models with Omega Agent, Inline Assistant, and similar m
 
 If your LM Studio server requires a key, enter the key in the provider UI or set `LMSTUDIO_API_KEY`.
 
+## exo {#exo}
+
+Use [exo](https://github.com/exo-explore/exo) to cluster your local devices into one OpenAI-compatible endpoint and serve models across them.
+
+1. Install exo:
+
+   ```sh
+   brew install --cask exo
+   ```
+
+   Or install it from source with the instructions in the exo repository.
+
+2. Start exo:
+
+   ```sh
+   exo
+   ```
+
+3. In Zed, select an exo model from the model dropdown.
+
+Omega lists the full exo model catalog, but a model must have a running instance before chat works. Start an instance from the exo dashboard at `http://127.0.0.1:52415`. If you send a message to a model with no running instance, Omega shows a clear error that tells you to load the model first.
+
+To customize the endpoint or the model list:
+
+```json [settings]
+{
+  "language_models": {
+    "exo": {
+      "api_url": "http://127.0.0.1:52415/v1",
+      "available_models": [
+        {
+          "name": "qwen3-30b",
+          "max_tokens": 40960,
+          "supports_tools": true
+        }
+      ]
+    }
+  }
+}
+```
+
+Security note: the exo API has no authentication, and exo's defaults expose it on your local network. Keep the API URL on `127.0.0.1` unless you trust the network.
+
 ## Local OpenAI-Compatible Servers {#openai-compatible}
 
 Use [OpenAI-compatible endpoints](./use-api-access.md#openai-compatible) for local or self-hosted servers that expose an OpenAI-compatible API.

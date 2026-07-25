@@ -14,6 +14,7 @@ pub struct AllLanguageModelSettingsContent {
     pub anthropic_compatible: Option<HashMap<Arc<str>, AnthropicCompatibleSettingsContent>>,
     pub bedrock: Option<AmazonBedrockSettingsContent>,
     pub deepseek: Option<DeepseekSettingsContent>,
+    pub exo: Option<ExoSettingsContent>,
     pub google: Option<GoogleSettingsContent>,
     #[serde(rename = "llama.cpp")]
     pub llama_cpp: Option<LlamaCppSettingsContent>,
@@ -353,6 +354,32 @@ pub struct DeepseekAvailableModel {
     pub display_name: Option<String>,
     pub max_tokens: u64,
     pub max_output_tokens: Option<u64>,
+}
+
+#[with_fallible_options]
+#[derive(Default, Clone, Debug, Serialize, Deserialize, PartialEq, JsonSchema, MergeFrom)]
+pub struct ExoSettingsContent {
+    pub api_url: Option<String>,
+    pub api_key: Option<String>,
+    pub available_models: Option<Vec<ExoAvailableModel>>,
+    pub custom_headers: Option<HashMap<String, String>>,
+}
+
+#[with_fallible_options]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema, MergeFrom)]
+pub struct ExoAvailableModel {
+    /// The model id reported by the exo cluster, e.g. "llama-3.2-1b".
+    pub name: String,
+    /// The model's name in Zed's UI, such as in the model selector dropdown menu in the agent panel.
+    pub display_name: Option<String>,
+    /// The model's context window size.
+    pub max_tokens: u64,
+    /// Whether the model supports tools.
+    pub supports_tools: Option<bool>,
+    /// Whether the model supports vision.
+    pub supports_images: Option<bool>,
+    /// Whether the model supports exo's `enable_thinking` request toggle.
+    pub supports_thinking_toggle: Option<bool>,
 }
 
 #[with_fallible_options]
