@@ -5735,7 +5735,7 @@ mod tests {
         for theme_name in themes.list().into_iter().map(|meta| meta.name) {
             let theme = themes.get(&theme_name).unwrap();
             assert_eq!(theme.name, theme_name);
-            if theme.name.as_ref() == "Aiur Dark" {
+            if theme.name.as_ref() == "Aiur" {
                 has_default_theme = true;
             }
         }

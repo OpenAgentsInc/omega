@@ -185,6 +185,7 @@ enum IdentityAction {
     Reset,
     Relaunch,
     Protect,
+    ReplaceRecovery,
 }
 
 impl IdentityAction {
@@ -198,6 +199,7 @@ impl IdentityAction {
             Self::Reset => "reset",
             Self::Relaunch => "relaunch",
             Self::Protect => "protect",
+            Self::ReplaceRecovery => "replace-recovery",
         }
     }
 
@@ -211,6 +213,11 @@ impl IdentityAction {
             Self::Reset => "Reset identity",
             Self::Relaunch => "Relaunch Omega",
             Self::Protect => "Protect recovery",
+            // A distinct action rather than a relabelled Protect, so the
+            // protected and unprotected states can never present the same
+            // control again. Offering "Protect recovery" beside "Recovery
+            // protected" reads as though the protection did not take.
+            Self::ReplaceRecovery => "Replace recovery file",
         }
     }
 
@@ -567,7 +574,7 @@ impl IdentitySection {
             ),
             IdentityAction::Reset => self.confirm_reset(window, cx),
             IdentityAction::Relaunch => cx.restart(),
-            IdentityAction::Protect => {
+            IdentityAction::Protect | IdentityAction::ReplaceRecovery => {
                 self.controller.cancel();
                 self.clear_recovery_material(cx);
                 self.recovery_mode = Some(RecoveryMode::Protect);
@@ -1197,7 +1204,11 @@ impl IdentitySection {
                     } else {
                         Color::Success
                     },
-                    actions: vec![IdentityAction::Protect],
+                    actions: vec![if needs_recovery {
+                        IdentityAction::Protect
+                    } else {
+                        IdentityAction::ReplaceRecovery
+                    }],
                 }
             }
         }
@@ -1842,20 +1853,45 @@ mod tests {
         assert_eq!(presentation.actions, vec![IdentityAction::Protect]);
     }
 
+    /// The protected and unprotected states must never present the same
+    /// control. Offering "Protect recovery" beside "Recovery protected" reads
+    /// as though the protection did not take, which is what omega#68 reported.
+    ///
+    /// Rotation stays reachable, relabelled, so this fix does not quietly
+    /// remove the ability to replace a recovery file.
     #[test]
-    fn compact_ready_identity_keeps_recovery_protection_action_reachable() {
+    fn a_protected_identity_offers_replacement_rather_than_protection() {
         let mut inspection = inspection(CustodyState::Ready);
         inspection.recovery_protection = RecoveryProtectionStatus {
             state: RecoveryProtectionState::Protected,
             record: None,
         };
-        let presentation = IdentitySection::durable_presentation(&inspection);
-        assert_eq!(presentation.title, "Identity ready");
-        assert_eq!(presentation.actions, vec![IdentityAction::Protect]);
+        let protected = IdentitySection::durable_presentation(&inspection);
+        assert_eq!(protected.title, "Identity ready");
+        assert_eq!(protected.actions, vec![IdentityAction::ReplaceRecovery]);
+        assert_eq!(
+            IdentityAction::ReplaceRecovery.label(),
+            "Replace recovery file"
+        );
         assert_eq!(
             IdentitySection::compact_recovery_protection_for(&inspection).map(|(label, _)| label),
             Some("Recovery protected")
         );
+
+        inspection.recovery_protection = RecoveryProtectionStatus {
+            state: RecoveryProtectionState::Needed,
+            record: None,
+        };
+        let needed = IdentitySection::durable_presentation(&inspection);
+        assert_eq!(needed.actions, vec![IdentityAction::Protect]);
+
+        assert_eq!(
+            IdentitySection::compact_recovery_protection_for(&inspection).map(|(label, _)| label),
+            Some("Recovery protection needed")
+        );
+
+        // The two states must differ. If they ever converge again, this fails.
+        assert_ne!(protected.actions, needed.actions);
     }
 
     #[test]

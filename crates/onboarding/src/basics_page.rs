@@ -25,8 +25,11 @@ use crate::{
     theme_preview::{ThemePreviewStyle, ThemePreviewTile},
 };
 
-const LIGHT_THEMES: [&str; 3] = ["Aiur Light", "Ayu Light", "Gruvbox Light"];
-const DARK_THEMES: [&str; 3] = ["Aiur Dark", "Ayu Dark", "Gruvbox Dark"];
+// Aiur is dark-only (omega#70). Selecting the Aiur family gives Aiur in
+// either appearance rather than substituting a light theme the owner did
+// not choose.
+const LIGHT_THEMES: [&str; 3] = ["Aiur", "Ayu Light", "Gruvbox Light"];
+const DARK_THEMES: [&str; 3] = ["Aiur", "Ayu Dark", "Gruvbox Dark"];
 const FAMILY_NAMES: [SharedString; 3] = [
     SharedString::new_static("Aiur"),
     SharedString::new_static("Ayu"),
@@ -765,8 +768,8 @@ mod tests {
 
     #[test]
     fn omega_onboarding_preserves_theme_families() {
-        assert_eq!(LIGHT_THEMES, ["Aiur Light", "Ayu Light", "Gruvbox Light"]);
-        assert_eq!(DARK_THEMES, ["Aiur Dark", "Ayu Dark", "Gruvbox Dark"]);
+        assert_eq!(LIGHT_THEMES, ["Aiur", "Ayu Light", "Gruvbox Light"]);
+        assert_eq!(DARK_THEMES, ["Aiur", "Ayu Dark", "Gruvbox Dark"]);
         assert_eq!(
             FAMILY_NAMES.map(|name| name.to_string()),
             ["Aiur", "Ayu", "Gruvbox"]
@@ -775,10 +778,8 @@ mod tests {
             get_theme_family_themes("Ayu Dark"),
             Some(("Ayu Light", "Ayu Dark"))
         );
-        assert_eq!(
-            get_theme_family_themes("Aiur Dark"),
-            Some(("Aiur Light", "Aiur Dark"))
-        );
+        // Aiur is dark-only, so both appearances resolve to the same theme.
+        assert_eq!(get_theme_family_themes("Aiur"), Some(("Aiur", "Aiur")));
     }
 
     #[test]

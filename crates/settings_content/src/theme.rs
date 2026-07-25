@@ -286,8 +286,9 @@ pub enum ThemeSelection {
     },
 }
 
-pub const DEFAULT_LIGHT_THEME: &'static str = "Aiur Light";
-pub const DEFAULT_DARK_THEME: &'static str = "Aiur Dark";
+// Aiur is dark-only (omega#70), so the light default comes from Ayu.
+pub const DEFAULT_LIGHT_THEME: &'static str = "Ayu Light";
+pub const DEFAULT_DARK_THEME: &'static str = "Aiur";
 
 impl Default for ThemeSelection {
     fn default() -> Self {

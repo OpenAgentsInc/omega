@@ -322,14 +322,13 @@ impl Component for ThemePreviewTile {
     fn preview(_window: &mut Window, cx: &mut App) -> AnyElement {
         let theme_registry = ThemeRegistry::global(cx);
 
-        let aiur_dark = theme_registry.get("Aiur Dark");
-        let aiur_light = theme_registry.get("Aiur Light");
+        // Aiur is dark-only (omega#70).
+        let aiur = theme_registry.get("Aiur");
         let gruvbox_dark = theme_registry.get("Gruvbox Dark");
         let gruvbox_light = theme_registry.get("Gruvbox Light");
 
         let themes_to_preview = vec![
-            aiur_dark.clone().ok(),
-            aiur_light.ok(),
+            aiur.clone().ok(),
             gruvbox_dark.ok(),
             gruvbox_light.ok(),
         ]
@@ -341,7 +340,7 @@ impl Component for ThemePreviewTile {
             .gap_6()
             .p_4()
             .children({
-                if let Some(aiur_dark) = aiur_dark.ok() {
+                if let Some(aiur_dark) = aiur.ok() {
                     vec![example_group(vec![single_example(
                         "Default",
                         div()

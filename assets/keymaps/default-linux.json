@@ -648,7 +648,7 @@
       "ctrl-s": "workspace::Save",
       "ctrl-k s": "workspace::SaveWithoutFormat",
       "shift-save": "workspace::SaveAs",
-      "ctrl-shift-s": "workspace::SaveAs",
+      "ctrl-shift-s": "workroom::OpenPanel",
       "new": "workspace::NewFile",
       "ctrl-n": "workspace::NewFile",
       "shift-new": "workspace::NewWindow",
