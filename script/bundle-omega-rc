@@ -28,12 +28,12 @@ readonly OMEGA_SOURCE_VERIFIER_PATH="script/verify-omega-identity"
 readonly OMEGA_IDENTITY_BOUNDARY_LIST="BUZZ_PRIVATE_KEY,identity.key,get_nsec"
 readonly OMEGA_BRAND_VERIFIER_PATH="script/verify-omega-brand"
 readonly OMEGA_BRAND_POLICY_PATH="script/omega-brand-gate.json"
-readonly OMEGA_EFFECTD_RELEASE_TAG="omega-effectd-v0.1.0-rc.8"
+readonly OMEGA_EFFECTD_RELEASE_TAG="omega-effectd-v0.1.0-rc.9"
 readonly OMEGA_EFFECTD_ASSET_NAME="omega-effectd-v0.1.0-macos-arm64.tar.gz"
-readonly OMEGA_EFFECTD_ASSET_SHA256="01d11597b054d009296d0381b6cd6ed3d31c83b93e75a58845f2ae47bf33226a"
-readonly OMEGA_EFFECTD_MANIFEST_ASSET_SHA256="74f7eb1043de6662f490351d6587a4e85fb50d65e95aac792b4b32c315081f94"
-readonly OMEGA_EFFECTD_SOURCE_COMMIT="509ae747f00f6f7ebb413809ff5bd6ea123e1c1c"
-readonly OMEGA_EFFECTD_SOURCE_TREE="063f456be4e196b5eb6eff18f9a14453a52599fc"
+readonly OMEGA_EFFECTD_ASSET_SHA256="52429905efe9922348da7b762d5fc52d8663ace37cddbc979da60be8393f552b"
+readonly OMEGA_EFFECTD_MANIFEST_ASSET_SHA256="ed1c60e1d697c60ef1f48f7d121db67584f8c7f524bbf2e1ff5dfc31a440a937"
+readonly OMEGA_EFFECTD_SOURCE_COMMIT="28c877d0b85b57d8f3162488b27ecf77c20278e2"
+readonly OMEGA_EFFECTD_SOURCE_TREE="85eaf116ca8d1f303fcdb94279a512ffb5e6baa1"
 readonly OMEGA_EFFECTD_DOWNLOAD_URL="https://github.com/OpenAgentsInc/openagents/releases/download/${OMEGA_EFFECTD_RELEASE_TAG}/${OMEGA_EFFECTD_ASSET_NAME}"
 
 DRY_RUN=false
@@ -563,12 +563,12 @@ expected_effectd = {
     "service_version": "0.1.0",
     "protocol": "openagents.omega.effectd.v1",
     "platform": "darwin-arm64",
-    "release_tag": "omega-effectd-v0.1.0-rc.8",
+    "release_tag": "omega-effectd-v0.1.0-rc.9",
     "asset_name": "omega-effectd-v0.1.0-macos-arm64.tar.gz",
-    "archive_sha256": "01d11597b054d009296d0381b6cd6ed3d31c83b93e75a58845f2ae47bf33226a",
-    "manifest_sha256": "74f7eb1043de6662f490351d6587a4e85fb50d65e95aac792b4b32c315081f94",
-    "source_commit": "509ae747f00f6f7ebb413809ff5bd6ea123e1c1c",
-    "source_tree": "063f456be4e196b5eb6eff18f9a14453a52599fc",
+    "archive_sha256": "52429905efe9922348da7b762d5fc52d8663ace37cddbc979da60be8393f552b",
+    "manifest_sha256": "ed1c60e1d697c60ef1f48f7d121db67584f8c7f524bbf2e1ff5dfc31a440a937",
+    "source_commit": "28c877d0b85b57d8f3162488b27ecf77c20278e2",
+    "source_tree": "85eaf116ca8d1f303fcdb94279a512ffb5e6baa1",
 }
 for key, expected in expected_effectd.items():
     if effectd.get(key) != expected:

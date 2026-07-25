@@ -141,10 +141,10 @@ EXPECTED_LIFECYCLE_RECEIPTS = (
     "app_removal",
     "app_reinstall",
 )
-EXPECTED_EFFECTD_ARCHIVE_SHA256 = "01d11597b054d009296d0381b6cd6ed3d31c83b93e75a58845f2ae47bf33226a"
-EXPECTED_EFFECTD_MANIFEST_SHA256 = "74f7eb1043de6662f490351d6587a4e85fb50d65e95aac792b4b32c315081f94"
-EXPECTED_EFFECTD_SOURCE_COMMIT = "509ae747f00f6f7ebb413809ff5bd6ea123e1c1c"
-EXPECTED_EFFECTD_SOURCE_TREE = "063f456be4e196b5eb6eff18f9a14453a52599fc"
+EXPECTED_EFFECTD_ARCHIVE_SHA256 = "52429905efe9922348da7b762d5fc52d8663ace37cddbc979da60be8393f552b"
+EXPECTED_EFFECTD_MANIFEST_SHA256 = "ed1c60e1d697c60ef1f48f7d121db67584f8c7f524bbf2e1ff5dfc31a440a937"
+EXPECTED_EFFECTD_SOURCE_COMMIT = "28c877d0b85b57d8f3162488b27ecf77c20278e2"
+EXPECTED_EFFECTD_SOURCE_TREE = "85eaf116ca8d1f303fcdb94279a512ffb5e6baa1"
 MANUAL_CHECKS = (
     "clean_profile_side_by_side_zed",
     "offline_identity_first_start",
@@ -406,7 +406,7 @@ def validate_release_record(record: dict[str, Any], record_path: Path, artifact:
         "service_version": "0.1.0",
         "protocol": "openagents.omega.effectd.v1",
         "platform": "darwin-arm64",
-        "release_tag": "omega-effectd-v0.1.0-rc.8",
+        "release_tag": "omega-effectd-v0.1.0-rc.9",
         "asset_name": "omega-effectd-v0.1.0-macos-arm64.tar.gz",
         "archive_sha256": EXPECTED_EFFECTD_ARCHIVE_SHA256,
         "manifest_sha256": EXPECTED_EFFECTD_MANIFEST_SHA256,
@@ -1812,7 +1812,7 @@ def self_test() -> None:
                     "service_version": "0.1.0",
                     "protocol": "openagents.omega.effectd.v1",
                     "platform": "darwin-arm64",
-                    "release_tag": "omega-effectd-v0.1.0-rc.8",
+                    "release_tag": "omega-effectd-v0.1.0-rc.9",
                     "asset_name": "omega-effectd-v0.1.0-macos-arm64.tar.gz",
                     "archive_sha256": EXPECTED_EFFECTD_ARCHIVE_SHA256,
                     "source_commit": EXPECTED_EFFECTD_SOURCE_COMMIT,
