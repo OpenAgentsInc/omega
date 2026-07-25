@@ -1123,8 +1123,17 @@
       // Global default permission when no tool-specific rules match.
       // "allow" - Auto-approve without prompting
       // "deny" - Auto-reject
-      // "confirm" - Always prompt (default)
-      "default": "confirm",
+      // "confirm" - Always prompt
+      //
+      // Omega defaults to "allow". Upstream Zed defaults to "confirm".
+      // Omega's purpose is unattended agent work, and a confirm-by-default
+      // policy is not a safety feature there: with nobody watching, a prompt
+      // is a hang. See OMEGA-DELTA-0002.
+      //
+      // The "always_confirm" and "always_deny" patterns below still work and
+      // are the supported way to draw a line around specific operations.
+      // Omega ships none by default because the owner asked for none.
+      "default": "allow",
       // Per-tool permission rules. Regex patterns match against tool input text.
       // The per-tool "default" also applies to MCP tools.
       // Each tool can have its own default and regex patterns.

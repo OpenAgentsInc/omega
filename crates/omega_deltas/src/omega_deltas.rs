@@ -19,7 +19,12 @@ pub const DELTA_REGISTRY_PATH: &str = "OMEGA_DELTAS.md";
 ///
 /// Adding a check without adding its ID here, or an ID without a registry
 /// entry, fails `every_enforced_delta_is_registered`.
-pub const ENFORCED_DELTAS: &[&str] = &["OMEGA-DELTA-0001"];
+pub const ENFORCED_DELTAS: &[&str] = &[
+    "OMEGA-DELTA-0001",
+    "OMEGA-DELTA-0002",
+    "OMEGA-DELTA-0003",
+    "OMEGA-DELTA-0004",
+];
 
 /// Read a repository file relative to the workspace root.
 ///
@@ -162,6 +167,50 @@ mod tests {
              removed. If a rebase reverted this, restore it rather than \
              editing this test."
         );
+    }
+
+    /// OMEGA-DELTA-0002. Upstream Zed defaults to "confirm", which asks before
+    /// every agent tool action. Omega runs agents unattended, where a prompt
+    /// is a hang rather than a safeguard.
+    #[test]
+    fn agent_tool_permissions_default_to_allow() {
+        let settings = default_settings().expect("default settings parse");
+        let value = default_setting(&settings, "agent.tool_permissions.default")
+            .expect("agent.tool_permissions.default is present in default settings");
+        assert_eq!(
+            value.as_str(),
+            Some("allow"),
+            "OMEGA-DELTA-0002: Omega must default agent.tool_permissions.default \
+             to \"allow\". Upstream Zed defaults to \"confirm\", which blocks \
+             unattended agent work entirely. Draw lines with always_confirm / \
+             always_deny patterns instead of by reverting this default."
+        );
+    }
+
+    /// OMEGA-DELTA-0003. Already correct upstream-divergent value, locked so a
+    /// rebase cannot quietly reintroduce the quit prompt.
+    #[test]
+    fn quitting_is_never_confirmed() {
+        let settings = default_settings().expect("default settings parse");
+        assert_eq!(
+            default_setting(&settings, "confirm_quit").and_then(serde_json::Value::as_bool),
+            Some(false),
+            "OMEGA-DELTA-0003: Omega must not ask for confirmation on quit."
+        );
+    }
+
+    /// OMEGA-DELTA-0004. Telemetry stays off. This is a privacy posture, so it
+    /// is locked rather than left to whatever upstream ships next.
+    #[test]
+    fn telemetry_stays_off() {
+        let settings = default_settings().expect("default settings parse");
+        for key in ["telemetry.diagnostics", "telemetry.metrics"] {
+            assert_eq!(
+                default_setting(&settings, key).and_then(serde_json::Value::as_bool),
+                Some(false),
+                "OMEGA-DELTA-0004: {key} must default to false in Omega."
+            );
+        }
     }
 
     /// Every delta needs a registry entry, so a check cannot outlive its reason.

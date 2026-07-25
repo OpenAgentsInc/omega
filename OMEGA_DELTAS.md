@@ -53,3 +53,42 @@ cargo test -p omega_deltas
 - **Explicit access is retained:** the `ToggleWorktreeSecurity` action still
   opens the modal on demand. This delta removes the *automatic* interruption
   and the restricted default, not the ability to inspect trust.
+
+### OMEGA-DELTA-0002 — Agents do not ask before every tool action
+
+- **Upstream Zed:** `agent.tool_permissions.default` is `"confirm"`. Every agent
+  tool action prompts before running.
+- **Omega:** defaults to `"allow"`.
+- **Why:** Omega's purpose is unattended agent work. With nobody watching, a
+  confirmation prompt is not a safeguard — it is a hang, and the run stalls
+  until a human returns. Owner direction, 2026-07-25: Omega is *"YOLO mode
+  throughout, aka 'do what the user tells you'"*.
+- **The line is still drawable.** `always_confirm` and `always_deny` patterns
+  keep working and are the supported way to gate a specific operation, such as
+  `git reset --hard`, force pushes, or reads of `.env` and key material. Omega
+  ships none by default because the owner asked for none. Anyone who wants one
+  adds a pattern rather than reverting this default.
+- **Known tradeoff, stated plainly:** an agent can now run a destructive command
+  without asking. That is the requested behaviour, not an oversight.
+- **Enforced by:** `agent_tool_permissions_default_to_allow`.
+
+### OMEGA-DELTA-0003 — Quitting is never confirmed
+
+- **Upstream Zed:** ships a confirm-on-quit path.
+- **Omega:** `confirm_quit` defaults to `false`.
+- **Why:** quitting is deliberate and recoverable; unsaved buffers are handled
+  by `restore_unsaved_buffers`, not by a modal.
+- **Note:** this value already matched. The delta exists to lock it, so a rebase
+  cannot quietly reintroduce the prompt.
+- **Enforced by:** `quitting_is_never_confirmed`.
+
+### OMEGA-DELTA-0004 — Telemetry stays off
+
+- **Upstream Zed:** ships telemetry defaults that may change between releases.
+- **Omega:** `telemetry.diagnostics` and `telemetry.metrics` both default to
+  `false`.
+- **Why:** privacy posture, and Omega has no telemetry endpoint of its own. A
+  posture that depends on nobody changing an upstream default is not a posture.
+- **Note:** these values already matched, and are locked for the same reason as
+  `OMEGA-DELTA-0003`.
+- **Enforced by:** `telemetry_stays_off`.
