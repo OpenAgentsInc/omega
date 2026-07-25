@@ -11,16 +11,19 @@ use nostr::{
         nip49::{EncryptedSecretKey, KeySecurity},
         nip59,
     },
+    secp256k1::Message,
 };
 use serde::{Deserialize, Serialize};
+use sha2::{Digest as _, Sha256};
 use thiserror::Error;
 
 use crate::{
     AdmittedSigningRequest, CompletionRecord, ContractError, CustodyConflict,
     CustodyConflictReason, CustodyResult, CustodyState, GiftWrappedPrivateMessage,
     IdentityInspection, IdentityManifest, IdentityRef, ImportedSecret, KeyringLocator,
-    NostrPublicKeyHex, PendingIdentityOperation, PendingIdentityTransaction, PrivateMessageRequest,
-    PublicIdentity, PublicStoreError, ReceiptRef, SigningResult, UnwrappedPrivateMessage,
+    NostrPublicKeyHex, OwnerAttestationRequest, OwnerAttestationResult, PendingIdentityOperation,
+    PendingIdentityTransaction, PrivateMessageRequest, PublicIdentity, PublicStoreError,
+    ReceiptRef, SigningResult, UnwrappedPrivateMessage,
     mutation_lock::{IdentityMutationGuard, MutationLockError},
     proof::{IDENTITY_PROOF_KEYRING_ACCOUNT, IDENTITY_PROOF_KEYRING_SERVICE, ProofCrashBoundary},
     public_store::{
@@ -478,6 +481,51 @@ impl IdentityService {
             event_id: event.id.to_hex(),
             signature: event.sig.to_string(),
             signed_event_json,
+        })
+    }
+
+    pub fn sign_owner_attestation(
+        &self,
+        request: &OwnerAttestationRequest,
+    ) -> Result<OwnerAttestationResult, CustodyError> {
+        let _mutation_guard = IdentityMutationGuard::acquire(&self.locator)?;
+        self.require_no_reset_locked()?;
+        let resolved = self.resolve_locked();
+        if resolved.result.state != CustodyState::Ready {
+            return Err(CustodyError::CustodyDenied(resolved.result.state));
+        }
+        let identity = resolved
+            .result
+            .identity
+            .ok_or(CustodyError::CustodyDenied(CustodyState::Incomplete))?;
+        request.validate(&identity)?;
+        let secret = resolved
+            .secret
+            .ok_or(CustodyError::CustodyDenied(CustodyState::Incomplete))?;
+        let keys = secret
+            .keys()
+            .map_err(|_| CustodyError::CustodyDenied(CustodyState::Incomplete))?;
+        let digest = Sha256::digest(
+            format!(
+                "nostr:agent-auth:{}:{}",
+                request.agent_public_key_hex.as_str(),
+                request.conditions
+            )
+            .as_bytes(),
+        );
+        let message = Message::from_digest(digest.into());
+        let signature = keys.sign_schnorr(&message).to_string();
+        let auth_tag = vec![
+            "auth".to_string(),
+            identity.public_key_hex().as_str().to_string(),
+            request.conditions.clone(),
+            signature,
+        ];
+        Ok(OwnerAttestationResult {
+            request_ref: request.request_ref.clone(),
+            identity,
+            agent_public_key_hex: request.agent_public_key_hex.clone(),
+            auth_tag,
         })
     }
 
@@ -2766,6 +2814,55 @@ mod tests {
         assert_eq!(signed.identity, identity);
         assert_eq!(signed.event_id, event.id.to_hex());
         assert_eq!(signed.signature, event.sig.to_string());
+    }
+
+    #[test]
+    fn owner_attestation_matches_the_nip_oa_domain_without_exporting_custody() {
+        let temporary_directory = tempfile::tempdir().expect("create temporary directory");
+        let service = service(FakeStore::empty(), temporary_directory.path().to_path_buf());
+        let identity = service
+            .create(receipt())
+            .expect("create identity")
+            .identity
+            .expect("created public identity");
+        let agent_public_key_hex = NostrPublicKeyHex::new("2".repeat(64)).expect("agent key");
+        let result = service
+            .sign_owner_attestation(&OwnerAttestationRequest {
+                request_ref: ReceiptRef::new("attest-sarah").expect("request ref"),
+                identity_ref: identity.identity_ref().clone(),
+                agent_public_key_hex: agent_public_key_hex.clone(),
+                conditions: String::new(),
+            })
+            .expect("sign owner attestation");
+
+        assert_eq!(result.agent_public_key_hex, agent_public_key_hex);
+        assert_eq!(result.auth_tag[0], "auth");
+        assert_eq!(result.auth_tag[1], identity.public_key_hex().as_str());
+        assert_eq!(result.auth_tag[2], "");
+        let digest = Sha256::digest(
+            format!("nostr:agent-auth:{}:", result.agent_public_key_hex.as_str()).as_bytes(),
+        );
+        let message = Message::from_digest(digest.into());
+        let signature = result.auth_tag[3]
+            .parse::<nostr::secp256k1::schnorr::Signature>()
+            .expect("signature");
+        nostr::SECP256K1
+            .verify_schnorr(
+                &signature,
+                &message,
+                &identity
+                    .public_key_hex()
+                    .public_key()
+                    .expect("owner public key")
+                    .xonly()
+                    .expect("x-only owner key"),
+            )
+            .expect("verify NIP-OA signature");
+        assert!(
+            !serde_json::to_string(&result)
+                .expect("serialize result")
+                .contains("private")
+        );
     }
 
     #[test]

@@ -143,6 +143,23 @@ the same generation remains a conflict. Omega replaces a partially
 acknowledged pending announcement atomically and never advances stored expiry
 metadata without storing the exact newly signed event.
 
+The operator can issue Sarah's public NIP-OA relay attestation without reading
+or exporting the Omega owner secret:
+
+```sh
+cargo run -p omega_identity --bin omega-identity -- \
+  --channel rc attest-agent \
+  --agent-public-key-hex <sarah-public-key-hex>
+```
+
+The command reads channel custody through `IdentityService` and returns only a
+public `auth` tag plus public identity fields. It refuses self-attestation,
+invalid agent keys, control characters, oversized conditions, non-ready
+custody, and identity mismatch. The returned tag is suitable for the Sarah
+service's public `SARAH_NOSTR_OWNER_AUTH_TAG_JSON` configuration; the owner key
+never enters an environment variable, shell substitution, file, or process
+output.
+
 The device allowlist is runtime-local admission policy, not Nostr identity or
 durable grant history. Omega rebinds it after loading host state. Changing it
 controls which new pairing requests receive a challenge without rewriting or

@@ -602,6 +602,40 @@ pub struct AdmittedSigningRequest {
     pub event: UnsignedEventTemplate,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OwnerAttestationRequest {
+    pub request_ref: ReceiptRef,
+    pub identity_ref: IdentityRef,
+    pub agent_public_key_hex: NostrPublicKeyHex,
+    pub conditions: String,
+}
+
+impl OwnerAttestationRequest {
+    pub fn validate(&self, identity: &PublicIdentity) -> Result<(), ContractError> {
+        validate_reference("request_ref", self.request_ref.as_str())?;
+        validate_reference("identity_ref", self.identity_ref.as_str())?;
+        self.agent_public_key_hex.public_key()?;
+        if self.identity_ref != *identity.identity_ref()
+            || self.agent_public_key_hex == *identity.public_key_hex()
+            || self.conditions.len() > 1_024
+            || self.conditions.chars().any(char::is_control)
+        {
+            return Err(ContractError::SigningNotAdmitted);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OwnerAttestationResult {
+    pub request_ref: ReceiptRef,
+    pub identity: PublicIdentity,
+    pub agent_public_key_hex: NostrPublicKeyHex,
+    pub auth_tag: Vec<String>,
+}
+
 impl AdmittedSigningRequest {
     pub fn validate(&self) -> Result<(), ContractError> {
         validate_reference("request_ref", self.request_ref.as_str())?;

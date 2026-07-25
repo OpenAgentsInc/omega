@@ -8,7 +8,10 @@ use std::{path::PathBuf, process::ExitCode, str::FromStr};
 use anyhow::{Context as _, Result, bail};
 use app_identity::AppChannel;
 use clap::{Parser, Subcommand};
-use omega_identity::{CustodyState, IdentityRef, IdentityService, ReceiptRef};
+use omega_identity::{
+    CustodyState, IdentityRef, IdentityService, NostrPublicKeyHex, OwnerAttestationRequest,
+    ReceiptRef,
+};
 use serde_json::json;
 
 #[derive(Parser, Debug)]
@@ -33,6 +36,15 @@ struct Args {
 enum Command {
     /// Print custody state and public identity refs as JSON.
     Status,
+    /// Sign a public NIP-OA auth tag for an admitted agent without exporting the owner key.
+    AttestAgent {
+        #[arg(long)]
+        agent_public_key_hex: String,
+        #[arg(long, default_value = "")]
+        conditions: String,
+        #[arg(long)]
+        request: Option<String>,
+    },
     /// Record a marker-first reset (relaunch-required). Requires --yes.
     Reset {
         /// Confirm destructive reset of the current Ready identity.
@@ -87,6 +99,31 @@ fn run() -> Result<()> {
                 .inspect_details()
                 .context("inspect identity custody")?;
             println!("{}", serde_json::to_string_pretty(&inspection)?);
+        }
+        Command::AttestAgent {
+            agent_public_key_hex,
+            conditions,
+            request,
+        } => {
+            let inspection = service.inspect().context("inspect identity custody")?;
+            let identity = inspection
+                .identity
+                .context("no Ready identity to attest an agent")?;
+            let stamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .context("system clock")?
+                .as_millis();
+            let result = service
+                .sign_owner_attestation(&OwnerAttestationRequest {
+                    request_ref: ReceiptRef::new(request.unwrap_or_else(|| {
+                        format!("omega-identity-cli-agent-attestation-{stamp}")
+                    }))?,
+                    identity_ref: identity.identity_ref().clone(),
+                    agent_public_key_hex: NostrPublicKeyHex::new(agent_public_key_hex)?,
+                    conditions,
+                })
+                .context("sign owner agent attestation")?;
+            println!("{}", serde_json::to_string_pretty(&result)?);
         }
         Command::Reset {
             yes,
