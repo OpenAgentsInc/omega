@@ -3092,6 +3092,73 @@ mod tests {
         }
     }
 
+    /// The onboarding gate is `custody.state != CustodyState::Ready`
+    /// (`crates/onboarding/src/identity_startup.rs`). This pins both sides of
+    /// that predicate against a temporary root and a fake keyring, so first-run
+    /// behaviour is provable without a GUI, a human, or the login Keychain.
+    ///
+    /// It exists because a human was once asked to reset an identity to
+    /// unblock a proof. Test state is the harness's problem.
+    #[test]
+    fn a_fresh_profile_requires_onboarding_and_a_created_one_does_not() {
+        let temporary_directory = tempfile::tempdir().expect("create temporary directory");
+        let service = service(FakeStore::empty(), temporary_directory.path().to_path_buf());
+
+        // Nothing has been created yet: this is what a first run looks like.
+        let fresh = service.inspect().expect("inspect a fresh profile");
+        assert_ne!(
+            fresh.state,
+            CustodyState::Ready,
+            "a profile with no identity must not report Ready, or first launch \
+             would skip onboarding"
+        );
+        assert_eq!(fresh.state, CustodyState::Absent);
+
+        service.create(receipt()).expect("create identity");
+
+        // Same root, same store, identity now present.
+        let established = service.inspect().expect("inspect an established profile");
+        assert_eq!(
+            established.state,
+            CustodyState::Ready,
+            "an established identity must report Ready, or onboarding would \
+             show on every launch"
+        );
+    }
+
+    /// Resetting must return the profile to the first-run state, so a proof
+    /// harness can produce a clean identity itself rather than asking a person
+    /// to delete one.
+    #[test]
+    fn resetting_returns_a_profile_to_the_first_run_state() {
+        let temporary_directory = tempfile::tempdir().expect("create temporary directory");
+        let service = service(FakeStore::empty(), temporary_directory.path().to_path_buf());
+        let created = service.create(receipt()).expect("create identity");
+        let identity = created.identity.expect("created public identity");
+        assert_eq!(
+            service.inspect().expect("inspect").state,
+            CustodyState::Ready
+        );
+
+        let reset = service
+            .reset(
+                identity.identity_ref(),
+                ReceiptRef::new("harness-reset").expect("valid reset receipt"),
+            )
+            .expect("reset the identity");
+
+        // Reset lands on RelaunchRequired rather than Absent: the running
+        // process still holds the old identity, so the state is deliberately
+        // one that a restart resolves. What matters for the gate is only that
+        // it is not Ready.
+        assert_eq!(reset.state, CustodyState::RelaunchRequired);
+        assert_ne!(
+            reset.state,
+            CustodyState::Ready,
+            "after a reset the profile must once again require onboarding"
+        );
+    }
+
     #[test]
     fn reset_requires_the_expected_identity_and_verifies_deletion() {
         let temporary_directory = tempfile::tempdir().expect("create temporary directory");
