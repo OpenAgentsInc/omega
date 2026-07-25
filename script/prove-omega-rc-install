@@ -35,7 +35,29 @@ ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_APP = Path("/Applications/Omega.app")
 DEFAULT_OUTPUT = ROOT / "target/omega-rc-proof"
 EXPECTED_PRODUCT = "Omega"
-EXPECTED_VERSION = "0.2.0-rc2"
+
+
+def _expected_rc_version() -> str:
+    """Read the RC version from the packaging script, which owns it.
+
+    This constant used to be a literal here as well. It went stale — the
+    bundler moved to 0.2.0-rc3 while this proof still pinned 0.2.0-rc2, so the
+    proof would have refused the only artifact the repository can actually
+    build. A pinned expectation is right; a second copy of the pin is not.
+    """
+    source = ROOT / "script/bundle-omega-rc"
+    match = re.search(
+        r'^readonly OMEGA_RC_VERSION="([^"]+)"$', source.read_text(encoding="utf-8"), re.MULTILINE
+    )
+    if match is None:
+        raise SystemExit(
+            "cannot read OMEGA_RC_VERSION from script/bundle-omega-rc; "
+            "the packaging script owns the RC version"
+        )
+    return match.group(1)
+
+
+EXPECTED_VERSION = _expected_rc_version()
 EXPECTED_BUNDLE_ID = "com.openagents.omega.rc"
 EXPECTED_TEAM_ID = "HQWSG26L43"
 EXPECTED_SIGNER = "Developer ID Application: OpenAgents, Inc. (HQWSG26L43)"
