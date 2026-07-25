@@ -2984,6 +2984,10 @@ impl SarahConversationClient {
             Tag::parse(["generation", &expected_generation.to_string()])
                 .map_err(|error| SarahConversationError::InvalidRequest(error.to_string()))?,
         );
+        tags.push(
+            Tag::parse(["turn", &turn_ref])
+                .map_err(|error| SarahConversationError::InvalidRequest(error.to_string()))?,
+        );
         let mut public_event = None;
         let mut inserted_outbox_ref = None;
         let (event_id, created_at) = if self.relay.requires_private_messages() {
@@ -4067,6 +4071,17 @@ mod tests {
         );
         assert_eq!(snap.run_state.state, "running");
 
+        let conversation_ref = client.conversation_ref();
+        let published = client
+            .relay
+            .query(&conversation_ref, None, 10)
+            .expect("published message");
+        let message = published.events.last().expect("message event");
+        assert!(message.tags.iter().any(|tag| {
+            tag.first().map(String::as_str) == Some("turn")
+                && tag.get(1).map(String::as_str) == Some(sent.turn_ref.as_str())
+        }));
+
         let events = client.drain_events();
         assert!(
             events.iter().any(|event| {
@@ -4588,7 +4603,8 @@ mod tests {
         let signer = SigningIdentity::generate();
         let mut config = SarahConversationConfig::mock_fixture();
         config.identity.owner_public_key_hex = signer.public_key_hex.clone();
-        config.identity.sarah_public_key_hex = Keys::generate().public_key().to_hex();
+        let sarah_keys = Keys::generate();
+        config.identity.sarah_public_key_hex = sarah_keys.public_key().to_hex();
         config.relay_url = Some("wss://healthy.example".into());
         let relay_urls = vec![
             "wss://healthy.example".to_string(),
@@ -4670,6 +4686,37 @@ mod tests {
                 assert!(serialized.contains(&event.id.to_hex()));
             }
         }
+        let mut unwrapped_turn_refs = std::collections::BTreeSet::new();
+        for pending in persisted.private_outbox.values() {
+            let mut found_sarah_copy = false;
+            for gift_wrap in &pending.gift_wrap_event_json {
+                let event = Event::from_json(gift_wrap).expect("gift wrap");
+                match smol::block_on(nostr::nips::nip59::extract_rumor(&sarah_keys, &event)) {
+                    Ok(unwrapped) => {
+                        found_sarah_copy = true;
+                        let turn_ref = unwrapped
+                            .rumor
+                            .tags
+                            .iter()
+                            .find_map(|tag| {
+                                let tag = tag.as_slice();
+                                (tag.first().map(String::as_str) == Some("turn"))
+                                    .then(|| tag.get(1).cloned())
+                                    .flatten()
+                            })
+                            .expect("turn tag in Sarah rumor");
+                        unwrapped_turn_refs.insert(turn_ref);
+                    }
+                    // The other gift wrap is the owner's independently encrypted copy.
+                    Err(_) => {}
+                }
+            }
+            assert!(found_sarah_copy);
+        }
+        assert_eq!(
+            unwrapped_turn_refs,
+            std::collections::BTreeSet::from(["turn.1".to_string(), "turn.2".to_string()])
+        );
 
         let interrupt_params = json!({
             "turnRef": "turn.2",
