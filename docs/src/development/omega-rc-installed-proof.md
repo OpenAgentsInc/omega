@@ -314,6 +314,39 @@ The object must also contain `owner_observation` and
 names, `observed_at`, and a candidate-bound `evidence` reference. The harness
 does not generate or infer these attestations.
 
+### Network capture evidence
+
+`script/omega-network-capture-journey` keeps schema
+`openagents.omega.network-capture.v1` and requires collector version 2 fields.
+Before capture, it binds the root process to the canonical executable
+`/Applications/Omega.app/Contents/MacOS/omega`, the installed executable
+SHA-256, device and inode identity, strict deep `codesign` verification, leaf
+authority `Developer ID Application: OpenAgents, Inc. (HQWSG26L43)`, and team
+`HQWSG26L43`. Every sample records the root PID start identity and executable
+binding. A reused PID, changed process start, different executable path, or
+changed installed binary blocks the receipt.
+
+The validator rehashes the current collector and installed executable, reruns
+strict code-sign verification, requires one exact root process row, and checks
+every recorded root identity sample. It does not trust the receipt's passed
+status or `matches_installed_binary` field. Validate the candidate-bound
+receipt immediately after capture:
+
+```sh
+script/omega-network-capture-journey validate \
+  --candidate-digest "<candidate-sha256>" \
+  --input "<network-capture.json>"
+```
+
+Old v1 receipts without the additive collector, installed-binary, code-sign,
+and root-identity bindings must be recaptured. The self-test tampers the root
+start identity, canonical path, signing team, and collector digest and requires
+each forgery to fail:
+
+```sh
+script/omega-network-capture-journey self-test
+```
+
 ### Lifecycle evidence
 
 Lifecycle proof is a set of machine-readable receipts, not a free-form note.
@@ -343,7 +376,37 @@ Each reference is
 prover reloads and hashes every non-symlink receipt, verifies each
 comparison's snapshot hashes and empty change set, and requires both removal
 and reinstall to state that no Zed target was touched. The reinstall receipt
-must bind the same DMG and release record. Validate the lifecycle helper with:
+must bind the same DMG and release record.
+
+Lifecycle schema `openagents.omega.rc-lifecycle-proof.v1` now requires
+collector version 2 on snapshots, comparisons, removal, reinstall, and cleanup
+receipts. Each snapshot carries the exact Omega and Zed root-name inventory,
+root count, and a canonical digest over every manifest summary. Validation
+requires every expected root exactly once, verifies each path binding, status,
+count, byte total, symlink count, and manifest digest shape, then recomputes the
+inventory digest. A comparison binds both complete snapshot hashes, both scope
+manifest-set digests, and the exact expected root names. It cannot pass because
+the same root was omitted from both snapshots.
+
+Validate a snapshot directly, or a comparison against both source snapshots:
+
+```sh
+script/omega-rc-lifecycle-proof validate \
+  --candidate-digest "<candidate-sha256>" \
+  --input "<snapshot.json>"
+
+script/omega-rc-lifecycle-proof validate \
+  --candidate-digest "<candidate-sha256>" \
+  --input "<comparison.json>" \
+  --before "<before-snapshot.json>" \
+  --after "<after-snapshot.json>"
+```
+
+Receipts created before collector version 2 lack these additive bindings and
+must be regenerated. The self-test rejects a missing expected root, a forged
+manifest summary, a forged collector digest, and an incomplete comparison
+inventory. It also rejects a `passed` comparison when both snapshots contain
+the same blocked manifest:
 
 ```sh
 script/omega-rc-lifecycle-proof self-test

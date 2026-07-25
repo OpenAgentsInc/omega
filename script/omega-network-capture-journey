@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import ctypes
 import hashlib
 import ipaddress
 import json
@@ -21,6 +22,12 @@ from typing import Any
 ROOT = Path(__file__).resolve().parent.parent
 ALLOWLIST_PATH = ROOT / "crates/app_identity/fixtures/endpoint_allowlist.json"
 SCHEMA = "openagents.omega.network-capture.v1"
+COLLECTOR_VERSION = 2
+EXPECTED_ROOT_EXECUTABLE = Path("/Applications/Omega.app/Contents/MacOS/omega")
+EXPECTED_SIGNING_AUTHORITY = (
+    "Developer ID Application: OpenAgents, Inc. (HQWSG26L43)"
+)
+EXPECTED_TEAM_ID = "HQWSG26L43"
 LOCAL_HOSTS = {"localhost", "localhost.localdomain"}
 
 
@@ -54,6 +61,128 @@ def validate_digest(value: str) -> str:
 
 def run(command: list[str]) -> subprocess.CompletedProcess[str]:
     return subprocess.run(command, capture_output=True, text=True, check=False)
+
+
+def collector_binding() -> dict[str, Any]:
+    collector = Path(__file__).resolve()
+    return {
+        "path": "script/omega-network-capture-journey",
+        "version": COLLECTOR_VERSION,
+        "sha256": sha256_file(collector),
+    }
+
+
+def process_executable_path(process_id: int) -> Path:
+    try:
+        libproc = ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
+    except OSError as error:
+        raise CaptureError("cannot load macOS process inspection authority") from error
+    buffer = ctypes.create_string_buffer(4096)
+    libproc.proc_pidpath.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_uint32]
+    libproc.proc_pidpath.restype = ctypes.c_int
+    length = libproc.proc_pidpath(process_id, buffer, len(buffer))
+    if length <= 0:
+        raise CaptureError(f"cannot resolve executable path for PID {process_id}")
+    try:
+        raw_path = buffer.raw[:length].split(b"\0", 1)[0]
+        return Path(os.fsdecode(raw_path)).resolve(strict=True)
+    except OSError as error:
+        raise CaptureError(f"cannot canonicalize executable path for PID {process_id}") from error
+
+
+def process_start_identity(process_id: int) -> str:
+    result = run(["ps", "-p", str(process_id), "-o", "lstart="])
+    value = result.stdout.strip()
+    if result.returncode != 0 or not value:
+        raise CaptureError(f"cannot resolve start identity for PID {process_id}")
+    return value
+
+
+def codesign_binding(path: Path) -> dict[str, Any]:
+    verification = run(
+        ["/usr/bin/codesign", "--verify", "--deep", "--strict", "--verbose=4", str(path)]
+    )
+    if verification.returncode != 0:
+        raise CaptureError("installed Omega root executable failed strict codesign verification")
+    metadata = run(["/usr/bin/codesign", "-dv", "--verbose=4", str(path)])
+    if metadata.returncode != 0:
+        raise CaptureError("cannot read installed Omega root executable codesign metadata")
+    detail = "\n".join((metadata.stdout, metadata.stderr))
+    authorities = re.findall(r"(?m)^Authority=(.+)$", detail)
+    team_match = re.search(r"(?m)^TeamIdentifier=(.+)$", detail)
+    team_identifier = team_match.group(1) if team_match else None
+    if not authorities or authorities[0] != EXPECTED_SIGNING_AUTHORITY:
+        raise CaptureError("installed Omega root executable has unexpected signing authority")
+    if team_identifier != EXPECTED_TEAM_ID:
+        raise CaptureError("installed Omega root executable has unexpected signing team")
+    return {
+        "strict_verification": "passed",
+        "verification_arguments": ["--verify", "--deep", "--strict", "--verbose=4"],
+        "authorities": authorities,
+        "team_identifier": team_identifier,
+    }
+
+
+def installed_binary_binding(path: Path = EXPECTED_ROOT_EXECUTABLE) -> dict[str, Any]:
+    if path.is_symlink() or not path.is_file():
+        raise CaptureError(f"installed Omega root executable is missing or unsafe: {path}")
+    canonical = path.resolve(strict=True)
+    if canonical != EXPECTED_ROOT_EXECUTABLE:
+        raise CaptureError("installed Omega root executable canonical path is not exact")
+    metadata = canonical.stat()
+    binary_sha256 = sha256_file(canonical)
+    signing = codesign_binding(canonical)
+    confirmed_metadata = canonical.stat()
+    identity_fields = ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns")
+    if any(
+        getattr(metadata, field) != getattr(confirmed_metadata, field)
+        for field in identity_fields
+    ):
+        raise CaptureError("installed Omega root executable changed during inspection")
+    return {
+        "canonical_path": str(canonical),
+        "sha256": binary_sha256,
+        "device": metadata.st_dev,
+        "inode": metadata.st_ino,
+        "size": metadata.st_size,
+        "mtime_ns": metadata.st_mtime_ns,
+        "ctime_ns": metadata.st_ctime_ns,
+        "codesign": signing,
+    }
+
+
+def root_process_observation(
+    process_id: int, binary: dict[str, Any]
+) -> dict[str, Any]:
+    process_start = process_start_identity(process_id)
+    executable = process_executable_path(process_id)
+    metadata = executable.stat()
+    stable_file_identity = (
+        str(executable) == binary["canonical_path"]
+        and metadata.st_dev == binary["device"]
+        and metadata.st_ino == binary["inode"]
+        and metadata.st_size == binary["size"]
+        and metadata.st_mtime_ns == binary["mtime_ns"]
+        and metadata.st_ctime_ns == binary["ctime_ns"]
+    )
+    executable_sha256 = (
+        binary["sha256"] if stable_file_identity else sha256_file(executable)
+    )
+    if process_start_identity(process_id) != process_start:
+        raise CaptureError(f"PID {process_id} was reused during identity inspection")
+    return {
+        "pid": process_id,
+        "process_start": process_start,
+        "executable_path": str(executable),
+        "binary_sha256": executable_sha256,
+        "device": metadata.st_dev,
+        "inode": metadata.st_ino,
+        "size": metadata.st_size,
+        "mtime_ns": metadata.st_mtime_ns,
+        "ctime_ns": metadata.st_ctime_ns,
+        "matches_installed_binary": stable_file_identity
+        and executable_sha256 == binary["sha256"],
+    }
 
 
 def process_table() -> dict[int, tuple[int, str]]:
@@ -179,18 +308,40 @@ def classify_hosts(
 
 def collect(arguments: argparse.Namespace) -> int:
     candidate_digest = validate_digest(arguments.candidate_digest)
+    binary = installed_binary_binding()
+    initial_root = root_process_observation(arguments.pid, binary)
+    if not initial_root["matches_installed_binary"]:
+        raise CaptureError(
+            "root PID does not execute the exact installed Omega root executable"
+        )
     allowlist = load_json(ALLOWLIST_PATH, "endpoint allowlist")
     approved_host_resolutions = resolve_approved_hosts(allowlist)
     started_at = datetime.now(timezone.utc)
     deadline = time.monotonic() + arguments.duration
     observed_processes: dict[int, dict[str, Any]] = {}
     observed_destinations: dict[tuple[int, str, int, str], dict[str, Any]] = {}
+    root_identity_observations: list[dict[str, Any]] = []
     errors: set[str] = set()
+    sample_index = 0
 
     while True:
         table = process_table()
         if arguments.pid not in table:
             errors.add("root_process_not_running")
+        else:
+            try:
+                observation = root_process_observation(arguments.pid, binary)
+            except CaptureError:
+                errors.add("root_process_identity_unreadable")
+            else:
+                observation["sample_index"] = sample_index
+                root_identity_observations.append(observation)
+                if observation["process_start"] != initial_root["process_start"]:
+                    errors.add("root_pid_reused")
+                if observation["executable_path"] != initial_root["executable_path"]:
+                    errors.add("root_executable_path_changed")
+                if not observation["matches_installed_binary"]:
+                    errors.add("root_executable_binding_changed")
         for process_id in descendants(arguments.pid, table):
             process = table.get(process_id)
             if process is None:
@@ -201,6 +352,15 @@ def collect(arguments: argparse.Namespace) -> int:
                 "ppid": parent_id,
                 "command_basename": command,
             }
+            if process_id == arguments.pid and root_identity_observations:
+                observed_processes[process_id].update(
+                    {
+                        "executable_path": root_identity_observations[-1][
+                            "executable_path"
+                        ],
+                        "process_start": root_identity_observations[-1]["process_start"],
+                    }
+                )
             connections, error = collect_connections(process_id)
             if error is not None:
                 errors.add(error)
@@ -214,6 +374,7 @@ def collect(arguments: argparse.Namespace) -> int:
                 }
         if time.monotonic() >= deadline:
             break
+        sample_index += 1
         time.sleep(min(arguments.interval, max(0.0, deadline - time.monotonic())))
 
     processes = sorted(observed_processes.values(), key=lambda item: item["pid"])
@@ -249,7 +410,11 @@ def collect(arguments: argparse.Namespace) -> int:
         "started_at": started_at.isoformat(),
         "completed_at": datetime.now(timezone.utc).isoformat(),
         "root_pid": arguments.pid,
+        "root_process": initial_root,
+        "root_identity_observations": root_identity_observations,
+        "installed_binary": binary,
         "collector": {
+            **collector_binding(),
             "duration_seconds": arguments.duration,
             "interval_seconds": arguments.interval,
             "process_source": "ps",
@@ -272,12 +437,109 @@ def collect(arguments: argparse.Namespace) -> int:
     return 0 if report["status"] == "passed" else 3
 
 
+def validate_collector(report: dict[str, Any]) -> None:
+    collector = report.get("collector")
+    expected = collector_binding()
+    if not isinstance(collector, dict):
+        raise CaptureError("network capture has no collector binding")
+    for field in ("path", "version", "sha256"):
+        if collector.get(field) != expected[field]:
+            raise CaptureError("network capture collector binding differs")
+
+
+def validate_root_binding(
+    report: dict[str, Any], *, verify_live_binary: bool
+) -> None:
+    binary = report.get("installed_binary")
+    root = report.get("root_process")
+    observations = report.get("root_identity_observations")
+    if not isinstance(binary, dict) or not isinstance(root, dict):
+        raise CaptureError("network capture has no installed root binary binding")
+    if not isinstance(observations, list) or not observations:
+        raise CaptureError("network capture has no root PID identity observations")
+    if binary.get("canonical_path") != str(EXPECTED_ROOT_EXECUTABLE):
+        raise CaptureError("network capture root executable canonical path differs")
+    if re.fullmatch(r"[0-9a-f]{64}", str(binary.get("sha256", ""))) is None:
+        raise CaptureError("network capture installed binary digest is invalid")
+    for field in ("device", "inode", "size", "mtime_ns", "ctime_ns"):
+        if not isinstance(binary.get(field), int) or binary[field] < 0:
+            raise CaptureError("network capture installed binary identity is invalid")
+    signing = binary.get("codesign")
+    if not isinstance(signing, dict):
+        raise CaptureError("network capture has no strict codesign binding")
+    authorities = signing.get("authorities")
+    if (
+        signing.get("strict_verification") != "passed"
+        or signing.get("verification_arguments")
+        != ["--verify", "--deep", "--strict", "--verbose=4"]
+        or not isinstance(authorities, list)
+        or not authorities
+        or authorities[0] != EXPECTED_SIGNING_AUTHORITY
+        or signing.get("team_identifier") != EXPECTED_TEAM_ID
+    ):
+        raise CaptureError("network capture strict codesign binding is invalid")
+    if verify_live_binary and installed_binary_binding() != binary:
+        raise CaptureError("network capture no longer matches the installed root binary")
+
+    root_pid = report.get("root_pid")
+    if not isinstance(root_pid, int) or root_pid <= 0 or root.get("pid") != root_pid:
+        raise CaptureError("network capture root PID binding is invalid")
+    expected_identity = {
+        "executable_path": binary["canonical_path"],
+        "binary_sha256": binary["sha256"],
+        "device": binary["device"],
+        "inode": binary["inode"],
+        "size": binary["size"],
+        "mtime_ns": binary["mtime_ns"],
+        "ctime_ns": binary["ctime_ns"],
+    }
+    process_start = root.get("process_start")
+    if not isinstance(process_start, str) or not process_start:
+        raise CaptureError("network capture root process start identity is invalid")
+    for field, expected in expected_identity.items():
+        if root.get(field) != expected:
+            raise CaptureError("network capture root process path or binary differs")
+
+    for index, observation in enumerate(observations):
+        if not isinstance(observation, dict):
+            raise CaptureError("network capture root PID observation is invalid")
+        if observation.get("sample_index") != index:
+            raise CaptureError("network capture root PID observations are incomplete")
+        if observation.get("pid") != root_pid:
+            raise CaptureError("network capture root PID changed")
+        if observation.get("process_start") != process_start:
+            raise CaptureError("network capture detected PID reuse")
+        for field, expected in expected_identity.items():
+            if observation.get(field) != expected:
+                raise CaptureError("network capture detected root executable path mismatch")
+        if observation.get("matches_installed_binary") is not True:
+            raise CaptureError("network capture root executable did not match installation")
+
+    processes = report.get("processes")
+    if not isinstance(processes, list):
+        raise CaptureError("network capture process ancestry is invalid")
+    root_rows = [
+        item
+        for item in processes
+        if isinstance(item, dict) and item.get("pid") == root_pid
+    ]
+    if len(root_rows) != 1:
+        raise CaptureError("network capture process ancestry has no unique root PID")
+    if (
+        root_rows[0].get("executable_path") != binary["canonical_path"]
+        or root_rows[0].get("process_start") != process_start
+    ):
+        raise CaptureError("network capture process ancestry root path differs")
+
+
 def validate_report(path: Path, candidate_digest: str) -> dict[str, Any]:
     report = load_json(path, "network capture")
     if report.get("schema") != SCHEMA:
         raise CaptureError("network capture schema is not supported")
     if report.get("candidate_digest") != validate_digest(candidate_digest):
         raise CaptureError("network capture binds a different candidate")
+    validate_collector(report)
+    validate_root_binding(report, verify_live_binary=True)
     allowlist = load_json(ALLOWLIST_PATH, "endpoint allowlist")
     binding = report.get("allowlist", {})
     if binding.get("sha256") != sha256_file(ALLOWLIST_PATH):
@@ -362,6 +624,85 @@ def self_test(_arguments: argparse.Namespace) -> int:
         443,
     ):
         raise CaptureError("self-test endpoint parsing failed")
+
+    binary = {
+        "canonical_path": str(EXPECTED_ROOT_EXECUTABLE),
+        "sha256": "a" * 64,
+        "device": 1,
+        "inode": 2,
+        "size": 3,
+        "mtime_ns": 4,
+        "ctime_ns": 5,
+        "codesign": {
+            "strict_verification": "passed",
+            "verification_arguments": [
+                "--verify",
+                "--deep",
+                "--strict",
+                "--verbose=4",
+            ],
+            "authorities": [EXPECTED_SIGNING_AUTHORITY],
+            "team_identifier": EXPECTED_TEAM_ID,
+        },
+    }
+    identity = {
+        "pid": 42,
+        "process_start": "Fri Jul 24 12:00:00 2026",
+        "executable_path": str(EXPECTED_ROOT_EXECUTABLE),
+        "binary_sha256": "a" * 64,
+        "device": 1,
+        "inode": 2,
+        "size": 3,
+        "mtime_ns": 4,
+        "ctime_ns": 5,
+        "matches_installed_binary": True,
+    }
+    report = {
+        "root_pid": 42,
+        "installed_binary": binary,
+        "root_process": identity,
+        "root_identity_observations": [{**identity, "sample_index": 0}],
+        "processes": [
+            {
+                "pid": 42,
+                "ppid": 1,
+                "command_basename": "omega",
+                "executable_path": str(EXPECTED_ROOT_EXECUTABLE),
+                "process_start": identity["process_start"],
+            }
+        ],
+        "collector": collector_binding(),
+    }
+    validate_collector(report)
+    validate_root_binding(report, verify_live_binary=False)
+    for field, tampered in (
+        ("process_start", "Fri Jul 24 12:00:01 2026"),
+        ("executable_path", "/tmp/fake-omega"),
+    ):
+        forged = json.loads(json.dumps(report))
+        forged["root_identity_observations"][0][field] = tampered
+        try:
+            validate_root_binding(forged, verify_live_binary=False)
+        except CaptureError:
+            pass
+        else:
+            raise CaptureError(f"self-test accepted tampered root {field}")
+    forged = json.loads(json.dumps(report))
+    forged["installed_binary"]["codesign"]["team_identifier"] = "FAKE"
+    try:
+        validate_root_binding(forged, verify_live_binary=False)
+    except CaptureError:
+        pass
+    else:
+        raise CaptureError("self-test accepted tampered codesign team")
+    forged = json.loads(json.dumps(report))
+    forged["collector"]["sha256"] = "b" * 64
+    try:
+        validate_collector(forged)
+    except CaptureError:
+        pass
+    else:
+        raise CaptureError("self-test accepted tampered collector digest")
     print("Omega network capture self-test passed")
     return 0
 

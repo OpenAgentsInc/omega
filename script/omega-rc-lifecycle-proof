@@ -26,6 +26,7 @@ EXPECTED_KEYCHAIN = {
     "secret_read": False,
 }
 SCHEMA = "openagents.omega.rc-lifecycle-proof.v1"
+COLLECTOR_VERSION = 2
 
 
 class LifecycleError(RuntimeError):
@@ -38,6 +39,22 @@ def sha256_file(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def sha256_json(value: Any) -> str:
+    encoded = json.dumps(
+        value, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def collector_binding() -> dict[str, Any]:
+    collector = Path(__file__).resolve()
+    return {
+        "path": "script/omega-rc-lifecycle-proof",
+        "version": COLLECTOR_VERSION,
+        "sha256": sha256_file(collector),
+    }
 
 
 def validate_candidate_digest(value: str) -> str:
@@ -84,7 +101,7 @@ def roots() -> dict[str, dict[str, Path]]:
 
 
 def path_digest(path: Path) -> str:
-    return hashlib.sha256(os.fsencode(path.resolve(strict=False))).hexdigest()
+    return hashlib.sha256(os.fsencode(path.absolute())).hexdigest()
 
 
 def manifest_root(path: Path) -> dict[str, Any]:
@@ -143,19 +160,39 @@ def manifest_root(path: Path) -> dict[str, Any]:
     return result
 
 
-def build_snapshot(candidate_digest: str) -> dict[str, Any]:
-    inventory = roots()
+def inventory_summary(manifests: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    root_names = sorted(manifests)
+    return {
+        "root_names": root_names,
+        "root_count": len(root_names),
+        "manifests_sha256": sha256_json(
+            {name: manifests[name] for name in root_names}
+        ),
+    }
+
+
+def build_snapshot(
+    candidate_digest: str,
+    inventory: dict[str, dict[str, Path]] | None = None,
+) -> dict[str, Any]:
+    inventory = inventory or roots()
+    manifests = {
+        scope: {name: manifest_root(path) for name, path in paths.items()}
+        for scope, paths in inventory.items()
+    }
     return {
         "schema": SCHEMA,
         "kind": "snapshot",
         "candidate_digest": validate_candidate_digest(candidate_digest),
         "captured_at": datetime.now(timezone.utc).isoformat(),
+        "collector": collector_binding(),
         "user": {"uid": os.getuid()},
         "keychain_locator": EXPECTED_KEYCHAIN,
-        "roots": {
-            scope: {name: manifest_root(path) for name, path in paths.items()}
-            for scope, paths in inventory.items()
+        "root_inventory": {
+            scope: inventory_summary(scope_manifests)
+            for scope, scope_manifests in manifests.items()
         },
+        "roots": manifests,
     }
 
 
@@ -174,6 +211,97 @@ def read_json(path: Path) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise LifecycleError(f"proof JSON is not an object: {path}")
     return value
+
+
+def validate_collector(value: dict[str, Any]) -> None:
+    if value.get("collector") != collector_binding():
+        raise LifecycleError("lifecycle receipt collector binding differs")
+
+
+def validate_manifest_summary(
+    name: str, path: Path, summary: Any
+) -> dict[str, Any]:
+    if not isinstance(summary, dict):
+        raise LifecycleError(f"lifecycle root {name} has no manifest summary")
+    status = summary.get("status")
+    base_fields = {
+        "path_digest",
+        "status",
+        "files",
+        "directories",
+        "symlinks",
+        "bytes",
+        "manifest_sha256",
+    }
+    expected_fields = (
+        base_fields | {"error_count", "error_types"}
+        if status == "blocked"
+        else base_fields
+    )
+    if set(summary) != expected_fields:
+        raise LifecycleError(f"lifecycle root {name} manifest fields differ")
+    if summary.get("path_digest") != path_digest(path):
+        raise LifecycleError(f"lifecycle root {name} path binding differs")
+    for field in ("files", "directories", "symlinks", "bytes"):
+        if not isinstance(summary.get(field), int) or summary[field] < 0:
+            raise LifecycleError(f"lifecycle root {name} {field} is invalid")
+    if re.fullmatch(r"[0-9a-f]{64}", str(summary.get("manifest_sha256", ""))) is None:
+        raise LifecycleError(f"lifecycle root {name} manifest digest is invalid")
+    if status == "absent":
+        if any(summary[field] != 0 for field in ("files", "directories", "symlinks", "bytes")):
+            raise LifecycleError(f"absent lifecycle root {name} has content")
+        if summary["manifest_sha256"] != hashlib.sha256(b"absent").hexdigest():
+            raise LifecycleError(f"absent lifecycle root {name} digest differs")
+    elif status == "captured":
+        pass
+    elif status == "blocked":
+        if (
+            not isinstance(summary.get("error_count"), int)
+            or summary["error_count"] <= 0
+            or not isinstance(summary.get("error_types"), list)
+            or not summary["error_types"]
+            or not all(isinstance(error, str) and error for error in summary["error_types"])
+        ):
+            raise LifecycleError(f"blocked lifecycle root {name} errors are invalid")
+    else:
+        raise LifecycleError(f"lifecycle root {name} status is invalid")
+    return summary
+
+
+def validate_snapshot(
+    value: dict[str, Any],
+    candidate_digest: str,
+    inventory: dict[str, dict[str, Path]] | None = None,
+) -> None:
+    inventory = inventory or roots()
+    digest = validate_candidate_digest(candidate_digest)
+    if value.get("schema") != SCHEMA or value.get("kind") != "snapshot":
+        raise LifecycleError("input is not a lifecycle snapshot")
+    if value.get("candidate_digest") != digest:
+        raise LifecycleError("lifecycle snapshot binds a different candidate")
+    validate_collector(value)
+    if value.get("keychain_locator") != EXPECTED_KEYCHAIN:
+        raise LifecycleError("lifecycle snapshot keychain locator differs")
+    captured_roots = value.get("roots")
+    captured_inventory = value.get("root_inventory")
+    if not isinstance(captured_roots, dict) or set(captured_roots) != set(inventory):
+        raise LifecycleError("lifecycle snapshot scope inventory differs")
+    if not isinstance(captured_inventory, dict) or set(captured_inventory) != set(
+        inventory
+    ):
+        raise LifecycleError("lifecycle snapshot root inventory summary differs")
+    for scope, expected_paths in inventory.items():
+        scope_roots = captured_roots.get(scope)
+        if not isinstance(scope_roots, dict) or set(scope_roots) != set(expected_paths):
+            raise LifecycleError(f"lifecycle snapshot {scope} root inventory differs")
+        validated = {
+            name: validate_manifest_summary(name, expected_paths[name], scope_roots[name])
+            for name in sorted(expected_paths)
+        }
+        if captured_inventory.get(scope) != inventory_summary(validated):
+            raise LifecycleError(
+                f"lifecycle snapshot {scope} manifest summary digest differs"
+            )
 
 
 def validate_exact_app(path: Path, *, must_exist: bool) -> None:
@@ -213,11 +341,8 @@ def compare_command(arguments: argparse.Namespace) -> int:
     before = read_json(arguments.before)
     after = read_json(arguments.after)
     digest = validate_candidate_digest(arguments.candidate_digest)
-    for label, value in (("before", before), ("after", after)):
-        if value.get("schema") != SCHEMA or value.get("kind") != "snapshot":
-            raise LifecycleError(f"{label} input is not a lifecycle snapshot")
-        if value.get("candidate_digest") != digest:
-            raise LifecycleError(f"{label} snapshot binds a different candidate")
+    validate_snapshot(before, digest)
+    validate_snapshot(after, digest)
     before_scope = before.get("roots", {}).get(arguments.scope)
     after_scope = after.get("roots", {}).get(arguments.scope)
     if not isinstance(before_scope, dict) or not isinstance(after_scope, dict):
@@ -227,19 +352,98 @@ def compare_command(arguments: argparse.Namespace) -> int:
         for name in set(before_scope) | set(after_scope)
         if before_scope.get(name) != after_scope.get(name)
     )
+    blocked_roots = sorted(
+        name
+        for name in set(before_scope) | set(after_scope)
+        if before_scope.get(name, {}).get("status") == "blocked"
+        or after_scope.get(name, {}).get("status") == "blocked"
+    )
+    status = "blocked" if blocked_roots else ("passed" if not changed else "changed")
     report = {
         "schema": SCHEMA,
         "kind": "comparison",
         "candidate_digest": digest,
+        "collector": collector_binding(),
         "scope": arguments.scope,
+        "expected_root_names": sorted(roots()[arguments.scope]),
         "before_snapshot_sha256": sha256_file(arguments.before),
         "after_snapshot_sha256": sha256_file(arguments.after),
-        "status": "passed" if not changed else "changed",
+        "before_manifests_sha256": before["root_inventory"][arguments.scope][
+            "manifests_sha256"
+        ],
+        "after_manifests_sha256": after["root_inventory"][arguments.scope][
+            "manifests_sha256"
+        ],
+        "status": status,
+        "blocked_roots": blocked_roots,
         "changed_roots": changed,
     }
+    validate_comparison(
+        report,
+        digest,
+        arguments.before,
+        arguments.after,
+    )
     write_new_json(arguments.output, report)
     print(f"wrote lifecycle comparison: {arguments.output}")
+    if blocked_roots:
+        return 2
     return 0 if not changed else 1
+
+
+def validate_comparison(
+    value: dict[str, Any],
+    candidate_digest: str,
+    before_path: Path,
+    after_path: Path,
+    inventory: dict[str, dict[str, Path]] | None = None,
+) -> None:
+    inventory = inventory or roots()
+    digest = validate_candidate_digest(candidate_digest)
+    if value.get("schema") != SCHEMA or value.get("kind") != "comparison":
+        raise LifecycleError("input is not a lifecycle comparison")
+    if value.get("candidate_digest") != digest:
+        raise LifecycleError("lifecycle comparison binds a different candidate")
+    validate_collector(value)
+    scope = value.get("scope")
+    if scope not in inventory:
+        raise LifecycleError("lifecycle comparison scope is invalid")
+    before = read_json(before_path)
+    after = read_json(after_path)
+    validate_snapshot(before, digest, inventory)
+    validate_snapshot(after, digest, inventory)
+    before_scope = before["roots"][scope]
+    after_scope = after["roots"][scope]
+    changed = sorted(
+        name
+        for name in inventory[scope]
+        if before_scope.get(name) != after_scope.get(name)
+    )
+    blocked_roots = sorted(
+        name
+        for name in inventory[scope]
+        if before_scope.get(name, {}).get("status") == "blocked"
+        or after_scope.get(name, {}).get("status") == "blocked"
+    )
+    expected = {
+        "expected_root_names": sorted(inventory[scope]),
+        "before_snapshot_sha256": sha256_file(before_path),
+        "after_snapshot_sha256": sha256_file(after_path),
+        "before_manifests_sha256": before["root_inventory"][scope][
+            "manifests_sha256"
+        ],
+        "after_manifests_sha256": after["root_inventory"][scope][
+            "manifests_sha256"
+        ],
+        "status": (
+            "blocked" if blocked_roots else ("passed" if not changed else "changed")
+        ),
+        "blocked_roots": blocked_roots,
+        "changed_roots": changed,
+    }
+    for field, expected_value in expected.items():
+        if value.get(field) != expected_value:
+            raise LifecycleError(f"lifecycle comparison {field} differs")
 
 
 def remove_app_command(arguments: argparse.Namespace) -> int:
@@ -256,6 +460,7 @@ def remove_app_command(arguments: argparse.Namespace) -> int:
         "schema": SCHEMA,
         "kind": "app_removal",
         "candidate_digest": validate_candidate_digest(arguments.candidate_digest),
+        "collector": collector_binding(),
         "performed_at": datetime.now(timezone.utc).isoformat(),
         "source_path": str(EXPECTED_APP),
         "holding_path": str(held_app),
@@ -319,6 +524,7 @@ def reinstall_command(arguments: argparse.Namespace) -> int:
         "schema": SCHEMA,
         "kind": "app_reinstall",
         "candidate_digest": validate_candidate_digest(arguments.candidate_digest),
+        "collector": collector_binding(),
         "performed_at": datetime.now(timezone.utc).isoformat(),
         "artifact_sha256": expected_digest,
         "release_record_sha256": sha256_file(arguments.release_record),
@@ -364,6 +570,7 @@ def cleanup_data_command(arguments: argparse.Namespace) -> int:
         "schema": SCHEMA,
         "kind": "data_cleanup",
         "candidate_digest": validate_candidate_digest(arguments.candidate_digest),
+        "collector": collector_binding(),
         "performed_at": datetime.now(timezone.utc).isoformat(),
         "moved_omega_roots": moved,
         "holding_directory": str(arguments.holding_dir),
@@ -373,6 +580,28 @@ def cleanup_data_command(arguments: argparse.Namespace) -> int:
     }
     write_new_json(arguments.output, receipt)
     print(f"moved {len(moved)} Omega data roots to recoverable holding")
+    return 0
+
+
+def validate_command(arguments: argparse.Namespace) -> int:
+    value = read_json(arguments.input)
+    digest = validate_candidate_digest(arguments.candidate_digest)
+    kind = value.get("kind")
+    if kind == "snapshot":
+        validate_snapshot(value, digest)
+    elif kind == "comparison":
+        if arguments.before is None or arguments.after is None:
+            raise LifecycleError(
+                "comparison validation requires --before and --after snapshots"
+            )
+        validate_comparison(value, digest, arguments.before, arguments.after)
+    elif kind in {"app_removal", "app_reinstall", "data_cleanup"}:
+        if value.get("schema") != SCHEMA or value.get("candidate_digest") != digest:
+            raise LifecycleError("lifecycle operation receipt binding differs")
+        validate_collector(value)
+    else:
+        raise LifecycleError("lifecycle receipt kind is unsupported")
+    print(f"lifecycle receipt valid: {arguments.input}")
     return 0
 
 
@@ -391,6 +620,98 @@ def self_test_command(_arguments: argparse.Namespace) -> int:
         second = manifest_root(sample)
         if first["manifest_sha256"] == second["manifest_sha256"]:
             raise LifecycleError("self-test manifest did not detect changed content")
+        control = test_root / "control"
+        control.mkdir()
+        test_inventory = {
+            "omega": {"sample": sample},
+            "zed": {"control": control},
+        }
+        snapshot = build_snapshot(digest, test_inventory)
+        validate_snapshot(snapshot, digest, test_inventory)
+
+        def reject_snapshot(tampered: dict[str, Any], description: str) -> None:
+            try:
+                validate_snapshot(tampered, digest, test_inventory)
+            except LifecycleError:
+                return
+            raise LifecycleError(f"self-test accepted {description}")
+
+        tampered = json.loads(json.dumps(snapshot))
+        del tampered["roots"]["omega"]["sample"]
+        reject_snapshot(tampered, "missing expected root")
+        tampered = json.loads(json.dumps(snapshot))
+        tampered["roots"]["omega"]["sample"]["manifest_sha256"] = "b" * 64
+        reject_snapshot(tampered, "forged manifest summary")
+        tampered = json.loads(json.dumps(snapshot))
+        tampered["collector"]["sha256"] = "b" * 64
+        reject_snapshot(tampered, "forged collector digest")
+
+        before_path = test_root / "before.json"
+        after_path = test_root / "after.json"
+        before_path.write_text(json.dumps(snapshot), encoding="utf-8")
+        after_path.write_text(json.dumps(snapshot), encoding="utf-8")
+        comparison = {
+            "schema": SCHEMA,
+            "kind": "comparison",
+            "candidate_digest": digest,
+            "collector": collector_binding(),
+            "scope": "zed",
+            "expected_root_names": ["control"],
+            "before_snapshot_sha256": sha256_file(before_path),
+            "after_snapshot_sha256": sha256_file(after_path),
+            "before_manifests_sha256": snapshot["root_inventory"]["zed"][
+                "manifests_sha256"
+            ],
+            "after_manifests_sha256": snapshot["root_inventory"]["zed"][
+                "manifests_sha256"
+            ],
+            "status": "passed",
+            "blocked_roots": [],
+            "changed_roots": [],
+        }
+        validate_comparison(
+            comparison, digest, before_path, after_path, test_inventory
+        )
+        blocked_snapshot = json.loads(json.dumps(snapshot))
+        blocked_manifest = blocked_snapshot["roots"]["zed"]["control"]
+        blocked_manifest["status"] = "blocked"
+        blocked_manifest["error_count"] = 1
+        blocked_manifest["error_types"] = ["PermissionError"]
+        blocked_snapshot["root_inventory"]["zed"] = inventory_summary(
+            blocked_snapshot["roots"]["zed"]
+        )
+        before_path.write_text(json.dumps(blocked_snapshot), encoding="utf-8")
+        after_path.write_text(json.dumps(blocked_snapshot), encoding="utf-8")
+        forged_pass = {
+            **comparison,
+            "before_snapshot_sha256": sha256_file(before_path),
+            "after_snapshot_sha256": sha256_file(after_path),
+            "before_manifests_sha256": blocked_snapshot["root_inventory"]["zed"][
+                "manifests_sha256"
+            ],
+            "after_manifests_sha256": blocked_snapshot["root_inventory"]["zed"][
+                "manifests_sha256"
+            ],
+        }
+        try:
+            validate_comparison(
+                forged_pass, digest, before_path, after_path, test_inventory
+            )
+        except LifecycleError:
+            pass
+        else:
+            raise LifecycleError("self-test accepted blocked manifests as passed")
+        before_path.write_text(json.dumps(snapshot), encoding="utf-8")
+        after_path.write_text(json.dumps(snapshot), encoding="utf-8")
+        comparison["expected_root_names"] = []
+        try:
+            validate_comparison(
+                comparison, digest, before_path, after_path, test_inventory
+            )
+        except LifecycleError:
+            pass
+        else:
+            raise LifecycleError("self-test accepted incomplete comparison inventory")
         if validate_candidate_digest(digest) != digest:
             raise LifecycleError("self-test candidate digest validation failed")
         try:
@@ -414,6 +735,13 @@ def parse_arguments() -> argparse.Namespace:
     snapshot.add_argument("--candidate-digest", required=True)
     snapshot.add_argument("--output", type=Path, required=True)
     snapshot.set_defaults(handler=snapshot_command)
+
+    validate = subparsers.add_parser("validate")
+    validate.add_argument("--candidate-digest", required=True)
+    validate.add_argument("--input", type=Path, required=True)
+    validate.add_argument("--before", type=Path)
+    validate.add_argument("--after", type=Path)
+    validate.set_defaults(handler=validate_command)
 
     compare = subparsers.add_parser("compare")
     compare.add_argument("--candidate-digest", required=True)

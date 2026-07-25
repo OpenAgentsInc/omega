@@ -341,6 +341,13 @@ By default Omega does not contact Zed production hosts.
   `crates/app_identity/fixtures/endpoint_allowlist.json`
 - Capture journey helper: `script/omega-network-capture-journey`
 
+The capture helper binds its root PID to the canonical installed Omega
+executable, executable digest, strict Developer ID authority/team result, and
+stable process-start identity at every sample. Its validator rehashes and
+re-verifies the installed executable and rejects PID reuse or path drift before
+it considers destination classification. Run the helper's `self-test` to prove
+the path, PID, signing-team, and collector-digest tamper cases fail.
+
 The endpoint allowlist is an installed-release proof contract, not an in-app
 firewall. Runtime requests do not consult the JSON file. Candidate acceptance
 must capture process network destinations and reject an unreviewed host or any
