@@ -14,6 +14,10 @@ from typing import Any
 MATRIX_SCHEMA = "openagents.omega.identity-proof-matrix.v1"
 TRIPWIRE_SCHEMA = "openagents.omega.installed-secret-tripwires.v1"
 INSTALLED_OBSERVATIONS_SCHEMA = "openagents.omega.identity-installed-observations.v1"
+RECOVERY_EVIDENCE_SCHEMA = "openagents.omega.identity-recovery-evidence.v1"
+ROLLBACK_CONTINUITY_SCHEMA = (
+    "openagents.omega.identity-update-downgrade-rollback.v2"
+)
 MATRIX_CASES = {
     "disposable-namespace-safety",
     "create-read-back-restart-sign",
@@ -66,6 +70,15 @@ ACCESSIBILITY_CHECKS = {
     "dark-theme",
     "high-contrast",
     "reduced-motion",
+}
+ROLLBACK_EVIDENCE_REFS = {
+    "candidate_before",
+    "downgrade_removal",
+    "downgrade_install",
+    "identity_after_downgrade",
+    "rollback_removal",
+    "rollback_install",
+    "identity_after_rollback",
 }
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
 
@@ -294,6 +307,172 @@ def validate_installed_observations(path: Path, candidate_digest: str, evidence_
     canonical.pop("evidence_sha256")
     if canonical_digest(canonical) != claimed:
         raise IdentityEvidenceError("installed identity observation digest differs")
+    return sha256_file(path)
+
+
+def validate_recovery_evidence(
+    path: Path,
+    candidate_digest: str,
+    candidate_artifact_sha256: str,
+    candidate_binary_sha256: str,
+    evidence_root: Path,
+) -> str:
+    if path.is_symlink() or not path.is_file():
+        raise IdentityEvidenceError("identity recovery evidence is not a regular file")
+    report = load_json(path, "identity recovery evidence")
+    if set(report) != {
+        "schema",
+        "candidate_digest",
+        "status",
+        "identity_matrix",
+        "rollback_continuity",
+        "evidence_sha256",
+    }:
+        raise IdentityEvidenceError("identity recovery evidence keys are not exact")
+    if (
+        report.get("schema") != RECOVERY_EVIDENCE_SCHEMA
+        or report.get("candidate_digest") != candidate_digest
+        or report.get("status") != "passed"
+    ):
+        raise IdentityEvidenceError(
+            "identity recovery evidence is not passed or candidate-bound"
+        )
+    matrix_path, _ = resolve_evidence_reference(
+        report.get("identity_matrix"), evidence_root
+    )
+    rollback_path, _ = resolve_evidence_reference(
+        report.get("rollback_continuity"), evidence_root
+    )
+    if matrix_path == rollback_path:
+        raise IdentityEvidenceError(
+            "recovery matrix and rollback continuity must be distinct references"
+        )
+    validate_identity_matrix(matrix_path, candidate_digest)
+    validate_rollback_continuity(
+        rollback_path,
+        candidate_digest,
+        candidate_artifact_sha256,
+        candidate_binary_sha256,
+        evidence_root,
+    )
+    claimed = require_sha256(
+        report.get("evidence_sha256"), "identity recovery evidence digest"
+    )
+    canonical = dict(report)
+    canonical.pop("evidence_sha256")
+    if canonical_digest(canonical) != claimed:
+        raise IdentityEvidenceError("identity recovery evidence digest differs")
+    return sha256_file(path)
+
+
+def validate_rollback_continuity(
+    path: Path,
+    candidate_digest: str,
+    candidate_artifact_sha256: str,
+    candidate_binary_sha256: str,
+    evidence_root: Path,
+) -> str:
+    report = load_json(path, "identity rollback continuity")
+    if set(report) != {
+        "schema",
+        "candidate_digest",
+        "status",
+        "observed_at",
+        "identity_fingerprint_before",
+        "identity_fingerprint_after",
+        "sequence",
+        "evidence_refs",
+        "evidence_sha256",
+    }:
+        raise IdentityEvidenceError("identity rollback continuity keys are not exact")
+    if (
+        report.get("schema") != ROLLBACK_CONTINUITY_SCHEMA
+        or report.get("candidate_digest") != candidate_digest
+        or report.get("status") != "passed"
+    ):
+        raise IdentityEvidenceError(
+            "identity rollback continuity is not passed or candidate-bound"
+        )
+    require_timestamp(report.get("observed_at"), "identity rollback continuity")
+    before = report.get("identity_fingerprint_before")
+    after = report.get("identity_fingerprint_after")
+    if (
+        not isinstance(before, str)
+        or not before.strip()
+        or len(before) > 256
+        or before != after
+        or "nsec" in before.lower()
+        or "ncryptsec" in before.lower()
+    ):
+        raise IdentityEvidenceError(
+            "identity rollback continuity fingerprint changed or is unsafe"
+        )
+    sequence = report.get("sequence")
+    if not isinstance(sequence, list) or len(sequence) != 2:
+        raise IdentityEvidenceError("identity rollback continuity sequence is incomplete")
+    downgrade, rollback = sequence
+    if not isinstance(downgrade, dict) or set(downgrade) != {
+        "action",
+        "from_artifact_sha256",
+        "to_artifact_sha256",
+    }:
+        raise IdentityEvidenceError("identity downgrade step is not exact")
+    if not isinstance(rollback, dict) or set(rollback) != {
+        "action",
+        "from_artifact_sha256",
+        "to_artifact_sha256",
+        "installed_binary_sha256",
+    }:
+        raise IdentityEvidenceError("identity rollback step is not exact")
+    older_artifact = require_sha256(
+        downgrade.get("to_artifact_sha256"), "downgrade target artifact"
+    )
+    if (
+        downgrade.get("action") != "downgrade"
+        or require_sha256(
+            downgrade.get("from_artifact_sha256"), "downgrade source artifact"
+        )
+        != candidate_artifact_sha256
+        or older_artifact == candidate_artifact_sha256
+        or rollback.get("action") != "update_and_rollback_to_candidate"
+        or require_sha256(
+            rollback.get("from_artifact_sha256"), "rollback source artifact"
+        )
+        != older_artifact
+        or require_sha256(
+            rollback.get("to_artifact_sha256"), "rollback target artifact"
+        )
+        != candidate_artifact_sha256
+        or require_sha256(
+            rollback.get("installed_binary_sha256"), "rollback installed binary"
+        )
+        != candidate_binary_sha256
+    ):
+        raise IdentityEvidenceError(
+            "identity rollback sequence does not bind the candidate and older artifact"
+        )
+    references = report.get("evidence_refs")
+    if not isinstance(references, dict) or set(references) != ROLLBACK_EVIDENCE_REFS:
+        raise IdentityEvidenceError(
+            "identity rollback continuity evidence inventory is not exact"
+        )
+    resolved = [
+        resolve_evidence_reference(reference, evidence_root)
+        for reference in references.values()
+    ]
+    if len({(resolved_path, digest) for resolved_path, digest in resolved}) != len(
+        resolved
+    ):
+        raise IdentityEvidenceError(
+            "identity rollback continuity repeats an evidence reference"
+        )
+    claimed = require_sha256(
+        report.get("evidence_sha256"), "identity rollback continuity digest"
+    )
+    canonical = dict(report)
+    canonical.pop("evidence_sha256")
+    if canonical_digest(canonical) != claimed:
+        raise IdentityEvidenceError("identity rollback continuity digest differs")
     return sha256_file(path)
 
 
@@ -610,6 +789,138 @@ def self_test() -> None:
         resolve_evidence_reference(
             {"path": observations_path.name, "sha256": observation_digest}, root
         )
+        rollback_refs = {}
+        for name in sorted(ROLLBACK_EVIDENCE_REFS):
+            rollback_evidence_path = root / f"rollback-{name}.txt"
+            rollback_evidence_path.write_text(
+                f"rollback observation fixture {name}", encoding="utf-8"
+            )
+            rollback_refs[name] = {
+                "path": rollback_evidence_path.name,
+                "sha256": sha256_file(rollback_evidence_path),
+            }
+        rollback = {
+            "schema": ROLLBACK_CONTINUITY_SCHEMA,
+            "candidate_digest": candidate_digest,
+            "status": "passed",
+            "observed_at": "2026-07-24T12:00:00+00:00",
+            "identity_fingerprint_before": "B15D 76DE 47C0 0ACE",
+            "identity_fingerprint_after": "B15D 76DE 47C0 0ACE",
+            "sequence": [
+                {
+                    "action": "downgrade",
+                    "from_artifact_sha256": candidate["artifact_sha256"],
+                    "to_artifact_sha256": "3" * 64,
+                },
+                {
+                    "action": "update_and_rollback_to_candidate",
+                    "from_artifact_sha256": "3" * 64,
+                    "to_artifact_sha256": candidate["artifact_sha256"],
+                    "installed_binary_sha256": "4" * 64,
+                },
+            ],
+            "evidence_refs": rollback_refs,
+        }
+        rollback["evidence_sha256"] = canonical_digest(rollback)
+        rollback_path = root / "rollback-continuity.json"
+        rollback_path.write_text(json.dumps(rollback), encoding="utf-8")
+        recovery = {
+            "schema": RECOVERY_EVIDENCE_SCHEMA,
+            "candidate_digest": candidate_digest,
+            "status": "passed",
+            "identity_matrix": {
+                "path": matrix_path.name,
+                "sha256": matrix_digest,
+            },
+            "rollback_continuity": {
+                "path": rollback_path.name,
+                "sha256": sha256_file(rollback_path),
+            },
+        }
+        recovery["evidence_sha256"] = canonical_digest(recovery)
+        recovery_path = root / "recovery-evidence.json"
+        recovery_path.write_text(json.dumps(recovery), encoding="utf-8")
+        validate_recovery_evidence(
+            recovery_path,
+            candidate_digest,
+            candidate["artifact_sha256"],
+            "4" * 64,
+            root,
+        )
+        invalid_rollbacks = []
+        wrong_binary = json.loads(json.dumps(rollback))
+        wrong_binary["sequence"][1]["installed_binary_sha256"] = "5" * 64
+        wrong_binary["evidence_sha256"] = canonical_digest(
+            {
+                key: value
+                for key, value in wrong_binary.items()
+                if key != "evidence_sha256"
+            }
+        )
+        invalid_rollbacks.append(wrong_binary)
+        changed_identity = json.loads(json.dumps(rollback))
+        changed_identity["identity_fingerprint_after"] = "0000 0000 0000 0000"
+        changed_identity["evidence_sha256"] = canonical_digest(
+            {
+                key: value
+                for key, value in changed_identity.items()
+                if key != "evidence_sha256"
+            }
+        )
+        invalid_rollbacks.append(changed_identity)
+        for invalid_rollback in invalid_rollbacks:
+            rollback_path.write_text(json.dumps(invalid_rollback), encoding="utf-8")
+            invalid_recovery = json.loads(json.dumps(recovery))
+            invalid_recovery["rollback_continuity"]["sha256"] = sha256_file(
+                rollback_path
+            )
+            invalid_recovery["evidence_sha256"] = canonical_digest(
+                {
+                    key: value
+                    for key, value in invalid_recovery.items()
+                    if key != "evidence_sha256"
+                }
+            )
+            recovery_path.write_text(json.dumps(invalid_recovery), encoding="utf-8")
+            try:
+                validate_recovery_evidence(
+                    recovery_path,
+                    candidate_digest,
+                    candidate["artifact_sha256"],
+                    "4" * 64,
+                    root,
+                )
+            except IdentityEvidenceError:
+                pass
+            else:
+                raise IdentityEvidenceError(
+                    "invalid rollback continuity was accepted"
+                )
+        rollback_path.write_text(json.dumps(rollback), encoding="utf-8")
+        substituted_recovery = json.loads(json.dumps(recovery))
+        substituted_recovery["rollback_continuity"] = substituted_recovery[
+            "identity_matrix"
+        ]
+        substituted_recovery["evidence_sha256"] = canonical_digest(
+            {
+                key: value
+                for key, value in substituted_recovery.items()
+                if key != "evidence_sha256"
+            }
+        )
+        recovery_path.write_text(json.dumps(substituted_recovery), encoding="utf-8")
+        try:
+            validate_recovery_evidence(
+                recovery_path,
+                candidate_digest,
+                candidate["artifact_sha256"],
+                "4" * 64,
+                root,
+            )
+        except IdentityEvidenceError:
+            pass
+        else:
+            raise IdentityEvidenceError("recovery evidence substitution was accepted")
         matrix["cases"].pop()
         matrix_path.write_text(json.dumps(matrix), encoding="utf-8")
         try:

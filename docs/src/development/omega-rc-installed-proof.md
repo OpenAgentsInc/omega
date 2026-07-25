@@ -35,6 +35,7 @@ script/prove-omega-rc-install \
   --app /Applications/Omega.app \
   --identity-evidence target/omega-identity-evidence/candidate-evidence.json \
   --identity-matrix target/omega-identity-proof/matrix-evidence.json \
+  --identity-recovery-evidence target/omega-identity-proof/recovery-evidence.json \
   --installed-tripwires target/omega-identity-proof/installed-secret-tripwires.json \
   --installed-identity-observations target/omega-identity-proof/installed-observations.json \
   --evidence-root target/omega-identity-proof \
@@ -59,6 +60,7 @@ script/generate-omega-identity-candidate-evidence \
   --artifact target/omega-rc/Omega-v0.2.0-rc3-macos-arm64.dmg \
   --cargo-lock-snapshot target/omega-rc/Cargo.lock.omega-v0.2.0-rc3 \
   --identity-matrix target/omega-identity-proof/matrix-evidence.json \
+  --recovery-evidence target/omega-identity-proof/recovery-evidence.json \
   --installed-tripwires target/omega-identity-proof/installed-secret-tripwires.json \
   --installed-observations target/omega-identity-proof/installed-observations.json \
   --evidence-root target/omega-identity-proof \
@@ -126,9 +128,38 @@ stale-task, and installed-tripwire attestations use exact
 `--evidence-root`; the generator rejects traversal, symlinks, missing files,
 digest mismatch, and substitution of another receipt. Manual-journey and
 accessibility attestations use the same reference shape and must bind the
-validated installed-observations receipt described below. Other gates retain
+validated installed-observations receipt described below. Recovery attestations
+must bind the validated recovery receipt described below. Other gates retain
 nonempty candidate-bound results where a file receipt is not applicable. One
 generic evidence key cannot pass a multi-requirement gate.
+
+Validate recovery evidence independently before generation:
+
+```sh
+script/validate-omega-identity-recovery-evidence \
+  --input target/omega-identity-proof/recovery-evidence.json \
+  --candidate-digest "<candidate-sha256>" \
+  --candidate-artifact-sha256 "<candidate-dmg-sha256>" \
+  --candidate-binary-sha256 "<packaged-omega-binary-sha256>" \
+  --evidence-root "$PWD/target/omega-identity-proof"
+```
+
+The `openagents.omega.identity-recovery-evidence.v1` receipt contains two
+distinct content-addressed references. `identity_matrix` must name the exact
+passed disposable matrix, including offline creation, encrypted recovery,
+wrong-password and corrupt-artifact rejection, and recovery restart
+continuity. `rollback_continuity` must name a separately collected
+`openagents.omega.identity-update-downgrade-rollback.v2` installed observation.
+That observation records equal before/after public fingerprints, an exact
+candidate-to-older downgrade followed by update and rollback to the candidate,
+the final installed candidate binary digest, exact supporting evidence
+references, and its own canonical digest. Its evidence inventory is the
+candidate-before observation; downgrade removal, install, and resulting
+identity; and rollback removal, install, and resulting identity. The validator rejects stale
+candidate binding, artifact or binary substitution, changed or secret-bearing
+fingerprints, unsafe or repeated paths, digest mismatch, and either recovery
+source being substituted for the other. It validates supplied observations;
+it does not create or infer them.
 
 Validate the installed manual and accessibility packet independently before
 generation:
