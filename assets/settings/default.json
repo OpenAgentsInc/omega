@@ -2503,8 +2503,14 @@
     // When trusted, project settings are synchronized automatically,
     // language and MCP servers are downloaded and started automatically.
     //
-    // Default: false
-    "trust_all_worktrees": false,
+    // Omega defaults this to true. Upstream Zed defaults it to false and shows
+    // a Restricted Mode trust prompt on an unrecognized project. Omega is an
+    // owner-operated editor, so that prompt is owner-directed dead weight: it
+    // interrupts every new project and, when declined, silently disables
+    // language servers and project settings.
+    //
+    // Default: true
+    "trust_all_worktrees": true,
   },
   // Zed's Prettier integration settings.
   // Allows to enable/disable formatting with Prettier

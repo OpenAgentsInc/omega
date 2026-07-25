@@ -390,7 +390,10 @@ pub struct SessionSettingsContent {
     /// When trusted, project settings are synchronized automatically,
     /// language and MCP servers are downloaded and started automatically.
     ///
-    /// Default: false
+    /// Omega defaults this to true; upstream Zed defaults it to false.
+    /// See OMEGA-DELTA-0001.
+    ///
+    /// Default: true
     pub trust_all_worktrees: Option<bool>,
 }
 

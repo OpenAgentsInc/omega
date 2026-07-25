@@ -12551,6 +12551,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "omega_deltas"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+]
+
+[[package]]
 name = "omega_effectd"
 version = "0.1.0"
 dependencies = [
