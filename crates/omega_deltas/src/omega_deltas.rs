@@ -17,8 +17,11 @@ pub const DELTA_REGISTRY_PATH: &str = "OMEGA_DELTAS.md";
 
 /// Every delta ID enforced by a test in this crate.
 ///
-/// Adding a check without adding its ID here, or an ID without a registry
-/// entry, fails `every_enforced_delta_is_registered`.
+/// Kept in sync in both directions by `the_registry_and_the_checks_agree`:
+/// an ID here with no `### <ID>` heading in the registry fails, and a heading
+/// in the registry with no ID here fails too. An earlier version of this
+/// comment claimed a check that did not exist, which an adversarial review
+/// caught.
 pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0001",
     "OMEGA-DELTA-0002",
@@ -213,20 +216,6 @@ mod tests {
         }
     }
 
-    /// Every delta needs a registry entry, so a check cannot outlive its reason.
-    #[test]
-    fn every_enforced_delta_is_registered() {
-        let path = repository_path(DELTA_REGISTRY_PATH);
-        let registry = std::fs::read_to_string(&path).expect("delta registry is readable");
-        for delta in ENFORCED_DELTAS {
-            assert!(
-                registry.contains(delta),
-                "{delta} is enforced by a test but missing from {}",
-                path.display()
-            );
-        }
-    }
-
     /// The normalizer must not touch string contents. If it did, a setting
     /// whose value contains `//` or a comma would be silently corrupted and
     /// every check above would be reading the wrong document.
@@ -237,12 +226,16 @@ mod tests {
                 // a leading comment
                 "url": "https://example.com/a//b",
                 "text": "a, b",
+                "glob": "**/*.pem",
                 "trailing": [1, 2,],
             }"#,
         ))
         .expect("normalized JSONC parses");
         assert_eq!(parsed["url"], "https://example.com/a//b");
         assert_eq!(parsed["text"], "a, b");
+        // default.json really does contain this shape; a naive block-comment
+        // patch would treat the `/*` as an opening delimiter.
+        assert_eq!(parsed["glob"], "**/*.pem");
         assert_eq!(parsed["trailing"], serde_json::json!([1, 2]));
     }
 
@@ -254,6 +247,18 @@ mod tests {
             serde_json::from_str(&strip_jsonc("{\n  \"a\": 1,\n  // trailing note\n}"))
                 .expect("normalized JSONC parses");
         assert_eq!(parsed["a"], 1);
+    }
+
+    /// Block comments are not supported, and must fail loudly rather than
+    /// truncate the document into something that still parses.
+    #[test]
+    fn a_block_comment_fails_closed() {
+        let normalized = strip_jsonc("{ /* note */ \"a\": 1 }");
+        assert!(
+            serde_json::from_str::<serde_json::Value>(&normalized).is_err(),
+            "an unsupported block comment must fail the check, never parse to \
+             a different document"
+        );
     }
 
     /// The delta check has to be able to fail, or it proves nothing.
@@ -268,6 +273,42 @@ mod tests {
                 .and_then(serde_json::Value::as_bool),
             Some(false),
             "the lookup used by the delta check must observe an upstream revert"
+        );
+    }
+
+    /// The registry and the checks must agree, in both directions.
+    ///
+    /// A check with no registry entry is an unexplained rule. A registry entry
+    /// with no check is a promise nothing keeps — and the registry's own rules
+    /// require every delta to have one.
+    #[test]
+    fn the_registry_and_the_checks_agree() {
+        let path = repository_path(DELTA_REGISTRY_PATH);
+        let registry = std::fs::read_to_string(&path).expect("delta registry is readable");
+
+        // Match the heading that opens an entry, not any mention of the ID.
+        // A substring match would accept "OMEGA-DELTA-0001 was withdrawn".
+        let documented: std::collections::BTreeSet<String> = registry
+            .lines()
+            .filter_map(|line| line.strip_prefix("### "))
+            .filter_map(|heading| heading.split_whitespace().next())
+            .filter(|token| token.starts_with("OMEGA-DELTA-"))
+            .map(str::to_owned)
+            .collect();
+        let enforced: std::collections::BTreeSet<String> =
+            ENFORCED_DELTAS.iter().map(|id| (*id).to_owned()).collect();
+
+        let undocumented: Vec<&String> = enforced.difference(&documented).collect();
+        assert!(
+            undocumented.is_empty(),
+            "enforced but missing a `### <ID>` entry in {}: {undocumented:?}",
+            path.display()
+        );
+        let unenforced: Vec<&String> = documented.difference(&enforced).collect();
+        assert!(
+            unenforced.is_empty(),
+            "documented in {} but not listed in ENFORCED_DELTAS: {unenforced:?}",
+            path.display()
         );
     }
 

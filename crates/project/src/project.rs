@@ -5579,6 +5579,16 @@ impl Project {
             return Ok(proto::Ack {});
         }
 
+        // A remote server can push a restriction regardless of what this client
+        // decided locally. Omega never restricts (OMEGA-DELTA-0001), and a
+        // remote peer running upstream Zed must not be able to reintroduce
+        // Restricted Mode on the operator's machine.
+        let auto_trusts_everything =
+            cx.update(|cx| ProjectSettings::get_global(cx).session.trust_all_worktrees);
+        if auto_trusts_everything {
+            return Ok(proto::Ack {});
+        }
+
         let trusted_worktrees = cx
             .update(|cx| TrustedWorktrees::try_get_global(cx))
             .context("missing trusted worktrees")?;

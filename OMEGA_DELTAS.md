@@ -50,9 +50,25 @@ cargo test -p omega_deltas
   forbids independently of the owner's preference.
 - **Enforced by:** `crates/omega_deltas/src/omega_deltas.rs`,
   `trust_all_worktrees_defaults_to_true`.
-- **Explicit access is retained:** the `ToggleWorktreeSecurity` action still
-  opens the modal on demand. This delta removes the *automatic* interruption
-  and the restricted default, not the ability to inspect trust.
+- **Correction, 2026-07-25 (adversarial review).** An earlier version of this
+  entry claimed the `ToggleWorktreeSecurity` action still opens the modal on
+  demand. **That was false.** `can_trust`
+  (`crates/project/src/trusted_worktrees.rs:469`) returns early when
+  `trust_all_worktrees` is set, before populating the `restricted` map, so
+  `has_restricted_worktrees` is permanently false and
+  `show_worktree_trust_security_modal`
+  (`crates/workspace/src/workspace.rs:8541`) returns without opening anything.
+  The action is a silent no-op. This delta therefore *does* remove the ability
+  to inspect trust — invisibly, rather than by deleting the code.
+- **The Zed identifier is still in the tree.** The modal body's
+  *"Review .zed/settings.json"* (`crates/workspace/src/security_modal.rs:196`)
+  was made unreachable, not removed. Tracked separately; unreachable code that
+  a rebase can revive is not a fix.
+- **Remote peers cannot reintroduce it.** `handle_restrict_worktrees`
+  (`crates/project/src/project.rs`) used to call `restrict()` unconditionally,
+  so a remote server running upstream Zed could push Restricted Mode onto this
+  machine regardless of the local default. It now returns early when
+  `trust_all_worktrees` is set.
 
 ### OMEGA-DELTA-0002 — Agents do not ask before every tool action
 
