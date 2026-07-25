@@ -40,6 +40,7 @@ use language_model::{
     LanguageModelProvider, LanguageModelProviderId, LanguageModelRegistry, Speed,
 };
 use notifications::status_toast::StatusToast;
+use omega_front_door::ExecutorDisclosure;
 use settings::{update_settings_file, update_settings_file_with_completion};
 use ui::{
     ButtonLike, CalloutBorderPosition, Checkbox, SpinnerLabel, SpinnerVariant, SplitButton,
@@ -11917,6 +11918,54 @@ impl ThreadView {
     }
 }
 
+impl ThreadView {
+    /// OMEGA-DELTA-0021. Who executed this thread.
+    ///
+    /// Two sources, both durable. The connection classifies the runtime and
+    /// carries the model, and it is rebuilt from the thread's persisted agent
+    /// id and `DbThread.model` on every start. The lane run, when there is one,
+    /// comes from the Full Auto correlation journal, which is reloaded from
+    /// disk at startup. Nothing here reads a cached label, so the line a thread
+    /// shows after a restart is derived from the same record it showed before.
+    pub fn executor_disclosure(&self, cx: &App) -> ExecutorDisclosure {
+        use crate::omega_executor_disclosure::ThreadExecutorDisclosure as _;
+
+        let disclosure = self.thread.read(cx).omega_executor_disclosure(cx);
+        match crate::omega_host_bridge::engine_lane_run(self.root_thread_id) {
+            Some(run_ref) => {
+                crate::omega_executor_disclosure::delegated_to_run(disclosure, run_ref)
+            }
+            None => disclosure,
+        }
+    }
+
+    /// The executor line, rendered from the record.
+    ///
+    /// Unconditional, and above the entries rather than beside them, because
+    /// omega#77's falsifier is a thread surface that shows work without naming
+    /// its executor — including an empty thread, which is about to.
+    fn render_executor_disclosure(&self, cx: &App) -> impl IntoElement {
+        let disclosure = self.executor_disclosure(cx);
+        h_flex()
+            .w_full()
+            .px_2()
+            .py_1()
+            .gap_1()
+            .border_b_1()
+            .border_color(cx.theme().colors().border_variant)
+            .child(
+                Icon::new(self.agent_icon)
+                    .size(IconSize::XSmall)
+                    .color(Color::Muted),
+            )
+            .child(
+                Label::new(disclosure.label())
+                    .size(LabelSize::XSmall)
+                    .color(Color::Muted),
+            )
+    }
+}
+
 impl Render for ThreadView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // Keep the message editor's local slash commands in sync with the
@@ -11928,6 +11977,8 @@ impl Render for ThreadView {
         let list_state = self.list_state.clone();
 
         let conversation = v_flex()
+            // OMEGA-DELTA-0021. Before anything the thread produced.
+            .child(self.render_executor_disclosure(cx))
             .when(self.resumed_without_history, |this| {
                 this.child(Self::render_resume_notice(cx))
             })

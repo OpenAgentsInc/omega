@@ -112,18 +112,28 @@ impl ExecutorClass {
 /// needs a signer, not a rewrite of every stored thread record.
 ///
 /// So [`label`](Self::label) is a function of the fields, and there is no
-/// field to put a rendered label in. omega#77 populates this; omega#76 fixes
-/// its shape and leaves the front door room to render it.
+/// field to put a rendered label in. omega#76 fixed this shape; omega#77
+/// populates it from live threads and renders the line.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExecutorDisclosure {
     /// Which of the three admitted classes ran the work.
     pub class: ExecutorClass,
     /// The executor's own identifier, as the executor reports it.
     pub agent_id: String,
-    /// The model provider that served the turn.
-    pub provider: String,
-    /// The model that served the turn.
-    pub model: String,
+    /// The model provider that served the turn, where the executor reports
+    /// one.
+    ///
+    /// `None` is *not disclosed*, and is different from an empty string, which
+    /// is a bug. `AcpConnection` does not implement
+    /// `AgentConnection::model_selector`, so an external ACP agent such as
+    /// `codex-acp` genuinely does not tell Omega which model served a turn.
+    /// Before omega#77 this was a `String`, which left only two options for
+    /// that case — fabricate a model, or fail [`is_coherent`](Self::is_coherent)
+    /// on every external thread. Saying "not disclosed" is the honest third.
+    pub provider: Option<String>,
+    /// The model that served the turn, where the executor reports one. See
+    /// [`provider`](Self::provider) for why this is optional.
+    pub model: Option<String>,
     /// The engine run this thread is bound to, where one applies.
     ///
     /// `Some` only for [`ExecutorClass::EngineLane`]: a native or ACP turn has
@@ -135,15 +145,20 @@ impl ExecutorDisclosure {
     /// Render the disclosure line for a thread.
     ///
     /// Derived on every call. Nothing stores the output.
+    ///
+    /// An undisclosed model is *said*, not skipped. A line that quietly
+    /// dropped the model segment would read as a complete disclosure, and the
+    /// reader would have no way to tell "Omega did not ask" from "the executor
+    /// would not say".
     #[must_use]
     pub fn label(&self) -> String {
-        let mut line = format!(
-            "{} · {} · {}/{}",
-            self.class.token(),
-            self.agent_id,
-            self.provider,
-            self.model
-        );
+        let model = match (&self.provider, &self.model) {
+            (Some(provider), Some(model)) => format!("{provider}/{model}"),
+            (Some(provider), None) => format!("{provider}/model not disclosed"),
+            (None, Some(model)) => format!("provider not disclosed/{model}"),
+            (None, None) => "model not disclosed".to_owned(),
+        };
+        let mut line = format!("{} · {} · {model}", self.class.token(), self.agent_id);
         if let Some(run_ref) = &self.run_ref {
             line.push_str(" · ");
             line.push_str(run_ref);
@@ -154,12 +169,16 @@ impl ExecutorDisclosure {
     /// Whether this record is internally consistent.
     ///
     /// A run reference on a native turn means something mislabelled a routed
-    /// result, which `OMEGA-AGENT-AC-05` exists to prevent.
+    /// result, which `OMEGA-AGENT-AC-05` exists to prevent. An identifier that
+    /// is present but empty means something built the record out of a missing
+    /// value instead of leaving it absent, so it stays incoherent.
     #[must_use]
     pub fn is_coherent(&self) -> bool {
+        let present_and_named =
+            |value: &Option<String>| value.as_ref().is_none_or(|value| !value.is_empty());
         !self.agent_id.is_empty()
-            && !self.provider.is_empty()
-            && !self.model.is_empty()
+            && present_and_named(&self.provider)
+            && present_and_named(&self.model)
             && match self.class {
                 ExecutorClass::EngineLane => self.run_ref.is_some(),
                 ExecutorClass::NativeLoop | ExecutorClass::ExternalAcp => self.run_ref.is_none(),
@@ -460,8 +479,8 @@ mod tests {
         let disclosure = ExecutorDisclosure {
             class: ExecutorClass::EngineLane,
             agent_id: "codex-local".into(),
-            provider: "google".into(),
-            model: "gemini-3.6-flash".into(),
+            provider: Some("google".into()),
+            model: Some("gemini-3.6-flash".into()),
             run_ref: Some("run.abc".into()),
         };
         assert_eq!(
@@ -480,6 +499,37 @@ mod tests {
         );
     }
 
+    /// An executor that does not report a model is disclosed as not reporting
+    /// one. omega#77.
+    ///
+    /// The failure this guards is a line that reads as complete while a part
+    /// of it is missing: `external_acp · codex-acp` alone gives the reader no
+    /// way to tell a fully disclosed thread from a partly disclosed one.
+    #[test]
+    fn an_undisclosed_model_is_said_rather_than_skipped() {
+        let disclosure = ExecutorDisclosure {
+            class: ExecutorClass::ExternalAcp,
+            agent_id: "codex-acp".into(),
+            provider: None,
+            model: None,
+            run_ref: None,
+        };
+        assert!(disclosure.is_coherent());
+        assert_eq!(
+            disclosure.label(),
+            "external_acp · codex-acp · model not disclosed"
+        );
+
+        let half_known = ExecutorDisclosure {
+            provider: Some("openai".into()),
+            ..disclosure
+        };
+        assert_eq!(
+            half_known.label(),
+            "external_acp · codex-acp · openai/model not disclosed"
+        );
+    }
+
     /// A struct with no field to hold a rendered label cannot accidentally
     /// grow one without this test's author noticing.
     #[test]
@@ -487,8 +537,8 @@ mod tests {
         let disclosure = ExecutorDisclosure {
             class: ExecutorClass::NativeLoop,
             agent_id: "a".into(),
-            provider: "p".into(),
-            model: "m".into(),
+            provider: Some("p".into()),
+            model: Some("m".into()),
             run_ref: None,
         };
         // Debug is the closest thing to reflection available here: if a
@@ -509,8 +559,8 @@ mod tests {
         let base = ExecutorDisclosure {
             class: ExecutorClass::EngineLane,
             agent_id: "codex-local".into(),
-            provider: "google".into(),
-            model: "gemini-3.6-flash".into(),
+            provider: Some("google".into()),
+            model: Some("gemini-3.6-flash".into()),
             run_ref: Some("run.abc".into()),
         };
         assert!(base.is_coherent());
@@ -523,9 +573,16 @@ mod tests {
         native_with_run.class = ExecutorClass::NativeLoop;
         assert!(!native_with_run.is_coherent());
 
-        let mut blank_model = base;
-        blank_model.model = String::new();
+        // A present-but-empty identifier stays incoherent after omega#77 made
+        // these optional. Absent means "not disclosed"; empty means something
+        // built the record out of a missing value and lost the distinction.
+        let mut blank_model = base.clone();
+        blank_model.model = Some(String::new());
         assert!(!blank_model.is_coherent());
+
+        let mut blank_provider = base;
+        blank_provider.provider = Some(String::new());
+        assert!(!blank_provider.is_coherent());
     }
 
     /// `OMEGA-AGENT-AC-04` fixes the executor set at exactly three.

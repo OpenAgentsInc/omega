@@ -48,6 +48,32 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0018",
     "OMEGA-DELTA-0019",
     "OMEGA-DELTA-0020",
+    "OMEGA-DELTA-0021",
+];
+
+/// OMEGA-DELTA-0021. The file that holds the executor-disclosure record.
+pub const EXECUTOR_DISCLOSURE_RECORD_PATH: &str = "crates/omega_front_door/src/omega_front_door.rs";
+
+/// OMEGA-DELTA-0021. The file that binds the record to a live thread.
+pub const EXECUTOR_DISCLOSURE_BINDING_PATH: &str = "crates/agent_ui/src/omega_executor_disclosure.rs";
+
+/// OMEGA-DELTA-0021. The thread surface that has to render the line.
+pub const THREAD_VIEW_PATH: &str = "crates/agent_ui/src/conversation_view/thread_view.rs";
+
+/// OMEGA-DELTA-0021. Every field the disclosure record is allowed to hold.
+///
+/// A closed list, not a forbidden-substring scan. The owner's condition on
+/// omega#74 is that disclosure is *a record a label renders*, so the check that
+/// matters is "these parts and nothing else" — a `line`, `text`, `summary` or
+/// `display` field would be a rendered label under a name no denylist thought
+/// of. Adding a genuine new part is a one-line edit here, and that edit is the
+/// record that somebody decided it was a part rather than a caption.
+pub const EXECUTOR_DISCLOSURE_FIELDS: &[(&str, &str)] = &[
+    ("class", "ExecutorClass"),
+    ("agent_id", "String"),
+    ("provider", "Option<String>"),
+    ("model", "Option<String>"),
+    ("run_ref", "Option<String>"),
 ];
 
 /// Files deleted from the fork, checked by absence.
@@ -563,6 +589,40 @@ pub fn icon_name_variants(source: &str) -> Vec<String> {
         .filter(|name| {
             name.chars()
                 .all(|character| character.is_ascii_alphanumeric())
+        })
+        .collect()
+}
+
+/// The declared fields of a `pub struct NAME { … }`, as `(name, type)`.
+///
+/// Doc comments, attributes and blank lines are skipped, so the result is the
+/// data the struct actually holds. Returns an empty vector if the struct is not
+/// found, which the callers assert against separately — a check that reads no
+/// fields must fail loudly rather than pass vacuously.
+#[must_use]
+pub fn struct_fields(source: &str, name: &str) -> Vec<(String, String)> {
+    let header = format!("pub struct {name} {{\n");
+    let Some(start) = source.find(&header) else {
+        return Vec::new();
+    };
+    let body_start = start + header.len();
+    let Some(end) = source[body_start..].find("\n}") else {
+        return Vec::new();
+    };
+    source[body_start..body_start + end]
+        .lines()
+        .map(str::trim)
+        .filter(|line| {
+            !line.is_empty() && !line.starts_with("///") && !line.starts_with("//")
+                && !line.starts_with("#[")
+        })
+        .filter_map(|line| {
+            let line = line.trim_end_matches(',');
+            let (field, type_name) = line.split_once(':')?;
+            Some((
+                field.trim_start_matches("pub ").trim().to_owned(),
+                type_name.trim().to_owned(),
+            ))
         })
         .collect()
 }
@@ -1763,6 +1823,128 @@ mod tests {
             unenforced.is_empty(),
             "documented in {} but not listed in ENFORCED_DELTAS: {unenforced:?}",
             path.display()
+        );
+    }
+
+    /// OMEGA-DELTA-0021. Disclosure is a typed record, never a label string.
+    ///
+    /// This is the owner's binding condition from omega#74, mechanised. The
+    /// owner accepted that the first-party agent does not sign with its own
+    /// principal *on the condition* that disclosure is stored as a record a
+    /// label renders. A stored label would make that reversible decision
+    /// irreversible: switching to a signing principal would then mean parsing
+    /// prose back into parts for every thread, instead of adding a signer.
+    ///
+    /// So the field set is asserted exactly, and `label` is asserted to be a
+    /// method. Upstream Zed has no equivalent — there is nothing to revert to
+    /// here, only something to quietly add.
+    #[test]
+    fn executor_disclosure_is_a_typed_record_not_a_label_string() {
+        let path = repository_path(EXECUTOR_DISCLOSURE_RECORD_PATH);
+        let source = std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
+
+        let fields = struct_fields(&source, "ExecutorDisclosure");
+        assert!(
+            !fields.is_empty(),
+            "OMEGA-DELTA-0021: no ExecutorDisclosure struct found in {}. \
+             The check would be vacuous, so it fails instead.",
+            path.display()
+        );
+
+        let found: Vec<(&str, &str)> = fields
+            .iter()
+            .map(|(name, type_name)| (name.as_str(), type_name.as_str()))
+            .collect();
+        assert_eq!(
+            found, EXECUTOR_DISCLOSURE_FIELDS,
+            "OMEGA-DELTA-0021: ExecutorDisclosure holds different parts than \
+             the ones recorded. If a part was genuinely added, add it to \
+             EXECUTOR_DISCLOSURE_FIELDS and say so in the delta. If a rendered \
+             line was added, that is the failure this test exists for: the \
+             owner's identity decision on omega#74 stays reversible only while \
+             disclosure is a record a label renders."
+        );
+
+        assert!(
+            source.contains("pub fn label(&self) -> String"),
+            "OMEGA-DELTA-0021: {} must render the line from the record with a \
+             `label` method.",
+            path.display()
+        );
+    }
+
+    /// OMEGA-DELTA-0021. The thread surface renders the line, from the record.
+    ///
+    /// omega#77's falsifier is a thread surface showing work without naming its
+    /// executor. A record nothing draws satisfies every other check here and
+    /// discloses nothing, so the call site is pinned as well as the type.
+    #[test]
+    fn the_thread_surface_renders_the_executor_line_from_the_record() {
+        let path = repository_path(THREAD_VIEW_PATH);
+        let source = std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
+
+        assert!(
+            source.contains("fn render_executor_disclosure("),
+            "OMEGA-DELTA-0021: {} must define the executor line.",
+            path.display()
+        );
+        assert!(
+            source.contains(".child(self.render_executor_disclosure(cx))"),
+            "OMEGA-DELTA-0021: {} must draw the executor line in the thread. \
+             Defining it without rendering it discloses nothing.",
+            path.display()
+        );
+        assert!(
+            source.contains("Label::new(disclosure.label())"),
+            "OMEGA-DELTA-0021: the executor line must be rendered from the \
+             disclosure record in {}, not from a stored or hand-built string.",
+            path.display()
+        );
+    }
+
+    /// OMEGA-DELTA-0021. The disclosure rides an extension trait, not a fork.
+    ///
+    /// omega#77 requires the disclosure to be carried "via an Omega extension
+    /// trait behind a checked downcast on the shared thread types — never a
+    /// fork of `AcpThread`". Two halves: the `impl` exists here, and the
+    /// upstream crate stays clean. Putting the record into `crates/acp_thread`
+    /// would work fine and would make every future rebase of that crate an
+    /// Omega merge conflict.
+    #[test]
+    fn the_disclosure_is_an_extension_trait_and_not_a_fork_of_the_shared_thread() {
+        let path = repository_path(EXECUTOR_DISCLOSURE_BINDING_PATH);
+        let source = std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
+        assert!(
+            source.contains("impl ThreadExecutorDisclosure for AcpThread"),
+            "OMEGA-DELTA-0021: {} must implement the Omega extension trait for \
+             the shared thread type.",
+            path.display()
+        );
+        assert!(
+            source.contains("downcast::<NativeAgentConnection>()"),
+            "OMEGA-DELTA-0021: {} must classify the executor by a checked \
+             downcast. Matching on the agent's display name would make the \
+             disclosure a string comparison on a label #75 is renaming.",
+            path.display()
+        );
+
+        let mut offenders = Vec::new();
+        for_each_source_file(
+            &repository_path("crates/acp_thread"),
+            &["rs"],
+            |file, contents| {
+                if contents.contains("ExecutorDisclosure") {
+                    offenders.push(file.display().to_string());
+                }
+            },
+        );
+        assert!(
+            offenders.is_empty(),
+            "OMEGA-DELTA-0021: the disclosure record leaked into the shared \
+             thread crate, which is the fork omega#77 forbids: {offenders:?}"
         );
     }
 

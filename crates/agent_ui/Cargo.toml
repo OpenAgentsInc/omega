@@ -80,6 +80,7 @@ menu.workspace = true
 multi_buffer.workspace = true
 notifications.workspace = true
 omega_effectd.workspace = true
+omega_front_door.workspace = true
 omega_identity.workspace = true
 ordered-float.workspace = true
 parking_lot.workspace = true

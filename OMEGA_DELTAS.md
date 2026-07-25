@@ -571,3 +571,78 @@ cargo test -p omega_deltas
 - **Enforced by:** `crates/omega_deltas/src/omega_deltas.rs`,
   `full_auto_is_folded_into_the_chat_panel` and
   `only_a_click_listener_starts_a_full_auto_run`.
+
+### OMEGA-DELTA-0021 — A thread names the executor that did its work
+
+- **Upstream Zed:** a thread shows the agent's display name and icon in the
+  panel chrome, and nothing else. That is enough when the panel is Zed's own
+  agent talking to a model the user picked in the same window.
+- **Omega, before this:** Omega presents one chat surface over three executor
+  classes — the native agent loop, external ACP agents such as `codex-acp`, and
+  `omega-effectd` engine lanes. All three rendered identically. Output produced
+  by another company's coding agent, on another company's model, dispatched by
+  a Full Auto run the user was not watching, appeared in an Omega window and
+  read as Omega's own work. Nothing in the surface said otherwise.
+- **Omega now:** every thread carries an executor line above its entries,
+  naming the runtime class, the executing agent, the provider and model where
+  the executor reports them, and the engine run where there is one. The line is
+  rendered from `omega_front_door::ExecutorDisclosure` on every draw.
+- **Why:** honest attribution before any routing intelligence. Omega Agent is a
+  router that owns routing, disclosure and receipts and owns no execution
+  (omega#74, admitted by the owner 2026-07-25). A router that does not disclose
+  what it routed to is indistinguishable from a first-party agent that did the
+  work itself, and the difference is a claim about authorship.
+- **Why it is a record and not a string, which is the binding part.** The owner
+  accepted, in the same admission, that the first-party agent does **not** sign
+  with its own principal and projects onto the owner's record — *on the
+  condition that disclosure is stored as a typed record that a label renders,
+  never as a label string.* That condition is the only reason the choice stays
+  cheap to reverse. A record of parts can be handed to a signer later; a stored
+  line `"engine_lane · codex-acp · run.77"` cannot, because recovering the
+  parts means parsing prose, so switching to a signing principal would mean
+  rewriting every thread record instead of adding a signer. A label-string
+  disclosure would silently convert a reversible owner decision into an
+  irreversible one. `executor_disclosure_is_a_typed_record_not_a_label_string`
+  asserts the field set exactly, rather than scanning for suspicious names: a
+  `line`, `text` or `summary` field would be a rendered label under a name no
+  denylist anticipated.
+- **Nothing new is persisted, and that is the design rather than an omission.**
+  omega#77's falsifier names a new GPUI-owned durable store as a failure. Every
+  part of the record already has a durable home — the agent id in
+  `sidebar_threads`, the provider and model in `DbThread.model` restored by
+  `Thread::from_db`, the run reference in `full-auto-host-correlation.json`,
+  reloaded at startup — so the record is a projection over them. A projection
+  cannot disagree with the thread it describes; a cached copy can, and a
+  disclosure that disagrees with its executor is worse than none.
+- **The classification is a checked downcast, not a name match.** `agent_id()`
+  is a display identifier that `OMEGA-DELTA-0020`'s neighbour omega#75 is
+  renaming, and that any extension can set to anything. Deciding *what ran*
+  from it would make the disclosure a string comparison on a label. The
+  fallback for an unrecognised connection is `ExternalAcp`, never `NativeLoop`:
+  guessing wrong towards "not ours" costs precision, guessing wrong towards
+  "ours" is exactly the dishonest first-party claim this delta exists to stop.
+- **`provider` and `model` became optional here.** `AcpConnection` does not
+  implement `AgentConnection::model_selector`, so a `codex-acp` thread has no
+  model to report. With required strings the only options were to fabricate a
+  model or to fail `is_coherent()` on every external thread; the line now says
+  "model not disclosed" instead. An *empty* identifier stays incoherent, so the
+  distinction between "not disclosed" and "built from a missing value" is
+  preserved rather than flattened.
+- **The binding is an extension trait, not a fork.** `AcpThread` is upstream
+  and unchanged: `ThreadExecutorDisclosure` is implemented for it from
+  `crates/agent_ui/src/omega_executor_disclosure.rs`. A rebase that reshapes
+  the shared thread type breaks the `impl` and fails the build, rather than
+  silently dropping the disclosure.
+- **What this does not cover.** The executor line is on the thread surface. A
+  thread listed in the sidebar, exported, or shared shows its agent name and no
+  executor line. The model is disclosed only where the executor reports it, so
+  most external ACP threads disclose a class and an agent rather than a model.
+  And no check here inspects rendered pixels: the line is asserted to be
+  constructed and drawn, not to be legible.
+- **Enforced by:** `crates/omega_deltas/src/omega_deltas.rs`,
+  `executor_disclosure_is_a_typed_record_not_a_label_string`,
+  `the_thread_surface_renders_the_executor_line_from_the_record`, and
+  `the_disclosure_is_an_extension_trait_and_not_a_fork_of_the_shared_thread`;
+  plus `a_restarted_process_still_discloses_the_lane_that_owns_a_thread` in
+  `crates/agent_ui`, which empties the process-local lane index exactly as a
+  process exit does and rebuilds the disclosure from the journal on disk.

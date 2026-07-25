@@ -23,6 +23,7 @@ mod message_editor;
 mod mode_selector;
 mod model_selector;
 mod model_selector_popover;
+pub mod omega_executor_disclosure;
 mod omega_host_bridge;
 mod profile_selector;
 mod terminal_codegen;

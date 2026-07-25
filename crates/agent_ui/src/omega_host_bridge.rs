@@ -1,8 +1,9 @@
 use std::cell::RefCell;
+use std::collections::HashMap as StdHashMap;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
 
 use acp_thread::{AgentThreadEntry, ThreadStatus};
@@ -39,6 +40,54 @@ const MAX_EVIDENCE_TURNS: usize = 48;
 const MAX_TOTAL_ASSISTANT_TEXT_BYTES: usize = 6 * 1024;
 const CORRELATION_SCHEMA: &str = "openagents.omega.full_auto_host_correlation.v1";
 const CORRELATION_FILE: &str = "full-auto-host-correlation.json";
+
+/// OMEGA-DELTA-0021. Which `omega-effectd` lane run each host-bridge thread
+/// belongs to, so the thread surface can disclose it.
+///
+/// A read-mostly index, not a store. It is derived twice from the correlation
+/// journal — once when the journal is loaded at startup, and again on every
+/// write — so it cannot outlive or disagree with the durable record. omega#77's
+/// falsifier names a *new durable* store for disclosure; this is neither new
+/// nor durable, and deleting the file it mirrors empties it.
+///
+/// It exists because `HostBridgeState` lives inside the host handler's closure
+/// and is not reachable from a render, while the disclosure has to be readable
+/// wherever a thread is drawn.
+static ENGINE_LANE_RUNS: LazyLock<Mutex<StdHashMap<ThreadId, String>>> =
+    LazyLock::new(|| Mutex::new(StdHashMap::new()));
+
+/// The lane index a set of host threads implies.
+fn engine_lane_runs_from(threads: &[HostThread]) -> StdHashMap<ThreadId, String> {
+    threads
+        .iter()
+        .map(|thread| (thread.thread_id, thread.operation_ref.clone()))
+        .collect()
+}
+
+/// Replace the lane index with what the correlation journal now says.
+///
+/// Wholesale replacement rather than insertion: a thread dropped from the
+/// journal must stop being disclosed as a lane run, and an incremental index
+/// would keep disclosing it.
+fn republish_engine_lane_runs(threads: &[HostThread]) {
+    let runs = engine_lane_runs_from(threads);
+    match ENGINE_LANE_RUNS.lock() {
+        Ok(mut index) => *index = runs,
+        Err(poisoned) => *poisoned.into_inner() = runs,
+    }
+}
+
+/// The `omega-effectd` lane run this thread belongs to, if it is one.
+///
+/// Returns `None` for every thread the user started themselves, which is what
+/// keeps a hand-driven `codex-acp` thread disclosed as routed rather than as a
+/// delegated lane run.
+pub fn engine_lane_run(thread_id: ThreadId) -> Option<String> {
+    match ENGINE_LANE_RUNS.lock() {
+        Ok(index) => index.get(&thread_id).cloned(),
+        Err(poisoned) => poisoned.into_inner().get(&thread_id).cloned(),
+    }
+}
 
 #[derive(Clone)]
 struct WorkspaceBinding {
@@ -183,6 +232,10 @@ pub fn omega_effectd_host_handler(cx: &App) -> OmegaEffectdHostHandler {
         Ok(threads) => (threads, None),
         Err(error) => (Vec::new(), Some(error.to_string())),
     };
+    // OMEGA-DELTA-0021. This is the restart edge: the lane index is empty in a
+    // freshly started process, and the journal on disk is what refills it, so a
+    // thread resumed after a restart still discloses the lane that owns it.
+    republish_engine_lane_runs(&threads);
     let state = Rc::new(RefCell::new(HostBridgeState {
         workspace: None,
         threads,
@@ -1226,6 +1279,10 @@ fn turn_timeout_for_lane(lane: &str) -> Option<Duration> {
 }
 
 fn persist_correlation_journal(state: &HostBridgeState) -> anyhow::Result<()> {
+    // OMEGA-DELTA-0021. Every mutation of `state.threads` reaches disk through
+    // here, so republishing here is what keeps the lane index and the durable
+    // journal from drifting apart within a session.
+    republish_engine_lane_runs(&state.threads);
     let journal = CorrelationJournal {
         schema: CORRELATION_SCHEMA.to_string(),
         threads: state
@@ -1408,7 +1465,20 @@ fn internal(message: impl Into<String>) -> HostResponseError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use omega_front_door::{ExecutorClass, ExecutorDisclosure};
     use tempfile::tempdir;
+
+    /// `ENGINE_LANE_RUNS` is process-wide and every publication replaces it
+    /// wholesale, so two tests publishing at once would clobber each other's
+    /// assertions. Every test that publishes takes this first.
+    static LANE_INDEX_GUARD: Mutex<()> = Mutex::new(());
+
+    fn lane_index_guard() -> std::sync::MutexGuard<'static, ()> {
+        LANE_INDEX_GUARD.lock().unwrap_or_else(|poisoned| {
+            LANE_INDEX_GUARD.clear_poison();
+            poisoned.into_inner()
+        })
+    }
 
     #[test]
     fn validates_bounded_refs_and_params() {
@@ -1461,6 +1531,7 @@ mod tests {
 
     #[test]
     fn correlation_journal_round_trips_without_conversation_entities() {
+        let _lane_index = lane_index_guard();
         let directory = tempdir().expect("tempdir");
         let path = directory.path().join(CORRELATION_FILE);
         let thread_id = ThreadId::new();
@@ -1508,8 +1579,91 @@ mod tests {
         );
     }
 
+    /// OMEGA-DELTA-0021, omega#77's exit: a thread still names its executor
+    /// after a restart.
+    ///
+    /// The restart is real rather than mimed. The lane index is process state,
+    /// so it is emptied here exactly as a process exit empties it, and the only
+    /// thing that survives into the assertion is the file on disk. A disclosure
+    /// that lived only in memory fails this test at the `engine_lane_run` call.
+    #[test]
+    fn a_restarted_process_still_discloses_the_lane_that_owns_a_thread() {
+        let _lane_index = lane_index_guard();
+        let directory = tempdir().expect("tempdir");
+        let path = directory.path().join(CORRELATION_FILE);
+        let thread_id = ThreadId::new();
+        let state = HostBridgeState {
+            workspace: None,
+            threads: vec![HostThread {
+                workspace_ref: SUPERVISED_WORKSPACE_REF.to_string(),
+                lane: CODEX_LOCAL_LANE.to_string(),
+                operation_ref: "operation.full-auto.77".to_string(),
+                thread_id,
+                conversation: None,
+                turns: Vec::new(),
+                revision: 1,
+            }],
+            correlation_path: path.clone(),
+            load_error: None,
+            sarah_conversation: None,
+        };
+        persist_correlation_journal(&state).expect("persist correlation journal");
+
+        // The process ends here. Everything below is a cold start.
+        republish_engine_lane_runs(&[]);
+        assert_eq!(
+            engine_lane_run(thread_id),
+            None,
+            "a cold process must know nothing until it reads the journal"
+        );
+
+        let restored = load_correlation_journal(&path).expect("load correlation journal");
+        republish_engine_lane_runs(&restored);
+
+        let run = engine_lane_run(thread_id).expect("the reloaded journal names this thread's run");
+        assert_eq!(run, "operation.full-auto.77");
+
+        let disclosure = crate::omega_executor_disclosure::delegated_to_run(
+            ExecutorDisclosure {
+                class: ExecutorClass::ExternalAcp,
+                agent_id: CODEX_AGENT_ID.to_string(),
+                provider: None,
+                model: None,
+                run_ref: None,
+            },
+            run,
+        );
+        assert_eq!(disclosure.class, ExecutorClass::EngineLane);
+        assert!(disclosure.is_coherent());
+
+        let line = disclosure.label();
+        assert!(line.contains(CODEX_AGENT_ID), "{line:?}");
+        assert!(line.contains("engine_lane"), "{line:?}");
+        assert!(line.contains("operation.full-auto.77"), "{line:?}");
+    }
+
+    /// A thread the user started themselves is not a lane run, and must not be
+    /// disclosed as one. Without this, the index's default answer would
+    /// silently attribute every hand-driven thread to Full Auto.
+    #[test]
+    fn a_thread_that_is_not_a_lane_run_is_not_disclosed_as_one() {
+        let _lane_index = lane_index_guard();
+        let hand_started = ThreadId::new();
+        republish_engine_lane_runs(&[HostThread {
+            workspace_ref: SUPERVISED_WORKSPACE_REF.to_string(),
+            lane: CLAUDE_LOCAL_LANE.to_string(),
+            operation_ref: "operation.full-auto.1".to_string(),
+            thread_id: ThreadId::new(),
+            conversation: None,
+            turns: Vec::new(),
+            revision: 1,
+        }]);
+        assert_eq!(engine_lane_run(hand_started), None);
+    }
+
     #[test]
     fn completed_turn_is_persisted_after_releasing_mutable_state_borrow() {
+        let _lane_index = lane_index_guard();
         let directory = tempdir().expect("tempdir");
         let path = directory.path().join(CORRELATION_FILE);
         let thread_id = ThreadId::new();
@@ -1563,6 +1717,7 @@ mod tests {
 
     #[test]
     fn timed_out_turn_is_persisted_as_a_terminal_failure() {
+        let _lane_index = lane_index_guard();
         let directory = tempdir().expect("tempdir");
         let path = directory.path().join(CORRELATION_FILE);
         let thread_id = ThreadId::new();
