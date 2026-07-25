@@ -141,6 +141,48 @@ script/generate-omega-identity-candidate-evidence --self-test
 
 ### Full Auto assurance evidence
 
+Before assembling Full Auto observations, collect the durable receipts for
+explicit installed run refs from the release-namespaced registries:
+
+```sh
+script/collect-omega-full-auto-installed-evidence \
+  --release-record "$PWD/target/omega-rc/omega-v0.2.0-rc3-macos-arm64.release.json" \
+  --identity-evidence "$PWD/target/omega-identity-evidence/candidate-evidence.json" \
+  --app /Applications/Omega.app \
+  --registry-root "$HOME/Library/Application Support/Omega RC/openagents/full-auto" \
+  --run-ref run.full-auto.<explicit-ref> \
+  --run-ref run.full-auto.<explicit-handoff-ref> \
+  --output "$PWD/target/omega-full-auto-evidence/observed/installed-runs.json"
+```
+
+The collector accepts only the exact `/Applications/Omega.app` executable
+whose digest, bundle identifier, version, release record, and identity
+candidate agree. On macOS, the registry directory must be the private
+`0700` directory derived from the release record's Omega namespace. The four
+required registry files must be regular non-symlink `0600` files with the
+expected run, report, provider-handoff, and native-binding schemas. Duplicate
+JSON keys, duplicate registry refs, symbolic-link traversal, weak modes,
+candidate substitution, registry digest changes, and inconsistent
+run/report/handoff/native bindings are refused.
+
+Output is a public-safe projection. It includes controlled lifecycle and
+provider enums, counts, timestamps, pre-existing objective and done-condition
+digests, hashed opaque thread/workspace/project/worktree refs, canonical
+record and registry digests, and exact candidate bindings. It never emits
+objectives, prompts, titles, reasons, outcome summaries, transcripts, raw
+paths, credentials, tokens, or other free-form content. The output file is
+written atomically with mode `0600`; `evidence_sha256` is the SHA-256 of its
+canonical JSON before that field is added.
+
+This receipt can support the applicable installed observations, but it does
+not decide that an obligation or issue gate passed and does not create a
+reviewer or release-authority decision. Test deterministic projection and
+duplicate-key, tamper, redaction, symlink, and weak-mode refusal with:
+
+```sh
+script/collect-omega-full-auto-installed-evidence --self-test
+```
+
 The admitted Omega Full Auto AssuranceSpec is revision 5. Its design-admission
 receipt does not prove an installed candidate. Collect a separate packet with
 schema `openagents.omega.full-auto-observations.v1`, then bind it to the exact

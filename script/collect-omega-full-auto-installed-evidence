@@ -1,0 +1,604 @@
+#!/usr/bin/env python3
+"""Collect public-safe Full Auto receipts from one exact installed Omega candidate."""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import plistlib
+import re
+import stat
+import subprocess
+import sys
+import tempfile
+from datetime import datetime
+from pathlib import Path
+from typing import Any
+
+
+SCHEMA = "openagents.omega.full-auto-installed-run-evidence.v1"
+RUNS_SCHEMA = "openagents.desktop.full_auto_run_registry.v1"
+REPORTS_SCHEMA = "openagents.desktop.full_auto_run_report.v1"
+HANDOFFS_SCHEMA = "openagents.desktop.provider_handoff_transition.v1"
+NATIVE_BINDINGS_SCHEMA = "openagents.omega.full_auto_native_binding.v1"
+REGISTRY_FILES = {
+    "runs": ("runs.json", RUNS_SCHEMA, "runs"),
+    "reports": ("run-reports.json", REPORTS_SCHEMA, "reports"),
+    "handoffs": ("provider-handoffs.json", HANDOFFS_SCHEMA, "transitions"),
+    "native_bindings": ("native-bindings.json", NATIVE_BINDINGS_SCHEMA, "bindings"),
+}
+RUN_REF_RE = re.compile(r"run\.full-auto\.[a-z0-9.-]+")
+REF_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,255}")
+SHA256_RE = re.compile(r"[0-9a-f]{64}")
+COMMIT_RE = re.compile(r"[0-9a-f]{40}")
+ALLOWED_STATES = {
+    "draft", "running", "pausing", "paused", "stalled", "stopping",
+    "stopped", "completed", "failed",
+}
+ALLOWED_ACTORS = {"control_api", "effectd", "host", "owner", "system"}
+ALLOWED_LANES = {"codex-local", "claude-local"}
+ALLOWED_DISPOSITIONS = {
+    "complete_within_bounds", "completed", "failed", "interrupted",
+    "stopped", "cancelled", "timed_out", "unknown",
+}
+SENSITIVE_KEY_PARTS = {
+    "objective", "prompt", "message", "reason", "title", "path", "content",
+    "credential", "token", "secret", "password", "transcript", "summary",
+}
+SECRET_PATTERNS = (
+    re.compile(r"sk-[A-Za-z0-9_-]{12,}"),
+    re.compile(r"(?i)bearer\s+[A-Za-z0-9._~+/-]{12,}"),
+    re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"),
+)
+
+
+class EvidenceError(RuntimeError):
+    pass
+
+
+def duplicate_key_guard(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise EvidenceError(f"duplicate JSON key: {key}")
+        result[key] = value
+    return result
+
+
+def canonical_bytes(value: Any) -> bytes:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
+
+
+def digest_bytes(value: bytes) -> str:
+    return hashlib.sha256(value).hexdigest()
+
+
+def digest_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def digest_value(value: Any) -> str:
+    return digest_bytes(canonical_bytes(value))
+
+
+def digest_ref(value: str, label: str) -> str:
+    require_ref(value, label)
+    return digest_bytes(value.encode())
+
+
+def require_ref(value: Any, label: str) -> str:
+    if not isinstance(value, str) or REF_RE.fullmatch(value) is None:
+        raise EvidenceError(f"{label} is not a safe public reference")
+    return value
+
+
+def require_sha256(value: Any, label: str) -> str:
+    if not isinstance(value, str) or SHA256_RE.fullmatch(value) is None:
+        raise EvidenceError(f"{label} must be a lowercase SHA-256 digest")
+    return value
+
+
+def require_time(value: Any, label: str) -> str:
+    if not isinstance(value, str):
+        raise EvidenceError(f"{label} must be an ISO-8601 timestamp")
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as error:
+        raise EvidenceError(f"{label} must be an ISO-8601 timestamp") from error
+    if parsed.tzinfo is None:
+        raise EvidenceError(f"{label} must include a timezone")
+    return value
+
+
+def require_integer(value: Any, label: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise EvidenceError(f"{label} must be a nonnegative integer")
+    return value
+
+
+def require_no_symlink_components(path: Path, label: str) -> None:
+    absolute = path.absolute()
+    current = Path(absolute.anchor)
+    for component in absolute.parts[1:]:
+        current /= component
+        if current.is_symlink():
+            raise EvidenceError(f"{label} traverses a symbolic link")
+
+
+def require_regular(path: Path, label: str, *, private: bool = False) -> os.stat_result:
+    require_no_symlink_components(path, label)
+    try:
+        metadata = path.stat()
+    except OSError as error:
+        raise EvidenceError(f"cannot inspect {label}: {error}") from error
+    if not stat.S_ISREG(metadata.st_mode):
+        raise EvidenceError(f"{label} must be a regular non-symlink file")
+    mode = stat.S_IMODE(metadata.st_mode)
+    if private and mode & 0o077:
+        raise EvidenceError(f"{label} must not grant group or other permissions")
+    if mode & 0o022:
+        raise EvidenceError(f"{label} must not be group- or world-writable")
+    return metadata
+
+
+def load_json(path: Path, label: str, *, private: bool = False) -> dict[str, Any]:
+    metadata = require_regular(path, label, private=private)
+    if metadata.st_size > 16 * 1024 * 1024:
+        raise EvidenceError(f"{label} is unexpectedly large")
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=duplicate_key_guard)
+    except (OSError, UnicodeError, json.JSONDecodeError, EvidenceError) as error:
+        raise EvidenceError(f"cannot read {label}: {error}") from error
+    if not isinstance(value, dict):
+        raise EvidenceError(f"{label} must be a JSON object")
+    return value
+
+
+def exact_object(value: Any, keys: set[str], label: str) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise EvidenceError(f"{label} must be an object")
+    if set(value) != keys:
+        raise EvidenceError(f"{label} keys are not exact")
+    return value
+
+
+def validate_registry_root(root: Path, release: dict[str, Any]) -> Path:
+    if not root.is_absolute():
+        raise EvidenceError("registry root must be absolute")
+    require_no_symlink_components(root, "registry root")
+    try:
+        metadata = root.stat()
+    except OSError as error:
+        raise EvidenceError(f"cannot inspect registry root: {error}") from error
+    if not stat.S_ISDIR(metadata.st_mode) or stat.S_IMODE(metadata.st_mode) & 0o077:
+        raise EvidenceError("registry root must be a private non-symlink directory")
+    if sys.platform == "darwin":
+        volume_name = release.get("volume_name")
+        if not isinstance(volume_name, str) or not volume_name.startswith("Omega"):
+            raise EvidenceError("release record has no valid Omega release namespace")
+        expected = Path.home() / "Library/Application Support" / volume_name / "openagents/full-auto"
+        if root != expected:
+            raise EvidenceError("registry root is outside the release-record namespace")
+    return root
+
+
+def candidate_bindings(release_path: Path, identity_path: Path, app: Path) -> dict[str, Any]:
+    release = load_json(release_path, "release record")
+    identity = load_json(identity_path, "identity candidate evidence")
+    if app != Path("/Applications/Omega.app"):
+        raise EvidenceError("installed application must be exactly /Applications/Omega.app")
+    require_no_symlink_components(app, "installed application")
+    if not app.is_dir():
+        raise EvidenceError("installed application is missing")
+    if stat.S_IMODE(app.stat().st_mode) & 0o022:
+        raise EvidenceError("installed application must not be group- or world-writable")
+    info_path = app / "Contents/Info.plist"
+    binary_path = app / "Contents/MacOS/omega"
+    require_regular(info_path, "installed Info.plist")
+    require_regular(binary_path, "installed Omega executable")
+    try:
+        with info_path.open("rb") as handle:
+            info = plistlib.load(handle)
+    except (OSError, plistlib.InvalidFileException) as error:
+        raise EvidenceError(f"cannot read installed Info.plist: {error}") from error
+    if info.get("CFBundleIdentifier") != release.get("bundle_identifier"):
+        raise EvidenceError("installed bundle identifier differs from release record")
+    bundle_version = release.get("bundle_version", release.get("version"))
+    if info.get("CFBundleShortVersionString") != bundle_version:
+        raise EvidenceError("installed version differs from release record")
+    binary_sha256 = digest_file(binary_path)
+    expected_binary = release.get("digests", {}).get("omega_binary_sha256")
+    if binary_sha256 != expected_binary:
+        raise EvidenceError("installed executable digest differs from release record")
+    artifact_sha256 = require_sha256(
+        release.get("digests", {}).get("package_sha256"), "release artifact digest"
+    )
+    omega_commit = release.get("source", {}).get("commit")
+    if not isinstance(omega_commit, str) or COMMIT_RE.fullmatch(omega_commit) is None:
+        raise EvidenceError("release record source commit is invalid")
+    candidate = identity.get("candidate")
+    candidate_digest = identity.get("candidate_digest", {}).get("value")
+    if not isinstance(candidate, dict):
+        raise EvidenceError("identity evidence has no candidate object")
+    require_sha256(candidate_digest, "identity candidate digest")
+    if digest_value(candidate) != candidate_digest:
+        raise EvidenceError("identity candidate digest is not canonical")
+    artifact = candidate.get("artifact", {})
+    if (
+        candidate.get("omega", {}).get("commit") != omega_commit
+        or artifact.get("sha256") != artifact_sha256
+        or artifact.get("release_record_sha256") != digest_file(release_path)
+    ):
+        raise EvidenceError("identity evidence binds a different candidate")
+    if sys.platform == "darwin":
+        result = subprocess.run(
+            ["codesign", "--verify", "--deep", "--strict", str(app)],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+        )
+        if result.returncode != 0:
+            raise EvidenceError("installed application fails strict code-signature verification")
+    return {
+        "candidate_digest": candidate_digest,
+        "artifact_sha256": artifact_sha256,
+        "release_record_sha256": digest_file(release_path),
+        "omega_commit": omega_commit,
+        "installed_app_name": "Omega.app",
+        "installed_binary_sha256": binary_sha256,
+        "bundle_identifier": release["bundle_identifier"],
+        "release_version": release["version"],
+        "bundle_version": bundle_version,
+    }
+
+
+def transition_projection(value: Any, label: str) -> dict[str, Any]:
+    transition = exact_object(value, {"from", "to", "actor", "at", "reason"}, label)
+    source = transition["from"]
+    target = transition["to"]
+    actor = transition["actor"]
+    if source not in ALLOWED_STATES or target not in ALLOWED_STATES:
+        raise EvidenceError(f"{label} has an unknown state")
+    if actor not in ALLOWED_ACTORS:
+        raise EvidenceError(f"{label} has an unknown actor")
+    if not isinstance(transition["reason"], str):
+        raise EvidenceError(f"{label}.reason must be a string")
+    return {
+        "from": source, "to": target, "actor": actor,
+        "at": require_time(transition["at"], f"{label}.at"),
+        "record_sha256": digest_value(transition),
+    }
+
+
+def handoff_projection(value: Any, label: str, run_ref: str) -> dict[str, Any]:
+    keys = {
+        "handoffRef", "runRef", "threadRef", "sourceThreadRef", "targetThreadRef",
+        "from", "to", "actor", "at", "reason", "disposition", "truncated",
+        "envelopeSchema",
+    }
+    handoff = exact_object(value, keys, label)
+    if handoff["runRef"] != run_ref:
+        raise EvidenceError(f"{label} binds a different run")
+    if handoff["from"] not in ALLOWED_LANES or handoff["to"] not in ALLOWED_LANES:
+        raise EvidenceError(f"{label} has an unknown provider lane")
+    if handoff["from"] == handoff["to"]:
+        raise EvidenceError(f"{label} does not change provider lane")
+    if handoff["actor"] not in ALLOWED_ACTORS:
+        raise EvidenceError(f"{label} has an unknown actor")
+    if handoff["disposition"] not in ALLOWED_DISPOSITIONS:
+        raise EvidenceError(f"{label} has an unknown disposition")
+    if not isinstance(handoff["truncated"], bool) or not isinstance(handoff["reason"], str):
+        raise EvidenceError(f"{label} has invalid typed fields")
+    if handoff["envelopeSchema"] != "openagents.desktop.provider_handoff_envelope.v1":
+        raise EvidenceError(f"{label} has an unknown envelope schema")
+    return {
+        "handoff_ref": require_ref(handoff["handoffRef"], f"{label}.handoffRef"),
+        "from": handoff["from"], "to": handoff["to"], "actor": handoff["actor"],
+        "at": require_time(handoff["at"], f"{label}.at"),
+        "disposition": handoff["disposition"], "truncated": handoff["truncated"],
+        "envelope_schema": handoff["envelopeSchema"],
+        "thread_ref_sha256": digest_ref(handoff["threadRef"], f"{label}.threadRef"),
+        "source_thread_ref_sha256": digest_ref(handoff["sourceThreadRef"], f"{label}.sourceThreadRef"),
+        "target_thread_ref_sha256": digest_ref(handoff["targetThreadRef"], f"{label}.targetThreadRef"),
+        "record_sha256": digest_value(handoff),
+    }
+
+
+def one_by_run(records: list[Any], run_ref: str, label: str) -> dict[str, Any]:
+    matches = [record for record in records if isinstance(record, dict) and record.get("runRef") == run_ref]
+    if len(matches) != 1:
+        raise EvidenceError(f"{label} must contain exactly one record for {run_ref}")
+    return matches[0]
+
+
+def require_unique_registry_refs(records: list[Any], key: str, label: str) -> None:
+    observed: set[str] = set()
+    for index, record in enumerate(records):
+        if not isinstance(record, dict):
+            raise EvidenceError(f"{label}[{index}] must be an object")
+        value = require_ref(record.get(key), f"{label}[{index}].{key}")
+        if value in observed:
+            raise EvidenceError(f"{label} contains duplicate {key}: {value}")
+        observed.add(value)
+
+
+def collect(release_path: Path, identity_path: Path, app: Path, root: Path, run_refs: list[str]) -> dict[str, Any]:
+    if not run_refs or len(run_refs) != len(set(run_refs)):
+        raise EvidenceError("run refs must be a nonempty unique list")
+    for run_ref in run_refs:
+        if RUN_REF_RE.fullmatch(run_ref) is None:
+            raise EvidenceError(f"invalid run ref: {run_ref}")
+    bindings = candidate_bindings(release_path, identity_path, app)
+    release = load_json(release_path, "release record")
+    root = validate_registry_root(root, release)
+    registries: dict[str, dict[str, Any]] = {}
+    registry_evidence: dict[str, Any] = {}
+    for key, (filename, schema_name, array_key) in REGISTRY_FILES.items():
+        path = root / filename
+        document = load_json(path, f"{key} registry", private=True)
+        exact_object(document, {"schema", array_key}, f"{key} registry")
+        if document["schema"] != schema_name or not isinstance(document[array_key], list):
+            raise EvidenceError(f"{key} registry schema is invalid")
+        registries[key] = document
+        registry_evidence[key] = {
+            "schema": schema_name,
+            "sha256": digest_file(path),
+            "mode": "0600",
+        }
+    require_unique_registry_refs(registries["runs"]["runs"], "runRef", "runs registry")
+    require_unique_registry_refs(registries["reports"]["reports"], "runRef", "reports registry")
+    require_unique_registry_refs(
+        registries["native_bindings"]["bindings"], "runRef", "native bindings registry"
+    )
+    require_unique_registry_refs(
+        registries["handoffs"]["transitions"], "handoffRef", "handoffs registry"
+    )
+    runs = []
+    for run_ref in run_refs:
+        run = one_by_run(registries["runs"]["runs"], run_ref, "runs registry")
+        report = one_by_run(registries["reports"]["reports"], run_ref, "reports registry")
+        native = one_by_run(registries["native_bindings"]["bindings"], run_ref, "native bindings registry")
+        state = run.get("state")
+        if state not in ALLOWED_STATES or report.get("state") != state:
+            raise EvidenceError(f"run/report state mismatch for {run_ref}")
+        thread_ref = require_ref(run.get("threadRef"), f"{run_ref}.threadRef")
+        if report.get("threadRef") != thread_ref:
+            raise EvidenceError(f"run/report thread mismatch for {run_ref}")
+        transitions = run.get("transitions")
+        if not isinstance(transitions, list) or not transitions:
+            raise EvidenceError(f"{run_ref} has no lifecycle transitions")
+        projected_transitions = [
+            transition_projection(value, f"{run_ref}.transitions[{index}]")
+            for index, value in enumerate(transitions)
+        ]
+        handoffs = [
+            value for value in registries["handoffs"]["transitions"]
+            if isinstance(value, dict) and value.get("runRef") == run_ref
+        ]
+        projected_handoffs = [
+            handoff_projection(value, f"{run_ref}.handoffs[{index}]", run_ref)
+            for index, value in enumerate(handoffs)
+        ]
+        report_handoffs = report.get("providerTransitions")
+        if not isinstance(report_handoffs, list):
+            raise EvidenceError(f"{run_ref} report has invalid provider transitions")
+        if [digest_value(value) for value in report_handoffs] != [digest_value(value) for value in handoffs]:
+            raise EvidenceError(f"{run_ref} report and handoff registry disagree")
+        workspace_ref = require_ref(run.get("workspaceRef"), f"{run_ref}.workspaceRef")
+        if report.get("workspaceRef") != workspace_ref or native.get("workspaceRef") != workspace_ref:
+            raise EvidenceError(f"{run_ref} workspace binding mismatch")
+        if native.get("runRef") != run_ref or not isinstance(native.get("rebaseUnsafe"), bool):
+            raise EvidenceError(f"{run_ref} native binding is invalid")
+        worktree_path_digest = native.get("worktreePathDigest")
+        if worktree_path_digest is not None:
+            require_sha256(worktree_path_digest, f"{run_ref}.worktreePathDigest")
+        git_head = native.get("gitHead")
+        if git_head is not None and (not isinstance(git_head, str) or COMMIT_RE.fullmatch(git_head) is None):
+            raise EvidenceError(f"{run_ref}.gitHead is invalid")
+        objective_digest = require_sha256(report.get("objectiveDigest"), f"{run_ref}.objectiveDigest")
+        done_digest = require_sha256(report.get("doneConditionDigest"), f"{run_ref}.doneConditionDigest")
+        run_projection = {
+            "run_ref": run_ref,
+            "thread_ref_sha256": digest_ref(thread_ref, f"{run_ref}.threadRef"),
+            "workspace_ref_sha256": digest_ref(workspace_ref, f"{run_ref}.workspaceRef"),
+            "objective_sha256": objective_digest,
+            "done_condition_sha256": done_digest,
+            "state": state,
+            "state_revision": require_integer(run.get("stateRevision"), f"{run_ref}.stateRevision"),
+            "turn_cap": require_integer(run.get("turnCap"), f"{run_ref}.turnCap"),
+            "successful_attempts": require_integer(run.get("successfulAttempts"), f"{run_ref}.successfulAttempts"),
+            "failed_attempts": require_integer(run.get("failedAttempts"), f"{run_ref}.failedAttempts"),
+            "created_at": require_time(run.get("createdAt"), f"{run_ref}.createdAt"),
+            "started_at": require_time(run.get("startedAt"), f"{run_ref}.startedAt"),
+            "updated_at": require_time(report.get("updatedAt"), f"{run_ref}.updatedAt"),
+            "lifecycle_transitions": projected_transitions,
+            "provider_handoffs": projected_handoffs,
+            "native_binding": {
+                "project_ref_sha256": digest_ref(native.get("projectRef"), f"{run_ref}.projectRef"),
+                "worktree_ref_sha256": digest_ref(native.get("worktreeRef"), f"{run_ref}.worktreeRef"),
+                "worktree_path_sha256": worktree_path_digest,
+                "git_head": git_head,
+                "rebase_unsafe": native["rebaseUnsafe"],
+                "bound_at": require_time(native.get("boundAt"), f"{run_ref}.boundAt"),
+                "record_sha256": digest_value(native),
+            },
+            "run_record_sha256": digest_value(run),
+            "report_record_sha256": digest_value(report),
+        }
+        runs.append(run_projection)
+    evidence = {
+        "schema": SCHEMA,
+        **bindings,
+        "collector": {
+            "name": "collect-omega-full-auto-installed-evidence",
+            "version": 1,
+            "sha256": digest_file(Path(__file__)),
+        },
+        "registry_namespace": release["volume_name"],
+        "registries": registry_evidence,
+        "selected_run_count": len(runs),
+        "runs": runs,
+    }
+    validate_public_output(evidence)
+    evidence["evidence_sha256"] = digest_value(evidence)
+    return evidence
+
+
+def validate_public_output(value: Any, path: str = "$") -> None:
+    if isinstance(value, dict):
+        for key, child in value.items():
+            lowered = key.lower()
+            if any(part in lowered for part in SENSITIVE_KEY_PARTS):
+                allowed = key in {"objective_sha256", "done_condition_sha256", "worktree_path_sha256"}
+                if not allowed:
+                    raise EvidenceError(f"public output contains forbidden field at {path}.{key}")
+            validate_public_output(child, f"{path}.{key}")
+    elif isinstance(value, list):
+        for index, child in enumerate(value):
+            validate_public_output(child, f"{path}[{index}]")
+    elif isinstance(value, str):
+        for pattern in SECRET_PATTERNS:
+            if pattern.search(value):
+                raise EvidenceError(f"public output contains secret-shaped text at {path}")
+        if value.startswith("/") or re.search(r"(?:^|/)Users/", value):
+            raise EvidenceError(f"public output contains a raw path at {path}")
+
+
+def write_output(path: Path, evidence: dict[str, Any]) -> None:
+    if not path.is_absolute():
+        raise EvidenceError("output path must be absolute")
+    require_no_symlink_components(path.parent, "output parent")
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    except OSError as error:
+        raise EvidenceError(f"cannot create output directory: {error}") from error
+    if path.is_symlink():
+        raise EvidenceError("output must not be a symbolic link")
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        try:
+            descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                json.dump(evidence, handle, indent=2, sort_keys=True)
+                handle.write("\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, path)
+            os.chmod(path, 0o600)
+        except OSError as error:
+            raise EvidenceError(f"cannot write output: {error}") from error
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+
+
+def self_test() -> None:
+    base_transition = {
+        "from": "running", "to": "paused", "actor": "control_api",
+        "at": "2026-07-25T00:00:00Z", "reason": "owner request",
+    }
+    projected = transition_projection(base_transition, "test transition")
+    if "reason" in projected or projected["to"] != "paused":
+        raise EvidenceError("transition projection leaked a reason")
+    if projected != transition_projection(dict(base_transition), "test transition"):
+        raise EvidenceError("transition projection is not deterministic")
+    handoff = {
+        "handoffRef": "handoff.provider.test", "runRef": "run.full-auto.test",
+        "threadRef": "thread.test", "sourceThreadRef": "thread.source",
+        "targetThreadRef": "thread.target", "from": "codex-local", "to": "claude-local",
+        "actor": "control_api", "at": "2026-07-25T00:00:01Z", "reason": "switch",
+        "disposition": "complete_within_bounds", "truncated": False,
+        "envelopeSchema": "openagents.desktop.provider_handoff_envelope.v1",
+    }
+    projected_handoff = handoff_projection(handoff, "test handoff", "run.full-auto.test")
+    if "reason" in projected_handoff or "thread.test" in canonical_bytes(projected_handoff).decode():
+        raise EvidenceError("handoff projection leaked private text or opaque refs")
+    for forged in (
+        '{"schema":"x","schema":"y"}',
+        '{"token":"sk-testSecretValue123456789"}',
+    ):
+        try:
+            value = json.loads(forged, object_pairs_hook=duplicate_key_guard)
+            validate_public_output(value)
+        except EvidenceError:
+            pass
+        else:
+            raise EvidenceError("duplicate-key or redaction forgery was accepted")
+    with tempfile.TemporaryDirectory() as temporary_directory:
+        root = Path(temporary_directory)
+        private = root / "private.json"
+        private.write_text('{"schema":"x"}\n', encoding="utf-8")
+        private.chmod(0o644)
+        try:
+            load_json(private, "private fixture", private=True)
+        except EvidenceError:
+            pass
+        else:
+            raise EvidenceError("weak registry mode was accepted")
+        target = root / "target.json"
+        target.write_text('{}\n', encoding="utf-8")
+        link = root / "link.json"
+        link.symlink_to(target)
+        try:
+            load_json(link, "symlink fixture")
+        except EvidenceError:
+            pass
+        else:
+            raise EvidenceError("symlink registry was accepted")
+        tampered = dict(handoff)
+        tampered["disposition"] = "secret: sk-testSecretValue123456789"
+        try:
+            handoff_projection(tampered, "tampered handoff", "run.full-auto.test")
+        except EvidenceError:
+            pass
+        else:
+            raise EvidenceError("tampered handoff was accepted")
+    print("Full Auto installed evidence collector self-test passed")
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--release-record", type=Path)
+    parser.add_argument("--identity-evidence", type=Path)
+    parser.add_argument("--app", type=Path, default=Path("/Applications/Omega.app"))
+    parser.add_argument("--registry-root", type=Path)
+    parser.add_argument("--run-ref", action="append", dest="run_refs")
+    parser.add_argument("--output", type=Path)
+    parser.add_argument("--self-test", action="store_true")
+    return parser.parse_args()
+
+
+def main() -> int:
+    args = parse_args()
+    try:
+        if args.self_test:
+            self_test()
+            return 0
+        required = {
+            "--release-record": args.release_record,
+            "--identity-evidence": args.identity_evidence,
+            "--registry-root": args.registry_root,
+            "--run-ref": args.run_refs,
+            "--output": args.output,
+        }
+        missing = [name for name, value in required.items() if not value]
+        if missing:
+            raise EvidenceError(f"missing required arguments: {', '.join(missing)}")
+        evidence = collect(
+            args.release_record.absolute(), args.identity_evidence.absolute(),
+            args.app, args.registry_root, args.run_refs,
+        )
+        write_output(args.output, evidence)
+        print(f"wrote public-safe Full Auto installed evidence: {args.output}")
+        return 0
+    except EvidenceError as error:
+        print(f"Full Auto installed evidence refused: {error}", file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
