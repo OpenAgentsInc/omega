@@ -1,0 +1,88 @@
+{
+  "schema": "openagents.desktop.full_auto_run_report.v1",
+  "runRef": "run.full-auto.ms0o1ae4.9wjcec9p",
+  "threadRef": "thread.omega.1",
+  "title": "issue47 live walk",
+  "objectiveDigest": "d75e419c61cf96837cd5df0da5cdc81743c074d7e9de8377f3a4af7ecdb3ad19",
+  "doneConditionDigest": "1d5e0df8bc58da0288b73abb1cd5db5f8ffccd6bcf5a2d9aab2ac09901fd87b2",
+  "objectiveRevisionCount": 1,
+  "workspaceRef": "workspace.omega.supervised",
+  "providerProfile": {
+    "lane": "codex-local"
+  },
+  "turnCap": 6,
+  "successfulAttempts": 1,
+  "failedAttempts": 0,
+  "state": "running",
+  "createdAt": "2026-07-25T17:51:26.428Z",
+  "startedAt": "2026-07-25T17:51:26.429Z",
+  "lifecycleTransitions": [
+    {
+      "from": "draft",
+      "to": "running",
+      "actor": "control_api",
+      "at": "2026-07-25T17:51:26.429Z",
+      "reason": "started via the local control API (caller: control-api)"
+    }
+  ],
+  "ownerActions": [
+    {
+      "from": "draft",
+      "to": "running",
+      "actor": "control_api",
+      "at": "2026-07-25T17:51:26.429Z",
+      "reason": "started via the local control API (caller: control-api)"
+    }
+  ],
+  "providerTransitions": [],
+  "livenessObservations": [
+    {
+      "at": "2026-07-25T17:51:26.431Z",
+      "projectedState": "running",
+      "cause": null,
+      "recoveryAction": "none",
+      "sinceLastProgressMs": 1
+    }
+  ],
+  "livenessGaps": [],
+  "uninterruptedIntervals": [
+    {
+      "startedAt": "2026-07-25T17:51:26.429Z",
+      "endedAt": null,
+      "durationMs": null
+    }
+  ],
+  "turns": [],
+  "verifiedRefs": [],
+  "threadFailureHistory": {
+    "consecutiveFailures": 0,
+    "failureLimit": 5,
+    "lastFailureAt": null,
+    "blockedReason": null,
+    "disabledBy": null,
+    "disabledAt": null
+  },
+  "metricsEnabled": true,
+  "metrics": {
+    "turnsObserved": 0,
+    "turnsCompleted": 0,
+    "turnsFailed": 0,
+    "turnsInterrupted": 0,
+    "longestCompletedStreak": 0,
+    "continuationsDispatched": 1,
+    "dispatchFailures": 0,
+    "repoGroundedTurns": 0,
+    "evidenceRefCount": 0,
+    "stopAttributed": false
+  },
+  "progressDisposition": "unknown",
+  "usage": {
+    "totalTokensKnown": false,
+    "totalTokens": null,
+    "costUsdKnown": false,
+    "costUsd": null
+  },
+  "rawEvidenceRef": "thread:thread.omega.1",
+  "reportRevision": 4,
+  "updatedAt": "2026-07-25T17:51:26.441Z"
+}

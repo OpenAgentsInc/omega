@@ -15,6 +15,8 @@ pub use draft::{
 };
 pub use evidence_chain::FullAutoEvidenceView;
 pub use issue31_adjunct::{
+    publish_issue31_host_snapshot, Issue31HostIdentitySource, Issue31HostProjectionError,
+    Issue31HostPublication,
     project_issue31_full_auto_adjunct, Issue31FullAutoLiveSources, Issue31FullAutoProjectionError,
 };
 pub use panel::{init, FullAutoPanel};

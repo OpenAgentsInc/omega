@@ -25,11 +25,13 @@ pub use issue31_full_auto::{
     is_issue31_public_text,
 };
 pub use issue31_host::{
-    ISSUE31_HOST_ADJUNCT_SCHEMA, Issue31CommandState, Issue31Gap, Issue31HostAdjunct,
-    Issue31HostAdjunctError, Issue31HostProjection, Issue31ProjectionCapability,
-    Issue31ProjectionSource, Issue31Role, Issue31RoleKind, Issue31RoleStatus, Issue31SourceKind,
-    Issue31TerminalState, MAX_ISSUE31_PROJECTION_REFS, MAX_ISSUE31_TIMESTAMP_MS,
-    ProjectionFreshness, decode_issue31_host_adjunct,
+    ISSUE31_HOST_ADJUNCT_SCHEMA, Issue31AbsentGap, Issue31CommandState, Issue31CommandStateInput,
+    Issue31Gap, Issue31HostAdjunct, Issue31HostAdjunctError, Issue31HostProjection,
+    Issue31HostProjectionInput, Issue31HostSources, Issue31ObservedGap,
+    Issue31ProjectionCapability, Issue31ProjectionSource, Issue31Role, Issue31RoleInput,
+    Issue31RoleKind, Issue31RoleStatus, Issue31SourceKind, Issue31TerminalState,
+    MAX_ISSUE31_PROJECTION_REFS, MAX_ISSUE31_TIMESTAMP_MS, ProjectionFreshness,
+    build_issue31_host_adjunct, decode_issue31_host_adjunct,
 };
 pub use public_ref::{PUBLIC_REF_MAX_LEN, PublicRef, is_public_safe_ref, sanitize_public_ref};
 pub use receipt::{

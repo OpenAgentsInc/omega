@@ -158,7 +158,15 @@ pub struct RunSnapshot {
     pub thread_ref: Option<String>,
     pub state: String,
     pub title: String,
+    /// Formatted for display. Never re-parsed to derive a duration.
     pub updated_at: String,
+    /// OMEGA-MOB-31-03 (omega#47): the host's own numeric record of when the
+    /// run began, in epoch milliseconds. `None` when this host never recorded
+    /// one — a run that predates the field, or one that has not started. The
+    /// mobile projection refuses such a run rather than reporting a zero
+    /// unattended duration.
+    #[serde(default)]
+    pub started_at_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
