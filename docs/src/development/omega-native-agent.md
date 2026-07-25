@@ -1,0 +1,288 @@
+# The Native Zed Agent in Omega
+
+Omega inherits Zed's first-party agent runtime. The current source and UI call
+it **Zed Agent**. It is present in Omega, but Omega disables the Agent Panel by
+default. It therefore does not appear in the Command Palette on a fresh
+installation.
+
+This page explains how to expose the current implementation, what it does, and
+where it fits in Omega's architecture.
+
+## Open It in Omega Today {#open-it}
+
+The master switch is currently JSON-only. The Settings Editor exposes the
+Agent Panel button, but it does not expose `agent.enabled`.
+
+1. Open **Omega → Settings → Open Settings File**.
+2. Add the following settings:
+
+   ```json [settings]
+   {
+     "disable_ai": false,
+     "agent": {
+       "enabled": true,
+       "button": true
+     }
+   }
+   ```
+
+3. Open the Command Palette and run {#action agent::NewThread}, or choose
+   **View → Agent Panel**.
+4. Open the new-thread menu in the panel and choose **Zed Agent**.
+
+`agent.button` only controls the status-bar button. Setting it to `true`
+without also setting `agent.enabled` does not enable the panel.
+
+If a project has `"disable_ai": true` in its project settings, that setting
+also disables the Agent Panel and removes its actions.
+
+> **Note:** This manual settings edit is a current Omega product gap. An
+> enabled product surface should have an Omega-owned setup path instead of
+> requiring you to discover a hidden JSON switch.
+
+## Configure a Model {#configure-a-model}
+
+Zed Agent is an agent runtime, not a model. It needs a language model configured
+through Omega's inherited LLM provider support.
+
+Omega's default native-agent selection is `ollama/llama3.1`. It only works when
+that model is available from a running Ollama installation. You can instead
+configure another direct provider, an OpenAI-compatible endpoint, or another
+supported local provider in Agent Settings.
+
+Omega deliberately does not provide Zed-hosted models:
+
+- `services.openagents.invalid` is the default hosted-service endpoint.
+- The Zed cloud model provider is gated.
+- Zed account, plan, trial, and subscription paths are not Omega product
+  surfaces.
+- Provider credentials remain with the selected provider and use the existing
+  credential storage path.
+
+An External Agent such as Codex ACP is a different choice in the same
+new-thread menu. It does not supply a model to Zed Agent. The external agent
+owns its own runtime, authentication, model selection, tools, and sessions.
+
+## What Zed Agent Is {#what-it-is}
+
+Zed Agent is the in-process, project-aware coding-agent engine inherited from
+Zed. It combines:
+
+- a selected `LanguageModel`
+- a native conversation `Thread`
+- project and worktree context
+- instructions and skills
+- built-in editor, language, filesystem, and terminal tools
+- MCP tools
+- tool profiles and permission policy
+- local thread persistence
+- Agent Panel, Threads Sidebar, diff review, and checkpoint projections
+
+The name is currently fixed by `ZED_AGENT_ID` as `Zed Agent`. The implementation
+is `NativeAgent`; `NativeAgentServer` constructs it inside the Omega process and
+wraps it in `NativeAgentConnection`.
+
+The connection implements the same `AgentConnection` interface used by the
+Agent Panel for ACP-backed agents. That shared interface does not make Zed Agent
+an external ACP process. No agent executable is launched and no ACP transport
+is crossed for a native Zed Agent thread.
+
+## How a Turn Works {#turn-flow}
+
+A native turn follows this path:
+
+1. The Agent Panel opens or restores a native session.
+2. `NativeAgent` binds the session to an Omega `Project`.
+3. It builds `ProjectContext` from visible worktrees, project rules,
+   instructions, and available skills.
+4. The selected profile determines which built-in and MCP tools the model can
+   see.
+5. `Thread` builds a language-model request from the system prompt, project
+   context, conversation history, and current message.
+6. The selected model streams text, reasoning, and tool calls.
+7. Tool calls pass through Omega's permission policy and execute against the
+   project, editor, language servers, filesystem, terminal, or MCP server.
+8. Tool results are appended to the thread and sent back to the model.
+9. The loop continues until the model stops, the user cancels, or an error
+   terminates the turn.
+10. Thread events are projected into the Agent Panel and saved by the local
+    thread store.
+
+Long conversations can be compacted. A compacted thread replaces older model
+context with a summary while preserving the visible local history.
+
+## Native Capabilities {#capabilities}
+
+The native runtime has tighter editor integration than an arbitrary external
+agent. Depending on the selected profile, model support, and current project,
+it can:
+
+- read, search, create, edit, move, and delete project files
+- inspect symbols, definitions, references, and diagnostics
+- request language-server code actions and renames
+- run terminal commands and project tasks
+- fetch URLs and use configured web tools
+- read project instructions such as `AGENTS.md`
+- discover and invoke installed skills
+- call tools from configured MCP servers
+- spawn child native agents
+- create sibling panel threads with an available agent and model
+- stream file edits and terminal output into the Agent Panel
+- present changes in Omega's native review UI
+- restore checkpoints made before agent edits
+
+Profiles control tool availability. Permissions control whether an available
+tool call is allowed, denied, or confirmed. These are separate controls.
+
+## Omega's Permission Delta {#permissions}
+
+Omega intentionally differs from upstream Zed. Its global tool-permission
+default is `allow`, not `confirm`, because unattended Full Auto work cannot
+make progress while waiting at a prompt.
+
+This does not mean every possible command is safe:
+
+- hardcoded terminal rules still reject a small set of catastrophic commands
+- `always_deny` and `always_confirm` patterns can narrow the default
+- a tool omitted by the active profile is unavailable
+- an external agent can apply additional permission rules of its own
+
+Omega must describe the effective policy honestly. It must not copy upstream
+documentation that promises a confirmation prompt for every consequential
+tool call.
+
+Omega also must not claim that a native thread is sandboxed merely because the
+inherited agent has sandbox-related types or settings. The current Omega
+product direction removed Bubblewrap and other gates that blocked unattended
+work. Any future containment must report the effective runtime and filesystem
+boundary for the specific run.
+
+## What It Is Not {#what-it-is-not}
+
+Zed Agent is not:
+
+- a language model or provider
+- Codex, Claude, Hermes, or another external agent
+- the ACP protocol, even though its UI connection uses the shared thread
+  abstraction
+- Full Auto
+- `omega-effectd`
+- Agent Computer
+- Sarah
+- an OpenAgents identity
+- a durable workroom, run, policy, receipt, or claim authority
+
+Those distinctions matter because the Agent Panel can display several of these
+systems without owning their durable state.
+
+## Runtime Boundaries in Omega {#runtime-boundaries}
+
+| Path               | Runtime owner                                             | Configuration owner                                           | Durable authority                                  | Omega UI role                               |
+| ------------------ | --------------------------------------------------------- | ------------------------------------------------------------- | -------------------------------------------------- | ------------------------------------------- |
+| Zed Agent          | Omega's in-process Rust runtime                           | Omega provider, profile, skill, instruction, and MCP settings | Local native thread history only                   | Execute and review local coding turns       |
+| External ACP agent | The external agent process or endpoint                    | The external agent                                            | The external agent, where supported                | Project an ACP session                      |
+| Terminal Thread    | The selected CLI or TUI                                   | The CLI or TUI                                                | The CLI or its service                             | Host a terminal-backed session              |
+| Full Auto          | Released OpenAgents engine under `omega-effectd`          | OpenAgents Full Auto contracts and provider bindings          | OpenAgents work, run, outcome, and receipt records | Launch, observe, review, and intervene      |
+| Agent Computer     | OpenAgents cloud capacity reached through `omega-effectd` | OpenAgents placement and harness environment                  | OpenAgents cloud-session and receipt records       | Start and observe a bounded cloud turn      |
+| Sarah workroom     | Sarah services and the admitted Nostr record              | Sarah and workroom contracts                                  | Signed conversation, decision, and receipt records | Project the owner-private or community room |
+
+Zed remains authoritative for editor, project, buffer, language, terminal, and
+worktree state. OpenAgents remains authoritative for work, agent, policy,
+receipt, and run state. GitHub remains repository and claim authority until a
+separate admitted cutover.
+
+## How Omega Should Use It {#omega-use}
+
+Omega should retain the native runtime as its local agent-to-code loop. This is
+the implementation substrate for roadmap packet `OMEGA-OA-06`:
+
+- connect a work item to a project and worktree
+- give an agent native buffer, selection, diagnostic, Git, and language context
+- execute local tool calls
+- show the exact edits and command output
+- let the operator review, keep, reject, or restore changes
+
+Omega should also retain the shared `AgentConnection` and `AcpThread`
+projection layer. It lets one Agent Panel host native agents, external agents,
+and terminal-backed work without pretending that they share a runtime or
+authority model.
+
+The native thread store should remain local conversation and UI continuity. It
+must not become an Omega-only cloud thread store or the canonical record for a
+workroom, Full Auto run, Agent Computer session, decision, or receipt. A native
+thread attached to durable OpenAgents work should store references to those
+records and project their terminal outcomes.
+
+Skills, instructions, and recalled context should guide the native coding
+loop. They are input to the model, not authorization. A signed event also does
+not grant authority by itself. Commands that affect durable OpenAgents state
+must still pass the typed OpenAgents command, grant, and receipt boundaries.
+
+## How Omega Should Not Use It {#omega-non-use}
+
+Omega should not:
+
+- wrap every external agent inside `NativeAgent`
+- copy an external agent's home, credentials, memory, or provider state into
+  Omega
+- make a native `Thread` the source of truth for Full Auto
+- call Firecracker, placement, or cloud coding-session APIs directly from the
+  native agent or GPUI
+- treat Nostr relay acceptance as permission to run a local tool
+- infer capabilities from an agent or provider name
+- claim hosted Zed AI support
+- present the inherited `telemetry_id` or `Zed Agent` label as an OpenAgents
+  service identity
+- silently substitute another provider or model when the selected one is
+  unavailable
+
+Full Auto should continue through `omega-effectd` and its typed protocol.
+Agent Computer should remain one execution environment behind that service.
+Sarah and community workrooms should attach bounded work to workers without
+granting the worker Sarah's authority. The native agent can be one such worker;
+it does not absorb the system that assigned the work.
+
+## Product Work Still Needed {#product-gaps}
+
+The implementation exists, but its Omega product contract is unfinished.
+
+1. Add an Omega-owned enablement and provider setup flow. Do not require a
+   JSON-only switch.
+2. Decide the user-facing name and icon. The current planning corpus explicitly
+   says not to relabel the Zed Agent tile as **Omega Agent** without an admitted
+   Omega service and product contract.
+3. Remove or rewrite remaining Zed-specific copy in the native-agent journey.
+4. Show the exact runtime, provider, model, profile, and effective permission
+   policy in each thread.
+5. Keep hosted Zed plans, trials, account state, feedback upload, and service
+   assumptions out of Omega.
+6. Define typed links from a local agent thread to OpenAgents work, runs,
+   decisions, and receipts without duplicating their storage.
+7. Test local provider failure, missing model, restart, cancellation, dirty
+   worktree, wrong project, revoked grant, and external-agent handoff paths.
+8. Bind any release claim to an installed Omega candidate. A source test or
+   fixture pass does not prove the packaged journey.
+
+Until that work lands, **Zed Agent** in Omega means “the inherited local native
+coding runtime,” not an OpenAgents-hosted agent product.
+
+## Implementation Map {#implementation-map}
+
+| Responsibility                                             | Current source                            |
+| ---------------------------------------------------------- | ----------------------------------------- |
+| Native runtime, project context, skills, and UI connection | `crates/agent/src/agent.rs`               |
+| Model/tool loop and thread events                          | `crates/agent/src/thread.rs`              |
+| Local native thread storage                                | `crates/agent/src/thread_store.rs`        |
+| In-process server construction                             | `crates/agent/src/native_agent_server.rs` |
+| Tool implementations                                       | `crates/agent/src/tools/`                 |
+| Tool permission evaluation                                 | `crates/agent/src/tool_permissions.rs`    |
+| Agent defaults and Omega permission delta                  | `assets/settings/default.json`            |
+| Agent Panel and new-thread selection                       | `crates/agent_ui/src/agent_panel.rs`      |
+| Native/external agent registration                         | `crates/agent_ui/src/agent_ui.rs`         |
+| Durable Omega product boundaries                           | `PRODUCT.md` and `OMEGA_DELTAS.md`        |
+
+The product guidance on this page is derived from the complete
+`openagents/docs/omega/` planning corpus, especially its permanent design laws,
+native agent-to-code packet, Full Auto contract, Agent Computer contract,
+identity-first onboarding plan, Sarah workroom contracts, mobile adaptation
+audit, brand audit, and Bubblewrap removal audit.

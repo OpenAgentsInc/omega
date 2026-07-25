@@ -218,6 +218,7 @@
 
 - [Developing Zed](./development.md)
   - [Omega application identity](./development/omega-application-identity.md)
+  - [The native Zed Agent in Omega](./development/omega-native-agent.md)
   - [Omega Full Auto contract freeze](./development/omega-full-auto-contract-freeze.md)
   - [Omega Agent Computer contract freeze](./development/omega-agent-computer-contract-freeze.md)
   - [HE-02 harness-environment release](./development/he02-harness-environment-release.md)
