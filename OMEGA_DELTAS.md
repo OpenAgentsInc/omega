@@ -413,3 +413,87 @@ cargo test -p omega_deltas
   repointing a default fails here rather than at first light-mode launch.
 - **Enforced by:** `aiur_is_a_single_dark_theme` and
   `default_themes_exist_in_shipped_assets`.
+
+### OMEGA-DELTA-0017 — No competitor's name in the packaged `Info.plist`
+
+- **Upstream Zed:** `crates/zed/resources/info/Permissions.plist` and
+  `DocumentTypes.plist` name Zed in thirteen strings — twelve
+  `NS*UsageDescription` values and `CFBundleTypeName`.
+- **Omega, before this:** the fork inherited all thirteen verbatim and shipped
+  them signed and notarized in `0.2.0-rc10`. `cargo-bundle` merges every file
+  in that directory into `Contents/Info.plist`
+  (`osx_info_plist_exts = ["resources/info/*"]`).
+- **Omega now:** all thirteen name Omega, and both the source tree and the
+  packaged bundle are gated.
+- **Why:** macOS renders an `NS*UsageDescription` inside *its own* permission
+  dialog. The first time Omega asked for the microphone, the operating system
+  told the owner that an application in **Zed** wanted it — a competitor's
+  product name, system-modal, presented under our Developer ID signature.
+  `CFBundleTypeName` shows in Finder's Get Info and Open With menu. See
+  omega#83.
+- **Why nothing caught it:** `script/bundle-omega-rc` scanned the packaged app
+  for exactly three *identity* literals (`BUZZ_PRIVATE_KEY`, `identity.key`,
+  `get_nsec`). There was no brand gate at all, so no packaging step had ever
+  read `Info.plist`. Every prior brand check on omega#16 compared strings
+  inside the compiled executable, and these strings are not in the executable.
+  The rc5 and rc6 evidence tables were true and the product still shipped it.
+- **The gate reads values, not a list of keys**, and walks the whole fragment
+  directory rather than a list of known files, so a brand-new key with a Zed
+  string in a file nobody has heard of fails the same way.
+- **Enforced by:** `no_info_plist_value_names_a_competitor` and
+  `the_plist_fragment_parser_reaches_real_values` in `crates/omega_deltas/`
+  (source tree), `script/verify-omega-brand --app` called from
+  `script/bundle-omega-rc` (packaged bundle), and
+  `the_packaging_path_runs_the_brand_gate`, which fails if the bundle script
+  stops calling it. Policy is shared in `script/omega-brand-gate.json`.
+
+### OMEGA-DELTA-0018 — No competitor's mark in the shipped icon set
+
+- **Upstream Zed:** ships `zed_assistant.svg`, `zed_agent.svg`,
+  `zed_agent_two.svg`, `zed_predict*.svg` and `zed_src_*.svg`, several of which
+  draw the Zed **Z**, behind `IconName::Zed*` variants.
+- **Omega, before this:** `IconName::ZedAssistant` and `IconName::ZedAgent`
+  rendered a Zed logo mark on three status-bar buttons of the running
+  `0.2.0-rc10`, and the same mark appeared in the conversation view, the
+  sidebar, the model selector and the edit-prediction button.
+- **Omega now:** those variants are `IconName::OmegaAgent`, `OmegaAgentTwo`,
+  `OmegaAssistant` and `OmegaPredict*`, drawn with the Ω letterform taken
+  verbatim from `assets/images/omega_logo.svg` — the same artwork as the app
+  icon — keeping each icon's upstream affordance (the assistant sparkles, the
+  `2`, the prediction chevrons and arrows, the error cross, the disabled
+  slash). `zed_src_custom.svg` and `zed_src_extension.svg` carry no Z and were
+  renamed to `src_custom.svg` and `src_extension.svg`.
+- **`ai_zed.svg` stays**, and is recorded as a third-party allowance in
+  `script/omega-brand-gate.json`. It labels the Zed **base-keymap preset**
+  (beside VS Code, JetBrains and Sublime Text) and Zed's own model provider,
+  exactly as `ai_anthropic.svg` labels Anthropic. Naming somebody else's
+  product is not Omega presenting itself as that product.
+- **Why nothing caught it:** a logo carries no text. No scan of the source tree
+  and no scan of the compiled executable can see one, and every brand check on
+  omega#16 through rc6 was a string comparison. See omega#84.
+- **Why the gate is built the way it is.** Two designs were available: pin the
+  digests of the shipped icons, or forbid competitor-named icon identifiers and
+  assets. **Only the name rule would have caught these three**, because digest
+  pinning catches a *change* from whatever was pinned, and what would have been
+  pinned in rc10 is the Zed artwork itself. So the name rule is the gate, over
+  a complete inventory: `assets/icons/` and the `IconName` enum are a
+  bijection, enforced by the icons crate's own `test_all_icons_exist` and
+  `test_no_dangling_icons`, and both halves are checked, because renaming only
+  the file leaves the next rebase an identifier to restore the artwork under.
+  The digest pin is kept **as well**, for the one hole the name rule cannot
+  see: Zed artwork placed inside a correctly named Omega file.
+- **Enforced by:** `no_shipped_icon_carries_a_competitor_name` and
+  `the_omega_marks_are_the_reviewed_artwork` in `crates/omega_deltas/` (source
+  tree), and `script/verify-omega-brand --app` from `script/bundle-omega-rc`,
+  which checks the packaged executable's embedded rust-embed asset paths *and*
+  asserts the reviewed artwork bytes are the bytes that were built.
+- **What these gates do not cover.** Neither gate can recognise a competitor's
+  drawing under a name nobody has flagged; the digest pin only says the shipped
+  bytes are the reviewed bytes, and only for the icons listed in
+  `reviewed_marks`. Nothing here inspects rendered pixels. `.icns` and `.png`
+  app artwork is pinned separately, by the icon-family manifest in the release
+  record, not by this gate. The packaged half runs against the macOS bundle
+  only, so the Linux `.desktop`, Flatpak, Snap and Windows resources under
+  `crates/zed/resources/` are unchecked. And no name is forbidden unless it is
+  written down in `script/omega-brand-gate.json`. Rendered review of a
+  candidate is still an owner step, not a mechanical one.

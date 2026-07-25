@@ -1190,7 +1190,7 @@ impl Panel for FullAutoPanel {
     }
 
     fn icon(&self, _: &Window, _: &App) -> Option<IconName> {
-        Some(IconName::ZedAgent)
+        Some(IconName::OmegaAgent)
     }
 
     fn icon_tooltip(&self, _: &Window, _: &App) -> Option<&'static str> {

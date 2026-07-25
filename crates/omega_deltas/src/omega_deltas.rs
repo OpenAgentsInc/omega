@@ -44,6 +44,8 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0014",
     "OMEGA-DELTA-0015",
     "OMEGA-DELTA-0016",
+    "OMEGA-DELTA-0017",
+    "OMEGA-DELTA-0018",
 ];
 
 /// Files deleted from the fork, checked by absence.
@@ -386,6 +388,189 @@ pub fn shipped_theme_names() -> Result<std::collections::BTreeSet<String>, Strin
         }
     }
     Ok(names)
+}
+
+/// Shared brand-gate policy.
+///
+/// OMEGA-DELTA-0017 and OMEGA-DELTA-0018. The same file is read by the tests
+/// here, which check the source tree, and by `script/verify-omega-brand`,
+/// which checks the packaged application. One file so the two sides cannot
+/// come to disagree about what counts as a competitor's name.
+pub const BRAND_GATE_POLICY_PATH: &str = "script/omega-brand-gate.json";
+
+/// The packaged-side brand gate.
+pub const BRAND_VERIFIER_PATH: &str = "script/verify-omega-brand";
+
+/// The RC packaging entry point the brand gate has to be wired into.
+pub const RC_BUNDLE_SCRIPT_PATH: &str = "script/bundle-omega-rc";
+
+/// Parse the shared brand-gate policy.
+///
+/// # Errors
+/// If the policy file is unreadable or is not valid JSON.
+pub fn brand_policy() -> Result<serde_json::Value, String> {
+    let path = repository_path(BRAND_GATE_POLICY_PATH);
+    let raw = std::fs::read_to_string(&path)
+        .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
+    serde_json::from_str(&raw).map_err(|error| format!("cannot parse {}: {error}", path.display()))
+}
+
+fn policy_strings(policy: &serde_json::Value, first: &str, second: &str) -> Vec<String> {
+    policy
+        .get(first)
+        .and_then(|value| value.get(second))
+        .and_then(serde_json::Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Competitor brand names appearing in `text`.
+///
+/// `brand.words` match case-sensitively at ASCII alphanumeric boundaries, so
+/// `Zed` and `Zed's` match while `Zedd` does not. Lowercase `zed` is
+/// deliberately not a word: it is a substring of `authorized`, `organized` and
+/// `normalized`, and a gate that cries wolf gets deleted rather than fixed.
+/// `brand.substrings` match case-insensitively.
+#[must_use]
+pub fn brand_hits(text: &str, policy: &serde_json::Value) -> Vec<String> {
+    let mut hits = Vec::new();
+    for word in policy_strings(policy, "brand", "words") {
+        if text.match_indices(&word).any(|(at, _)| {
+            let before = text[..at].chars().next_back();
+            let after = text[at + word.len()..].chars().next();
+            !before.is_some_and(|character| character.is_ascii_alphanumeric())
+                && !after.is_some_and(|character| character.is_ascii_alphanumeric())
+        }) {
+            hits.push(word);
+        }
+    }
+    let lowered = text.to_lowercase();
+    for substring in policy_strings(policy, "brand", "substrings") {
+        if lowered.contains(&substring.to_lowercase()) {
+            hits.push(substring);
+        }
+    }
+    hits
+}
+
+/// Every `<string>` in an `Info.plist` fragment, paired with the `<key>` that
+/// most recently preceded it.
+///
+/// Values, not a list of known keys: a brand-new key carrying a competitor's
+/// name has to fail the same as `NSMicrophoneUsageDescription` does.
+#[must_use]
+pub fn plist_fragment_values(source: &str) -> Vec<(String, String)> {
+    let mut values = Vec::new();
+    let mut key = "<unkeyed>".to_owned();
+    let mut rest = source;
+    loop {
+        let next_key = next_element(rest, "key");
+        let next_string = next_element(rest, "string");
+        match (next_key, next_string) {
+            (Some((_, content, after)), None) => {
+                key = content.trim().to_owned();
+                rest = &rest[after..];
+            }
+            (None, Some((_, content, after))) => {
+                values.push((key.clone(), content.to_owned()));
+                rest = &rest[after..];
+            }
+            (
+                Some((key_at, key_content, key_after)),
+                Some((string_at, string_content, string_after)),
+            ) => {
+                if key_at < string_at {
+                    key = key_content.trim().to_owned();
+                    rest = &rest[key_after..];
+                } else {
+                    values.push((key.clone(), string_content.to_owned()));
+                    rest = &rest[string_after..];
+                }
+            }
+            (None, None) => break,
+        }
+    }
+    values
+}
+
+/// `(start of the opening tag, content, offset just past the closing tag)`.
+fn next_element<'a>(source: &'a str, tag: &str) -> Option<(usize, &'a str, usize)> {
+    let open = format!("<{tag}>");
+    let close = format!("</{tag}>");
+    let start = source.find(&open)?;
+    let content_start = start + open.len();
+    let end = source[content_start..].find(&close)? + content_start;
+    Some((start, &source[content_start..end], end + close.len()))
+}
+
+/// `source` with every `<tag>…</tag>` block removed.
+#[must_use]
+pub fn without_elements(source: &str, tag: &str) -> String {
+    let mut remaining = source;
+    let mut out = String::new();
+    while let Some((start, _, after)) = next_element(remaining, tag) {
+        out.push_str(&remaining[..start]);
+        remaining = &remaining[after..];
+    }
+    out.push_str(remaining);
+    out
+}
+
+/// Lowercase hex SHA-256 of `bytes`, the form the pins are written in.
+#[must_use]
+pub fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::Digest as _;
+    let mut hasher = sha2::Sha256::new();
+    hasher.update(bytes);
+    hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+/// `OmegaAgentTwo` -> `omega_agent_two`, the mapping `IconName::path` uses.
+#[must_use]
+pub fn icon_stem(variant: &str) -> String {
+    let mut stem = String::new();
+    for (index, character) in variant.char_indices() {
+        if character.is_ascii_uppercase() && index != 0 {
+            stem.push('_');
+        }
+        stem.push(character.to_ascii_lowercase());
+    }
+    stem
+}
+
+/// Every variant of the `IconName` enum, in declaration order.
+#[must_use]
+pub fn icon_name_variants(source: &str) -> Vec<String> {
+    let Some((_, body, _)) = next_enum_body(source, "IconName") else {
+        return Vec::new();
+    };
+    body.lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(|line| line.trim_end_matches(',').to_owned())
+        .filter(|name| {
+            name.chars()
+                .all(|character| character.is_ascii_alphanumeric())
+        })
+        .collect()
+}
+
+fn next_enum_body<'a>(source: &'a str, name: &str) -> Option<(usize, &'a str, usize)> {
+    let header = format!("pub enum {name} {{\n");
+    let start = source.find(&header)?;
+    let body_start = start + header.len();
+    let end = source[body_start..].find("\n}")? + body_start;
+    Some((start, &source[body_start..end], end))
 }
 
 /// Read the value of a `pub const NAME: &str = "value";` declaration.
@@ -807,10 +992,7 @@ mod tests {
         let default_model = default_setting(&settings, "agent.default_model")
             .expect("agent.default_model must be present in the shipped defaults");
 
-        for (key, expected) in [
-            ("provider", EXPECTED_PROVIDER),
-            ("model", EXPECTED_MODEL),
-        ] {
+        for (key, expected) in [("provider", EXPECTED_PROVIDER), ("model", EXPECTED_MODEL)] {
             assert_eq!(
                 default_model.get(key).and_then(serde_json::Value::as_str),
                 Some(expected),
@@ -1040,7 +1222,10 @@ mod tests {
 
         let mut dark_defaults: Vec<(&str, String)> = Vec::new();
         for (relative_path, constant) in [
-            ("crates/settings_content/src/theme.rs", "DEFAULT_LIGHT_THEME"),
+            (
+                "crates/settings_content/src/theme.rs",
+                "DEFAULT_LIGHT_THEME",
+            ),
             ("crates/settings_content/src/theme.rs", "DEFAULT_DARK_THEME"),
             ("crates/theme/src/theme.rs", "DEFAULT_DARK_THEME"),
         ] {
@@ -1071,6 +1256,264 @@ mod tests {
             dark_defaults[0].1, "Aiur",
             "OMEGA-DELTA-0016: the dark default must be Aiur"
         );
+    }
+
+    /// OMEGA-DELTA-0017. No merged `Info.plist` value names a competitor.
+    ///
+    /// Every file in the fragment directory is merged into the packaged
+    /// `Info.plist` by cargo-bundle, so the directory is walked rather than a
+    /// list of known files, and every `<string>` is read rather than a list of
+    /// known keys. `0.2.0-rc10` shipped thirteen of these signed and
+    /// notarized, and macOS renders `NS*UsageDescription` inside its own
+    /// permission dialog: the operating system told the owner that an
+    /// application in Zed wanted the microphone.
+    #[test]
+    fn no_info_plist_value_names_a_competitor() {
+        let policy = brand_policy().expect("brand gate policy parses");
+        let directory = repository_path(
+            policy["info_plist"]["fragment_dir"]
+                .as_str()
+                .expect("info_plist.fragment_dir is a string"),
+        );
+        let mut fragments: Vec<std::path::PathBuf> = std::fs::read_dir(&directory)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", directory.display()))
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| path.is_file())
+            .collect();
+        fragments.sort();
+        assert!(
+            !fragments.is_empty(),
+            "OMEGA-DELTA-0017: {} is empty, so this check would be vacuous",
+            directory.display()
+        );
+
+        let mut offenders: Vec<String> = Vec::new();
+        for path in &fragments {
+            let source = std::fs::read_to_string(path)
+                .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
+            for (key, value) in plist_fragment_values(&source) {
+                for hit in brand_hits(&value, &policy) {
+                    offenders.push(format!("{}:{key} names {hit:?}: {value:?}", path.display()));
+                }
+            }
+            // A brand name in a key, comment or attribute would not appear in
+            // a dialog, but it is still a rebase restoring upstream identity.
+            for hit in brand_hits(&without_elements(&source, "string"), &policy) {
+                offenders.push(format!(
+                    "{} names {hit:?} outside a <string> value",
+                    path.display()
+                ));
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "OMEGA-DELTA-0017: a competitor's name is back in the packaged \
+             Info.plist:\n{}",
+            offenders.join("\n")
+        );
+    }
+
+    /// The plist parser has to reach real values, or the check above passes on
+    /// an empty list and reports a clean tree that was never read.
+    #[test]
+    fn the_plist_fragment_parser_reaches_real_values() {
+        let policy = brand_policy().expect("brand gate policy parses");
+        let path = repository_path("crates/zed/resources/info/Permissions.plist");
+        let source = std::fs::read_to_string(&path).expect("Permissions.plist is readable");
+        let values = plist_fragment_values(&source);
+        let microphone = values
+            .iter()
+            .find(|(key, _)| key == "NSMicrophoneUsageDescription")
+            .map(|(_, value)| value.clone())
+            .expect("NSMicrophoneUsageDescription is present and keyed");
+        assert!(
+            microphone.contains("Omega"),
+            "the microphone permission dialog must name Omega, got {microphone:?}"
+        );
+        assert!(
+            !brand_hits(
+                "An application in Zed wants to use your microphone.",
+                &policy
+            )
+            .is_empty(),
+            "the brand matcher must still recognise the string 0.2.0-rc10 shipped"
+        );
+        assert!(
+            brand_hits(
+                "The request was not authorized and is now normalized.",
+                &policy
+            )
+            .is_empty(),
+            "the brand matcher must not fire on 'authorized' or 'normalized'"
+        );
+    }
+
+    /// OMEGA-DELTA-0018. No shipped icon carries a competitor's name.
+    ///
+    /// `assets/icons` and the `IconName` enum are a bijection, enforced by the
+    /// icons crate's own `test_all_icons_exist` and `test_no_dangling_icons`,
+    /// so scanning both is a complete inventory of every icon that can ship.
+    /// Both halves are checked because renaming only the file leaves the next
+    /// rebase an identifier to restore the artwork under.
+    #[test]
+    fn no_shipped_icon_carries_a_competitor_name() {
+        let policy = brand_policy().expect("brand gate policy parses");
+        let icons = &policy["icons"];
+        let allowed: std::collections::BTreeSet<String> = icons["third_party_allowances"]
+            .as_object()
+            .expect("icons.third_party_allowances is an object")
+            .keys()
+            .cloned()
+            .collect();
+        let stem_tokens: Vec<String> = policy_strings(&policy, "icons", "forbidden_stem_tokens");
+        let variant_tokens: Vec<String> =
+            policy_strings(&policy, "icons", "forbidden_variant_tokens");
+        assert!(
+            !stem_tokens.is_empty() && !variant_tokens.is_empty(),
+            "OMEGA-DELTA-0018: an empty token list makes this check vacuous"
+        );
+
+        let asset_dir = repository_path(icons["asset_dir"].as_str().expect("icons.asset_dir"));
+        let mut stems: Vec<String> = std::fs::read_dir(&asset_dir)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", asset_dir.display()))
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| path.extension().is_some_and(|extension| extension == "svg"))
+            .filter_map(|path| path.file_stem()?.to_str().map(str::to_owned))
+            .collect();
+        stems.sort();
+        assert!(
+            !stems.is_empty(),
+            "OMEGA-DELTA-0018: {} holds no icons, so this check would be vacuous",
+            asset_dir.display()
+        );
+
+        let mut offenders: Vec<String> = Vec::new();
+        for stem in &stems {
+            if allowed.contains(stem) {
+                continue;
+            }
+            let lowered = stem.to_lowercase();
+            if stem_tokens.iter().any(|token| lowered.contains(token)) {
+                offenders.push(format!("asset {stem}.svg"));
+            }
+        }
+
+        let enum_source =
+            repository_path(icons["enum_source"].as_str().expect("icons.enum_source"));
+        let source = std::fs::read_to_string(&enum_source)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", enum_source.display()));
+        let variants = icon_name_variants(&source);
+        assert!(
+            variants.len() > 100,
+            "OMEGA-DELTA-0018: parsed {} IconName variants, which means the \
+             enum parser broke and this check is vacuous",
+            variants.len()
+        );
+        for variant in &variants {
+            if allowed.contains(&icon_stem(variant)) {
+                continue;
+            }
+            if variant_tokens.iter().any(|token| variant.contains(token)) {
+                offenders.push(format!("IconName::{variant}"));
+            }
+        }
+
+        assert!(
+            offenders.is_empty(),
+            "OMEGA-DELTA-0018: a competitor's name is back in the shipped icon \
+             set: {offenders:?}. Replace the artwork and the name, or record in \
+             {} why it identifies somebody else's product.",
+            BRAND_GATE_POLICY_PATH
+        );
+    }
+
+    /// OMEGA-DELTA-0018. The Omega marks are the artwork that was looked at.
+    ///
+    /// A name check cannot see a logo. Three Zed marks shipped on the status
+    /// bar of `0.2.0-rc10` while every brand check on omega#16 passed, because
+    /// all of them were string comparisons. Pinning the bytes is the only part
+    /// of this delta that can tell one drawing from another, so swapping the
+    /// artwork back under an Omega file name fails here.
+    #[test]
+    fn the_omega_marks_are_the_reviewed_artwork() {
+        let policy = brand_policy().expect("brand gate policy parses");
+        let marks = policy["icons"]["reviewed_marks"]
+            .as_object()
+            .expect("icons.reviewed_marks is an object");
+        assert!(
+            !marks.is_empty(),
+            "OMEGA-DELTA-0018: no artwork is pinned, so nothing checks the marks"
+        );
+
+        let mut offenders: Vec<String> = Vec::new();
+        for (relative, expected) in marks {
+            let expected = expected.as_str().expect("a pinned digest is a string");
+            let path = repository_path(relative);
+            let Ok(bytes) = std::fs::read(&path) else {
+                offenders.push(format!("{relative} is missing"));
+                continue;
+            };
+            let actual = sha256_hex(&bytes);
+            if actual != expected {
+                offenders.push(format!("{relative}: {actual} != {expected}"));
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "OMEGA-DELTA-0018: shipped Omega artwork is not the reviewed \
+             artwork:\n{}\nIf the change is deliberate, look at the rendered \
+             icon and update the pin in {} in the same commit.",
+            offenders.join("\n"),
+            BRAND_GATE_POLICY_PATH
+        );
+    }
+
+    /// OMEGA-DELTA-0017 and OMEGA-DELTA-0018. The packaging path runs the gate.
+    ///
+    /// The source checks above cannot see a packaging regression, and the
+    /// packaged gate cannot run if nothing calls it. `0.2.0-rc6` hard-panicked
+    /// at startup on assets that `cargo check --workspace` had been happy with
+    /// all along, which is the same shape of gap. This asserts the wiring
+    /// itself, so deleting the call from the bundle script fails here.
+    #[test]
+    fn the_packaging_path_runs_the_brand_gate() {
+        let verifier = repository_path(BRAND_VERIFIER_PATH);
+        assert!(
+            verifier.is_file(),
+            "OMEGA-DELTA-0017: {BRAND_VERIFIER_PATH} is missing"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = std::fs::metadata(&verifier)
+                .expect("brand verifier metadata")
+                .permissions()
+                .mode();
+            assert!(
+                mode & 0o111 != 0,
+                "OMEGA-DELTA-0017: {BRAND_VERIFIER_PATH} is not executable, so \
+                 the packaging path cannot run it"
+            );
+        }
+
+        let bundle = repository_path(RC_BUNDLE_SCRIPT_PATH);
+        let script = std::fs::read_to_string(&bundle)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", bundle.display()));
+        for required in [
+            "verify_source_brand\n",
+            "verify_packaged_brand \"${app_path}\"\n",
+            BRAND_VERIFIER_PATH,
+            BRAND_GATE_POLICY_PATH,
+        ] {
+            assert!(
+                script.contains(required),
+                "OMEGA-DELTA-0017: {RC_BUNDLE_SCRIPT_PATH} no longer contains \
+                 {required:?}. A candidate could be packaged without the brand \
+                 gate ever reading its Info.plist or its icons."
+            );
+        }
     }
 
     /// An ID that names two entries names none of them.

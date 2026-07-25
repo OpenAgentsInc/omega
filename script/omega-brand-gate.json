@@ -1,0 +1,62 @@
+{
+  "_comment": [
+    "Single source of truth for the Omega brand gate (OMEGA-DELTA-0017 and",
+    "OMEGA-DELTA-0018). Read by crates/omega_deltas on the source tree and by",
+    "script/verify-omega-brand on the packaged application, so the two sides",
+    "cannot drift apart on what counts as a competitor's name.",
+    "",
+    "Do not add an entry to third_party_allowances to make a build pass. An",
+    "allowance means the asset identifies somebody else's product the way",
+    "ai_anthropic.svg identifies Anthropic, not that Omega presents itself as",
+    "that product."
+  ],
+  "brand": {
+    "_comment": [
+      "words are matched case-sensitively at ASCII alphanumeric boundaries, so",
+      "'Zed' and \"Zed's\" match while 'Zedd' does not. Lowercase 'zed' is NOT a",
+      "word here on purpose: it is a substring of 'authorized', 'organized' and",
+      "'normalized', and a gate that cries wolf gets deleted."
+    ],
+    "words": ["Zed"],
+    "substrings": ["zed.dev", "zed industries"]
+  },
+  "info_plist": {
+    "_comment": [
+      "Every file in fragment_dir is merged into the packaged Info.plist by",
+      "cargo-bundle (osx_info_plist_exts = ['resources/info/*'] in",
+      "crates/zed/Cargo.toml), so the whole directory is scanned rather than a",
+      "list of known files. macOS renders NS*UsageDescription values inside its",
+      "own system permission dialogs, so a competitor's name here is presented",
+      "by the operating system, under our Developer ID signature."
+    ],
+    "fragment_dir": "crates/zed/resources/info"
+  },
+  "icons": {
+    "_comment": [
+      "assets/icons and the IconName enum are a bijection, enforced by",
+      "crates/icons test_all_icons_exist and test_no_dangling_icons, so",
+      "scanning both is a complete inventory of every icon that can ship.",
+      "",
+      "reviewed_marks pins the bytes of the Omega artwork. The name rules",
+      "cannot see a logo; the digests can. Changing one of these files is a",
+      "deliberate artwork change and has to update this pin in the same commit."
+    ],
+    "asset_dir": "assets/icons",
+    "enum_source": "crates/icons/src/icons.rs",
+    "forbidden_stem_tokens": ["zed"],
+    "forbidden_variant_tokens": ["Zed"],
+    "third_party_allowances": {
+      "ai_zed": "Identifies the Zed editor's base-keymap preset (next to VS Code, JetBrains and Sublime Text) and Zed's own hosted model provider, exactly as ai_anthropic.svg identifies Anthropic. Naming somebody else's product is not Omega presenting itself as that product."
+    },
+    "reviewed_marks": {
+      "assets/icons/omega_agent.svg": "8119f84363c69db874d7e10be886b4cbd715ec12b3fd0500119b7331e68edfff",
+      "assets/icons/omega_agent_two.svg": "65ffa47f074aa62fcfe8d35588bfe5a11877157c925b5aea494a4e1ab5eefeac",
+      "assets/icons/omega_assistant.svg": "e2f280a7e42686872420b50f74ea4ca59d7a27d99d3811bd6c894e0dbd800978",
+      "assets/icons/omega_predict.svg": "97069f9505d8eeb99bbb07f36f52d11ff2bc2993fe93c78a5500d4d547001477",
+      "assets/icons/omega_predict_disabled.svg": "f37b0b528f47bf9db512d4482e5742cbdd8c2a6f43200da88309c6a968f60e7a",
+      "assets/icons/omega_predict_down.svg": "5ebbcf41039b30f35745d7e4bac18b7cf7fc505aa001d2d27eb82f8b5a6f5b85",
+      "assets/icons/omega_predict_error.svg": "bd55454ff5b74f168958473f8cc3504b5bf7f49b37f394beb0adc198799a6e9a",
+      "assets/icons/omega_predict_up.svg": "9136685248fac925d2666996df01cfb2629911c701988f1ed02dce4490d48a4b"
+    }
+  }
+}

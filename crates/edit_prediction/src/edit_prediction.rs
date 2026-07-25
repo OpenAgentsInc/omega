@@ -1178,11 +1178,11 @@ impl EditPredictionStore {
                 edit_prediction_types::EditPredictionIconSet::new(IconName::Inception)
             }
             EditPredictionModel::Zeta => {
-                edit_prediction_types::EditPredictionIconSet::new(IconName::ZedPredict)
-                    .with_disabled(IconName::ZedPredictDisabled)
-                    .with_up(IconName::ZedPredictUp)
-                    .with_down(IconName::ZedPredictDown)
-                    .with_error(IconName::ZedPredictError)
+                edit_prediction_types::EditPredictionIconSet::new(IconName::OmegaPredict)
+                    .with_disabled(IconName::OmegaPredictDisabled)
+                    .with_up(IconName::OmegaPredictUp)
+                    .with_down(IconName::OmegaPredictDown)
+                    .with_error(IconName::OmegaPredictError)
             }
             EditPredictionModel::Fim { .. } => {
                 let settings = &all_language_settings(None, cx).edit_predictions;

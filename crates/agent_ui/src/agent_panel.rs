@@ -5017,7 +5017,7 @@ impl Panel for AgentPanel {
     }
 
     fn icon(&self, _window: &Window, cx: &App) -> Option<IconName> {
-        (self.enabled(cx) && AgentSettings::get_global(cx).button).then_some(IconName::ZedAssistant)
+        (self.enabled(cx) && AgentSettings::get_global(cx).button).then_some(IconName::OmegaAssistant)
     }
 
     fn icon_tooltip(&self, _window: &Window, _cx: &App) -> Option<&'static str> {
@@ -5806,7 +5806,7 @@ impl AgentPanel {
                                     !showing_terminal && is_agent_selected(Agent::NativeAgent),
                                     |this| this.action(Box::new(NewThread)),
                                 )
-                                .icon(IconName::ZedAgent)
+                                .icon(IconName::OmegaAgent)
                                 .icon_color(Color::Muted)
                                 .handler({
                                     let workspace = workspace.clone();
@@ -5833,7 +5833,7 @@ impl AgentPanel {
                         )
                         .item(
                             ContextMenuEntry::new("Full Auto")
-                                .icon(IconName::ZedAgent)
+                                .icon(IconName::OmegaAgent)
                                 .icon_color(Color::Accent)
                                 .handler({
                                     move |window, cx| {
@@ -5843,7 +5843,7 @@ impl AgentPanel {
                         )
                         .item(
                             ContextMenuEntry::new("Agent Computer")
-                                .icon(IconName::ZedAgent)
+                                .icon(IconName::OmegaAgent)
                                 .icon_color(Color::Accent)
                                 .handler({
                                     move |window, cx| {
@@ -5856,7 +5856,7 @@ impl AgentPanel {
                         )
                         .item(
                             ContextMenuEntry::new("Sarah")
-                                .icon(IconName::ZedAgent)
+                                .icon(IconName::OmegaAgent)
                                 .icon_color(Color::Accent)
                                 .handler({
                                     move |window, cx| {

@@ -1,0 +1,298 @@
+#!/usr/bin/env bash
+#
+# Omega brand gate (OMEGA-DELTA-0017, OMEGA-DELTA-0018).
+#
+# Two modes:
+#
+#   verify-omega-brand                 source tree
+#   verify-omega-brand --app PATH      a built Omega.app, before signing
+#
+# The packaged mode exists because a source-level check is not a packaging
+# check. 0.2.0-rc10 shipped thirteen Zed strings in a signed Info.plist and
+# three Zed logo marks in the status bar while every brand check on omega#16
+# passed, because those checks scanned the executable for three identity
+# literals and nothing had ever read Info.plist or looked at an asset.
+#
+# Policy lives in script/omega-brand-gate.json and is shared with
+# crates/omega_deltas so the source and packaged sides cannot drift.
+
+set -euo pipefail
+
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+repository_root="${OMEGA_BRAND_VERIFY_ROOT:-$(cd "${script_dir}/.." && pwd)}"
+
+APP_PATH=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --app)
+      APP_PATH="${2:-}"
+      if [[ -z "${APP_PATH}" ]]; then
+        echo "error: --app needs a path to an Omega.app bundle." >&2
+        exit 2
+      fi
+      shift
+      ;;
+    -h|--help)
+      echo "Usage: ${0##*/} [--app PATH_TO_OMEGA_APP]"
+      exit 0
+      ;;
+    *)
+      echo "error: unknown argument: $1" >&2
+      exit 2
+      ;;
+  esac
+  shift
+done
+
+python3 - "${repository_root}" "${APP_PATH}" <<'PY'
+from __future__ import annotations
+
+import hashlib
+import json
+import plistlib
+import re
+import sys
+from pathlib import Path
+
+ROOT = Path(sys.argv[1]).resolve()
+APP = Path(sys.argv[2]).resolve() if sys.argv[2] else None
+
+POLICY = json.loads((ROOT / "script/omega-brand-gate.json").read_text(encoding="utf-8"))
+WORDS = POLICY["brand"]["words"]
+SUBSTRINGS = [value.lower() for value in POLICY["brand"]["substrings"]]
+ICONS = POLICY["icons"]
+ALLOWED_STEMS = set(ICONS["third_party_allowances"])
+STEM_TOKENS = [token.lower() for token in ICONS["forbidden_stem_tokens"]]
+VARIANT_TOKENS = ICONS["forbidden_variant_tokens"]
+REVIEWED_MARKS = ICONS["reviewed_marks"]
+
+failures: list[str] = []
+
+
+def fail(message: str) -> None:
+    failures.append(message)
+
+
+def brand_hits(text: str) -> list[str]:
+    """Competitor brand names in `text`.
+
+    Words match case-sensitively at ASCII alphanumeric boundaries so that
+    'authorized' and 'normalized' are not reported, which is what a lowercase
+    substring rule would do. Substrings match case-insensitively.
+    """
+    hits: list[str] = []
+    for word in WORDS:
+        for match in re.finditer(re.escape(word), text):
+            before = text[match.start() - 1] if match.start() else ""
+            after = text[match.end()] if match.end() < len(text) else ""
+            if before.isalnum() or after.isalnum():
+                continue
+            hits.append(word)
+            break
+    lowered = text.lower()
+    hits.extend(substring for substring in SUBSTRINGS if substring in lowered)
+    return hits
+
+
+def stem_is_forbidden(stem: str) -> bool:
+    if stem in ALLOWED_STEMS:
+        return False
+    lowered = stem.lower()
+    return any(token in lowered for token in STEM_TOKENS)
+
+
+# ---------------------------------------------------------------- source mode
+
+
+def check_info_plist_fragments() -> None:
+    """OMEGA-DELTA-0017, source side.
+
+    Every file in the fragment directory is merged into Info.plist by
+    cargo-bundle, so the directory is walked rather than a list of known
+    files, and every value is read rather than a list of known keys. A new
+    key carrying a competitor's name is caught the same as a known one.
+    """
+    directory = ROOT / POLICY["info_plist"]["fragment_dir"]
+    if not directory.is_dir():
+        fail(f"info plist fragment directory is missing: {directory}")
+        return
+    fragments = sorted(path for path in directory.iterdir() if path.is_file())
+    if not fragments:
+        fail(f"info plist fragment directory is empty: {directory}")
+        return
+    for path in fragments:
+        text = path.read_text(encoding="utf-8", errors="replace")
+        # Report the owning key where the fragment gives one, so the failure
+        # names the macOS dialog the string would appear in.
+        key = None
+        for match in re.finditer(r"<key>(.*?)</key>|<string>(.*?)</string>", text, re.S):
+            if match.group(1) is not None:
+                key = match.group(1).strip()
+                continue
+            value = match.group(2)
+            for hit in brand_hits(value):
+                where = f"{path.relative_to(ROOT)}:{key or '<unkeyed>'}"
+                fail(f"OMEGA-DELTA-0017: {where} value names {hit!r}: {value.strip()!r}")
+        # Belt and braces: catch a brand name in a key, comment or attribute,
+        # which the key/value pass above does not read.
+        for hit in brand_hits(re.sub(r"<string>.*?</string>", "", text, flags=re.S)):
+            fail(
+                f"OMEGA-DELTA-0017: {path.relative_to(ROOT)} names {hit!r} "
+                "outside a <string> value"
+            )
+
+
+def check_icon_inventory() -> None:
+    """OMEGA-DELTA-0018, source side.
+
+    assets/icons and the IconName enum are kept in bijection by the icons
+    crate's own tests, so scanning both is a complete inventory of every icon
+    that can ship.
+    """
+    asset_dir = ROOT / ICONS["asset_dir"]
+    stems = sorted(path.stem for path in asset_dir.glob("*.svg"))
+    if not stems:
+        fail(f"icon asset directory is empty: {asset_dir}")
+    for stem in stems:
+        if stem_is_forbidden(stem):
+            fail(
+                f"OMEGA-DELTA-0018: {ICONS['asset_dir']}/{stem}.svg carries a "
+                "competitor's name. Replace the artwork and the file name, or "
+                "record why it identifies somebody else's product in "
+                "script/omega-brand-gate.json."
+            )
+
+    enum_source = (ROOT / ICONS["enum_source"]).read_text(encoding="utf-8")
+    body = re.search(r"pub enum IconName \{\n(.*?)\n\}", enum_source, re.S)
+    if body is None:
+        fail(f"cannot find the IconName enum in {ICONS['enum_source']}")
+        return
+    variants = [line.strip().rstrip(",") for line in body.group(1).splitlines() if line.strip()]
+    if not variants:
+        fail("the IconName enum parsed as empty; this check would be vacuous")
+    for variant in variants:
+        stem = re.sub(r"(?<!^)(?=[A-Z])", "_", variant).lower()
+        if stem in ALLOWED_STEMS:
+            continue
+        if any(token in variant for token in VARIANT_TOKENS):
+            fail(
+                f"OMEGA-DELTA-0018: IconName::{variant} carries a competitor's "
+                "name. Renaming the file without renaming the variant leaves "
+                "the next rebase a name to restore the artwork under."
+            )
+
+    for relative, expected in sorted(REVIEWED_MARKS.items()):
+        path = ROOT / relative
+        if not path.is_file():
+            fail(f"OMEGA-DELTA-0018: reviewed Omega mark is missing: {relative}")
+            continue
+        actual = hashlib.sha256(path.read_bytes()).hexdigest()
+        if actual != expected:
+            fail(
+                f"OMEGA-DELTA-0018: {relative} is not the reviewed artwork "
+                f"({actual} != {expected}). A name check cannot see a logo. If "
+                "this change is deliberate, look at the rendered icon and "
+                "update the pin in script/omega-brand-gate.json."
+            )
+
+
+# -------------------------------------------------------------- packaged mode
+
+
+def walk_plist(value, path: str):
+    if isinstance(value, dict):
+        for key, item in value.items():
+            yield f"{path}.{key}" if path else key, key
+            yield from walk_plist(item, f"{path}.{key}" if path else key)
+    elif isinstance(value, (list, tuple)):
+        for index, item in enumerate(value):
+            yield from walk_plist(item, f"{path}[{index}]")
+    elif isinstance(value, str):
+        yield path, value
+
+
+def check_packaged_info_plist(app: Path) -> None:
+    """OMEGA-DELTA-0017, packaged side.
+
+    Reads the merged Info.plist that actually ships, walking every value
+    rather than a list of keys, because macOS renders these strings in its own
+    permission dialogs under our Developer ID signature.
+    """
+    plists = sorted(app.rglob("*.plist"))
+    info = app / "Contents/Info.plist"
+    if not info.is_file():
+        fail(f"packaged Info.plist is missing: {info}")
+        return
+    for path in plists:
+        try:
+            data = plistlib.loads(path.read_bytes())
+        except Exception as error:  # noqa: BLE001 - report, do not swallow
+            fail(f"cannot parse packaged plist {path}: {error}")
+            continue
+        for key_path, text in walk_plist(data, ""):
+            for hit in brand_hits(text):
+                fail(
+                    f"OMEGA-DELTA-0017: packaged {path.relative_to(app.parent)} "
+                    f"{key_path} names {hit!r}: {text!r}"
+                )
+
+
+def check_packaged_icons(app: Path) -> None:
+    """OMEGA-DELTA-0018, packaged side.
+
+    Icons are embedded into the executable by rust-embed, so the packaged app
+    has no assets directory. Both the asset path literals and the raw SVG
+    bytes survive in the binary, so this checks the names AND the artwork.
+    """
+    binary = app / "Contents/MacOS/omega"
+    if not binary.is_file():
+        fail(f"packaged Omega binary is missing: {binary}")
+        return
+    data = binary.read_bytes()
+
+    embedded = sorted({match.decode() for match in re.findall(rb"icons/[A-Za-z0-9_]+\.svg", data)})
+    if not embedded:
+        fail(
+            "no embedded icon asset paths were found in the packaged binary; "
+            "this check would be vacuous"
+        )
+    for relative in embedded:
+        stem = relative[len("icons/") : -len(".svg")]
+        if stem_is_forbidden(stem):
+            fail(f"OMEGA-DELTA-0018: packaged Omega embeds {relative}")
+
+    for relative, expected in sorted(REVIEWED_MARKS.items()):
+        source = ROOT / relative
+        if not source.is_file():
+            fail(f"OMEGA-DELTA-0018: reviewed Omega mark is missing: {relative}")
+            continue
+        artwork = source.read_bytes()
+        if hashlib.sha256(artwork).hexdigest() != expected:
+            fail(f"OMEGA-DELTA-0018: {relative} is not the reviewed artwork")
+            continue
+        if artwork not in data:
+            fail(
+                f"OMEGA-DELTA-0018: the reviewed artwork for {relative} is not "
+                "in the packaged binary. The package was built from different "
+                "bytes than the ones that were reviewed."
+            )
+
+
+check_info_plist_fragments()
+check_icon_inventory()
+if APP is not None:
+    if not APP.is_dir():
+        fail(f"packaged application is missing: {APP}")
+    else:
+        check_packaged_info_plist(APP)
+        check_packaged_icons(APP)
+
+if failures:
+    print("Omega brand gate FAILED:", file=sys.stderr)
+    for failure in failures:
+        print(f"  - {failure}", file=sys.stderr)
+    raise SystemExit(1)
+
+scope = "source tree" if APP is None else f"source tree and {APP}"
+print(f"Omega brand gate ok ({scope})")
+PY

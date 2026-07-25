@@ -26,6 +26,8 @@ readonly OMEGA_RELEASE_RECORD_SCHEMA_VERSION=1
 readonly OMEGA_BUILD_LOCK_SNAPSHOT_NAME="Cargo.lock.omega-v${OMEGA_RC_VERSION}"
 readonly OMEGA_SOURCE_VERIFIER_PATH="script/verify-omega-identity"
 readonly OMEGA_IDENTITY_BOUNDARY_LIST="BUZZ_PRIVATE_KEY,identity.key,get_nsec"
+readonly OMEGA_BRAND_VERIFIER_PATH="script/verify-omega-brand"
+readonly OMEGA_BRAND_POLICY_PATH="script/omega-brand-gate.json"
 readonly OMEGA_EFFECTD_RELEASE_TAG="omega-effectd-v0.1.0-rc.8"
 readonly OMEGA_EFFECTD_ASSET_NAME="omega-effectd-v0.1.0-macos-arm64.tar.gz"
 readonly OMEGA_EFFECTD_ASSET_SHA256="01d11597b054d009296d0381b6cd6ed3d31c83b93e75a58845f2ae47bf33226a"
@@ -49,6 +51,10 @@ IDENTITY_PROOF_BINARY_DIGEST=""
 SOURCE_VERIFIER_DIGEST=""
 SOURCE_VERIFIER_PASSED=false
 PACKAGED_BOUNDARY_SCAN_PASSED=false
+BRAND_VERIFIER_DIGEST=""
+BRAND_POLICY_DIGEST=""
+BRAND_SOURCE_SCAN_PASSED=false
+BRAND_PACKAGED_SCAN_PASSED=false
 OMEGA_EFFECTD_ARCHIVE_PATH="${ROOT}/target/omega-effectd-cache/${OMEGA_EFFECTD_RELEASE_TAG}/${OMEGA_EFFECTD_ASSET_NAME}"
 OMEGA_EFFECTD_MANIFEST_SHA256=""
 OMEGA_EFFECTD_WRAPPER_SHA256=""
@@ -399,6 +405,32 @@ verify_source_identity_boundaries() {
   SOURCE_VERIFIER_PASSED=true
 }
 
+# OMEGA-DELTA-0017 and OMEGA-DELTA-0018, source side.
+verify_source_brand() {
+  "${OMEGA_BRAND_VERIFIER_PATH}"
+  BRAND_VERIFIER_DIGEST="$(sha256_file "${OMEGA_BRAND_VERIFIER_PATH}")"
+  BRAND_POLICY_DIGEST="$(sha256_file "${OMEGA_BRAND_POLICY_PATH}")"
+  if [[ -z "${BRAND_VERIFIER_DIGEST}" || -z "${BRAND_POLICY_DIGEST}" ]]; then
+    echo "error: brand gate digests are unavailable." >&2
+    exit 1
+  fi
+  BRAND_SOURCE_SCAN_PASSED=true
+}
+
+# OMEGA-DELTA-0017 and OMEGA-DELTA-0018, packaged side.
+#
+# 0.2.0-rc10 shipped thirteen Zed strings in its signed Info.plist and Zed logo
+# marks on its status bar while every brand check on omega#16 passed, because
+# those checks read the executable for three identity literals. Nothing had
+# ever read Info.plist, and no string scan can see a logo. This runs against
+# the built bundle, before signing, so a packaging regression fails here rather
+# than in a macOS permission dialog on the owner's machine.
+verify_packaged_brand() {
+  local app_path="$1"
+  "${OMEGA_BRAND_VERIFIER_PATH}" --app "${app_path}"
+  BRAND_PACKAGED_SCAN_PASSED=true
+}
+
 validate_release_record_schema() {
   local path="$1"
   python3 - \
@@ -438,6 +470,7 @@ required = [
     "components",
     "digests",
     "identity_boundaries",
+    "brand_gate",
     "notarization",
     "legal",
     "publication",
@@ -575,6 +608,25 @@ if packaged_scan.get("forbidden_literals") != [
 ]:
     raise SystemExit("identity_boundaries.packaged_scan.forbidden_literals is invalid")
 
+# OMEGA-DELTA-0017 and OMEGA-DELTA-0018. A release record that cannot say the
+# brand gate ran is not evidence that it ran.
+brand = record["brand_gate"]
+brand_source = brand.get("source_verifier", {})
+if brand_source.get("path") != "script/verify-omega-brand":
+    raise SystemExit("brand_gate.source_verifier.path is invalid")
+if brand_source.get("passed") is not True:
+    raise SystemExit("brand_gate.source_verifier.passed must be true")
+if not valid_sha256(brand_source.get("sha256")):
+    raise SystemExit("brand_gate.source_verifier.sha256 must be a SHA-256 digest")
+brand_policy = brand.get("policy", {})
+if brand_policy.get("path") != "script/omega-brand-gate.json":
+    raise SystemExit("brand_gate.policy.path is invalid")
+if not valid_sha256(brand_policy.get("sha256")):
+    raise SystemExit("brand_gate.policy.sha256 must be a SHA-256 digest")
+brand_packaged = brand.get("packaged_scan", {})
+if brand_packaged.get("surfaces") != ["Contents/Info.plist", "embedded icon assets"]:
+    raise SystemExit("brand_gate.packaged_scan.surfaces is invalid")
+
 if execution["dry_run"]:
     if any(build_lock.get(key) is not None for key in ("name", "sha256")):
         raise SystemExit("dry-run must not claim a build Cargo.lock snapshot")
@@ -585,6 +637,8 @@ if execution["dry_run"]:
         raise SystemExit("dry-run must not claim package or binary digests")
     if packaged_scan.get("passed") is not False:
         raise SystemExit("dry-run packaged boundary scan must be false")
+    if brand_packaged.get("passed") is not False:
+        raise SystemExit("dry-run packaged brand scan must be false")
     if effectd.get("packaged_node_sha256") is not None:
         raise SystemExit("dry-run must not claim a signed packaged omega-effectd Node digest")
     if identity_proof.get("binary_sha256") is not None:
@@ -606,6 +660,8 @@ else:
             raise SystemExit(f"digests.{key} must be a SHA-256 digest")
     if packaged_scan.get("passed") is not True:
         raise SystemExit("built package boundary scan must pass")
+    if brand_packaged.get("passed") is not True:
+        raise SystemExit("built package brand scan must pass")
     if not valid_sha256(effectd.get("packaged_node_sha256")):
         raise SystemExit("built package must bind the signed omega-effectd Node digest")
     if not valid_sha256(identity_proof.get("binary_sha256")):
@@ -788,6 +844,12 @@ write_release_record() {
   OMEGA_RC_SOURCE_VERIFIER_PASSED="${SOURCE_VERIFIER_PASSED}" \
   OMEGA_RC_PACKAGED_SCAN_PASSED="${PACKAGED_BOUNDARY_SCAN_PASSED}" \
   OMEGA_RC_IDENTITY_BOUNDARIES="${OMEGA_IDENTITY_BOUNDARY_LIST}" \
+  OMEGA_RC_BRAND_VERIFIER_PATH="${OMEGA_BRAND_VERIFIER_PATH}" \
+  OMEGA_RC_BRAND_VERIFIER_DIGEST="${BRAND_VERIFIER_DIGEST}" \
+  OMEGA_RC_BRAND_POLICY_PATH="${OMEGA_BRAND_POLICY_PATH}" \
+  OMEGA_RC_BRAND_POLICY_DIGEST="${BRAND_POLICY_DIGEST}" \
+  OMEGA_RC_BRAND_SOURCE_PASSED="${BRAND_SOURCE_SCAN_PASSED}" \
+  OMEGA_RC_BRAND_PACKAGED_PASSED="${BRAND_PACKAGED_SCAN_PASSED}" \
   OMEGA_RC_DRY_RUN="${DRY_RUN}" \
   OMEGA_RC_NOTARIZATION_STATUS="${notarization_status}" \
   OMEGA_RC_NOTARIZATION_ATTEMPTED="${notarization_attempted}" \
@@ -903,6 +965,21 @@ record = {
         "packaged_scan": {
             "passed": os.environ["OMEGA_RC_PACKAGED_SCAN_PASSED"] == "true",
             "forbidden_literals": os.environ["OMEGA_RC_IDENTITY_BOUNDARIES"].split(","),
+        },
+    },
+    "brand_gate": {
+        "source_verifier": {
+            "path": os.environ["OMEGA_RC_BRAND_VERIFIER_PATH"],
+            "sha256": os.environ["OMEGA_RC_BRAND_VERIFIER_DIGEST"],
+            "passed": os.environ["OMEGA_RC_BRAND_SOURCE_PASSED"] == "true",
+        },
+        "policy": {
+            "path": os.environ["OMEGA_RC_BRAND_POLICY_PATH"],
+            "sha256": os.environ["OMEGA_RC_BRAND_POLICY_DIGEST"],
+        },
+        "packaged_scan": {
+            "passed": os.environ["OMEGA_RC_BRAND_PACKAGED_PASSED"] == "true",
+            "surfaces": ["Contents/Info.plist", "embedded icon assets"],
         },
     },
     "notarization": {
@@ -1070,6 +1147,7 @@ fi
 require_arm64_host_or_target
 require_clean_checkout
 verify_source_identity_boundaries
+verify_source_brand
 prepare_omega_effectd_archive
 
 DMG_PATH="${OUTPUT_DIR}/${OMEGA_ARTIFACT_NAME}"
@@ -1163,6 +1241,7 @@ cp "target/${TARGET_TRIPLE}/release/cli" "${app_path}/Contents/MacOS/cli"
 cp "target/${TARGET_TRIPLE}/release/omega-identity-proof" "${app_path}/Contents/MacOS/omega-identity-proof"
 stage_omega_effectd_component "${app_path}"
 verify_packaged_identity_boundaries "${app_path}"
+verify_packaged_brand "${app_path}"
 
 # Strip associated-domains entitlement: it requires an Omega-owned profile.
 entitlements_path="${OUTPUT_DIR}/omega-rc.entitlements"
