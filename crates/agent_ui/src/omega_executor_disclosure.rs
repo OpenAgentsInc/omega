@@ -115,6 +115,7 @@ fn classify_connection(
             provider,
             model,
             run_ref: None,
+            route: crate::omega_router::recorded_route(session_id),
         };
     }
 
@@ -133,6 +134,7 @@ fn classify_connection(
         provider: None,
         model: None,
         run_ref: None,
+        route: crate::omega_router::recorded_route(session_id),
     }
 }
 
@@ -150,6 +152,7 @@ mod tests {
             provider: None,
             model: None,
             run_ref: None,
+            route: Some(omega_front_door::RouteReason::PinHonored),
         };
         assert!(routed.is_coherent());
 
@@ -178,6 +181,7 @@ mod tests {
                 provider: None,
                 model: None,
                 run_ref,
+                route: Some(omega_front_door::RouteReason::PinHonored),
             };
             assert!(disclosure.is_coherent(), "{class:?}");
             assert_ne!(disclosure.class, ExecutorClass::NativeLoop);

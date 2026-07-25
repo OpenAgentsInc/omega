@@ -13,6 +13,13 @@
 //! Product contract: `specs/omega/omega-agent.product-spec.md` revision 1 in
 //! the openagents repository, admitted by the owner on 2026-07-25.
 
+pub mod router;
+
+pub use router::{
+    EngineLane, EngineReadiness, EngineUnreachable, ExecutorPin, LaneState, RESERVED_RECORD_CHARACTERS,
+    RouteDecision, RouteInputs, RouteReason, lane_ref_is_recordable, route, select_lane,
+};
+
 // -------------------------------------------------------------------------
 // Where a fresh launch lands
 // -------------------------------------------------------------------------
@@ -139,6 +146,19 @@ pub struct ExecutorDisclosure {
     /// `Some` only for [`ExecutorClass::EngineLane`]: a native or ACP turn has
     /// no run authority to reference.
     pub run_ref: Option<String>,
+    /// Why Omega Agent routed the thread here, where it routed the thread.
+    ///
+    /// A typed part, added by omega#78 — not a caption. `None` means this
+    /// thread was not routed by the router: a thread restored from before
+    /// `OMEGA-DELTA-0029`, or one opened directly on an executor. Saying "not
+    /// routed" is different from claiming a reason nobody recorded, and the
+    /// difference matters most for the fallback reasons, which are the ones a
+    /// user needs to see.
+    ///
+    /// This is the field that makes an engine-down fallback *visible*. A
+    /// fallback the user cannot see is the same defect class as a handoff with
+    /// no system note.
+    pub route: Option<RouteReason>,
 }
 
 impl ExecutorDisclosure {
@@ -163,6 +183,13 @@ impl ExecutorDisclosure {
             line.push_str(" · ");
             line.push_str(run_ref);
         }
+        // omega#78. An unrouted thread says nothing here rather than claiming a
+        // reason nobody recorded; a routed one always says why, including — and
+        // especially — when a pin could not be honoured.
+        if let Some(route) = self.route {
+            line.push_str(" · routed: ");
+            line.push_str(route.phrase());
+        }
         line
     }
 
@@ -172,13 +199,26 @@ impl ExecutorDisclosure {
     /// result, which `OMEGA-AGENT-AC-05` exists to prevent. An identifier that
     /// is present but empty means something built the record out of a missing
     /// value instead of leaving it absent, so it stays incoherent.
+    ///
+    /// omega#78 adds two clauses about the route. A record that says a pin
+    /// could not be honoured while showing an engine lane is claiming both that
+    /// the router fell back and that it did not; and a record that says the
+    /// thread was unpinned while showing an engine lane is owner gate 8 broken,
+    /// because nothing but a human pin may reach Full Auto authority.
     #[must_use]
     pub fn is_coherent(&self) -> bool {
         let present_and_named =
             |value: &Option<String>| value.as_ref().is_none_or(|value| !value.is_empty());
+        let route_agrees_with_the_class = match self.route {
+            Some(route) if route.is_fallback() || route == RouteReason::UnpinnedDefault => {
+                self.class == ExecutorClass::NativeLoop
+            }
+            Some(_) | None => true,
+        };
         !self.agent_id.is_empty()
             && present_and_named(&self.provider)
             && present_and_named(&self.model)
+            && route_agrees_with_the_class
             && match self.class {
                 ExecutorClass::EngineLane => self.run_ref.is_some(),
                 ExecutorClass::NativeLoop | ExecutorClass::ExternalAcp => self.run_ref.is_none(),
@@ -482,6 +522,7 @@ mod tests {
             provider: Some("google".into()),
             model: Some("gemini-3.6-flash".into()),
             run_ref: Some("run.abc".into()),
+            route: None,
         };
         assert_eq!(
             disclosure.label(),
@@ -513,6 +554,7 @@ mod tests {
             provider: None,
             model: None,
             run_ref: None,
+            route: None,
         };
         assert!(disclosure.is_coherent());
         assert_eq!(
@@ -540,6 +582,7 @@ mod tests {
             provider: Some("p".into()),
             model: Some("m".into()),
             run_ref: None,
+            route: None,
         };
         // Debug is the closest thing to reflection available here: if a
         // `label` field is ever added, it shows up in the struct dump.
@@ -562,6 +605,7 @@ mod tests {
             provider: Some("google".into()),
             model: Some("gemini-3.6-flash".into()),
             run_ref: Some("run.abc".into()),
+            route: None,
         };
         assert!(base.is_coherent());
 
@@ -583,6 +627,83 @@ mod tests {
         let mut blank_provider = base;
         blank_provider.provider = Some(String::new());
         assert!(!blank_provider.is_coherent());
+    }
+
+    /// omega#78. A thread routed by a fallback says so on its own line.
+    ///
+    /// This is the "prove it is disclosed rather than silent" half of the
+    /// engine-down exit property. The record carries the typed reason; the line
+    /// renders it; neither stores a sentence.
+    #[test]
+    fn an_engine_down_fallback_is_visible_on_the_disclosure_line() {
+        let decision = route(
+            &RouteInputs::native_only()
+                .with_engine(EngineReadiness::Unreachable(EngineUnreachable::NotRunning))
+                .pinned(ExecutorPin::on_lane("claude-local")),
+        );
+        assert_eq!(decision.chosen, ExecutorClass::NativeLoop);
+
+        let disclosure = ExecutorDisclosure {
+            class: decision.chosen,
+            agent_id: "omega-agent".into(),
+            provider: Some("anthropic".into()),
+            model: Some("claude-opus-5".into()),
+            run_ref: None,
+            route: Some(decision.disclosed_route()),
+        };
+        assert!(disclosure.is_coherent());
+
+        let line = disclosure.label();
+        assert!(
+            line.contains("engine unreachable, fell back to the native loop"),
+            "the thread ran somewhere the user did not pin and the line does \
+             not say so: {line}"
+        );
+
+        // The same record with the route dropped renders a line that reads as
+        // an ordinary native thread. That silence is the defect.
+        let silent = ExecutorDisclosure {
+            route: None,
+            ..disclosure
+        };
+        assert!(!silent.label().contains("fell back"));
+    }
+
+    /// omega#78. A record cannot say both "the pin was not honoured" and "an
+    /// engine lane ran it", and cannot say an unpinned thread reached Full Auto
+    /// authority.
+    #[test]
+    fn a_route_that_contradicts_the_executor_is_incoherent() {
+        let engine_thread = ExecutorDisclosure {
+            class: ExecutorClass::EngineLane,
+            agent_id: "codex-local".into(),
+            provider: None,
+            model: None,
+            run_ref: Some("run.abc".into()),
+            route: Some(RouteReason::PinHonored),
+        };
+        assert!(engine_thread.is_coherent());
+
+        for contradiction in [
+            RouteReason::EngineUnreachable,
+            RouteReason::EngineAtCapacity,
+            RouteReason::EngineHasNoReadyLane,
+            RouteReason::PinnedLaneUnavailable,
+            RouteReason::ExternalAcpUnavailable,
+            RouteReason::UnrecordableLane,
+            // Owner gate 8: nothing unpinned reaches an engine lane.
+            RouteReason::UnpinnedDefault,
+        ] {
+            let lying = ExecutorDisclosure {
+                route: Some(contradiction),
+                ..engine_thread.clone()
+            };
+            assert!(
+                !lying.is_coherent(),
+                "{} on an engine-lane thread passed coherence",
+                contradiction.token()
+            );
+        }
     }
 
     /// `OMEGA-AGENT-AC-04` fixes the executor set at exactly three.

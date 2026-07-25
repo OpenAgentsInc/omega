@@ -1105,3 +1105,101 @@ cargo test -p omega_deltas
   renders into a selector and writes into the owner's settings file.
 - **Enforced by:** `the_default_icon_theme_is_omegas` in
   `crates/omega_deltas/`.
+
+### OMEGA-DELTA-0029 — Omega Agent routes deterministically, fails closed, and records why
+
+- **Upstream Zed:** a thread is bound to whichever agent connection created it,
+  for its whole life. There is one executor per thread and no decision to make,
+  so there is nothing to explain and nothing to record.
+- **Omega, before this:** Omega presents one chat surface over three executor
+  classes, and which one a thread got was decided implicitly by which panel
+  entry the user happened to open. `OMEGA-DELTA-0021` made a thread *name* its
+  executor; nothing yet chose it on purpose, and nothing wrote down why.
+- **Omega now:** `omega_front_door::router` is the routing law — a pure function
+  from typed inputs (a user pin, the engine's last framed `get_capacity` answer,
+  and which executors are connected) to a typed `RouteDecision`.
+  `agent_ui::omega_router::OmegaAgentConnection` is the dispatch half: it
+  implements `AgentConnection` and hands every method to the executor the
+  decision names.
+- **Pins are honoured.** An explicitly pinned executor that can serve is always
+  used, whatever else is ready. A pin outranks an idle engine lane, because the
+  engine being free is not a reason to move a turn a person placed.
+- **Engine-down fails closed to the native loop, and says so.** Every way the
+  engine can be unavailable — not running, timed out, an answer this build
+  cannot read, at its active-run limit, no ready lane, a named lane that is
+  busy, no executor connected for lanes — lands on the native loop with a typed
+  fallback reason, keeps the pin it could not honour, and renders a line that
+  says a pin was not honoured. A fallback the user cannot see is the same defect
+  class as a handoff with no system note, which shipped in `0.2.0-rc11` because
+  `appendSystemNote` was bound to `() => {}` on the framed path.
+- **The decision is recorded.** Every decision is written to
+  `agent-route-journal.json` under the Omega data directory in a canonical form
+  that round-trips back into a typed decision, keyed by session, rewritten
+  atomically. It carries **no clock**: a timestamp would make two identical
+  decisions look different and would put a non-deterministic value beside a
+  decision path whose whole point is that it is reproducible. A record that
+  reads cleanly but describes an impossible decision — a fallback that claims an
+  engine lane, an honoured pin naming a different class from the one that ran —
+  is rejected rather than believed.
+- **Determinism, and why it is not just a unit test.** The routing law reads
+  nothing but its argument, walks only ordered slices, and resolves a choice
+  among equally ready lanes by a total order on the lane reference rather than
+  by the order the engine listed them — the engine's array order is not a stable
+  input, so "the first available lane" would route the same thread two ways on
+  two runs with nothing wrong with either.
+  `the_routing_law_has_no_clock_no_randomness_and_no_hash_order` reads both
+  source files for clocks, randomness, hash-map iteration, and the environment,
+  because a behavioural test can only show that the inputs it happened to try
+  agreed twice.
+- **An unpinned thread never reaches an engine lane, on purpose.** Owner gate 8
+  says no model-initiated path may start Full Auto authority, wherever that
+  action lives. An engine lane *is* Full Auto authority, so a router that
+  preferred a ready lane for an unpinned thread would be exactly that
+  forbidden start, through a door nobody had flagged — which is how
+  `full_auto_enable` survived until it was removed today. v1 therefore routes an
+  unpinned thread to the native loop, always, and engine lanes are reachable
+  only through a pin a person sets on a visible control. Model-advisory routing
+  is out of scope for v1 by the packet's own terms; this is the shape that keeps
+  it out.
+- **The router owns no execution, and that is read off the source.**
+  `the_router_owns_no_execution_and_starts_no_run` scans the dispatch file for
+  execution vocabulary and for run-control verbs;
+  `the_router_delegates_every_agent_connection_method` parses the
+  `impl AgentConnection` block and fails if any method stops handing its work to
+  an executor. A method that quietly grew a turn loop would still compile, still
+  pass every behavioural test that did not call it, and still read as a router
+  from its own module docs.
+- **`omega-effectd` stays the sole run authority.** The engine's capacity answer
+  is read, never written back, never cached as run state. The router projects;
+  it does not own. A later engine answer does not rewrite a decision already
+  recorded, so a turn does not move executors mid-thread because capacity
+  changed between turns.
+- **A routed thread carries the executor's connection, not the router's.**
+  `OMEGA-DELTA-0021` classifies a thread by downcasting its connection, so a
+  thread carrying the router would disclose the router as its executor — the
+  exact first-party attribution claim omega#77 exists to stop.
+- **Disclosure grew a part, not a caption.** `ExecutorDisclosure` gained
+  `route: Option<RouteReason>`, a closed typed set, added to
+  `EXECUTOR_DISCLOSURE_FIELDS`. `None` means the thread was not routed by the
+  router, which is different from claiming a reason nobody recorded.
+- **Enforced by:** `the_routing_law_has_no_clock_no_randomness_and_no_hash_order`,
+  `the_router_owns_no_execution_and_starts_no_run`,
+  `the_router_delegates_every_agent_connection_method`, and
+  `the_route_decision_is_a_record_that_round_trips` in `crates/omega_deltas`;
+  the routing-law suite in `crates/omega_front_door/src/router.rs`; and the
+  dispatch and journal suite in `crates/agent_ui/src/omega_router.rs`.
+- **Not covered.** The router is **not yet wired into the agent panel**: nothing
+  in the shipped app constructs an `OmegaAgentConnection`, and there is no pin
+  control on any surface, so in `0.2.0-rc13` the journal stays empty and every
+  thread still discloses `route: None`. The routing law, the dispatch seam, the
+  fail-closed behaviour, and the record are all real and tested; the *user* has
+  no way to reach them yet. That wiring — a pin affordance, the panel building
+  the router, and the `get_capacity` poll feeding `observe_capacity` — is the
+  next packet, and until it lands the exit properties hold in the router and not
+  in the product. Separately, the router can decide an engine-lane route it
+  cannot itself dispatch, because engine lanes are started by a person on the
+  Full Auto surface and driven by the host bridge rather than through
+  `AgentConnection::prompt`; that gap is the named `engine_lane_not_connected`
+  fallback rather than a substitution. And no check here looks at a rendered
+  pixel, so a route line that is correct in source and truncated or absent on
+  screen still passes.

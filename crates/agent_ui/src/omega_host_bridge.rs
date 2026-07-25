@@ -1630,6 +1630,7 @@ mod tests {
                 provider: None,
                 model: None,
                 run_ref: None,
+                route: Some(omega_front_door::RouteReason::PinHonored),
             },
             run,
         );

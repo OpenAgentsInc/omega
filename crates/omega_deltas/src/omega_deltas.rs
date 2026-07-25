@@ -56,6 +56,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0026",
     "OMEGA-DELTA-0027",
     "OMEGA-DELTA-0028",
+    "OMEGA-DELTA-0029",
 ];
 
 /// OMEGA-DELTA-0025. The file that declares the measured digest.
@@ -173,6 +174,70 @@ pub const EXECUTOR_DISCLOSURE_FIELDS: &[(&str, &str)] = &[
     ("provider", "Option<String>"),
     ("model", "Option<String>"),
     ("run_ref", "Option<String>"),
+    // OMEGA-DELTA-0029. Why the router sent the thread here. A typed reason
+    // from a closed set, not a sentence: the same law as every other part.
+    ("route", "Option<RouteReason>"),
+];
+
+/// OMEGA-DELTA-0029. The routing law.
+pub const ROUTE_DECISION_PATH: &str = "crates/omega_front_door/src/router.rs";
+
+/// OMEGA-DELTA-0029. The dispatch half of the router.
+pub const ROUTER_DISPATCH_PATH: &str = "crates/agent_ui/src/omega_router.rs";
+
+/// OMEGA-DELTA-0029. Vocabulary that would make a route irreproducible.
+///
+/// The packet's exit is a *deterministic* router, and determinism is not a
+/// property a unit test can establish on its own: a test can only show that the
+/// inputs it happened to try gave the same answer twice. This scan covers the
+/// ways the answer could stop depending only on its inputs at all, so a later
+/// edit that reaches for a clock or a hash map fails here rather than making
+/// two identical threads route differently in a way nobody reproduces.
+pub const NON_DETERMINISTIC_ROUTING_TOKENS: &[(&str, &str)] = &[
+    ("a clock", "SystemTime"),
+    ("a clock", "Instant"),
+    ("a clock", "::now("),
+    ("a clock", "chrono"),
+    ("a clock", "timestamp"),
+    ("randomness", "rand::"),
+    ("hash iteration order", "HashMap"),
+    ("hash iteration order", "HashSet"),
+    ("the environment", "std::env"),
+];
+
+/// OMEGA-DELTA-0029. Vocabulary that would mean the router started executing.
+///
+/// omega#74 admitted Omega Agent as a router that owns routing, disclosure and
+/// receipts and owns **no execution**. "Owns no execution" is a property of the
+/// source, not of its author's intent, so it is read off the source. The last
+/// four entries are owner gate 8: the router must not be able to start, stop,
+/// or resume run authority, because only an explicit human action may.
+pub const ROUTER_EXECUTION_TOKENS: &[&str] = &[
+    "LanguageModel",
+    "stream_completion",
+    "system_prompt",
+    "run_turn",
+    "start_run",
+    "stop_run",
+    "resume_run",
+    "LaunchOrigin",
+];
+
+/// OMEGA-DELTA-0029. Methods of the router's `AgentConnection` impl that are
+/// allowed not to delegate, and why.
+///
+/// `into_any` is the trait's own downcast escape hatch: it hands back the
+/// router itself by definition, so requiring it to delegate would require it to
+/// lie about what it is.
+pub const ROUTER_NON_DELEGATING_METHODS: &[&str] = &["into_any"];
+
+/// OMEGA-DELTA-0029. How a router method is allowed to reach an executor.
+pub const ROUTER_DELEGATION_MARKERS: &[&str] = &[
+    "self.native",
+    "self.executor(",
+    "self.executor_for(",
+    "self.agent_id",
+    "executor.new_session",
 ];
 
 /// Files deleted from the fork, checked by absence.
@@ -744,6 +809,22 @@ fn next_enum_body<'a>(source: &'a str, name: &str) -> Option<(usize, &'a str, us
     let body_start = start + header.len();
     let end = source[body_start..].find("\n}")? + body_start;
     Some((start, &source[body_start..end], end))
+}
+
+/// A source file with its line comments removed.
+///
+/// OMEGA-DELTA-0029's scans read code, not prose: the doc comments in the
+/// router deliberately name the tokens they forbid, in the course of saying why
+/// they are not there. A scan that could not tell the two apart would force the
+/// explanation out of the file, which is the opposite of what these checks are
+/// for.
+#[must_use]
+pub fn code_of(source: &str) -> String {
+    source
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("//"))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Read the value of a `pub const NAME: &str = "value";` declaration.
@@ -3122,6 +3203,163 @@ mod tests {
              `label` method.",
             path.display()
         );
+    }
+
+    /// OMEGA-DELTA-0029. The routing law reads nothing but its inputs.
+    ///
+    /// Determinism is the packet's exit and the hardest half to establish: a
+    /// unit test shows only that the inputs it tried gave the same answer
+    /// twice. This reads the source for the ways the answer could stop
+    /// depending on its inputs at all.
+    #[test]
+    fn the_routing_law_has_no_clock_no_randomness_and_no_hash_order() {
+        for path in [ROUTE_DECISION_PATH, ROUTER_DISPATCH_PATH] {
+            let full = repository_path(path);
+            let source = std::fs::read_to_string(&full)
+                .unwrap_or_else(|error| panic!("cannot read {}: {error}", full.display()));
+            assert!(
+                source.contains("pub fn route(") || source.contains("route(&self.inputs_for("),
+                "OMEGA-DELTA-0029: {path} does not look like part of the \
+                 routing path any more; the scan below would be vacuous."
+            );
+            // Code only: the doc comments name several of these tokens in the
+            // course of explaining why they are not there.
+            let code = code_of(&source);
+            for (what, token) in NON_DETERMINISTIC_ROUTING_TOKENS {
+                assert!(
+                    !code.contains(token),
+                    "OMEGA-DELTA-0029: {path} reaches for {what} (`{token}`). \
+                     The router's exit is that the same inputs give the same \
+                     route; anything here that is not an input breaks that in \
+                     a way nobody can reproduce afterwards."
+                );
+            }
+        }
+    }
+
+    /// OMEGA-DELTA-0029. The router owns no execution.
+    ///
+    /// omega#74 admitted Omega Agent as a router that owns routing, disclosure
+    /// and receipts and owns no execution. The last four tokens are owner gate
+    /// 8: the router must not be able to start run authority at all, because
+    /// only an explicit human action may — and today three model-callable
+    /// starts were removed from Desktop, one of them a rename of another.
+    #[test]
+    fn the_router_owns_no_execution_and_starts_no_run() {
+        let path = repository_path(ROUTER_DISPATCH_PATH);
+        let source = std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
+        assert!(
+            source.contains("impl AgentConnection for OmegaAgentConnection"),
+            "OMEGA-DELTA-0029: {} no longer implements the seam it routes at.",
+            path.display()
+        );
+        // Doc comments name several of these tokens on purpose, so the scan
+        // reads code only.
+        let code = code_of(&source);
+        for token in ROUTER_EXECUTION_TOKENS {
+            assert!(
+                !code.contains(token),
+                "OMEGA-DELTA-0029: the router reaches for `{token}`. It routes, \
+                 discloses, and records; it does not execute, and it does not \
+                 start run authority."
+            );
+        }
+    }
+
+    /// OMEGA-DELTA-0029. Every routed method hands the work to an executor.
+    ///
+    /// A method that stopped delegating would be the router quietly becoming an
+    /// executor — the packet's falsifier — and it would still compile, still
+    /// pass every behavioural test that did not happen to call it, and still
+    /// read as a router from its module docs.
+    #[test]
+    fn the_router_delegates_every_agent_connection_method() {
+        let path = repository_path(ROUTER_DISPATCH_PATH);
+        let source = std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
+
+        let header = "impl AgentConnection for OmegaAgentConnection {\n";
+        let start = source
+            .find(header)
+            .unwrap_or_else(|| panic!("{} has no router impl block", path.display()))
+            + header.len();
+        let end = source[start..]
+            .find("\n}")
+            .unwrap_or_else(|| panic!("{} has an unterminated impl block", path.display()))
+            + start;
+        let block = &source[start..end];
+
+        let mut checked = 0;
+        for item in block.split("\n    fn ").skip(1) {
+            let name = item
+                .split(['(', '<'])
+                .next()
+                .unwrap_or_default()
+                .trim()
+                .to_owned();
+            if ROUTER_NON_DELEGATING_METHODS.contains(&name.as_str()) {
+                continue;
+            }
+            checked += 1;
+            assert!(
+                ROUTER_DELEGATION_MARKERS
+                    .iter()
+                    .any(|marker| item.contains(marker)),
+                "OMEGA-DELTA-0029: `{name}` in {} does not hand its work to an \
+                 executor. The router owns no execution, so every method of the \
+                 seam it implements has to reach one of {ROUTER_DELEGATION_MARKERS:?}.",
+                path.display()
+            );
+        }
+        assert!(
+            checked >= 10,
+            "OMEGA-DELTA-0029: only {checked} router methods were checked. The \
+             impl block parse is finding almost nothing, so this check is close \
+             to vacuous."
+        );
+    }
+
+    /// OMEGA-DELTA-0029. The decision record is a record, like the disclosure.
+    ///
+    /// Same law, same reason: a stored sentence cannot be re-rendered, re-read,
+    /// or handed to a later signer, and the whole point of writing a route down
+    /// is that somebody can ask it a question later.
+    #[test]
+    fn the_route_decision_is_a_record_that_round_trips() {
+        let path = repository_path(ROUTE_DECISION_PATH);
+        let source = std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
+
+        let fields = struct_fields(&source, "RouteDecision");
+        let found: Vec<(&str, &str)> = fields
+            .iter()
+            .map(|(name, type_name)| (name.as_str(), type_name.as_str()))
+            .collect();
+        assert_eq!(
+            found,
+            [
+                ("chosen", "ExecutorClass"),
+                ("reason", "RouteReason"),
+                ("pin", "Option<ExecutorPin>"),
+                ("lane_ref", "Option<String>"),
+            ],
+            "OMEGA-DELTA-0029: RouteDecision holds different parts than the \
+             ones recorded. A rendered explanation stored as a field is the \
+             failure this exists for."
+        );
+        for required in [
+            "pub fn canonical_record(&self) -> String",
+            "pub fn parse_canonical_record(record: &str) -> Option<Self>",
+            "pub fn is_coherent(&self) -> bool",
+        ] {
+            assert!(
+                source.contains(required),
+                "OMEGA-DELTA-0029: {} must define `{required}`; a record that \
+                 cannot be read back is a log line.",
+                path.display()
+            );
+        }
     }
 
     /// OMEGA-DELTA-0021. The thread surface renders the line, from the record.
