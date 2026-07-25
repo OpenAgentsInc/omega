@@ -139,6 +139,7 @@ script/generate-omega-full-auto-candidate-evidence \
   --artifact target/omega-rc/Omega-v0.2.0-rc2-macos-arm64.dmg \
   --identity-evidence target/omega-identity-evidence/candidate-evidence.json \
   --observations target/omega-full-auto-evidence/observations.json \
+  --evidence-root "$PWD/target/omega-full-auto-evidence/observed" \
   --output target/omega-full-auto-evidence/candidate-evidence.json
 ```
 
@@ -149,15 +150,41 @@ reconciliation, control matrix, visible cross-provider handoff, offline and
 Sync gap behavior, mobile typed outcomes, ordinary-chat separation,
 redaction, and exact-candidate independent review. Each observation carries a
 timestamp, evidence tier, and one or more evidence references. All eight
-obligations and every live issue gate require `installed_candidate`; source
-tests cannot satisfy them.
+obligations and every issue gate, including incident replay, require
+`installed_candidate`; source tests cannot satisfy them.
 
-The owner attestation uses `openagents.owner`. The distinct verifier uses
-`openagents.assurance_reviewer`. Both repeat the candidate, artifact,
-release-record, and Omega commit bindings. The generator rejects missing or
-unknown gates, duplicate JSON keys, source-only installed evidence, stale or
-forged bindings, role substitution, and owner self-review. It never creates
-observations or attestations. Test its refusal logic with:
+Every `evidence_refs` item is exactly
+`{"path":"relative/file","sha256":"<64 lowercase hexadecimal>"}`. Paths
+resolve beneath the explicit absolute `--evidence-root`. The generator and
+installed prover both reject absolute or parent-traversing paths, symbolic
+links in any path component, non-regular files, digest mismatches, and
+duplicate references in one observation. Referenced JSON must contain the
+same top-level `candidate_digest`; image, video, audio, and other non-JSON
+files remain bound by their digest. The evidence root itself must be a real,
+non-symlink directory.
+
+The distinct verifier first writes a durable JSON decision under the evidence
+root with schema `openagents.omega.full-auto-authority-decision.v1`, action
+`verify_omega_full_auto_candidate`, actor role
+`openagents.assurance_reviewer`, outcome `succeeded`, no predecessor, the four
+candidate bindings, and structured evidence references. The owner writes a
+separate later decision with action `release_omega_full_auto_candidate`, role
+`openagents.owner`, and `predecessor_decision_ref` equal to the verifier's
+decision ref. Decision refs use `authority.decision.*`.
+
+`observations.json` includes structured `verification_decision` and
+`release_decision` references. Its independent attestation repeats the
+verification decision ref; its owner attestation repeats the release decision
+ref. Both attestations repeat the candidate, artifact, release-record, and
+Omega commit bindings and use structured evidence references. The owner actor
+must equal the admitted identity-candidate owner, and the verifier must be a
+different actor. Release must occur strictly after verification.
+
+The generator rejects missing or unknown gates, duplicate JSON keys or
+references, source-only incident or obligation evidence, stale or forged
+files and bindings, role substitution, unordered decisions, and owner
+self-review. It never creates observations, attestations, verification, or
+release decisions. Test its refusal logic with:
 
 ```sh
 script/generate-omega-full-auto-candidate-evidence --self-test
@@ -308,8 +335,11 @@ script/omega-rc-lifecycle-proof self-test
 
 Incomplete proofs exit non-zero and write
 `target/omega-rc-proof/installed-proof.json` with structured pending or passed
-gates and blockers. `status` can be `complete` only when every automated and
-manual gate passes. Validate tamper and false-green refusal behavior with:
+gates and blockers. The v3 proof also records SHA-256 for every file input:
+release record, DMG, identity evidence, Full Auto evidence, manual evidence,
+network evidence, and lifecycle manifest. `status` can be `complete` only
+when every automated and manual gate passes. Validate tamper and false-green
+refusal behavior with:
 
 ```sh
 script/prove-omega-rc-install --self-test

@@ -7,6 +7,7 @@ import argparse
 import hashlib
 import json
 import re
+import stat
 import sys
 import tempfile
 from datetime import datetime
@@ -44,6 +45,7 @@ ISSUE_GATES = (
     "independent_exact_candidate_review",
 )
 INSTALLED_ONLY_GATES = {
+    "incident_replay",
     "owner_real_multi_turn",
     "restart_reconciliation",
     "control_matrix",
@@ -64,11 +66,28 @@ ATTESTATION_KEYS = {
     "artifact_sha256",
     "release_record_sha256",
     "omega_commit",
+    "authority_decision_ref",
 }
 OBSERVATION_KEYS = {
     "status",
     "evidence_tier",
     "observed_at",
+    "evidence_refs",
+}
+REFERENCE_KEYS = {"path", "sha256"}
+DECISION_KEYS = {
+    "schema",
+    "decision_ref",
+    "action",
+    "actor",
+    "actor_role",
+    "decided_at",
+    "outcome",
+    "candidate_digest",
+    "artifact_sha256",
+    "release_record_sha256",
+    "omega_commit",
+    "predecessor_decision_ref",
     "evidence_refs",
 }
 
@@ -137,15 +156,75 @@ def require_time(value: Any, label: str) -> str:
     return value
 
 
-def require_refs(value: Any, label: str) -> list[str]:
+def validate_evidence_root(path: Path) -> Path:
+    if not path.is_absolute() or path.is_symlink() or not path.is_dir():
+        raise EvidenceError("evidence root must be an absolute, non-symlink directory")
+    try:
+        return path.resolve(strict=True)
+    except OSError as error:
+        raise EvidenceError(f"cannot resolve evidence root {path}: {error}") from error
+
+
+def resolve_evidence_ref(
+    reference: Any,
+    label: str,
+    evidence_root: Path,
+    candidate_digest: str,
+) -> tuple[dict[str, str], Path]:
+    if not isinstance(reference, dict):
+        raise EvidenceError(f"{label} must be a structured evidence reference")
+    require_exact_keys(reference, REFERENCE_KEYS, label)
+    relative = reference.get("path")
+    expected_digest = reference.get("sha256")
     if (
-        not isinstance(value, list)
-        or not value
-        or any(not isinstance(item, str) or not item.strip() for item in value)
-        or len(set(value)) != len(value)
+        not isinstance(relative, str)
+        or not relative
+        or Path(relative).is_absolute()
+        or ".." in Path(relative).parts
     ):
-        raise EvidenceError(f"{label} must contain distinct nonempty evidence references")
-    return value
+        raise EvidenceError(f"{label}.path must be a safe relative path")
+    require_digest(expected_digest, f"{label}.sha256")
+    candidate = evidence_root / relative
+    current = evidence_root
+    for component in Path(relative).parts:
+        current = current / component
+        if current.is_symlink():
+            raise EvidenceError(f"{label} traverses a symbolic link")
+    try:
+        metadata = candidate.stat()
+    except OSError as error:
+        raise EvidenceError(f"cannot inspect {label}: {error}") from error
+    if not stat.S_ISREG(metadata.st_mode):
+        raise EvidenceError(f"{label} must resolve to a regular file")
+    if sha256_file(candidate) != expected_digest:
+        raise EvidenceError(f"{label} digest differs from the referenced file")
+    if candidate.suffix.lower() == ".json":
+        document = load_json(candidate, label)
+        if document.get("candidate_digest") != candidate_digest:
+            raise EvidenceError(f"{label} JSON binds a different candidate")
+    return {"path": relative, "sha256": expected_digest}, candidate
+
+
+def require_refs(
+    value: Any,
+    label: str,
+    evidence_root: Path,
+    candidate_digest: str,
+) -> list[dict[str, str]]:
+    if not isinstance(value, list) or not value:
+        raise EvidenceError(f"{label} must contain evidence references")
+    validated: list[dict[str, str]] = []
+    identities: set[tuple[str, str]] = set()
+    for index, reference in enumerate(value):
+        normalized, _path = resolve_evidence_ref(
+            reference, f"{label}[{index}]", evidence_root, candidate_digest
+        )
+        identity = (normalized["path"], normalized["sha256"])
+        if identity in identities:
+            raise EvidenceError(f"{label} contains a duplicate evidence reference")
+        identities.add(identity)
+        validated.append(normalized)
+    return validated
 
 
 def candidate_bindings(
@@ -212,7 +291,12 @@ def candidate_bindings(
 
 
 def validate_observation(
-    observation: Any, label: str, *, installed_required: bool
+    observation: Any,
+    label: str,
+    *,
+    installed_required: bool,
+    evidence_root: Path,
+    candidate_digest: str,
 ) -> dict[str, Any]:
     if not isinstance(observation, dict):
         raise EvidenceError(f"{label} must be an object")
@@ -225,8 +309,15 @@ def validate_observation(
     if installed_required and observation["evidence_tier"] != "installed_candidate":
         raise EvidenceError(f"{label} requires installed-candidate evidence")
     require_time(observation["observed_at"], f"{label}.observed_at")
-    require_refs(observation["evidence_refs"], f"{label}.evidence_refs")
-    return observation
+    return {
+        **observation,
+        "evidence_refs": require_refs(
+            observation["evidence_refs"],
+            f"{label}.evidence_refs",
+            evidence_root,
+            candidate_digest,
+        ),
+    }
 
 
 def validate_attestation(
@@ -234,6 +325,7 @@ def validate_attestation(
     label: str,
     expected_role: str,
     bindings: dict[str, Any],
+    evidence_root: Path,
 ) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise EvidenceError(f"{label} must be an object")
@@ -243,7 +335,12 @@ def validate_attestation(
     if not isinstance(value["actor"], str) or not value["actor"].strip():
         raise EvidenceError(f"{label} requires a named actor")
     require_time(value["observed_at"], f"{label}.observed_at")
-    require_refs(value["evidence_refs"], f"{label}.evidence_refs")
+    evidence_refs = require_refs(
+        value["evidence_refs"],
+        f"{label}.evidence_refs",
+        evidence_root,
+        bindings["candidate_digest"],
+    )
     for key in (
         "candidate_digest",
         "artifact_sha256",
@@ -252,12 +349,65 @@ def validate_attestation(
     ):
         if value[key] != bindings[key]:
             raise EvidenceError(f"{label} binds a different {key}")
-    return value
+    return {**value, "evidence_refs": evidence_refs}
+
+
+def validate_authority_decision(
+    reference: Any,
+    label: str,
+    expected_action: str,
+    expected_role: str,
+    expected_actor: str,
+    expected_predecessor: str | None,
+    bindings: dict[str, Any],
+    evidence_root: Path,
+) -> tuple[dict[str, str], dict[str, Any]]:
+    normalized, decision_path = resolve_evidence_ref(
+        reference, label, evidence_root, bindings["candidate_digest"]
+    )
+    decision = load_json(decision_path, label)
+    require_exact_keys(decision, DECISION_KEYS, label)
+    if decision.get("schema") != "openagents.omega.full-auto-authority-decision.v1":
+        raise EvidenceError(f"{label} schema is not supported")
+    decision_ref = decision.get("decision_ref")
+    if (
+        not isinstance(decision_ref, str)
+        or re.fullmatch(r"authority\.decision\.[0-9a-z._-]+", decision_ref) is None
+    ):
+        raise EvidenceError(f"{label} decision_ref is invalid")
+    if (
+        decision.get("action") != expected_action
+        or decision.get("actor_role") != expected_role
+        or decision.get("actor") != expected_actor
+        or decision.get("outcome") != "succeeded"
+        or decision.get("predecessor_decision_ref") != expected_predecessor
+    ):
+        raise EvidenceError(f"{label} has the wrong action, actor, role, outcome, or predecessor")
+    require_time(decision.get("decided_at"), f"{label}.decided_at")
+    for key in (
+        "candidate_digest",
+        "artifact_sha256",
+        "release_record_sha256",
+        "omega_commit",
+    ):
+        if decision.get(key) != bindings[key]:
+            raise EvidenceError(f"{label} binds a different {key}")
+    decision = {
+        **decision,
+        "evidence_refs": require_refs(
+            decision.get("evidence_refs"),
+            f"{label}.evidence_refs",
+            evidence_root,
+            bindings["candidate_digest"],
+        ),
+    }
+    return normalized, decision
 
 
 def build_evidence(
-    observations: dict[str, Any], bindings: dict[str, Any]
+    observations: dict[str, Any], bindings: dict[str, Any], evidence_root: Path
 ) -> dict[str, Any]:
+    evidence_root = validate_evidence_root(evidence_root)
     require_exact_keys(
         observations,
         {
@@ -270,6 +420,8 @@ def build_evidence(
             "issue_matrix",
             "owner_observation",
             "independent_verification",
+            "verification_decision",
+            "release_decision",
         },
         "observation packet",
     )
@@ -291,7 +443,13 @@ def build_evidence(
     if not isinstance(issue_matrix, dict) or set(issue_matrix) != set(ISSUE_GATES):
         raise EvidenceError("observation issue-matrix inventory is not exact")
     validated_obligations = {
-        key: validate_observation(value, f"obligations.{key}", installed_required=True)
+        key: validate_observation(
+            value,
+            f"obligations.{key}",
+            installed_required=True,
+            evidence_root=evidence_root,
+            candidate_digest=bindings["candidate_digest"],
+        )
         for key, value in obligations.items()
     }
     validated_matrix = {
@@ -299,6 +457,8 @@ def build_evidence(
             value,
             f"issue_matrix.{key}",
             installed_required=key in INSTALLED_ONLY_GATES,
+            evidence_root=evidence_root,
+            candidate_digest=bindings["candidate_digest"],
         )
         for key, value in issue_matrix.items()
     }
@@ -307,21 +467,53 @@ def build_evidence(
         "owner_observation",
         "openagents.owner",
         bindings,
+        evidence_root,
     )
     independent = validate_attestation(
         observations["independent_verification"],
         "independent_verification",
         "openagents.assurance_reviewer",
         bindings,
+        evidence_root,
     )
     if owner["actor"] == independent["actor"]:
         raise EvidenceError("owner and independent verifier must be distinct actors")
+    verification_ref, verification = validate_authority_decision(
+        observations["verification_decision"],
+        "verification_decision",
+        "verify_omega_full_auto_candidate",
+        "openagents.assurance_reviewer",
+        independent["actor"],
+        None,
+        bindings,
+        evidence_root,
+    )
+    if independent["authority_decision_ref"] != verification["decision_ref"]:
+        raise EvidenceError("independent attestation does not bind the verification decision")
+    release_ref, release = validate_authority_decision(
+        observations["release_decision"],
+        "release_decision",
+        "release_omega_full_auto_candidate",
+        "openagents.owner",
+        owner["actor"],
+        verification["decision_ref"],
+        bindings,
+        evidence_root,
+    )
+    if owner["authority_decision_ref"] != release["decision_ref"]:
+        raise EvidenceError("owner attestation does not bind the release decision")
+    verified_at = datetime.fromisoformat(verification["decided_at"].replace("Z", "+00:00"))
+    released_at = datetime.fromisoformat(release["decided_at"].replace("Z", "+00:00"))
+    if released_at <= verified_at:
+        raise EvidenceError("release decision must occur after independent verification")
 
     return {
         "schema": SCHEMA,
         "schema_version": 1,
         "status": "verified",
         "candidate_verified": True,
+        "candidate_released": True,
+        "evidence_root": str(evidence_root),
         "candidate": {
             "candidate_digest": bindings["candidate_digest"],
             "omega": {
@@ -341,6 +533,10 @@ def build_evidence(
         "issue_matrix": validated_matrix,
         "owner_observation": owner,
         "independent_verification": independent,
+        "authority_decisions": {
+            "verification": verification_ref,
+            "release": release_ref,
+        },
     }
 
 
@@ -358,74 +554,173 @@ def write_evidence(path: Path, evidence: dict[str, Any]) -> None:
 
 
 def self_test() -> None:
-    bindings = {
-        "candidate_digest": "a" * 64,
-        "artifact_name": "Omega.dmg",
-        "artifact_sha256": "b" * 64,
-        "release_record_sha256": "c" * 64,
-        "omega_commit": "d" * 40,
-        "omega_effectd": {
-            "release_tag": "omega-effectd-v0.1.0-rc.test",
-            "archive_sha256": "1" * 64,
-            "manifest_sha256": "2" * 64,
-            "source_commit": "3" * 40,
-            "source_tree": "4" * 40,
-            "wrapper_sha256": "5" * 64,
-            "bundle_sha256": "6" * 64,
-            "source_node_sha256": "7" * 64,
-            "packaged_node_sha256": "8" * 64,
-        },
-    }
-    observation = {
-        "status": "passed",
-        "evidence_tier": "installed_candidate",
-        "observed_at": "2026-07-24T12:00:00Z",
-        "evidence_refs": ["sha256:" + "9" * 64],
-    }
-    attestation = {
-        "status": "passed",
-        "actor": "Owner",
-        "role": "openagents.owner",
-        "observed_at": "2026-07-24T12:01:00Z",
-        "evidence_refs": ["sha256:" + "a" * 64],
-        **{key: bindings[key] for key in (
-            "candidate_digest", "artifact_sha256", "release_record_sha256", "omega_commit"
-        )},
-    }
-    packet = {
-        "schema": OBSERVATION_SCHEMA,
-        **{key: bindings[key] for key in (
-            "candidate_digest", "artifact_sha256", "release_record_sha256", "omega_commit"
-        )},
-        "obligations": {key: dict(observation) for key in OBLIGATIONS},
-        "issue_matrix": {key: dict(observation) for key in ISSUE_GATES},
-        "owner_observation": attestation,
-        "independent_verification": {
-            **attestation,
-            "actor": "Euler",
-            "role": "openagents.assurance_reviewer",
-        },
-    }
-    evidence = build_evidence(packet, bindings)
-    if evidence["status"] != "verified":
-        raise EvidenceError("self-test did not build verified evidence")
-    packet["issue_matrix"]["owner_real_multi_turn"]["evidence_tier"] = "source"
-    try:
-        build_evidence(packet, bindings)
-    except EvidenceError:
-        pass
-    else:
-        raise EvidenceError("self-test accepted source-only owner evidence")
-    packet["issue_matrix"]["owner_real_multi_turn"]["evidence_tier"] = "installed_candidate"
-    packet["independent_verification"]["candidate_digest"] = "0" * 64
-    try:
-        build_evidence(packet, bindings)
-    except EvidenceError:
-        pass
-    else:
-        raise EvidenceError("self-test accepted a mismatched independent attestation")
     with tempfile.TemporaryDirectory(prefix="omega-fa-evidence-self-test-") as directory:
         test_root = Path(directory)
+        evidence_root = test_root / "evidence"
+        evidence_root.mkdir()
+        bindings = {
+            "candidate_digest": "a" * 64,
+            "artifact_name": "Omega.dmg",
+            "artifact_sha256": "b" * 64,
+            "release_record_sha256": "c" * 64,
+            "omega_commit": "d" * 40,
+            "omega_effectd": {
+                "release_tag": "omega-effectd-v0.1.0-rc.test",
+                "archive_sha256": "1" * 64,
+                "manifest_sha256": "2" * 64,
+                "source_commit": "3" * 40,
+                "source_tree": "4" * 40,
+                "wrapper_sha256": "5" * 64,
+                "bundle_sha256": "6" * 64,
+                "source_node_sha256": "7" * 64,
+                "packaged_node_sha256": "8" * 64,
+            },
+        }
+        artifact_receipt = evidence_root / "installed-observation.json"
+        artifact_receipt.write_text(
+            json.dumps(
+                {
+                    "schema": "openagents.omega.self-test-observation.v1",
+                    "candidate_digest": bindings["candidate_digest"],
+                }
+            ),
+            encoding="utf-8",
+        )
+        evidence_ref = {
+            "path": artifact_receipt.name,
+            "sha256": sha256_file(artifact_receipt),
+        }
+        observation = {
+            "status": "passed",
+            "evidence_tier": "installed_candidate",
+            "observed_at": "2026-07-24T12:00:00Z",
+            "evidence_refs": [evidence_ref],
+        }
+        attestation_bindings = {
+            key: bindings[key]
+            for key in (
+                "candidate_digest",
+                "artifact_sha256",
+                "release_record_sha256",
+                "omega_commit",
+            )
+        }
+        owner_decision_ref = "authority.decision.owner-release-self-test"
+        verifier_decision_ref = "authority.decision.verifier-self-test"
+        owner = {
+            "status": "passed",
+            "actor": "Owner",
+            "role": "openagents.owner",
+            "observed_at": "2026-07-24T12:01:00Z",
+            "evidence_refs": [evidence_ref],
+            "authority_decision_ref": owner_decision_ref,
+            **attestation_bindings,
+        }
+        reviewer = {
+            **owner,
+            "actor": "Euler",
+            "role": "openagents.assurance_reviewer",
+            "authority_decision_ref": verifier_decision_ref,
+        }
+
+        def write_decision(
+            name: str,
+            decision_ref: str,
+            action: str,
+            actor: str,
+            role: str,
+            decided_at: str,
+            predecessor: str | None,
+        ) -> dict[str, str]:
+            path = evidence_root / name
+            path.write_text(
+                json.dumps(
+                    {
+                        "schema": "openagents.omega.full-auto-authority-decision.v1",
+                        "decision_ref": decision_ref,
+                        "action": action,
+                        "actor": actor,
+                        "actor_role": role,
+                        "decided_at": decided_at,
+                        "outcome": "succeeded",
+                        **attestation_bindings,
+                        "predecessor_decision_ref": predecessor,
+                        "evidence_refs": [evidence_ref],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            return {"path": name, "sha256": sha256_file(path)}
+
+        verifier_decision = write_decision(
+            "verification.json",
+            verifier_decision_ref,
+            "verify_omega_full_auto_candidate",
+            "Euler",
+            "openagents.assurance_reviewer",
+            "2026-07-24T12:02:00Z",
+            None,
+        )
+        owner_decision = write_decision(
+            "release.json",
+            owner_decision_ref,
+            "release_omega_full_auto_candidate",
+            "Owner",
+            "openagents.owner",
+            "2026-07-24T12:03:00Z",
+            verifier_decision_ref,
+        )
+        packet = {
+            "schema": OBSERVATION_SCHEMA,
+            **attestation_bindings,
+            "obligations": {key: dict(observation) for key in OBLIGATIONS},
+            "issue_matrix": {key: dict(observation) for key in ISSUE_GATES},
+            "owner_observation": owner,
+            "independent_verification": reviewer,
+            "verification_decision": verifier_decision,
+            "release_decision": owner_decision,
+        }
+        evidence = build_evidence(packet, bindings, evidence_root)
+        if evidence["status"] != "verified" or evidence["candidate_released"] is not True:
+            raise EvidenceError("self-test did not build released evidence")
+        packet["issue_matrix"]["incident_replay"]["evidence_tier"] = "source"
+        try:
+            build_evidence(packet, bindings, evidence_root)
+        except EvidenceError:
+            pass
+        else:
+            raise EvidenceError("self-test accepted source-only incident evidence")
+        packet["issue_matrix"]["incident_replay"]["evidence_tier"] = "installed_candidate"
+        packet["obligations"][OBLIGATIONS[0]]["evidence_refs"] = [evidence_ref, evidence_ref]
+        try:
+            build_evidence(packet, bindings, evidence_root)
+        except EvidenceError:
+            pass
+        else:
+            raise EvidenceError("self-test accepted duplicate evidence references")
+        packet["obligations"][OBLIGATIONS[0]]["evidence_refs"] = [evidence_ref]
+        original = artifact_receipt.read_text(encoding="utf-8")
+        artifact_receipt.write_text(original + "\n", encoding="utf-8")
+        try:
+            build_evidence(packet, bindings, evidence_root)
+        except EvidenceError:
+            pass
+        else:
+            raise EvidenceError("self-test accepted a changed evidence file")
+        artifact_receipt.write_text(original, encoding="utf-8")
+        release_document = load_json(evidence_root / "release.json", "release fixture")
+        release_document["predecessor_decision_ref"] = None
+        (evidence_root / "release.json").write_text(
+            json.dumps(release_document), encoding="utf-8"
+        )
+        packet["release_decision"]["sha256"] = sha256_file(evidence_root / "release.json")
+        try:
+            build_evidence(packet, bindings, evidence_root)
+        except EvidenceError:
+            pass
+        else:
+            raise EvidenceError("self-test accepted release without verifier predecessor")
+
         artifact = test_root / "Omega.dmg"
         artifact.write_bytes(b"candidate")
         release_path = test_root / "release.json"
@@ -479,6 +774,7 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--artifact", type=Path)
     parser.add_argument("--identity-evidence", type=Path)
     parser.add_argument("--observations", type=Path)
+    parser.add_argument("--evidence-root", type=Path)
     parser.add_argument(
         "--output",
         type=Path,
@@ -489,7 +785,13 @@ def parse_arguments() -> argparse.Namespace:
         return arguments
     missing = [
         name
-        for name in ("release_record", "artifact", "identity_evidence", "observations")
+        for name in (
+            "release_record",
+            "artifact",
+            "identity_evidence",
+            "observations",
+            "evidence_root",
+        )
         if getattr(arguments, name) is None
     ]
     if missing:
@@ -512,7 +814,7 @@ def main() -> int:
         bindings = candidate_bindings(
             release_record, arguments.release_record, arguments.artifact, identity
         )
-        evidence = build_evidence(observations, bindings)
+        evidence = build_evidence(observations, bindings, arguments.evidence_root)
         write_evidence(arguments.output, evidence)
         print(f"wrote verified Full Auto candidate evidence: {arguments.output}")
         return 0

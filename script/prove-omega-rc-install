@@ -11,6 +11,7 @@ import os
 import plistlib
 import re
 import selectors
+import stat
 import subprocess
 import sys
 import tempfile
@@ -83,6 +84,22 @@ EXPECTED_FULL_AUTO_GATES = (
     "redaction",
     "independent_exact_candidate_review",
 )
+FULL_AUTO_REFERENCE_KEYS = {"path", "sha256"}
+FULL_AUTO_DECISION_KEYS = {
+    "schema",
+    "decision_ref",
+    "action",
+    "actor",
+    "actor_role",
+    "decided_at",
+    "outcome",
+    "candidate_digest",
+    "artifact_sha256",
+    "release_record_sha256",
+    "omega_commit",
+    "predecessor_decision_ref",
+    "evidence_refs",
+}
 EXPECTED_LIFECYCLE_RECEIPTS = (
     "before_snapshot",
     "after_removal_snapshot",
@@ -577,6 +594,123 @@ def validate_network_evidence(path: Path, candidate_digest: str) -> None:
             raise ProofError(f"network capture {field} must be empty")
 
 
+def validate_full_auto_evidence_root(value: Any) -> Path:
+    if not isinstance(value, str):
+        raise ProofError("Full Auto evidence root is missing")
+    root = Path(value)
+    if not root.is_absolute() or root.is_symlink() or not root.is_dir():
+        raise ProofError("Full Auto evidence root must be an absolute non-symlink directory")
+    try:
+        return root.resolve(strict=True)
+    except OSError as error:
+        raise ProofError(f"cannot resolve Full Auto evidence root: {error}") from error
+
+
+def validate_full_auto_reference(
+    reference: Any,
+    label: str,
+    evidence_root: Path,
+    candidate_digest: str,
+) -> tuple[str, Path]:
+    if not isinstance(reference, dict) or set(reference) != FULL_AUTO_REFERENCE_KEYS:
+        raise ProofError(f"{label} is not an exact structured evidence reference")
+    relative = reference.get("path")
+    expected_digest = reference.get("sha256")
+    if (
+        not isinstance(relative, str)
+        or not relative
+        or Path(relative).is_absolute()
+        or ".." in Path(relative).parts
+        or not isinstance(expected_digest, str)
+        or re.fullmatch(r"[0-9a-f]{64}", expected_digest) is None
+    ):
+        raise ProofError(f"{label} is invalid")
+    candidate = evidence_root / relative
+    current = evidence_root
+    for component in Path(relative).parts:
+        current = current / component
+        if current.is_symlink():
+            raise ProofError(f"{label} traverses a symbolic link")
+    try:
+        metadata = candidate.stat()
+    except OSError as error:
+        raise ProofError(f"cannot inspect {label}: {error}") from error
+    if not stat.S_ISREG(metadata.st_mode):
+        raise ProofError(f"{label} must resolve to a regular file")
+    if sha256_file(candidate) != expected_digest:
+        raise ProofError(f"{label} digest differs from the referenced file")
+    if candidate.suffix.lower() == ".json":
+        document = load_json(candidate, label)
+        if document.get("candidate_digest") != candidate_digest:
+            raise ProofError(f"{label} JSON binds a different candidate")
+    return expected_digest, candidate
+
+
+def validate_full_auto_references(
+    references: Any,
+    label: str,
+    evidence_root: Path,
+    candidate_digest: str,
+) -> None:
+    if not isinstance(references, list) or not references:
+        raise ProofError(f"{label} has no evidence references")
+    identities: set[tuple[str, str]] = set()
+    for index, reference in enumerate(references):
+        validate_full_auto_reference(
+            reference, f"{label}[{index}]", evidence_root, candidate_digest
+        )
+        identity = (reference["path"], reference["sha256"])
+        if identity in identities:
+            raise ProofError(f"{label} contains a duplicate evidence reference")
+        identities.add(identity)
+
+
+def validate_full_auto_authority_decision(
+    reference: Any,
+    label: str,
+    expected_action: str,
+    expected_role: str,
+    expected_actor: str,
+    expected_predecessor: str | None,
+    bindings: dict[str, Any],
+    evidence_root: Path,
+) -> dict[str, Any]:
+    _digest, path = validate_full_auto_reference(
+        reference, label, evidence_root, bindings["candidate_digest"]
+    )
+    decision = load_json(path, label)
+    if set(decision) != FULL_AUTO_DECISION_KEYS:
+        raise ProofError(f"{label} keys are not exact")
+    decision_ref = decision.get("decision_ref")
+    if (
+        decision.get("schema") != "openagents.omega.full-auto-authority-decision.v1"
+        or not isinstance(decision_ref, str)
+        or re.fullmatch(r"authority\.decision\.[0-9a-z._-]+", decision_ref) is None
+        or decision.get("action") != expected_action
+        or decision.get("actor_role") != expected_role
+        or decision.get("actor") != expected_actor
+        or decision.get("outcome") != "succeeded"
+        or decision.get("predecessor_decision_ref") != expected_predecessor
+    ):
+        raise ProofError(f"{label} has invalid authority or disposition")
+    try:
+        decided_at = datetime.fromisoformat(decision["decided_at"].replace("Z", "+00:00"))
+    except (KeyError, AttributeError, ValueError) as error:
+        raise ProofError(f"{label} has an invalid decision timestamp") from error
+    if decided_at.tzinfo is None:
+        raise ProofError(f"{label} decision timestamp has no timezone")
+    for key, value in bindings.items():
+        if decision.get(key) != value:
+            raise ProofError(f"{label} binds a different {key}")
+    validate_full_auto_references(
+        decision.get("evidence_refs"),
+        f"{label}.evidence_refs",
+        evidence_root,
+        bindings["candidate_digest"],
+    )
+    return decision
+
+
 def validate_full_auto_evidence(
     evidence: dict[str, Any],
     record: dict[str, Any],
@@ -586,8 +720,13 @@ def validate_full_auto_evidence(
     identity_owner: str,
 ) -> tuple[str, str]:
     validate_full_auto_evidence_schema(evidence)
-    if evidence.get("status") != "verified" or evidence.get("candidate_verified") is not True:
-        raise ProofError("Full Auto candidate evidence is not verified")
+    if (
+        evidence.get("status") != "verified"
+        or evidence.get("candidate_verified") is not True
+        or evidence.get("candidate_released") is not True
+    ):
+        raise ProofError("Full Auto candidate evidence is not verified and released")
+    evidence_root = validate_full_auto_evidence_root(evidence.get("evidence_root"))
     candidate = evidence.get("candidate", {})
     if candidate.get("candidate_digest") != candidate_digest:
         raise ProofError("Full Auto evidence binds a different candidate digest")
@@ -639,6 +778,14 @@ def validate_full_auto_evidence(
             or not observation["evidence_refs"]
         ):
             raise ProofError(f"Full Auto evidence {name} is not passed with evidence")
+        if observation.get("evidence_tier") != "installed_candidate":
+            raise ProofError(f"Full Auto evidence {name} is not installed-candidate evidence")
+        validate_full_auto_references(
+            observation["evidence_refs"],
+            f"Full Auto evidence {name}",
+            evidence_root,
+            candidate_digest,
+        )
     owner = evidence.get("owner_observation", {})
     independent = evidence.get("independent_verification", {})
     bindings = {
@@ -660,10 +807,47 @@ def validate_full_auto_evidence(
             or any(attestation.get(key) != value for key, value in bindings.items())
         ):
             raise ProofError(f"Full Auto {label} is incomplete or candidate-mismatched")
+        validate_full_auto_references(
+            attestation.get("evidence_refs"),
+            f"Full Auto {label}",
+            evidence_root,
+            candidate_digest,
+        )
     if owner["actor"] != identity_owner:
         raise ProofError("Full Auto owner differs from the admitted identity candidate owner")
     if owner["actor"] == independent["actor"]:
         raise ProofError("Full Auto owner and independent verifier must be distinct")
+    decisions = evidence.get("authority_decisions")
+    if not isinstance(decisions, dict) or set(decisions) != {"verification", "release"}:
+        raise ProofError("Full Auto authority decision inventory is not exact")
+    verification = validate_full_auto_authority_decision(
+        decisions["verification"],
+        "Full Auto verification decision",
+        "verify_omega_full_auto_candidate",
+        "openagents.assurance_reviewer",
+        independent["actor"],
+        None,
+        bindings,
+        evidence_root,
+    )
+    if independent.get("authority_decision_ref") != verification["decision_ref"]:
+        raise ProofError("Full Auto reviewer does not bind the verification decision")
+    release = validate_full_auto_authority_decision(
+        decisions["release"],
+        "Full Auto release decision",
+        "release_omega_full_auto_candidate",
+        "openagents.owner",
+        owner["actor"],
+        verification["decision_ref"],
+        bindings,
+        evidence_root,
+    )
+    if owner.get("authority_decision_ref") != release["decision_ref"]:
+        raise ProofError("Full Auto owner does not bind the release decision")
+    verified_at = datetime.fromisoformat(verification["decided_at"].replace("Z", "+00:00"))
+    released_at = datetime.fromisoformat(release["decided_at"].replace("Z", "+00:00"))
+    if released_at <= verified_at:
+        raise ProofError("Full Auto release decision does not follow verification")
     return owner["actor"], independent["actor"]
 
 
@@ -1135,14 +1319,22 @@ def write_proof(
     candidate_digest: str | None,
 ) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
+    input_file_sha256 = {
+        name: sha256_file(path)
+        for name, path in paths.items()
+        if not path.is_symlink()
+        and path.is_file()
+        and stat.S_ISREG(path.stat().st_mode)
+    }
     proof = {
-        "schema": "openagents.omega.installed-proof.v2",
-        "schema_version": 2,
+        "schema": "openagents.omega.installed-proof.v3",
+        "schema_version": 3,
         "status": status,
         "product": EXPECTED_PRODUCT,
         "version": EXPECTED_VERSION,
         "candidate_digest": candidate_digest,
         "paths": {name: str(path.resolve()) for name, path in paths.items()},
+        "input_file_sha256": input_file_sha256,
         "checks": checks,
         "blockers": blockers,
     }
@@ -1180,7 +1372,11 @@ def prove(arguments: argparse.Namespace) -> int:
     blockers: list[str] = []
     candidate_digest: str | None = None
     for name, path in paths.items():
-        expected = path.is_dir() if name == "installed_app" else path.is_file()
+        expected = (
+            path.is_dir()
+            if name == "installed_app"
+            else path.is_file() and not path.is_symlink()
+        )
         if not expected:
             blockers.append(f"missing {name.replace('_', ' ')}: {path}")
             if name in ("release_record", "artifact"):
@@ -1567,11 +1763,27 @@ def self_test() -> None:
         if observed != (candidate_digest, "Owner", "Reviewer"):
             raise ProofError("self-test identity binding returned unexpected values")
 
+        full_auto_root = root / "full-auto-evidence"
+        full_auto_root.mkdir()
+        observation_path = full_auto_root / "observation.json"
+        observation_path.write_text(
+            json.dumps(
+                {
+                    "schema": "openagents.omega.self-test-observation.v1",
+                    "candidate_digest": candidate_digest,
+                }
+            ),
+            encoding="utf-8",
+        )
+        full_auto_ref = {
+            "path": observation_path.name,
+            "sha256": sha256_file(observation_path),
+        }
         full_auto_observation = {
             "status": "passed",
             "evidence_tier": "installed_candidate",
             "observed_at": "2026-07-24T12:02:00Z",
-            "evidence_refs": ["sha256:" + "3" * 64],
+            "evidence_refs": [full_auto_ref],
         }
         full_auto_binding = {
             "candidate_digest": candidate_digest,
@@ -1584,7 +1796,8 @@ def self_test() -> None:
             "actor": "Owner",
             "role": "openagents.owner",
             "observed_at": "2026-07-24T12:03:00Z",
-            "evidence_refs": ["sha256:" + "4" * 64],
+            "evidence_refs": [full_auto_ref],
+            "authority_decision_ref": "authority.decision.owner-release-self-test",
             **full_auto_binding,
         }
         effectd_binding_keys = (
@@ -1598,11 +1811,60 @@ def self_test() -> None:
             "source_node_sha256",
             "packaged_node_sha256",
         )
+        def write_authority_decision(
+            name: str,
+            decision_ref: str,
+            action: str,
+            actor: str,
+            role: str,
+            decided_at: str,
+            predecessor: str | None,
+        ) -> dict[str, str]:
+            path = full_auto_root / name
+            path.write_text(
+                json.dumps(
+                    {
+                        "schema": "openagents.omega.full-auto-authority-decision.v1",
+                        "decision_ref": decision_ref,
+                        "action": action,
+                        "actor": actor,
+                        "actor_role": role,
+                        "decided_at": decided_at,
+                        "outcome": "succeeded",
+                        **full_auto_binding,
+                        "predecessor_decision_ref": predecessor,
+                        "evidence_refs": [full_auto_ref],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            return {"path": name, "sha256": sha256_file(path)}
+
+        verification_decision = write_authority_decision(
+            "verification.json",
+            "authority.decision.verifier-self-test",
+            "verify_omega_full_auto_candidate",
+            "Euler",
+            "openagents.assurance_reviewer",
+            "2026-07-24T12:04:00Z",
+            None,
+        )
+        release_decision = write_authority_decision(
+            "release.json",
+            "authority.decision.owner-release-self-test",
+            "release_omega_full_auto_candidate",
+            "Owner",
+            "openagents.owner",
+            "2026-07-24T12:05:00Z",
+            "authority.decision.verifier-self-test",
+        )
         full_auto = {
             "schema": "openagents.omega.full-auto-candidate-evidence.v1",
             "schema_version": 1,
             "status": "verified",
             "candidate_verified": True,
+            "candidate_released": True,
+            "evidence_root": str(full_auto_root),
             "candidate": {
                 "candidate_digest": candidate_digest,
                 "omega": {
@@ -1633,6 +1895,11 @@ def self_test() -> None:
                 **full_auto_attestation,
                 "actor": "Euler",
                 "role": "openagents.assurance_reviewer",
+                "authority_decision_ref": "authority.decision.verifier-self-test",
+            },
+            "authority_decisions": {
+                "verification": verification_decision,
+                "release": release_decision,
             },
         }
         if validate_full_auto_evidence(
@@ -1654,6 +1921,51 @@ def self_test() -> None:
             pass
         else:
             raise ProofError("self-test accepted mismatched Full Auto assurance")
+        duplicate_full_auto = json.loads(json.dumps(full_auto))
+        duplicate_full_auto["issue_matrix"]["incident_replay"]["evidence_refs"] *= 2
+        try:
+            validate_full_auto_evidence(
+                duplicate_full_auto,
+                record,
+                record_path,
+                artifact,
+                candidate_digest,
+                "Owner",
+            )
+        except ProofError:
+            pass
+        else:
+            raise ProofError("self-test accepted duplicate Full Auto evidence references")
+        source_incident = json.loads(json.dumps(full_auto))
+        source_incident["issue_matrix"]["incident_replay"]["evidence_tier"] = "source"
+        try:
+            validate_full_auto_evidence(
+                source_incident,
+                record,
+                record_path,
+                artifact,
+                candidate_digest,
+                "Owner",
+            )
+        except ProofError:
+            pass
+        else:
+            raise ProofError("self-test accepted source-only incident replay")
+        write_proof(
+            root / "input-digest-proof",
+            "incomplete",
+            pending_checks(),
+            ["self-test"],
+            {"full_auto_evidence": observation_path},
+            candidate_digest,
+        )
+        digest_proof = load_json(
+            root / "input-digest-proof/installed-proof.json", "input digest proof"
+        )
+        if digest_proof.get("input_file_sha256", {}).get(
+            "full_auto_evidence"
+        ) != sha256_file(observation_path):
+            raise ProofError("self-test proof did not bind its input file digest")
         identity["candidate_admitted"] = False
         try:
             validate_identity_evidence(identity, record, record_path, artifact)
