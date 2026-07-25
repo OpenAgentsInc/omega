@@ -16944,11 +16944,21 @@ mod tests {
 
     #[gpui::test]
     async fn test_toggle_theme_mode_persists_and_updates_active_theme(cx: &mut TestAppContext) {
-        use settings::{ThemeName, ThemeSelection};
+        use settings::{DEFAULT_DARK_THEME, DEFAULT_LIGHT_THEME, ThemeName, ThemeSelection};
         use theme::SystemAppearance;
         use zed_actions::theme::ToggleMode;
 
         init_test(cx);
+
+        // The static theme this test seeds must not be either default, or the
+        // migration assertion below cannot tell "the slots were filled from the
+        // defaults" from "the seeded static theme was carried into a slot".
+        // Upstream seeds "One Light" and expects "One Light" back, so upstream
+        // cannot tell them apart; under OMEGA-DELTA-0016 the defaults are Aiur
+        // and Ayu Light, so the distinction is real and is guarded here.
+        const SEEDED_STATIC_THEME: &str = "One Light";
+        assert_ne!(SEEDED_STATIC_THEME, DEFAULT_LIGHT_THEME);
+        assert_ne!(SEEDED_STATIC_THEME, DEFAULT_DARK_THEME);
 
         let fs = FakeFs::new(cx.executor());
         let settings_fs: Arc<dyn fs::Fs> = fs.clone();
@@ -16967,7 +16977,8 @@ mod tests {
         workspace.update_in(cx, |_workspace, _window, cx| {
             *SystemAppearance::global_mut(cx) = SystemAppearance(theme::Appearance::Light);
             settings::update_settings_file(settings_fs.clone(), cx, |settings, _cx| {
-                settings.theme.theme = Some(ThemeSelection::Static(ThemeName("One Light".into())));
+                settings.theme.theme =
+                    Some(ThemeSelection::Static(ThemeName(SEEDED_STATIC_THEME.into())));
             });
         });
         cx.executor().advance_clock(Duration::from_millis(200));
@@ -16976,7 +16987,7 @@ mod tests {
         // Confirm the initial persisted settings contain the static theme
         // we just wrote before any toggling happens.
         let settings_text = SettingsStore::load_settings(&settings_fs).await.unwrap();
-        assert!(settings_text.contains(r#""theme": "One Light""#));
+        assert!(settings_text.contains(&format!(r#""theme": "{SEEDED_STATIC_THEME}""#)));
 
         // Toggle once. This should migrate the persisted theme settings
         // into light/dark slots and enable system mode.
@@ -16987,15 +16998,25 @@ mod tests {
         cx.run_until_parked();
 
         // 1. Static -> Dynamic
-        // this assertion checks theme changed from static to dynamic.
+        // this assertion checks theme changed from static to dynamic, and that
+        // the two slots were filled from the appearance defaults rather than
+        // from the theme that was already selected.
+        //
+        // The slot values are read from the constants rather than written out,
+        // because what this test owns is the migration behaviour, not the
+        // defaults themselves: OMEGA-DELTA-0016 pins Aiur and Ayu Light, and
+        // `the_shipped_theme_defaults_are_the_omega_themes` in
+        // `crates/omega_deltas` is what fails if either changes. Upstream Zed
+        // ships One Dark and One Light here; do not restore those literals to
+        // reach green, because that asserts the pre-Omega defaults.
         let settings_text = SettingsStore::load_settings(&settings_fs).await.unwrap();
         let parsed: serde_json::Value = settings::parse_json_with_comments(&settings_text).unwrap();
         assert_eq!(
             parsed["theme"],
             serde_json::json!({
                 "mode": "system",
-                "light": "One Light",
-                "dark": "One Dark"
+                "light": DEFAULT_LIGHT_THEME,
+                "dark": DEFAULT_DARK_THEME
             })
         );
 

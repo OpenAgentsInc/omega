@@ -101,16 +101,23 @@ fn default_settings_enable_registry_acp_without_enabling_zed_production() {
         .unwrap_or_else(|error| panic!("parse {}: {error}", path.display()));
 
     assert_eq!(settings["disable_ai"], false);
+    // OMEGA-DELTA-0027. Full Auto is routed through this agent, so an empty
+    // `agent_servers` is a Full Auto run that cannot start.
     assert_eq!(settings["agent_servers"]["codex-acp"]["type"], "registry");
-    assert_eq!(
-        settings["server_url"],
-        "https://services.openagents.invalid"
-    );
-    assert_eq!(settings["telemetry"]["diagnostics"], false);
-    assert_eq!(settings["telemetry"]["metrics"], false);
+    // The next four are OMEGA-DELTA-0026: the settings-layer half of the
+    // service isolation this test is named for. `auto_update` and
+    // `auto_install_extensions` look off-topic here and are not — they are the
+    // two defaults that reach a Zed production host without any account. Do not
+    // tidy them away; the delta cites these exact assertions, and
+    // `the_service_isolation_test_still_asserts_the_registered_defaults` in
+    // `crates/omega_deltas` fails if they go.
+    assert_eq!(settings["server_url"], "https://services.openagents.invalid");
     assert_eq!(settings["auto_update"], false);
     assert_eq!(settings["edit_predictions"]["provider"], "none");
     assert_eq!(settings["auto_install_extensions"], serde_json::json!({}));
+    // OMEGA-DELTA-0004.
+    assert_eq!(settings["telemetry"]["diagnostics"], false);
+    assert_eq!(settings["telemetry"]["metrics"], false);
     assert!(!text.contains("\"server_url\": \"https://zed.dev\""));
     // A direct provider, not a Zed-hosted one. What this assertion protects is
     // that the default never points at a Zed service; it is not a claim about

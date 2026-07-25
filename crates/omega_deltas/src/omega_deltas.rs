@@ -53,6 +53,9 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0023",
     "OMEGA-DELTA-0024",
     "OMEGA-DELTA-0025",
+    "OMEGA-DELTA-0026",
+    "OMEGA-DELTA-0027",
+    "OMEGA-DELTA-0028",
 ];
 
 /// OMEGA-DELTA-0025. The file that declares the measured digest.
@@ -72,6 +75,80 @@ pub const HARNESS_MAINTENANCE_PATH: &str = "crates/project/src/harness_maintenan
 
 /// OMEGA-DELTA-0025. The launch path the provenance gate sits in.
 pub const AGENT_SERVER_STORE_PATH: &str = "crates/project/src/agent_server_store.rs";
+
+/// OMEGA-DELTA-0026. Shipped defaults that would otherwise point a running
+/// Omega at one of Zed's production hosts, as
+/// `(dotted key, upstream JSON, Omega JSON)`.
+///
+/// The values are written as JSON text rather than typed constants because they
+/// are not all the same type — a URL, a boolean, an enum string and an object —
+/// and a table that can hold all four is what makes this one check rather than
+/// four.
+pub const SERVICE_ISOLATION_DEFAULTS: &[(&str, &str, &str)] = &[
+    (
+        "server_url",
+        "\"https://zed.dev\"",
+        "\"https://services.openagents.invalid\"",
+    ),
+    ("auto_update", "true", "false"),
+    ("edit_predictions.provider", "\"zed\"", "\"none\""),
+    ("auto_install_extensions", "{\"html\": true}", "{}"),
+];
+
+/// The service-isolation test the registry cites for `OMEGA-DELTA-0026` and
+/// `OMEGA-DELTA-0027`.
+pub const SERVICE_ISOLATION_TEST_PATH: &str = "crates/app_identity/src/service_isolation.rs";
+
+/// Assertions in `SERVICE_ISOLATION_TEST_PATH` that two delta entries cite.
+///
+/// Citing an existing check instead of duplicating it is the right call, and it
+/// creates a new way to fail: the cited assertion can be deleted. `auto_update`
+/// and `auto_install_extensions` read as off-topic inside a test named for Zed
+/// service isolation, so they are the first lines a tidy-up drops — and nothing
+/// would notice, because deleting an assertion turns a test green.
+///
+/// Matched with whitespace removed, so rustfmt rewrapping a long `assert_eq!`
+/// does not read as somebody deleting it.
+pub const PINNED_SERVICE_ISOLATION_ASSERTIONS: &[(&str, &str)] = &[
+    (
+        "OMEGA-DELTA-0026",
+        "assert_eq!(settings[\"server_url\"], \"https://services.openagents.invalid\");",
+    ),
+    (
+        "OMEGA-DELTA-0026",
+        "assert_eq!(settings[\"auto_update\"], false);",
+    ),
+    (
+        "OMEGA-DELTA-0026",
+        "assert_eq!(settings[\"edit_predictions\"][\"provider\"], \"none\");",
+    ),
+    (
+        "OMEGA-DELTA-0026",
+        "assert_eq!(settings[\"auto_install_extensions\"], serde_json::json!({}));",
+    ),
+    (
+        "OMEGA-DELTA-0027",
+        "assert_eq!(settings[\"agent_servers\"][\"codex-acp\"][\"type\"], \"registry\");",
+    ),
+];
+
+/// OMEGA-DELTA-0016. Every shipped settings file that names a theme.
+///
+/// `default.json` is the base settings layer. `initial_user_settings.json` is
+/// the template copied verbatim into a new user's own settings file on first
+/// start, where it becomes a user-layer value that overrides the base layer for
+/// good — so a revert there survives being corrected in `default.json` later,
+/// and is the more durable of the two.
+pub const SHIPPED_THEME_SETTINGS_FILES: &[&str] = &[
+    DEFAULT_SETTINGS_PATH,
+    "assets/settings/initial_user_settings.json",
+];
+
+/// OMEGA-DELTA-0028. The file that declares the built-in icon theme's name.
+///
+/// The shipped `icon_theme` setting has to name the same theme, or the lookup
+/// in `configured_icon_theme` misses and falls back with a logged error.
+pub const DEFAULT_ICON_THEME_SOURCE: &str = "crates/theme/src/icon_theme.rs";
 
 /// OMEGA-DELTA-0021. The file that holds the executor-disclosure record.
 pub const EXECUTOR_DISCLOSURE_RECORD_PATH: &str = "crates/omega_front_door/src/omega_front_door.rs";
@@ -557,6 +634,18 @@ fn next_element<'a>(source: &'a str, tag: &str) -> Option<(usize, &'a str, usize
     let content_start = start + open.len();
     let end = source[content_start..].find(&close)? + content_start;
     Some((start, &source[content_start..end], end + close.len()))
+}
+
+/// `source` with every whitespace character removed.
+///
+/// Used to match a pinned assertion against a source file without asserting
+/// rustfmt's current line wrapping, which is not the thing being protected.
+#[must_use]
+pub fn without_whitespace(source: &str) -> String {
+    source
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .collect()
 }
 
 /// `source` with every `<tag>…</tag>` block removed.
@@ -1672,6 +1761,211 @@ mod tests {
             dark_defaults[0].1, "Aiur",
             "OMEGA-DELTA-0016: the dark default must be Aiur"
         );
+    }
+
+    /// OMEGA-DELTA-0016. The theme values that actually decide are the shipped
+    /// ones, not the constants.
+    ///
+    /// `default_themes_exist_in_shipped_assets` reads `DEFAULT_LIGHT_THEME` and
+    /// `DEFAULT_DARK_THEME`, which `theme_settings` consults only when no
+    /// settings layer supplies a theme selection at all.
+    /// `assets/settings/default.json` is the base layer and always supplies
+    /// one, so it is what ships. A rebase restoring `"One Light"` / `"One Dark"`
+    /// there would have shipped One Dark with every check green: One Dark is
+    /// still a shipped theme, and both constants would still have said Aiur.
+    ///
+    /// Both shipped settings files are read, because the theme divergence lives
+    /// in two of them and only one had ever been looked at.
+    #[test]
+    fn the_shipped_theme_defaults_are_the_omega_themes() {
+        let shipped = shipped_theme_names().expect("shipped themes parse");
+
+        for settings_file in SHIPPED_THEME_SETTINGS_FILES {
+            let settings_path = repository_path(settings_file);
+            let raw = std::fs::read_to_string(&settings_path).unwrap_or_else(|error| {
+                panic!("cannot read {}: {error}", settings_path.display())
+            });
+            let settings: serde_json::Value = serde_json::from_str(&strip_jsonc(&raw))
+                .unwrap_or_else(|error| {
+                    panic!("cannot parse {}: {error}", settings_path.display())
+                });
+
+            for (key, relative_path, constant) in [
+                (
+                    "theme.light",
+                    "crates/settings_content/src/theme.rs",
+                    "DEFAULT_LIGHT_THEME",
+                ),
+                (
+                    "theme.dark",
+                    "crates/settings_content/src/theme.rs",
+                    "DEFAULT_DARK_THEME",
+                ),
+            ] {
+                let configured = default_setting(&settings, key)
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_else(|| {
+                        panic!("OMEGA-DELTA-0016: {settings_file} no longer names {key}")
+                    });
+                assert!(
+                    shipped.contains(configured),
+                    "OMEGA-DELTA-0016: {settings_file} sets {key} to \
+                     {configured:?}, which no theme under assets/themes/ \
+                     declares. Omega would resolve to a missing theme on that \
+                     appearance. Shipped: {shipped:?}"
+                );
+
+                let path = repository_path(relative_path);
+                let source = std::fs::read_to_string(&path)
+                    .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
+                let declared = string_constant(&source, constant).unwrap_or_else(|| {
+                    panic!("{constant} is not declared as a string literal in {relative_path}")
+                });
+                assert_eq!(
+                    configured, declared,
+                    "OMEGA-DELTA-0016: {settings_file} sets {key} to \
+                     {configured:?} but {constant} in {relative_path} is \
+                     {declared:?}. These are two mechanisms for one decision — \
+                     the setting decides, the constant is the fallback for an \
+                     absent selection — and a rebase that reverts one and not \
+                     the other ships the reverted one silently."
+                );
+            }
+        }
+    }
+
+    /// OMEGA-DELTA-0026. The shipped defaults still point away from Zed's
+    /// production hosts.
+    ///
+    /// Four values from one commit, `9e585569cb`. They are asserted here as
+    /// well as in `SERVICE_ISOLATION_TEST_PATH` because `cargo test -p
+    /// omega_deltas` is what the registry tells a reader to run: a delta whose
+    /// only value assertion lives in another crate is green under the command
+    /// this file documents.
+    #[test]
+    fn the_service_isolation_defaults_are_still_the_omega_values() {
+        let settings = default_settings().expect("default settings parse");
+        for (key, upstream, omega) in SERVICE_ISOLATION_DEFAULTS {
+            let expected: serde_json::Value =
+                serde_json::from_str(omega).expect("the recorded Omega value is JSON");
+            let actual = default_setting(&settings, key).unwrap_or_else(|| {
+                panic!("OMEGA-DELTA-0026: {key} is absent from the shipped defaults")
+            });
+            assert_eq!(
+                actual, &expected,
+                "OMEGA-DELTA-0026: {key} must default to {omega}. Upstream Zed \
+                 ships {upstream}, which points a running Omega at one of Zed's \
+                 production hosts — for auto_update, at the one that can replace \
+                 the binary."
+            );
+        }
+    }
+
+    /// OMEGA-DELTA-0027. The Codex ACP executor is configured out of the box.
+    ///
+    /// Full Auto dispatches to `codex-acp`, so an empty `agent_servers` is not
+    /// a neutral default here: it is Full Auto failing on a missing agent.
+    #[test]
+    fn codex_acp_is_configured_by_default() {
+        let settings = default_settings().expect("default settings parse");
+        let entry = default_setting(&settings, "agent_servers.codex-acp").unwrap_or_else(|| {
+            panic!(
+                "OMEGA-DELTA-0027: agent_servers no longer declares codex-acp. \
+                 Upstream Zed ships agent_servers as {{}}; Full Auto is routed \
+                 through this agent, so an empty map is a Full Auto run that \
+                 cannot start."
+            )
+        });
+        assert_eq!(
+            entry.get("type").and_then(serde_json::Value::as_str),
+            Some("registry"),
+            "OMEGA-DELTA-0027: codex-acp must resolve from the ACP registry. \
+             Any other type is a different agent than the one the endpoint \
+             allow-list approved."
+        );
+    }
+
+    /// OMEGA-DELTA-0026 and OMEGA-DELTA-0027. The cited check still asserts
+    /// what the registry says it asserts.
+    ///
+    /// Citing an existing check rather than duplicating it is right, and it
+    /// adds a failure mode: the cited assertion can be deleted, and deleting an
+    /// assertion turns a test green. This also requires the delta ID to appear
+    /// beside it, so a reader who finds the assertion finds the reason.
+    #[test]
+    fn the_service_isolation_test_still_asserts_the_registered_defaults() {
+        let path = repository_path(SERVICE_ISOLATION_TEST_PATH);
+        let source = std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
+        let compact = without_whitespace(&source);
+
+        for (delta, assertion) in PINNED_SERVICE_ISOLATION_ASSERTIONS {
+            assert!(
+                compact.contains(&without_whitespace(assertion)),
+                "{delta}: {SERVICE_ISOLATION_TEST_PATH} no longer asserts \
+                 {assertion:?}. That is the check the registry entry cites, and \
+                 it reads as off-topic inside a test named for Zed service \
+                 isolation, so it is the first line a tidy-up drops."
+            );
+            assert!(
+                source.contains(delta),
+                "{delta}: {SERVICE_ISOLATION_TEST_PATH} carries an assertion \
+                 this delta cites but never names the delta, so a reader who \
+                 finds the assertion cannot find the reason for it."
+            );
+        }
+    }
+
+    /// OMEGA-DELTA-0028. The default icon theme is Omega's own, in both places
+    /// that have to agree about its name.
+    ///
+    /// `configured_icon_theme` looks the settings value up in the registry, and
+    /// the only built-in icon theme is registered under
+    /// `DEFAULT_ICON_THEME_NAME`. Reverting one and not the other does not
+    /// break anything visible — the lookup misses, the error is logged, the
+    /// fallback renders — so the product keeps working while the settings file
+    /// the owner opens names a competitor. Agreement is therefore the check,
+    /// and the brand rule catches a revert of both.
+    #[test]
+    fn the_default_icon_theme_is_omegas() {
+        let policy = brand_policy().expect("brand gate policy parses");
+        let settings = default_settings().expect("default settings parse");
+        let configured = default_setting(&settings, "icon_theme")
+            .and_then(serde_json::Value::as_str)
+            .expect("icon_theme is present in the shipped defaults");
+
+        let path = repository_path(DEFAULT_ICON_THEME_SOURCE);
+        let source = std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
+        let declared = string_constant(&source, "DEFAULT_ICON_THEME_NAME").unwrap_or_else(|| {
+            panic!("DEFAULT_ICON_THEME_NAME is not a string literal in {DEFAULT_ICON_THEME_SOURCE}")
+        });
+
+        assert_eq!(
+            configured, declared,
+            "OMEGA-DELTA-0028: the shipped icon_theme is {configured:?} but \
+             DEFAULT_ICON_THEME_NAME in {DEFAULT_ICON_THEME_SOURCE} is \
+             {declared:?}. The registry has exactly one built-in icon theme, \
+             registered under the constant, so a settings value that disagrees \
+             misses the lookup and falls back with a logged error rather than \
+             failing."
+        );
+
+        for (what, value) in [
+            ("the shipped icon_theme setting", configured),
+            ("DEFAULT_ICON_THEME_NAME", declared.as_str()),
+        ] {
+            let hits = brand_hits(value, &policy);
+            assert!(
+                hits.is_empty(),
+                "OMEGA-DELTA-0028: {what} is {value:?}, which names {hits:?}. \
+                 The icon theme name is rendered by the icon-theme selector and \
+                 written into the settings file the owner opens, so it is \
+                 product copy. base_keymap: \"Zed\" stays and is why this reads \
+                 one key rather than scanning the file: that value names Zed's \
+                 keybinding scheme, offered beside VS Code and JetBrains."
+            );
+        }
     }
 
     /// OMEGA-DELTA-0017. No merged `Info.plist` value names a competitor.

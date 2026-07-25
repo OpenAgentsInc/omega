@@ -6,11 +6,19 @@
   // - "system": Use the theme that corresponds to the system's appearance
   // - "light": Use the theme indicated by the "light" field
   // - "dark": Use the theme indicated by the "dark" field
+  //
+  // Aiur is Omega's own theme and is dark-only. Upstream Zed ships One Dark and
+  // One Light here. These two values are what actually select the theme; the
+  // DEFAULT_DARK_THEME / DEFAULT_LIGHT_THEME constants only apply when no
+  // settings layer names one. See OMEGA-DELTA-0016.
   "theme": {
     "mode": "system",
     "light": "Ayu Light",
     "dark": "Aiur",
   },
+  // Upstream Zed names this "Zed (Default)". It has to match
+  // DEFAULT_ICON_THEME_NAME in crates/theme/src/icon_theme.rs, which registers
+  // the only built-in icon theme. See OMEGA-DELTA-0028.
   "icon_theme": "Omega (Default)",
   // The name of a base set of key bindings to use.
   // This setting can take the following values:
@@ -1579,6 +1587,8 @@
   // isolated independently by Omega's service gates and provider defaults.
   "disable_ai": false,
   // Automatically update Omega. Disabled until an owned update feed exists.
+  // Upstream Zed ships true, which points the updater at Zed's release feed —
+  // the one default that can replace the binary. See OMEGA-DELTA-0026.
   "auto_update": false,
   // How to render LSP `textDocument/documentColor` colors in the editor.
   //
@@ -1763,7 +1773,9 @@
   //      "load_direnv": "disabled"
   "load_direnv": "direct",
   "edit_predictions": {
-    // Which edit prediction provider to use.
+    // Which edit prediction provider to use. Upstream Zed ships "zed", which
+    // is its hosted edit-prediction service. Omega has none, and its retained
+    // provider is GitHub Copilot, configured per user. See OMEGA-DELTA-0026.
     "provider": "none",
     // A list of globs representing files that edit predictions should be disabled for.
     // There's a sensible default list of globs already included.
@@ -2157,6 +2169,9 @@
   //
   // If you don't want any of these extensions, add this field to your settings
   // and change the value to `false`.
+  //
+  // Empty in Omega. Upstream Zed installs the "html" extension from Zed's
+  // extension registry on first start. See OMEGA-DELTA-0026.
   "auto_install_extensions": {},
   // The capabilities granted to extensions.
   //
@@ -2680,7 +2695,8 @@
   },
   // The server to connect to. Omega does not use Zed production services.
   // Inherited account, collab, and cloud clients are gated unless
-  // OMEGA_ALLOW_ZED_SERVICES=1. This host is intentionally non-Zed.
+  // OMEGA_ALLOW_ZED_SERVICES=1. This host is intentionally non-Zed, and is
+  // intentionally non-routable. See OMEGA-DELTA-0026.
   "server_url": "https://services.openagents.invalid",
   // Settings overrides to use when using Zed Preview.
   // Mostly useful for developers who are managing multiple instances of Zed.
@@ -2784,6 +2800,11 @@
   // Configures context servers for use by the agent.
   "context_servers": {},
   // Configures agent servers available in the agent panel.
+  //
+  // Upstream Zed ships this empty. Omega configures codex-acp because Full Auto
+  // dispatches to it, so an empty map is a Full Auto run that cannot start. It
+  // resolves from the ACP registry, an approved host in the endpoint
+  // allow-list. See OMEGA-DELTA-0027.
   "agent_servers": {
     "codex-acp": {
       "type": "registry"

@@ -428,8 +428,43 @@ cargo test -p omega_deltas
   and asserts both defaults are in that set, and that the two independent
   `DEFAULT_DARK_THEME` constants still agree. Deleting a variant without
   repointing a default fails here rather than at first light-mode launch.
-- **Enforced by:** `aiur_is_a_single_dark_theme` and
-  `default_themes_exist_in_shipped_assets`.
+- **Enforced by:** `aiur_is_a_single_dark_theme`,
+  `default_themes_exist_in_shipped_assets`, and
+  `the_shipped_theme_defaults_are_the_omega_themes`.
+- **Amended 2026-07-25 (omega#73): the check was reading the fallback, not the
+  value that ships.** `default_themes_exist_in_shipped_assets` reads
+  `DEFAULT_LIGHT_THEME` and `DEFAULT_DARK_THEME`, which `theme_settings`
+  consults only when *no* settings layer names a theme.
+  `assets/settings/default.json` is the base settings layer and always names
+  one, so `"light": "Ayu Light"` / `"dark": "Aiur"` there are what actually
+  select the theme — and they were unchecked. A rebase restoring `"One Light"`
+  / `"One Dark"` in that file would have shipped One Dark with every check
+  green, because One Dark is still a shipped theme and both constants would
+  still have said Aiur. The new check asserts the shipped values name shipped
+  themes *and* agree with the constants, so a half-revert of either mechanism
+  fails.
+- **The same values live in a second shipped file, and nothing read that one
+  either.** `assets/settings/initial_user_settings.json` is the template copied
+  into a *new user's own* settings file on first start, and it also names
+  `"Ayu Light"` / `"Aiur"` (`3493676d71`). A revert there is the more durable
+  of the two: it lands in the user layer, which overrides the base layer, so
+  correcting `default.json` afterwards would not undo it. Both files are now
+  read by the same check.
+- **Inherited test reconciled, 2026-07-25 (omega#73).**
+  `workspace::test_toggle_theme_mode_persists_and_updates_active_theme` seeds a
+  static theme, toggles the appearance mode, and asserted the static-to-dynamic
+  migration produced `{"light": "One Light", "dark": "One Dark"}` — the
+  pre-Omega defaults. It was **red on `main`**, and had been since this delta
+  landed. It now reads `DEFAULT_LIGHT_THEME` and `DEFAULT_DARK_THEME` rather
+  than naming themes, because what that test owns is the migration behaviour
+  and what this delta owns is the values.
+  **It also got stronger, not just green.** Upstream seeds `"One Light"` and
+  expects `"One Light"` in the light slot, so upstream cannot distinguish *"the
+  slots were filled from the defaults"* from *"the seeded static theme was
+  carried into a slot"*. Under Omega's defaults those are different strings, so
+  the distinction is real; the seed is now a named constant with an `assert_ne!`
+  against both defaults, so a future default change cannot quietly collapse the
+  test back into that ambiguity.
 
 ### OMEGA-DELTA-0017 — No competitor's name in the packaged `Info.plist`
 
@@ -953,3 +988,120 @@ cargo test -p omega_deltas
   render, not a rendered control. Nothing here verifies a publisher signature:
   the digest says the bytes did not change since Omega measured them, not that
   they are the bytes the publisher built.
+
+### OMEGA-DELTA-0026 — The shipped defaults reach no Zed service
+
+- **Upstream Zed:** `server_url` is `https://zed.dev`, `auto_update` is `true`,
+  `edit_predictions.provider` is `"zed"`, and `auto_install_extensions`
+  installs the `html` extension from Zed's extension registry on first start.
+- **Omega:** `server_url` is `https://services.openagents.invalid`,
+  `auto_update` is `false`, `edit_predictions.provider` is `"none"`, and
+  `auto_install_extensions` is `{}`.
+- **Why:** all four landed in one commit, `9e585569cb` ("Isolate Omega from Zed
+  production services"), and they are one decision rather than four: the
+  settings-layer half of the isolation that `OMEGA_ALLOW_ZED_SERVICES` gates in
+  code. Omega has no update feed, no hosted edit-prediction service, and no
+  extension registry of its own, so each of these defaults otherwise points a
+  running Omega at a competitor's production host — with no account, no
+  consent, and in `auto_update`'s case at the one host that can replace the
+  binary.
+- **The telemetry values from that same commit are `OMEGA-DELTA-0004`**, and
+  were registered when the delta programme started two days later. These four
+  were not, and have shipped unregistered since — including through the
+  `0.2.0-rc10` and `0.2.0-rc11` brand reviews, which read icons, plists,
+  actions and binaries, and never read a settings *value*.
+- **`disable_ai` is not in this set.** The isolation commit also set it `true`;
+  `87703b753a` set it back to `false` when registry ACP agents were enabled, so
+  it matches upstream today and is not a divergence. The comment above it still
+  differs, which is prose, not policy.
+- **Enforced by:**
+  `default_settings_enable_registry_acp_without_enabling_zed_production` in
+  `crates/app_identity/src/service_isolation.rs`, which has asserted all four
+  since the isolation commit and is the primary check; plus
+  `the_service_isolation_defaults_are_still_the_omega_values` and
+  `the_service_isolation_test_still_asserts_the_registered_defaults` in
+  `crates/omega_deltas/`.
+- **Why there is a second check, when the rule is to cite rather than
+  duplicate.** Citing alone fails two ways here, and both are the failure this
+  file exists for.
+  1. The cited assertions can be deleted, and deleting an assertion turns a
+     test green. `auto_update` and `auto_install_extensions` read as off-topic
+     inside a test named for Zed *service* isolation and are exactly what a
+     tidy-up removes. `the_service_isolation_test_still_asserts_the_registered_defaults`
+     pins them, and pins the delta ID beside them.
+  2. `cargo test -p omega_deltas` is the command this registry tells a reader
+     to run. A delta whose only value assertion lives in another crate's test
+     is green under that command while the value is reverted — a mechanism
+     reporting green about less than the reader assumed, which is precisely the
+     shape of every miss recorded above.
+- **Not covered:** these are *defaults*. A user settings file, a project
+  settings file, or an environment variable still overrides every one of them,
+  and `ZED_SERVER_URL` overrides `server_url` without touching any file. This
+  delta says what Omega ships, not what a running Omega cannot be told to do.
+
+### OMEGA-DELTA-0027 — Codex ACP is configured out of the box
+
+- **Upstream Zed:** `agent_servers` is `{}`. An external ACP agent is something
+  the user adds.
+- **Omega:** `agent_servers` declares `codex-acp` with `"type": "registry"`, so
+  it resolves from the ACP registry at `cdn.agentclientprotocol.com` — an
+  `approved` host in `crates/app_identity/fixtures/endpoint_allowlist.json`.
+- **Why:** `bc87aec95c` routed Full Auto through Codex ACP, which makes this
+  not an optional extra. It is one of the three executor classes
+  `OMEGA-DELTA-0021` exists to disclose, and a Full Auto lane dispatched at an
+  agent that is not configured does not fall back — it fails. Shipping it
+  configured is the difference between Full Auto working on first launch and
+  Full Auto reporting a missing agent.
+- **Stated plainly: this is a default that reaches a third-party network
+  service.** It is not covered by `OMEGA-DELTA-0026` and is not meant to be —
+  that posture is about *Zed's* production services, not about Omega making no
+  requests at all. `codex-acp` is an npx-published registry agent, so the first
+  turn on it reaches `cdn.agentclientprotocol.com`, `registry.npmjs.org` and
+  `nodejs.org` — all three `approved` in the same allow-list. A genuinely
+  offline first start therefore does not get Codex. The offline-start
+  requirement on omega#16 is about launching, not about every executor being
+  reachable.
+- **Enforced by:** `codex_acp_is_configured_by_default` in
+  `crates/omega_deltas/`, and the `agent_servers` assertion in
+  `default_settings_enable_registry_acp_without_enabling_zed_production`, which
+  `the_service_isolation_test_still_asserts_the_registered_defaults` keeps in
+  place.
+
+### OMEGA-DELTA-0028 — The default icon theme is Omega's own
+
+- **Upstream Zed:** the built-in icon theme is `Zed (Default)`, in both
+  `DEFAULT_ICON_THEME_NAME` and the shipped `icon_theme` setting.
+- **Omega:** both are `Omega (Default)`.
+- **Why:** the owner opened `~/.config/omega-rc/settings.json` and it
+  introduced the product as Zed (`3493676d71`). A settings file the owner opens
+  is a product surface, and omega#16 forbids presenting Zed as the product
+  there. The name is also what the icon-theme selector displays.
+- **Why the check is about agreement rather than about the string.** The two
+  values are coupled: `configured_icon_theme` looks the settings value up in
+  the registry, and the registry's only built-in icon theme is registered under
+  `DEFAULT_ICON_THEME_NAME`. A rebase that reverts one and not the other breaks
+  nothing visible — `crates/theme_settings/src/theme_settings.rs` logs the
+  lookup failure and falls back — so the product keeps working while shipping a
+  competitor's name in the file the owner reads. Pinning the literal in a third
+  place would catch a revert of *both* and miss the half-revert entirely. The
+  check therefore asserts the two agree, and then asserts neither names a
+  competitor, using the same `script/omega-brand-gate.json` word list as the
+  packaged gate.
+- **`base_keymap: "Zed"` deliberately stays**, and is why the check reads one
+  key instead of scanning the settings file for brand words. That value names
+  Zed's keybinding scheme, offered beside VS Code, JetBrains and Sublime,
+  exactly as `ai_zed.svg` labels Zed's own model provider. Renaming it would
+  misdescribe what the setting selects.
+- **Not covered, and deliberately not registered:** the *comments* in
+  `assets/settings/default.json`. Four of them were reworded from Zed to Omega
+  alongside the value changes above (`3493676d71`, `9e585569cb`), and roughly
+  sixty-five other lines in that same file still describe inherited behaviour
+  by naming Zed. Registering the four would assert a policy — "the shipped
+  settings comments say Omega" — that is not true of the file and that no check
+  could enforce without classifying the other sixty-five, which is the
+  prose-classification work `OMEGA-DELTA-0022` explicitly records as not done.
+  They are drive-by edits, so they are flagged here rather than blessed with an
+  ID. This delta covers the icon theme's *name*, which is a value the product
+  renders into a selector and writes into the owner's settings file.
+- **Enforced by:** `the_default_icon_theme_is_omegas` in
+  `crates/omega_deltas/`.
