@@ -1728,6 +1728,78 @@ impl Issue31OwnerProjectionBody {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Issue31OwnerProjectionInput<'a> {
+    pub host_ref: &'a str,
+    pub host_public_key_hex: &'a str,
+    pub device_public_key_hex: &'a str,
+    pub sarah_public_key_hex: &'a str,
+    pub grant_ref: &'a str,
+    pub expected_generation: u64,
+    pub source_event_id: &'a str,
+    pub source_author_public_key_hex: &'a str,
+    pub source_kind: u16,
+    pub source_created_at: u64,
+    pub projected_at: u64,
+    pub projection: Issue31OwnerProjectionBody,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Issue31OwnerProjectionEmission {
+    pub record: Issue31OwnerProjectionRecord,
+    pub content: String,
+}
+
+/// Emit an owner projection for one admitted device.
+///
+/// The emitted bytes are routed back through `Issue31OwnerProjectionRecord::decode`
+/// and the private-binding check before they are returned, so the host cannot
+/// publish a projection its own reader would refuse. `decode` also applies the
+/// record budget, which a direct `validate` call does not: a body inside its
+/// per-field bounds can still serialize past the budget once JSON escaping is
+/// applied, and that record would be readable on the host and unreadable on the
+/// device. `source_role` is derived from the body rather than supplied, because
+/// a caller-chosen role is a second source of truth for something the body
+/// already decides.
+pub fn emit_issue31_owner_projection(
+    input: Issue31OwnerProjectionInput<'_>,
+) -> Result<Issue31OwnerProjectionEmission, Issue31NostrError> {
+    let (_, source_role) = input.projection.validate()?;
+    let record = Issue31OwnerProjectionRecord {
+        schema: ISSUE31_OWNER_PROJECTION_SCHEMA.into(),
+        record_type: "owner_projection".into(),
+        host_ref: input.host_ref.into(),
+        host_public_key_hex: input.host_public_key_hex.into(),
+        device_public_key_hex: input.device_public_key_hex.into(),
+        grant_ref: input.grant_ref.into(),
+        expected_generation: input.expected_generation,
+        source_event_id: input.source_event_id.into(),
+        source_author_public_key_hex: input.source_author_public_key_hex.into(),
+        source_role,
+        source_kind: input.source_kind,
+        source_created_at: input.source_created_at,
+        projected_at: input.projected_at,
+        projection: input.projection,
+    };
+    let content = serde_json::to_string(&record)
+        .map_err(|error| Issue31NostrError::Invalid(error.to_string()))?;
+    let decoded = Issue31OwnerProjectionRecord::decode(content.as_bytes())?;
+    decoded.validate_private_binding(
+        input.host_public_key_hex,
+        input.device_public_key_hex,
+        input.sarah_public_key_hex,
+    )?;
+    if decoded != record {
+        return Err(Issue31NostrError::Invalid(
+            "owner projection did not survive its own decoder".into(),
+        ));
+    }
+    Ok(Issue31OwnerProjectionEmission {
+        record: decoded,
+        content,
+    })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Issue31CommandEvent {
     pub event_id: String,
     pub record: Issue31CommandRecord,
@@ -3494,6 +3566,227 @@ mod tests {
             format!("{:x}", Sha256::digest(projection_bytes)),
             "2a8bec5fa23f27d20db35f3d76bd59817672431328f191bc4302dfa37e7f804d"
         );
+    }
+
+    const OWNER_PROJECTION_BODY_FIXTURES: &[(&str, &str, &[u8])] = &[
+        (
+            "read-state",
+            "efd96dbe997e021c8e77300a802ab929b8c05981a1029c509b94d47410afc264",
+            include_bytes!(
+                "../fixtures/openagents.omega.issue31.owner_projection.v1.canonical-read-state.json"
+            ),
+        ),
+        (
+            "reminder",
+            "d21b2168d32d3c8e76294502b9a30a75a6f5f4f15c5195ac0c160fad15539fe3",
+            include_bytes!(
+                "../fixtures/openagents.omega.issue31.owner_projection.v1.canonical-reminder.json"
+            ),
+        ),
+        (
+            "authority-receipt",
+            "50d97118aec8931e624856246ae5e187bb6944f750052383f89472c4e9e27733",
+            include_bytes!(
+                "../fixtures/openagents.omega.issue31.owner_projection.v1.canonical-authority-receipt.json"
+            ),
+        ),
+        (
+            "engram",
+            "d499644feb77cb7d61b35fda9a4fbafe0b06fcc86e33a61985fbe36c1a819dae",
+            include_bytes!(
+                "../fixtures/openagents.omega.issue31.owner_projection.v1.canonical-engram.json"
+            ),
+        ),
+    ];
+
+    const OWNER_PROJECTION_NEGATIVE_FIXTURES: &[(&str, &str, &[u8])] = &[
+        (
+            "read-state-role",
+            "1073644580d2c8d8768866c81a26cb8b044b13da4297383d54962ff949982baa",
+            include_bytes!(
+                "../fixtures/openagents.omega.issue31.owner_projection.v1.negative-read-state-role.json"
+            ),
+        ),
+        (
+            "read-state-version",
+            "9b134615eb992b2395c59dfc72abe8be3d472dd69c8dff73b7ec670757ebcfba",
+            include_bytes!(
+                "../fixtures/openagents.omega.issue31.owner_projection.v1.negative-read-state-version.json"
+            ),
+        ),
+        (
+            "reminder-pending-without-not-before",
+            "e0f8a8c6a6f22c4b53326dbeb193eeda0832b8b8cbe0c2aae02ca7e1b70a1cec",
+            include_bytes!(
+                "../fixtures/openagents.omega.issue31.owner_projection.v1.negative-reminder-pending-without-not-before.json"
+            ),
+        ),
+        (
+            "authority-receipt-terminal-without-outcome",
+            "737bbaa8fece20bf9b898f4f76f5bf6d4369a1b0a487984302f0cf9a8bd9cc3b",
+            include_bytes!(
+                "../fixtures/openagents.omega.issue31.owner_projection.v1.negative-authority-receipt-terminal-without-outcome.json"
+            ),
+        ),
+        (
+            "engram-slug",
+            "3997fb6d470f20e4796f4765d2406e6e3f4a629f090b3c4ef26e77274cf7b6ed",
+            include_bytes!(
+                "../fixtures/openagents.omega.issue31.owner_projection.v1.negative-engram-slug.json"
+            ),
+        ),
+    ];
+
+    /// The read-state, reminder, authority-receipt, and engram projection bodies
+    /// are the three omega#46 exits that had no shared fixture and therefore no
+    /// agreement between this host and the device reader. The pinned digests are
+    /// the byte-sharing mechanism: the same digests are asserted by the
+    /// TypeScript peer, so a one-sided edit fails on both sides.
+    #[test]
+    fn owner_projection_body_fixtures_decode_and_bind() {
+        for (label, digest, bytes) in OWNER_PROJECTION_BODY_FIXTURES {
+            assert_eq!(
+                &format!("{:x}", Sha256::digest(bytes)),
+                digest,
+                "{label} fixture bytes changed"
+            );
+            let record = Issue31OwnerProjectionRecord::decode(bytes)
+                .unwrap_or_else(|error| panic!("{label} fixture decodes: {error}"));
+            record
+                .validate_private_binding(&"1".repeat(64), &"2".repeat(64), &"3".repeat(64))
+                .unwrap_or_else(|error| panic!("{label} fixture binds: {error}"));
+        }
+    }
+
+    #[test]
+    fn owner_projection_negative_fixtures_are_refused() {
+        for (label, digest, bytes) in OWNER_PROJECTION_NEGATIVE_FIXTURES {
+            assert_eq!(
+                &format!("{:x}", Sha256::digest(bytes)),
+                digest,
+                "{label} fixture bytes changed"
+            );
+            assert!(
+                Issue31OwnerProjectionRecord::decode(bytes).is_err(),
+                "{label} negative fixture must be refused"
+            );
+        }
+    }
+
+    /// The fixtures are only shared truth if the host actually emits them. This
+    /// drives the real emitter with each fixture's own inputs and requires the
+    /// emitted bytes back.
+    #[test]
+    fn the_emitter_reproduces_every_canonical_body_fixture() {
+        for (label, _, bytes) in OWNER_PROJECTION_BODY_FIXTURES {
+            let expected =
+                Issue31OwnerProjectionRecord::decode(bytes).expect("canonical fixture decodes");
+            let emission = emit_issue31_owner_projection(Issue31OwnerProjectionInput {
+                host_ref: &expected.host_ref,
+                host_public_key_hex: &expected.host_public_key_hex,
+                device_public_key_hex: &expected.device_public_key_hex,
+                sarah_public_key_hex: &"3".repeat(64),
+                grant_ref: &expected.grant_ref,
+                expected_generation: expected.expected_generation,
+                source_event_id: &expected.source_event_id,
+                source_author_public_key_hex: &expected.source_author_public_key_hex,
+                source_kind: expected.source_kind,
+                source_created_at: expected.source_created_at,
+                projected_at: expected.projected_at,
+                projection: expected.projection.clone(),
+            })
+            .unwrap_or_else(|error| panic!("{label} emits: {error}"));
+            assert_eq!(emission.record, expected, "{label} emitted record differs");
+            let emitted: serde_json::Value =
+                serde_json::from_str(&emission.content).expect("emitted content is JSON");
+            let fixture: serde_json::Value =
+                serde_json::from_slice(bytes).expect("fixture is JSON");
+            assert_eq!(emitted, fixture, "{label} emitted bytes differ from fixture");
+        }
+    }
+
+    /// Falsification. A read-state body can sit inside every per-field bound the
+    /// projection contract states and still serialize past the record budget once
+    /// JSON escaping is applied, because the escaping happens outside the body.
+    /// `validate` accepts that body. The emitter must not, because the device
+    /// reader applies the budget and would refuse the published record.
+    #[test]
+    fn the_emitter_cannot_produce_a_record_its_own_decoder_refuses() {
+        let mut contexts = String::new();
+        for index in 0..1_800 {
+            if index > 0 {
+                contexts.push(',');
+            }
+            // Every escaped quote in a context id costs one byte in the body and
+            // three in the record, so a legal body crosses the record budget.
+            contexts.push_str(&format!("\"{}\":1784937608", "\\\"".repeat(120)));
+            let _ = index;
+        }
+        let plaintext = format!("{{\"v\":1,\"client_id\":\"omega-host\",\"contexts\":{{{contexts}}}}}");
+        assert!(
+            plaintext.len() <= 524_288,
+            "the oversized body must stay inside its own plaintext bound"
+        );
+        let projection = Issue31OwnerProjectionBody::ReadState {
+            d_tag: "read-state:owner-private".into(),
+            plaintext,
+        };
+        projection
+            .validate()
+            .expect("the body is legal on its own terms");
+
+        let error = emit_issue31_owner_projection(Issue31OwnerProjectionInput {
+            host_ref: "omega.host.local",
+            host_public_key_hex: &"1".repeat(64),
+            device_public_key_hex: &"2".repeat(64),
+            sarah_public_key_hex: &"3".repeat(64),
+            grant_ref: "grant.omega.device_1",
+            expected_generation: 3,
+            source_event_id: &"c".repeat(64),
+            source_author_public_key_hex: &"1".repeat(64),
+            source_kind: SARAH_READ_STATE_KIND,
+            source_created_at: 1_784_937_620,
+            projected_at: 1_784_937_621,
+            projection,
+        })
+        .expect_err("the emitter must refuse a record its own decoder refuses");
+        assert!(matches!(error, Issue31NostrError::Invalid(_)));
+    }
+
+    /// A reference the host builds from a Sarah-authored tag is still untrusted
+    /// input. The emitter refuses it rather than publishing a record the device
+    /// reader would reject.
+    #[test]
+    fn the_emitter_refuses_an_unsafe_reference_taken_from_a_source_event() {
+        let projection = Issue31OwnerProjectionBody::AuthorityReceipt {
+            receipt_ref: format!("receipt.issue31.{}", "a".repeat(24)),
+            turn_ref: "turn.issue31.release_evidence".into(),
+            authority_decision: Issue31AuthorityDecisionProjection {
+                state: "refused".into(),
+                decision_ref: format!("decision.issue31.{}", "a".repeat(24)),
+                reason_ref: Some("reason.openagents._reserved".into()),
+            },
+            target_outcome: Issue31TargetOutcomeProjection {
+                state: "pending".into(),
+                outcome_ref: None,
+                reason_ref: None,
+            },
+        };
+        emit_issue31_owner_projection(Issue31OwnerProjectionInput {
+            host_ref: "omega.host.local",
+            host_public_key_hex: &"1".repeat(64),
+            device_public_key_hex: &"2".repeat(64),
+            sarah_public_key_hex: &"3".repeat(64),
+            grant_ref: "grant.omega.device_1",
+            expected_generation: 3,
+            source_event_id: &("a".repeat(24) + &"b".repeat(40)),
+            source_author_public_key_hex: &"3".repeat(64),
+            source_kind: SARAH_AUTHORITY_RECEIPT_KIND,
+            source_created_at: 1_784_937_640,
+            projected_at: 1_784_937_641,
+            projection,
+        })
+        .expect_err("a leading underscore segment is not a public reference");
     }
 
     #[test]

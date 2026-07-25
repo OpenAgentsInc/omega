@@ -41,9 +41,9 @@ use crate::{
     Issue31CommandHandlingStatus, Issue31CommandRecord, Issue31CommandRecordV2,
     Issue31CommandStatus, Issue31HostConfiguration, Issue31HostController, Issue31HostDiscovery,
     Issue31HostDiscoveryV2, Issue31NostrError, Issue31OwnerProjectionBody,
-    Issue31OwnerProjectionRecord, Issue31PairingEvent, Issue31PairingRecord, Issue31SourceRole,
+    Issue31OwnerProjectionInput, Issue31PairingEvent, Issue31PairingRecord, Issue31SourceRole,
     Issue31TargetOutcomeProjection, SARAH_AUTHORITY_RECEIPT_KIND, SARAH_ENGRAM_KIND,
-    SARAH_READ_STATE_KIND, SARAH_REMINDER_KIND,
+    SARAH_READ_STATE_KIND, SARAH_REMINDER_KIND, emit_issue31_owner_projection,
 };
 
 pub use crate::openagents_binding::BindingState;
@@ -2513,34 +2513,24 @@ impl SarahConversationClient {
                 "Issue 31 projection source is not owner-authored".into(),
             ));
         }
-        let record = Issue31OwnerProjectionRecord {
-            schema: crate::ISSUE31_OWNER_PROJECTION_SCHEMA.into(),
-            record_type: "owner_projection".into(),
-            host_ref: "omega.host.local".into(),
-            host_public_key_hex: self.config.identity.owner_public_key_hex.clone(),
-            device_public_key_hex: device_public_key_hex.into(),
-            grant_ref: grant_ref.into(),
+        let emission = emit_issue31_owner_projection(Issue31OwnerProjectionInput {
+            host_ref: "omega.host.local",
+            host_public_key_hex: &self.config.identity.owner_public_key_hex,
+            device_public_key_hex,
+            sarah_public_key_hex: &self.config.identity.sarah_public_key_hex,
+            grant_ref,
             expected_generation,
-            source_event_id: source.event_id,
-            source_author_public_key_hex: source.pubkey,
-            source_role: Issue31SourceRole::Owner,
+            source_event_id: &source.event_id,
+            source_author_public_key_hex: &source.pubkey,
             source_kind: source.kind,
             source_created_at: source.created_at,
             projected_at: unix_now().max(source.created_at),
             projection,
-        };
-        record
-            .validate_private_binding(
-                &self.config.identity.owner_public_key_hex,
-                device_public_key_hex,
-                &self.config.identity.sarah_public_key_hex,
-            )
-            .map_err(issue31_error)?;
-        let content = serde_json::to_string(&record)
-            .map_err(|error| SarahConversationError::Internal(error.to_string()))?;
+        })
+        .map_err(issue31_error)?;
         self.enqueue_issue31_private_content(
             crate::ISSUE31_OWNER_PROJECTION_SCHEMA,
-            &content,
+            &emission.content,
             device_public_key_hex,
         )?;
         Ok(())
@@ -2619,6 +2609,8 @@ impl SarahConversationClient {
                         continue;
                     }
                 };
+                let mut emissions = Vec::new();
+                let mut refused_by_own_decoder = false;
                 for grant in &grants {
                     if controller.source_was_projected(
                         &grant.grant_ref,
@@ -2627,34 +2619,44 @@ impl SarahConversationClient {
                     ) {
                         continue;
                     }
-                    let record = Issue31OwnerProjectionRecord {
-                        schema: crate::ISSUE31_OWNER_PROJECTION_SCHEMA.into(),
-                        record_type: "owner_projection".into(),
-                        host_ref: grant.host_ref.clone(),
-                        host_public_key_hex: grant.host_public_key_hex.clone(),
-                        device_public_key_hex: grant.device_public_key_hex.clone(),
-                        grant_ref: grant.grant_ref.clone(),
+                    match emit_issue31_owner_projection(Issue31OwnerProjectionInput {
+                        host_ref: &grant.host_ref,
+                        host_public_key_hex: &grant.host_public_key_hex,
+                        device_public_key_hex: &grant.device_public_key_hex,
+                        sarah_public_key_hex: &grant.sarah_public_key_hex,
+                        grant_ref: &grant.grant_ref,
                         expected_generation: grant.generation,
-                        source_event_id: source.event_id.clone(),
-                        source_author_public_key_hex: source.pubkey.clone(),
-                        source_role: projection_source_role(&projection),
+                        source_event_id: &source.event_id,
+                        source_author_public_key_hex: &source.pubkey,
                         source_kind: source.kind,
                         source_created_at: source.created_at,
                         projected_at: now.max(source.created_at),
                         projection: projection.clone(),
-                    };
-                    record
-                        .validate_private_binding(
-                            &self.config.identity.owner_public_key_hex,
-                            &grant.device_public_key_hex,
-                            &grant.sarah_public_key_hex,
-                        )
-                        .map_err(issue31_error)?;
-                    let content = serde_json::to_string(&record)
-                        .map_err(|error| SarahConversationError::Internal(error.to_string()))?;
+                    }) {
+                        Ok(emission) => emissions.push((grant, emission)),
+                        // A source event Sarah or the owner signed can still
+                        // carry a reference or a body the device reader
+                        // refuses. Quarantining that one event keeps the
+                        // remaining sources projecting, rather than letting a
+                        // single malformed record stop every device.
+                        Err(_) => {
+                            refused_by_own_decoder = true;
+                            break;
+                        }
+                    }
+                }
+                if refused_by_own_decoder {
+                    self.quarantine_issue31_event(
+                        &source.event_id,
+                        "reason.omega.invalid_projection_source",
+                        controller,
+                    )?;
+                    continue;
+                }
+                for (grant, emission) in emissions {
                     self.enqueue_issue31_private_content(
                         crate::ISSUE31_OWNER_PROJECTION_SCHEMA,
-                        &content,
+                        &emission.content,
                         &grant.device_public_key_hex,
                     )?;
                     controller
@@ -3881,17 +3883,6 @@ fn stored_tag_value(tags: &[Vec<String>], name: &str) -> Option<String> {
     })
 }
 
-fn projection_source_role(projection: &Issue31OwnerProjectionBody) -> Issue31SourceRole {
-    match projection {
-        Issue31OwnerProjectionBody::Message { role, .. } => *role,
-        Issue31OwnerProjectionBody::ReadState { .. }
-        | Issue31OwnerProjectionBody::Reminder { .. } => Issue31SourceRole::Owner,
-        Issue31OwnerProjectionBody::Turn { .. }
-        | Issue31OwnerProjectionBody::AuthorityReceipt { .. }
-        | Issue31OwnerProjectionBody::Engram { .. } => Issue31SourceRole::Sarah,
-    }
-}
-
 fn private_recipients(
     owner_pubkey: &str,
     sarah_pubkey: &str,
@@ -4275,6 +4266,138 @@ mod tests {
                 got: 3
             })
         ));
+    }
+
+    /// A source event the host itself signed can still carry a body the device
+    /// reader refuses. Before the emitter owned that decision, one such event
+    /// aborted the whole projection pass, so a single malformed record stopped
+    /// every later record reaching every paired device. The bad event is
+    /// quarantined and the pass continues.
+    #[test]
+    fn one_refused_projection_source_is_quarantined_without_stopping_the_pass() {
+        let signer = SigningIdentity::generate();
+        let mut config = SarahConversationConfig::mock_fixture();
+        config.identity.owner_public_key_hex = signer.public_key_hex.clone();
+        let owner_public_key_hex = signer.public_key_hex.clone();
+        let sarah_public_key_hex = config.identity.sarah_public_key_hex.clone();
+        let conversation_ref = config.conversation_ref();
+        let mut relay = MockRelayAdapter::new();
+        for (index, (event_id, created_at, text)) in [
+            ("1".repeat(64), 10_u64, "before"),
+            // An empty message body is inside every record-level bound and
+            // outside the projection body contract.
+            ("2".repeat(64), 11, ""),
+            ("3".repeat(64), 12, "after"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            relay.seed_event(StoredConversationEvent {
+                event_id,
+                kind: crate::ISSUE31_PRIVATE_RUMOR_KIND,
+                pubkey: owner_public_key_hex.clone(),
+                created_at,
+                conversation_ref: conversation_ref.clone(),
+                content_summary: text.into(),
+                tags: Vec::new(),
+                record_kind: "message".into(),
+                store_index: index,
+            });
+        }
+        let mut client = SarahConversationClient::with_relay(config, Box::new(relay), signer);
+
+        let host_configuration = Issue31HostConfiguration {
+            host_ref: "omega.host.local".into(),
+            host_public_key_hex: owner_public_key_hex.clone(),
+            sarah_public_key_hex,
+            conversation: conversation_ref,
+            display_name: "Omega host".into(),
+            relay_urls: vec!["wss://relay.example.com".into()],
+            generation: 1,
+        };
+        let device_public_key_hex = "2".repeat(64);
+        let mut controller =
+            Issue31HostController::new(host_configuration.clone()).expect("host controller");
+        controller
+            .set_admitted_device_policy(
+                vec![device_public_key_hex.clone()],
+                vec![crate::Issue31PairingScope::ObserveIssue31],
+            )
+            .expect("admit the device");
+        let challenge = controller
+            .handle_pairing_event(
+                Issue31PairingEvent {
+                    event_id: "a".repeat(64),
+                    record: Issue31PairingRecord::PairingRequest {
+                        schema: crate::ISSUE31_PAIRING_SCHEMA.into(),
+                        host_ref: host_configuration.host_ref.clone(),
+                        host_public_key_hex: owner_public_key_hex.clone(),
+                        device_public_key_hex: device_public_key_hex.clone(),
+                        issued_at: 100,
+                        pairing_request_ref: "pairing_request.projection".into(),
+                        requested_scopes: vec![crate::Issue31PairingScope::ObserveIssue31],
+                        expires_at: 700,
+                    },
+                },
+                100,
+            )
+            .expect("pairing request")
+            .expect("pairing challenge");
+        let Issue31PairingRecord::PairingChallenge {
+            challenge: challenge_value,
+            ..
+        } = &challenge
+        else {
+            panic!("expected a pairing challenge");
+        };
+        let challenge_value = challenge_value.clone();
+        controller
+            .record_emitted_pairing("b".repeat(64), challenge)
+            .expect("record the challenge");
+        let grant = controller
+            .handle_pairing_event(
+                Issue31PairingEvent {
+                    event_id: "c".repeat(64),
+                    record: Issue31PairingRecord::PairingResponse {
+                        schema: crate::ISSUE31_PAIRING_SCHEMA.into(),
+                        host_ref: host_configuration.host_ref,
+                        host_public_key_hex: owner_public_key_hex,
+                        device_public_key_hex,
+                        issued_at: 110,
+                        pairing_response_ref: "pairing_response.projection".into(),
+                        pairing_challenge_event_id: "b".repeat(64),
+                        challenge: challenge_value,
+                        expires_at: 700,
+                    },
+                },
+                110,
+            )
+            .expect("pairing response")
+            .expect("scoped grant");
+        controller
+            .record_emitted_pairing("d".repeat(64), grant)
+            .expect("record the grant");
+        assert_eq!(controller.active_grants(120).expect("grants").len(), 1);
+
+        client.ensure_connected().expect("connect the mock relay");
+        client
+            .project_issue31_sources(&mut controller, 200)
+            .expect("the pass survives a refused source");
+
+        assert_eq!(
+            client
+                .issue31_quarantined_events
+                .get(&"2".repeat(64))
+                .map(String::as_str),
+            Some("reason.omega.invalid_projection_source")
+        );
+        let grant_ref = controller.active_grants(200).expect("grants")[0]
+            .grant_ref
+            .clone();
+        assert!(controller.source_was_projected(&grant_ref, 1, &"1".repeat(64)));
+        assert!(!controller.source_was_projected(&grant_ref, 1, &"2".repeat(64)));
+        assert!(controller.source_was_projected(&grant_ref, 1, &"3".repeat(64)));
+        assert_eq!(client.issue31_private_outbox.len(), 2);
     }
 
     #[test]
