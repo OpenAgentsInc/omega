@@ -1,0 +1,28 @@
+{
+  "runRef": "run.full-auto.ms0qo37q.ro3zx3uf",
+  "threadRef": "thread.omega.1",
+  "state": "completed",
+  "title": "issue47 evidence chain live walk",
+  "objective": "Land one finished Full Auto work unit and prove it end to end.",
+  "doneCondition": "README.md records the finished unit.\nverify: grep -q 'the finished unit landed here' README.md",
+  "workspaceRef": "/tmp/omega47-live-walk/workspace",
+  "lane": "codex-local",
+  "turnCap": 4,
+  "successfulAttempts": 2,
+  "failedAttempts": 0,
+  "stallCause": null,
+  "recoveryAction": "none",
+  "terminalReason": "host verified the done condition (verification passed)",
+  "terminalReasonRef": "terminal.full_auto.completed.control_api",
+  "updatedAt": "2026-07-25T19:05:10.357Z",
+  "startedAtMs": 1785006309447,
+  "nativeEvidence": null,
+  "turns": [
+    {
+      "turnRef": "turn.full-auto.1",
+      "lane": "codex-local",
+      "outcomeSummary": "turn completed",
+      "createdAt": "2026-07-25T19:05:09.528Z"
+    }
+  ]
+}

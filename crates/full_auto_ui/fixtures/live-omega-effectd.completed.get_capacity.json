@@ -1,0 +1,60 @@
+{
+  "activeRunLimit": 8,
+  "activeRunCount": 0,
+  "lanes": [
+    {
+      "lane": "acp:cursor-agent",
+      "state": "available",
+      "activeRuns": 0,
+      "reason": "ready and idle"
+    },
+    {
+      "lane": "acp:grok-cli",
+      "state": "available",
+      "activeRuns": 0,
+      "reason": "ready and idle"
+    },
+    {
+      "lane": "claude-local",
+      "state": "available",
+      "activeRuns": 0,
+      "reason": "ready and idle"
+    },
+    {
+      "lane": "codex-local",
+      "state": "available",
+      "activeRuns": 0,
+      "reason": "ready and idle"
+    },
+    {
+      "lane": "harness:goose",
+      "state": "available",
+      "activeRuns": 0,
+      "reason": "ready and idle"
+    },
+    {
+      "lane": "harness:opencode",
+      "state": "available",
+      "activeRuns": 0,
+      "reason": "ready and idle"
+    },
+    {
+      "lane": "harness:pi",
+      "state": "available",
+      "activeRuns": 0,
+      "reason": "ready and idle"
+    }
+  ],
+  "nonOverridableGuardrails": [
+    "workspace_binding",
+    "own_capacity_only",
+    "no_rate_limit_reset_triggering"
+  ],
+  "ownerConfigurableGuardrails": [
+    "maxWallClockMs",
+    "maxTurns",
+    "maxPerTurnFailures",
+    "tokenBudgetRef"
+  ],
+  "enabledThreadsNeverEvicted": true
+}

@@ -38,6 +38,10 @@ pub enum Issue31FullAutoProjectionError {
     /// The host never recorded when this run began, so its exact unattended
     /// duration is unknown. Showing zero would be a claim nothing supports.
     UnattendedDurationUnknown,
+    /// The host reported a lifecycle state this contract does not model. The
+    /// safe answer is to refuse: guessing which contract state an unrecognised
+    /// host state resembles is how a stalled run gets shown as running.
+    UnknownLifecycle,
     /// The assembled projection was refused by the contract.
     Contract(Issue31FullAutoAdjunctError),
 }
@@ -51,6 +55,8 @@ impl std::fmt::Display for Issue31FullAutoProjectionError {
             Self::UnattendedDurationUnknown => {
                 formatter.write_str("full auto run has no host-recorded start time")
             }
+            Self::UnknownLifecycle => formatter
+                .write_str("full auto run reported a lifecycle state this contract does not model"),
             Self::Contract(error) => write!(formatter, "{error}"),
         }
     }
@@ -58,12 +64,33 @@ impl std::fmt::Display for Issue31FullAutoProjectionError {
 
 impl std::error::Error for Issue31FullAutoProjectionError {}
 
-/// The controls this host accepts for a run in a given lifecycle state.
+/// The contract lifecycle for a host lifecycle state.
 ///
-/// The host reported the state; these are the mutations `FullAutoPanel` itself
-/// sends for it. A run only ever carries controls the same host would honour,
-/// so the phone cannot present a button whose completion can never arrive. A
-/// host that declares its own `permittedControls` overrides this entirely.
+/// `omega_effectd` and the mobile contract name the same lifecycle with two
+/// vocabularies, so exactly one place has to translate. Doing it here, as a
+/// total match over the host's typed states, means an unrecognised state is a
+/// refusal rather than a silent pass-through that the emitter would reject with
+/// a state error the reader cannot act on.
+///
+/// `draft` maps to `queued` because both mean the same thing to a viewer: this
+/// run exists and no work has begun. Every other pair is a rename.
+fn lifecycle_for_host_state(state: &str) -> Option<&'static str> {
+    Some(match state {
+        "draft" | "queued" => "queued",
+        "running" => "running",
+        "pausing" => "pausing",
+        "paused" => "paused",
+        "stopping" => "stopping",
+        "retrying" => "retrying",
+        "stalled" => "stalled",
+        "completed" => "succeeded",
+        "failed" => "failed",
+        "stopped" => "stopped",
+        "cap_reached" => "expired",
+        _ => return None,
+    })
+}
+
 fn controls_for_state(state: &str) -> &'static [&'static str] {
     match state {
         "running" | "retrying" | "stalled" => &["pause", "stop"],
@@ -112,6 +139,8 @@ fn project_run(run: &Value, host_generation: u64) -> Result<Value, Issue31FullAu
         .ok_or(Issue31FullAutoProjectionError::IncompleteRunRecord)?;
     let started_at_ms =
         started_at_ms(run).ok_or(Issue31FullAutoProjectionError::UnattendedDurationUnknown)?;
+    let lifecycle =
+        lifecycle_for_host_state(state).ok_or(Issue31FullAutoProjectionError::UnknownLifecycle)?;
 
     let permitted: Vec<&str> = match run.get("permittedControls").and_then(Value::as_array) {
         Some(declared) => declared.iter().filter_map(Value::as_str).collect(),
@@ -122,7 +151,7 @@ fn project_run(run: &Value, host_generation: u64) -> Result<Value, Issue31FullAu
         "runRef": run_ref,
         "objective": objective,
         "laneRef": lane_ref,
-        "state": state,
+        "state": lifecycle,
         "generation": host_generation,
         "startedAtMs": started_at_ms,
         "permittedControls": permitted,
@@ -137,6 +166,12 @@ fn project_run(run: &Value, host_generation: u64) -> Result<Value, Issue31FullAu
             object.insert(field.into(), value.clone());
         }
     }
+    // The host's free-text `terminalReason` is deliberately NOT promoted into
+    // `terminalReasonRef`. A sentence written for a human is not a typed
+    // classification, and reading one as the other is how a run's ending
+    // acquires a meaning nobody recorded. A finished run whose host stated no
+    // typed reason reaches the emitter without one, which marks it
+    // `reason.full-auto.unrecorded` -- a gap the owner can see.
     Ok(projected)
 }
 
@@ -412,8 +447,18 @@ pub fn publish_issue31_host_snapshot(
 mod tests {
     use super::*;
     use workroom_receipts::{
-        Issue31EvidenceChain, Issue31EvidenceUnavailableReason, Issue31FullAutoLifecycle,
+        ISSUE31_EVIDENCE_HOPS, Issue31EvidenceChain, Issue31EvidenceUnavailableReason,
+        Issue31FullAutoLifecycle, PublicRef,
     };
+
+    fn unavailable_reason_of(adjunct: &Issue31FullAutoAdjunct) -> Issue31EvidenceUnavailableReason {
+        match &adjunct.evidence[0] {
+            Issue31EvidenceChain::Unavailable { reason, .. } => *reason,
+            Issue31EvidenceChain::Complete { .. } => {
+                panic!("expected the chain to be refused")
+            }
+        }
+    }
 
     const NOW: u64 = 1_784_894_400_000;
     const HOST_GENERATION: u64 = 19;
@@ -493,8 +538,13 @@ mod tests {
             .collect();
         assert_eq!(kinds.len(), 2);
 
+        // The host's own word for a finished run is `completed`; the contract
+        // calls the same state `succeeded`. The live capture is what settled
+        // that -- these inputs are host records, so they use the host's
+        // vocabulary and the adapter translates.
         let mut finished = run_detail();
-        finished["state"] = json!("succeeded");
+        finished["state"] = json!("completed");
+        finished["terminalReasonRef"] = json!("terminal.full_auto.completed.control_api");
         finished
             .as_object_mut()
             .expect("object")
@@ -708,8 +758,13 @@ mod tests {
     /// Full Auto action the host would refuse to honour.
     #[test]
     fn a_snapshot_of_only_finished_runs_advertises_no_run_controls() {
+        // The host's own word for a finished run is `completed`; the contract
+        // calls the same state `succeeded`. The live capture is what settled
+        // that -- these inputs are host records, so they use the host's
+        // vocabulary and the adapter translates.
         let mut finished = run_detail();
-        finished["state"] = json!("succeeded");
+        finished["state"] = json!("completed");
+        finished["terminalReasonRef"] = json!("terminal.full_auto.completed.control_api");
         finished
             .as_object_mut()
             .expect("object")
@@ -861,28 +916,21 @@ mod tests {
         assert_eq!(adjunct.runs[0].unattended_ms, 90_000);
     }
 
-    /// The walk's honest stopping point, pinned rather than described.
+    /// A live run that has NOT finished still has no chain to show.
     ///
-    /// A live `omega-effectd` `get_report` / `get_receipt` pair does NOT carry
-    /// the omega#43 chain: the report has no `evidence` block naming the
-    /// objective, turn, change, project generation, verification, test outcome,
-    /// and host execution, and the receipt has no `decisionRef` or
-    /// `authorityReceiptRef`. It carries digests and lifecycle history instead.
-    ///
-    /// So a viewer cannot yet follow one finished unit from objective through
-    /// authority receipt against a live host — not because the contract fails,
-    /// but because the host does not emit those hops. The contract's answer is
-    /// `unavailable`, which is the correct one: it claims no partial proof. If
-    /// the engine ever starts emitting the chain, this test goes red and is the
-    /// place to record that the walk now completes.
+    /// The earlier capture is a run in flight: the host has not verified any
+    /// done condition, so the report carries no `evidence` block and the receipt
+    /// carries no `decisionRef` or `authorityReceiptRef`. The contract's answer
+    /// is `unavailable`, and that is the correct one — a run that has not
+    /// finished has produced no finished unit to prove. The run beside it still
+    /// renders: one unavailable chain never hides the work the owner is
+    /// entitled to see.
     #[test]
-    fn a_live_report_and_receipt_do_not_yet_form_an_authority_chain() {
+    fn a_live_unfinished_run_projects_no_authority_chain() {
         let report = live("get_report", LIVE_REPORT);
         let receipt = live("get_receipt", LIVE_RECEIPT);
-        assert!(
-            report.get("evidence").is_none(),
-            "a live report carrying an evidence block would complete this walk"
-        );
+        assert_eq!(report.get("state").and_then(Value::as_str), Some("running"));
+        assert!(report.get("evidence").is_none());
         assert!(receipt.get("authorityReceiptRef").is_none());
         assert!(receipt.get("decisionRef").is_none());
 
@@ -903,12 +951,394 @@ mod tests {
                 assert_eq!(*reason, Issue31EvidenceUnavailableReason::HopMissing);
             }
             Issue31EvidenceChain::Complete { .. } => {
-                panic!("a live host does not yet produce the omega#43 chain")
+                panic!("an unfinished run has no finished unit to prove")
             }
         }
-        // The run beside it still renders. One unavailable chain never hides
-        // the work the owner is entitled to see.
         assert_eq!(adjunct.runs.len(), 1);
+    }
+
+    // -----------------------------------------------------------------
+    // The finished-unit walk.
+    //
+    // These four fixtures are the EXACT bytes a running `omega-effectd`
+    // returned for one COMPLETED Full Auto run, captured on 2026-07-25 against
+    // the engine that stamps the omega#43 chain. The run was started through
+    // the framed protocol with autonomy on, a provider turn edited and
+    // committed real files in a real Git worktree and self-reported
+    // FULL-AUTO-COMPLETE, and the host then ran the run's own `verify:` command
+    // as a child process, read its exit code, and admitted the completion.
+    //
+    // The start request DELIBERATELY carried a forged `evidence` block, a
+    // forged `decisionRef`, and a forged `authorityReceiptRef`. Nothing the
+    // client sent appears anywhere in what the host published; every assertion
+    // below reads a value the host measured for itself.
+    // -----------------------------------------------------------------
+
+    const DONE_RUN: &str = include_str!("../fixtures/live-omega-effectd.completed.get_run.json");
+    const DONE_CAPACITY: &str =
+        include_str!("../fixtures/live-omega-effectd.completed.get_capacity.json");
+    const DONE_REPORT: &str =
+        include_str!("../fixtures/live-omega-effectd.completed.get_report.json");
+    const DONE_RECEIPT: &str =
+        include_str!("../fixtures/live-omega-effectd.completed.get_receipt.json");
+    const DONE_STARTED_AT_MS: u64 = 1_785_006_309_447;
+
+    fn finished_sources(
+        generated_at_ms: u64,
+        evidence: &[(Value, Value)],
+    ) -> Result<Issue31FullAutoAdjunct, Issue31FullAutoProjectionError> {
+        project_issue31_full_auto_adjunct(&Issue31FullAutoLiveSources {
+            host_ref: "host.omega.device-alpha",
+            snapshot_ref: "snapshot.omega.issue31.finished-unit",
+            generated_at_ms,
+            host_generation: HOST_GENERATION,
+            run_details: &[live("get_run", DONE_RUN)],
+            capacity: &live("get_capacity", DONE_CAPACITY),
+            handoffs: &[],
+            evidence,
+        })
+    }
+
+    /// omega#47's exit line, against a live host: a viewer follows ONE finished
+    /// unit from objective through authority receipt.
+    #[test]
+    fn a_live_finished_unit_walks_from_objective_through_authority_receipt() {
+        let report = live("get_report", DONE_REPORT);
+        let receipt = live("get_receipt", DONE_RECEIPT);
+        let adjunct = finished_sources(DONE_STARTED_AT_MS + 120_000, &[(report, receipt)])
+            .expect("a finished live run projects");
+
+        let hops = match &adjunct.evidence[0] {
+            Issue31EvidenceChain::Complete {
+                hops,
+                authority_allowed,
+                ..
+            } => {
+                assert!(*authority_allowed, "the host's authority admitted this run");
+                hops
+            }
+            Issue31EvidenceChain::Unavailable { reason, .. } => {
+                panic!("a live finished unit must walk end to end (reason: {reason:?})")
+            }
+        };
+        assert_eq!(
+            hops.iter().map(|hop| hop.kind).collect::<Vec<_>>(),
+            ISSUE31_EVIDENCE_HOPS,
+            "the walk is the contract's ordered chain, objective first and receipt last"
+        );
+        // The run beside the chain is the finished one, with no control the
+        // host would refuse.
+        assert_eq!(
+            adjunct.runs[0].lifecycle,
+            Issue31FullAutoLifecycle::Succeeded
+        );
+        assert!(adjunct.runs[0].controls.is_empty());
+        assert!(adjunct.runs[0].terminal_reason_ref.is_some());
+    }
+
+    /// Every hop is something the host MEASURED, not something the run said.
+    ///
+    /// The client that started this run sent a complete forged chain. If any
+    /// forged value had reached the projection, it would appear here.
+    #[test]
+    fn every_live_hop_is_a_host_measurement_rather_than_a_client_claim() {
+        let report = live("get_report", DONE_REPORT);
+        let receipt = live("get_receipt", DONE_RECEIPT);
+        let evidence = report
+            .get("evidence")
+            .expect("the live report carries hops");
+
+        // The objective hop is the digest of the objective the host itself
+        // holds: it equals the report's own `objectiveDigest`, so a reader can
+        // check the chain names the mission the report is about.
+        assert_eq!(
+            evidence.get("objectiveRef").and_then(Value::as_str),
+            Some(
+                format!(
+                    "objective.{}",
+                    report
+                        .get("objectiveDigest")
+                        .and_then(Value::as_str)
+                        .expect("digest")
+                )
+                .as_str()
+            )
+        );
+        // The turn hop is a real row in the host's own journal.
+        let turn_ref = evidence
+            .get("turnRef")
+            .and_then(Value::as_str)
+            .expect("turn");
+        assert!(
+            live("get_run", DONE_RUN)
+                .get("turns")
+                .and_then(Value::as_array)
+                .expect("turns")
+                .iter()
+                .any(|turn| turn.get("turnRef").and_then(Value::as_str) == Some(turn_ref)),
+            "the verified turn is one the host recorded"
+        );
+        // The change and generation hops are one Git reading of the bound
+        // worktree, and the diff counts name the baseline they were measured
+        // against.
+        let change = evidence
+            .get("changeRef")
+            .and_then(Value::as_str)
+            .expect("change");
+        assert!(change.starts_with("change."));
+        assert_eq!(change.len(), "change.".len() + 40);
+        assert!(
+            evidence
+                .get("projectGeneration")
+                .and_then(Value::as_str)
+                .is_some_and(|value| value.starts_with("generation.project."))
+        );
+        assert!(
+            evidence
+                .get("diffSummary")
+                .and_then(Value::as_str)
+                .is_some_and(|value| value.contains("files changed")),
+            "the change hop carries the host's own shortstat"
+        );
+        // The verification hop is the host's own executed command.
+        assert_eq!(
+            evidence.get("hostExecuted").and_then(Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            evidence.get("testOutcome").and_then(Value::as_str),
+            Some("outcome.test.passed")
+        );
+
+        // Nothing the client sent survived anywhere.
+        for record in [&report, &receipt] {
+            let serialized = record.to_string();
+            for forged in [
+                "objective.client.forged",
+                "turn.client.forged",
+                "change.client.forged",
+                "verification.client.forged",
+                "decision.client.forged",
+                "receipt.client.forged",
+                "generation.project.99999",
+                "999 files changed",
+            ] {
+                assert!(
+                    !serialized.contains(forged),
+                    "a client-supplied {forged} reached a host record"
+                );
+            }
+        }
+    }
+
+    /// The report and the receipt tell ONE story, because the host projects
+    /// both from one stored record.
+    #[test]
+    fn the_live_report_and_receipt_agree_on_every_shared_hop() {
+        let report = live("get_report", DONE_REPORT);
+        let receipt = live("get_receipt", DONE_RECEIPT);
+        let evidence = report.get("evidence").expect("hops");
+        for field in ["objectiveRef", "turnRef", "changeRef", "verificationRef"] {
+            assert_eq!(
+                evidence.get(field),
+                receipt.get(field),
+                "{field} must not tell two stories about one run"
+            );
+        }
+        assert!(receipt.get("decisionRef").is_some());
+        assert!(receipt.get("authorityReceiptRef").is_some());
+        assert_eq!(
+            receipt.get("authorityRef").and_then(Value::as_str),
+            Some("authority.omega.host.full_auto_completion"),
+            "the receipt names WHICH authority allowed the completion"
+        );
+    }
+
+    /// The same live records drive the desktop panel's inspector, so the phone
+    /// and Omega cannot show two different chains for one run.
+    #[test]
+    fn the_live_records_also_render_in_the_desktop_inspector() {
+        let view = crate::evidence_chain::FullAutoEvidenceView::from_records(
+            &live("get_report", DONE_REPORT),
+            &live("get_receipt", DONE_RECEIPT),
+        )
+        .expect("the panel renders the same live chain");
+        let labels: Vec<_> = view.fields.iter().map(|field| field.label).collect();
+        assert!(labels.contains(&"objective_ref"));
+        assert!(labels.contains(&"authority_receipt_ref"));
+        assert!(labels.contains(&"decision_ref"));
+    }
+
+    /// Falsification: break each hop of the live chain in turn and watch the
+    /// projection refuse. A refusal nobody watched is not proven.
+    #[test]
+    fn breaking_any_live_hop_refuses_the_chain() {
+        let generated = DONE_STARTED_AT_MS + 120_000;
+
+        // A self-reported verification.
+        let mut report = live("get_report", DONE_REPORT);
+        report["evidence"]["hostExecuted"] = json!(false);
+        assert_eq!(
+            unavailable_reason_of(
+                &finished_sources(generated, &[(report, live("get_receipt", DONE_RECEIPT))])
+                    .expect("projects")
+            ),
+            Issue31EvidenceUnavailableReason::SelfReported
+        );
+
+        // A receipt that disagrees with the report about the change.
+        let mut receipt = live("get_receipt", DONE_RECEIPT);
+        receipt["changeRef"] = json!("change.0000000000000000000000000000000000000000");
+        assert_eq!(
+            unavailable_reason_of(
+                &finished_sources(generated, &[(live("get_report", DONE_REPORT), receipt)])
+                    .expect("projects")
+            ),
+            Issue31EvidenceUnavailableReason::HopMismatched
+        );
+
+        // A private path smuggled into the test command.
+        let mut report = live("get_report", DONE_REPORT);
+        report["evidence"]["testCommand"] = json!("cat /Users/owner/.codex/auth.json");
+        assert_eq!(
+            unavailable_reason_of(
+                &finished_sources(generated, &[(report, live("get_receipt", DONE_RECEIPT))])
+                    .expect("projects")
+            ),
+            Issue31EvidenceUnavailableReason::HopPrivate
+        );
+
+        // Each hop of the chain, removed one at a time.
+        for hop in [
+            "objectiveRef",
+            "turnRef",
+            "changeRef",
+            "projectGeneration",
+            "verificationRef",
+            "testOutcome",
+        ] {
+            let mut report = live("get_report", DONE_REPORT);
+            report["evidence"]
+                .as_object_mut()
+                .expect("evidence object")
+                .remove(hop);
+            let adjunct =
+                finished_sources(generated, &[(report, live("get_receipt", DONE_RECEIPT))])
+                    .expect("projects");
+            assert!(
+                matches!(
+                    adjunct.evidence[0],
+                    Issue31EvidenceChain::Unavailable { .. }
+                ),
+                "removing {hop} must break the chain"
+            );
+        }
+        // And the two hops only the receipt carries.
+        for hop in ["decisionRef", "authorityReceiptRef", "allowed"] {
+            let mut receipt = live("get_receipt", DONE_RECEIPT);
+            receipt.as_object_mut().expect("receipt object").remove(hop);
+            let adjunct =
+                finished_sources(generated, &[(live("get_report", DONE_REPORT), receipt)])
+                    .expect("projects");
+            assert!(
+                matches!(
+                    adjunct.evidence[0],
+                    Issue31EvidenceChain::Unavailable { .. }
+                ),
+                "removing {hop} must break the chain"
+            );
+        }
+    }
+
+    /// Falsification: the two hop DETAILS -- the diff counts and the exact
+    /// command -- are optional to the phone contract but required by the
+    /// desktop inspector, which shows them as their own fields. Removing either
+    /// therefore leaves the phone chain complete and refuses the panel view,
+    /// and this pins that difference rather than leaving it to be discovered.
+    #[test]
+    fn removing_a_hop_detail_refuses_the_panel_view() {
+        for detail in ["testCommand", "diffSummary"] {
+            let mut report = live("get_report", DONE_REPORT);
+            report["evidence"]
+                .as_object_mut()
+                .expect("evidence object")
+                .remove(detail);
+            assert!(
+                crate::evidence_chain::FullAutoEvidenceView::from_records(
+                    &report,
+                    &live("get_receipt", DONE_RECEIPT)
+                )
+                .is_none(),
+                "the inspector must refuse a chain missing {detail}"
+            );
+        }
+    }
+
+    /// The typed terminal reason is the host's, and the free-text explanation
+    /// beside it is never read as one.
+    ///
+    /// A live finished run states `terminal.full_auto.completed.control_api`,
+    /// built from its own typed state and the actor that ended it. Strip that
+    /// and the projection reports `reason.full-auto.unrecorded` -- an honest
+    /// gap -- rather than mining the sentence "host verified the done
+    /// condition" for a classification nobody recorded.
+    #[test]
+    fn the_terminal_reason_is_typed_and_never_read_out_of_the_prose() {
+        let adjunct = finished_sources(DONE_STARTED_AT_MS + 120_000, &[]).expect("projects");
+        assert_eq!(
+            adjunct.runs[0]
+                .terminal_reason_ref
+                .as_ref()
+                .map(PublicRef::as_str),
+            Some("terminal.full_auto.completed.control_api")
+        );
+
+        let mut run = live("get_run", DONE_RUN);
+        assert!(
+            run.get("terminalReason")
+                .and_then(Value::as_str)
+                .is_some_and(|reason| reason.contains("verified")),
+            "the free-text explanation is still there to be misread"
+        );
+        run["terminalReasonRef"] = json!(null);
+        let adjunct = project_issue31_full_auto_adjunct(&Issue31FullAutoLiveSources {
+            host_ref: "host.omega.device-alpha",
+            snapshot_ref: "snapshot.omega.issue31.finished-unit",
+            generated_at_ms: DONE_STARTED_AT_MS + 120_000,
+            host_generation: HOST_GENERATION,
+            run_details: &[run],
+            capacity: &live("get_capacity", DONE_CAPACITY),
+            handoffs: &[],
+            evidence: &[],
+        })
+        .expect("projects with an explicit gap");
+        assert_eq!(
+            adjunct.runs[0]
+                .terminal_reason_ref
+                .as_ref()
+                .map(PublicRef::as_str),
+            Some("reason.full-auto.unrecorded")
+        );
+    }
+
+    /// Falsification: a lifecycle state this contract does not model is a
+    /// refusal, never a guess at the nearest one.
+    #[test]
+    fn an_unmodelled_lifecycle_state_is_refused() {
+        let mut run = live("get_run", DONE_RUN);
+        run["state"] = json!("hibernating");
+        let error = project_issue31_full_auto_adjunct(&Issue31FullAutoLiveSources {
+            host_ref: "host.omega.device-alpha",
+            snapshot_ref: "snapshot.omega.issue31.finished-unit",
+            generated_at_ms: DONE_STARTED_AT_MS + 120_000,
+            host_generation: HOST_GENERATION,
+            run_details: &[run],
+            capacity: &live("get_capacity", DONE_CAPACITY),
+            handoffs: &[],
+            evidence: &[],
+        })
+        .expect_err("must refuse");
+        assert_eq!(error, Issue31FullAutoProjectionError::UnknownLifecycle);
     }
 
     #[test]
