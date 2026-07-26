@@ -1,36 +1,24 @@
-//! The zero-base surface: the gate that refuses, the palette restriction, and
-//! the visible control that leaves.
+//! The zero-base surface: the gate that refuses and the palette restriction.
 //!
 //! omega#99. The mode itself lives in `crates/omega_zero_base`, which reads the
 //! process command line and nothing else. This module is what a person sees and
-//! touches: what the palette lists, what a refused key binding says, and the
-//! one control that puts the editor back.
+//! touches: what the palette lists and what a refused key binding says.
+//!
+//! `OMEGA-DELTA-0052`, omega#100. This module used to own a third thing — the
+//! status-bar control that put the editor back. The owner asked for it to go:
+//! *"remove the 'zero base / leave zero base' buttons. they must be stuck in
+//! zero base with no way out if it was started in this mode."* So the control,
+//! the `Leave` action, and the runtime unwind that put the panels back are all
+//! removed. What is left is the half that was always the load-bearing half:
+//! a hidden surface is only safe while something refuses it at dispatch.
 
-use gpui::{
-    Action, App, AppContext as _, Context, IntoElement, ParentElement, Render, Styled, Window,
-    actions,
-};
-use omega_zero_base::{ADMITTED_ACTIONS, ADMITTED_NAMESPACES, BANNER_LABEL, LEAVE_LABEL};
-use ui::{
-    Button, ButtonCommon, Clickable, Color, FluentBuilder as _, Label, LabelCommon, LabelSize,
-    Tooltip, h_flex,
-};
-use workspace::{
-    HideStatusItem, StatusItemView, Toast, Workspace, item::ItemHandle,
-    notifications::NotificationId,
-};
-
-actions!(
-    omega_zero_base,
-    [
-        /// Leaves zero base and puts the full Omega surface back in this window.
-        Leave
-    ]
-);
+use gpui::App;
+use omega_zero_base::{ADMITTED_ACTIONS, ADMITTED_NAMESPACES};
+use workspace::{Toast, Workspace, notifications::NotificationId};
 
 /// Install the refusal gate and the palette restriction, once, at app init.
 ///
-/// Only called when the process was started with the flag. Without it nothing
+/// Only called when the process started in zero base. Without that, nothing
 /// here runs and Omega's behaviour is byte-identical to a build that never had
 /// this module.
 pub fn init(cx: &mut App) {
@@ -95,95 +83,19 @@ fn report_refusal(action_name: &'static str, cx: &mut App) {
     });
 }
 
-/// Put the zero-base control on this workspace and register the way out.
-///
-/// Called from `initialize_workspace` in place of the ordinary status-bar
-/// items, so in zero base the status bar carries this one control and nothing
-/// else.
-///
-/// `restore_panels` is the caller's, because the two binaries that build this
-/// surface load panels differently: the app calls `initialize_panels`, and the
-/// visual runner adds the one panel it photographs by hand.
-pub fn install_on_workspace(
-    workspace: &mut Workspace,
-    window: &mut Window,
-    cx: &mut Context<Workspace>,
-    restore_panels: impl Fn(&mut Workspace, &mut Window, &mut Context<Workspace>) + 'static,
-) {
-    let restore_panels = std::rc::Rc::new(restore_panels);
-    workspace.register_action(move |workspace, _: &Leave, window, cx| {
-        leave(workspace, window, cx);
-        restore_panels(workspace, window, cx);
-    });
-
-    let control = cx.new(|_| ZeroBaseStatusItem);
-    workspace.status_bar().update(cx, |status_bar, cx| {
-        status_bar.add_left_item(control, window, cx);
-    });
-}
-
-/// Leave zero base inside the window a person is already looking at.
-///
-/// The mode goes off, the palette restriction is lifted, the gate stops
-/// refusing, and the zoomed Exo panel goes back to being one panel among the
-/// rest. Entry is not re-readable, so nothing re-enters.
-fn leave(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
-    omega_zero_base::leave();
-    command_palette_hooks::CommandPaletteFilter::update_global(cx, |filter, _| {
-        filter.clear_restriction();
-    });
-    cx.clear_action_gate();
-
-    if let Some(panel) = workspace.panel::<agent_ui::AgentPanel>(cx) {
-        panel.update(cx, |panel, cx| {
-            use workspace::dock::Panel as _;
-            panel.set_zoomed(false, window, cx);
-        });
-    }
-    cx.notify();
-}
-
-/// The visible way out, on the status bar.
-struct ZeroBaseStatusItem;
-
-impl Render for ZeroBaseStatusItem {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let active = omega_zero_base::is_active();
-        h_flex()
-            .gap_2()
-            .when(active, |this| {
-                this.child(
-                    Label::new(BANNER_LABEL)
-                        .size(LabelSize::Small)
-                        .color(Color::Accent),
-                )
-                .child(
-                    Button::new("omega-zero-base-leave", LEAVE_LABEL)
-                        .label_size(LabelSize::Small)
-                        .tooltip(Tooltip::text(format!(
-                            "{BANNER_LABEL} shows one Exo thread and nothing else. \
-                             This puts the rest of Omega back in this window."
-                        )))
-                        .on_click(cx.listener(|_, _, window, cx| {
-                            window.dispatch_action(Leave.boxed_clone(), cx);
-                        })),
-                )
-            })
-    }
-}
-
-impl StatusItemView for ZeroBaseStatusItem {
-    fn set_active_pane_item(
-        &mut self,
-        _active_pane_item: Option<&dyn ItemHandle>,
-        _window: &mut Window,
-        _cx: &mut Context<Self>,
-    ) {
-    }
-
-    /// `None`: this control is conditional on the process command line, and a
-    /// settings file must not be able to hide the way out of the mode.
-    fn hide_setting(&self, _cx: &App) -> Option<HideStatusItem> {
-        None
-    }
-}
+// OMEGA-DELTA-0052. The way out used to live below this line: a status-bar
+// item, the workspace installer that added it, the action it dispatched, and
+// the unwind that lifted the palette restriction and the action gate and
+// un-zoomed the panel. All of it is gone rather than hidden.
+//
+// Hiding the control would have been the cheap version — one `when(false)` and
+// the button disappears — and it would have left the mode's exit on the crate,
+// the action in the registry, and the restriction still liftable at runtime.
+// The owner asked for no way out, and a way out that is merely not drawn is
+// still one dispatch away. That is the exact reasoning `OMEGA-DELTA-0048` uses
+// about every other hidden surface, and the answer here is different only
+// because this one is not hidden: it does not exist.
+//
+// Nothing else was deleted. The mode still hides by filter and refusal and
+// still removes no keymap binding, because the removed action was Omega's own
+// with no shipped binding — `keymaps_name_no_deleted_action` covers the rest.

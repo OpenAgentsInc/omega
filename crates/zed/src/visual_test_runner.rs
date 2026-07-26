@@ -151,20 +151,16 @@ use {
     zed_actions::OpenSettingsAt,
 };
 
-// omega#99. The zero-base surface, compiled into this binary from the same file
-// the shipped `omega` binary compiles. The baseline has to photograph the code
-// that ships; a stand-in status-bar control here would photograph a claim about
-// zero base rather than zero base.
+// OMEGA-DELTA-0052, omega#100. The `omega_zero_base_ui` module used to be
+// compiled into this binary too, because the runner installed the mode's
+// status-bar control by hand before photographing a zero-base scene.
 //
-// `dead_code` because this binary uses only `install_on_workspace`: the palette
-// restriction and the action gate are proven by `command_palette_hooks`'
-// restriction test and by gpui's action-gate keystroke test, neither of which a
-// screenshot could show.
-#[cfg(all(target_os = "macos", feature = "visual-tests"))]
-#[allow(dead_code)]
-#[path = "omega_zero_base_ui.rs"]
-mod omega_zero_base_ui;
-
+// That control is gone. What is left in that module — the palette restriction
+// and the action gate — is proven by `command_palette_hooks`' restriction test
+// and by gpui's action-gate keystroke test, neither of which a screenshot could
+// show, so the runner no longer compiles it at all. The scenes still photograph
+// the shipped surface: the difference between the two pairs is now entirely
+// what `omega_zero_base::is_active()` makes the panel and the composer render.
 // All macOS-specific constants grouped together
 #[cfg(target_os = "macos")]
 mod constants {
@@ -3098,12 +3094,19 @@ fn run_omega_exo_visual_tests(
         update_baseline,
     )?;
 
-    // omega#99. The zero-base scenes come last, and the mode is never left.
-    // `omega_zero_base` is a process-global entered once from the command line;
-    // `leave` turns it off permanently within the process, so a scene recorded
-    // after a leave would not be zero base at all. Entering here rather than in
-    // `main` also keeps the two scenes above photographing the ordinary
-    // surface, which is what makes the pair of pairs worth having.
+    // omega#99. The zero-base scenes come last, and the order is the mechanism.
+    // `omega_zero_base` is a process-global entered once and, since
+    // `OMEGA-DELTA-0052`, never left, so the two scenes above are ordinary only
+    // because they were taken before this line. That is what makes the pair of
+    // pairs worth having, and `run_omega_exo_visual_capture` asserts it per
+    // scene rather than trusting the reading order of this function.
+    //
+    // OMEGA-DELTA-0052. Zero base is now the shipped default for `omega`, and
+    // this runner is unaffected by that: it is a separate binary with its own
+    // `main`, it never parses `Args`, and the only thing that turns the mode on
+    // in this process is the call below. So the ordinary-surface baselines still
+    // photograph something that happens — a person who starts Omega with
+    // `--full-editor` sees exactly it.
     omega_zero_base::enter_from_command_line();
     anyhow::ensure!(
         omega_zero_base::is_active(),
@@ -3229,25 +3232,32 @@ fn run_omega_exo_visual_capture(
         .context("failed to open the Exo workspace window")?;
     cx.run_until_parked();
 
-    // omega#99. Zero base's status bar carries one control — the visible way
-    // out — and none of the editor's own indicators. This is the same call
-    // `initialize_workspace` makes in the shipped binary. The `restore_panels`
-    // argument is a no-op here because this runner adds by hand the one panel
-    // it photographs, which is exactly the difference the argument exists for.
-    if surface == ExoSceneSurface::ZeroBase {
-        workspace_window
-            .update(cx, |workspace, window, cx| {
-                omega_zero_base_ui::install_on_workspace(
-                    workspace,
-                    window,
-                    cx,
-                    |_workspace, _window, _cx| {},
-                );
-            })
-            .context("failed to install the zero-base surface")?;
-        cx.run_until_parked();
-    }
-
+    // OMEGA-DELTA-0052, omega#100. Zero base's status bar is empty now.
+    //
+    // This is where the runner used to call `install_on_workspace` to add the
+    // mode's one status-bar control before capturing. There is no control, so
+    // there is nothing to install, and the scene is what the shipped binary
+    // draws for the same reason it was before: the mode flag is on and the
+    // surfaces that read it render the subtracted form.
+    //
+    // What is left is worth asserting, because it is the property the pair of
+    // pairs rests on and it is now the *only* thing that separates them. The
+    // mode is a process global, entered once and never left, so a scene ordered
+    // wrongly would photograph the subtracted surface and file it under the
+    // ordinary one — and the baseline would look plausible.
+    anyhow::ensure!(
+        omega_zero_base::is_active() == (surface == ExoSceneSurface::ZeroBase),
+        "{test_name} asks for {}, and zero base is {}",
+        match surface {
+            ExoSceneSurface::ZeroBase => "the subtracted surface",
+            ExoSceneSurface::FullEditor => "the ordinary surface",
+        },
+        if omega_zero_base::is_active() {
+            "on"
+        } else {
+            "off"
+        }
+    );
     let (weak_workspace, async_window_cx) = workspace_window
         .update(cx, |workspace, window, cx| {
             (workspace.weak_handle(), window.to_async(cx))

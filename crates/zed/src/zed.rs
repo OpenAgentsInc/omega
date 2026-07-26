@@ -105,8 +105,8 @@ use workspace::{
 };
 use workspace::{Pane, notifications::DetachAndPromptErr};
 use zed_actions::{
-    About, GetMerch, OpenAccountSettings, OpenBrowser, OpenDocs, OpenProjectTasks,
-    OpenServerSettings, OpenSettingsFile, OpenStatusPage, OpenAppUrl, Quit,
+    About, GetMerch, OpenAccountSettings, OpenAppUrl, OpenBrowser, OpenDocs, OpenProjectTasks,
+    OpenServerSettings, OpenSettingsFile, OpenStatusPage, Quit,
 };
 
 const DOCS_URL: &str = app_identity::PRODUCT_DOCS_URL;
@@ -594,21 +594,14 @@ pub fn initialize_workspace(app_state: Arc<AppState>, cx: &mut App) {
             }
         }
 
-        // omega#99. Zero base draws one control on the status bar — the visible
-        // way out — and none of the editor's own indicators. They are not
-        // rendered rather than removed: without the flag the block below runs
-        // exactly as it always has.
+        // omega#99. Zero base draws none of the editor's own status-bar
+        // indicators. They are not rendered rather than removed: with
+        // `--full-editor` the block below runs exactly as it always has.
+        //
+        // OMEGA-DELTA-0052, omega#100. It used to draw one control here — the
+        // visible way out — and that control is gone with the mode's exit. The
+        // status bar in zero base is now empty rather than carrying one button.
         if omega_zero_base::is_active() {
-            crate::omega_zero_base_ui::install_on_workspace(
-                workspace,
-                window,
-                cx,
-                |workspace, window, cx| {
-                    let panels_task = initialize_panels(window, cx);
-                    workspace.set_panels_task(panels_task);
-                },
-            );
-
             let panels_task = initialize_panels(window, cx);
             workspace.set_panels_task(panels_task);
             register_actions(app_state.clone(), workspace, window, cx);
@@ -869,6 +862,21 @@ pub(crate) fn initialize_panels(
                         });
                     }
                     workspace.focus_panel::<agent_ui::AgentPanel>(window, cx);
+                    // OMEGA-DELTA-0053. Seal the window here and nowhere else.
+                    //
+                    // After the identity gate, and after the thread is open,
+                    // because sealing stops the workspace rendering a centre
+                    // pane and `OMEGA-DELTA-0040`'s identity onboarding is a
+                    // centre-pane item. Sealing earlier would leave a fresh
+                    // profile with no surface to answer the identity gate on,
+                    // which is a worse dead end than the one
+                    // `OMEGA-DELTA-0051` repaired.
+                    //
+                    // From here the editor is not rendered rather than covered
+                    // by the zoom above, so a control that survives the action
+                    // gate cannot put it back.
+                    omega_zero_base::seal();
+                    cx.notify();
                 })
                 .log_err();
 

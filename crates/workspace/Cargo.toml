@@ -49,6 +49,9 @@ log.workspace = true
 menu.workspace = true
 markdown.workspace = true
 node_runtime.workspace = true
+# OMEGA-DELTA-0053. A leaf crate with no dependencies of its own: it reads the
+# process command line once and answers two questions about it.
+omega_zero_base.workspace = true
 parking_lot.workspace = true
 postage.workspace = true
 project.workspace = true

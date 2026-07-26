@@ -160,13 +160,11 @@ pub use workspace_settings::{
 };
 use zed_actions::{Spawn, feedback::FileBugReport, theme::ToggleMode};
 
-use crate::{dock::PanelSizeState, item::ItemBufferKind, notifications::NotificationId};
-use crate::{
-    persistence::{
-        SerializedAxis,
-        model::{SerializedItem, SerializedPane, SerializedPaneGroup},
-    },
+use crate::persistence::{
+    SerializedAxis,
+    model::{SerializedItem, SerializedPane, SerializedPaneGroup},
 };
+use crate::{dock::PanelSizeState, item::ItemBufferKind, notifications::NotificationId};
 
 pub const SERIALIZATION_THROTTLE_TIME: Duration = Duration::from_millis(200);
 
@@ -4466,6 +4464,25 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // OMEGA-DELTA-0053. A sealed zero base reveals nothing, because there
+        // is nothing behind the thread to reveal.
+        //
+        // This is the function the owner reached by pressing the sidebar
+        // control: it closes every dock that is not the one being revealed and
+        // clears the zoom. In zero base that closed the one panel the window
+        // has and put the editor's "Welcome back to Omega" surface on screen,
+        // with New File, Open Project, Open Settings and Explore Extensions on
+        // it. The mode's premise is that those are not present.
+        //
+        // Returning early is not what hides them — the render does that, and it
+        // draws no centre pane, no tab bar, no title bar and no status bar once
+        // the mode is sealed. This keeps the one panel open and filling the
+        // window, so a control that survives the action gate cannot leave a
+        // person looking at an empty background either.
+        if omega_zero_base::is_sealed() {
+            return;
+        }
+
         // If a center pane is zoomed, unzoom it.
         for pane in &self.panes {
             if pane != &self.active_pane || dock_to_reveal.is_some() {
@@ -8501,7 +8518,6 @@ impl Workspace {
             theme_settings::set_mode(settings, next_mode);
         });
     }
-
 }
 
 pub trait AnyActiveCall {
@@ -8979,6 +8995,28 @@ impl Render for Workspace {
         };
         let ui_font = theme_settings::setup_ui_font(window, cx);
 
+        // OMEGA-DELTA-0053. Once zero base's surface owns the window, the
+        // editor around it is **not rendered** rather than covered.
+        //
+        // The mode used to hide the editor by zooming the agent panel over it,
+        // and the comment in `crates/zed/src/zed.rs` said so: "Zooming is what
+        // takes the editor pane and the tab bar off the screen". It was one
+        // control away from being false. Pressing the sidebar toggle released
+        // the zoom and revealed the whole editor — the welcome surface, the
+        // command palette entry point, Open Settings, Explore Extensions —
+        // inside a mode that claims none of them are present. Removing the
+        // "Leave zero base" button while that was still true would have made
+        // the mode look sealed rather than be sealed, which is worse than a
+        // leak somebody can see.
+        //
+        // The seal is deliberately later than the mode. `OMEGA-DELTA-0040`'s
+        // identity onboarding is a centre-pane item, so a window with no centre
+        // pane could never show it and a fresh profile would have nowhere to
+        // answer the identity gate. The mode therefore renders the ordinary
+        // workspace until the gate is answered and the thread is open, and only
+        // then seals.
+        let zero_base_sealed = omega_zero_base::is_sealed();
+
         let theme = cx.theme().clone();
         let colors = theme.colors();
         let notification_entities = self
@@ -9014,36 +9052,43 @@ impl Render for Workspace {
             // a tab group: region navigation lands on the first control (per
             // the ARIA toolbar pattern), Tab steps through them, and arrow keys
             // move between them once focus is inside.
-            .when_some(self.titlebar_item.clone(), |this, item| {
-                this.child(
-                    div()
-                        .id("titlebar-region")
-                        .track_focus(&self.titlebar_focus_handle)
-                        .tab_group()
-                        .role(gpui::Role::Toolbar)
-                        .aria_label("Title bar")
-                        .on_key_down(cx.listener(
-                            |workspace, event: &gpui::KeyDownEvent, window, cx| {
-                                if event.keystroke.modifiers.modified() {
-                                    return;
-                                }
-                                match event.keystroke.key.as_str() {
-                                    "right" => {
-                                        workspace.move_titlebar_item_focus(true, window, cx);
-                                        cx.stop_propagation();
+            // OMEGA-DELTA-0053. No title bar in a sealed zero base. Its
+            // controls are ordinary click listeners rather than dispatched
+            // actions, so the action gate never sees them — the sidebar toggle
+            // that exposed the editor is one of them.
+            .when_some(
+                self.titlebar_item.clone().filter(|_| !zero_base_sealed),
+                |this, item| {
+                    this.child(
+                        div()
+                            .id("titlebar-region")
+                            .track_focus(&self.titlebar_focus_handle)
+                            .tab_group()
+                            .role(gpui::Role::Toolbar)
+                            .aria_label("Title bar")
+                            .on_key_down(cx.listener(
+                                |workspace, event: &gpui::KeyDownEvent, window, cx| {
+                                    if event.keystroke.modifiers.modified() {
+                                        return;
                                     }
-                                    "left" => {
-                                        workspace.move_titlebar_item_focus(false, window, cx);
-                                        cx.stop_propagation();
+                                    match event.keystroke.key.as_str() {
+                                        "right" => {
+                                            workspace.move_titlebar_item_focus(true, window, cx);
+                                            cx.stop_propagation();
+                                        }
+                                        "left" => {
+                                            workspace.move_titlebar_item_focus(false, window, cx);
+                                            cx.stop_propagation();
+                                        }
+                                        _ => {}
                                     }
-                                    _ => {}
-                                }
-                            },
-                        ))
-                        .w_full()
-                        .child(item),
-                )
-            })
+                                },
+                            ))
+                            .w_full()
+                            .child(item),
+                    )
+                },
+            )
             .on_modifiers_changed(move |_, _, cx| {
                 for &id in &notification_entities {
                     cx.notify(id);
@@ -9150,7 +9195,37 @@ impl Render for Workspace {
                                 ))
                             })
                             .child({
-                                match bottom_dock_layout {
+                                // OMEGA-DELTA-0053. A sealed zero base draws
+                                // its docks and no centre. `render_center` is
+                                // the editor pane group and its tab bar, and
+                                // the welcome surface the owner was shown is an
+                                // item inside it. Not calling it is what makes
+                                // the mode a subtraction rather than a cover.
+                                if zero_base_sealed {
+                                    div()
+                                        .flex()
+                                        .flex_row()
+                                        .h_full()
+                                        .children(self.render_dock(
+                                            DockPosition::Left,
+                                            &self.left_dock,
+                                            window,
+                                            cx,
+                                        ))
+                                        .children(self.render_dock(
+                                            DockPosition::Right,
+                                            &self.right_dock,
+                                            window,
+                                            cx,
+                                        ))
+                                        .children(self.render_dock(
+                                            DockPosition::Bottom,
+                                            &self.bottom_dock,
+                                            window,
+                                            cx,
+                                        ))
+                                } else {
+                                    match bottom_dock_layout {
                                     BottomDockLayout::Full => div()
                                         .flex()
                                         .flex_col()
@@ -9385,6 +9460,7 @@ impl Render for Workspace {
                                             cx,
                                         )),
                                 }
+                                }
                             })
                             .children(self.zoomed.as_ref().and_then(|view| {
                                 let zoomed_view = view.upgrade()?;
@@ -9411,7 +9487,11 @@ impl Render for Workspace {
                             }))
                             .children(self.render_notifications(window, cx)),
                     )
-                    .when(self.status_bar_visible(cx), |parent| {
+                    // OMEGA-DELTA-0053. No status bar in a sealed zero base.
+                    // The one control it used to carry was the way out, and
+                    // `OMEGA-DELTA-0052` removed that; the editor's own
+                    // indicators were never rendered here in the first place.
+                    .when(self.status_bar_visible(cx) && !zero_base_sealed, |parent| {
                         parent.child(self.status_bar.clone())
                     })
                     .child(self.toast_layer.clone()),
@@ -16977,8 +17057,9 @@ mod tests {
         workspace.update_in(cx, |_workspace, _window, cx| {
             *SystemAppearance::global_mut(cx) = SystemAppearance(theme::Appearance::Light);
             settings::update_settings_file(settings_fs.clone(), cx, |settings, _cx| {
-                settings.theme.theme =
-                    Some(ThemeSelection::Static(ThemeName(SEEDED_STATIC_THEME.into())));
+                settings.theme.theme = Some(ThemeSelection::Static(ThemeName(
+                    SEEDED_STATIC_THEME.into(),
+                )));
             });
         });
         cx.executor().advance_clock(Duration::from_millis(200));

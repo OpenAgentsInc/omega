@@ -20,6 +20,26 @@
 //! store. [`enter_from_command_line`] is the only way in, and the only caller
 //! is the argument parser in `crates/zed/src/main.rs`.
 //!
+//! # Which way the default points
+//!
+//! `OMEGA-DELTA-0052`, omega#100. Zero base is what `omega` does with no
+//! arguments, and the editor is what [`FULL_EDITOR_FLAG`] asks for. The owner
+//! said it in as many words: *"they must be stuck in zero base with no way out
+//! if it was started in this mode. which must be the default starting now.
+//! booting the full editor must require a separate flag."*
+//!
+//! The reader did not move. `OMEGA-DELTA-0047` is about *where* the mode is
+//! read from — the parsed command line, once, never a settings key — and that
+//! is unchanged. What changed is which way the boolean points when nobody says
+//! anything.
+//!
+//! # There is no way out
+//!
+//! `OMEGA-DELTA-0052`. A process that starts in zero base stays in zero base
+//! until it exits. There is no `leave`, no status-bar control, and no action
+//! that puts the editor back, because the owner asked for exactly that. Ending
+//! the process is still a complete repair: the mode is never written to disk.
+//!
 //! # What the mode does
 //!
 //! Three mechanisms, and the distinction decides what breaks:
@@ -29,32 +49,46 @@
 //!   capability behind an unrendered surface is still one key press away.
 //! - **Disabled.** Everything outside [`ADMITTED_NAMESPACES`] and
 //!   [`ADMITTED_ACTIONS`] is refused at dispatch with [`refusal`] — one sentence
-//!   that names the mode and the way out of it. Never a silent no-op.
-//! - **Removed.** Nothing. The same binary is a full editor without the flag.
-//!   An unresolvable key binding panics Omega before any window opens, so zero
-//!   base deletes no action and edits no keymap file.
+//!   that names the mode and how to start Omega without it. Never a silent
+//!   no-op.
+//! - **Removed.** Nothing. The same binary is a full editor with
+//!   [`FULL_EDITOR_FLAG`]. An unresolvable key binding panics Omega before any
+//!   window opens, so zero base deletes no action and edits no keymap file.
 
 #![deny(missing_docs)]
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
-/// The command-line flag that enters zero base, as a person types it.
+/// The command-line flag that used to enter zero base, as a person types it.
+///
+/// `OMEGA-DELTA-0052`. Zero base is the default now, so this flag asks for what
+/// it already gets. It is still accepted, and it still does nothing else, so
+/// commands and scripts that carry it keep working.
 pub const FLAG: &str = "--zero-base";
 
-/// What a person sees when zero base refuses something, and how they leave.
+/// The command-line flag that asks for the editor around the thread.
+///
+/// `OMEGA-DELTA-0052`. The one way to start Omega as a full editor.
+pub const FULL_EDITOR_FLAG: &str = "--full-editor";
+
+/// What a person sees when zero base refuses something.
 pub const MODE_NAME: &str = "zero base";
 
-/// The label on the visible control that leaves zero base inside the window.
-pub const LEAVE_LABEL: &str = "Leave zero base";
-
-/// The one line the surface shows to say where it is.
-pub const BANNER_LABEL: &str = "Zero base";
-
-/// Was the process started with the flag? Written once, by the argument parser.
+/// Is this process in zero base? Written once, by the argument parser.
+///
+/// One-way for the life of the process. There is no companion static for
+/// leaving, because `OMEGA-DELTA-0052` removed leaving.
 static ENTERED: AtomicBool = AtomicBool::new(false);
 
-/// Has a person used the visible control to leave? Never written back to true.
-static LEFT: AtomicBool = AtomicBool::new(false);
+/// Has zero base's own surface taken the window over yet?
+///
+/// `OMEGA-DELTA-0053`. Written once, by the workspace initialiser, after the
+/// identity gate has been answered and the thread is open. Before that the
+/// ordinary workspace has to render, because `OMEGA-DELTA-0040`'s identity
+/// onboarding is a centre-pane item and a window with no centre pane could
+/// never show it — which would be a worse dead end than the one
+/// `OMEGA-DELTA-0051` just repaired.
+static SEALED: AtomicBool = AtomicBool::new(false);
 
 /// The namespaces zero base admits.
 ///
@@ -68,14 +102,16 @@ static LEFT: AtomicBool = AtomicBool::new(false);
 /// - `menu`, `picker` and `command_palette` are how the palette opens and how a
 ///   person moves inside it.
 /// - `markdown` is copying out of the transcript.
-/// - `omega_zero_base` is the way out.
+///
+/// `OMEGA-DELTA-0052` removed `omega_zero_base` from this list. That namespace
+/// held one action, `Leave`, and there is no leaving now. An admitted namespace
+/// with nothing in it is a door left standing where the room was demolished.
 pub const ADMITTED_NAMESPACES: &[&str] = &[
     "agent",
     "command_palette",
     "editor",
     "markdown",
     "menu",
-    "omega_zero_base",
     "picker",
 ];
 
@@ -119,31 +155,57 @@ pub const ADMITTED_ACTIONS: &[&str] = &[
 
 /// Enter zero base, from the parsed command line and from nowhere else.
 ///
-/// Idempotent, and one-way within a process: a person leaves with
-/// [`leave`], and nothing re-enters. The mode is never written to disk, so
-/// ending the process is always a complete repair.
+/// Idempotent, and one-way for the life of the process: `OMEGA-DELTA-0052`
+/// removed the way out, so nothing turns this off again. The mode is never
+/// written to disk, so ending the process is always a complete repair.
+///
+/// The name still says where the mode comes from, and that is still true after
+/// `OMEGA-DELTA-0052`: the caller is the argument parser, and it calls this when
+/// the parsed command line asked for no editor. A default is a decision made
+/// from the command line as much as a flag is.
 pub fn enter_from_command_line() {
     ENTERED.store(true, Ordering::SeqCst);
-}
-
-/// Leave zero base, from the visible control in the window.
-///
-/// The full surface comes back in the running window. A viewer who cannot leave
-/// a demonstration will not trust the demonstration.
-pub fn leave() {
-    LEFT.store(true, Ordering::SeqCst);
 }
 
 /// Is zero base on right now?
 #[must_use]
 pub fn is_active() -> bool {
-    ENTERED.load(Ordering::SeqCst) && !LEFT.load(Ordering::SeqCst)
+    ENTERED.load(Ordering::SeqCst)
 }
 
-/// Did this process start in zero base, whether or not a person has left?
+/// Did this process start in zero base?
+///
+/// The same answer as [`is_active`] since `OMEGA-DELTA-0052`, and kept separate
+/// because the two questions are asked for different reasons: this one decides
+/// what to install once at startup, and [`is_active`] is asked on every render.
 #[must_use]
 pub fn entered_from_command_line() -> bool {
     ENTERED.load(Ordering::SeqCst)
+}
+
+/// Zero base's surface now owns the window. One-way, like entry.
+///
+/// `OMEGA-DELTA-0053`. Called by the workspace initialiser once the identity
+/// gate is answered and the thread is open. It does nothing outside zero base,
+/// so a build started with the editor flag cannot be sealed by a stray call.
+pub fn seal() {
+    if is_active() {
+        SEALED.store(true, Ordering::SeqCst);
+    }
+}
+
+/// Has zero base's surface taken the window over?
+///
+/// `OMEGA-DELTA-0053`. While this is true the workspace renders no editor pane,
+/// no tab bar, no title bar and no status bar — they are **not rendered**,
+/// rather than covered by a zoomed panel. Hiding the editor by zooming a panel
+/// over it was the previous mechanism, and one sidebar toggle released the zoom
+/// and put Zed's whole "Welcome back" surface on the screen, with New File,
+/// Open Project, Open Settings and Explore Extensions on it, inside a mode
+/// whose premise is that those are not present.
+#[must_use]
+pub fn is_sealed() -> bool {
+    is_active() && SEALED.load(Ordering::SeqCst)
 }
 
 /// Does zero base admit this action name?
@@ -159,14 +221,18 @@ pub fn admits_action(name: &str) -> bool {
 
 /// The one sentence a refused action answers with.
 ///
-/// It names the action, the mode, and the way out. A refusal a person cannot
-/// read is the same thing as a silent no-op.
+/// It names the action, the mode, and how to start Omega without the mode. A
+/// refusal a person cannot read is the same thing as a silent no-op.
+///
+/// `OMEGA-DELTA-0052` changed the second half of the sentence. It used to name
+/// a control in the window, and that control is gone: there is no way out of a
+/// running zero base, so a sentence that offered one would be a lie a person
+/// would go looking for.
 #[must_use]
 pub fn refusal(action_name: &str) -> String {
     format!(
         "{action_name} is off in {MODE_NAME}, which shows one Exo thread and \
-         nothing else. Choose \u{201c}{LEAVE_LABEL}\u{201d} in the window, or \
-         start Omega without {FLAG}."
+         nothing else. Start Omega with {FULL_EDITOR_FLAG} for the editor."
     )
 }
 
@@ -174,9 +240,17 @@ pub fn refusal(action_name: &str) -> String {
 mod tests {
     use super::*;
 
-    /// The mode reader names the command line. Nothing here reads a settings
-    /// store, an environment variable or a file, and the source check in
-    /// `crates/omega_deltas/` asserts the same thing about this file's text.
+    /// The mode reader names the command line, and once it is on it stays on.
+    ///
+    /// `OMEGA-DELTA-0052`. This test used to end by leaving and proving nothing
+    /// re-entered. There is no leaving now, so it ends by proving the opposite
+    /// property: the mode is one-way for the life of the process.
+    ///
+    /// The static starts `false` here even though zero base is the shipped
+    /// default, and that is the point of the split: the default lives in the
+    /// argument parser in `crates/zed/src/main.rs`, not in this crate. A crate
+    /// that defaulted itself to on would be a second reader of the mode, which
+    /// `OMEGA-DELTA-0047` refuses.
     #[test]
     fn the_mode_is_off_until_the_command_line_turns_it_on() {
         // The statics are process-wide, so this test owns the transitions and
@@ -188,29 +262,34 @@ mod tests {
         assert!(is_active());
         assert!(entered_from_command_line());
 
-        leave();
-        assert!(!is_active(), "the visible control must leave the mode");
-        assert!(
-            entered_from_command_line(),
-            "leaving does not rewrite how the process started"
-        );
-
         enter_from_command_line();
         assert!(
-            !is_active(),
-            "nothing re-enters zero base inside a process that left it"
+            is_active(),
+            "entering twice is the same as entering once, and nothing turns the \
+             mode off inside a process"
         );
+
+        // OMEGA-DELTA-0053. Sealing is a second one-way step, after the
+        // identity gate, and it is what stops the editor being one un-zoom
+        // away. It happens inside this test because the statics are
+        // process-wide and this test owns the transitions.
+        assert!(
+            !is_sealed(),
+            "entering zero base does not seal the window on its own; the \
+             identity gate renders in the ordinary workspace first"
+        );
+        seal();
+        assert!(is_sealed());
     }
 
     #[test]
-    fn the_admitted_set_is_the_exo_surface_and_the_way_out() {
+    fn the_admitted_set_is_the_exo_surface_and_nothing_else() {
         for admitted in [
             "agent::Chat",
             "agent::ToggleFocus",
             "editor::Backspace",
             "menu::Confirm",
             "command_palette::Toggle",
-            "omega_zero_base::Leave",
             "omega::Quit",
             // omega#99. The action that releases `await_identity_ready`.
             // Without it a fresh profile can reach identity onboarding and
@@ -238,17 +317,27 @@ mod tests {
             "onboarding::SignIn",
             "onboarding::OpenAccount",
             "onboarding::ResetHints",
+            // OMEGA-DELTA-0052. The namespace that held the way out. There is
+            // no `Leave` action any more, and admitting a namespace with
+            // nothing in it would leave the door frame standing.
+            "omega_zero_base::Leave",
         ] {
             assert!(!admits_action(refused), "{refused} must be refused");
         }
     }
 
+    /// `OMEGA-DELTA-0052`. The sentence names how to start Omega differently,
+    /// and never a control in the window.
     #[test]
-    fn a_refusal_is_one_readable_sentence_with_the_way_out() {
+    fn a_refusal_is_one_readable_sentence_naming_the_editor_flag() {
         let sentence = refusal("project_panel::ToggleFocus");
         assert!(sentence.contains("project_panel::ToggleFocus"));
         assert!(sentence.contains(MODE_NAME));
-        assert!(sentence.contains(LEAVE_LABEL));
-        assert!(sentence.contains(FLAG));
+        assert!(sentence.contains(FULL_EDITOR_FLAG));
+        assert!(
+            !sentence.contains("Leave"),
+            "there is no way out of a running zero base, so the refusal must \
+             not send a person looking for a button that does not exist: {sentence}"
+        );
     }
 }

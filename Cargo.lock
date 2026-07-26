@@ -21870,6 +21870,7 @@ dependencies = [
  "markdown",
  "menu",
  "node_runtime",
+ "omega_zero_base",
  "parking_lot",
  "postage",
  "pretty_assertions",

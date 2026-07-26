@@ -2436,13 +2436,19 @@ than it sounds, because the harness omega#81's acceptance sentence names —
   one real turn, requires the reply and all three durable references, and then
   records both layouts.
 
-### OMEGA-DELTA-0047 — Zero base is off unless the process was started with the flag
+### OMEGA-DELTA-0047 — Zero base is read from the process command line and from nowhere else
+
+> **`OMEGA-DELTA-0052` changed which way the default points.** This delta is
+> about *where* the mode is read from, and that is unchanged. Zero base is now
+> what `omega` does with no arguments, and `--full-editor` asks for the editor.
+> Read the sentences below as "the command line decides, once", not as "the flag
+> turns it on".
 
 - **Before this change:** Omega had one surface. Every mode-like behaviour it
   had was a setting, and a setting is writable by a project settings file and by
   anything else that can write settings.
-- **Omega now:** `omega --zero-base` opens one window that shows one Exo thread
-  and the controls that operate it. Without the flag Omega is unchanged.
+- **Omega now:** `omega` opens one window that shows one Exo thread and the
+  controls that operate it. `omega --full-editor` is unchanged Omega.
 - **The mode is read from the process command line, once, and from nowhere
   else.** `crates/omega_zero_base/` reads no settings store, no environment
   variable and no file. The only writer of its entry is the argument parser in
@@ -2454,8 +2460,10 @@ than it sounds, because the harness omega#81's acceptance sentence names —
   because `OMEGA-DELTA-0038` requires the packaged gate to open every executable
   that ships.
 - **Nothing persists.** The mode is never written to disk, so ending the process
-  is a complete repair, and a visible control on the status bar leaves it inside
-  the window a person is already looking at.
+  is a complete repair. It used to say here that a visible control on the status
+  bar leaves the mode inside the window. `OMEGA-DELTA-0052` removed that control
+  and the whole leave path with it: a process that starts in zero base stays in
+  zero base until it exits.
 - **Enforced by:** `zero_base_is_entered_only_from_the_command_line` in
   `crates/omega_deltas/`, and the mode's own tests in
   `crates/omega_zero_base/`.
@@ -2476,8 +2484,10 @@ than it sounds, because the harness omega#81's acceptance sentence names —
   to `omega_zero_base::ADMITTED_NAMESPACES` and `ADMITTED_ACTIONS`, and an
   action outside that set is refused at dispatch.
 - **A refusal is a sentence, never a silent no-op.** The refusal names the
-  action, names the mode, and names the two ways out: the visible control in the
-  window, and starting Omega without the flag.
+  action, names the mode, and names the way to get the thing it refused.
+  `OMEGA-DELTA-0052` cut the first of the two ways out it used to name: there is
+  no control in the window any more, so the sentence names `--full-editor` and
+  nothing else.
 - **The gate is the reason "not rendered" is safe.** A surface that is only
   visually absent is still one key press away, so the mode installs an action
   gate consulted before any listener runs, and the two halves are applied
@@ -2529,6 +2539,14 @@ than it sounds, because the harness omega#81's acceptance sentence names —
 - **Enforced by:** `a_zero_base_turn_still_names_its_executor` in
   `crates/omega_deltas/`, and the two committed baselines under
   `crates/zed/test_fixtures/visual_tests/`.
+- **One token in that check changed with `OMEGA-DELTA-0052`.** The check used to
+  require the runner to call `omega_zero_base_ui::install_on_workspace`, which
+  put the mode's status-bar control on the captured workspace. That control no
+  longer exists. What the token protected — "the zero-base scene is built by the
+  shipped surface code, not by a stand-in" — is now protected more directly: the
+  capture refuses to photograph a scene whose declared surface does not match
+  the mode's actual state, so an ordinary-surface baseline cannot be recorded
+  with zero base on, or the reverse.
 - **Scope, and why it was narrowed.** The check reads the bodies of
   `render_executor_disclosure` and `render_executor_pin`, not the whole of
   `thread_view.rs`. It was first written against the whole file, on the
@@ -2621,3 +2639,127 @@ than it sounds, because the harness omega#81's acceptance sentence names —
   any later visit, and the editor-setup journey outside a first run is
   unchanged. This does not make onboarding unclosable, and closing it is still
   the dead end `OMEGA-DELTA-0040` already records.
+
+### OMEGA-DELTA-0052 — Zero base is the default, the editor is a flag, and there is no way out
+
+- **Upstream Zed:** starting the binary with no arguments opens the editor. There
+  is no mode, so there is nothing to leave.
+- **Omega, before this:** `omega` opened the editor and `omega --zero-base`
+  opened one Exo thread. A control on the status bar read "Zero base" beside a
+  button reading "Leave zero base", and pressing it put the editor back in the
+  running window.
+- **Omega now:** `omega` opens zero base. `omega --full-editor` opens the editor.
+  A process that starts in zero base stays in zero base until it exits: the
+  status-bar control, the `Leave` action, and the runtime unwind behind them are
+  removed. The owner asked for exactly this: *"remove the 'zero base / leave zero
+  base' buttons. they must be stuck in zero base with no way out if it was
+  started in this mode. which must be the default starting now. booting the full
+  editor must require a separate flag."*
+- **The reader did not move.** `OMEGA-DELTA-0047` says the mode is read from the
+  parsed process command line, once, and never from a settings key. That is
+  unchanged. What changed is the direction of the default when nobody says
+  anything, and a default decided in the argument parser is still a decision
+  made from the command line.
+- **`--zero-base` is accepted and does nothing.** It asks for what it already
+  gets. Keeping it means commands, scripts and muscle memory that carry it keep
+  working instead of failing on an unknown argument.
+- **A command line that names something to edit implies the editor.** A path, a
+  diff pair, `--dev-container` and `--demo-workroom` each open the editor with no
+  flag. `omega src/main.rs` that opened a single chat thread with no way to reach
+  that file would be a regression, not a subtraction, and zero base does not
+  render the workroom surface `--demo-workroom` exists to open.
+- **Absent, not unrendered — and this is the part that needed the check.** The
+  cheap version of this change is one `when(false)` that hides the button, and
+  it leaves `omega_zero_base::leave` on the crate, the `Leave` action in the
+  registry, and the palette restriction still clearable at runtime. That reads
+  as removed while remaining one dispatch away, which is the failure
+  `OMEGA-DELTA-0048` names about every other hidden surface. So the way out is
+  deleted: no `leave`, no `LEFT` static, no `LEAVE_LABEL`, no `BANNER_LABEL`, no
+  status item, no `clear_restriction`, no `clear_action_gate`, and the
+  `omega_zero_base` namespace is out of the admitted set because the one action
+  it carried is gone.
+- **Nothing else was deleted.** `OMEGA-DELTA-0048` still holds: no shipped keymap
+  binding is removed, and `keymaps_name_no_deleted_action` stays green. `Leave`
+  was Omega's own action with no shipped binding, which is why removing it does
+  not reach the failure that killed `0.2.0-rc6`.
+- **The refusal sentence changed with it.** It used to name two ways out — the
+  control in the window, and starting Omega without the flag. It now names
+  `--full-editor` only. A refusal that offered a button that does not exist would
+  send a person looking for it.
+- **The visual runner is unaffected by the new default, and says so.** It is a
+  separate binary with its own `main`; it never parses `Args`, so nothing turns
+  the mode on in that process except its own explicit call before the two
+  zero-base scenes. The ordinary-surface baselines therefore still photograph
+  something that happens — what a person sees with `--full-editor`. The runner no
+  longer installs a status-bar control, and each capture now asserts that the
+  mode's state matches the surface the scene declares, so a scene recorded in the
+  wrong order fails instead of filing a subtracted window under an ordinary name.
+- **Enforced by:** `zero_base_is_the_default_and_has_no_way_out` in
+  `crates/omega_deltas/`, the mode's own tests in `crates/omega_zero_base/`, and
+  the unchanged `zero_base_hides_by_filter_and_refusal_and_deletes_nothing`.
+- **What this does not cover.** This says nothing about what zero base *shows*.
+  The composer, the transcript and the executor line are `OMEGA-DELTA-0049` and
+  `OMEGA-DELTA-0051`. It also does not make the mode persistent: it is still
+  never written to disk, so ending the process is still a complete repair, and
+  `omega --full-editor` is always available to the person at the keyboard.
+
+### OMEGA-DELTA-0053 — A sealed zero base does not render the editor
+
+- **Upstream Zed:** the workspace is an editor. Panels sit in docks around a
+  centre pane group, and a zoomed panel is drawn over that group rather than
+  instead of it.
+- **Omega, before this:** zero base used the zoom. `initialize_panels` opened the
+  agent panel, called `set_zoomed(true, ...)` and focused it, and the comment in
+  `crates/zed/src/zed.rs` said what that bought: "Zooming is what takes the
+  editor pane and the tab bar off the screen". It was one control away from
+  being false. The owner pressed the sidebar toggle and the zoom was released,
+  and Zed's whole welcome surface appeared — "Welcome back to Omega / Your last
+  IDE", with New File, Open Project, Clone Repository, Open Command Palette,
+  Open Settings, Customize Keymaps, Explore Extensions and Open Agent Panel. His
+  words were "wtf is that".
+- **Why the action gate did not catch it.** The gate refuses *actions*. The
+  control that did this is an ordinary click listener on the title bar that
+  calls a workspace method, so nothing was dispatched and nothing was refused.
+  A gate over actions cannot cover a surface that is merely covered.
+- **Omega now:** once zero base is **sealed**, the workspace renders no centre
+  pane group, no tab bar, no title bar and no status bar. They are not drawn at
+  all rather than drawn and hidden. `dismiss_zoomed_items_to_reveal`, the
+  function the sidebar control reached, returns early in a sealed zero base —
+  it used to close every dock that was not the one being revealed, which in this
+  mode is the one panel the window has.
+- **The seal is later than the mode, and that is load-bearing.**
+  `OMEGA-DELTA-0040`'s identity onboarding is a centre-pane item. A window with
+  no centre pane could never show it, so a mode that sealed at startup would
+  leave a fresh profile with nowhere to answer the identity gate — the same
+  shape of dead end `OMEGA-DELTA-0051` repaired, and worse, because it would be
+  unreachable rather than unanswerable. So the ordinary workspace renders until
+  the identity gate is answered and the thread is open, and
+  `initialize_panels` seals exactly once, at that point.
+- **Removing the button alone would have been dishonest.** `OMEGA-DELTA-0052`
+  removed the way out. Doing that while the editor still sat one un-zoom away
+  would have produced a mode that looks sealed and is not, which is worse than a
+  leak a person can see and name.
+- **The status bar goes with it, and that answers a second complaint.** The owner
+  hovered the status bar's bottom-left icon, read "Close Left Dock ⌘B", pressed
+  it, and nothing happened: `workspace::ToggleLeftDock` is outside the admitted
+  set, so the gate refused it. A control that is drawn and denied is the same
+  "looks one way, is another" failure as the zoom, pointing the other way — it
+  looks available and is not. The general rule is that **if the gate refuses an
+  action, its control must not be drawn**, and not rendering the status bar in a
+  sealed zero base is how every control on it obeys that rule at once, including
+  ones a later crate adds.
+- **`--full-editor` is untouched.** The seal is gated on the mode being active,
+  and `seal()` does nothing when it is not, so a build started with the flag
+  cannot be sealed by a stray call. Every surface above renders exactly as it
+  did.
+- **Enforced by:** `a_sealed_zero_base_renders_no_editor` in
+  `crates/omega_deltas/`, which pins the seal's four render sites, the early
+  return in the reveal path, the requirement that `is_sealed` implies the mode
+  is on, and the ordering of the seal after `await_identity_ready`.
+- **What this does not cover.** This is about what the workspace draws. It says
+  nothing about what the thread surface draws inside it — that is
+  `OMEGA-DELTA-0049` and `OMEGA-DELTA-0051` — and it does not claim the admitted
+  action set is correct, which is `OMEGA-DELTA-0048`'s job. It also cannot be
+  checked by a compiler: the seal is reached only in a process that started in
+  zero base and answered the identity gate, so `cargo check`, `cargo test` and
+  clippy say nothing about whether the window looks right. Only opening it does.

@@ -277,7 +277,29 @@ fn main() {
     // project settings file and by anything else that can write settings, and a
     // mode that hides authority-bearing surfaces must not be settable by
     // something that is not the person at the keyboard.
-    if args.zero_base {
+    //
+    // OMEGA-DELTA-0052, omega#100. The default is inverted. `omega` with no
+    // arguments is zero base, and `--full-editor` is what asks for the editor.
+    // The owner asked for it in as many words: "they must be stuck in zero base
+    // with no way out if it was started in this mode. which must be the default
+    // starting now. booting the full editor must require a separate flag."
+    //
+    // The reader did not move, which is the part `OMEGA-DELTA-0047` is about:
+    // still the parsed command line, still once, still never a settings key.
+    // Only the direction of the default changed.
+    //
+    // A command line that names something to edit implies the editor without
+    // the flag. `omega src/main.rs` opening a single chat thread with no way to
+    // reach that file would be a regression rather than a subtraction, and the
+    // same is true of a diff pair, a dev container, and the demo workroom —
+    // that last one because zero base does not render the workroom surface the
+    // flag exists to open. `--zero-base` is accepted and does nothing, because
+    // it now asks for what it already gets.
+    let names_something_to_edit = !args.paths_or_urls.is_empty()
+        || !args.diff.is_empty()
+        || args.dev_container
+        || args.demo_workroom;
+    if !args.full_editor && !names_something_to_edit {
         omega_zero_base::enter_from_command_line();
     }
 
@@ -1707,15 +1729,27 @@ struct Args {
     #[arg(long, requires = "user_data_dir")]
     demo_workroom: bool,
 
-    /// Opens zero base: one Exo thread and the controls that operate it.
+    /// Accepted and ignored: zero base is what Omega does by default.
     ///
-    /// The editor around the thread is not rendered and the actions outside the
-    /// admitted set are refused with a sentence, but nothing is deleted — the
-    /// same binary is a full editor without this flag. The mode is read here,
-    /// once, and never written anywhere, so ending the process leaves nothing
-    /// to repair. A visible control leaves it inside the window.
+    /// OMEGA-DELTA-0052. Kept so commands and scripts that carry it keep
+    /// working. Use --full-editor for the editor.
     #[arg(long)]
     zero_base: bool,
+
+    /// Opens the full Omega editor instead of zero base.
+    ///
+    /// OMEGA-DELTA-0052. Omega opens zero base by default: one Exo thread, the
+    /// controls that operate it, and nothing else. The editor around the thread
+    /// is not rendered and the actions outside the admitted set are refused with
+    /// a sentence, and there is no way out of the mode inside a running process.
+    /// Nothing is deleted — the same binary is a full editor with this flag. The
+    /// choice is read here, once, and never written anywhere, so ending the
+    /// process leaves nothing to repair.
+    ///
+    /// A path, a diff pair, a dev container or the demo workroom already names
+    /// something to edit, so each implies the editor without this flag.
+    #[arg(long)]
+    full_editor: bool,
 
     /// Pairs of file paths to diff. Can be specified multiple times.
     /// When directories are provided, recurses into them and shows all changed files in a single multi-diff view.

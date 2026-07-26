@@ -79,6 +79,8 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0049",
     "OMEGA-DELTA-0050",
     "OMEGA-DELTA-0051",
+    "OMEGA-DELTA-0052",
+    "OMEGA-DELTA-0053",
 ];
 
 /// OMEGA-DELTA-0036. The uninstall script embedded in the shipped `cli`.
@@ -2004,12 +2006,17 @@ pub const ONBOARDING_SECTIONS_ZERO_BASE_SKIPS: &[&str] = &[
 /// the admitted set is, and what a refusal says.
 pub const ZERO_BASE_MODE_PATH: &str = "crates/omega_zero_base/src/omega_zero_base.rs";
 
-/// OMEGA-DELTA-0048, 0050. The surface: the palette restriction, the action
-/// gate, and the visible way out.
+/// OMEGA-DELTA-0048, 0050, 0052. The surface: the palette restriction and the
+/// action gate. It carried the visible way out until `OMEGA-DELTA-0052`.
 pub const ZERO_BASE_UI_PATH: &str = "crates/zed/src/omega_zero_base_ui.rs";
 
-/// OMEGA-DELTA-0048. Where panels are added, and where zero base skips them.
+/// OMEGA-DELTA-0048, 0053. Where panels are added, where zero base skips them,
+/// and where the mode seals the window after the identity gate.
 pub const WORKSPACE_INITIALIZATION_PATH: &str = "crates/zed/src/zed.rs";
+
+/// OMEGA-DELTA-0053. The workspace render, which draws no editor pane, no
+/// title bar and no status bar once zero base is sealed.
+pub const WORKSPACE_RENDER_PATH: &str = "crates/workspace/src/workspace.rs";
 
 /// OMEGA-DELTA-0048. The palette filter the restriction extends.
 pub const COMMAND_PALETTE_FILTER_PATH: &str =
@@ -7139,11 +7146,20 @@ mod tests {
         let visual_path = repository_path(VISUAL_TEST_RUNNER_PATH);
         let visual = std::fs::read_to_string(&visual_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", visual_path.display()));
+        // OMEGA-DELTA-0052 removed `omega_zero_base_ui::install_on_workspace(`
+        // from this list. The runner used to call it to add the mode's one
+        // status-bar control before capturing, and that control no longer
+        // exists — the owner asked for zero base to have no way out. The token
+        // is not weakened away: what it protected was "the zero-base scene is
+        // built by the shipped surface code, not by a stand-in", and the
+        // per-scene assertion the runner now carries protects the same thing
+        // more directly by refusing to photograph a scene whose surface does
+        // not match the mode's actual state.
         for token in [
             "\"omega_zero_base_wide\"",
             "\"omega_zero_base_narrow\"",
             "ExoSceneSurface::ZeroBase",
-            "omega_zero_base_ui::install_on_workspace(",
+            "omega_zero_base::is_active() == (surface == ExoSceneSurface::ZeroBase)",
             "omega_zero_base::enter_from_command_line();",
         ] {
             assert!(
@@ -7188,14 +7204,16 @@ mod tests {
         // failure because it reports nothing, so every wait in this capture
         // spends a budget and then says what it was waiting for.
         assert!(
-            visual.contains("fn step_scheduler(")
-                && visual.contains("SCHEDULER_STEP_BUDGET"),
+            visual.contains("fn step_scheduler(") && visual.contains("SCHEDULER_STEP_BUDGET"),
             "OMEGA-DELTA-0049: {} lost its bounded wait. `run_until_parked` \
              does not return while a real `exo acp` child is attached.",
             visual_path.display()
         );
         assert!(
-            visual.matches("step_scheduler(cx, SCHEDULER_STEP_BUDGET)").count() >= 2,
+            visual
+                .matches("step_scheduler(cx, SCHEDULER_STEP_BUDGET)")
+                .count()
+                >= 2,
             "OMEGA-DELTA-0049: {} waits on the Exo turn without a budget \
              somewhere. Both the wait for the connected thread and the wait \
              after the turn are unbounded without it.",
@@ -7385,7 +7403,9 @@ mod tests {
             .split_once("if omega_zero_base::is_active() {")
             .map(|(_, rest)| rest)
             .unwrap_or_default();
-        let branch = branch.split_once("\n    }").map_or(branch, |(body, _)| body);
+        let branch = branch
+            .split_once("\n    }")
+            .map_or(branch, |(body, _)| body);
         assert!(
             branch.contains("render_identity_section("),
             "OMEGA-DELTA-0051: zero base's branch in {} does not render the \
@@ -7427,9 +7447,7 @@ mod tests {
             .split_once("pub const ADMITTED_ACTIONS: &[&str] = &[")
             .map(|(_, rest)| rest)
             .unwrap_or_default();
-        let admitted = admitted
-            .split_once("];")
-            .map_or(admitted, |(list, _)| list);
+        let admitted = admitted.split_once("];").map_or(admitted, |(list, _)| list);
         assert!(
             !admitted.is_empty(),
             "OMEGA-DELTA-0051: no ADMITTED_ACTIONS list found in {}. The check \
@@ -7459,6 +7477,293 @@ mod tests {
                 mode_path.display()
             );
         }
+    }
+
+    // ---------------------------------------------------------------------
+    // OMEGA-DELTA-0052 — Zero base is the default, and it has no exit
+    // ---------------------------------------------------------------------
+
+    /// OMEGA-DELTA-0052. `omega` opens zero base, `--full-editor` opens the
+    /// editor, and a process in zero base cannot leave it.
+    ///
+    /// Both halves invert something a person can see, and both are invisible to
+    /// the compiler for the reason every zero-base defect this week has been:
+    /// the mode is decided in the argument parser and read through a process
+    /// global, so `cargo check`, `cargo test` and clippy can all be green while
+    /// the shipped binary opens the wrong product entirely.
+    ///
+    /// The removal half needs a check more than the default half does. Deleting
+    /// a control is easy to *half* do — hide the button, keep `leave` on the
+    /// crate, keep the action in the registry, keep the palette restriction
+    /// clearable — and the result reads as removed while remaining one dispatch
+    /// away. That is exactly the failure `OMEGA-DELTA-0048` names about every
+    /// other hidden surface, so the check is that the way out is *absent*
+    /// rather than *unrendered*.
+    #[test]
+    fn zero_base_is_the_default_and_has_no_way_out() {
+        let startup_path = repository_path(STARTUP_PATH);
+        let startup = std::fs::read_to_string(&startup_path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", startup_path.display()));
+
+        assert!(
+            startup.contains("full_editor: bool"),
+            "OMEGA-DELTA-0052: {} no longer declares the full-editor flag, so \
+             the shipped binary has no way to open the editor at all.",
+            startup_path.display()
+        );
+        assert!(
+            startup.contains("if !args.full_editor && !names_something_to_edit {"),
+            "OMEGA-DELTA-0052: {} no longer defaults to zero base. `omega` with \
+             no arguments must open one Exo thread; the editor is what the flag \
+             asks for, not the other way round.",
+            startup_path.display()
+        );
+        // A path argument implies the editor. Without this, `omega src/main.rs`
+        // opens a chat thread with no way to reach the file it was given, which
+        // is a regression rather than a subtraction.
+        for implied in [
+            "!args.paths_or_urls.is_empty()",
+            "!args.diff.is_empty()",
+            "args.dev_container",
+            "args.demo_workroom",
+        ] {
+            assert!(
+                startup.contains(implied),
+                "OMEGA-DELTA-0052: {} no longer treats `{implied}` as naming \
+                 something to edit, so that command line would open a single \
+                 chat thread with no editor and nothing to point it at.",
+                startup_path.display()
+            );
+        }
+
+        let mode_path = repository_path(ZERO_BASE_MODE_PATH);
+        let mode = std::fs::read_to_string(&mode_path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", mode_path.display()));
+        assert!(
+            mode.contains("pub const FULL_EDITOR_FLAG: &str = \"--full-editor\";"),
+            "OMEGA-DELTA-0052: {} no longer names the flag that opens the \
+             editor, and the refusal sentence has nothing true to point at.",
+            mode_path.display()
+        );
+        for gone in [
+            "pub fn leave()",
+            "static LEFT",
+            "LEAVE_LABEL",
+            "BANNER_LABEL",
+        ] {
+            assert!(
+                !mode.contains(gone),
+                "OMEGA-DELTA-0052: {} still carries `{gone}`. A process that \
+                 starts in zero base stays in zero base, so leaving is absent \
+                 rather than unrendered — the owner asked for no way out, and a \
+                 way out that is merely not drawn is still one dispatch away.",
+                mode_path.display()
+            );
+        }
+        assert!(
+            mode.contains("pub fn is_active() -> bool {\n    ENTERED.load(Ordering::SeqCst)\n}"),
+            "OMEGA-DELTA-0052: `is_active` in {} reads something other than the \
+             single entry flag. A second input is a second way for the mode to \
+             turn off inside a running process.",
+            mode_path.display()
+        );
+
+        // The admitted namespace that held the way out. `omega_zero_base` had
+        // exactly one action in it, `Leave`, and an admitted namespace with
+        // nothing in it is a door frame left standing where the room went.
+        let namespaces = mode
+            .split_once("pub const ADMITTED_NAMESPACES: &[&str] = &[")
+            .map(|(_, rest)| rest)
+            .unwrap_or_default();
+        let namespaces = namespaces
+            .split_once("];")
+            .map_or(namespaces, |(list, _)| list);
+        assert!(
+            !namespaces.is_empty(),
+            "OMEGA-DELTA-0052: no ADMITTED_NAMESPACES list found in {}. The \
+             check below would be vacuous, so it fails instead.",
+            mode_path.display()
+        );
+        assert!(
+            !namespaces.contains("\"omega_zero_base\""),
+            "OMEGA-DELTA-0052: {} still admits the `omega_zero_base` namespace, \
+             which existed only to carry the `Leave` action.",
+            mode_path.display()
+        );
+
+        let ui_path = repository_path(ZERO_BASE_UI_PATH);
+        let ui = std::fs::read_to_string(&ui_path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", ui_path.display()));
+        for gone in [
+            "pub fn install_on_workspace",
+            "ZeroBaseStatusItem",
+            "clear_restriction()",
+            "cx.clear_action_gate()",
+            "omega_zero_base::leave()",
+        ] {
+            assert!(
+                !ui.contains(gone),
+                "OMEGA-DELTA-0052: {} still carries `{gone}`. The status-bar \
+                 control, the action that unwound the mode, and the two calls \
+                 that lifted the palette restriction and the action gate at \
+                 runtime are all removed together — keeping any one of them \
+                 leaves the mode leavable by something other than the button.",
+                ui_path.display()
+            );
+        }
+        // The half that stays. Removing the way out must not remove the two
+        // mechanisms `OMEGA-DELTA-0048` depends on.
+        for kept in [
+            "filter.restrict_to(ADMITTED_NAMESPACES, ADMITTED_ACTIONS)",
+            "cx.set_action_gate(",
+        ] {
+            assert!(
+                ui.contains(kept),
+                "OMEGA-DELTA-0052: {} lost `{kept}` along with the way out. The \
+                 refusal gate is what makes an unrendered surface safe, and it \
+                 is not what the owner asked to remove.",
+                ui_path.display()
+            );
+        }
+
+        let panels_path = repository_path(WORKSPACE_INITIALIZATION_PATH);
+        let panels = std::fs::read_to_string(&panels_path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", panels_path.display()));
+        assert!(
+            !panels.contains("omega_zero_base_ui::install_on_workspace"),
+            "OMEGA-DELTA-0052: {} still installs the zero-base status-bar \
+             control on the workspace.",
+            panels_path.display()
+        );
+
+        // The refusal sentence, read from the source rather than called. This
+        // crate checks text on purpose: `omega_zero_base` proves the sentence's
+        // shape with its own unit test, and depending on it here would make the
+        // registry's checks depend on the tree they check.
+        let sentence = mode
+            .split_once("pub fn refusal(action_name: &str) -> String {")
+            .map(|(_, rest)| rest)
+            .unwrap_or_default();
+        let sentence = sentence
+            .split_once("\n}")
+            .map_or(sentence, |(body, _)| body);
+        assert!(
+            sentence.contains("{FULL_EDITOR_FLAG}"),
+            "OMEGA-DELTA-0052: the refusal sentence in {} no longer names the \
+             flag that opens the editor. A refusal must say how to get the thing \
+             it refused, and starting Omega differently is now the only way.",
+            mode_path.display()
+        );
+        assert!(
+            !sentence.contains("LEAVE_LABEL"),
+            "OMEGA-DELTA-0052: the refusal sentence in {} still offers a control \
+             in the window. There is no longer one to find, so the sentence \
+             would send a person looking for a button that does not exist.",
+            mode_path.display()
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // OMEGA-DELTA-0053 — A sealed zero base does not render the editor
+    // ---------------------------------------------------------------------
+
+    /// OMEGA-DELTA-0053. Zero base subtracts the editor rather than covering
+    /// it.
+    ///
+    /// The mode used to hide the editor by zooming the agent panel over it, and
+    /// one press of the sidebar control released the zoom and put Zed's whole
+    /// welcome surface on the screen — New File, Open Project, Clone
+    /// Repository, Open Command Palette, Open Settings, Customize Keymaps,
+    /// Explore Extensions — inside a mode whose premise is that none of them
+    /// are present.
+    ///
+    /// The action gate cannot catch that. It refuses *actions*, and the control
+    /// that did it is an ordinary click listener on the title bar that calls a
+    /// workspace method. So the answer is structural: once sealed, the
+    /// workspace renders no centre pane, no title bar and no status bar, and
+    /// the reveal path returns early instead of closing the one panel the
+    /// window has.
+    ///
+    /// The seal is later than the mode on purpose, and the check pins that too.
+    /// `OMEGA-DELTA-0040`'s identity onboarding is a centre-pane item, so
+    /// sealing at startup would leave a fresh profile with nowhere to answer the
+    /// identity gate — a worse dead end than the one `OMEGA-DELTA-0051`
+    /// repaired, and the same shape.
+    #[test]
+    fn a_sealed_zero_base_renders_no_editor() {
+        let mode_path = repository_path(ZERO_BASE_MODE_PATH);
+        let mode = std::fs::read_to_string(&mode_path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", mode_path.display()));
+        assert!(
+            mode.contains("pub fn seal()") && mode.contains("pub fn is_sealed() -> bool"),
+            "OMEGA-DELTA-0053: {} no longer offers the seal. Without it the mode \
+             is back to hiding the editor under a zoomed panel, which one \
+             sidebar toggle undid.",
+            mode_path.display()
+        );
+        assert!(
+            mode.contains("is_active() && SEALED.load(Ordering::SeqCst)"),
+            "OMEGA-DELTA-0053: `is_sealed` in {} no longer requires the mode to \
+             be on. A build started with the editor flag must not be sealable by \
+             a stray call.",
+            mode_path.display()
+        );
+
+        let workspace_path = repository_path(WORKSPACE_RENDER_PATH);
+        let workspace = std::fs::read_to_string(&workspace_path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", workspace_path.display()));
+        assert!(
+            workspace.contains("let zero_base_sealed = omega_zero_base::is_sealed();"),
+            "OMEGA-DELTA-0053: {} no longer reads the seal, so its render draws \
+             the editor in zero base again.",
+            workspace_path.display()
+        );
+        for structural in [
+            // The centre pane group and its tab bar, which is where the welcome
+            // surface the owner was shown lives.
+            "if zero_base_sealed {",
+            // The title bar, whose controls are click listeners the action gate
+            // never sees.
+            ".filter(|_| !zero_base_sealed)",
+            // The status bar.
+            "self.status_bar_visible(cx) && !zero_base_sealed",
+            // The reveal path that closed the one open dock.
+            "if omega_zero_base::is_sealed() {",
+        ] {
+            assert!(
+                workspace.contains(structural),
+                "OMEGA-DELTA-0053: {} lost `{structural}`. Each one is a surface \
+                 the mode claims is absent, and a surface that is only covered \
+                 is one control away from being present.",
+                workspace_path.display()
+            );
+        }
+
+        // Sealing happens after the identity gate, in the one place that opens
+        // the thread. A seal anywhere earlier is the dead end described above.
+        let panels_path = repository_path(WORKSPACE_INITIALIZATION_PATH);
+        let panels = std::fs::read_to_string(&panels_path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", panels_path.display()));
+        assert_eq!(
+            panels.matches("omega_zero_base::seal();").count(),
+            1,
+            "OMEGA-DELTA-0053: {} must seal the window exactly once. A second \
+             caller is a second policy about when the identity gate can still \
+             be answered.",
+            panels_path.display()
+        );
+        let before_seal = panels
+            .split_once("omega_zero_base::seal();")
+            .map(|(before, _)| before)
+            .unwrap_or_default();
+        assert!(
+            before_seal.contains("await_identity_ready(app_state, cx).await.log_err();"),
+            "OMEGA-DELTA-0053: {} seals the window before waiting for identity \
+             onboarding. Identity onboarding is a centre-pane item and a sealed \
+             workspace renders no centre pane, so a fresh profile would have \
+             nowhere to answer the gate `OMEGA-DELTA-0040` puts in front of it.",
+            panels_path.display()
+        );
     }
 
     // ---------------------------------------------------------------------
