@@ -45,6 +45,12 @@ impl AgentServerDelegate {
             loading_status: loading_status_tx,
         }
     }
+
+    /// The store that owns external-agent commands for this connection.
+    #[must_use]
+    pub fn store(&self) -> &Entity<AgentServerStore> {
+        &self.store
+    }
 }
 
 pub trait AgentServer: Send {

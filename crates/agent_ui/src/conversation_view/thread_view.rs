@@ -32,9 +32,9 @@ use crate::unicode_confusables;
 
 use db::kvp::KeyValueStore;
 use full_auto_ui::{ThreadRunLink, ThreadRunRecords, project_thread_run_link};
-use gpui::List;
 use gpui::Stateful;
 use gpui::TaskExt;
+use gpui::{List, PromptLevel};
 use heapless::Vec as ArrayVec;
 use language_model::{
     FastModeConfirmation, LanguageModel, LanguageModelEffortLevel, LanguageModelId,
@@ -2257,10 +2257,9 @@ impl ThreadView {
         // Only an external peer negotiates. Omega owns the native loop's stop,
         // and an engine lane's answer does not depend on what the engine can do.
         let capability = match disclosure.class {
-            omega_front_door::ExecutorClass::ExternalAcp => self
-                .session_capabilities
-                .read()
-                .omega_steer_capability(),
+            omega_front_door::ExecutorClass::ExternalAcp => {
+                self.session_capabilities.read().omega_steer_capability()
+            }
             _ => omega_front_door::SteerCapability::Unknown,
         };
         omega_front_door::disposition(command, disclosure.class, capability)
@@ -12110,8 +12109,16 @@ impl ThreadView {
     /// Unconditional, and above the entries rather than beside them, because
     /// omega#77's falsifier is a thread surface that shows work without naming
     /// its executor — including an empty thread, which is about to.
-    fn render_executor_disclosure(&self, cx: &App) -> impl IntoElement {
+    fn render_executor_disclosure(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let disclosure = self.executor_disclosure(cx);
+        let exo = self
+            .thread
+            .read(cx)
+            .connection()
+            .clone()
+            .downcast::<crate::omega_exo_connection::ExoHarnessConnection>();
+        let receipt = exo.as_ref().and_then(|exo| exo.tier_c_receipt());
+        let thread = self.thread.clone();
         h_flex()
             .w_full()
             .px_2()
@@ -12130,6 +12137,76 @@ impl ThreadView {
                     .color(Color::Muted),
             )
             .child(div().flex_1())
+            .when_some(receipt, |row, receipt| {
+                row.child(
+                    Label::new(format!(
+                        "self-modification {} · generation {} · event {}",
+                        receipt.outcome,
+                        receipt.observed.generation,
+                        receipt.latest_event_id.as_deref().unwrap_or("pending")
+                    ))
+                    .size(LabelSize::XSmall)
+                    .color(Color::Muted),
+                )
+            })
+            .when_some(exo, |row, exo| {
+                row.child(
+                    Button::new(
+                        "omega-exo-authorize-self-modification",
+                        "Authorize one self-modifying turn",
+                    )
+                    .label_size(LabelSize::XSmall)
+                    .color(Color::Warning)
+                    .on_click(move |_, window, cx| {
+                        let (session_id, prompt) = {
+                            let thread = thread.read(cx);
+                            let prompt = thread
+                                .draft_prompt()
+                                .filter(|prompt| !prompt.is_empty())
+                                .map(<[acp::ContentBlock]>::to_vec);
+                            (thread.session_id().clone(), prompt)
+                        };
+                        let Some(prompt) = prompt else {
+                            log::warn!(
+                                "omega#87: a self-modification grant needs a non-empty draft"
+                            );
+                            return;
+                        };
+                        let objective = crate::omega_exo_connection::exo_prompt_objective(&prompt);
+                        let Ok(turn_ref) =
+                            crate::omega_exo_connection::exo_turn_ref(&session_id, &prompt)
+                        else {
+                            log::error!("omega#87: failed to bind the Exo draft to a turn");
+                            return;
+                        };
+                        let exo = Rc::clone(&exo);
+                        window
+                            .spawn(cx, async move |cx| {
+                                let request =
+                                    exo.self_modification_request(objective, turn_ref).await?;
+                                let detail = format!(
+                                    "This grant expires in 60 seconds and applies only to this \
+                                     exact draft, Exo generation, source tree, binary, tool \
+                                     modules, and read-write mounts.\n\nExact capabilities:\n{:#?}",
+                                    request.capabilities
+                                );
+                                let answer = cx
+                                    .prompt(
+                                        PromptLevel::Warning,
+                                        "Allow this Exo agent to modify itself for one turn?",
+                                        Some(&detail),
+                                        &["Authorize one turn", "Cancel"],
+                                    )
+                                    .await?;
+                                if answer == 0 {
+                                    exo.confirm_self_modification(request)?;
+                                }
+                                anyhow::Ok(())
+                            })
+                            .detach_and_log_err(cx);
+                    }),
+                )
+            })
             .child(self.render_executor_pin(cx))
     }
 
@@ -12172,39 +12249,42 @@ impl ThreadView {
             .menu(move |window, cx| {
                 let session_id = session_id.clone();
                 let pinned = pinned.clone();
-                Some(ContextMenu::build(window, cx, move |mut menu, _window, _cx| {
-                    menu = menu.header("Pin this thread's executor");
-                    for class in ExecutorClass::all() {
-                        let class = *class;
-                        let is_selected =
-                            pinned.as_ref().is_some_and(|pin| pin.class == class);
-                        let entry = ContextMenuEntry::new(class.token())
-                            .toggleable(IconPosition::End, is_selected);
-                        menu.push_item(entry.handler({
-                            let session_id = session_id.clone();
+                Some(ContextMenu::build(
+                    window,
+                    cx,
+                    move |mut menu, _window, _cx| {
+                        menu = menu.header("Pin this thread's executor");
+                        for class in ExecutorClass::all() {
+                            let class = *class;
+                            let is_selected = pinned.as_ref().is_some_and(|pin| pin.class == class);
+                            let entry = ContextMenuEntry::new(class.token())
+                                .toggleable(IconPosition::End, is_selected);
+                            menu.push_item(entry.handler({
+                                let session_id = session_id.clone();
+                                move |_window, _cx| {
+                                    let Some(router) = crate::omega_router::active_router() else {
+                                        return;
+                                    };
+                                    router.pin_session(
+                                        &session_id,
+                                        ExecutorPin::new(class),
+                                        PinGesture::ExecutorPinMenuItem,
+                                    );
+                                }
+                            }));
+                        }
+                        menu = menu.separator();
+                        menu.push_item(ContextMenuEntry::new("Unpin").handler({
                             move |_window, _cx| {
                                 let Some(router) = crate::omega_router::active_router() else {
                                     return;
                                 };
-                                router.pin_session(
-                                    &session_id,
-                                    ExecutorPin::new(class),
-                                    PinGesture::ExecutorPinMenuItem,
-                                );
+                                router.unpin_session(&session_id, PinGesture::ExecutorPinCleared);
                             }
                         }));
-                    }
-                    menu = menu.separator();
-                    menu.push_item(ContextMenuEntry::new("Unpin").handler({
-                        move |_window, _cx| {
-                            let Some(router) = crate::omega_router::active_router() else {
-                                return;
-                            };
-                            router.unpin_session(&session_id, PinGesture::ExecutorPinCleared);
-                        }
-                    }));
-                    menu
-                }))
+                        menu
+                    },
+                ))
             })
     }
 }

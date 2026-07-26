@@ -4,7 +4,7 @@ version = "0.1.0"
 edition.workspace = true
 publish.workspace = true
 license = "GPL-3.0-or-later"
-description = "The Exo harness lane law: pin, invocation, loopback, turn reading (OMEGA-EXO-01 Tier A)"
+description = "The Exo harness lane law: pin, ACP transport, authority, and disclosure"
 
 [lints]
 workspace = true
@@ -16,5 +16,6 @@ doctest = false
 [dependencies]
 omega_front_door.workspace = true
 omega_harness.workspace = true
+serde.workspace = true
 
 [dev-dependencies]

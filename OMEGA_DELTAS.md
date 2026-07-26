@@ -2075,9 +2075,11 @@ than it sounds, because the harness omega#81's acceptance sentence names —
 - **Upstream Zed:** external agents are attached over ACP or configured as
   custom agent servers. There is no notion of an executor whose own agent can
   rewrite itself, and nothing in the fork's ancestry has ever had to bound one.
-- **Which Exo, first.** This is `exoharness/exo`, the recursive-self-improvement
-  agent harness, pinned at `baa07f6785547080d99bd2a7d3eab6d76b984e35` with tree
-  `0aff9139a166414fa51a09b66ba4785bae05b46b`. It is **not** exo labs'
+- **Which Exo, first.** This is the maintained `OpenAgentsInc/exo` fork of
+  `exoharness/exo`, the recursive-self-improvement agent harness. Omega pins
+  commit `cd7c0d29db869e953fb7261d8390ca93007d36a6` and tree
+  `c61846e3f44daaf445930d1a499432ca9b069306`. The fork contains the ACP
+  transport while the upstream change is under review. It is **not** exo labs'
   `exo-explore/exo` cluster-inference appliance, which shares a name and nothing
   else; omega#86 was closed for integrating the wrong one. The pin therefore
   carries the repository as a field a test reads, alongside the commit and the
@@ -2089,9 +2091,8 @@ than it sounds, because the harness omega#81's acceptance sentence names —
   harness whose agent has an unrestricted networked shell and can rebuild
   itself. Exo has no approval prompt anywhere by design — its security model is
   sandbox isolation, and its threat model assumes you *want* the agent to modify
-  itself. Omega adds the gate Exo does not have, and the gate is four refusals
-  the turn path runs **before** it sends, each from a live observation rather
-  than from configuration Omega wrote down earlier:
+  itself. Omega adds the gate Exo does not have. The turn path runs these checks
+  **before** it sends. Each check uses a live observation:
   - **where Exo is** — `EXO_EXOHARNESS_URL` is inherited from the environment,
     and setting it redirects the lane from the state root on disk to an HTTP
     server that has no authentication and full access to Exo's secrets. It is
@@ -2102,26 +2103,22 @@ than it sounds, because the harness omega#81's acceptance sentence names —
     tree, and the pin admits or refuses it;
   - **which bytes** — the binary is measured and compared against the owner's
     `omega_harness` pin ledger entry for `exo`, when the owner froze one;
-  - **which agent** — `exo agent show` is read, and a turn is refused when the
-    agent carries self-modification capability: runtime tool authoring, a tool
-    module (which is how `guardian_action` is installed), or a read-write mount
-    (which is how Exo's source tree is edited from inside the sandbox). Tier C
-    is out of scope, and this is its enforcement rather than a promise about it.
-    Networking is *reported and not refused*, because refusing it would refuse
-    every useful agent and say nothing about self-modification.
-- **User text is never argument syntax.** Exo accepts its global options *after*
-  the subcommand, so an unterminated prompt is not a string Exo receives — it is
-  Exo's command line. Driven against the pinned binary, a prompt of `--help` on
-  an otherwise correct `conversation send` **exits 0, prints Exo's usage text,
-  and runs no turn**; a lane without the terminator would have rendered that
-  usage text as the model's reply, silently and on a success exit code. Every
-  command line the lane can produce is a variant of a closed enum whose exact
-  argv shape is written down, and every value reachable from a person or a model
-  is emitted after `--`.
-- **Omega never configures Exo.** The admitted verbs are one send and four
-  reads. `create`, `update`, `delete`, `mount`, `set`, `register`, `configure`,
-  `serve`, and `repl` are unreachable — not filtered, unexpressible. The only
-  mutation the lane causes is Exo's own record of the turn it just ran.
+  - **which capability** — Omega reads both `exo agent show` and
+    `exo conversation show`. The read includes exact tool-module paths, module
+    digests, and agent-level and conversation-level mounts. The normal path
+    refuses a self-modifying turn. A person can use a dedicated warning dialog
+    to authorize one exact draft. The one-use grant binds the source commit and
+    tree, binary digest, agent, conversation, connection generation, objective,
+    capability set, tool-module digests, mount paths, turn reference, and
+    expiry. Drift, reuse, restart, cancellation, and a different draft refuse.
+    Networking is reported and is not refused.
+- **Prompts cross ACP, not command-line arguments.** Omega starts
+  `exo --root <root> acp <agent> <conversation>`. ACP JSON-RPC carries the
+  prompt on standard input. User text cannot become Exo argument syntax.
+- **Omega never configures Exo.** The admitted command starts `exo acp` and
+  reads capability records. `create`, `update`, `delete`, `mount`, `set`,
+  `register`, `configure`, `serve`, and `repl` are unreachable. Exo owns its
+  state and its durable turn log.
 - **The executor class, decided rather than defaulted.** `ExecutorClass` is
   closed at three by `OMEGA-AGENT-AC-04`, and it answers *who ran the work*. An
   Exo thread reports `ExternalAcp`. Not `NativeLoop`, which is the first-party
@@ -2132,9 +2129,8 @@ than it sounds, because the harness omega#81's acceptance sentence names —
   fourth model-reachable door into Full Auto authority opened by adding an
   executor, three of which were removed from OpenAgents Desktop the same day.
   `ExternalAcp` fits because the class is about the executor and not the wire: a
-  separate process Omega does not own, carrying no run reference. Tier B swaps
-  the CLI for ACP and the class does not change, which is the check that the
-  class was about the right thing. A fourth variant was considered and **not
+  separate process Omega does not own, carrying no run reference. ACP does not
+  change the class. A fourth variant was considered and **not
   taken**; the argument is written in `crates/omega_exo_lane` so a later reader
   can disagree with something concrete.
 - **The disclosure names Exo, its executor, and its model** —
@@ -2143,16 +2139,26 @@ than it sounds, because the harness omega#81's acceptance sentence names —
   closed on purpose. `provider` is genuinely absent because Exo's LLM binding
   has no provider field at all, only an optional base URL, and saying "not
   disclosed" is better than deriving `openai` from an absence.
-- **Coarse on purpose.** One shot per turn, no live text deltas, tool activity
-  after the fact. That is Exo's limit at this pin — its turn streaming is an
-  in-process enum consumed by its own REPL and serialised to no transport. Tier
-  B lifts it by contributing a transport upstream, and is **not** started here.
+- **The stream is typed.** Exo maps each `ExecutionStreamEvent` to ACP. Omega
+  receives live text chunks, tool calls, tool results, and a completion record.
+  The completion metadata includes Exo's durable session, turn, and latest-event
+  references. ACP cancellation uses cooperative executor cancellation. Exo
+  appends a cancellation event and closes the durable turn before it reports
+  `Cancelled`.
+- **Turn-boundary behavior is explicit.** Exo declares `CannotSteer`. Omega
+  queues a mid-turn prompt. It does not guess that Exo can steer, and it does not
+  turn a steer request into an implicit cancellation.
+- **Self-modification receipts are durable.** Omega writes the one-use authority
+  decision and Exo's returned durable references to
+  `exo-self-modification-receipts.jsonl`. The thread shows the outcome,
+  generation, and latest event reference.
 - **Enforced by:** `the_exo_lane_drives_the_harness_exo_and_not_the_cluster_one`,
   `the_exo_lane_puts_no_user_text_before_the_argument_terminator`,
   `the_exo_lane_exposes_no_endpoint_off_this_machine`,
   `the_exo_lane_opens_no_path_into_full_auto_authority`,
-  `an_exo_turn_checks_the_pin_and_the_agent_before_it_sends`, and
-  `the_exo_lane_is_reachable_from_omega_agent` in `crates/omega_deltas/`, the 35
+  `an_exo_turn_checks_the_pin_and_the_agent_before_it_sends`,
+  `an_exo_turn_streams_cancels_and_requires_exact_one_use_authority`, and
+  `the_exo_lane_is_reachable_from_omega_agent` in `crates/omega_deltas/`, the 40
   unit checks in `crates/omega_exo_lane/`, and `drives_a_real_exo` in
   `crates/agent_ui/`, which is `#[ignore]`d because it needs a real Exo.
 - **Falsified against a running Exo,** every edit probed before its run. Pointing
@@ -2168,13 +2174,9 @@ than it sounds, because the harness omega#81's acceptance sentence names —
   arm supplies, and the same edit fails it. A second falsification silently
   no-opped through a shell quoting error and was caught by its probe rather than
   by its result.
-- **What this does not cover.** Cancellation: an Exo turn is one blocking
-  process with no interruption point that leaves its durable log consistent, so
-  the lane says so in a log line rather than pretending. Steer and queue
-  negotiate against a turn boundary the lane cannot see mid-turn, which is
-  Tier B's to fix. The lane reads Exo's durable event log after a turn and
-  currently only logs a failure to do so, because the turn has already run and
-  refusing it afterwards would describe a world that did not happen.
+- **What this does not cover.** The grant does not give Exo Full Auto
+  authority. Omega does not edit Exo configuration. Exo remains an external ACP
+  executor and has no engine run reference.
 
 ### OMEGA-DELTA-0043 — `--uninstall` removes the installation, not one file inside it
 

@@ -45,11 +45,17 @@ use util::{ResultExt, debug_panic};
 use workspace::{CollaboratorId, Workspace};
 use zed_actions::agent::{Chat, PasteRaw};
 
-#[derive(Default)]
 pub struct SessionCapabilities {
     prompt_capabilities: acp::PromptCapabilities,
     available_commands: Vec<acp::AvailableCommand>,
     available_skills: Vec<AvailableSkill>,
+    omega_steer_capability: omega_front_door::SteerCapability,
+}
+
+impl Default for SessionCapabilities {
+    fn default() -> Self {
+        Self::new(Default::default(), Vec::new(), Vec::new())
+    }
 }
 
 impl SessionCapabilities {
@@ -62,7 +68,16 @@ impl SessionCapabilities {
             prompt_capabilities,
             available_commands,
             available_skills,
+            omega_steer_capability: omega_front_door::SteerCapability::Unknown,
         }
+    }
+
+    pub fn with_omega_steer_capability(
+        mut self,
+        capability: omega_front_door::SteerCapability,
+    ) -> Self {
+        self.omega_steer_capability = capability;
+        self
     }
 
     pub fn from_acp_commands(
@@ -91,15 +106,12 @@ impl SessionCapabilities {
     /// `OMEGA-DELTA-0032`. Whether this peer said it can take a message while a
     /// turn is running.
     ///
-    /// The Agent Client Protocol has no prompt capability for mid-turn
-    /// delivery, so today every external peer answers
-    /// [`SteerCapability::Unknown`](omega_front_door::SteerCapability::Unknown)
-    /// — and Omega refuses the steer and queues instead of guessing. That is
-    /// the honest reading: silence is not a declared capability, and the cost
-    /// of guessing wrong is the user's running turn. When ACP gains the
-    /// capability, this is the one place that changes.
+    /// ACP has no standard prompt capability for mid-turn delivery. A peer is
+    /// `Unknown` unless its integration supplies an exact answer. The Exo ACP
+    /// transport supplies `CannotSteer`: cancellation is supported, but a new
+    /// prompt is accepted only after the active turn ends.
     pub fn omega_steer_capability(&self) -> omega_front_door::SteerCapability {
-        omega_front_door::SteerCapability::Unknown
+        self.omega_steer_capability
     }
 
     pub fn has_slash_completions(&self) -> bool {
@@ -2280,6 +2292,16 @@ mod tests {
     use parking_lot::RwLock;
     use project::{AgentId, CompletionIntent, Project, ProjectPath};
     use serde_json::{Value, json};
+
+    #[test]
+    fn exo_can_declare_that_it_cannot_steer_mid_turn() {
+        let capabilities = super::SessionCapabilities::default()
+            .with_omega_steer_capability(omega_front_door::SteerCapability::CannotSteer);
+        assert_eq!(
+            capabilities.omega_steer_capability(),
+            omega_front_door::SteerCapability::CannotSteer
+        );
+    }
 
     use text::Point;
     use ui::{App, Context, IntoElement, Render, SharedString, Window};
@@ -5521,7 +5543,9 @@ mod tests {
             .decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==")
             .expect("decode png");
         let file_name = match extension {
-            Some(extension) => format!("omega-agent-ui-test-{}.{}", uuid::Uuid::new_v4(), extension),
+            Some(extension) => {
+                format!("omega-agent-ui-test-{}.{}", uuid::Uuid::new_v4(), extension)
+            }
             None => format!("omega-agent-ui-test-{}", uuid::Uuid::new_v4()),
         };
         let path = std::env::temp_dir().join(file_name);
