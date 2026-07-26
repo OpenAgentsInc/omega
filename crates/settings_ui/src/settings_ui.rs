@@ -2090,6 +2090,16 @@ impl SettingsWindow {
         }));
     }
 
+    /// Recompute the maintenance rows and wait for nothing.
+    ///
+    /// The visual test needs the row to be populated at the moment it takes the
+    /// picture; production repopulates it on window open, on a settings change,
+    /// and after an owner action, none of which a screenshot can wait for.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn refresh_harness_maintenance_for_test(&mut self, cx: &mut Context<Self>) {
+        self.refresh_harness_maintenance(cx);
+    }
+
     fn harness_maintenance_target(
         &self,
         id: &project::AgentId,

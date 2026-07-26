@@ -51,6 +51,18 @@ fn main() {
         std::env::set_var("ZED_STATELESS", "1");
     }
 
+    // Redirect every derived data path into a temporary directory. A visual
+    // test that exercises real on-disk state — omega#81's harness pins and
+    // receipts do — would otherwise write into the developer's own Omega
+    // installation. Set before anything can read `data_dir`.
+    let data_dir = tempfile::tempdir().expect("Failed to create data directory");
+    paths::set_custom_data_dir(
+        data_dir
+            .keep()
+            .to_str()
+            .expect("Data directory path is not UTF-8"),
+    );
+
     env_logger::builder()
         .filter_level(log::LevelFilter::Info)
         .init();
@@ -621,6 +633,23 @@ fn run_visual_tests(project_path: PathBuf, update_baseline: bool) -> Result<()> 
         }
         Err(e) => {
             eprintln!("✗ settings_ui_subpage_auto_open: FAILED - {}", e);
+            failed += 1;
+        }
+    }
+
+    // Run Test 11: External agent harness maintenance (omega#81)
+    println!("\n--- Test 11: external_agent_harness_maintenance ---");
+    match run_external_agent_maintenance_visual_tests(app_state.clone(), &mut cx, update_baseline) {
+        Ok(TestResult::Passed) => {
+            println!("\u{2713} external_agent_harness_maintenance: PASSED");
+            passed += 1;
+        }
+        Ok(TestResult::BaselineUpdated(_)) => {
+            println!("\u{2713} external_agent_harness_maintenance: Baselines updated");
+            updated += 1;
+        }
+        Err(e) => {
+            eprintln!("\u{2717} external_agent_harness_maintenance: FAILED - {}", e);
             failed += 1;
         }
     }
@@ -3592,4 +3621,313 @@ fn run_sidebar_duplicate_project_names_visual_tests(
     } else {
         Ok(TestResult::Passed)
     }
+}
+
+/// Visual test for harness maintenance on the External Agents settings page.
+/// omega#81, `OMEGA-DELTA-0033`.
+///
+/// The gap omega#81 stayed open for was that every maintenance decision existed
+/// and nothing rendered one: a refusal reached the owner only as agent-launch
+/// error text, and there was no control to take or remove a pin. So the proof
+/// that gap is closed has to be a picture of the row.
+///
+/// Nothing here is synthetic state handed to a widget. Two registry agents are
+/// registered, their installed trees are written to the directories the launch
+/// path measures, one is pinned to a different version through the same
+/// `pin_installed_harness` the button calls, and the page is then opened and
+/// photographed. What the screenshot shows is what the enforcement path
+/// decided.
+#[cfg(target_os = "macos")]
+fn run_external_agent_maintenance_visual_tests(
+    app_state: Arc<AppState>,
+    cx: &mut VisualTestAppContext,
+    update_baseline: bool,
+) -> Result<TestResult> {
+    use ::collections::HashMap;
+    use project::agent_registry_store::{
+        AgentRegistryStore, RegistryAgent, RegistryAgentMetadata, RegistryBinaryAgent,
+        RegistryTargetConfig,
+    };
+    use gpui::UpdateGlobal as _;
+    use settings::SettingsStore;
+
+    const HEALTHY: &str = "omega-visual-harness";
+    const PINNED: &str = "omega-visual-pinned-harness";
+
+    let platform_key = format!(
+        "{}-{}",
+        if cfg!(target_os = "macos") {
+            "darwin"
+        } else {
+            "linux"
+        },
+        if cfg!(target_arch = "aarch64") {
+            "aarch64"
+        } else {
+            "x86_64"
+        }
+    );
+
+    let registry_agent = |id: &str, name: &str, version: &str| {
+        let mut targets = HashMap::default();
+        targets.insert(
+            platform_key.clone(),
+            RegistryTargetConfig {
+                archive: format!("https://example.invalid/{id}-{version}.tar.gz"),
+                cmd: "./harness".to_string(),
+                args: vec![],
+                sha256: None,
+                env: HashMap::default(),
+            },
+        );
+        RegistryAgent::Binary(RegistryBinaryAgent {
+            metadata: RegistryAgentMetadata {
+                id: AgentId(id.to_string().into()),
+                name: name.into(),
+                description: "A wrapped ACP harness.".into(),
+                version: version.into(),
+                repository: None,
+                website: None,
+                icon_path: None,
+            },
+            targets,
+            supports_current_platform: true,
+        })
+    };
+
+    cx.update(|cx| {
+        AgentRegistryStore::init_test_global(
+            cx,
+            vec![
+                registry_agent(HEALTHY, "Visual Harness", "1.0.0"),
+                // The registry now offers 1.1.0; the pin below freezes 1.0.0,
+                // so this row is the refusal an owner has to be able to read.
+                registry_agent(PINNED, "Pinned Harness", "1.1.0"),
+            ],
+        );
+    });
+
+    cx.update(|cx| {
+        SettingsStore::update_global(cx, |store: &mut SettingsStore, cx| {
+            store.update_user_settings(cx, |content| {
+                let agent_servers = content.agent_servers.get_or_insert_default();
+                for id in [HEALTHY, PINNED] {
+                    agent_servers.insert(
+                        id.to_string(),
+                        settings::CustomAgentServerSettings::Registry {
+                            default_mode: None,
+                            env: Default::default(),
+                            default_config_options: Default::default(),
+                            favorite_config_option_values: Default::default(),
+                        },
+                    );
+                }
+            });
+        });
+    });
+
+    // `OpenSettingsAt` reuses an open settings window, and an earlier test's
+    // window is bound to an earlier test's project — which has no external
+    // agents. Close them so the window this test opens is the one it set up.
+    let existing: Vec<gpui::AnyWindowHandle> = cx
+        .update(|cx| cx.windows())
+        .into_iter()
+        .filter(|window| window.downcast::<SettingsWindow>().is_some())
+        .collect();
+    for window in existing {
+        cx.update_window(window, |_, window, _cx| {
+            window.remove_window();
+        })
+        .log_err();
+    }
+    cx.run_until_parked();
+
+    let window_size = size(px(900.0), px(700.0));
+    let bounds = Bounds {
+        origin: point(px(0.0), px(0.0)),
+        size: window_size,
+    };
+
+    let project = cx.update(|cx| {
+        project::Project::local(
+            app_state.client.clone(),
+            app_state.node_runtime.clone(),
+            app_state.user_store.clone(),
+            app_state.languages.clone(),
+            app_state.fs.clone(),
+            None,
+            project::LocalProjectFlags {
+                init_worktree_trust: false,
+                ..Default::default()
+            },
+            cx,
+        )
+    });
+
+    cx.run_until_parked();
+
+    // The store owns the derivation of the measured tree, so the test asks it
+    // rather than re-deriving one. A test that guessed the directory would
+    // prove a row about a tree the launch path never looks at.
+    let targets: Vec<(String, PathBuf, String)> = cx.update(|cx| {
+        let store = project.read(cx).agent_server_store().clone();
+        let store = store.read(cx);
+        [HEALTHY, PINNED]
+            .into_iter()
+            .filter_map(|id| {
+                let target = store.maintenance_target(&AgentId(id.to_string().into()))?;
+                Some((
+                    id.to_string(),
+                    target.installed_dir?,
+                    target.version.to_string(),
+                ))
+            })
+            .collect()
+    });
+    anyhow::ensure!(
+        targets.len() == 2,
+        "the store did not offer a maintenance target for both registry agents"
+    );
+
+    for (_, dir, version) in &targets {
+        std::fs::create_dir_all(dir)?;
+        std::fs::write(dir.join("harness"), format!("harness {version}"))?;
+        std::fs::write(dir.join("LICENSE"), b"Apache-2.0")?;
+    }
+
+    // Attest the healthy one and freeze the other, through the production
+    // functions the settings buttons call.
+    let fs = app_state.fs.clone();
+    let healthy = targets[0].clone();
+    let pinned = targets[1].clone();
+    // Driven on the test executor rather than by blocking this thread: the
+    // filesystem work these functions do is scheduled by that executor, so
+    // blocking the thread it runs on deadlocks instead of waiting.
+    // `RealFs` does its work on real IO threads, so the deterministic scheduler
+    // has to be allowed to park while it waits for them. This test runs last.
+    cx.executor().allow_parking();
+
+    let outcome: Arc<std::sync::Mutex<Option<Result<()>>>> =
+        Arc::new(std::sync::Mutex::new(None));
+    let setup = cx.update(|cx| {
+        let outcome = outcome.clone();
+        cx.background_spawn(async move {
+            let result = async {
+                project::harness_maintenance::reprobe_installed_harness(
+                    fs.clone(),
+                    &healthy.0,
+                    &healthy.2,
+                    &healthy.1,
+                    1_784_894_400_000,
+                )
+                .await?;
+                project::harness_maintenance::pin_installed_harness(
+                    fs.clone(),
+                    &pinned.0,
+                    // Frozen at 1.0.0 while the registry advertises 1.1.0.
+                    "1.0.0",
+                    &pinned.1,
+                    1_784_894_400_001,
+                )
+                .await?;
+                anyhow::Ok(())
+            }
+            .await;
+            *outcome.lock().unwrap() = Some(result);
+        })
+    });
+    for _ in 0..200 {
+        cx.run_until_parked();
+        if outcome.lock().unwrap().is_some() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    setup.detach();
+    match outcome.lock().unwrap().take() {
+        Some(Ok(())) => {}
+        Some(Err(error)) => return Err(error).context("preparing harness maintenance state"),
+        None => anyhow::bail!("harness maintenance setup did not finish"),
+    }
+
+    let workspace_window: WindowHandle<MultiWorkspace> = cx
+        .update(|cx| {
+            cx.open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(bounds)),
+                    focus: false,
+                    show: false,
+                    ..Default::default()
+                },
+                |window, cx| {
+                    let workspace = cx.new(|cx| {
+                        Workspace::new(None, project.clone(), app_state.clone(), window, cx)
+                    });
+                    cx.new(|cx| MultiWorkspace::new(workspace, window, cx))
+                },
+            )
+        })
+        .context("Failed to open workspace window for external agents test")?;
+
+    cx.run_until_parked();
+
+    workspace_window
+        .update(cx, |_workspace, window, cx| {
+            window.dispatch_action(
+                Box::new(OpenSettingsAt {
+                    path: "agent_servers".to_string(),
+                    target: None,
+                }),
+                cx,
+            );
+        })
+        .context("Failed to dispatch OpenSettingsAt for external agents")?;
+
+    cx.run_until_parked();
+    for _ in 0..10 {
+        cx.advance_clock(Duration::from_millis(50));
+        cx.run_until_parked();
+    }
+
+    // Earlier tests leave their own settings windows open, so "the newest
+    // window" is not reliably this test's. Take the newest one that is a
+    // settings window.
+    let all_windows = cx.update(|cx| cx.windows());
+    let (settings_window, settings_window_handle) = all_windows
+        .iter()
+        .rev()
+        .find_map(|window| Some((*window, window.downcast::<SettingsWindow>()?)))
+        .context("No settings window found")?;
+
+    settings_window_handle
+        .update(cx, |settings_window, window, cx| {
+            settings_window.navigate_to_sub_page("agent_servers", window, cx);
+            settings_window.refresh_harness_maintenance_for_test(cx);
+        })
+        .context("Failed to navigate to the External Agents sub-page")?;
+
+    cx.run_until_parked();
+    for _ in 0..20 {
+        cx.advance_clock(Duration::from_millis(50));
+        cx.run_until_parked();
+    }
+
+    let result = run_visual_test(
+        "external_agent_harness_maintenance",
+        settings_window,
+        cx,
+        update_baseline,
+    )?;
+
+    cx.update_window(settings_window, |_, window, _cx| {
+        window.remove_window();
+    })
+    .log_err();
+    cx.update_window(workspace_window.into(), |_, window, _cx| {
+        window.remove_window();
+    })
+    .log_err();
+    cx.run_until_parked();
+
+    Ok(result)
 }

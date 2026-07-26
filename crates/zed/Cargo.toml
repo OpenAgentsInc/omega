@@ -51,6 +51,7 @@ visual-tests = [
     "fs/test-support",
     "recent_projects/test-support",
     "title_bar/test-support",
+    "settings_ui/test-support",
 ]
 
 [[bin]]
