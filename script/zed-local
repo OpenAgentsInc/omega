@@ -198,7 +198,15 @@ setTimeout(() => {
     } else if (i != 0 && othersOnPreview) {
       binaryPath = "/Applications/Zed Preview.app/Contents/MacOS/zed";
     }
-    spawn(binaryPath, i == 0 ? args : [], {
+    // OMEGA-DELTA-0052. `omega` with no arguments opens zero base, which is
+    // one Exo thread and no editor. Every instance after the first is spawned
+    // with no arguments, and this harness exists to put several editors on one
+    // screen, so each Omega instance asks for the editor explicitly. Only
+    // Omega: upstream Zed does not know the flag and would refuse to start.
+    const isOmega = binaryPath === zedBinary;
+    const editorFlag = isOmega ? ["--full-editor"] : [];
+    const instanceArgs = i == 0 ? [...editorFlag, ...args] : editorFlag;
+    spawn(binaryPath, instanceArgs, {
       stdio: "inherit",
       env: Object.assign({}, process.env, {
         ZED_IMPERSONATE: users[i],
