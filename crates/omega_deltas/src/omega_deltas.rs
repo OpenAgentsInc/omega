@@ -86,6 +86,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0060",
     "OMEGA-DELTA-0070",
     "OMEGA-DELTA-0080",
+    "OMEGA-DELTA-0090",
 ];
 
 /// OMEGA-DELTA-0080. Where the agent panel declares its result-body ceiling and
@@ -2109,6 +2110,106 @@ pub const PUBLIC_NOSTR_CHAT_SKILL_NAME: &str = "public-nostr-chat";
 /// run on their own without building the UI framework. The check below asserts
 /// the mirrored value against the source that owns it, so drift fails here.
 pub const MAX_SKILL_DESCRIPTION_LEN: usize = 1024;
+
+// ------ OMEGA-DELTA-0090
+
+/// OMEGA-DELTA-0090. The episode law: which Exo requests, which comparison,
+/// which loop.
+pub const EPISODE_LAW_PATH: &str = "crates/omega_exo_episode/src/omega_exo_episode.rs";
+
+/// OMEGA-DELTA-0090. The partition of Exo's protocol into admitted and refused
+/// families.
+pub const EPISODE_FAMILY_PATH: &str = "crates/omega_exo_episode/src/family.rs";
+
+/// OMEGA-DELTA-0090. The four requests an episode sends, and their wire shapes.
+pub const EPISODE_REQUEST_PATH: &str = "crates/omega_exo_episode/src/request.rs";
+
+/// OMEGA-DELTA-0090. The reset, its admission table, and the falsification
+/// loop.
+pub const EPISODE_RESET_PATH: &str = "crates/omega_exo_episode/src/reset.rs";
+
+/// OMEGA-DELTA-0090. The state comparison two forks are judged identical by.
+pub const EPISODE_STATE_PATH: &str = "crates/omega_exo_episode/src/state.rs";
+
+/// OMEGA-DELTA-0090. Single-writer claims on an Exo root.
+pub const EPISODE_ROOT_PATH: &str = "crates/omega_exo_episode/src/root.rs";
+
+/// OMEGA-DELTA-0090. Every source file of the episode crate.
+///
+/// Listed rather than walked, so a new module added to the crate has to be
+/// added here too. A walk would silently include a file nobody reviewed, and
+/// the scan below is exactly the kind that is worth failing loudly when the
+/// surface grows.
+pub const EPISODE_CRATE_SOURCES: &[&str] = &[
+    EPISODE_LAW_PATH,
+    EPISODE_FAMILY_PATH,
+    "crates/omega_exo_episode/src/ids.rs",
+    EPISODE_REQUEST_PATH,
+    EPISODE_RESET_PATH,
+    EPISODE_ROOT_PATH,
+    EPISODE_STATE_PATH,
+];
+
+/// OMEGA-DELTA-0090. Vocabulary that would mean the episode crate can reach the
+/// working tree.
+///
+/// The manual falsification loop this replaces destroyed uncommitted work in
+/// two files with `git checkout --`. The crate's answer is not care: it is that
+/// there is no path, no process, and no filesystem anywhere in it, so no
+/// version of that mistake is expressible. Each token below is a way that would
+/// stop being true.
+pub const EPISODE_FORBIDDEN_REACH: &[&str] = &[
+    "std::fs",
+    "std::process",
+    "std::path",
+    "PathBuf",
+    "Command",
+    "include_str!",
+    "env!",
+    "std::env",
+];
+
+/// OMEGA-DELTA-0090. The request families an episode may send.
+pub const EPISODE_ADMITTED_FAMILIES: &[&str] = &["Query", "Fork", "Reset"];
+
+/// OMEGA-DELTA-0090. The request families an episode may never send.
+///
+/// `exo serve` has no authentication and answers the whole 52-variant protocol,
+/// so the boundary that matters is not the endpoint, it is the family.
+pub const EPISODE_REFUSED_FAMILIES: &[&str] = &["Write", "Secret"];
+
+/// OMEGA-DELTA-0090. Exo request types the episode client must never name.
+///
+/// A sample rather than a full list — the family partition is what actually
+/// decides. These are the ones whose appearance would be worst: appending to
+/// somebody else's history, deleting their records, or reading their secrets.
+pub const EPISODE_REFUSED_REQUEST_TYPES: &[&str] = &[
+    "conversation_add_events",
+    "turn_add_events",
+    "turn_finish",
+    "conversation_begin_turn",
+    "delete_conversation",
+    "delete_agent",
+    "get_secret",
+    "agent_get_secret",
+    "conversation_get_secret",
+    "conversation_put_secret",
+];
+
+/// OMEGA-DELTA-0090. The three event fields `conversation_fork` rewrites, and
+/// therefore the only three an episode comparison may ignore.
+///
+/// Read off the replay loop in `BasicConversationHandle::fork`. A fourth entry
+/// would make more episodes compare equal by ignoring more, which is a green
+/// check that read less — the exact failure shape this delta exists to end.
+pub const EPISODE_IDENTITY_FIELDS: &[&str] = &["id", "conversation_id", "created_at"];
+
+/// OMEGA-DELTA-0090. The prefixes Exo's `fork` copies out of a conversation.
+///
+/// `snapshots` is deliberately absent: it is absent upstream, which is why the
+/// filesystem half of the reset does not compose at the pin.
+pub const EPISODE_FORK_COPIES_PREFIXES: &[&str] =
+    &["bindings", "secrets", "artifacts", "sandboxes"];
 
 /// OMEGA-DELTA-0048. The namespaces zero base hides that the three default
 /// keymaps must still bind.
@@ -9101,6 +9202,278 @@ mod tests {
              lines, and a hand-written \"Show more\" tells a reader nothing \
              about what opening it costs.",
             render_path.display()
+        );
+    }
+
+    // ------ OMEGA-DELTA-0090 — Fork and snapshot as episode reset
+
+    /// OMEGA-DELTA-0090. The episode crate cannot reach the working tree.
+    ///
+    /// This is the load-bearing one. The manual falsification loop it replaces
+    /// reverted a mutation with `git checkout --` and wiped uncommitted work in
+    /// two files. A rule saying "do not do that" is a rule somebody forgets at
+    /// 3am; the crate's answer is that it has no filesystem, no process, and no
+    /// path type anywhere in it, so no version of that mistake compiles.
+    ///
+    /// Scanned over production source rather than tests, for the same reason
+    /// `OMEGA-DELTA-0042` does it: the tests beside a refusal must be free to
+    /// write the refused thing down.
+    #[test]
+    fn the_episode_crate_cannot_reach_the_working_tree() {
+        let mut scanned = 0usize;
+        for relative in EPISODE_CRATE_SOURCES {
+            let path = repository_path(relative);
+            let source = std::fs::read_to_string(&path)
+                .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
+            scanned += 1;
+            for token in EPISODE_FORBIDDEN_REACH {
+                assert!(
+                    !named_in_code(&source, token),
+                    "OMEGA-DELTA-0090: {} names `{token}` in code. The episode crate \
+                     is a leaf law with no filesystem and no process; the whole \
+                     reason a forked episode cannot destroy uncommitted work is \
+                     that nothing in it can reach a file.",
+                    path.display()
+                );
+            }
+        }
+        assert_eq!(
+            scanned,
+            EPISODE_CRATE_SOURCES.len(),
+            "OMEGA-DELTA-0090: the scan read {scanned} files, so it is reading less \
+             than the crate."
+        );
+        assert!(
+            scanned >= 7,
+            "OMEGA-DELTA-0090: {scanned} files is not the episode crate. A module \
+             added to the crate must be added to EPISODE_CRATE_SOURCES, or it goes \
+             unscanned."
+        );
+    }
+
+    /// OMEGA-DELTA-0090. An episode sends queries, one fork, and one restore.
+    ///
+    /// `exo serve` is unauthenticated and answers the whole protocol, including
+    /// `get_secret` and `delete_agent`. Loopback keeps the endpoint off the
+    /// network; this keeps the authority small once you are on it. Read off the
+    /// `request_type` table, because that table is what actually goes on the
+    /// wire.
+    #[test]
+    fn an_episode_sends_no_write_or_secret_request() {
+        let path = repository_path(EPISODE_REQUEST_PATH);
+        let source = std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
+        let table = source
+            .split_once("pub const fn request_type(&self)")
+            .and_then(|(_, rest)| rest.split_once("\n    }"))
+            .expect("OMEGA-DELTA-0090: the request_type table is present")
+            .0;
+        let emitted: Vec<&str> = table
+            .match_indices('"')
+            .map(|(offset, _)| offset)
+            .collect::<Vec<_>>()
+            .chunks_exact(2)
+            .map(|pair| &table[pair[0] + 1..pair[1]])
+            .collect();
+        assert_eq!(
+            emitted.len(),
+            4,
+            "OMEGA-DELTA-0090: the request_type table parsed as {emitted:?}, which is \
+             not the closed set of four this delta describes."
+        );
+
+        let families = repository_path(EPISODE_FAMILY_PATH);
+        let family_source = std::fs::read_to_string(&families)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", families.display()));
+        for request_type in &emitted {
+            let row = family_source
+                .lines()
+                .find(|line| line.contains(&format!("(\"{request_type}\", RequestFamily::")))
+                .unwrap_or_else(|| {
+                    panic!(
+                        "OMEGA-DELTA-0090: the episode client emits `{request_type}` and \
+                         the family table does not classify it, so nothing decided it \
+                         was admitted."
+                    )
+                });
+            assert!(
+                EPISODE_ADMITTED_FAMILIES
+                    .iter()
+                    .any(|family| row.contains(&format!("RequestFamily::{family}"))),
+                "OMEGA-DELTA-0090: the episode client emits `{request_type}`, which is \
+                 classified `{}`. Admitted families are {EPISODE_ADMITTED_FAMILIES:?}.",
+                row.trim()
+            );
+        }
+
+        for refused in EPISODE_REFUSED_REQUEST_TYPES {
+            assert!(
+                !emitted.contains(refused),
+                "OMEGA-DELTA-0090: the episode client emits `{refused}`, which appends \
+                 to, deletes from, or reads the secrets of somebody else's Exo."
+            );
+        }
+        for family in EPISODE_REFUSED_FAMILIES {
+            assert!(
+                family_source.contains(&format!("RequestFamily::{family}")),
+                "OMEGA-DELTA-0090: the family partition no longer has a `{family}` \
+                 family, so nothing is refused by construction any more."
+            );
+        }
+    }
+
+    /// OMEGA-DELTA-0090. Two forks are compared, and the comparison ignores
+    /// only what a fork rewrites.
+    ///
+    /// `conversation_fork` re-mints every event id, sets the fork's own
+    /// conversation id, and recomputes `created_at`. Nothing else changes, so
+    /// those three are identity and everything else is content. The dangerous
+    /// direction is growth: an exclusion set that grew would make more and more
+    /// episodes compare equal, and the acceptance condition "two forks start
+    /// identical" would go green by ignoring more rather than by matching more.
+    #[test]
+    fn the_episode_comparison_ignores_only_what_a_fork_rewrites() {
+        let path = repository_path(EPISODE_STATE_PATH);
+        let source = std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
+        let declared = source
+            .split_once("pub const IDENTITY_FIELDS: &[&str] = &[")
+            .and_then(|(_, rest)| rest.split_once("];"))
+            .expect("OMEGA-DELTA-0090: IDENTITY_FIELDS is declared")
+            .0;
+        let fields: Vec<&str> = declared
+            .match_indices('"')
+            .map(|(offset, _)| offset)
+            .collect::<Vec<_>>()
+            .chunks_exact(2)
+            .map(|pair| &declared[pair[0] + 1..pair[1]])
+            .collect();
+        assert_eq!(
+            fields, EPISODE_IDENTITY_FIELDS,
+            "OMEGA-DELTA-0090: the episode comparison ignores {fields:?}. Exactly \
+             {EPISODE_IDENTITY_FIELDS:?} are the fields `fork` rewrites; anything \
+             more is a real divergence being hidden, and anything less makes every \
+             correct fork compare unequal."
+        );
+        assert!(
+            !fields.contains(&"data"),
+            "OMEGA-DELTA-0090: the comparison ignores the event payload, so every \
+             pair of episodes compares equal and the check tests nothing."
+        );
+        for content in ["session_id", "turn_id"] {
+            assert!(
+                !fields.contains(&content),
+                "OMEGA-DELTA-0090: the comparison ignores `{content}`, which a fork \
+                 copies verbatim. Ignoring it hides a divergence that is real."
+            );
+        }
+    }
+
+    /// OMEGA-DELTA-0090. The loop forks before it mutates, and probes before it
+    /// reads the check.
+    ///
+    /// Both orderings are omega#103's own falsifiers. Fork after the mutation
+    /// and the sibling carries it, so the fork point proves nothing. Read the
+    /// check outcome before proving the mutation applied and a check that never
+    /// ran against anything reports green — which happened here, more than once,
+    /// on 2026-07-26.
+    #[test]
+    fn the_falsification_loop_forks_first_and_probes_before_it_checks() {
+        let path = repository_path(EPISODE_RESET_PATH);
+        let source = std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
+        let loop_source = source
+            .split_once("pub const FALSIFICATION_LOOP: &[Step] = &[")
+            .and_then(|(_, rest)| rest.split_once("];"))
+            .expect("OMEGA-DELTA-0090: FALSIFICATION_LOOP is declared")
+            .0;
+        let steps: Vec<&str> = loop_source
+            .lines()
+            .filter_map(|line| line.trim().strip_prefix("Step::"))
+            .filter_map(|line| line.split(',').next())
+            .collect();
+        assert!(
+            steps.len() >= 10,
+            "OMEGA-DELTA-0090: the loop parsed as {steps:?}, so this check is \
+             reading nothing."
+        );
+        let at = |step: &str| {
+            steps
+                .iter()
+                .position(|candidate| *candidate == step)
+                .unwrap_or_else(|| {
+                    panic!("OMEGA-DELTA-0090: `{step}` is not a step of the loop: {steps:?}")
+                })
+        };
+        assert!(
+            at("ForkCandidate") < at("ApplyMutationInCandidate"),
+            "OMEGA-DELTA-0090: the loop mutates before it forks, so the sibling \
+             carries the mutation and the fork point proves nothing: {steps:?}"
+        );
+        assert!(
+            at("ForkControl") < at("ApplyMutationInCandidate"),
+            "OMEGA-DELTA-0090: the control fork is taken after the mutation: {steps:?}"
+        );
+        assert!(
+            at("ProbeMutationApplied") < at("RunNamedCheck"),
+            "OMEGA-DELTA-0090: the loop runs the check before it proves the mutation \
+             applied. An edit that silently did not apply produces a check that \
+             passes while testing nothing: {steps:?}"
+        );
+        assert!(
+            at("CompareStartingStates") < at("ApplyMutationInCandidate"),
+            "OMEGA-DELTA-0090: the starting states are compared after something \
+             already moved one of them: {steps:?}"
+        );
+        assert!(
+            at("RunNamedCheck") < at("ReadVerdict"),
+            "OMEGA-DELTA-0090: the verdict is read before the check runs: {steps:?}"
+        );
+    }
+
+    /// OMEGA-DELTA-0090. The crate records that Exo's fork does not carry
+    /// snapshots.
+    ///
+    /// omega#103 and the teardown both say fork plus `start_sandbox` is a
+    /// complete episode reset needing no upstream change. The conversation half
+    /// is; the filesystem half is not, because `fork` copies four prefixes and
+    /// `snapshots` is not one of them. If somebody quietly adds `snapshots` to
+    /// the copied list here to make a refusal go away, the refusals stop
+    /// matching Exo and the episode reports a reset it did not perform.
+    #[test]
+    fn the_episode_reset_records_that_a_fork_does_not_carry_snapshots() {
+        let path = repository_path(EPISODE_RESET_PATH);
+        let source = std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
+        let copied = source
+            .split_once("pub const FORK_COPIES_PREFIXES: &[&str] = &[")
+            .and_then(|(_, rest)| rest.split_once("];"))
+            .expect("OMEGA-DELTA-0090: FORK_COPIES_PREFIXES is declared")
+            .0;
+        let prefixes: Vec<&str> = copied
+            .match_indices('"')
+            .map(|(offset, _)| offset)
+            .collect::<Vec<_>>()
+            .chunks_exact(2)
+            .map(|pair| &copied[pair[0] + 1..pair[1]])
+            .collect();
+        assert_eq!(
+            prefixes, EPISODE_FORK_COPIES_PREFIXES,
+            "OMEGA-DELTA-0090: the crate says `fork` copies {prefixes:?}. Upstream's \
+             `BasicConversationHandle::fork` makes exactly four `copy_prefix` calls, \
+             for {EPISODE_FORK_COPIES_PREFIXES:?}."
+        );
+        assert!(
+            !prefixes.contains(&"snapshots"),
+            "OMEGA-DELTA-0090: the crate now believes a fork carries snapshots. It \
+             does not, at the pinned Exo, and `start_sandbox` inside a fork fails \
+             loading the manifest."
+        );
+        assert!(
+            source.contains("SnapshotLostByFork") && source.contains("SiblingsShareOneSandbox"),
+            "OMEGA-DELTA-0090: the two reset refusals are gone from {}. Removing them \
+             does not make the filesystem reset work; it makes the failure silent.",
+            path.display()
         );
     }
 }

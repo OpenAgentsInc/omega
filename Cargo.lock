@@ -11999,6 +11999,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "omega_exo_episode"
+version = "0.1.0"
+dependencies = [
+ "omega_exo_lane",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
 name = "omega_exo_lane"
 version = "0.1.0"
 dependencies = [

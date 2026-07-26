@@ -3100,3 +3100,108 @@ than it sounds, because the harness omega#81's acceptance sentence names —
   terminal tool result only: a tool that returns Markdown, a diff, or an image
   keeps the height it had. And the terminal is resized to the ceiling, so a
   command that reads the terminal height sees 16 rows while the ceiling holds.
+
+### OMEGA-DELTA-0090 — A check is falsified in a forked episode, never in the working tree
+
+- **Upstream behaviour.** Zed has no notion of an episode. Omega's delta
+  discipline — watch a check fail before you trust it — is therefore performed
+  by hand: edit a file, run the check, revert. On 2026-07-26 that loop ran about
+  fifteen times across four lanes and cost real damage. One lane reverted with
+  `git checkout --` and wiped uncommitted work in two files; it recovered, and
+  changed its script to restore from a byte copy. One check "passed" while
+  testing nothing, because the mutated string also appeared in a second code
+  path, so deleting the intended arm left it green. One suite flaked on a model
+  declining to call a tool, and there was no way to re-run from an identical
+  start, so the answer was to run it again and hope.
+- **Why Omega diverges.** Every one of those is an episode-reset problem, and
+  the Exo lane (`OMEGA-DELTA-0042`) already puts a harness with the primitive
+  inside reach. `conversation_fork` replays a conversation's whole event log at
+  a chosen event into a *new* conversation, leaving the source untouched. A
+  mutation applied in a fork is applied to a copy, so a failed revert cannot
+  destroy anything — there is nothing to revert.
+- **The law.** `crates/omega_exo_episode` is a leaf, in the shape
+  `omega_exo_lane` established: no GPUI, no process, no filesystem, no clock, no
+  network. It has five parts, and each one is a refusal rather than a
+  convention.
+  - **The working tree is unreachable, not merely untouched.** The crate names
+    no path type, no `std::fs`, no `std::process`, and no `Command`. The reason
+    a forked episode cannot wipe uncommitted work is not that it is careful; it
+    is that nothing in it can reach a file.
+  - **Query and fork families only.** `exo serve` is unauthenticated by design
+    and answers all 52 request variants on one endpoint, `get_secret` and
+    `delete_agent` included. `omega_exo_episode::family` partitions the whole
+    protocol rather than allowlisting the calls this crate happens to make: an
+    allowlist is silent about a 53rd variant nobody classified, and a partition
+    fails on it. Two of the 52 are admitted beyond reading — `conversation_fork`
+    and `start_sandbox` — and each is its own family, so nobody reads "queries
+    only" and believes an episode leaves Exo's storage untouched. It does not:
+    it adds one conversation, which is Exo's own record of the fork it was asked
+    to make.
+  - **The fork point is required.** Upstream's `up_to_inclusive` is optional and
+    `None` means "the whole history". `EpisodeRequest::ForkAtEvent` takes an
+    event id and cannot say `None`, because forking after the mutation puts the
+    mutation in the sibling and a fork at "now" is that same mistake by
+    omission.
+  - **The reset is aimed at the fork, by type.** `RestoreSandbox` takes a
+    `ForkedConversation`, whose only constructor reads a fork response. A
+    restore cannot be pointed at the conversation the episode forked *from*.
+  - **One writer per root.** `.exo` is single-writer storage with one in-process
+    mutex; two processes on one root interleave rather than conflict, which
+    would produce a fork of a history that never existed while every check still
+    passed. `ExoRoots` refuses a second claim, is not `Clone`, and refuses any
+    path spelling that could alias another.
+- **Two forks are compared, not asserted.** They are not byte-identical and
+  cannot be: `fork` re-mints every event id, sets the fork's own
+  `conversation_id`, and recomputes `created_at`. Those three fields are the
+  identity of the copy; everything else — `session_id`, `turn_id`, the whole
+  payload — is preserved verbatim and is content. `EpisodeState` removes exactly
+  those three and compares the rest, with a digest for "are these the same" and
+  a diff for "where did they stop". The dangerous direction is growth: an
+  exclusion set that grew would make more episodes compare equal, so the set is
+  asserted to be those three and nothing else.
+- **The probe comes before the check.** `verdict` is total over (probe, check
+  outcome) and has three answers, not two. A mutation that applied against a
+  check that passed is `CheckDidNotNotice` — the check tests something else. A
+  mutation that never applied is `MutationDidNotApply` whatever the check said —
+  a failure of the loop, not of the check, and a different file to go read.
+  Folding those together is how a loop sends somebody to the wrong place.
+- **The filesystem half does not compose yet, and the crate says so.** omega#103
+  and `docs/teardowns/2026-07-25-exoharness-exo-teardown.md` §11.5 both state
+  that fork plus `start_sandbox { snapshot_id }` is a complete episode reset
+  needing no upstream change. The conversation half is exactly that. The
+  filesystem half is not, at the pinned Exo: `fork` copies four prefixes —
+  `bindings`, `secrets`, `artifacts`, `sandboxes` — and `snapshots` is not one
+  of them, so a conversation-scoped snapshot taken before the fork does not
+  exist inside it and `start_sandbox` fails loading the manifest. An
+  agent-scoped snapshot is reachable and is one sandbox record shared by every
+  conversation of the agent, so two siblings restoring it share a filesystem and
+  are not two episodes. `admit_filesystem_reset` is total over (scope, shape)
+  and issues its witness for one combination — agent scope, one episode at a
+  time — naming the reason for each refusal. Exo's own documentation agrees:
+  snapshots time-travel a sandbox "without forking the conversation itself" and
+  are "not a conversation rewind". The fix is one more `copy_prefix` beside the
+  four that are already there, additive and in upstream's own direction, and it
+  is owner-gated like every other upstream contribution.
+- **What this does not cover.** This is the law, not the client: nothing here
+  opens a socket, so no episode has been run end to end against a live `exo
+  serve` on this machine. The shapes and the fork finding are read from the
+  pinned source — `crates/exoharness/src/{protocol,basic,types}.rs`,
+  `http/server.rs`, and `docs/sandbox-snapshots.md`, which are byte-identical
+  between upstream `baa07f67` where the teardown read them and the
+  `OpenAgentsInc/exo` fork `cd7c0d29` the lane drives — and they are stated as
+  values so a live run can contradict them loudly. The mutation itself stays
+  where it already lives: a turn sent by `omega_exo_lane::ExoCommand::SendTurn`,
+  the lane's one write. Discarding a fork is Exo's `delete_conversation`, a
+  write family call this crate does not make, so a discarded fork leaves Exo's
+  own record of it behind — Omega starts no sandbox, spawns no process, and
+  makes no other `.exo` mutation. And self-modification stays out entirely:
+  `guardian_action`, agent-authored tools, and the read-write source mount are
+  refused by `omega_exo_lane::capability`, and nothing here relaxes,
+  re-implements, or routes around that gate.
+- **Enforced by:** `the_episode_crate_cannot_reach_the_working_tree`,
+  `an_episode_sends_no_write_or_secret_request`,
+  `the_episode_comparison_ignores_only_what_a_fork_rewrites`,
+  `the_falsification_loop_forks_first_and_probes_before_it_checks`, and
+  `the_episode_reset_records_that_a_fork_does_not_carry_snapshots` in
+  `crates/omega_deltas`; plus the 42 unit tests in
+  `crates/omega_exo_episode/src/`.

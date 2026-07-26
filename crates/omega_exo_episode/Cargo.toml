@@ -1,0 +1,21 @@
+[package]
+name = "omega_exo_episode"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license = "GPL-3.0-or-later"
+description = "Episode reset over Exo: fork the log, compare the state, falsify a check"
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/omega_exo_episode.rs"
+doctest = false
+
+[dependencies]
+omega_exo_lane.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+
+[dev-dependencies]
