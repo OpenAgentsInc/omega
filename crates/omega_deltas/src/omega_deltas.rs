@@ -70,6 +70,8 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0040",
     "OMEGA-DELTA-0041",
     "OMEGA-DELTA-0042",
+    "OMEGA-DELTA-0043",
+    "OMEGA-DELTA-0044",
 ];
 
 /// OMEGA-DELTA-0036. The uninstall script embedded in the shipped `cli`.
@@ -77,6 +79,10 @@ pub const UNINSTALL_SCRIPT_PATH: &str = "script/uninstall.sh";
 
 /// OMEGA-DELTA-0036. Where the removal plan is derived from `paths::`.
 pub const UNINSTALL_PLAN_PATH: &str = "crates/cli/src/uninstall.rs";
+
+/// OMEGA-DELTA-0043, OMEGA-DELTA-0044. The CLI binary: it derives the
+/// uninstall plan and renders the open-behavior prompt.
+pub const CLI_MAIN_PATH: &str = "crates/cli/src/main.rs";
 
 /// OMEGA-DELTA-0037. Outbound attribution on OpenRouter requests.
 pub const OPEN_ROUTER_PATH: &str = "crates/open_router/src/open_router.rs";
@@ -1466,6 +1472,65 @@ pub fn is_prose(text: &str) -> bool {
     plain >= 2
 }
 
+/// Whether `text` is a command line whose program name is a competitor's
+/// binary.
+///
+/// OMEGA-DELTA-0044. `is_prose` needs three tokens, so `zed --existing`,
+/// `zed --classic` and `zed <path>` were invisible to it — and all three
+/// shipped in the signed `cli` of `0.2.0-rc16`, in an interactive panel whose
+/// surrounding copy says "Omega window" and "Omega settings" around them
+/// (omega#93). Substitute our own name and each stays true, so by the rule
+/// this gate is written around they are product claims, not references.
+///
+/// This admits the narrow shape only: a brand word standing in `argv[0]`,
+/// followed by flags, placeholders or paths. Admitting every two-token literal
+/// that starts with a brand word instead adds 8 more across the tree — `Zed
+/// Pro`, `Zed (Default)`, `Zed Repository` — which are genuine references to
+/// somebody else's product; admitting a bare brand token adds 55. This shape
+/// adds exactly the three, which is why the gate can afford to carry it
+/// instead of writing the three literals into a denylist.
+#[must_use]
+pub fn is_command_form(text: &str, policy: &serde_json::Value) -> bool {
+    let words: Vec<&str> = policy["brand"]["words"]
+        .as_array()
+        .map(|values| values.iter().filter_map(serde_json::Value::as_str).collect())
+        .unwrap_or_default();
+    let tokens: Vec<&str> = text.split_whitespace().collect();
+    if tokens.len() < 2 || !words.contains(&tokens[0]) {
+        return false;
+    }
+    tokens[1..].iter().all(|token| is_command_argument(token))
+}
+
+/// A flag (`-n`, `--existing`), a placeholder (`<path>`, `[FILE]`), or a path
+/// (`.`, `..`, `~/x`, `./x`, `/x`).
+fn is_command_argument(token: &str) -> bool {
+    let flag = token.strip_prefix("--").or_else(|| token.strip_prefix('-'));
+    if let Some(rest) = flag {
+        return rest
+            .chars()
+            .next()
+            .is_some_and(|character| character.is_ascii_alphanumeric())
+            && rest
+                .chars()
+                .all(|character| character.is_ascii_alphanumeric() || "-_.".contains(character));
+    }
+    let placeholder = matches!(token.chars().next(), Some('<' | '[' | '{'))
+        && matches!(token.chars().last(), Some('>' | ']' | '}'))
+        && token.len() >= 2
+        && !token[1..token.len() - 1].contains(['>', ']', '}']);
+    if placeholder {
+        return true;
+    }
+    token == "." || token == ".." || token.starts_with(['~', '/']) || token.starts_with("./")
+}
+
+/// Prose, or a command form. What the prose inventory admits.
+#[must_use]
+pub fn is_user_facing_text(text: &str, policy: &serde_json::Value) -> bool {
+    is_prose(text) || is_command_form(&normalize_prose(text), policy)
+}
+
 /// Every Rust string literal in `source`, as `(start line, contents)`.
 ///
 /// Raw and multi-line literals included, comments skipped. A regex over single
@@ -1775,7 +1840,7 @@ pub fn prose_inventory(policy: &serde_json::Value) -> (Vec<ProseLiteral>, ProseR
             if is_test_file || skipped.contains(&number) {
                 continue;
             }
-            if !brand_hits(&body, policy).is_empty() && is_prose(&body) {
+            if !brand_hits(&body, policy).is_empty() && is_user_facing_text(&body, policy) {
                 items.push(ProseLiteral {
                     kind: "rust_string",
                     file: relative.clone(),
@@ -1792,7 +1857,7 @@ pub fn prose_inventory(policy: &serde_json::Value) -> (Vec<ProseLiteral>, ProseR
             let Some(body) = doc_comment_body(line) else {
                 continue;
             };
-            if brand_hits(body, policy).is_empty() || !is_prose(body) {
+            if brand_hits(body, policy).is_empty() || !is_user_facing_text(body, policy) {
                 continue;
             }
             let kind = if actions.contains(&number) {
@@ -1822,7 +1887,7 @@ pub fn prose_inventory(policy: &serde_json::Value) -> (Vec<ProseLiteral>, ProseR
             continue;
         }
         for (index, line) in source.lines().enumerate() {
-            if !brand_hits(line, policy).is_empty() && is_prose(line) {
+            if !brand_hits(line, policy).is_empty() && is_user_facing_text(line, policy) {
                 items.push(ProseLiteral {
                     kind: "asset",
                     file: relative.clone(),
@@ -4051,6 +4116,138 @@ mod tests {
         );
     }
 
+    /// OMEGA-DELTA-0044. A brand-bearing command form is user-facing text.
+    ///
+    /// `is_prose` needs three tokens, and `0.2.0-rc16` shipped three two-token
+    /// command literals in the signed `cli` because of it: `zed --existing`,
+    /// `zed --classic` and `zed <path>`, rendered by an interactive panel that
+    /// says "Omega window" and "Omega settings" around them (omega#93). They
+    /// were in neither `prose.classified` nor the compatibility allow-list, and
+    /// `verify-omega-brand --app` exited 0.
+    ///
+    /// Both directions matter. Widening this to "any two tokens beginning with
+    /// a brand word" pulls in eight more literals that really are references to
+    /// somebody else's product, and widening it to a bare brand token pulls in
+    /// 55; a rule that cries wolf gets deleted, which is how the blind spot
+    /// stayed open once it was known about.
+    #[test]
+    fn a_brand_bearing_command_form_is_user_facing_text() {
+        let policy = brand_policy().expect("brand policy parses");
+
+        for shipped in ["zed --existing", "zed --classic", "zed <path>"] {
+            assert!(
+                !is_prose(shipped),
+                "OMEGA-DELTA-0044: {shipped:?} is being kept out of the \
+                 inventory by the three-token rule, which is the blind spot \
+                 this exists to close"
+            );
+            assert!(
+                is_command_form(shipped, &policy),
+                "OMEGA-DELTA-0044: {shipped:?} shipped in a signed `cli` and \
+                 the inventory still cannot see it"
+            );
+            assert!(is_user_facing_text(shipped, &policy));
+        }
+        for form in ["zed .", "zed ~/project", "zed -n", "Zed --help"] {
+            assert!(
+                is_command_form(form, &policy),
+                "OMEGA-DELTA-0044: {form:?} is a command form"
+            );
+        }
+
+        // The other direction: the shapes that would make this noisy enough to
+        // be deleted, and are therefore excluded on purpose.
+        for benign in [
+            "Zed Pro",
+            "Zed (Default)",
+            "Zed Repository",
+            "zed",
+            "crates/zed/src",
+            "X-Zed-Predict-Edits-Mode",
+            "zed_llm_client",
+        ] {
+            assert!(
+                !is_command_form(benign, &policy),
+                "OMEGA-DELTA-0044: {benign:?} is not a command form. This rule \
+                 covers a brand word standing in argv[0]; a two-word label is \
+                 either prose already or a reference to be classified."
+            );
+        }
+
+        // The shell gate carries the same rule, on the same three streams, or
+        // the source and packaged sides disagree about what is inventoried.
+        let verifier =
+            std::fs::read_to_string(repository_path(BRAND_VERIFIER_PATH)).expect("brand verifier");
+        assert!(
+            verifier.contains("def is_command_form("),
+            "OMEGA-DELTA-0044: {BRAND_VERIFIER_PATH} does not carry the \
+             command-form rule, so `verify-omega-brand` and these tests \
+             inventory different things."
+        );
+        let wired = verifier.matches("is_user_facing_text(").count();
+        assert!(
+            wired >= 4,
+            "OMEGA-DELTA-0044: {BRAND_VERIFIER_PATH} calls is_user_facing_text \
+             {wired} time(s) — one definition and one call per stream (Rust \
+             literals, doc lines, embedded assets) is the minimum. A predicate \
+             that is defined and never called is the state \
+             first_party_agent.phrases was in for four release candidates."
+        );
+        assert!(
+            !verifier.contains("and is_prose(body)") && !verifier.contains("not is_prose(doc)"),
+            "OMEGA-DELTA-0044: a stream in {BRAND_VERIFIER_PATH} still filters \
+             on is_prose alone, so command forms are invisible to it."
+        );
+    }
+
+    /// OMEGA-DELTA-0044. The prompt spells its command forms with the binary's
+    /// own name.
+    ///
+    /// Fixing the three literals is not the same as making them unable to come
+    /// back. Any command form written out by hand can drift from the binary it
+    /// describes; one built from `paths::BINARY_NAME` cannot.
+    #[test]
+    fn the_cli_prompt_names_our_own_binary() {
+        let path = repository_path(CLI_MAIN_PATH);
+        let source = std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
+        let prompt = source
+            .split("fn prompt_open_behavior()")
+            .nth(1)
+            .expect("OMEGA-DELTA-0044: prompt_open_behavior is gone");
+        let prompt = &prompt[..prompt.find("\n}\n").unwrap_or(prompt.len())];
+        // Ordinary comments are dropped, doc comments are not: a `//` line does
+        // not reach a user, and the comment recording what shipped here has to
+        // be able to quote it. `///` and `//!` stay, because clap and schemars
+        // print those.
+        let rendered: String = prompt
+            .lines()
+            .filter(|line| {
+                let trimmed = line.trim_start();
+                !trimmed.starts_with("//") || trimmed.starts_with("///") || trimmed.starts_with("//!")
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let policy = brand_policy().expect("brand policy parses");
+        let hits = brand_hits(&rendered, &policy);
+        assert!(
+            hits.is_empty(),
+            "OMEGA-DELTA-0044: the open-behavior prompt in {} names {hits:?}. \
+             This panel already says \"Omega window\" and \"Omega settings\"; \
+             the commands beside them have to be ours too (omega#93).",
+            path.display()
+        );
+        let derived = rendered.matches("paths::BINARY_NAME").count();
+        assert!(
+            derived >= 3,
+            "OMEGA-DELTA-0044: the prompt builds only {derived} of its command \
+             forms from paths::BINARY_NAME. All three — the two choices and the \
+             heading — come from the binary's own name, so a rename cannot \
+             leave one behind."
+        );
+    }
+
     #[test]
     fn delta_ids_are_unique() {
         let mut seen = std::collections::BTreeSet::new();
@@ -5807,6 +6004,67 @@ mod tests {
             "OMEGA-DELTA-0036: the uninstall script accepted an empty plan. \
              Refusing is the safe direction; every default this file has ever \
              had belonged to somebody else's product."
+        );
+    }
+
+    /// OMEGA-DELTA-0043. `--uninstall` plans the installation, not one file.
+    ///
+    /// `0.2.0-rc16` fixed the destructive half of omega#88 and still did not
+    /// remove Omega: `main.rs` handed `app.path()` — `Omega.app/Contents/MacOS/
+    /// omega` — to a field documented as "the application bundle or executable",
+    /// so a completed uninstall left `/Applications/Omega.app` in place with
+    /// 130.9 MB, five executables including a `cli` that still carries
+    /// `--uninstall`, and a bundled Node runtime (omega#92).
+    ///
+    /// The behavioural proof is in `crates/cli/src/uninstall.rs`, where the
+    /// shipped script runs against a fabricated home whose bundle holds several
+    /// executables and every one of them is read back. This asserts the two
+    /// structural properties: the call site asks for the installation rather
+    /// than the executable, and the constructor normalizes what it is given so
+    /// a caller cannot reintroduce the defect from outside.
+    #[test]
+    fn the_uninstall_plan_names_the_installation_root() {
+        let plan_path = repository_path(UNINSTALL_PLAN_PATH);
+        let plan = std::fs::read_to_string(&plan_path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", plan_path.display()));
+        assert!(
+            plan.contains("pub fn installation_root("),
+            "OMEGA-DELTA-0043: {} no longer derives an installation root, so \
+             whatever path a caller happens to be holding is what gets removed.",
+            plan_path.display()
+        );
+        let constructor = plan
+            .split("pub fn from_installed_paths")
+            .nth(1)
+            .and_then(|tail| tail.split("\n    }").next())
+            .expect("OMEGA-DELTA-0043: from_installed_paths is gone");
+        assert!(
+            constructor.contains("installation_root"),
+            "OMEGA-DELTA-0043: from_installed_paths takes the caller's path as \
+             the installation root. Every macOS caller holds an executable \
+             inside the bundle, and removing it is not an uninstall."
+        );
+
+        let main_path = repository_path(CLI_MAIN_PATH);
+        let main = std::fs::read_to_string(&main_path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", main_path.display()));
+        let call = main
+            .split("from_installed_paths(")
+            .nth(1)
+            .expect("OMEGA-DELTA-0043: the uninstall call site is gone");
+        let call = &call[..call.find(')').unwrap_or(call.len())];
+        assert!(
+            call.contains("installation_root"),
+            "OMEGA-DELTA-0043: {} passes {call:?} to the uninstaller. \
+             `path()` is one executable inside `Omega.app`; \
+             `installation_root()` is the installation.",
+            main_path.display()
+        );
+        assert!(
+            main.contains("fn installation_root(&self) -> PathBuf;"),
+            "OMEGA-DELTA-0043: InstalledApp no longer distinguishes the \
+             executable from the installation. One method answering both \
+             questions is what shipped omega#92."
         );
     }
 

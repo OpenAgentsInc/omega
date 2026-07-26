@@ -43,7 +43,17 @@ trait InstalledApp {
         ipc_url: String,
         user_data_dir: Option<&str>,
     ) -> io::Result<ExitStatus>;
+    /// The executable to run — one file.
     fn path(&self) -> PathBuf;
+    /// The whole installation — the directory `--uninstall` has to remove.
+    ///
+    /// Distinct from `path` because on macOS they are never the same thing:
+    /// `path` is `Omega.app/Contents/MacOS/omega`, and the installation is
+    /// `Omega.app`, which also holds `cli`, `omega-identity-proof`, and a
+    /// bundled Node runtime. `0.2.0-rc16` passed `path` to the uninstaller, so
+    /// a full uninstall left 130.9 MB and five executables in `/Applications`,
+    /// among them a `cli` that still carried `--uninstall` (omega#92).
+    fn installation_root(&self) -> PathBuf;
 }
 
 #[derive(Parser, Debug)]
@@ -581,8 +591,12 @@ fn run() -> Result<()> {
         use std::os::unix::fs::PermissionsExt as _;
         fs::set_permissions(&script_path, fs::Permissions::from_mode(0o755))?;
 
-        let plan = cli::uninstall::UninstallRoots::from_installed_paths(Some(app.path()))
-            .plan(paths::app_name());
+        // `installation_root()`, never `path()`: on macOS the executable is one
+        // file inside `Omega.app`, and removing it leaves the bundle, four more
+        // executables and a bundled Node runtime behind (omega#92).
+        let plan =
+            cli::uninstall::UninstallRoots::from_installed_paths(Some(app.installation_root()))
+                .plan(paths::app_name());
 
         let status = std::process::Command::new("sh")
             .arg(&script_path)
@@ -863,17 +877,27 @@ fn prompt_open_behavior() -> Option<cli::CliBehaviorSetting> {
     }
 
     let blue = console::Style::new().blue();
+    // Every command form here is built from `paths::BINARY_NAME`, never
+    // written out. The literals `zed --existing`, `zed --classic` and
+    // `zed <path>` shipped in the signed `cli` of `0.2.0-rc16`, in a panel
+    // whose surrounding copy said "Omega window" and "Omega settings", so it
+    // named our product twice and somebody else's binary three times
+    // (omega#93). A command form cannot drift from the binary it describes if
+    // it is spelled by the binary's own name.
     let items = [
         format!(
             "Add to existing Omega window ({})",
-            blue.apply_to("zed --existing")
+            blue.apply_to(format!("{} --existing", paths::BINARY_NAME))
         ),
-        format!("Open a new window ({})", blue.apply_to("zed --classic")),
+        format!(
+            "Open a new window ({})",
+            blue.apply_to(format!("{} --classic", paths::BINARY_NAME))
+        ),
     ];
 
     let prompt = format!(
         "Configure default behavior for {}\n{}",
-        blue.apply_to("zed <path>"),
+        blue.apply_to(format!("{} <path>", paths::BINARY_NAME)),
         console::style("You can change this later in Omega settings"),
     );
 
@@ -989,6 +1013,14 @@ mod linux {
         }
 
         fn path(&self) -> PathBuf {
+            self.0.clone()
+        }
+
+        fn installation_root(&self) -> PathBuf {
+            // A Linux install is loose files under a prefix — `libexec`,
+            // `bin`, `share` — with no single directory that is only Omega, so
+            // the editor binary is the honest answer here. macOS is where the
+            // installation really is one directory.
             self.0.clone()
         }
     }
@@ -1256,6 +1288,11 @@ mod windows {
         fn path(&self) -> PathBuf {
             self.0.clone()
         }
+
+        fn installation_root(&self) -> PathBuf {
+            // Windows has no `--uninstall`; the installer owns removal there.
+            self.0.clone()
+        }
     }
 
     impl Detect {
@@ -1371,7 +1408,15 @@ mod mac_os {
 
     impl InstalledApp for Bundle {
         fn app_version_string(&self) -> String {
-            format!("Omega {} – {}", self.version(), self.path().display(),)
+            // The installation, which is what a person can point at in Finder.
+            // This used to read `self.path()`, resolved to an inherent method
+            // that returned the bundle while the trait method of the same name
+            // returned the executable. That ambiguity is what omega#92 was.
+            format!(
+                "Omega {} – {}",
+                self.version(),
+                self.installation_root().display(),
+            )
         }
 
         fn launch(&self, url: String, user_data_dir: Option<&str>) -> anyhow::Result<()> {
@@ -1466,6 +1511,15 @@ mod mac_os {
                 Bundle::LocalPath { executable, .. } => executable.clone(),
             }
         }
+
+        fn installation_root(&self) -> PathBuf {
+            match self {
+                // The bundle, not the executable inside it. Everything Omega
+                // installs on macOS lives under this directory.
+                Bundle::App { app_bundle, .. } => app_bundle.clone(),
+                Bundle::LocalPath { executable, .. } => executable.clone(),
+            }
+        }
     }
 
     impl Bundle {
@@ -1473,13 +1527,6 @@ mod mac_os {
             match self {
                 Self::App { plist, .. } => plist.bundle_short_version_string.clone(),
                 Self::LocalPath { .. } => "<development>".to_string(),
-            }
-        }
-
-        fn path(&self) -> &Path {
-            match self {
-                Self::App { app_bundle, .. } => app_bundle,
-                Self::LocalPath { executable, .. } => executable,
             }
         }
     }

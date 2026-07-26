@@ -16,6 +16,30 @@
 
 use std::path::{Path, PathBuf};
 
+/// The installation root containing `path`.
+///
+/// On macOS an Omega installation is one directory — `Omega.app` — and every
+/// path a caller has to hand names something *inside* it: the running
+/// executable, the `cli` beside it, a resource. Removing what the caller
+/// happened to be holding is not an uninstall, so any path under a `.app`
+/// resolves to the outermost `.app` in it. Anything else, including a
+/// development build sitting loose in `target/debug`, is returned unchanged.
+#[must_use]
+pub fn installation_root(path: &Path) -> PathBuf {
+    let mut root: Option<&Path> = None;
+    let mut cursor = Some(path);
+    while let Some(candidate) = cursor {
+        if candidate
+            .extension()
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("app"))
+        {
+            root = Some(candidate);
+        }
+        cursor = candidate.parent().filter(|parent| !parent.as_os_str().is_empty());
+    }
+    root.unwrap_or(path).to_path_buf()
+}
+
 /// The roots an Omega installation occupies on this machine.
 ///
 /// One field per place Omega writes. `plan` destructures this exhaustively, so
@@ -23,8 +47,18 @@ use std::path::{Path, PathBuf};
 /// property the old shell table could not have.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UninstallRoots {
-    /// The application bundle or executable this CLI belongs to.
-    pub app: Option<PathBuf>,
+    /// The installation root — the whole directory Omega occupies, never one
+    /// executable inside it.
+    ///
+    /// The name and the doc comment used to read "the application bundle or
+    /// executable", and the caller took the second reading: `0.2.0-rc16`
+    /// planned `Omega.app/Contents/MacOS/omega`, so a completed uninstall left
+    /// `Omega.app` in `/Applications` with 130.9 MB, four more executables and
+    /// a bundled Node runtime in it — including a `cli` that still carried
+    /// `--uninstall` (omega#92). `installation_root` now resolves any path
+    /// inside a bundle to the bundle itself, so a caller that hands over an
+    /// executable cannot reintroduce that.
+    pub app_root: Option<PathBuf>,
     /// `paths::data_dir()` — database, extensions, embeddings.
     pub data_dir: PathBuf,
     /// `paths::config_dir()` — settings and keymap. Prompted for, never
@@ -62,7 +96,7 @@ impl UninstallRoots {
     /// Every field is read from the function that writes it. Nothing here is a
     /// literal path.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
-    pub fn from_installed_paths(app: Option<PathBuf>) -> Self {
+    pub fn from_installed_paths(app_root: Option<PathBuf>) -> Self {
         let app_id = release_channel::RELEASE_CHANNEL.app_id();
         let home = paths::home_dir();
         let platform_paths = if cfg!(target_os = "macos") {
@@ -79,7 +113,9 @@ impl UninstallRoots {
             ]
         };
         Self {
-            app,
+            // Normalized here rather than trusted from the caller: the caller
+            // holds an executable, and every macOS caller always will.
+            app_root: app_root.as_deref().map(installation_root),
             data_dir: paths::data_dir().clone(),
             config_dir: paths::config_dir().clone(),
             logs_dir: paths::logs_dir().clone(),
@@ -96,7 +132,7 @@ impl UninstallRoots {
     /// settings and keymap, and the caller asks before removing it.
     pub fn plan(&self, product: &str) -> UninstallPlan {
         let Self {
-            app,
+            app_root,
             data_dir,
             config_dir,
             logs_dir,
@@ -113,8 +149,8 @@ impl UninstallRoots {
                 removals.push(path);
             }
         };
-        if let Some(app) = app {
-            push(app);
+        if let Some(app_root) = app_root {
+            push(app_root);
         }
         push(data_dir);
         push(logs_dir);
@@ -152,9 +188,17 @@ impl UninstallPlan {
 mod tests {
     use super::*;
 
+    /// The path the CLI actually holds: the executable it is running beside,
+    /// inside the bundle. Every root below is derived from it the way the
+    /// product derives it, so a plan that names the executable fails here
+    /// rather than in `/Applications`.
+    fn installed_executable(home: &Path) -> PathBuf {
+        home.join("Applications/Omega.app/Contents/MacOS/omega")
+    }
+
     fn roots(home: &Path) -> UninstallRoots {
         UninstallRoots {
-            app: Some(home.join("Applications/Omega.app")),
+            app_root: Some(installation_root(&installed_executable(home))),
             data_dir: home.join("Library/Application Support/Omega RC"),
             config_dir: home.join(".config/omega-rc"),
             logs_dir: home.join("Library/Logs/omega-rc"),
@@ -198,6 +242,58 @@ mod tests {
         );
     }
 
+    /// OMEGA-DELTA-0043. The plan names the installation, not one file in it.
+    ///
+    /// `0.2.0-rc16` planned `Omega.app/Contents/MacOS/omega`, so an uninstall
+    /// that reported success left the bundle, the `cli` that carries
+    /// `--uninstall`, `omega-identity-proof` and a bundled Node runtime in
+    /// `/Applications` (omega#92). Both directions are asserted: the bundle is
+    /// in the plan, and the executable is not standing in for it.
+    #[test]
+    fn the_plan_names_the_bundle_root_and_never_an_executable_inside_it() {
+        let home = Path::new("/tmp/omega-uninstall-fixture");
+        let bundle = home.join("Applications/Omega.app");
+        let plan = roots(home).plan("Omega RC");
+
+        assert!(
+            plan.removals.contains(&bundle),
+            "the plan does not remove {}, so the installation survives an \
+             uninstall that reports success",
+            bundle.display()
+        );
+        for inside in [
+            installed_executable(home),
+            bundle.join("Contents/MacOS/cli"),
+            bundle.join("Contents/Resources/omega-effectd/runtime/bin/node"),
+        ] {
+            assert!(
+                !plan.removals.contains(&inside),
+                "the plan names {}, a file inside the bundle. Removing one file \
+                 out of an installation is not an uninstall.",
+                inside.display()
+            );
+        }
+
+        // The derivation itself, on the shapes a caller can hand it.
+        assert_eq!(
+            installation_root(&installed_executable(home)),
+            bundle,
+            "a path inside a bundle resolves to the bundle"
+        );
+        assert_eq!(
+            installation_root(&bundle),
+            bundle,
+            "the bundle resolves to itself"
+        );
+        let development = Path::new("/tmp/omega/target/debug/omega");
+        assert_eq!(
+            installation_root(development),
+            development,
+            "a loose development build has no bundle to climb to, and inventing \
+             one would plan its parent directory for removal"
+        );
+    }
+
     /// OMEGA-DELTA-0036. The shipped script, run for real, against a machine
     /// that has both editors installed.
     ///
@@ -209,10 +305,33 @@ mod tests {
         let home = temp.path();
         let roots = roots(home);
 
-        // An Omega installation.
+        // An Omega installation. The bundle is planted the way one ships:
+        // several executables and a bundled Node runtime under the same root,
+        // because "the app is gone" and "one file in the app is gone" look
+        // identical from a root that holds a single marker (omega#92).
+        // Named here, not read out of `roots`: reading it back from the plan
+        // would make this circular, and a plan that named the executable would
+        // plant its files under the executable and pass.
+        let bundle = home.join("Applications/Omega.app");
+        let bundle_contents: Vec<PathBuf> = [
+            "Contents/Info.plist",
+            "Contents/MacOS/omega",
+            "Contents/MacOS/cli",
+            "Contents/MacOS/omega-identity-proof",
+            "Contents/Resources/omega-effectd/dist/omega-effectd.mjs",
+            "Contents/Resources/omega-effectd/runtime/bin/node",
+        ]
+        .iter()
+        .map(|relative| bundle.join(relative))
+        .collect();
+        for path in &bundle_contents {
+            std::fs::create_dir_all(path.parent().unwrap()).expect("create bundle directory");
+            std::fs::write(path, b"omega").expect("write bundle file");
+        }
+
         let mut planted = Vec::new();
         for directory in [
-            &roots.app.clone().unwrap(),
+            &bundle,
             &roots.data_dir,
             &roots.config_dir,
             &roots.logs_dir,
@@ -273,7 +392,7 @@ mod tests {
         // root would pass it. Destructuring is exhaustive, so a root added to
         // the struct and left out of the plan fails to compile here.
         let UninstallRoots {
-            app,
+            app_root,
             data_dir,
             config_dir,
             logs_dir,
@@ -282,7 +401,7 @@ mod tests {
             cli_symlink,
             platform_paths,
         } = &roots;
-        let occupied: Vec<&PathBuf> = app
+        let occupied: Vec<&PathBuf> = app_root
             .iter()
             .chain([data_dir, config_dir, logs_dir, temp_dir, state_dir, cli_symlink])
             .chain(platform_paths.iter())
@@ -291,6 +410,20 @@ mod tests {
             assert!(
                 !path.exists(),
                 "{} survived the uninstall, so Omega was not removed",
+                path.display()
+            );
+        }
+
+        // And nothing inside the bundle either. A plan that names the
+        // executable removes one file and reports success, which is what
+        // `0.2.0-rc16` shipped: 130.9 MB and five executables survived
+        // (omega#92). The root check above cannot see that, because the root it
+        // was handed would have been the executable.
+        for path in &bundle_contents {
+            assert!(
+                !path.exists(),
+                "{} survived the uninstall. The plan removed something inside \
+                 the installation instead of the installation.",
                 path.display()
             );
         }

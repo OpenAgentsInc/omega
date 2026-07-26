@@ -2175,3 +2175,141 @@ than it sounds, because the harness omega#81's acceptance sentence names —
   Tier B's to fix. The lane reads Exo's durable event log after a turn and
   currently only logs a failure to do so, because the turn has already run and
   refusing it afterwards would describe a world that did not happen.
+
+### OMEGA-DELTA-0043 — `--uninstall` removes the installation, not one file inside it
+
+- **Upstream Zed:** `script/uninstall.sh` removes `/Applications/Zed.app` — the
+  bundle — along with the user-level directories. Correct for Zed.
+- **Omega, before this:** `OMEGA-DELTA-0036` moved the path table out of the
+  shell script and into `UninstallRoots`, built from the `paths::` functions
+  that write those directories, and that fix is real: the plan derived by the
+  signed `0.2.0-rc16` holds nine Omega paths and zero belonging to anybody else.
+  But `crates/cli/src/main.rs` handed it `app.path()`, which on macOS is
+  `Omega.app/Contents/MacOS/omega` — **one executable inside the bundle** — into
+  a field whose doc comment read "the application bundle **or executable** this
+  CLI belongs to". So a full uninstall run against the signed `0.2.0-rc16`
+  reported success and left `/Applications/Omega.app` standing with **130.9 MB
+  and five executables** in it: `cli`, which still carries `--uninstall`,
+  `omega-identity-proof`, `omega-effectd` and its **bundled Node runtime**. Zed
+  was safe and Omega was not removed; the user was left to drag a signed,
+  non-functional bundle out of `/Applications` by hand (omega#92).
+- **Why nothing caught it.** The end-to-end test planted the app root as a
+  directory holding a single marker file, and asserted the root was gone.
+  "Removed the bundle" and "removed the one file the plan named" are the same
+  observation from a root like that. And `InstalledApp` had a single `path()`
+  answering two different questions, shadowed on macOS by an inherent `path()`
+  that returned the bundle — so the same call spelled two ways returned two
+  different paths, and the uninstaller took the wrong one.
+- **Omega now:** `InstalledApp` has two methods with two names.
+  `path()` is the executable to run; `installation_root()` is the whole
+  directory a removal has to remove, and on macOS it is the `.app`. The
+  ambiguous inherent `path()` is gone, so there is one answer per question. The
+  field is `UninstallRoots::app_root`, and `from_installed_paths` runs whatever
+  it is given through `uninstall::installation_root`, which resolves any path
+  under a `.app` to the outermost `.app` — a caller holding an executable, which
+  every macOS caller does, cannot reintroduce the defect from outside. A loose
+  development build with no bundle above it is returned unchanged, because
+  inventing a root there would plan its parent directory for removal.
+- **Enforced by:** `the_uninstall_plan_names_the_installation_root` in
+  `crates/omega_deltas/` (the derivation exists, the constructor normalizes
+  through it, the call site asks for the installation, and the trait still
+  distinguishes the two), and by two tests in `crates/cli/src/uninstall.rs`:
+  `the_plan_names_the_bundle_root_and_never_an_executable_inside_it`, which
+  asserts both directions — the bundle is planned, and no file inside it stands
+  in for it — and the end-to-end
+  `the_script_removes_omega_and_leaves_the_other_editor_untouched`, whose
+  fabricated bundle now holds `omega`, `cli`, `omega-identity-proof`, the
+  `omega-effectd` bundle and its Node runtime, every one of which is read back
+  after the real script has run. The bundle path in that test is named
+  independently of the plan, so a plan that names the executable plants its
+  files somewhere else and fails rather than moving with the defect.
+- **Proved against the product, not only the tests.** The plan was derived by
+  running the built `cli --uninstall` with `OMEGA_UNINSTALL_DRY_RUN=1` under an
+  isolated `HOME` against a fabricated bundle, exactly as omega#92 recorded the
+  defect. Before: `remove: …/Omega.app/Contents/MacOS/omega`. After:
+  `remove: …/Omega.app`, with the other eight roots unchanged.
+- **Falsified.** Reverting the call site to `app.path()` reproduced the
+  executable in the product's own dry-run plan and failed the delta test.
+  Making `installation_root` return its argument unchanged failed the plan test
+  and left `cli` alive in the end-to-end test. Both edits were probed in the
+  file and in the rebuilt binary before their tests ran.
+- **Handled with the care this path has earned.** This is the code that
+  destroyed the owner's real Zed installation on 2026-07-25, when a
+  falsification restored the old script and one test did not override `HOME`.
+  Every manual exercise here ran with `OMEGA_UNINSTALL_DRY_RUN=1` and an
+  isolated `HOME`, against a fabricated bundle in a scratch directory. Nothing
+  was ever run against `/Applications`.
+
+### OMEGA-DELTA-0044 — A brand-bearing command form is user-facing text
+
+- **Upstream Zed:** the CLI's interactive open-behavior prompt shows
+  `zed --existing`, `zed --classic` and `zed <path>`. Correct for Zed.
+- **Omega, before this:** those three literals shipped verbatim in the signed
+  `cli` of `0.2.0-rc16`, inside a panel whose surrounding copy reads "Add to
+  existing **Omega** window", "You can change this later in **Omega**
+  settings" — naming our product twice and somebody else's binary three times.
+  `zed --existing` and `zed --classic` are not Omega commands at all
+  (omega#93).
+- **They are product claims by the gate's own rule.** `OMEGA-DELTA-0031` is
+  written around one test: substitute our own name, and if the sentence stays
+  true the brand was standing where our product's name belongs. "Add to existing
+  Omega window (`omega --existing`)" is true of Omega. All three are rewrites,
+  not classifications.
+- **Why the gate passed.** `is_prose` requires three tokens, so a two-token
+  command form is invisible to it. That blind spot was *known* — the
+  `0.2.0-rc16` release notes record "does not classify one- and two-word
+  labels" — and this is it biting: the three literals were in neither
+  `prose.classified` nor the compatibility allow-list, and
+  `verify-omega-brand --app` exited 0.
+- **Omega now:** the prompt builds every command form from
+  `paths::BINARY_NAME`, so it cannot drift from the binary it describes. And
+  the blind spot is **narrowed rather than papered over**: the inventory admits
+  prose *or* a command form — a brand word standing in `argv[0]` followed by
+  flags, placeholders or paths — in all three streams (Rust literals, doc lines,
+  embedded assets), on both the Python and the Rust side. Adding the three
+  strings to a denylist instead would have reproduced exactly the defect the
+  inverted inventory was built to end.
+- **The width was measured, not asserted.** Across the whole tree the
+  command-form shape adds **3** items — the three defects, and nothing else.
+  Admitting any two-token literal beginning with a brand word instead adds
+  **11** (8 more: `Zed Pro`, `Zed Agent`, `Zed AI`, `Zed Repository`,
+  `Zed Twitter`, `Zed Default`, and `Zed (Default)` twice), all genuine
+  references to somebody else's product that would need classifying. Admitting a
+  bare brand token adds **58**. A gate that cries wolf gets deleted, which is
+  how a known blind spot stays open; the shape that costs nothing is the one
+  that can be carried.
+- **Enforced by:** `a_brand_bearing_command_form_is_user_facing_text` in
+  `crates/omega_deltas/` (the three shipped literals are invisible to `is_prose`
+  and visible to `is_command_form`; the eight two-word labels and a bare brand
+  token are not command forms; and `script/verify-omega-brand` carries the same
+  rule wired into the same three streams, so the source and packaged sides
+  cannot drift), and `the_cli_prompt_names_our_own_binary`, which reads
+  `prompt_open_behavior` and fails on any brand hit or on a command form not
+  built from `paths::BINARY_NAME`.
+- **Reachability, and what was actually observed.** `resolve_open_behavior` in
+  `crates/zed/src/zed/open_listener.rs` sends `CliResponse::PromptOpenBehavior`
+  when there are existing windows, the paths are not already in a workspace, at
+  least one path is a directory, and the settings file has no
+  `cli_default_open_behavior`. omega#93 recorded a *shipped-string* result,
+  because the reporting lane could not get the installed CLI to render the panel
+  with all four conditions held. This lane rendered it: the built `cli` was run
+  under a pty against a stand-in for the editor that performs the real IPC
+  handshake and sends `PromptOpenBehavior`, and the panel came up reading
+
+  ```
+  Configure default behavior for omega <path>
+  You can change this later in Omega settings:
+  > Add to existing Omega window (omega --existing)
+    Open a new window (omega --classic)
+  ```
+
+  So the CLI half is live code, not dead code, and the copy it renders is ours.
+  What that does **not** establish is that a running Omega reaches the four send
+  conditions in practice — the stand-in supplied the response. That half is
+  still unobserved, and the panel is still worth deleting if nobody can make a
+  real Omega send it.
+- **Falsified.** Restoring `zed --existing` failed both the prompt test and the
+  unclassified-prose test. Restoring the three-token rule alone — leaving the
+  literals fixed — failed the command-form test. Removing the rule from
+  `script/verify-omega-brand` while keeping it in Rust failed the parity
+  assertion. Each edit was probed in the file before its test ran.

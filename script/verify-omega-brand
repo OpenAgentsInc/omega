@@ -513,6 +513,40 @@ def is_prose(text: str) -> bool:
     return plain >= 2
 
 
+COMMAND_ARGUMENT = re.compile(
+    r"^(?:--?[A-Za-z0-9][-A-Za-z0-9_.]*"  # a flag: -n, --existing
+    r"|[<\[{][^\s>\]}]*[>\]}]"  # a placeholder: <path>, [FILE]
+    r"|\.{1,2}|[~./][^\s]*)$"  # a path: ., .., ~/x, ./x, /x
+)
+
+
+def is_command_form(text: str) -> bool:
+    """A command line whose program name is a competitor's binary.
+
+    `is_prose` needs three tokens, so `zed --existing`, `zed --classic` and
+    `zed <path>` were invisible to it -- and all three shipped in the signed
+    `cli` of `0.2.0-rc16`, inside a panel that says "Omega window" and "Omega
+    settings" around them (omega#93). Substituting our own name leaves each one
+    true, so by the rule this gate is written around they are product claims.
+
+    This is the narrow shape only: a brand word standing in argv[0], followed
+    by flags, placeholders or paths. Counting every two-token literal beginning
+    with a brand word instead adds 8 more across the tree -- `Zed Pro`, `Zed
+    (Default)`, `Zed Repository` -- which are genuine references to somebody
+    else's product and would need classifying; counting a bare brand token adds
+    55. This shape adds exactly the three, which is why the gate can carry it.
+    """
+    tokens = text.split()
+    if len(tokens) < 2 or tokens[0] not in WORDS:
+        return False
+    return all(COMMAND_ARGUMENT.fullmatch(token) for token in tokens[1:])
+
+
+def is_user_facing_text(text: str) -> bool:
+    """Prose, or a command form. What the inventory admits."""
+    return is_prose(text) or is_command_form(normalize_prose(text))
+
+
 def rust_string_literals(text: str) -> list[tuple[int, str]]:
     """(start line, contents) for every Rust string literal in `text`.
 
@@ -686,13 +720,13 @@ def prose_inventory() -> tuple[tuple[tuple[str, str, int, str], ...], dict[str, 
         for number, body in literals:
             if is_test_file or number in skipped:
                 continue
-            if brand_hits(body) and is_prose(body):
+            if brand_hits(body) and is_user_facing_text(body):
                 items.append(("rust_string", relative, number, normalize_prose(body)))
         for number, line in enumerate(lines, 1):
             if is_test_file or number in skipped:
                 continue
             doc = doc_line_body(line)
-            if doc is None or not brand_hits(doc) or not is_prose(doc):
+            if doc is None or not brand_hits(doc) or not is_user_facing_text(doc):
                 continue
             if number in actions:
                 kind = "action_doc"
@@ -713,7 +747,7 @@ def prose_inventory() -> tuple[tuple[tuple[str, str, int, str], ...], dict[str, 
         if not brand_hits(text):
             continue
         for number, line in enumerate(text.splitlines(), 1):
-            if brand_hits(line) and is_prose(line):
+            if brand_hits(line) and is_user_facing_text(line):
                 items.append(("asset", relative, number, normalize_prose(line)))
     return tuple(items), read
 
