@@ -3014,3 +3014,89 @@ than it sounds, because the harness omega#81's acceptance sentence names —
   not sign, connect, or publish anything because this skill is present. The
   signer, the relay, and the group stay operator-selected, and the skill refuses
   a shared key and an implicit machine key.
+
+### OMEGA-DELTA-0080 — A tool result opens at a ceiling, and says what it hides
+
+- **Upstream Zed:** a terminal tool call renders its result body at the natural
+  height of the output. The only ceiling is
+  `TerminalView::MAX_EMBEDDED_LINES`, 1,000 lines, above which the body becomes
+  a scroll region of `h_72`. A forty-line result is therefore forty lines tall.
+- **Omega:** the body opens at 16 lines. A control below it states the count of
+  lines it hides, and a click lifts the ceiling. A second click puts it back.
+- **Why:** owner direction, 2026-07-26, on a thread that ran the
+  `public-nostr-chat` skill: *"those tool calls are not looking so good — the
+  huge json blobs shouldnt be full height automatically like that, maybe make
+  them smaller default but then expandable"*. The thread ran several `nak`
+  commands, and each one returned raw Nostr events. One result was five events,
+  about forty lines of hexadecimal identifiers and signatures. Several such
+  bodies in one turn push the reasoning that produced them off the screen, and
+  the one useful line — `publishing to relay.openagents.com... success.` — sits
+  under a wall of signature text.
+- **The ceiling is 16 lines, because the tree already treats 16 lines as a
+  bounded body.** The scrollable fallback for a result over 1,000 lines is
+  `h_72`: 18 rem, 288 px, which is about 16 lines at the agent panel's text
+  size. A capped result is therefore the same size as a result that upstream
+  already capped, and it costs about a fifth of a full-height window. A
+  two-line result is under the ceiling, so nothing is cut and no control is
+  drawn.
+- **The last lines stay, not the first.** A terminal keeps its viewport at the
+  bottom, so a body given fewer lines than it holds shows the most recent ones.
+  This is also the correct end for a command: the first lines are the setup and
+  the last lines are the result. `publishing... success.` was the last line of
+  the body the owner was looking at.
+- **The control names a count.** `tool_output_ceiling_label` returns
+  `Show 24 more lines`, not `Show more`. A reader decides whether to spend the
+  screen, and `Show more` gives that reader nothing to decide with. The count
+  is the difference between the lines the body holds and the lines it shows, so
+  it is exact rather than estimated.
+- **The ceiling wins over the scrollable fallback.** `content_mode` checks for a
+  ceiling before it compares against `MAX_EMBEDDED_LINES`. Without that order,
+  the longest results are the ones that escape the ceiling.
+- **The open state survives streaming.** The state is the ceiling itself, held
+  on the `TerminalView` that `EntryViewState` builds once per terminal and
+  reuses for every frame. There is no second record to drift from it, and a
+  body a reader opened does not shut while the turn continues. It has the same
+  lifetime as the terminal's own scroll position.
+- **The command stays visible.** The ceiling applies to the result body. The
+  card header, which carries the command, the working directory, the elapsed
+  time, and the failure state, is untouched.
+- **Focus does not lift the ceiling.** The upstream field beside it,
+  `max_lines_when_unfocused`, is removed by a click into the terminal. A
+  ceiling that a click for a text selection removes is not a ceiling the reader
+  controls, so the new field is independent of focus.
+- **The control sits outside the body it describes.** `OMEGA-DELTA-0060`'s rule
+  is that a bound cannot be the reason the reader is not told about the bound.
+  A control drawn inside the capped region is cut by the ceiling it announces,
+  so the control is a sibling of the body, in the card.
+- **This is the view, and omega#105 is the record. They are independent, and
+  both are needed.** That issue makes a tool result a versioned artifact and
+  puts a bounded preview plus a truncation marker in the event, so the model's
+  context and a transcript reader stop carrying the whole blob. It does not
+  replace this delta: a preview is sized for a context budget, and a budget of
+  a few thousand bytes is still about forty lines of Nostr JSON, which is the
+  height the owner objected to. A ceiling of 16 lines is smaller than any
+  preview that issue would pick.
+- **The seam between them is one function.** `tool_output_ceiling_label` forms
+  the whole sentence, and nothing else does. After omega#105 the body may
+  itself be a preview, so the line count this delta reads would be the
+  preview's, and the label would state a total that is not the total — a
+  reader who lifts the ceiling and reaches the last line would conclude they
+  had the whole result. The repair is a third input to that one function, the
+  amount the record withheld, not a second sentence elsewhere. The card already
+  keeps the two levels apart: the header carries the existing notice for what
+  the *agent* received, and this control carries what the *reader* can see.
+
+- **Enforced by:** `a_tool_result_opens_at_a_ceiling_the_reader_can_lift` in
+  `crates/omega_deltas/`, which pins the value, the application at
+  construction, the order against the fallback, and the control. The arithmetic
+  and the label run through their real functions in
+  `embedded_ceiling_only_binds_on_a_long_result`
+  (`crates/terminal_view/`) and `test_tool_output_ceiling_label`
+  (`crates/agent_ui/`).
+- **What this does not cover.** No check reads a rendered pixel, so the height
+  in points, the position of the control, and the text that a person sees are
+  unverified here. The ceiling counts terminal lines, not wrapped display rows,
+  so a body of long lines shows fewer than 16 rows of content. It applies to a
+  terminal tool result only: a tool that returns Markdown, a diff, or an image
+  keeps the height it had. And the terminal is resized to the ceiling, so a
+  command that reads the terminal height sees 16 rows while the ceiling holds.

@@ -23,6 +23,9 @@ use editor::actions::OpenExcerpts;
 use sandbox::{SandboxFsPolicy, SandboxNetPolicy, SandboxPolicy};
 
 use crate::completion_provider::{AvailableSkill, PromptLocalCommand, pluralize};
+// `OMEGA-DELTA-0080`. The ceiling on a tool call's result body, and the label
+// of the control that lifts it.
+use crate::entry_view_state::{COLLAPSED_TOOL_OUTPUT_LINES, tool_output_ceiling_label};
 use crate::message_editor::SharedSessionCapabilities;
 use crate::ui::{
     SandboxGroup, SandboxRow, SandboxSection, SandboxStatusTooltip, TerminalSandboxWarning,
@@ -44,6 +47,7 @@ use notifications::status_toast::StatusToast;
 use omega_exo_lane::ObservedExoCapabilityState;
 use omega_front_door::ExecutorDisclosure;
 use settings::{update_settings_file, update_settings_file_with_completion};
+use terminal_view::{ContentMode, TerminalView};
 use ui::{
     ButtonLike, CalloutBorderPosition, Checkbox, SpinnerLabel, SpinnerVariant, SplitButton,
     SplitButtonStyle, Tab, ToggleState,
@@ -8121,6 +8125,16 @@ impl ThreadView {
                         .text_ui_sm(cx)
                         .h_full()
                         .children(terminal_view.map(|terminal_view| {
+                            // `OMEGA-DELTA-0080`. Build the footer before the
+                            // element consumes the handle, so it can say how
+                            // many lines the ceiling is hiding.
+                            let ceiling_toggle = self.render_terminal_output_ceiling_toggle(
+                                &terminal_view,
+                                border_color,
+                                window,
+                                cx,
+                            );
+
                             let element = if terminal_view
                                 .read(cx)
                                 .content_mode(window, cx)
@@ -8131,12 +8145,17 @@ impl ThreadView {
                                 terminal_view.into_any_element()
                             };
 
+                            // `OMEGA-DELTA-0080`. The control is a sibling of
+                            // the capped body, never a child of it, following
+                            // `OMEGA-DELTA-0060`: the bound can never be the
+                            // reason the reader is not told about the bound.
                             div()
                                 .on_action(cx.listener(|_this, _: &NewTerminal, window, cx| {
                                     window.dispatch_action(NewThread.boxed_clone(), cx);
                                     cx.stop_propagation();
                                 }))
                                 .child(element)
+                                .children(ceiling_toggle)
                                 .into_any_element()
                         })),
                 )
@@ -8156,6 +8175,78 @@ impl ThreadView {
                 ))
             })
             .into_any()
+    }
+
+    /// `OMEGA-DELTA-0080`. The control under a tool call's result body that
+    /// lifts the height ceiling, or puts it back.
+    ///
+    /// Returns `None` when the body already shows every line it has, so a
+    /// short result gains nothing it does not need. The label names the count
+    /// of hidden lines, because "Show more" does not tell a reader whether
+    /// opening it is worth the screen.
+    fn render_terminal_output_ceiling_toggle(
+        &self,
+        terminal_view: &Entity<TerminalView>,
+        border_color: Hsla,
+        window: &Window,
+        cx: &Context<Self>,
+    ) -> Option<AnyElement> {
+        let view = terminal_view.read(cx);
+        let is_capped = view.embedded_max_lines().is_some();
+        let (displayed_lines, total_lines) = match view.content_mode(window, cx) {
+            ContentMode::Inline {
+                displayed_lines,
+                total_lines,
+            } => (displayed_lines, total_lines),
+            // Only reachable with the ceiling lifted: a capped body is always
+            // inline. The fallback bounds itself and scrolls, so nothing is
+            // hidden — but the reader still needs the way back.
+            ContentMode::Scrollable => {
+                let total_lines = view.terminal().read(cx).total_lines();
+                (total_lines, total_lines)
+            }
+        };
+
+        let label = tool_output_ceiling_label(total_lines, displayed_lines, is_capped)?;
+
+        let terminal_view = terminal_view.clone();
+        let button_id = SharedString::from(format!(
+            "terminal-output-ceiling-{}",
+            terminal_view.entity_id()
+        ));
+
+        Some(
+            div()
+                .w_full()
+                .border_t_1()
+                .border_color(border_color)
+                .child(
+                    Button::new(button_id, label)
+                        .full_width()
+                        .label_size(LabelSize::Small)
+                        .color(Color::Muted)
+                        .start_icon(
+                            Icon::new(if is_capped {
+                                IconName::ChevronDown
+                            } else {
+                                IconName::ChevronUp
+                            })
+                            .size(IconSize::Small)
+                            .color(Color::Muted),
+                        )
+                        .on_click(cx.listener(move |_this, _, _window, cx| {
+                            terminal_view.update(cx, |view, cx| {
+                                let lifted = view.embedded_max_lines().is_none();
+                                view.set_embedded_max_lines(
+                                    lifted.then_some(COLLAPSED_TOOL_OUTPUT_LINES),
+                                    cx,
+                                );
+                            });
+                            cx.notify();
+                        })),
+                )
+                .into_any_element(),
+        )
     }
 
     fn sandbox_not_applied_warning(

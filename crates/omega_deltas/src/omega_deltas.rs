@@ -85,7 +85,28 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0055",
     "OMEGA-DELTA-0060",
     "OMEGA-DELTA-0070",
+    "OMEGA-DELTA-0080",
 ];
+
+/// OMEGA-DELTA-0080. Where the agent panel declares its result-body ceiling and
+/// applies it to every terminal it creates.
+pub const TOOL_OUTPUT_CEILING_PATH: &str = "crates/agent_ui/src/entry_view_state.rs";
+
+/// OMEGA-DELTA-0080. Where the thread draws the control that lifts the ceiling.
+pub const TOOL_OUTPUT_CEILING_RENDER_PATH: &str =
+    "crates/agent_ui/src/conversation_view/thread_view.rs";
+
+/// OMEGA-DELTA-0080. Where a ceiling becomes a displayed line count.
+pub const TOOL_OUTPUT_CEILING_TERMINAL_PATH: &str = "crates/terminal_view/src/terminal_view.rs";
+
+/// OMEGA-DELTA-0080. The Omega ceiling on a tool call's result body, in lines.
+pub const TOOL_OUTPUT_CEILING_LINES: usize = 16;
+
+/// OMEGA-DELTA-0080. The only ceiling upstream Zed puts on the same body.
+///
+/// `TerminalView::MAX_EMBEDDED_LINES`. A result under it renders at its natural
+/// height, so forty lines of JSON take forty lines of the window.
+pub const UPSTREAM_TOOL_OUTPUT_CEILING_LINES: usize = 1_000;
 
 /// OMEGA-DELTA-0060. The tool that reads a subagent's transcript.
 pub const SUBAGENT_TRANSCRIPT_TOOL_PATH: &str =
@@ -8937,5 +8958,149 @@ mod tests {
                 DEFAULT_SETTINGS_PATH
             );
         }
+    }
+
+    /// OMEGA-DELTA-0080. A tool call's result body opens at a ceiling, and the
+    /// reader is told what the ceiling hides.
+    ///
+    /// Four seams, because reverting any one of them restores the full-height
+    /// body without a compile error:
+    ///
+    /// 1. the ceiling exists and is the Omega value, not the upstream one;
+    /// 2. every terminal the agent panel creates opens with it applied;
+    /// 3. the terminal honours it before it falls back to a scroll region,
+    ///    otherwise a long result escapes the ceiling by being long;
+    /// 4. the thread draws the control that lifts it, otherwise the ceiling is
+    ///    a truncation with no way out.
+    #[test]
+    fn a_tool_result_opens_at_a_ceiling_the_reader_can_lift() {
+        let ceiling_path = repository_path(TOOL_OUTPUT_CEILING_PATH);
+        let ceiling_source = std::fs::read_to_string(&ceiling_path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", ceiling_path.display()));
+
+        // 1. The value. Read from the declaration, so a changed number fails
+        // here rather than passing because the name is still spelled the same.
+        let declared = ceiling_source
+            .split_once("const COLLAPSED_TOOL_OUTPUT_LINES: usize =")
+            .and_then(|(_, rest)| rest.split_once(';'))
+            .map(|(value, _)| value.trim().replace('_', ""))
+            .unwrap_or_else(|| {
+                panic!(
+                    "OMEGA-DELTA-0080: {} declares no \
+                     `COLLAPSED_TOOL_OUTPUT_LINES`. Without it a tool result \
+                     renders at its natural height again, which is upstream \
+                     Zed's behaviour and the defect the owner reported.",
+                    ceiling_path.display()
+                )
+            });
+        assert_eq!(
+            declared.parse::<usize>().ok(),
+            Some(TOOL_OUTPUT_CEILING_LINES),
+            "OMEGA-DELTA-0080: the ceiling in {} is `{declared}`, not \
+             {TOOL_OUTPUT_CEILING_LINES}. Upstream's only ceiling on the same \
+             body is {UPSTREAM_TOOL_OUTPUT_CEILING_LINES} lines. The value is \
+             also restated in the `terminal_view` test \
+             `embedded_ceiling_only_binds_on_a_long_result`, which fails with \
+             this one if the two drift apart.",
+            ceiling_path.display()
+        );
+
+        // 2. Applied at creation, so a result is capped before anybody reads
+        // it. A ceiling applied on first render would flash the full height.
+        //
+        // Comment lines are dropped first. A commented-out call is the exact
+        // shape a rebase leaves behind, and it reads as present to a plain
+        // substring search.
+        let compact_ceiling = without_whitespace(
+            &ceiling_source
+                .lines()
+                .filter(|line| !line.trim_start().starts_with("//"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
+        assert!(
+            compact_ceiling.contains(&without_whitespace(
+                "view.set_embedded_max_lines(Some(COLLAPSED_TOOL_OUTPUT_LINES), cx);"
+            )),
+            "OMEGA-DELTA-0080: `create_terminal` in {} no longer applies the \
+             ceiling to the terminal it builds. Every tool result the agent \
+             panel shows comes from this one constructor, so the ceiling is \
+             absent everywhere if it is absent here.",
+            ceiling_path.display()
+        );
+
+        // 3. Honoured ahead of the scrollable fallback. Without the guard, a
+        // result over `MAX_EMBEDDED_LINES` takes the fallback and ignores the
+        // ceiling — the longest results would be the ones that escape it.
+        let terminal_path = repository_path(TOOL_OUTPUT_CEILING_TERMINAL_PATH);
+        let terminal_source = std::fs::read_to_string(&terminal_path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", terminal_path.display()));
+        let compact_terminal = without_whitespace(production_source(&terminal_source));
+        assert!(
+            compact_terminal.contains(&without_whitespace(
+                "if max_lines.is_none() && total_lines > Self::MAX_EMBEDDED_LINES {"
+            )),
+            "OMEGA-DELTA-0080: `content_mode` in {} no longer checks the \
+             ceiling before the `MAX_EMBEDDED_LINES` fallback, so a result \
+             longer than {UPSTREAM_TOOL_OUTPUT_CEILING_LINES} lines escapes \
+             the ceiling by being long.",
+            terminal_path.display()
+        );
+        assert!(
+            compact_terminal.contains(&without_whitespace("pub fn embedded_displayed_lines(")),
+            "OMEGA-DELTA-0080: {} no longer exposes `embedded_displayed_lines`. \
+             The decision moved back inside a method that needs a window, and \
+             the ceiling has no test that can run without one.",
+            terminal_path.display()
+        );
+
+        // 4. The way out. A ceiling with no control is a truncation.
+        let render_path = repository_path(TOOL_OUTPUT_CEILING_RENDER_PATH);
+        let render_source = std::fs::read_to_string(&render_path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", render_path.display()));
+        // `production_source` is no use here: this file opens a `#[cfg(test)]`
+        // block near the top, so it would cut away everything being asserted.
+        assert!(
+            render_source.contains("fn render_terminal_output_ceiling_toggle(")
+                && render_source.contains("self.render_terminal_output_ceiling_toggle("),
+            "OMEGA-DELTA-0080: {} declares the ceiling control but never calls \
+             it, or no longer has it. A reader would have no way to see the \
+             lines the ceiling hides.",
+            render_path.display()
+        );
+        // The control is a sibling of the capped body, never inside it.
+        // `OMEGA-DELTA-0060`'s rule: the bound cannot be the reason the reader
+        // is not told about the bound. A control placed inside the region the
+        // ceiling clips would be cut by the ceiling it describes.
+        let compact_render = without_whitespace(&render_source);
+        assert!(
+            compact_render.contains(&without_whitespace(
+                ".child(element)
+                 .children(ceiling_toggle)
+                 .into_any_element()"
+            )),
+            "OMEGA-DELTA-0080: in {} the ceiling control is no longer the last \
+             sibling of the capped body. Nested inside it, the control is \
+             clipped by the ceiling it exists to announce.",
+            render_path.display()
+        );
+        assert!(
+            compact_render.contains(&without_whitespace(
+                "div().h_72().child(terminal_view).into_any_element()"
+            )),
+            "OMEGA-DELTA-0080: in {} the bounded branch no longer holds the \
+             terminal alone. Anything else put inside it is subject to the \
+             same height limit, which is how the control ends up clipped.",
+            render_path.display()
+        );
+
+        assert!(
+            render_source.contains("tool_output_ceiling_label(total_lines"),
+            "OMEGA-DELTA-0080: {} no longer takes the control's label from \
+             `tool_output_ceiling_label`. The label states the count of hidden \
+             lines, and a hand-written \"Show more\" tells a reader nothing \
+             about what opening it costs.",
+            render_path.display()
+        );
     }
 }

@@ -19,7 +19,7 @@ use rope::Point;
 use settings::{Settings as _, ThinkingBlockDisplay};
 use terminal_view::TerminalView;
 use theme_settings::ThemeSettings;
-use ui::{Context, TextSize};
+use ui::{Context, SharedString, TextSize};
 use workspace::Workspace;
 
 use crate::message_editor::{MessageEditor, MessageEditorEvent, SharedSessionCapabilities};
@@ -33,6 +33,54 @@ fn reindex_after_removal(index: usize, removed: &Range<usize>) -> Option<usize> 
         None
     } else {
         Some(index - removed.len())
+    }
+}
+
+/// `OMEGA-DELTA-0080`. How many lines of a tool call's result body the thread
+/// shows before it needs the reader's permission to show more.
+///
+/// Upstream Zed has no ceiling below `TerminalView::MAX_EMBEDDED_LINES`
+/// (1,000), so a forty-line command result renders forty lines tall and pushes
+/// the turn that produced it off the screen.
+///
+/// Sixteen is the height the tree already treats as a bounded terminal: the
+/// scrollable fallback for a result over 1,000 lines is `h_72` (18rem, 288px),
+/// which at the agent panel's text size is about sixteen lines. So a capped
+/// result is the same size as a result that was already capped, and the
+/// ceiling costs about a fifth of a full-height window instead of all of it.
+pub(crate) const COLLAPSED_TOOL_OUTPUT_LINES: usize = 16;
+
+/// `OMEGA-DELTA-0080`. The label of the control under a capped result body, or
+/// `None` when the body needs no control.
+///
+/// A short result shows every line it has, so it gains nothing. A capped result
+/// names the count of lines it is hiding, because "Show more" does not tell a
+/// reader whether opening it is worth the screen it costs.
+///
+/// **This is the only place the sentence is formed, and omega#105 must extend
+/// it rather than add a second one.** That issue bounds the *record*: a tool
+/// result becomes an artifact, and the event carries a preview plus a marker
+/// naming the withheld amount. When it lands, the body this function describes
+/// may already be a preview, so `total_lines` would count the preview and this
+/// label would state a total that is not the total. A reader who lifts the
+/// ceiling and sees the last line would conclude they had the whole result.
+/// The repair is a third input here — the amount the record withheld — not a
+/// second sentence somewhere else.
+pub(crate) fn tool_output_ceiling_label(
+    total_lines: usize,
+    displayed_lines: usize,
+    is_capped: bool,
+) -> Option<SharedString> {
+    if is_capped {
+        match total_lines.saturating_sub(displayed_lines) {
+            0 => None,
+            1 => Some("Show 1 more line".into()),
+            hidden => Some(format!("Show {hidden} more lines").into()),
+        }
+    } else if total_lines > COLLAPSED_TOOL_OUTPUT_LINES {
+        Some("Show fewer lines".into())
+    } else {
+        None
     }
 }
 
@@ -663,6 +711,9 @@ fn create_terminal(
             cx,
         );
         view.set_embedded_mode(Some(1000), cx);
+        // `OMEGA-DELTA-0080`. A tool result opens at a ceiling, not at its
+        // natural height. The reader lifts it from the card footer.
+        view.set_embedded_max_lines(Some(COLLAPSED_TOOL_OUTPUT_LINES), cx);
         view
     })
 }
@@ -741,6 +792,47 @@ mod tests {
     use settings::SettingsStore;
     use util::path;
     use workspace::{MultiWorkspace, PathList};
+
+    /// `OMEGA-DELTA-0080`. The control appears only when it has something to
+    /// offer, and it says how much.
+    #[test]
+    fn test_tool_output_ceiling_label() {
+        use super::{COLLAPSED_TOOL_OUTPUT_LINES, tool_output_ceiling_label};
+
+        // A short result is whole on screen, so no control is drawn — capped or
+        // not, the ceiling never bound.
+        assert_eq!(tool_output_ceiling_label(2, 2, true), None);
+        assert_eq!(tool_output_ceiling_label(2, 2, false), None);
+        assert_eq!(
+            tool_output_ceiling_label(
+                COLLAPSED_TOOL_OUTPUT_LINES,
+                COLLAPSED_TOOL_OUTPUT_LINES,
+                true
+            ),
+            None
+        );
+
+        // A capped result names the exact count it is hiding.
+        assert_eq!(
+            tool_output_ceiling_label(40, COLLAPSED_TOOL_OUTPUT_LINES, true),
+            Some("Show 24 more lines".into())
+        );
+        assert_eq!(
+            tool_output_ceiling_label(COLLAPSED_TOOL_OUTPUT_LINES + 1, 16, true),
+            Some("Show 1 more line".into())
+        );
+
+        // With the ceiling lifted, the control offers the way back — and only
+        // for a result the ceiling would have bound.
+        assert_eq!(
+            tool_output_ceiling_label(40, 40, false),
+            Some("Show fewer lines".into())
+        );
+        assert_eq!(
+            tool_output_ceiling_label(COLLAPSED_TOOL_OUTPUT_LINES, 16, false),
+            None
+        );
+    }
 
     #[test]
     fn test_reindex_after_removal() {

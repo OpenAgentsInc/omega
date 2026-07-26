@@ -165,7 +165,37 @@ pub enum TerminalMode {
     Standalone,
     Embedded {
         max_lines_when_unfocused: Option<usize>,
+        /// `OMEGA-DELTA-0080`. A ceiling on the displayed lines that does not
+        /// depend on focus, so a host can give a long result a small default
+        /// height and a control that lifts the ceiling. `None` is the upstream
+        /// behaviour: the body is as tall as its content.
+        max_lines: Option<usize>,
     },
+}
+
+/// `OMEGA-DELTA-0080`. How many lines an embedded terminal shows, given the
+/// content it holds and the two ceilings a host can put on it.
+///
+/// Split out of [`TerminalView::content_mode`] so the decision can be tested
+/// without a window. The terminal grid keeps its viewport at the bottom, so a
+/// displayed count below `total_lines` shows the **last** `displayed` lines.
+pub fn embedded_displayed_lines(
+    total_lines: usize,
+    max_lines: Option<usize>,
+    max_lines_when_unfocused: Option<usize>,
+    focused: bool,
+) -> usize {
+    let mut displayed_lines = total_lines;
+
+    if let Some(max_lines) = max_lines {
+        displayed_lines = displayed_lines.min(max_lines);
+    }
+
+    if !focused && let Some(max_lines_when_unfocused) = max_lines_when_unfocused {
+        displayed_lines = displayed_lines.min(max_lines_when_unfocused);
+    }
+
+    displayed_lines
 }
 
 #[derive(Clone)]
@@ -315,8 +345,34 @@ impl TerminalView {
     ) {
         self.mode = TerminalMode::Embedded {
             max_lines_when_unfocused,
+            max_lines: None,
         };
         cx.notify();
+    }
+
+    /// `OMEGA-DELTA-0080`. Put a focus-independent ceiling on an embedded
+    /// terminal's height, or lift it with `None`. Does nothing to a standalone
+    /// terminal.
+    pub fn set_embedded_max_lines(&mut self, max_lines: Option<usize>, cx: &mut Context<Self>) {
+        if let TerminalMode::Embedded {
+            max_lines: current, ..
+        } = &mut self.mode
+        {
+            if *current == max_lines {
+                return;
+            }
+            *current = max_lines;
+            cx.notify();
+        }
+    }
+
+    /// `OMEGA-DELTA-0080`. The ceiling currently in force, if any. `None` means
+    /// the reader lifted it, or the host never set one.
+    pub fn embedded_max_lines(&self) -> Option<usize> {
+        match &self.mode {
+            TerminalMode::Standalone => None,
+            TerminalMode::Embedded { max_lines, .. } => *max_lines,
+        }
     }
 
     /// Explicitly override whether workspace-specific context menu actions (e.g. creating or
@@ -345,22 +401,24 @@ impl TerminalView {
             TerminalMode::Standalone => ContentMode::Scrollable,
             TerminalMode::Embedded {
                 max_lines_when_unfocused,
+                max_lines,
             } => {
                 let total_lines = self.terminal.read(cx).total_lines();
 
-                if total_lines > Self::MAX_EMBEDDED_LINES {
+                // `OMEGA-DELTA-0080`. A ceiling the reader can lift wins over
+                // the scrollable fallback: a capped body already paints only
+                // its last few lines, so long content needs no scroll region
+                // until the reader asks for it.
+                if max_lines.is_none() && total_lines > Self::MAX_EMBEDDED_LINES {
                     ContentMode::Scrollable
                 } else {
-                    let mut displayed_lines = total_lines;
-
-                    if !self.focus_handle.is_focused(window)
-                        && let Some(max_lines) = max_lines_when_unfocused
-                    {
-                        displayed_lines = displayed_lines.min(*max_lines)
-                    }
-
                     ContentMode::Inline {
-                        displayed_lines,
+                        displayed_lines: embedded_displayed_lines(
+                            total_lines,
+                            *max_lines,
+                            *max_lines_when_unfocused,
+                            self.focus_handle.is_focused(window),
+                        ),
                         total_lines,
                     }
                 }
@@ -2172,6 +2230,50 @@ mod tests {
     use util::rel_path::RelPath;
     use workspace::item::test::{TestItem, TestProjectItem};
     use workspace::{AppState, MultiWorkspace, SelectedEntry};
+
+    /// `OMEGA-DELTA-0080`. A result short enough to read whole keeps its
+    /// natural height, and a long one is cut to the ceiling the host set.
+    #[test]
+    fn embedded_ceiling_only_binds_on_a_long_result() {
+        let ceiling = Some(agent_ui_collapsed_lines());
+
+        // A two-line result is under the ceiling, so nothing is hidden and the
+        // host has no reason to draw a control.
+        assert_eq!(embedded_displayed_lines(2, ceiling, Some(1_000), false), 2);
+
+        // A result exactly at the ceiling is still whole.
+        assert_eq!(
+            embedded_displayed_lines(agent_ui_collapsed_lines(), ceiling, Some(1_000), false),
+            agent_ui_collapsed_lines()
+        );
+
+        // A forty-line result is cut, and the hidden count is exact.
+        let displayed = embedded_displayed_lines(40, ceiling, Some(1_000), false);
+        assert_eq!(displayed, agent_ui_collapsed_lines());
+        assert_eq!(40 - displayed, 40 - agent_ui_collapsed_lines());
+
+        // Focus does not lift it. Upstream's only ceiling was
+        // `max_lines_when_unfocused`, which a click would have removed.
+        assert_eq!(
+            embedded_displayed_lines(40, ceiling, Some(1_000), true),
+            agent_ui_collapsed_lines()
+        );
+
+        // Lifting the ceiling restores the upstream behaviour: as tall as the
+        // content, up to the unfocused limit.
+        assert_eq!(embedded_displayed_lines(40, None, Some(1_000), false), 40);
+        assert_eq!(
+            embedded_displayed_lines(2_000, None, Some(1_000), false),
+            1_000
+        );
+    }
+
+    /// The agent panel's ceiling, restated here so this crate's test does not
+    /// depend on `agent_ui`. `agent_tool_output_ceiling_is_pinned` in
+    /// `omega_deltas` fails if the two ever disagree.
+    fn agent_ui_collapsed_lines() -> usize {
+        16
+    }
 
     fn expected_drop_text(paths: &[PathBuf]) -> String {
         let mut text = String::new();
