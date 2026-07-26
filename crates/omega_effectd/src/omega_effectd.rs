@@ -75,6 +75,8 @@ pub fn init_with_host_handler(handler: Option<OmegaEffectdHostHandler>, cx: &mut
         return;
     }
 
+    start_served_acp_surface();
+
     let runtime = match std::env::current_exe()
         .map_err(anyhow::Error::from)
         .and_then(|executable| {
@@ -96,6 +98,39 @@ pub fn init_with_host_handler(handler: Option<OmegaEffectdHostHandler>, cx: &mut
         Err(error) => OmegaEffectdRuntime::Unavailable(error.to_string().into()),
     };
     cx.set_global(runtime);
+}
+
+/// `OMEGA-DELTA-0041`, omega#82. Serve Omega Agent over ACP, if the flag says
+/// so.
+///
+/// The supervisor layer owns this, not GPUI. The socket itself lives in
+/// `crates/omega_acp_server`, which depends on no part of GPUI, and this is its
+/// only production call site — `crates/omega_deltas` fails if a second one
+/// appears in a UI crate. Omega's own windows never open a listener.
+///
+/// Off unless `OMEGA_ACP_SERVER` is exactly `1`, so the shipped default binds
+/// nothing at all and this is a no-op in every normal launch.
+fn start_served_acp_surface() {
+    match omega_acp_server::start_if_enabled() {
+        omega_acp_server::StartOutcome::NotStarted(reason) => {
+            log::debug!(
+                "OMEGA-DELTA-0041: Omega Agent is not served over ACP ({})",
+                reason.token()
+            );
+        }
+        omega_acp_server::StartOutcome::Listening(address) => {
+            log::info!(
+                "OMEGA-DELTA-0041: Omega Agent is served over ACP on {address} \
+                 (loopback, unauthenticated, read-only)"
+            );
+        }
+        omega_acp_server::StartOutcome::Failed(error) => {
+            log::error!(
+                "OMEGA-DELTA-0041: the served ACP surface was asked for and \
+                 could not listen: {error}"
+            );
+        }
+    }
 }
 
 pub fn shared_supervisor(cx: &App) -> Result<SharedOmegaEffectdSupervisor> {

@@ -21,7 +21,9 @@ credentials_provider.workspace = true
 futures.workspace = true
 gpui.workspace = true
 http_client.workspace = true
+log.workspace = true
 nostr = { workspace = true, features = ["nip59"] }
+omega_acp_server.workspace = true
 omega_identity.workspace = true
 paths.workspace = true
 rand.workspace = true

@@ -68,6 +68,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0038",
     "OMEGA-DELTA-0039",
     "OMEGA-DELTA-0040",
+    "OMEGA-DELTA-0041",
 ];
 
 /// OMEGA-DELTA-0036. The uninstall script embedded in the shipped `cli`.
@@ -324,6 +325,18 @@ pub const NEW_THREAD_CHORD_NARROW_CONTEXTS: &[&str] = &[
     "RecentProjects || (RecentProjects > Picker > Editor)",
     "Terminal",
 ];
+
+/// OMEGA-DELTA-0041. The crate that owns the served ACP socket.
+pub const ACP_SERVER_PATH: &str = "crates/omega_acp_server/src/omega_acp_server.rs";
+
+/// OMEGA-DELTA-0041. That crate's manifest, which must not reach GPUI.
+pub const ACP_SERVER_MANIFEST_PATH: &str = "crates/omega_acp_server/Cargo.toml";
+
+/// OMEGA-DELTA-0041. The supervisor layer that owns the listener's lifecycle.
+pub const EFFECTD_PATH: &str = "crates/omega_effectd/src/omega_effectd.rs";
+
+/// OMEGA-DELTA-0041. Where the first-party agent identity is declared.
+pub const NATIVE_AGENT_IDENTITY_PATH: &str = "crates/agent/src/agent.rs";
 
 /// OMEGA-DELTA-0040. The startup path that opens Omega's first window.
 pub const STARTUP_PATH: &str = "crates/zed/src/main.rs";
@@ -5964,6 +5977,210 @@ mod tests {
             !bundler.contains("\"dirty\": False"),
             "OMEGA-DELTA-0039: the release record states `dirty` as a literal. \
              It is a field that reads like an observation, so it has to be one."
+        );
+    }
+    // ---------------------------------------------------------------------
+    // OMEGA-DELTA-0041 — Omega Agent served over ACP on a loopback socket
+    // ---------------------------------------------------------------------
+
+    /// OMEGA-DELTA-0041. The served ACP surface is off unless the flag says
+    /// exactly `1`, and the source says so.
+    ///
+    /// `omega_acp_server` proves the behaviour with its own unit test. This
+    /// checks the *shape* the behaviour depends on, in the file, because a
+    /// later edit that made the flag truthy-tolerant — `is_some`,
+    /// `unwrap_or("1")`, a `parse::<bool>()` — would keep every one of that
+    /// crate's tests passing for the values it happened to list while turning
+    /// a listener on for values it did not.
+    #[test]
+    fn the_served_acp_surface_is_off_unless_the_flag_is_exact() {
+        let source = std::fs::read_to_string(repository_path(ACP_SERVER_PATH))
+            .expect("the served ACP surface is readable");
+
+        assert!(
+            source.contains("None => Enablement::Off(OffReason::FlagUnset)"),
+            "OMEGA-DELTA-0041: an unset OMEGA_ACP_SERVER must be off. A              listener that is on by default is a different product."
+        );
+        assert!(
+            source.contains("Some(ENABLE_VALUE) => Enablement::On")
+                && source.contains("Some(_) => Enablement::Off(OffReason::FlagNotExactlyOne)"),
+            "OMEGA-DELTA-0041: the enable flag must be an exact match on              ENABLE_VALUE with everything else off. A truthy-tolerant flag is              a flag whose default nobody can state."
+        );
+        for tolerant in [
+            "to_lowercase()",
+            "eq_ignore_ascii_case",
+            "parse::<bool>",
+            "unwrap_or(ENABLE_VALUE)",
+            "flag.is_some()",
+        ] {
+            assert!(
+                !source.contains(tolerant),
+                "OMEGA-DELTA-0041: the enable flag reads {tolerant}, which                  widens the set of values that open an unauthenticated socket."
+            );
+        }
+    }
+
+    /// OMEGA-DELTA-0041. The socket is the supervisor's, and GPUI cannot reach
+    /// the crate that opens it.
+    ///
+    /// omega#82's falsifier is *GPUI owns the socket*. Two things make that
+    /// false and both are checked here rather than asserted in prose: the
+    /// crate that binds declares no GPUI dependency at all, and the only
+    /// production caller of `start_if_enabled` is `crates/omega_effectd`.
+    #[test]
+    fn only_the_supervisor_opens_the_served_acp_socket() {
+        let manifest = std::fs::read_to_string(repository_path(ACP_SERVER_MANIFEST_PATH))
+            .expect("the served ACP surface's manifest is readable");
+        for reaching_into_the_app in [
+            "gpui.workspace",
+            "workspace.workspace",
+            "agent_ui.workspace",
+            "project.workspace",
+            "ui.workspace",
+            "editor.workspace",
+        ] {
+            assert!(
+                !manifest.contains(reaching_into_the_app),
+                "OMEGA-DELTA-0041: crates/omega_acp_server depends on                  {reaching_into_the_app}. The crate that opens the                  unauthenticated loopback socket must not be reachable from                  the UI layer — that is exactly what omega#82's falsifier                  names."
+            );
+        }
+
+        let crates = repository_path("crates");
+        let mut binders: Vec<String> = Vec::new();
+        let mut starters: Vec<String> = Vec::new();
+        for_each_source_file(&crates, &["rs"], |path, source| {
+            let display = path
+                .display()
+                .to_string()
+                .rsplit("crates/")
+                .next()
+                .unwrap_or_default()
+                .to_owned();
+            if display.starts_with("omega_deltas/") {
+                return;
+            }
+            for line in source.lines() {
+                let trimmed = line.trim();
+                if trimmed.starts_with("//") || trimmed.starts_with("///") {
+                    continue;
+                }
+                if trimmed.contains("LoopbackAcpServer::bind(") {
+                    binders.push(display.clone());
+                }
+                if trimmed.contains("start_if_enabled()") && !trimmed.starts_with("pub fn ") {
+                    starters.push(display.clone());
+                }
+            }
+        });
+
+        assert!(
+            !binders.is_empty() && !starters.is_empty(),
+            "OMEGA-DELTA-0041: the scan found no bind and no start, so this              check is vacuous. Either the served surface is gone or the              needles stopped matching."
+        );
+        for file in &binders {
+            assert!(
+                file.starts_with("omega_acp_server/"),
+                "OMEGA-DELTA-0041: {file} binds the served ACP listener. Only                  crates/omega_acp_server may."
+            );
+        }
+        for file in &starters {
+            assert!(
+                file.starts_with("omega_effectd/") || file.starts_with("omega_acp_server/"),
+                "OMEGA-DELTA-0041: {file} starts the served ACP listener. The                  supervisor layer owns the lifecycle; GPUI never opens its own                  socket."
+            );
+        }
+    }
+
+    /// OMEGA-DELTA-0041. Nothing reachable over the socket can take an
+    /// executor pin.
+    ///
+    /// Owner gate 8 at the socket. An engine lane *is* Full Auto authority, a
+    /// pin is the only door to one, and `OMEGA-DELTA-0035` already requires
+    /// every pin-setting call to name a literal `PinGesture`. This closes the
+    /// other end: the crate serving an unauthenticated surface never names a
+    /// pin at all, so there is nothing there for a later edit to reach for.
+    #[test]
+    fn nothing_over_the_served_acp_surface_can_take_a_pin() {
+        let source = std::fs::read_to_string(repository_path(ACP_SERVER_PATH))
+            .expect("the served ACP surface is readable");
+        // The shipped half only. The test module below it reads the pin ledger
+        // on purpose, to prove every pin gesture is classified as unexposed.
+        let shipped = source
+            .split_once("#[cfg(test)]")
+            .map(|(shipped, _)| shipped)
+            .expect("the served ACP surface has a test module");
+        for line in shipped.lines() {
+            let trimmed = line.trim();
+            // The doc comments explain *why* there is no pin here, and must be
+            // allowed to say the word.
+            if trimmed.starts_with("//") {
+                continue;
+            }
+            for pin_reaching in ["PinGesture", "pin_session(", "pin_next_session(", "ExecutorPin::"]
+            {
+                assert!(
+                    !trimmed.contains(pin_reaching),
+                    "OMEGA-DELTA-0041: the served ACP surface names                      {pin_reaching}. Nothing an external host can reach may                      set a pin: a pin is the only door to an engine lane and                      an engine lane is Full Auto authority, which owner gate 8                      admits only an explicit human action into."
+                );
+            }
+        }
+        assert!(
+            source.contains("pin: None,"),
+            "OMEGA-DELTA-0041: the served route inputs no longer pin nothing.              If this moved, the check above is watching the wrong thing."
+        );
+    }
+
+    /// OMEGA-DELTA-0041. The served surface presents the first-party agent's
+    /// own identity, not a second one.
+    ///
+    /// An attached host is told it is talking to Omega Agent. If the served
+    /// identity drifted from the one `crates/agent` declares, the served
+    /// surface would be disclosing an agent that does not exist — which is the
+    /// same defect class as a rendered label in the record.
+    #[test]
+    fn the_served_surface_presents_the_first_party_agent_id() {
+        let identity = std::fs::read_to_string(repository_path(NATIVE_AGENT_IDENTITY_PATH))
+            .expect("the native agent is readable");
+        let served = std::fs::read_to_string(repository_path(ACP_SERVER_PATH))
+            .expect("the served ACP surface is readable");
+
+        let declared = identity
+            .lines()
+            .find_map(|line| {
+                let line = line.trim();
+                let rest = line.strip_prefix("pub static OMEGA_AGENT_ID")?;
+                let start = rest.find("AgentId::new(\"")? + "AgentId::new(\"".len();
+                let tail = &rest[start..];
+                let end = tail.find('"')?;
+                Some(tail[..end].to_owned())
+            })
+            .expect("crates/agent declares OMEGA_AGENT_ID as a literal");
+
+        assert!(
+            served.contains(&format!("pub const SERVED_AGENT_ID: &str = \"{declared}\";")),
+            "OMEGA-DELTA-0041: the served ACP surface presents an identity              other than {declared:?}, which is what crates/agent declares. An              attached host would be disclosed an agent that does not exist."
+        );
+    }
+
+    /// OMEGA-DELTA-0041. The supervisor's start is not conditional on anything
+    /// but the flag.
+    ///
+    /// A start hidden behind "and the engine is available" would make the
+    /// surface's default depend on packaging rather than on the flag, so the
+    /// default nobody could state would be back.
+    #[test]
+    fn the_supervisor_starts_the_served_surface_before_it_resolves_the_engine() {
+        let source = std::fs::read_to_string(repository_path(EFFECTD_PATH))
+            .expect("the supervisor is readable");
+        let start = source
+            .find("start_served_acp_surface();")
+            .expect("OMEGA-DELTA-0041: the supervisor no longer starts the served surface");
+        let resolve = source
+            .find("resolve_effectd_command(")
+            .expect("the supervisor resolves the packaged component");
+        assert!(
+            start < resolve,
+            "OMEGA-DELTA-0041: the served surface is started after the              packaged component is resolved, so whether it listens depends on              packaging as well as on the flag."
         );
     }
 }

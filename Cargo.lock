@@ -11934,6 +11934,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "omega_acp_server"
+version = "0.1.0"
+dependencies = [
+ "agent-client-protocol",
+ "futures 0.3.32",
+ "log",
+ "omega_front_door",
+ "serde_json",
+ "smol",
+]
+
+[[package]]
 name = "omega_deltas"
 version = "0.1.0"
 dependencies = [
@@ -11954,7 +11966,9 @@ dependencies = [
  "gpui",
  "http_client",
  "libc",
+ "log",
  "nostr",
+ "omega_acp_server",
  "omega_identity",
  "paths",
  "rand 0.9.4",

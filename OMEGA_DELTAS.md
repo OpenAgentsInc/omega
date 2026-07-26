@@ -1984,3 +1984,89 @@ than it sounds, because the harness omega#81's acceptance sentence names —
   onboarding-surface decision (omega#9) and not this delta's to take. This delta
   also does not cover *what* onboarding asks for, or the editor-setup journey,
   which reaches the welcome page rather than the front door and is unchanged.
+
+### OMEGA-DELTA-0041 — Omega Agent is attachable over ACP, on a loopback socket that is off by default and read-only
+
+- **Upstream Zed:** an ACP client only. `crates/agent_servers` reaches *out* to
+  external agents and every `ConnectionTo<…>` in the tree is a
+  `ConnectionTo<Agent>`. Nothing in upstream implements the agent role, so no
+  external host can attach to the editor and use the agent it is configured
+  with.
+- **Omega:** Omega Agent — the router, not a raw provider — can be served over
+  ACP to an external host on `127.0.0.1`. An attaching host initialises,
+  creates a session, prompts it, and is answered with the same disclosed
+  routing an in-app thread carries. omega#82's recursive composability, in the
+  direction upstream does not have.
+- **Off by default, and that is asserted rather than intended.**
+  `OMEGA_ACP_SERVER` must be exactly `1`. `true`, `yes`, `on`, `01`, ` 1` and an
+  unset variable are each off, with a typed `OffReason` rather than a bool, and
+  `the_served_acp_surface_is_off_unless_the_flag_is_exact` fails on a
+  truthy-tolerant read such as `to_lowercase()` or `parse::<bool>()`. A listener
+  that is on by default is a different product.
+- **Loopback by construction, not by configuration.** `LoopbackHost::new`
+  refuses anything but `127.0.0.1` and `::1`, and refuses a *name* rather than
+  resolving it — resolution is the step at which `localhost` can be made to mean
+  something routable. `LoopbackAcpServer::bind` takes that type, so reaching a
+  routable interface needs a new type rather than a new setting.
+- **Read-only, inside the authority partition rather than beside it.** This is
+  an **unauthenticated** model-driven surface — `authMethods` is empty, so it
+  carries no bearer at all and is structurally weaker than the Desktop MCP
+  surface. Owner gate 8 (*no model-initiated path can start Full Auto
+  authority; only an explicit human action can, wherever that action lives*)
+  therefore reaches it directly, and three model-callable Full Auto starts were
+  removed from OpenAgents Desktop the same day. So the surface does not sit
+  beside the partition: `SERVED_SURFACE` is the four methods a host can reach,
+  every one of them observation, and `UNEXPOSED_AUTHORITY` classifies every
+  authority-bearing control with the typed refusal a host attempting it gets —
+  checked in **both directions** against `FULL_AUTO_AFFORDANCES` and
+  `PinGesture::all()`, so adding a Full Auto control fails this crate's tests
+  until somebody says what a served host is told. Anything not listed is refused
+  by the absence of a dispatch entry, not by a branch someone has to remember.
+- **A served session can never reach an engine lane.** A pin is the only door to
+  one, setting a pin requires a `PinGesture`, and no variant of that enum is
+  reachable over a socket. `a_served_session_can_never_reach_an_engine_lane`
+  proves the consequence against every engine state the router can be shown —
+  including an engine with idle lanes and an executor registered — so "the
+  engine happened to be down" is not what is doing the work.
+- **Ingress is a record beside the disclosure, not a fourth executor class.**
+  `ExecutorClass` answers *who ran the work*; serving over ACP changes *who
+  asked*. Reusing `ExternalAcp` would make a served session claim an external
+  agent did work Omega did, and make one token mean opposite things depending on
+  which side of the socket the reader stands on. `OMEGA-AGENT-AC-04` therefore
+  stands unrevised at three classes and `SessionOrigin` carries the ingress.
+  Both records cross the wire with **exactly** their declared fields —
+  `EXECUTOR_DISCLOSURE_FIELDS` and `SESSION_ORIGIN_FIELDS`, asserted exactly
+  rather than against a denylist, because a denylist that fails on `label`
+  passes for `line`, `text`, `summary`, and `caption`.
+- **GPUI never opens the socket.** `crates/omega_acp_server` declares no
+  dependency on GPUI, `workspace`, `project`, `agent_ui`, or `ui`, and the only
+  production caller of `start_if_enabled` is `crates/omega_effectd` — the
+  supervisor layer. Both are checked by scanning the tree rather than asserted
+  in prose.
+- **Enforced by:** `the_served_acp_surface_is_off_unless_the_flag_is_exact`,
+  `only_the_supervisor_opens_the_served_acp_socket`,
+  `nothing_over_the_served_acp_surface_can_take_a_pin`,
+  `the_served_surface_presents_the_first_party_agent_id`, and
+  `the_supervisor_starts_the_served_surface_before_it_resolves_the_engine` in
+  `crates/omega_deltas`; the fourteen checks in `crates/omega_acp_server`,
+  including one that drives the real loopback socket with the **upstream** ACP
+  SDK client and reads the disclosure back off it; and
+  `the_disclosure_record_holds_no_rendered_label` plus
+  `the_origin_record_holds_no_rendered_label` in `crates/omega_front_door`.
+- **A served prompt ends its turn, and says what it did not do.** ACP has a
+  `refusal` stop reason and it is the wrong one: it means *the prompt and
+  everything after it will not be included in the next prompt*, and stock Zed
+  1.12.0 implements that literally — it dropped the turn and showed a refusal
+  banner with **no disclosure at all**. That was watched happening before this
+  shape was chosen. The turn genuinely ends, so it says `end_turn`, and what did
+  not happen is in the message the operator reads and in the typed record beside
+  it.
+- **What this does not cover.** The listener runs in the Omega process under the
+  supervisor's control, **not** inside the packaged `@openagentsinc/omega-effectd`
+  daemon; that daemon lives in the openagents repository and this packet is
+  scoped to omega. What is enforced here is the property omega#82's falsifier
+  names — the bind lives in a crate the UI layer cannot reach, and the start
+  lives in the supervisor. The surface also does not *execute*: a served turn is
+  answered by disclosing where it would route, and dispatching a served turn to
+  a real executor is a later decision with its own authority question, not an
+  omission. The v1 fleet-backed server (openagents #9179) stays deferred.

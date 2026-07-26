@@ -127,6 +127,13 @@ impl ExecutorClass {
 /// So [`label`](Self::label) is a function of the fields, and there is no
 /// field to put a rendered label in. omega#76 fixed this shape; omega#77
 /// populates it from live threads and renders the line.
+///
+/// omega#82 tightened how that is checked. The old check dumped the struct and
+/// failed if the word `label` appeared in it — a **denylist**, which passes for
+/// a field called `line`, `text`, `summary`, or `rendered`. The check now
+/// asserts the declared fields **exactly** against
+/// [`EXECUTOR_DISCLOSURE_FIELDS`], so any new field at all is a deliberate edit
+/// to a list that says why the shape is closed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExecutorDisclosure {
     /// Which of the three admitted classes ran the work.
@@ -230,6 +237,204 @@ impl ExecutorDisclosure {
                 ExecutorClass::NativeLoop | ExecutorClass::ExternalAcp => self.run_ref.is_none(),
             }
     }
+}
+
+/// Every field [`ExecutorDisclosure`] is allowed to have, in declaration order.
+///
+/// Asserted **exactly** against the struct's own source by
+/// `the_disclosure_record_holds_no_rendered_label`. The point of an exact list
+/// rather than a denylist is that a denylist only catches the names its author
+/// thought of: a `label` field fails a `contains("label")` check, and `line`,
+/// `text`, `summary`, `rendered`, and `caption` all sail through it. The
+/// binding condition of the owner's 2026-07-25 identity decision is that
+/// disclosure is a *record a label renders*, and a stored rendering under any
+/// name breaks it, not just one spelled `label`.
+pub const EXECUTOR_DISCLOSURE_FIELDS: &[&str] = &[
+    "class", "agent_id", "provider", "model", "run_ref", "route",
+];
+
+// -------------------------------------------------------------------------
+// Where a session was reached from
+// -------------------------------------------------------------------------
+
+/// How a session reached Omega Agent. omega#82.
+///
+/// **This is not an [`ExecutorClass`].** `ExecutorClass` answers *who ran the
+/// work*; this answers *who asked*. Serving Omega Agent over ACP to an external
+/// host changes the second and nothing about the first: the turn is still
+/// executed by the native loop, an external ACP agent, or an engine lane, and
+/// which one is a fact about the route decision rather than about the socket
+/// the request arrived on.
+///
+/// Reusing [`ExecutorClass::ExternalAcp`] for a served session would be
+/// actively wrong rather than merely imprecise. It would make a served
+/// session's disclosure say *an external ACP agent did this work* when Omega
+/// did, and it would make one token mean two opposite things depending on which
+/// side of the socket the reader is standing on — Omega-as-client reaching out
+/// to a foreign agent, and Omega-as-agent being reached by a foreign host. A
+/// disclosure record whose meaning depends on the reader's vantage point is not
+/// a disclosure record. A fourth `ExecutorClass` variant is wrong for the same
+/// reason: there is no fourth *executor*, and `ServedOverAcp` would be an
+/// ingress fact wearing an execution field's clothes.
+///
+/// So `OMEGA-AGENT-AC-04` stands unrevised at exactly three executor classes,
+/// and ingress is modelled here instead. That also keeps the identity decision
+/// cheap to reverse in the direction that matters: an origin record can be
+/// added and removed without rewriting a single stored thread record, whereas
+/// re-pointing `ExternalAcp` would retroactively change what every record
+/// already written meant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Ingress {
+    /// The session was started inside Omega, by a person at the front door.
+    InApp,
+    /// The session was reached over the loopback ACP server by an external
+    /// host. `OMEGA-DELTA-0041`.
+    LoopbackAcp,
+}
+
+impl Ingress {
+    /// Every admitted ingress, in declaration order.
+    #[must_use]
+    pub const fn all() -> &'static [Self] {
+        &[Self::InApp, Self::LoopbackAcp]
+    }
+
+    /// The stable wire token for this ingress.
+    #[must_use]
+    pub const fn token(self) -> &'static str {
+        match self {
+            Self::InApp => "in_app",
+            Self::LoopbackAcp => "loopback_acp",
+        }
+    }
+}
+
+/// What a session says about where it was reached from.
+///
+/// A record, on the same terms as [`ExecutorDisclosure`]: [`label`](Self::label)
+/// is derived on every call and nothing stores the output, so there is no field
+/// here to put a rendered sentence in either.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionOrigin {
+    /// How the session was reached.
+    pub ingress: Ingress,
+    /// The name the external host gave for itself, where one did.
+    ///
+    /// `None` is *not disclosed*. An in-app session has no host to name, and a
+    /// served session whose client sent no `clientInfo` genuinely did not say.
+    pub host_name: Option<String>,
+    /// The version the external host gave for itself, where one did.
+    pub host_version: Option<String>,
+    /// Whether the host authenticated.
+    ///
+    /// Always `false` for [`Ingress::LoopbackAcp`], and
+    /// [`is_coherent`](Self::is_coherent) enforces it: the served surface
+    /// declares an empty `authMethods` list, so a served session claiming an
+    /// authenticated host is claiming a credential no one could have presented.
+    pub authenticated: bool,
+}
+
+impl SessionOrigin {
+    /// The origin of a session a person started inside Omega.
+    #[must_use]
+    pub const fn in_app() -> Self {
+        Self {
+            ingress: Ingress::InApp,
+            host_name: None,
+            host_version: None,
+            authenticated: false,
+        }
+    }
+
+    /// The origin of a session an external host reached over the loopback ACP
+    /// server.
+    #[must_use]
+    pub const fn loopback_acp(host_name: Option<String>, host_version: Option<String>) -> Self {
+        Self {
+            ingress: Ingress::LoopbackAcp,
+            host_name,
+            host_version,
+            authenticated: false,
+        }
+    }
+
+    /// Render the origin line for a session.
+    ///
+    /// Derived on every call. Nothing stores the output. An undisclosed host is
+    /// *said*, for the same reason [`ExecutorDisclosure::label`] says an
+    /// undisclosed model: a line that quietly dropped the host would read as a
+    /// complete origin.
+    #[must_use]
+    pub fn label(&self) -> String {
+        let host = match (&self.host_name, &self.host_version) {
+            (Some(name), Some(version)) => format!("{name} {version}"),
+            (Some(name), None) => format!("{name}, version not disclosed"),
+            (None, _) => "host not disclosed".to_owned(),
+        };
+        match self.ingress {
+            Ingress::InApp => "in_app".to_owned(),
+            Ingress::LoopbackAcp => {
+                format!("loopback_acp · {host} · unauthenticated")
+            }
+        }
+    }
+
+    /// Whether this record is internally consistent.
+    #[must_use]
+    pub fn is_coherent(&self) -> bool {
+        let present_and_named =
+            |value: &Option<String>| value.as_ref().is_none_or(|value| !value.is_empty());
+        let named_host_matches_the_ingress = match self.ingress {
+            // An in-app session has no external host, so naming one means the
+            // record was built from the wrong session.
+            Ingress::InApp => self.host_name.is_none() && self.host_version.is_none(),
+            Ingress::LoopbackAcp => true,
+        };
+        // The served surface offers no authentication method at all, so an
+        // authenticated served session is a credential nobody could present.
+        let unauthenticated_where_it_must_be =
+            self.ingress != Ingress::LoopbackAcp || !self.authenticated;
+        present_and_named(&self.host_name)
+            && present_and_named(&self.host_version)
+            && named_host_matches_the_ingress
+            && unauthenticated_where_it_must_be
+    }
+}
+
+/// Every field [`SessionOrigin`] is allowed to have, in declaration order.
+///
+/// Asserted exactly, for the reason [`EXECUTOR_DISCLOSURE_FIELDS`] gives.
+pub const SESSION_ORIGIN_FIELDS: &[&str] =
+    &["ingress", "host_name", "host_version", "authenticated"];
+
+/// The `pub` field names a struct declares, read from source text.
+///
+/// A lexical scan rather than reflection, because Rust has none: the check that
+/// matters is "what does this struct declare", and the source is where that is
+/// written. Starts at `pub struct {name} {` and stops at the first line that is
+/// exactly `}`, which is where rustfmt puts a struct's closing brace.
+#[must_use]
+pub fn declared_struct_fields(source: &str, struct_name: &str) -> Vec<String> {
+    let opening = format!("pub struct {struct_name} {{");
+    let mut fields = Vec::new();
+    let mut inside = false;
+    for line in source.lines() {
+        if !inside {
+            inside = line.trim_start().starts_with(&opening);
+            continue;
+        }
+        if line == "}" {
+            break;
+        }
+        let trimmed = line.trim_start();
+        let Some(rest) = trimmed.strip_prefix("pub ") else {
+            continue;
+        };
+        if let Some((name, _)) = rest.split_once(':') {
+            fields.push(name.trim().to_owned());
+        }
+    }
+    fields
 }
 
 // -------------------------------------------------------------------------
@@ -629,8 +834,34 @@ mod tests {
 
     /// A struct with no field to hold a rendered label cannot accidentally
     /// grow one without this test's author noticing.
+    ///
+    /// omega#82 replaced a denylist with an **exact** field list. The old check
+    /// dumped the struct and failed if the word `label` appeared; a field named
+    /// `line`, `text`, `summary`, `rendered`, or `caption` passed it, and every
+    /// one of those is the same defect. The list is the whole check now: a new
+    /// field of any name fails until someone edits `EXECUTOR_DISCLOSURE_FIELDS`
+    /// on purpose.
     #[test]
     fn the_disclosure_record_holds_no_rendered_label() {
+        let source = std::fs::read_to_string(repository_path(
+            "crates/omega_front_door/src/omega_front_door.rs",
+        ))
+        .expect("this crate's source is readable");
+        let declared = declared_struct_fields(&source, "ExecutorDisclosure");
+        assert_eq!(
+            declared, EXECUTOR_DISCLOSURE_FIELDS,
+            "ExecutorDisclosure's declared fields moved. The owner admitted \
+             the non-signing identity choice on the condition that disclosure \
+             stays a typed record a label renders, so a field holding a \
+             rendered line — under any name, not only `label` — breaks it. If \
+             this is a deliberate shape change, edit \
+             EXECUTOR_DISCLOSURE_FIELDS and say why."
+        );
+
+        // The scan reaching nothing would make the assertion above vacuous in
+        // one direction, so the list is also checked to be non-empty and to
+        // name a field the struct genuinely round-trips.
+        assert!(!declared.is_empty(), "the field scan reached no fields");
         let disclosure = ExecutorDisclosure {
             class: ExecutorClass::NativeLoop,
             agent_id: "a".into(),
@@ -639,14 +870,113 @@ mod tests {
             run_ref: None,
             route: None,
         };
-        // Debug is the closest thing to reflection available here: if a
-        // `label` field is ever added, it shows up in the struct dump.
         let dumped = format!("{disclosure:?}");
+        for field in EXECUTOR_DISCLOSURE_FIELDS {
+            assert!(
+                dumped.contains(field),
+                "EXECUTOR_DISCLOSURE_FIELDS names {field}, which the struct \
+                 does not carry: {dumped}"
+            );
+        }
+    }
+
+    /// The field scan finds real fields and stops at the struct it was asked
+    /// about.
+    ///
+    /// A scan that silently matched nothing would make the exactness check
+    /// above pass for a struct that had grown a rendered line.
+    #[test]
+    fn the_field_scan_reads_a_struct_and_stops_at_its_brace() {
+        let source = "\
+pub struct Wanted {
+    /// doc
+    pub first: String,
+    pub second: Option<u8>,
+    private: bool,
+}
+
+pub struct Other {
+    pub third: String,
+}
+";
+        assert_eq!(
+            declared_struct_fields(source, "Wanted"),
+            ["first".to_owned(), "second".to_owned()],
+            "the scan must read public fields and must not walk into the \
+             next struct"
+        );
+        assert!(declared_struct_fields(source, "Missing").is_empty());
+    }
+
+    /// omega#82. Ingress is a separate record from the executor class, and the
+    /// executor set stays closed at three.
+    #[test]
+    fn reaching_over_acp_is_an_origin_and_not_an_executor() {
+        // The whole design call, as an assertion: no executor class names a
+        // socket direction, so a served session cannot claim an external agent
+        // did work Omega did.
+        for class in ExecutorClass::all() {
+            assert!(
+                !class.token().contains("served") && !class.token().contains("ingress"),
+                "{} names an ingress fact in an execution field",
+                class.token()
+            );
+        }
+        assert_eq!(ExecutorClass::all().len(), 3);
+
+        let origin = SessionOrigin::loopback_acp(Some("Zed".into()), Some("1.12.0".into()));
+        assert!(origin.is_coherent());
+        assert_eq!(origin.label(), "loopback_acp · Zed 1.12.0 · unauthenticated");
+        assert_eq!(origin.ingress.token(), "loopback_acp");
+
+        let quiet = SessionOrigin::loopback_acp(None, None);
+        assert!(quiet.is_coherent());
+        assert_eq!(
+            quiet.label(),
+            "loopback_acp · host not disclosed · unauthenticated"
+        );
+    }
+
+    /// omega#82. A served session cannot claim it authenticated, and an in-app
+    /// session cannot claim an external host.
+    #[test]
+    fn a_served_origin_cannot_claim_a_credential_nobody_could_present() {
+        let claiming = SessionOrigin {
+            authenticated: true,
+            ..SessionOrigin::loopback_acp(Some("Zed".into()), None)
+        };
         assert!(
-            !dumped.contains("label"),
-            "ExecutorDisclosure grew a stored label field: {dumped}. \
-             The owner admitted the non-signing identity choice on the \
-             condition that disclosure stays a typed record a label renders."
+            !claiming.is_coherent(),
+            "the served surface offers no auth method, so an authenticated \
+             served session is a credential that could not have been presented"
+        );
+
+        let borrowed_host = SessionOrigin {
+            host_name: Some("Zed".into()),
+            ..SessionOrigin::in_app()
+        };
+        assert!(!borrowed_host.is_coherent());
+
+        let blank_host = SessionOrigin::loopback_acp(Some(String::new()), None);
+        assert!(
+            !blank_host.is_coherent(),
+            "absent means not disclosed; empty means something built the \
+             record out of a missing value and lost the distinction"
+        );
+    }
+
+    /// The origin record holds no rendered line either, on the same terms.
+    #[test]
+    fn the_origin_record_holds_no_rendered_label() {
+        let source = std::fs::read_to_string(repository_path(
+            "crates/omega_front_door/src/omega_front_door.rs",
+        ))
+        .expect("this crate's source is readable");
+        assert_eq!(
+            declared_struct_fields(&source, "SessionOrigin"),
+            SESSION_ORIGIN_FIELDS,
+            "SessionOrigin's declared fields moved. Ingress is disclosed the \
+             same way execution is: a typed record a label renders."
         );
     }
 
