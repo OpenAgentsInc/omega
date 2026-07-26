@@ -26,6 +26,7 @@ mod model_selector_popover;
 pub mod omega_executor_disclosure;
 mod omega_host_bridge;
 pub mod omega_router;
+pub mod omega_send_queue;
 mod profile_selector;
 mod terminal_codegen;
 mod terminal_inline_assistant;

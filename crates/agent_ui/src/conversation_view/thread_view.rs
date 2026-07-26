@@ -2237,13 +2237,45 @@ impl ThreadView {
         cx.notify();
     }
 
+    /// `OMEGA-DELTA-0032`. What this thread's executor does with the front
+    /// queued message, decided by the law rather than by which branch of this
+    /// function happens to run.
+    ///
+    /// The steer flag alone used to decide this, and only the native loop was
+    /// ever told. An external ACP thread and an engine lane fell through to
+    /// [`Self::dispatch_queued_entry`]'s cancel, so "steer" silently became
+    /// "cancel the turn and restart" on two of the three classes. That is the
+    /// implicit provider steer omega#79 exists to make impossible.
+    pub fn omega_send_disposition(&self, cx: &App) -> omega_front_door::SendDisposition {
+        let command = if self.message_queue.front_wants_steer() {
+            omega_front_door::SendCommand::Steer
+        } else {
+            omega_front_door::SendCommand::Enqueue
+        };
+        use crate::omega_executor_disclosure::ThreadExecutorDisclosure as _;
+        let disclosure = self.thread.read(cx).omega_executor_disclosure(cx);
+        // Only an external peer negotiates. Omega owns the native loop's stop,
+        // and an engine lane's answer does not depend on what the engine can do.
+        let capability = match disclosure.class {
+            omega_front_door::ExecutorClass::ExternalAcp => self
+                .session_capabilities
+                .read()
+                .omega_steer_capability(),
+            _ => omega_front_door::SteerCapability::Unknown,
+        };
+        omega_front_door::disposition(command, disclosure.class, capability)
+    }
+
     pub fn sync_queue_flag_to_native_thread(&self, cx: &mut Context<Self>) {
+        // The boundary flag is set only when the law says this executor steers
+        // at a message boundary, which is the native loop's answer and nothing
+        // else's. Reading `front_wants_steer` directly here is what let a steer
+        // mean three different things.
+        let steers_at_boundary = self.omega_send_disposition(cx)
+            == omega_front_door::SendDisposition::SteerAtMessageBoundary;
         if let Some(native_thread) = self.as_native_thread(cx) {
-            // By default queued messages wait for the turn to fully complete.
-            // Only a "steering" front message ends the turn at the next boundary.
-            let end_at_boundary = self.message_queue.front_wants_steer();
             native_thread.update(cx, |thread, _| {
-                thread.set_end_turn_at_next_boundary(end_at_boundary);
+                thread.set_end_turn_at_next_boundary(steers_at_boundary);
             });
         }
     }
@@ -2293,7 +2325,17 @@ impl ThreadView {
             })
             .is_some();
 
-        let cancelled = self.thread.update(cx, |thread, cx| thread.cancel(cx));
+        // `OMEGA-DELTA-0032`. A dispatch cancels the running turn only when
+        // this executor's declared answer is to reach it. An enqueue, and any
+        // steer the law refused, is promoted after the turn is quiescent — it
+        // never cancels one. Cancelling unconditionally here is what turned a
+        // refused steer into an interrupted turn on the two classes that were
+        // never asked.
+        let cancelled = if self.omega_send_disposition(cx).reaches_running_turn() {
+            self.thread.update(cx, |thread, cx| thread.cancel(cx))
+        } else {
+            Task::ready(())
+        };
 
         let workspace = self.workspace.clone();
 

@@ -6,6 +6,7 @@
 //!
 //! `workroom_ui` (OMEGA-SW-03) consumes these types when wiring the pane.
 
+mod community_verification;
 mod issue31_full_auto;
 mod issue31_host;
 mod public_ref;
@@ -13,6 +14,12 @@ mod receipt;
 mod render;
 mod room_header;
 
+pub use community_verification::{
+    AdmittedVerification, COMMUNITY_FEEDBACK_KIND, COMMUNITY_INDEPENDENT_VERIFICATION_PACKET,
+    COMMUNITY_INDEPENDENT_VERIFICATION_SCHEMA, CommunityBinding,
+    INDEPENDENT_VERIFICATION_FEEDBACK_TYPE, SHARED_FIXTURE_DIGESTS, VerificationEvent,
+    VerificationRefusal, VerificationVerdict, admit_independent_verification,
+};
 pub use issue31_full_auto::{
     ISSUE31_EVIDENCE_HOPS, ISSUE31_FULL_AUTO_ADJUNCT_SCHEMA, Issue31EvidenceChain,
     Issue31EvidenceHop, Issue31EvidenceHopKind, Issue31EvidenceUnavailableReason,

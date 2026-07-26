@@ -14,6 +14,12 @@
 //! the openagents repository, admitted by the owner on 2026-07-25.
 
 pub mod router;
+mod send_during_turn;
+
+pub use send_during_turn::{
+    QueueItemState, Quiescence, SendCommand, SendDisposition, SendFallback, SteerCapability,
+    SteerRefusal, disposition, may_promote,
+};
 
 pub use router::{
     EngineLane, EngineReadiness, EngineUnreachable, ExecutorPin, LaneState, RESERVED_RECORD_CHARACTERS,

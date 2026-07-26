@@ -88,6 +88,20 @@ impl SessionCapabilities {
         &self.available_skills
     }
 
+    /// `OMEGA-DELTA-0032`. Whether this peer said it can take a message while a
+    /// turn is running.
+    ///
+    /// The Agent Client Protocol has no prompt capability for mid-turn
+    /// delivery, so today every external peer answers
+    /// [`SteerCapability::Unknown`](omega_front_door::SteerCapability::Unknown)
+    /// — and Omega refuses the steer and queues instead of guessing. That is
+    /// the honest reading: silence is not a declared capability, and the cost
+    /// of guessing wrong is the user's running turn. When ACP gains the
+    /// capability, this is the one place that changes.
+    pub fn omega_steer_capability(&self) -> omega_front_door::SteerCapability {
+        omega_front_door::SteerCapability::Unknown
+    }
+
     pub fn has_slash_completions(&self) -> bool {
         !self.available_commands.is_empty() || !self.available_skills.is_empty()
     }

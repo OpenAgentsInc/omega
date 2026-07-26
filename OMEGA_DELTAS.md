@@ -1452,3 +1452,63 @@ cargo test -p omega_deltas
   packaged scan. And no name is forbidden unless `brand.words` or
   `brand.substrings` says so: this delta is about *how completely* a forbidden
   name is looked for, not about which names are forbidden.
+
+### OMEGA-DELTA-0032 — A send during a running turn has one declared answer per executor
+
+- **Upstream behaviour.** `ThreadView::send` checks whether a turn is running
+  and, if so, queues the message. `MessageQueue` already tells a steer from an
+  enqueue, and `sync_queue_flag_to_native_thread` sets
+  `end_turn_at_next_boundary` on `agent::Thread` when the front entry wants to
+  steer. That function no-ops for anything that is not a native thread, and
+  `dispatch_queued_entry` then cancels the running turn unconditionally before
+  sending.
+- **Why Omega diverges.** Those two facts together mean one button does three
+  different things. On the native loop a steer ends the turn at a message
+  boundary. On an external ACP peer and on an engine lane the same gesture
+  cancels the running turn and starts a new one — a behaviour nobody declared,
+  nobody negotiated, and the user cannot distinguish from steering. Omega runs
+  three executor classes on purpose (`OMEGA-DELTA-0029`), so "two work and one
+  silently drops" is not a rough edge here, it is the concurrency hole omega#79
+  names at design time.
+- **The law.** `omega_front_door::disposition` is a total const function from
+  (command, executor class, declared steer capability) to a declared outcome.
+  There is no fallthrough and no variant meaning "whatever the executor does".
+  A steer the class cannot honour is a typed refusal that **carries its
+  fallback**, so a refusal cannot be constructed without saying what happened to
+  the message.
+  - The native loop steers at its message boundary. Omega owns both sides of
+    that loop, so it does not negotiate.
+  - An external ACP peer is asked. The Agent Client Protocol has no capability
+    for mid-turn delivery, so every peer today answers "unknown" — and unknown
+    is refused, not assumed. Silence is not a capability, and the cost of
+    guessing wrong is the user's running turn.
+  - An engine lane refuses whatever the engine can do. An engine lane *is* Full
+    Auto authority, and `OMEGA-DELTA-0030` keeps a run's controls bound to the
+    generation the run surface minted them for. A composer that could interrupt
+    a run would be a second surface that believes it can command one.
+- **Durable admission.** The queue is written down before the composer
+  acknowledges it. `openagents.omega.agent_send_queue.v1` is keyed by thread and
+  item, ordered by an admission sequence rather than by map order, rewritten
+  atomically, and refuses a document it did not write. A terminal item is never
+  reopened: `promoted`, `cancelled` and `failed` are final, because a restart
+  that could move an item back to `queued` would promote it twice. Promotion
+  needs *proven* quiescence — after a reconnect Omega never saw the prior turn
+  stop, and promoting there is how a queued message races the turn it was meant
+  to follow.
+- **The disposition is derived, never stored.** The same rule
+  `ExecutorDisclosure` holds to. A stored disposition could disagree with the
+  law that produced it, and then the record would be the lie. The journal holds
+  the parts; the phrase is a function of them.
+- **What this does not cover.** The queue's live half still lives on the view,
+  so the durable record is authority for *what was admitted* and not yet for the
+  editor state a restart would need to rebuild the composer rows. Nothing here
+  reads a rendered pixel. And an external peer's capability is a single call
+  site returning "unknown" — when ACP gains a mid-turn capability, that call
+  site is what changes, and the law above already has the variant for it.
+- **Enforced by:** `the_send_during_turn_law_answers_for_every_executor_class`,
+  `the_queue_law_and_its_journal_read_nothing_but_their_inputs`,
+  `the_composer_decides_a_mid_turn_send_through_the_law`, and
+  `the_send_queue_is_a_durable_record_and_not_renderer_memory` in
+  `crates/omega_deltas`; plus the suites in
+  `crates/omega_front_door/src/send_during_turn.rs` and
+  `crates/agent_ui/src/omega_send_queue.rs`.

@@ -59,6 +59,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0029",
     "OMEGA-DELTA-0030",
     "OMEGA-DELTA-0031",
+    "OMEGA-DELTA-0032",
 ];
 
 /// OMEGA-DELTA-0025. The file that declares the measured digest.
@@ -1680,6 +1681,37 @@ fn is_test_path(relative: &str) -> bool {
             .iter()
             .any(|segment| normalized.contains(segment))
 }
+
+
+// ------ OMEGA-DELTA-0032
+
+/// OMEGA-DELTA-0032. The law that decides what a send during a turn does.
+pub const SEND_DURING_TURN_PATH: &str = "crates/omega_front_door/src/send_during_turn.rs";
+
+/// OMEGA-DELTA-0032. The durable half of the queue.
+pub const SEND_QUEUE_JOURNAL_PATH: &str = "crates/agent_ui/src/omega_send_queue.rs";
+
+/// OMEGA-DELTA-0032. Where the composer decides what to do with a queued
+/// message.
+pub const CONVERSATION_SEND_PATH: &str = "crates/agent_ui/src/conversation_view/thread_view.rs";
+
+/// OMEGA-DELTA-0032. Vocabulary that would make the queue law irreproducible,
+/// for the same reason `NON_DETERMINISTIC_ROUTING_TOKENS` exists: a queue whose
+/// decision depends on a clock or on hash order cannot be replayed from a
+/// journal, and a journal that cannot be replayed is not a durable admission.
+pub const NON_DETERMINISTIC_QUEUE_TOKENS: &[(&str, &str)] = &[
+    ("a clock", "SystemTime"),
+    ("a clock", "Instant"),
+    ("a clock", "::now("),
+    ("a clock", "chrono"),
+    ("randomness", "rand::"),
+    ("hash iteration order", "HashMap"),
+    ("hash iteration order", "HashSet"),
+    ("the environment", "std::env"),
+];
+
+/// OMEGA-DELTA-0032. Every executor class the send law must answer for.
+pub const SEND_LAW_EXECUTOR_TOKENS: &[&str] = &["NativeLoop", "ExternalAcp", "EngineLane"];
 
 #[cfg(test)]
 mod tests {
@@ -4570,6 +4602,115 @@ mod tests {
             "settings lookup must return None for an absent key"
         );
     }
+
+    // ------ OMEGA-DELTA-0032
+
+    /// OMEGA-DELTA-0032. Upstream Zed decides a send during a running turn in
+    /// the view: `MessageQueue::front_wants_steer` sets a boundary flag on the
+    /// native thread, and every other executor falls through to a cancel. That
+    /// is three different behaviours behind one button, and the user cannot
+    /// tell which one they got.
+    ///
+    /// Omega decides it with a total law over all three executor classes. This
+    /// checks the law is where the delta says it is and answers for each class
+    /// by name — a law that never mentions a class cannot have declared
+    /// anything for it.
+    #[test]
+    fn the_send_during_turn_law_answers_for_every_executor_class() {
+        let path = repository_path(SEND_DURING_TURN_PATH);
+        let source = std::fs::read_to_string(&path).expect("the send law is readable");
+        for token in SEND_LAW_EXECUTOR_TOKENS {
+            assert!(
+                source.contains(&format!("ExecutorClass::{token}")),
+                "OMEGA-DELTA-0032: {} does not answer for ExecutorClass::{token}.                  A class the law does not name has no declared behaviour, which                  is the state this delta replaces.",
+                path.display()
+            );
+        }
+        assert!(
+            source.contains("pub const fn disposition("),
+            "OMEGA-DELTA-0032: the law must be a const fn of its inputs. A              disposition that can read anything else is not reproducible from a              journal."
+        );
+    }
+
+    /// OMEGA-DELTA-0032. The law and the journal are pure the way the router is
+    /// pure. A queued message restored from disk re-derives its disposition, so
+    /// a clock or a hash order in either file would make the same record decide
+    /// differently on the next launch.
+    #[test]
+    fn the_queue_law_and_its_journal_read_nothing_but_their_inputs() {
+        for relative in [SEND_DURING_TURN_PATH, SEND_QUEUE_JOURNAL_PATH] {
+            let path = repository_path(relative);
+            let source = std::fs::read_to_string(&path).expect("readable");
+            // The test module is allowed a temporary directory and its own
+            // scaffolding; the law is not.
+            let production = source
+                .split("#[cfg(test)]")
+                .next()
+                .expect("a file has a first section");
+            for (why, token) in NON_DETERMINISTIC_QUEUE_TOKENS {
+                assert!(
+                    !production.contains(token),
+                    "OMEGA-DELTA-0032: {} reads {why} (`{token}`). The queue is                      replayed from a journal, and a decision that depends on                      {why} does not replay.",
+                    path.display()
+                );
+            }
+        }
+    }
+
+    /// OMEGA-DELTA-0032. The composer asks the law rather than reading the
+    /// steer flag.
+    ///
+    /// This is the exact upstream line the delta replaces. Reading
+    /// `front_wants_steer` to set the boundary flag is what made "steer" mean
+    /// "end at a boundary" on the native loop and "cancel the turn" everywhere
+    /// else, and it is why an engine lane and an external ACP peer both got a
+    /// behaviour nobody declared for them.
+    #[test]
+    fn the_composer_decides_a_mid_turn_send_through_the_law() {
+        let path = repository_path(CONVERSATION_SEND_PATH);
+        let source = std::fs::read_to_string(&path).expect("the composer is readable");
+        assert!(
+            source.contains("omega_front_door::disposition("),
+            "OMEGA-DELTA-0032: {} no longer calls the send law. Deciding a              mid-turn send in the view is the upstream behaviour this delta              replaces.",
+            path.display()
+        );
+        assert!(
+            source.contains("SendDisposition::SteerAtMessageBoundary"),
+            "OMEGA-DELTA-0032: the boundary flag must be set from the law's              own answer, not from a steer flag the other two classes never see."
+        );
+        assert!(
+            source.contains(".reaches_running_turn()"),
+            "OMEGA-DELTA-0032: {} must gate its cancel on whether this              executor's declared answer reaches the running turn. An              unconditional cancel turns a refused steer into an interrupted              turn.",
+            path.display()
+        );
+    }
+
+    /// OMEGA-DELTA-0032. Queue state is durable, and its acknowledgement is the
+    /// write.
+    ///
+    /// Upstream holds the queue on the view: `Entity<MessageEditor>` handles in
+    /// a `VecDeque` that dies with the panel. A message the composer had
+    /// already called "queued" did not exist after a restart. The falsifier for
+    /// omega#79 names this directly.
+    #[test]
+    fn the_send_queue_is_a_durable_record_and_not_renderer_memory() {
+        let path = repository_path(SEND_QUEUE_JOURNAL_PATH);
+        let source = std::fs::read_to_string(&path).expect("the journal is readable");
+        assert!(
+            source.contains("openagents.omega.agent_send_queue.v1"),
+            "OMEGA-DELTA-0032: the durable queue must carry a schema, so a              foreign document is refused rather than adopted."
+        );
+        assert!(
+            source.contains("std::fs::rename(&temporary, &self.path)"),
+            "OMEGA-DELTA-0032: {} must rewrite atomically. A crash mid-write              must leave the previous queue, not a truncated one.",
+            path.display()
+        );
+        assert!(
+            !source.contains("Entity<MessageEditor>"),
+            "OMEGA-DELTA-0032: a live GPUI handle cannot be a durable fact.              That is exactly what made the upstream queue renderer-only."
+        );
+    }
+
 }
 
 
