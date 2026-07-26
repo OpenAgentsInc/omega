@@ -52,6 +52,43 @@ def osascript(script: str, timeout: int = 90) -> tuple[bool, str]:
     return result.returncode == 0, result.stdout.strip()
 
 
+#: See the same constant in `collect-omega-installed-observations`.
+NO_WINDOW_IN_TREE = -2
+
+#: Compiled `script/omega-window-list.swift`, set from `--window-list`.
+WINDOW_LIST_TOOL: Path | None = None
+
+
+def window_server_windows(owner: str) -> list[dict]:
+    """Ordinary windows the window server attributes to a process by name.
+
+    Asked only to tell two states apart: an application that is not showing a
+    window, and an application that is showing one the accessibility tree does
+    not carry. Without that distinction the probe reports the second as a
+    harness failure and no waiver can ever cite it.
+    """
+    if WINDOW_LIST_TOOL is None:
+        return []
+    try:
+        result = subprocess.run(
+            [str(WINDOW_LIST_TOOL)], capture_output=True, text=True, timeout=60
+        )
+    except (OSError, subprocess.SubprocessError):
+        return []
+    if result.returncode != 0:
+        return []
+    try:
+        windows = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        return []
+    return [
+        window
+        for window in windows
+        if window.get("layer") == 0
+        and str(window.get("owner", "")).casefold() == owner.casefold()
+    ]
+
+
 def ax_children(process: str) -> tuple[bool, int, list[str]]:
     script = f"""
     tell application "System Events"
@@ -75,6 +112,12 @@ def ax_children(process: str) -> tuple[bool, int, list[str]]:
     end tell
     """
     ok, output = osascript(script)
+    if ok and output == "NOWINDOW" and window_server_windows(process):
+        # The upstream build is running and the window server is showing its
+        # window. The accessibility tree carries no window for it. That is the
+        # weakest publication there is, and it is the observation this probe
+        # exists to make — not a failure to look.
+        return True, NO_WINDOW_IN_TREE, []
     if not ok or output in {"NOPROC", "NOWINDOW"}:
         return False, -1, []
     contents = -1
@@ -95,8 +138,26 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--app", type=Path, default=Path("/Applications/Zed.app"))
     parser.add_argument("--process", default="zed")
+    parser.add_argument(
+        "--window-list",
+        type=Path,
+        default=None,
+        help=(
+            "compiled script/omega-window-list.swift. Lets the probe tell an "
+            "application showing no window from one whose window the "
+            "accessibility tree does not carry."
+        ),
+    )
+    parser.add_argument(
+        "--owner",
+        default="Zed",
+        help="the window-server owner name of the upstream build",
+    )
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
+
+    global WINDOW_LIST_TOOL
+    WINDOW_LIST_TOOL = args.window_list
 
     if not args.app.is_dir():
         raise ParityError(f"{args.app} is not installed, so parity cannot be observed")
@@ -121,6 +182,7 @@ def main() -> int:
     if not already_running:
         subprocess.run(["open", "-a", str(args.app)], check=True, timeout=30)
         time.sleep(15)
+    server_windows = window_server_windows(args.owner)
     reachable, contents, children = ax_children(args.process)
     if not already_running:
         osascript(f'tell application "{args.app.stem}" to quit')
@@ -138,10 +200,24 @@ def main() -> int:
         "version": version.stdout.strip(),
         "method": (
             "System Events AXUIElement read of the front window: the size of "
-            "`entire contents` and the role description of every direct child"
+            "`entire contents` and the role description of every direct child, "
+            "with the window-server window list read alongside it so an "
+            "application showing no window is not confused with one whose "
+            "window the tree does not carry"
         ),
+        "window_server_windows": [
+            {"id": window.get("id"), "name": window.get("name")}
+            for window in server_windows
+        ],
         "observed": (
-            f"entire contents = {contents}; direct children = "
+            (
+                "the accessibility tree carries no window for the running "
+                f"process, while the window server is showing "
+                f"{len(server_windows)} window(s) for it; "
+                if contents == NO_WINDOW_IN_TREE
+                else ""
+            )
+            + f"entire contents = {contents}; direct children = "
             f"{', '.join(children) if children else 'none'}"
         ),
         "publishes_accessibility_tree": publishes,

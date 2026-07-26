@@ -62,6 +62,38 @@ ZED_DATA = Path.home() / "Library" / "Application Support" / "Zed"
 #: The application process name as macOS reports it to System Events.
 PROCESS = "omega"
 
+#: The exact process this run observes, set from `--pid`.
+#:
+#: A name is not an identity. This host routinely runs the installed candidate,
+#: a second copy under an emulated profile, and a development build, and macOS
+#: reports all three as `omega`. `tell process "omega"` addresses whichever one
+#: System Events happens to return first, so a run that targets by name can
+#: capture one application while it drives another and never notice. Every
+#: System Events call below addresses this identifier when it is set.
+PROCESS_PID: int | None = None
+
+#: The window-server identifier of the window this run observes, set from
+#: `--window-id`.
+#:
+#: `screencapture -l` captures that window even when another application holds
+#: the active space, which is what makes an observation possible on a shared
+#: host without taking the screen away from whoever is using it.
+WINDOW_ID: int | None = None
+
+#: Path to the compiled `script/omega-window-ocr.swift`, set from `--ocr`.
+#:
+#: This reads the text a person actually sees, with the position of each line.
+#: It is how the two journey checks below are performed on an application that
+#: publishes no accessibility tree, and it is a stronger observation than the
+#: tree read it replaces: a label present in a tree but clipped off the screen
+#: passes an accessibility-tree read and fails this one.
+OCR_TOOL: Path | None = None
+
+#: Path to the compiled `script/omega-window-list.swift`, set from
+#: `--window-list`. Used to read the window frame that the accessibility tree
+#: does not publish.
+WINDOW_LIST_TOOL: Path | None = None
+
 #: Width in points that the 360-pixel viewport check drives the window to.
 NARROW_VIEWPORT_POINTS = 360
 
@@ -142,9 +174,127 @@ def osascript(script: str, timeout: int = 60) -> tuple[bool, str]:
     return result.returncode == 0, result.stdout.strip()
 
 
+def target() -> str:
+    """The System Events clause that addresses the application under test.
+
+    With `--pid` this is the one process with that identifier. Without it the
+    clause falls back to the process name, which is only safe on a host running
+    a single copy.
+    """
+    if PROCESS_PID is not None:
+        return f'(first process whose unix id is {PROCESS_PID})'
+    return f'process "{PROCESS}"'
+
+
+def run_tool(tool: Path, *arguments: str) -> str | None:
+    try:
+        result = subprocess.run(
+            [str(tool), *arguments], capture_output=True, text=True, timeout=120
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    return result.stdout
+
+
+def candidate_windows() -> list[dict[str, Any]]:
+    """Every window the window server attributes to the process under test."""
+    if WINDOW_LIST_TOOL is None or PROCESS_PID is None:
+        return []
+    output = run_tool(WINDOW_LIST_TOOL)
+    if output is None:
+        return []
+    try:
+        windows = json.loads(output)
+    except json.JSONDecodeError:
+        return []
+    return [
+        window
+        for window in windows
+        if window.get("pid") == PROCESS_PID and window.get("layer") == 0
+    ]
+
+
+#: Smallest window the visibility check will accept as the main window, in
+#: points. A GPUI application also owns menu-bar-height and offscreen helper
+#: windows, and capturing one of those instead of the product would be a
+#: capture of nothing.
+MAIN_WINDOW_MINIMUM_HEIGHT = 400
+
+
+def visible_window() -> tuple[int, int, int, int] | None:
+    """Frame of the candidate's main window, only while it is on screen.
+
+    Returns `None` when the window server says the window is not being
+    displayed. Every caller treats that as a capture that could not be made,
+    which is never a pass.
+    """
+    best: tuple[int, int, int, int] | None = None
+    best_area = 0
+    for window in candidate_windows():
+        if not window.get("onscreen"):
+            continue
+        bounds = window.get("bounds")
+        if not isinstance(bounds, dict):
+            continue
+        try:
+            left = int(bounds["X"])
+            top = int(bounds["Y"])
+            width = int(bounds["Width"])
+            height = int(bounds["Height"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if height < MAIN_WINDOW_MINIMUM_HEIGHT:
+            continue
+        if width * height > best_area:
+            best_area = width * height
+            best = (left, top, width, height)
+    return best
+
+
+def raise_window() -> None:
+    """Ask the candidate's own window to come to the top of the stack."""
+    osascript(
+        f"tell application \"System Events\" to tell {target()} "
+        'to perform action "AXRaise" of window 1'
+    )
+
+
+def ocr_lines(path: Path) -> list[dict[str, Any]] | None:
+    """The text of a capture, each line with its position down the window.
+
+    `None` means the read could not be made, which never becomes a pass.
+    """
+    if OCR_TOOL is None:
+        return None
+    output = run_tool(OCR_TOOL, str(path))
+    if output is None:
+        return None
+    try:
+        return json.loads(output).get("lines")
+    except (json.JSONDecodeError, AttributeError):
+        return None
+
+
+def first_position(lines: list[dict[str, Any]], phrase: str) -> float | None:
+    """How far down the window a phrase first appears, or `None` if absent."""
+    needle = phrase.casefold()
+    for line in lines:
+        text = line.get("text")
+        if isinstance(text, str) and needle in text.casefold():
+            return float(line.get("y", 1.0))
+    return None
+
+
 def screencapture(path: Path, region: tuple[int, int, int, int] | None = None) -> bool:
     command = ["screencapture", "-x", "-o"]
-    if region is not None:
+    if WINDOW_ID is not None:
+        # Capture the window itself. A region capture reads whatever the screen
+        # is showing, which on a shared host is whatever the person at the
+        # keyboard is doing, not the candidate.
+        command += ["-l", str(WINDOW_ID)]
+    elif region is not None:
         command += ["-R", ",".join(str(value) for value in region)]
     command.append(str(path))
     try:
@@ -154,15 +304,49 @@ def screencapture(path: Path, region: tuple[int, int, int, int] | None = None) -
     return path.is_file()
 
 
+#: Who performed this run, and in which emulated profile. Written into every
+#: piece of evidence, because a reader has to be able to tell an
+#: agent-performed journey from an owner observation without being told. The
+#: owner grant of 2026-07-25 permits an agent to perform these journeys. It
+#: does not permit recording one as an owner observation.
+PERFORMED_BY = "agent"
+PROFILE: str | None = None
+
+
 def write_evidence(root: Path, name: str, payload: dict[str, Any]) -> dict[str, str]:
     path = root / f"observation-{name}.json"
-    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    body = dict(payload)
+    body["performed_by"] = PERFORMED_BY
+    if PROFILE is not None:
+        body["emulated_profile"] = PROFILE
+    path.write_text(json.dumps(body, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return {"path": path.name, "sha256": sha256_bytes(path.read_bytes())}
 
 
 def attach_screenshot(
     root: Path, name: str, region: tuple[int, int, int, int] | None = None
 ) -> dict[str, str] | None:
+    """Capture the candidate, or capture nothing.
+
+    A region capture reads the screen, not a window. If the candidate is not in
+    front, the rectangle where its window sits is filled by whatever is, and
+    the capture is then evidence about another application. That is the same
+    class of error as sending a keystroke to whatever happens to be frontmost,
+    and it is refused the same way: the candidate is brought to the front and
+    the identifier is checked before the shutter, and a capture that cannot be
+    established as the candidate's is not written.
+    """
+    if PROCESS_PID is not None and WINDOW_ID is None:
+        if not activate():
+            return None
+        # Frontmost is not the same as visible. An application can hold the
+        # front while its window sits on a space that is not the one being
+        # displayed, and a region capture then reads the windows that are.
+        # Ask the window server whether this window is actually on screen.
+        visible = visible_window()
+        if visible is None:
+            return None
+        region = visible
     path = root / f"screenshot-{name}.png"
     if not screencapture(path, region):
         return None
@@ -170,26 +354,45 @@ def attach_screenshot(
 
 
 def window_frame() -> tuple[int, int, int, int] | None:
-    """Position and size of the candidate's front window, in points."""
+    """Position and size of the candidate's front window, in points.
+
+    The accessibility tree is asked first. A GPUI application publishes none,
+    and on such an application `window 1` does not exist even though the window
+    is on the screen, so the window server is asked second.
+    """
     ok, output = osascript(
-        f'tell application "System Events" to tell process "{PROCESS}" '
+        f"tell application \"System Events\" to tell {target()} "
         "to get {position, size} of window 1"
     )
-    if not ok:
-        return None
-    parts = [part.strip() for part in output.split(",")]
-    if len(parts) != 4:
-        return None
-    try:
-        left, top, width, height = (int(part) for part in parts)
-    except ValueError:
-        return None
-    return left, top, width, height
+    if ok:
+        parts = [part.strip() for part in output.split(",")]
+        if len(parts) == 4:
+            try:
+                left, top, width, height = (int(part) for part in parts)
+                return left, top, width, height
+            except ValueError:
+                pass
+    for window in candidate_windows():
+        if WINDOW_ID is not None and window.get("id") != WINDOW_ID:
+            continue
+        bounds = window.get("bounds")
+        if not isinstance(bounds, dict):
+            continue
+        try:
+            return (
+                int(bounds["X"]),
+                int(bounds["Y"]),
+                int(bounds["Width"]),
+                int(bounds["Height"]),
+            )
+        except (KeyError, TypeError, ValueError):
+            continue
+    return None
 
 
 def set_window_size(width: int, height: int) -> bool:
     ok, _ = osascript(
-        f'tell application "System Events" to tell process "{PROCESS}" '
+        f"tell application \"System Events\" to tell {target()} "
         f"to set size of window 1 to {{{width}, {height}}}"
     )
     return ok
@@ -202,13 +405,51 @@ def frontmost_process() -> str:
     return output.strip() if ok else ""
 
 
-def activate() -> bool:
-    osascript(
-        f'tell application "System Events" to tell process "{PROCESS}" '
-        "to set frontmost to true"
+def frontmost_pid() -> int | None:
+    ok, output = osascript(
+        "tell application \"System Events\" to get unix id of "
+        "(first process whose frontmost is true)"
     )
-    time.sleep(2)
+    if not ok:
+        return None
+    try:
+        return int(output.strip())
+    except ValueError:
+        return None
+
+
+#: How many times to ask for the front before reporting that the candidate did
+#: not get it. A shared host has other work on it, and another application
+#: taking the front for a moment is ordinary contention rather than a fact
+#: about the candidate. Retrying changes nothing about what is accepted: the
+#: identifier is still checked after every attempt, and a run that never wins
+#: the front still refuses.
+ACTIVATE_ATTEMPTS = 6
+
+
+def is_frontmost() -> bool:
+    if PROCESS_PID is not None:
+        return frontmost_pid() == PROCESS_PID
     return frontmost_process().lower() == PROCESS.lower()
+
+
+def activate() -> bool:
+    """Bring the application under test to the front, or report that it is not.
+
+    With `--pid` the check is on the identifier, not the name. Three processes
+    on this host answer to `omega`, and a name comparison would report success
+    while a different copy held the keyboard.
+    """
+    for attempt in range(ACTIVATE_ATTEMPTS):
+        osascript(
+            f"tell application \"System Events\" to tell {target()} "
+            "to set frontmost to true"
+        )
+        raise_window()
+        time.sleep(2 if attempt == 0 else 1.5)
+        if is_frontmost() and (WINDOW_LIST_TOOL is None or visible_window() is not None):
+            return True
+    return False
 
 
 def keystroke(script_fragment: str) -> bool:
@@ -241,6 +482,13 @@ def window_digest(root: Path, name: str) -> tuple[str | None, dict[str, str] | N
     return reference["sha256"], reference
 
 
+#: `entire contents` value recorded when the process is running and its window
+#: is on the screen, and the accessibility tree publishes no window at all.
+#: This is a weaker publication than an empty tree, not a failure to look: the
+#: window server is asked separately and confirms the window exists.
+NO_WINDOW_IN_TREE = -2
+
+
 def ax_children(process: str) -> tuple[bool, int, list[str]]:
     """Direct children of the front window, as assistive technology sees them.
 
@@ -249,11 +497,23 @@ def ax_children(process: str) -> tuple[bool, int, list[str]]:
     frame buttons itself, so a window whose only children are those buttons and
     whose `entire contents` is empty publishes no application accessibility
     tree at all.
+
+    A running process whose window the tree does not list at all reports
+    `NO_WINDOW_IN_TREE`, which is reachable and publishes nothing. It is
+    distinguished from an absent process because those two states must not be
+    recorded the same way: one is a fact about the product, and the other is a
+    fact about the harness.
     """
+    clause = target() if PROCESS_PID is not None else f'process "{process}"'
+    exists_clause = (
+        f"(exists {clause})"
+        if PROCESS_PID is not None
+        else f'(exists process "{process}")'
+    )
     script = f"""
     tell application "System Events"
-        if not (exists process "{process}") then return "NOPROC"
-        tell process "{process}"
+        if not {exists_clause} then return "NOPROC"
+        tell {clause}
             if (count of windows) is 0 then return "NOWINDOW"
             set w to window 1
             set out to ""
@@ -272,6 +532,10 @@ def ax_children(process: str) -> tuple[bool, int, list[str]]:
     end tell
     """
     ok, output = osascript(script, timeout=90)
+    if ok and output == "NOWINDOW" and candidate_windows():
+        # The process is running and the window server is showing its window.
+        # The tree simply does not carry it.
+        return True, NO_WINDOW_IN_TREE, []
     if not ok or output in {"NOPROC", "NOWINDOW"}:
         return False, -1, []
     contents = -1
@@ -324,7 +588,7 @@ def view_menu(item: str) -> bool:
     if not activate():
         return False
     ok, _ = osascript(
-        f'tell application "System Events" to tell process "{PROCESS}" to click menu item '
+        f"tell application \"System Events\" to tell {target()} to click menu item "
         f'"{item}" of menu 1 of menu bar item "View" of menu bar 1'
     )
     time.sleep(2.5)
@@ -341,10 +605,16 @@ def publishes_accessibility_tree(reachable: bool, contents: int, children: list[
 
 def ax_dump(timeout: int = 90) -> tuple[bool, list[str]]:
     """Every accessibility label and value Omega exposes to assistive tech."""
+    clause = target()
+    exists_clause = (
+        f"(exists {clause})"
+        if PROCESS_PID is not None
+        else f'(exists process "{PROCESS}")'
+    )
     script = f"""
     tell application "System Events"
-        if not (exists process "{PROCESS}") then return "NOPROC"
-        tell process "{PROCESS}"
+        if not {exists_clause} then return "NOPROC"
+        tell {clause}
             set out to ""
             try
                 repeat with w in windows
@@ -462,8 +732,72 @@ def main() -> int:
             "screen-reader waiver has no observed condition and the run blocks."
         ),
     )
+    parser.add_argument(
+        "--pid",
+        type=int,
+        default=None,
+        help=(
+            "process identifier of the exact application under test. Required "
+            "where more than one copy is running, because macOS reports them "
+            "all under the same name."
+        ),
+    )
+    parser.add_argument(
+        "--window-id",
+        type=int,
+        default=None,
+        help=(
+            "window-server identifier of the window to capture. Captures that "
+            "window rather than the screen, so an observation does not depend "
+            "on the candidate holding the active space."
+        ),
+    )
+    parser.add_argument(
+        "--ocr",
+        type=Path,
+        default=None,
+        help="compiled script/omega-window-ocr.swift, used to read rendered text",
+    )
+    parser.add_argument(
+        "--window-list",
+        type=Path,
+        default=None,
+        help="compiled script/omega-window-list.swift, used to read the window frame",
+    )
+    parser.add_argument(
+        "--settings-path",
+        type=Path,
+        default=None,
+        help=(
+            "the running candidate's own settings file. Give this when the "
+            "candidate runs under an emulated profile with --user-data-dir, "
+            "where its settings do not live under ~/.config."
+        ),
+    )
+    parser.add_argument(
+        "--performed-by",
+        default="agent",
+        choices=["agent", "owner"],
+        help=(
+            "who performed these observations. An agent-performed journey is "
+            "recorded as such and is never an owner observation."
+        ),
+    )
+    parser.add_argument(
+        "--profile",
+        default=None,
+        help="name of the emulated profile these observations were performed in",
+    )
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
+
+    global PROCESS_PID, WINDOW_ID, OCR_TOOL, WINDOW_LIST_TOOL, PERFORMED_BY, PROFILE
+    PROCESS_PID = args.pid
+    WINDOW_ID = args.window_id
+    OCR_TOOL = args.ocr
+    WINDOW_LIST_TOOL = args.window_list
+    PERFORMED_BY = args.performed_by
+    PROFILE = args.profile
 
     evidence = json.loads(args.candidate_evidence.read_text(encoding="utf-8"))
     candidate_digest = evidence.get("candidate_digest", {}).get("value")
@@ -555,44 +889,154 @@ def main() -> int:
             )
 
     ok, labels = ax_dump()
-    if not ok:
-        blocked.append("accessibility: Omega exposes no accessibility tree; is it running?")
-        joined = ""
-    else:
-        joined = "\n".join(labels)
+    joined = "\n".join(labels) if ok else ""
 
+    # These two are journey checks, not assistive-technology checks. What they
+    # assert is what the first-run screen shows and in what order, and that is a
+    # fact about rendered pixels. Reading it from the accessibility tree was
+    # only ever a convenience, and on an application that publishes no tree the
+    # convenience blocks a fact anyone can see. So the tree is read first, and
+    # where it carries nothing the window itself is read.
+    #
+    # The pixel read is the stronger of the two. A label present in a tree but
+    # clipped off the screen passes a tree read and fails this one, and the
+    # order of the sections is observed rather than assumed: the identity
+    # heading has to sit above both the Theme and Agent Setup headings in the
+    # same capture.
     identity_ready = ok and "Identity ready" in joined
-    if ok:
-        if identity_ready:
-            record(
+    tree_families = [f for f in ("Aiur", "Ayu", "Gruvbox") if f in joined]
+    tree_agent_setup = "Agent Setup" in joined
+
+    if ok and identity_ready:
+        record(
+            "manual_journey",
+            "identity-first-first-run",
+            {
+                "identity_presented_before_editor_setup": True,
+                "identity_ready": True,
+            },
+            {
+                "observed_labels": [
+                    line for line in labels if "Identity" in line or "Recovery" in line
+                ][:12],
+                "method": "AXUIElement tree of the running candidate",
+            },
+        )
+
+    rendered: list[dict[str, Any]] | None = None
+    rendered_ref: dict[str, str] | None = None
+    tree_covers_everything = ok and identity_ready and len(tree_families) == 3 and tree_agent_setup
+    if not tree_covers_everything:
+        rendered_ref = attach_screenshot(root, "first-run-rendered", window_frame())
+        if rendered_ref is not None:
+            rendered = ocr_lines(root / rendered_ref["path"])
+
+    if ok and identity_ready:
+        pass  # already recorded from the tree
+    elif rendered is None:
+        blocked.append(
+            "identity-first-first-run: the tree carries no identity section and the "
+            "rendered window could not be read"
+        )
+    else:
+        identity_y = first_position(rendered, "Your identity")
+        theme_y = first_position(rendered, "Theme")
+        agent_y = first_position(rendered, "Agent Setup")
+        first = (
+            identity_y is not None
+            and theme_y is not None
+            and agent_y is not None
+            and identity_y < theme_y
+            and identity_y < agent_y
+        )
+        if not first:
+            blocked.append(
+                "identity-first-first-run: rendered order identity="
+                f"{identity_y} theme={theme_y} agent_setup={agent_y}"
+            )
+        else:
+            record_performed(
                 "manual_journey",
                 "identity-first-first-run",
                 {
                     "identity_presented_before_editor_setup": True,
                     "identity_ready": True,
                 },
-                {
-                    "observed_labels": [
-                        line for line in labels if "Identity" in line or "Recovery" in line
-                    ][:12],
-                    "method": "AXUIElement tree of the running candidate",
-                },
+                [
+                    write_evidence(
+                        root,
+                        "identity-first-first-run",
+                        {
+                            "identity_heading_position": identity_y,
+                            "theme_heading_position": theme_y,
+                            "agent_setup_heading_position": agent_y,
+                            "observed_lines": [
+                                line.get("text")
+                                for line in rendered
+                                if isinstance(line.get("text"), str)
+                            ][:40],
+                            "method": (
+                                "Optical character recognition over a capture of the "
+                                "running candidate's own window, taken by window "
+                                "identifier. Position is measured down from the top of "
+                                "the window, so a smaller value is higher on screen."
+                            ),
+                            "basis": (
+                                "The identity heading is rendered above both the Theme "
+                                "heading and the Agent Setup heading in the same "
+                                "capture, so identity is presented first."
+                            ),
+                        },
+                    ),
+                    rendered_ref,
+                ],
             )
-        else:
-            blocked.append("identity-first-first-run: identity section not present in the tree")
 
-        families = [f for f in ("Aiur", "Ayu", "Gruvbox") if f in joined]
-        agent_setup = "Agent Setup" in joined
+    if ok and len(tree_families) == 3 and tree_agent_setup:
+        record(
+            "manual_journey",
+            "theme-and-agent-setup-baseline",
+            {"theme_families": ["Aiur", "Ayu", "Gruvbox"], "agent_setup_visible": True},
+            {"observed_families": tree_families, "agent_setup_label_present": True},
+        )
+    elif rendered is None:
+        blocked.append(
+            "theme-and-agent-setup-baseline: the tree carries no theme section and "
+            "the rendered window could not be read"
+        )
+    else:
+        families = [
+            family
+            for family in ("Aiur", "Ayu", "Gruvbox")
+            if first_position(rendered, family) is not None
+        ]
+        agent_setup = first_position(rendered, "Agent Setup") is not None
         if len(families) == 3 and agent_setup:
-            record(
+            record_performed(
                 "manual_journey",
                 "theme-and-agent-setup-baseline",
                 {"theme_families": ["Aiur", "Ayu", "Gruvbox"], "agent_setup_visible": True},
-                {"observed_families": families, "agent_setup_label_present": True},
+                [
+                    write_evidence(
+                        root,
+                        "theme-and-agent-setup-baseline",
+                        {
+                            "observed_families": families,
+                            "agent_setup_label_present": agent_setup,
+                            "method": (
+                                "Optical character recognition over a capture of the "
+                                "running candidate's own window, taken by window "
+                                "identifier."
+                            ),
+                        },
+                    ),
+                    rendered_ref,
+                ],
             )
         else:
             blocked.append(
-                f"theme-and-agent-setup-baseline: families={families} agent_setup={agent_setup}"
+                f"theme-and-agent-setup-baseline: rendered families={families} "
+                f"agent_setup={agent_setup}"
             )
 
     # ---- screen reader ------------------------------------------------------
@@ -640,9 +1084,15 @@ def main() -> int:
                 "accessibility",
                 "screen-reader-output",
                 basis=(
-                    "The candidate publishes no application accessibility tree: its front "
-                    f"window reports `entire contents` = {contents} and only the macOS "
-                    "window frame buttons as direct children. Upstream Zed, read through "
+                    "The candidate publishes no application accessibility tree: "
+                    + (
+                        "the tree carries no window for the running process at all, "
+                        "while the window server is showing that window"
+                        if contents == NO_WINDOW_IN_TREE
+                        else f"its front window reports `entire contents` = {contents} "
+                        "and only the macOS window frame buttons as direct children"
+                    )
+                    + ". Upstream Zed, read through "
                     "the same interface, publishes none either. Under the owner direction "
                     "of 2026-07-25 the parity condition holds, so assistive technology is "
                     "not built for this release and this observation was NOT made. It is "
@@ -652,6 +1102,10 @@ def main() -> int:
                 detail={
                     "candidate_entire_contents": contents,
                     "candidate_direct_children": children,
+                    "candidate_window_server_windows": [
+                        {"id": window.get("id"), "name": window.get("name")}
+                        for window in candidate_windows()
+                    ],
                     "upstream_parity": parity,
                     "method": (
                         "System Events AXUIElement read of the front window of the "
@@ -896,7 +1350,11 @@ def main() -> int:
                 )
 
     # ---- larger UI font -----------------------------------------------------
-    settings = settings_file(args.config_name)
+    settings = (
+        args.settings_path
+        if args.settings_path is not None
+        else settings_file(args.config_name)
+    )
     if settings.is_symlink() or not settings.is_file():
         blocked.append(f"larger-ui-font: {settings} is not a regular settings file")
     else:
