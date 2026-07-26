@@ -793,7 +793,8 @@ impl ServedConnection {
                     "_meta": served_meta(&session),
                 });
                 self.sessions.push(session);
-                id.map(|id| vec![result_line(&id, result)]).unwrap_or_default()
+                id.map(|id| vec![result_line(&id, result)])
+                    .unwrap_or_default()
             }
             ServedMethodKind::Prompt => {
                 let session_id = params
@@ -881,7 +882,11 @@ impl ServedConnection {
         // No clock and no random source: the id is the connection's own label
         // and a count. Two identical runs mint identical ids, which is the same
         // discipline the route journal is held to.
-        let session_id = format!("omega-served-{}-{}", self.connection_ref, self.sessions.len());
+        let session_id = format!(
+            "omega-served-{}-{}",
+            self.connection_ref,
+            self.sessions.len()
+        );
         ServedSession {
             session_id,
             origin: self.origin(),
@@ -1110,7 +1115,9 @@ mod tests {
         // A name is refused rather than resolved: resolution is the step where
         // `localhost` can be pointed somewhere else.
         assert_eq!(
-            LoopbackHost::new("localhost").expect_err("names are refused").token(),
+            LoopbackHost::new("localhost")
+                .expect_err("names are refused")
+                .token(),
             "not_an_address"
         );
 
@@ -1122,7 +1129,10 @@ mod tests {
             LoopbackHost::new("::1").expect("loopback").address(),
             IpAddr::V6(Ipv6Addr::LOCALHOST)
         );
-        assert_eq!(LoopbackHost::DEFAULT.address(), IpAddr::V4(Ipv4Addr::LOCALHOST));
+        assert_eq!(
+            LoopbackHost::DEFAULT.address(),
+            IpAddr::V4(Ipv4Addr::LOCALHOST)
+        );
     }
 
     /// Every method the surface exposes is observation, and the surface is
@@ -1132,7 +1142,12 @@ mod tests {
         let methods: Vec<&str> = SERVED_SURFACE.iter().map(|entry| entry.method).collect();
         assert_eq!(
             methods,
-            ["initialize", "session/new", "session/prompt", "session/cancel"],
+            [
+                "initialize",
+                "session/new",
+                "session/prompt",
+                "session/cancel"
+            ],
             "the served surface grew or lost a method. It is deny-by-default, \
              so every addition is a deliberate edit to this list — and an \
              addition that can mutate run state or grant authority is owner \
@@ -1230,13 +1245,20 @@ mod tests {
                 engine_lane: Some("codex-local".to_owned()),
                 ..served_inputs()
             };
+            // OMEGA-DELTA-0055. This used to assert `NativeLoop`, and the
+            // property it is named for is about engine lanes. An unpinned
+            // thread now runs on an attached external ACP agent, which is not
+            // Full Auto authority and is not reachable from anything a socket
+            // can say — the connection is made at startup from what is
+            // installed. The engine lane is what the socket must never reach,
+            // and that is what is asserted.
             let decided = route(&inputs);
-            assert_eq!(
+            assert_ne!(
                 decided.chosen,
-                ExecutorClass::NativeLoop,
-                "a served session reached an executor other than the native \
-                 loop. Nothing over the socket may take a pin, and a pin is \
-                 the only door to Full Auto authority."
+                ExecutorClass::EngineLane,
+                "a served session reached an engine lane. Nothing over the \
+                 socket may take a pin, and a pin is the only door to Full \
+                 Auto authority."
             );
             assert!(decided.lane_ref.is_none());
         }
@@ -1266,7 +1288,9 @@ mod tests {
              nobody anticipated."
         );
 
-        let origin = meta["origin"].as_object().expect("the origin travels as an object");
+        let origin = meta["origin"]
+            .as_object()
+            .expect("the origin travels as an object");
         let mut origin_keys: Vec<&str> = origin.keys().map(String::as_str).collect();
         origin_keys.sort_unstable();
         let mut expected_origin: Vec<&str> = SESSION_ORIGIN_FIELDS.to_vec();
@@ -1288,7 +1312,9 @@ mod tests {
     fn a_served_prompt_executes_nothing_and_says_so() {
         let mut connection = initialized("Zed");
         let session = new_session(&mut connection);
-        let session_id = session["result"]["sessionId"].as_str().expect("a session id");
+        let session_id = session["result"]["sessionId"]
+            .as_str()
+            .expect("a session id");
 
         let lines = connection.handle_line(
             &json!({
@@ -1309,7 +1335,10 @@ mod tests {
             .expect("the disclosure is rendered for the operator");
         assert!(text.contains("native_loop · Omega Agent"), "{text}");
         assert!(text.contains("routed: unpinned"), "{text}");
-        assert!(text.contains("loopback_acp · Zed 1.12.0 · unauthenticated"), "{text}");
+        assert!(
+            text.contains("loopback_acp · Zed 1.12.0 · unauthenticated"),
+            "{text}"
+        );
         assert!(text.contains("dispatched to no executor"), "{text}");
 
         let response: Value = serde_json::from_str(&lines[1]).expect("JSON");
@@ -1347,17 +1376,26 @@ mod tests {
             .to_owned();
 
         for (index, (method, params)) in [
-            ("session/load", json!({ "sessionId": session_id, "cwd": "/tmp" })),
+            (
+                "session/load",
+                json!({ "sessionId": session_id, "cwd": "/tmp" }),
+            ),
             ("session/resume", json!({ "sessionId": session_id })),
             ("session/delete", json!({ "sessionId": session_id })),
-            ("session/set_mode", json!({ "sessionId": session_id, "modeId": "yolo" })),
+            (
+                "session/set_mode",
+                json!({ "sessionId": session_id, "modeId": "yolo" }),
+            ),
             (
                 "session/set_config_option",
                 json!({ "sessionId": session_id, "configId": "a", "value": true }),
             ),
             ("authenticate", json!({ "methodId": "anything" })),
             ("logout", json!({})),
-            ("fs/write_text_file", json!({ "path": "/tmp/x", "content": "x" })),
+            (
+                "fs/write_text_file",
+                json!({ "path": "/tmp/x", "content": "x" }),
+            ),
             ("terminal/create", json!({ "command": "sh" })),
             ("full_auto/start", json!({ "objective": "ship it" })),
             ("omega/pin_executor", json!({ "class": "engine_lane" })),
@@ -1369,7 +1407,11 @@ mod tests {
                 &json!({ "jsonrpc": "2.0", "id": 100 + index, "method": method, "params": params })
                     .to_string(),
             );
-            assert_eq!(lines.len(), 1, "{method} answered something other than one refusal");
+            assert_eq!(
+                lines.len(),
+                1,
+                "{method} answered something other than one refusal"
+            );
             let answer: Value = serde_json::from_str(&lines[0]).expect("JSON");
             assert!(
                 answer.get("result").is_none(),
@@ -1386,7 +1428,10 @@ mod tests {
         // Nothing the attached host attempted minted a session, changed one, or
         // left any trace at all.
         assert_eq!(connection.sessions().len(), 1);
-        assert_eq!(connection.sessions()[0].decision.chosen, ExecutorClass::NativeLoop);
+        assert_eq!(
+            connection.sessions()[0].decision.chosen,
+            ExecutorClass::NativeLoop
+        );
     }
 
     /// Every refusal has a distinct token and a message that says what did not
@@ -1508,7 +1553,10 @@ mod tests {
             &mut writer,
         );
         let session = read(&mut reader);
-        let session_id = session["result"]["sessionId"].as_str().expect("id").to_owned();
+        let session_id = session["result"]["sessionId"]
+            .as_str()
+            .expect("id")
+            .to_owned();
         assert_eq!(
             session["result"]["_meta"][SERVED_SESSION_META_KEY]["origin"]["ingress"],
             "loopback_acp"
@@ -1578,9 +1626,8 @@ mod tests {
                 .name("omega-conformance-client")
                 .connect_with(ByteStreams::new(outgoing, incoming), async |cx| {
                     cx.send_request(
-                        InitializeRequest::new(ProtocolVersion::V1).client_info(
-                            Implementation::new("omega-conformance-client", "0.1.0"),
-                        ),
+                        InitializeRequest::new(ProtocolVersion::V1)
+                            .client_info(Implementation::new("omega-conformance-client", "0.1.0")),
                     )
                     .block_task()
                     .await?;
@@ -1607,13 +1654,19 @@ mod tests {
             transcript.contains("Omega Agent, served over ACP"),
             "the upstream client read no disclosure: {transcript:?}"
         );
-        assert!(transcript.contains("native_loop \u{b7} Omega Agent"), "{transcript}");
+        assert!(
+            transcript.contains("native_loop \u{b7} Omega Agent"),
+            "{transcript}"
+        );
         assert!(transcript.contains("routed: unpinned"), "{transcript}");
         assert!(
             transcript.contains("loopback_acp \u{b7} omega-conformance-client"),
             "the origin the host is disclosed under must name the host: {transcript}"
         );
-        assert!(transcript.contains("dispatched to no executor"), "{transcript}");
+        assert!(
+            transcript.contains("dispatched to no executor"),
+            "{transcript}"
+        );
 
         // And the typed records the host received beside it.
         let meta = session_meta.expect("the session carries the served records");

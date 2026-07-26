@@ -2508,10 +2508,19 @@ than it sounds, because the harness omega#81's acceptance sentence names —
   presenting somebody else's output as its own. A mode whose whole purpose is
   subtraction is the most likely place for it to be subtracted by accident.
 - **Omega now:** zero base draws the same executor disclosure line, built by the
-  same `omega_executor_disclosure` binding from the same typed record, with the
-  same pin control beside it. `conversation_view/thread_view.rs` does not know
-  that zero base exists; there is no zero-base branch in the surface that draws
-  the line, which is why there is no second code path for it to drift down.
+  same `omega_executor_disclosure` binding from the same typed record.
+  `conversation_view/thread_view.rs` does not know that zero base exists; there
+  is no zero-base branch in the surface that draws the line, which is why there
+  is no second code path for it to drift down.
+- **The pin control that used to sit beside it is gone.** `OMEGA-DELTA-0055`
+  removed it. The sentence above this bullet used to say a thread routes to Exo
+  exactly when a person pins `ExternalAcp` on it, and while that was true the
+  pin was the door as well as the statement — which is why this delta asserted
+  the control was drawn. It is not the door any more: an unpinned thread runs on
+  an attached external agent automatically. **The pin assertion was removed from
+  this delta's check**, and it was removed because the policy changed rather
+  than to make anything pass. What stays is the half that still holds: the line
+  is drawn, and it has no cheaper zero-base-specific rendering path.
 - **Photographed, not asserted.** `omega_zero_base_wide` and
   `omega_zero_base_narrow` are recorded by `run_omega_exo_visual_tests` through
   the same capture that records `omega_exo_workspace_wide` and
@@ -2824,3 +2833,70 @@ than it sounds, because the harness omega#81's acceptance sentence names —
   workspace does, and restoring a previous session already restores its paths
   ahead of this. And it cannot be checked by a compiler: the path runs only in a
   process that started in zero base with no restorable workspace.
+
+### OMEGA-DELTA-0055 — Routing is decided, not selected
+
+- **Upstream Zed:** the agent a thread talks to is chosen from a picker, and the
+  picker names products a person recognises.
+- **Omega, before this:** the composer row carried a control reading
+  `pin: none ⌄`. Opening it offered "Pin this thread's executor" over
+  `native_loop`, `external_acp`, `engine_lane` and "Unpin". Those are the
+  router's wire tokens. `ExecutorClass::token`'s own documentation says the
+  token is "never shown to a user on its own", and this control was doing
+  exactly that. The owner: *"that UI selector makes no sense, i have no fucking
+  clue what youre talking about so the user won't, remove that UI piece and
+  handle it smartly in the background"*.
+- **Omega now:** the control is removed, and an unpinned thread runs on the
+  external ACP agent that is attached, under the new reason
+  `RouteReason::DetectedExternalAcp`. With nothing attached it still runs on the
+  native loop, as before.
+- **Removal and automatic routing are one change.** `OMEGA-DELTA-0049`'s prose
+  said a thread routes to Exo exactly when a person pins `ExternalAcp` on it, so
+  the pin was the *only door* into the lane. Deleting the control on its own
+  would have made Exo unreachable rather than automatic, and the mode's one
+  capability would have gone with it. That is why one check asserts both halves.
+- **Owner gate 8 is untouched, and the distinction is why this is admissible.**
+  The gate forbids any model-initiated path from starting Full Auto authority.
+  An engine lane *is* that authority: the engine-lane arm of `route` is
+  unchanged and still requires a pin, and an unpinned thread still never reaches
+  one. An external ACP agent is not that authority — `omega_exo_lane`'s module
+  docs choose `ExternalAcp` for Exo precisely *because* it is neither the
+  first-party claim nor Full Auto. It is also not model-initiated: nothing a
+  turn can say attaches an external agent, because that connection is made at
+  startup from what is installed on the machine. `PinGesture` still has exactly
+  two variants and nothing new calls `pin_session`.
+- **The reason is a new one rather than a reused one.** `DetectedExternalAcp` is
+  not `PinHonored` (nothing was pinned) and not a fallback (nothing went wrong).
+  Reusing either would have made the journal describe a route that did not
+  happen, and a fallback phrase would have told a person something failed. The
+  reason set moved from nine to ten, which its own closed-set test records.
+- **What the disclosure line says now.** It still names who ran the turn and on
+  what model, because a person is entitled to know which runtime and model spent
+  their budget — the owner objected to the *selector*, not to being told. The
+  `routed: unpinned` fragment is the same jargon as the control and is gone with
+  it.
+- **Three existing checks asserted the old policy and were changed, not
+  weakened.** `OMEGA-DELTA-0021`'s composer-bar check required the bar to carry
+  the pin and now requires it not to; `OMEGA-DELTA-0035`'s wiring check required
+  the pin control to be rendered and now requires the automatic arm to exist in
+  its place; `OMEGA-DELTA-0049` dropped the pin from the list of things the
+  thread surface must draw. Each is recorded in its own entry, with the reason.
+  Two behaviour tests changed for the same reason:
+  `an_unpinned_thread_never_reaches_an_engine_lane` and
+  `a_served_session_can_never_reach_an_engine_lane` both used to assert
+  `NativeLoop`, and both now assert the property they are named for — not an
+  engine lane — with the native answer kept for the case where nothing is
+  attached.
+- **Enforced by:** `routing_is_decided_rather_than_selected` in
+  `crates/omega_deltas/`, and
+  `an_unpinned_thread_runs_on_the_external_agent_that_is_attached` in
+  `crates/omega_front_door/`.
+- **What this does not cover.** It does not attach anything. A thread reaches
+  Exo automatically only when an Exo lane is connected, which today still needs
+  the lane file `OMEGA-DELTA-0042` describes; deriving that lane from what
+  detection found is omega#100's remaining deliverable and is not in this delta.
+  It also says nothing about thread titles, which are generated by the
+  summarization model rather than the thread's executor — a second model
+  spending budget on a thread routed elsewhere. The owner was asked and accepted
+  it directly: *"i am ok with gemini flash being used for thread titles to api
+  key"*.

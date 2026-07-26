@@ -42,7 +42,7 @@ use language_model::{
 };
 use notifications::status_toast::StatusToast;
 use omega_exo_lane::ObservedExoCapabilityState;
-use omega_front_door::{ExecutorClass, ExecutorDisclosure, ExecutorPin, PinGesture};
+use omega_front_door::ExecutorDisclosure;
 use settings::{update_settings_file, update_settings_file_with_completion};
 use ui::{
     ButtonLike, CalloutBorderPosition, Checkbox, SpinnerLabel, SpinnerVariant, SplitButton,
@@ -12509,7 +12509,6 @@ impl ThreadView {
                         cx.notify();
                     })),
             )
-            .child(self.render_executor_pin(cx))
             .into_any_element()
     }
 
@@ -12844,14 +12843,19 @@ impl ThreadView {
     /// entire purpose is to show one executor doing work is the last place a
     /// turn should go unattributed.
     ///
-    /// **The pin stays the same gesture.** `render_executor_pin` is reused
-    /// verbatim rather than reimplemented, so a pin is still
-    /// `PinGesture::ExecutorPinMenuItem` — a menu item a person picks. Owner
-    /// gate 8's `pin_gestures_are_all_human_gestures` closes that list at two
-    /// and explicitly names "a composer mode flag" as inadmissible; a popover
-    /// that moved rows is not a mode flag, and no third variant is added here.
-    /// Nothing on this row pre-pins: pinning `ExternalAcp` is the door into the
-    /// Exo lane and it stays a human click.
+    /// **Nothing here pins, and nothing here offers to.** `OMEGA-DELTA-0055`
+    /// removed the pin control from this row. It read `pin: none ⌄` and opened
+    /// a menu listing `native_loop`, `external_acp` and `engine_lane` — wire
+    /// tokens shown to a person as a choice. The owner said it plainly: "that
+    /// UI selector makes no sense, i have no fucking clue what youre talking
+    /// about so the user won't, remove that UI piece and handle it smartly in
+    /// the background".
+    ///
+    /// Removing it alone would have closed the only door into the Exo lane, so
+    /// routing became automatic in the same change. Owner gate 8 is untouched:
+    /// `PinGesture` still has exactly two variants, nothing here calls
+    /// `pin_session`, and an engine lane — the only Full Auto authority among
+    /// the three — is still reachable by a pin and by nothing else.
     fn render_zero_base_executor_bar(&self, cx: &mut Context<Self>) -> AnyElement {
         let disclosure = self.executor_disclosure(cx);
         let exo = self.exo_connection(cx);
@@ -12931,7 +12935,6 @@ impl ThreadView {
                         Some(config_view) => this.child(config_view),
                         None => this.children(self.model_selector.clone()),
                     })
-                    .child(self.render_executor_pin(cx))
                     // Stop lives here too: `render_send_button` already turns
                     // into a stop control while a turn is generating, so the
                     // Exo header's separate `Stop` was a second button for the
@@ -13049,86 +13052,7 @@ impl ThreadView {
                     .color(Color::Muted),
             )
             .child(div().flex_1())
-            .child(self.render_executor_pin(cx))
             .into_any_element()
-    }
-
-    /// `OMEGA-DELTA-0035`. The pin, as a gesture rather than a mode.
-    ///
-    /// omega#78 made a pin the only way a thread reaches anything but the
-    /// native loop, and an engine lane *is* Full Auto authority — so owner gate
-    /// 8 reaches this control as directly as it reaches the Start button.
-    /// omega#76 rejected a composer mode flag for exactly this reason: a
-    /// boolean the send path reads can be set by a slash command, a restored
-    /// draft, or a model-authored insertion.
-    ///
-    /// So the pin is not a flag anything reads on the way to sending. It is a
-    /// menu item a person picks, it takes an [`omega_front_door::PinGesture`]
-    /// that names the gesture, and there is no `PinGesture` variant for a tool
-    /// call, a turn, or a mode. Picking one re-decides the thread's route
-    /// immediately and writes the decision to the journal, so an unhonourable
-    /// pin shows up on this same line as a fallback with its reason instead of
-    /// silently doing nothing.
-    fn render_executor_pin(&self, cx: &App) -> impl IntoElement {
-        let session_id = self.thread.read(cx).session_id().clone();
-        let router = crate::omega_router::active_router();
-        let pinned = router.as_ref().and_then(|router| router.pin(&session_id));
-        let label: SharedString = match &pinned {
-            Some(pin) => format!("pin: {}", pin.token()).into(),
-            None => "pin: none".into(),
-        };
-
-        PopoverMenu::new("omega-executor-pin")
-            .trigger(
-                Button::new("omega-executor-pin-trigger", label)
-                    .label_size(LabelSize::XSmall)
-                    .color(Color::Muted)
-                    .end_icon(
-                        Icon::new(IconName::ChevronDown)
-                            .size(IconSize::XSmall)
-                            .color(Color::Muted),
-                    ),
-            )
-            .menu(move |window, cx| {
-                let session_id = session_id.clone();
-                let pinned = pinned.clone();
-                Some(ContextMenu::build(
-                    window,
-                    cx,
-                    move |mut menu, _window, _cx| {
-                        menu = menu.header("Pin this thread's executor");
-                        for class in ExecutorClass::all() {
-                            let class = *class;
-                            let is_selected = pinned.as_ref().is_some_and(|pin| pin.class == class);
-                            let entry = ContextMenuEntry::new(class.token())
-                                .toggleable(IconPosition::End, is_selected);
-                            menu.push_item(entry.handler({
-                                let session_id = session_id.clone();
-                                move |_window, _cx| {
-                                    let Some(router) = crate::omega_router::active_router() else {
-                                        return;
-                                    };
-                                    router.pin_session(
-                                        &session_id,
-                                        ExecutorPin::new(class),
-                                        PinGesture::ExecutorPinMenuItem,
-                                    );
-                                }
-                            }));
-                        }
-                        menu = menu.separator();
-                        menu.push_item(ContextMenuEntry::new("Unpin").handler({
-                            move |_window, _cx| {
-                                let Some(router) = crate::omega_router::active_router() else {
-                                    return;
-                                };
-                                router.unpin_session(&session_id, PinGesture::ExecutorPinCleared);
-                            }
-                        }));
-                        menu
-                    },
-                ))
-            })
     }
 }
 

@@ -310,9 +310,16 @@ impl RouteInputs {
 /// explained to them is the same defect class as a handoff with no system note.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RouteReason {
-    /// Nothing was pinned, so the thread ran on the native loop. v1 never
-    /// routes an unpinned thread anywhere else; see the module docs.
+    /// Nothing was pinned and no external agent was connected, so the thread
+    /// ran on the native loop. See the module docs on owner gate 8.
     UnpinnedDefault,
+    /// Nothing was pinned and an external ACP agent was connected, so the
+    /// thread ran on it. `OMEGA-DELTA-0055`.
+    ///
+    /// Not a fallback and not a pin. It is the router reading what is actually
+    /// attached and choosing it, which is what replaced the pin control the
+    /// owner asked to remove.
+    DetectedExternalAcp,
     /// The user pinned this executor and it could serve.
     PinHonored,
     /// An engine lane was pinned and the engine could not be asked.
@@ -342,6 +349,7 @@ impl RouteReason {
     pub const fn token(self) -> &'static str {
         match self {
             Self::UnpinnedDefault => "unpinned_default",
+            Self::DetectedExternalAcp => "detected_external_acp",
             Self::PinHonored => "pin_honored",
             Self::EngineUnreachable => "engine_unreachable",
             Self::EngineAtCapacity => "engine_at_capacity",
@@ -358,6 +366,7 @@ impl RouteReason {
     pub const fn all() -> &'static [Self] {
         &[
             Self::UnpinnedDefault,
+            Self::DetectedExternalAcp,
             Self::PinHonored,
             Self::EngineUnreachable,
             Self::EngineAtCapacity,
@@ -385,7 +394,7 @@ impl RouteReason {
     #[must_use]
     pub const fn is_fallback(self) -> bool {
         match self {
-            Self::UnpinnedDefault | Self::PinHonored => false,
+            Self::UnpinnedDefault | Self::DetectedExternalAcp | Self::PinHonored => false,
             Self::EngineUnreachable
             | Self::EngineAtCapacity
             | Self::EngineHasNoReadyLane
@@ -405,6 +414,7 @@ impl RouteReason {
     pub const fn phrase(self) -> &'static str {
         match self {
             Self::UnpinnedDefault => "unpinned",
+            Self::DetectedExternalAcp => "detected",
             Self::PinHonored => "pinned",
             Self::EngineUnreachable => "engine unreachable, fell back to the native loop",
             Self::EngineAtCapacity => "engine at capacity, fell back to the native loop",
@@ -542,8 +552,17 @@ impl RouteDecision {
         };
         let fallback_lands_native = !self.reason.is_fallback()
             || (self.chosen == ExecutorClass::NativeLoop && self.pin.is_some());
-        let unpinned_is_unpinned =
-            self.reason != RouteReason::UnpinnedDefault || self.pin.is_none();
+        // OMEGA-DELTA-0055. Both unpinned reasons carry no pin, and the
+        // detected one names the class it detected. Without the second clause a
+        // decision could claim it detected an external agent and run on the
+        // native loop, which is the same lie `fallback_lands_native` catches
+        // from the other direction.
+        let unpinned_is_unpinned = !matches!(
+            self.reason,
+            RouteReason::UnpinnedDefault | RouteReason::DetectedExternalAcp
+        ) || self.pin.is_none();
+        let detected_runs_what_it_detected = self.reason != RouteReason::DetectedExternalAcp
+            || self.chosen == ExecutorClass::ExternalAcp;
         let honoured_pin_names_the_class = self.reason != RouteReason::PinHonored
             || self
                 .pin
@@ -553,6 +572,7 @@ impl RouteDecision {
         lane_matches_class
             && fallback_lands_native
             && unpinned_is_unpinned
+            && detected_runs_what_it_detected
             && honoured_pin_names_the_class
     }
 
@@ -699,8 +719,37 @@ pub fn select_lane(lanes: &[EngineLane], pinned: Option<&str>) -> Option<String>
 #[must_use]
 pub fn route(inputs: &RouteInputs) -> RouteDecision {
     let Some(pin) = inputs.pin.clone() else {
-        // Nothing pinned. The native loop, always — see the module docs on
-        // owner gate 8.
+        // OMEGA-DELTA-0055. Nothing pinned, and something is attached.
+        //
+        // The pin used to be the only door into the Exo lane. The owner asked
+        // for the control that set it to go — "that UI selector makes no sense,
+        // i have no fucking clue what youre talking about so the user won't,
+        // remove that UI piece and handle it smartly in the background" — and
+        // removing the door without replacing it would have made the lane
+        // unreachable rather than automatic. So an unpinned thread runs on the
+        // external ACP agent when one is connected.
+        //
+        // Owner gate 8 is untouched, and the distinction is the whole reason
+        // this is admissible. The gate says no model-initiated path may start
+        // Full Auto authority. An engine lane *is* that authority, and an
+        // unpinned thread still never reaches one — the arm below is unchanged
+        // and still requires a pin. An external ACP agent is not that
+        // authority: `omega_exo_lane`'s module docs record the same reasoning
+        // in the other direction when they choose `ExternalAcp` for Exo
+        // *because* it is neither the first-party claim nor Full Auto.
+        //
+        // It is also not model-initiated. Nothing a turn can say attaches an
+        // external agent; that is a connection the process made at startup from
+        // what is installed on the machine.
+        if inputs.external_acp.is_some() {
+            return RouteDecision {
+                chosen: ExecutorClass::ExternalAcp,
+                reason: RouteReason::DetectedExternalAcp,
+                pin: None,
+                lane_ref: None,
+            };
+        }
+        // Nothing pinned and nothing attached. The native loop.
         return RouteDecision::native(RouteReason::UnpinnedDefault, None);
     };
 
@@ -855,12 +904,66 @@ mod tests {
             "an engine lane is reachable from these inputs, so the unpinned \
              case below is not passing by default"
         );
+        // OMEGA-DELTA-0055. This used to assert `NativeLoop` here. It now
+        // asserts the property owner gate 8 actually states, which is about
+        // engine lanes and not about the native loop: an unpinned thread must
+        // not reach Full Auto authority. An unpinned thread does now reach an
+        // external ACP agent, and that is a different class — see the module
+        // docs and the `route` arm.
         let decision = route(&inputs);
-        assert_eq!(decision.chosen, ExecutorClass::NativeLoop);
-        assert_eq!(decision.reason, RouteReason::UnpinnedDefault);
+        assert_ne!(
+            decision.chosen,
+            ExecutorClass::EngineLane,
+            "an unpinned thread reaching an engine lane is the model-initiated \
+             start of Full Auto authority that owner gate 8 forbids"
+        );
         assert!(decision.lane_ref.is_none());
         assert!(decision.pin.is_none());
         assert!(decision.is_coherent());
+
+        // With nothing attached, the unpinned answer is still the native loop.
+        let nothing_attached = RouteInputs::native_only()
+            .with_engine(ready_engine())
+            .with_engine_lane("codex-local");
+        let decision = route(&nothing_attached);
+        assert_eq!(decision.chosen, ExecutorClass::NativeLoop);
+        assert_eq!(decision.reason, RouteReason::UnpinnedDefault);
+        assert!(decision.is_coherent());
+    }
+
+    /// `OMEGA-DELTA-0055`. An unpinned thread runs on the external agent that
+    /// is attached, and says which reason it was.
+    ///
+    /// This is what replaced the pin control the owner asked to remove. Before
+    /// it, `route` returned the native loop for every unpinned thread, so a
+    /// window with Exo attached still talked to whatever model provider was
+    /// configured — which is exactly what the owner was looking at when he
+    /// said the selector made no sense.
+    ///
+    /// Falsified by deleting the `external_acp` arm in `route`: this test fails
+    /// on `chosen`, and nothing else in the suite does, which is why it exists
+    /// rather than being folded into the test above.
+    #[test]
+    fn an_unpinned_thread_runs_on_the_external_agent_that_is_attached() {
+        let decision = route(&RouteInputs::native_only().with_external_acp("codex-acp"));
+
+        assert_eq!(decision.chosen, ExecutorClass::ExternalAcp);
+        assert_eq!(decision.reason, RouteReason::DetectedExternalAcp);
+        assert!(
+            !decision.reason.is_fallback(),
+            "detection is not a pin that could not be honoured; a fallback \
+             phrase here would tell a person something went wrong"
+        );
+        assert!(decision.pin.is_none(), "nothing pinned it");
+        assert!(decision.lane_ref.is_none());
+        assert!(decision.is_coherent());
+
+        // The record round-trips, so the journal can still explain the route.
+        let record = decision.canonical_record();
+        assert_eq!(
+            RouteDecision::parse_canonical_record(&record),
+            Some(decision)
+        );
     }
 
     // ---------------------------------------------------------------------
@@ -1385,8 +1488,12 @@ mod tests {
         tokens.sort_unstable();
         tokens.dedup();
         assert_eq!(tokens.len(), count, "two reasons share a token");
+        // OMEGA-DELTA-0055 raised this from 9 to 10. `DetectedExternalAcp` is
+        // the deliberate edit: an unpinned thread that runs on an attached
+        // external agent is a route the router could not previously make and
+        // therefore had no way to explain.
         assert_eq!(
-            count, 9,
+            count, 10,
             "the reason set changed. Every reason is a thing the router can \
              tell a user; adding one is a deliberate edit, and removing one \
              means a route it used to explain is now unexplained."

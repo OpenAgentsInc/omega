@@ -82,6 +82,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0052",
     "OMEGA-DELTA-0053",
     "OMEGA-DELTA-0054",
+    "OMEGA-DELTA-0055",
 ];
 
 /// OMEGA-DELTA-0036. The uninstall script embedded in the shipped `cli`.
@@ -4710,11 +4711,24 @@ mod tests {
              and nothing else discloses the model, not the executor.",
             path.display()
         );
+        // OMEGA-DELTA-0055 replaced the assertion that used to be here. It
+        // required the bar to carry the executor pin, on the reasoning that the
+        // pin was how a thread reached the Exo lane. That reasoning was correct
+        // while the pin was the door, and the door is automatic routing now.
+        // The owner asked for the control to go: "that UI selector makes no
+        // sense, i have no fucking clue what youre talking about so the user
+        // won't, remove that UI piece and handle it smartly in the background".
+        //
+        // The half of the rule that still holds is above: the bar renders the
+        // line from the disclosure record. A person is entitled to know which
+        // runtime and model spent their budget, and that is what the owner
+        // objected to losing — he objected to the *selector*.
         assert!(
-            bar.contains("self.render_executor_pin(cx)"),
-            "OMEGA-DELTA-0021: zero base's composer bar in {} must carry the \
-             executor pin. The pin is how a thread reaches the Exo lane, so a \
-             bar without it removes the door into the mode's one capability.",
+            !bar.contains("render_executor_pin"),
+            "OMEGA-DELTA-0021: zero base's composer bar in {} carries the \
+             executor pin again. It showed `native_loop`, `external_acp` and \
+             `engine_lane` to a person as a choice, which are wire tokens \
+             nobody outside this codebase can read.",
             path.display()
         );
     }
@@ -5545,12 +5559,30 @@ mod tests {
         let disclosure_path = repository_path(THREAD_VIEW_PATH);
         let disclosure = std::fs::read_to_string(&disclosure_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", disclosure_path.display()));
+        // OMEGA-DELTA-0055 replaced the assertion that used to be here. It
+        // required the thread surface to render the executor pin control,
+        // because a pin was the only way a thread reached anything but the
+        // native loop. That is no longer true and the control is gone, so the
+        // rule became one protecting a control the owner asked to remove.
+        //
+        // What replaced it is the thing the pin was for: an unpinned thread
+        // reaching an attached external agent. If that arm goes, the pin's
+        // removal really would have left the Exo lane unreachable, which is the
+        // failure the old assertion was written against.
         assert!(
-            disclosure.contains("\"omega-executor-pin\""),
-            "OMEGA-DELTA-0035: {} no longer renders the executor pin control. \
-             A pin is the only way a thread reaches anything but the native \
-             loop, so with no control there is no route to honour.",
+            !disclosure.contains("\"omega-executor-pin\""),
+            "OMEGA-DELTA-0035: {} renders the executor pin control again.",
             disclosure_path.display()
+        );
+        let router_path = repository_path(ROUTE_DECISION_PATH);
+        let law = std::fs::read_to_string(&router_path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", router_path.display()));
+        assert!(
+            law.contains("if inputs.external_acp.is_some() {"),
+            "OMEGA-DELTA-0035: {} no longer routes an unpinned thread to an \
+             attached external agent, and the pin control that used to be the \
+             only door is gone. Together that makes the Exo lane unreachable.",
+            router_path.display()
         );
     }
 
@@ -7100,7 +7132,9 @@ mod tests {
         let thread_path = repository_path(THREAD_VIEW_PATH);
         let thread = std::fs::read_to_string(&thread_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", thread_path.display()));
-        for drawing in ["render_executor_disclosure", "render_executor_pin"] {
+        // OMEGA-DELTA-0055 removed `render_executor_pin` from this loop, along
+        // with the function itself. See the `drawn` list below.
+        for drawing in ["render_executor_disclosure"] {
             let body = function_body(&thread, drawing).unwrap_or_else(|| {
                 panic!(
                     "OMEGA-DELTA-0049: cannot find `{drawing}` in {}",
@@ -7121,19 +7155,31 @@ mod tests {
                 thread_path.display()
             );
         }
+        // OMEGA-DELTA-0055 removed `self.render_executor_pin(cx)` from this
+        // list. The reasoning it carried — "removing the executor line removes
+        // the door into the Exo lane" — was true while the pin *was* the door.
+        // Routing is automatic now, so the pin is not the door, and the
+        // assertion had become a rule protecting a control the owner asked to
+        // remove. The other half of 0049 is untouched: the disclosure line is
+        // still drawn, and still has no cheaper zero-base-specific path.
         for drawn in [
             "fn render_executor_disclosure",
             "self.render_executor_disclosure(cx)",
-            "self.render_executor_pin(cx)",
         ] {
             assert!(
                 thread.contains(drawn),
                 "OMEGA-DELTA-0049: {} no longer draws `{drawn}`. Removing the \
-                 executor line removes the door into the Exo lane as well as \
-                 the statement of who ran the turn.",
+                 executor line removes the statement of who ran the turn.",
                 thread_path.display()
             );
         }
+        assert!(
+            !thread.contains("render_executor_pin"),
+            "OMEGA-DELTA-0049: {} draws the executor pin again. \
+             `OMEGA-DELTA-0055` removed it, and the route it used to set is \
+             decided automatically.",
+            thread_path.display()
+        );
 
         // The binding that builds the typed record is untouched by the mode.
         let binding_path = repository_path(EXECUTOR_DISCLOSURE_BINDING_PATH);
@@ -7921,6 +7967,117 @@ mod tests {
             "OMEGA-DELTA-0054: {} admits `workspace::OpenFiles`. Choosing what \
              the thread can see is one control; opening the editor's file \
              surfaces inside a mode that does not render them is another.",
+            mode_path.display()
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // OMEGA-DELTA-0055 — Routing is decided, not selected
+    // ---------------------------------------------------------------------
+
+    /// OMEGA-DELTA-0055. The executor pin control is gone and the route it used
+    /// to set is decided automatically.
+    ///
+    /// These are one change, not two. The pin was the only door into the Exo
+    /// lane — `OMEGA-DELTA-0049`'s own prose says a thread routes to Exo
+    /// exactly when a person pins `ExternalAcp` on it — so deleting the control
+    /// on its own would have made the lane unreachable rather than automatic.
+    /// The check therefore asserts both halves together, because either alone
+    /// is a defect: the control without the routing is jargon shown to a
+    /// person, and the routing without the control is fine but the control
+    /// coming back is a regression.
+    ///
+    /// Owner gate 8 is deliberately untouched, and the reason it is untouched
+    /// is the reason this is admissible at all. The gate forbids a
+    /// model-initiated start of Full Auto authority. An engine lane is that
+    /// authority and still needs a pin. An external ACP agent is not — and the
+    /// connection is made at startup from what is installed, so nothing a turn
+    /// says can attach one.
+    #[test]
+    fn routing_is_decided_rather_than_selected() {
+        let thread_path = repository_path(THREAD_VIEW_PATH);
+        let thread = std::fs::read_to_string(&thread_path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", thread_path.display()));
+        for token in [
+            "render_executor_pin",
+            "\"omega-executor-pin\"",
+            "Pin this thread",
+        ] {
+            assert!(
+                !thread.contains(token),
+                "OMEGA-DELTA-0055: {} still carries `{token}`. The control read \
+                 `pin: none` and opened a menu of `native_loop`, `external_acp` \
+                 and `engine_lane` — wire tokens offered to a person as a \
+                 choice. `ExecutorClass::token`'s own documentation says it is \
+                 never shown to a user on its own.",
+                thread_path.display()
+            );
+        }
+
+        let law_path = repository_path(ROUTE_DECISION_PATH);
+        let law = std::fs::read_to_string(&law_path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", law_path.display()));
+        let rule = function_body(&law, "route").unwrap_or_else(|| {
+            panic!(
+                "OMEGA-DELTA-0055: cannot find the routing law in {}",
+                law_path.display()
+            )
+        });
+        assert!(
+            rule.len() > 400,
+            "OMEGA-DELTA-0055: the body read for the routing law is too short \
+             to be the real one, so the checks below would pass without reading \
+             it"
+        );
+        // Scoped to the *unpinned* branch, and the scoping is load-bearing.
+        // `if inputs.external_acp.is_some() {` also appears in the arm that
+        // honours an `ExternalAcp` pin, so a check against the whole function
+        // stayed green with the automatic arm deleted — observed directly while
+        // falsifying this test. The branch is what the delta is about.
+        let unpinned = rule
+            .split_once("let Some(pin) = inputs.pin.clone() else {")
+            .map(|(_, rest)| rest)
+            .unwrap_or_default();
+        let unpinned = unpinned
+            .split_once("\n    };")
+            .map_or(unpinned, |(body, _)| body);
+        assert!(
+            unpinned.len() > 200 && unpinned.len() < rule.len(),
+            "OMEGA-DELTA-0055: the unpinned branch read from {} is not a \
+             plausible branch, so the checks below would be testing the whole \
+             function or nothing",
+            law_path.display()
+        );
+        assert!(
+            unpinned.contains("if inputs.external_acp.is_some() {")
+                && unpinned.contains("reason: RouteReason::DetectedExternalAcp"),
+            "OMEGA-DELTA-0055: {} no longer routes an unpinned thread to an \
+             attached external agent. With the pin control removed, that leaves \
+             the Exo lane unreachable by any means.",
+            law_path.display()
+        );
+        assert!(
+            !unpinned.contains("ExecutorClass::EngineLane"),
+            "OMEGA-DELTA-0055: the unpinned branch in {} names an engine lane. \
+             An engine lane is Full Auto authority and owner gate 8 admits only \
+             an explicit human action into it, so an unpinned thread must not \
+             be able to reach one.",
+            law_path.display()
+        );
+        assert!(
+            law.contains("DetectedExternalAcp,"),
+            "OMEGA-DELTA-0055: {} no longer declares the reason an automatic \
+             route is recorded under. A route the journal cannot name is a \
+             route nobody can explain afterwards.",
+            law_path.display()
+        );
+
+        let mode_path = repository_path(ZERO_BASE_MODE_PATH);
+        let mode = std::fs::read_to_string(&mode_path).unwrap_or_default();
+        assert!(
+            !mode.contains("ExecutorPin") && !mode.contains("PinGesture"),
+            "OMEGA-DELTA-0055: {} now knows about pins. Automatic routing is a \
+             property of the routing law, not of a mode.",
             mode_path.display()
         );
     }
