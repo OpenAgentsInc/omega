@@ -6468,7 +6468,7 @@ mod tests {
             let sarah_relay = sarah_publisher.as_mut().expect("sarah adapter");
             let now = unix_now();
             let greeting = EventBuilder::new(
-                Kind::Custom(crate::ISSUE31_PRIVATE_RUMOR_KIND),
+                Kind::Custom(SARAH_TURN_RECORD_KIND),
                 "Sarah here. This reply crossed a real relay from a real Omega host.",
             )
             .tag(Tag::parse(["conversation", conversation_ref.as_str()]).expect("conversation tag"))
@@ -6508,8 +6508,10 @@ mod tests {
             if quarantine {
                 // Inside every record-level bound and outside the projection body
                 // contract, so the host quarantines it and must say so.
+                // Also 44300: a source the host never receives cannot be
+                // quarantined, so on kind 14 this proved nothing either.
                 let unreadable = EventBuilder::new(
-                    Kind::Custom(crate::ISSUE31_PRIVATE_RUMOR_KIND),
+                    Kind::Custom(SARAH_TURN_RECORD_KIND),
                     "",
                 )
                 .tag(
@@ -6605,8 +6607,13 @@ mod tests {
                     // admitted OpenAgents turn service: it produces a real
                     // signed Sarah record on a real relay, and is not evidence
                     // that the turn service produced it.
+                    // A Sarah turn is kind 44300. This harness published kind
+                    // 14 — a bare NIP-17 rumor — which the host never
+                    // subscribes to and would refuse anyway, so every reply it
+                    // ever "sent" was discarded in transit and the reply arm of
+                    // this proof had never actually run.
                     let reply = EventBuilder::new(
-                        Kind::Custom(crate::ISSUE31_PRIVATE_RUMOR_KIND),
+                        Kind::Custom(SARAH_TURN_RECORD_KIND),
                         format!(
                             "Received. Answering {turn_ref} from a real Omega host over a real relay."
                         ),
