@@ -72,6 +72,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0042",
     "OMEGA-DELTA-0043",
     "OMEGA-DELTA-0044",
+    "OMEGA-DELTA-0045",
 ];
 
 /// OMEGA-DELTA-0036. The uninstall script embedded in the shipped `cli`.
@@ -200,6 +201,22 @@ pub const EXECUTOR_DISCLOSURE_BINDING_PATH: &str =
 
 /// OMEGA-DELTA-0021. The thread surface that has to render the line.
 pub const THREAD_VIEW_PATH: &str = "crates/agent_ui/src/conversation_view/thread_view.rs";
+
+/// OMEGA-DELTA-0045. The host method the engine calls to disclose a handoff.
+pub const HOST_BRIDGE_PATH: &str = "crates/agent_ui/src/omega_host_bridge.rs";
+
+/// OMEGA-DELTA-0045. The shared thread crate that carries the entry kinds.
+pub const THREAD_ENTRY_PATH: &str = "crates/acp_thread/src/acp_thread.rs";
+
+/// OMEGA-DELTA-0045. The refusal that shipped in every candidate through
+/// `0.2.0-rc17`.
+///
+/// Named as a literal so the check fails on the exact bytes an independent
+/// reviewer found in the shipped binary, rather than on a paraphrase. The
+/// prose in `omega_host_bridge.rs` still quotes it in order to say why it is
+/// gone, so the scan reads `code_of` and not the raw file.
+pub const SYSTEM_NOTE_REFUSAL: &str =
+    "Agent threads do not expose an owner-visible system-note authority.";
 
 /// OMEGA-DELTA-0030. The typed start command sent to `omega-effectd`.
 pub const FULL_AUTO_DISPATCH_PATH: &str = "crates/full_auto_ui/src/dispatch.rs";
@@ -6895,5 +6912,179 @@ mod tests {
             start < resolve,
             "OMEGA-DELTA-0041: the served surface is started after the              packaged component is resolved, so whether it listens depends on              packaging as well as on the flag."
         );
+    }
+
+    // ------------------------------------------------------ OMEGA-DELTA-0045
+
+    /// OMEGA-DELTA-0045. A host-authored note is an entry kind, not a caption.
+    ///
+    /// `AgentThreadEntry` had six variants and every one of them was something
+    /// a model or a user said. There was nowhere to put a line the *host*
+    /// wrote, so the host had nothing to write into and refused. The variant is
+    /// the seam; without it the refusal is the only honest answer, which is
+    /// exactly the state rc11 through rc17 shipped.
+    ///
+    /// `push_system_note` is asserted to return `bool` and to be keyed on the
+    /// engine-supplied id. Last-write-wins would let a retry rewrite a
+    /// disclosure the owner had already been shown; an unkeyed append would
+    /// show it twice.
+    #[test]
+    fn a_host_authored_note_is_a_thread_entry_kind() {
+        let path = repository_path(THREAD_ENTRY_PATH);
+        let source = std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
+
+        let (_, body, _) = next_enum_body(&source, "AgentThreadEntry").unwrap_or_else(|| {
+            panic!(
+                "OMEGA-DELTA-0045: no AgentThreadEntry enum found in {}. The \
+                 check would be vacuous, so it fails instead.",
+                path.display()
+            )
+        });
+        assert!(
+            body.lines()
+                .map(str::trim)
+                .any(|line| line == "SystemNote(SystemNote),"),
+            "OMEGA-DELTA-0045: AgentThreadEntry has no SystemNote variant in \
+             {}. Without an entry kind a non-model disclosure can be, the host \
+             has nowhere to write a provider handoff and the thread the owner \
+             reads goes silent — the rc11 defect FA-07 gate 5 forbids.",
+            path.display()
+        );
+
+        let code = code_of(&source);
+        assert!(
+            code.contains(
+                "pub fn push_system_note(&mut self, note: SystemNote, cx: &mut Context<Self>) -> bool"
+            ),
+            "OMEGA-DELTA-0045: {} must expose push_system_note returning \
+             whether it appended.",
+            path.display()
+        );
+        assert!(
+            code.contains("existing.id == note.id"),
+            "OMEGA-DELTA-0045: push_system_note in {} no longer keys on the \
+             engine-supplied note id. Unkeyed, a retried append shows the owner \
+             the same disclosure twice; last-write-wins lets a retry rewrite a \
+             disclosure the owner has already read.",
+            path.display()
+        );
+    }
+
+    /// OMEGA-DELTA-0045. The host writes the note instead of refusing it.
+    ///
+    /// The refusal was typed and honest — better than rc11's silent
+    /// `() => {}` — and it was still silence in the place that matters. An
+    /// independent reviewer found `SYSTEM_NOTE_REFUSAL` in the shipped bytes of
+    /// both `0.2.0-rc15` and `0.2.0-rc16`, so no candidate to date discloses a
+    /// cross-provider handoff to the owner reading the thread.
+    ///
+    /// Two halves, because either alone is passable and useless: the refusal is
+    /// gone, and the method reaches `push_system_note` on the thread named by
+    /// `threadRef`. A handoff is addressed to the *target* thread; filing it
+    /// against the source one would put the disclosure where the owner is no
+    /// longer reading.
+    #[test]
+    fn the_host_appends_a_provider_handoff_note_rather_than_refusing_it() {
+        let path = repository_path(HOST_BRIDGE_PATH);
+        let source = std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
+        let code = code_of(&source);
+
+        assert!(
+            !code.contains(SYSTEM_NOTE_REFUSAL),
+            "OMEGA-DELTA-0045: {} still refuses the system-note method with \
+             {SYSTEM_NOTE_REFUSAL:?}. That refusal is the rc11 silence in a \
+             typed wrapper: the engine emits a provider-handoff note naming \
+             both lanes and the host drops it, so a run that changed which \
+             model spends the owner's budget leaves no trace in the transcript.",
+            path.display()
+        );
+        assert!(
+            code.contains("HostMethod::AppendSystemNote => append_system_note("),
+            "OMEGA-DELTA-0045: {} no longer routes AppendSystemNote to \
+             append_system_note.",
+            path.display()
+        );
+        assert!(
+            code.contains("thread.push_system_note("),
+            "OMEGA-DELTA-0045: append_system_note in {} does not reach \
+             push_system_note. A method that validates its params and returns \
+             `{{\"appended\": true}}` without writing anything is a refusal \
+             that lies rather than a refusal that is honest.",
+            path.display()
+        );
+        assert!(
+            code.contains("thread.thread_id.to_key_string() == params.thread_ref"),
+            "OMEGA-DELTA-0045: append_system_note in {} no longer resolves the \
+             thread named by threadRef. A handoff is addressed to the target \
+             thread; filing it against whichever thread is nearest puts the \
+             disclosure where the owner has stopped reading.",
+            path.display()
+        );
+    }
+
+    /// OMEGA-DELTA-0045. The thread surface draws the note, unconditionally.
+    ///
+    /// An entry kind nothing renders satisfies every other check here and
+    /// discloses nothing, which is the same failure shape omega#77 pinned for
+    /// the executor line. So the call site is pinned as well as the variant.
+    ///
+    /// And it is pinned as an *unconditional* draw. The gate is owner
+    /// visibility; a note behind a disclosure triangle, a hover, or a collapsed
+    /// section is a note the rc11 handoff would also have passed. The body is
+    /// read for the expansion vocabulary the compaction entry uses, because
+    /// that is the nearest thing in this file to copy by accident.
+    #[test]
+    fn the_thread_surface_draws_a_host_authored_note_unconditionally() {
+        let path = repository_path(THREAD_VIEW_PATH);
+        let source = std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
+        let code = code_of(&source);
+
+        assert!(
+            code.contains("fn render_system_note("),
+            "OMEGA-DELTA-0045: {} must define the host-authored note line.",
+            path.display()
+        );
+        assert!(
+            code.contains(
+                "AgentThreadEntry::SystemNote(note) => self.render_system_note(entry_ix, note),"
+            ),
+            "OMEGA-DELTA-0045: {} must draw a SystemNote entry from the entry \
+             match. Defining the renderer without dispatching to it discloses \
+             nothing, and every other check in this delta would still pass.",
+            path.display()
+        );
+
+        let start = code
+            .find("fn render_system_note(")
+            .expect("the renderer was just asserted to exist");
+        let body = &code[start..];
+        let end = body.find("\n    fn ").expect(
+            "OMEGA-DELTA-0045: no method follows render_system_note, so its \
+             body cannot be bounded and the scan below would read the rest of \
+             the file",
+        );
+        let body = &body[..end];
+
+        assert!(
+            body.contains("Label::new(note.text.clone())"),
+            "OMEGA-DELTA-0045: the note line in {} must be drawn from the \
+             entry's own text as a Label. Rendering it as Markdown would let \
+             provider-supplied content style a host-authored disclosure or pass \
+             itself off as one.",
+            path.display()
+        );
+        for hideable in ["is_expanded", "expansion", "toggle", "tooltip", "hover"] {
+            assert!(
+                !body.contains(hideable),
+                "OMEGA-DELTA-0045: the note line in {} names {hideable:?}. The \
+                 gate is owner visibility, and anything the owner has to click, \
+                 expand, or hover to see is a disclosure the rc11 handoff would \
+                 also have passed.",
+                path.display()
+            );
+        }
     }
 }

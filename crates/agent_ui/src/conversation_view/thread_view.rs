@@ -3938,6 +3938,46 @@ impl ThreadView {
             .into_any()
     }
 
+    /// OMEGA-DELTA-0045. Draw a host-authored note in the thread.
+    ///
+    /// The gate this satisfies is owner *visibility*, so the note is rendered
+    /// unconditionally: no collapse, no expansion toggle, no hover reveal.
+    /// Anything the owner has to click to see is a disclosure the rc11 handoff
+    /// would also have passed.
+    ///
+    /// `note.text` is a plain string written by the host and drawn as a
+    /// `Label`, not parsed as Markdown, so no provider-supplied content can
+    /// style it or pass itself off as one of these lines.
+    ///
+    /// The shape is the same rule-with-a-caption the thread already uses for
+    /// "Subagent Output": a line the eye reads as structure rather than as
+    /// something a model said.
+    fn render_system_note(&self, entry_ix: usize, note: &acp_thread::SystemNote) -> AnyElement {
+        h_flex()
+            .id(("system-note", entry_ix))
+            .w_full()
+            .px_5()
+            .py_1()
+            .gap_2()
+            .child(Divider::horizontal())
+            .child(
+                h_flex()
+                    .gap_1()
+                    .child(
+                        Icon::new(IconName::Info)
+                            .color(Color::Muted)
+                            .size(IconSize::Small),
+                    )
+                    .child(
+                        Label::new(note.text.clone())
+                            .size(LabelSize::Small)
+                            .color(Color::Muted),
+                    ),
+            )
+            .child(Divider::horizontal())
+            .into_any_element()
+    }
+
     fn render_context_compaction(
         &self,
         entry_ix: usize,
@@ -6438,6 +6478,7 @@ impl ThreadView {
             AgentThreadEntry::ContextCompaction(compaction) => {
                 self.render_context_compaction(entry_ix, compaction, window, cx)
             }
+            AgentThreadEntry::SystemNote(note) => self.render_system_note(entry_ix, note),
         };
 
         let is_subagent_output = self.is_subagent()
@@ -7728,7 +7769,8 @@ impl ThreadView {
                 | AgentThreadEntry::Elicitation(_)
                 | AgentThreadEntry::AssistantMessage(_)
                 | AgentThreadEntry::CompletedPlan(_)
-                | AgentThreadEntry::ContextCompaction(_) => {}
+                | AgentThreadEntry::ContextCompaction(_)
+                | AgentThreadEntry::SystemNote(_) => {}
             }
         }
 

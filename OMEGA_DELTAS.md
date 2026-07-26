@@ -2315,3 +2315,63 @@ than it sounds, because the harness omega#81's acceptance sentence names —
   literals fixed — failed the command-form test. Removing the rule from
   `script/verify-omega-brand` while keeping it in Rust failed the parity
   assertion. Each edit was probed in the file before its test ran.
+
+### OMEGA-DELTA-0045 — A provider handoff is visible in the thread the owner reads
+
+- **Upstream Zed:** `AgentThreadEntry` has six variants — a user message, an
+  assistant message, a tool call, an elicitation, a completed plan, a context
+  compaction. Every one of them is something a model or a user said. Correct for
+  Zed, which has no supervising host writing into a thread.
+- **Omega, before this:** Omega does have one. `omega-effectd` moves a Full Auto
+  run from one provider lane to another and emits a note naming both lanes,
+  addressed to the target thread. The host method it calls,
+  `omega_host_bridge::append_system_note`, validated its parameters and then
+  answered `unavailable("Agent threads do not expose an owner-visible
+  system-note authority.")` — because there was no entry kind a non-model
+  disclosure could be, so there was nowhere to put one.
+- **Why that is a defect and not a limitation.** `0.2.0-rc11` shipped a handoff
+  that changed **which model was spending the owner's budget** and left nothing
+  in the transcript the owner reads. The refusal is an improvement on rc11's
+  silent `() => {}` — it is typed, it is honest, and an operator reading the
+  wire can see the disclosure was dropped — but the owner reading the thread
+  cannot, and the owner reading the thread is the person the disclosure is for.
+  An independent reviewer confirmed the refusal string is in the shipped bytes
+  of `0.2.0-rc15` **and** `0.2.0-rc16`; it is in `rc17` too. No candidate to
+  date discloses a cross-provider handoff in the thread.
+- **Omega now:** a seventh variant, `AgentThreadEntry::SystemNote`, carrying an
+  engine-supplied id and plain text; `AcpThread::push_system_note`, idempotent
+  on that id; and `ThreadView::render_system_note`, which draws it as a
+  captioned rule in the transcript — the same shape the thread already uses for
+  "Subagent Output". `append_system_note` resolves the thread named by
+  `threadRef` and appends.
+- **Three properties the shape is chosen for.**
+  - **Unconditional.** No collapse, no expansion toggle, no hover. The gate is
+    owner *visibility*; anything the owner has to click to see is a disclosure
+    the rc11 handoff would also have passed.
+  - **Not Markdown.** The text is a `SharedString` the host wrote, drawn as a
+    `Label`. Nothing a provider emits can style one of these lines or pass
+    itself off as one.
+  - **Idempotent on the engine's id, not last-write-wins.** The engine may retry
+    after a response it never saw. A retry must not be able to rewrite a
+    disclosure the owner has already read, and must not double it either. The
+    idempotence is per live thread, which is the scope that matters: the note is
+    an entry in the thread, and a thread that is gone has no owner reading it.
+- **The cost, stated.** This is a variant added to `crates/acp_thread`, a shared
+  upstream crate, so it is a real rebase surface — unlike `OMEGA-DELTA-0021`,
+  which deliberately kept the executor record out of that crate behind an
+  extension trait. An extension trait cannot add an enum variant, and an
+  out-of-band side table keyed by entry index would not survive reordering, would
+  not appear in the thread's Markdown export, and would put the disclosure
+  somewhere other than where the transcript is read. The variant is the seam;
+  the rebase cost is accepted deliberately.
+- **Enforced by:** `a_host_authored_note_is_a_thread_entry_kind`,
+  `the_host_appends_a_provider_handoff_note_rather_than_refusing_it`, and
+  `the_thread_surface_draws_a_host_authored_note_unconditionally` in
+  `crates/omega_deltas/`. The three halves are separable and each one alone is
+  passable and useless: a variant nothing renders discloses nothing, a renderer
+  nothing dispatches to discloses nothing, and a host method that returns
+  `{"appended": true}` without writing anything is a refusal that lies rather
+  than a refusal that is honest.
+- **Scope.** This is the **source** half. `0.2.0-rc17` and every earlier
+  candidate carry the refusal in their shipped bytes; the packaged half needs
+  the next candidate.
