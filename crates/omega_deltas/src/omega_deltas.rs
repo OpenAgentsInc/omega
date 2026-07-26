@@ -67,6 +67,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0037",
     "OMEGA-DELTA-0038",
     "OMEGA-DELTA-0039",
+    "OMEGA-DELTA-0040",
 ];
 
 /// OMEGA-DELTA-0036. The uninstall script embedded in the shipped `cli`.
@@ -296,6 +297,42 @@ pub const AGENT_SERVER_FACTORY_PATH: &str = "crates/agent_ui/src/agent_ui.rs";
 
 /// OMEGA-DELTA-0035. The pin-setting methods that must name a human gesture.
 pub const PIN_SETTING_CALLS: &[&str] = &["pin_session(", "unpin_session(", "pin_next_session("];
+
+/// OMEGA-DELTA-0013. The chord that opens a new agent thread, per platform.
+///
+/// omega#76's exit is that this chord reaches the New Agent Thread surface from
+/// the editor, the welcome surface and the panel. All three live inside
+/// `Workspace`, so the property is "bound window-globally and not shadowed by
+/// anything narrower", which is what `the_new_thread_chord_is_window_global`
+/// checks.
+pub const NEW_THREAD_CHORDS: &[(&str, &str)] = &[
+    ("assets/keymaps/default-macos.json", "cmd-shift-a"),
+    ("assets/keymaps/default-linux.json", "ctrl-shift-a"),
+    ("assets/keymaps/default-windows.json", "ctrl-shift-a"),
+];
+
+/// OMEGA-DELTA-0013. The narrower surfaces admitted to take the chord back.
+///
+/// An allowlist and not a count. omega#76 asked for the shadowed lower-priority
+/// bindings to be *resolved deliberately*, and the deliberate resolution is
+/// that a modal the user opened on purpose, and a terminal whose select-all is
+/// a decades-old convention, may keep the chord while they have focus — but
+/// nothing else may take it, and an `Editor` or `AgentPanel` binding appearing
+/// here would put the chord back to being focus-dependent everywhere.
+pub const NEW_THREAD_CHORD_NARROW_CONTEXTS: &[&str] = &[
+    "ToolchainSelector",
+    "RecentProjects || (RecentProjects > Picker > Editor)",
+    "Terminal",
+];
+
+/// OMEGA-DELTA-0040. The startup path that opens Omega's first window.
+pub const STARTUP_PATH: &str = "crates/zed/src/main.rs";
+
+/// OMEGA-DELTA-0040. First-run onboarding, which that startup path waits on.
+pub const ONBOARDING_PATH: &str = "crates/onboarding/src/onboarding.rs";
+
+/// OMEGA-DELTA-0040. The coordinator that releases the startup path.
+pub const IDENTITY_STARTUP_PATH: &str = "crates/onboarding/src/identity_startup.rs";
 
 /// OMEGA-DELTA-0029. Vocabulary that would make a route irreproducible.
 ///
@@ -4799,6 +4836,196 @@ mod tests {
                 path.display()
             );
         }
+    }
+
+    /// OMEGA-DELTA-0013. The new-thread chord fires from anywhere in the window.
+    ///
+    /// Upstream binds `agent::NewThread` to `cmd-n` inside panel-scoped
+    /// contexts only, so it cannot start a thread unless the panel already has
+    /// focus. Omega's chord is window-global, which is the whole of omega#76's
+    /// "from every context" — editor, welcome and panel are all inside
+    /// `Workspace`.
+    ///
+    /// The check is two-sided, because each side alone is weak. A global
+    /// binding that exists proves nothing if something narrower shadows it, and
+    /// counting bindings would either forbid the modal pickers that legitimately
+    /// hold the chord or permit any new binding at all.
+    #[test]
+    fn the_new_thread_chord_is_window_global() {
+        for (keymap, chord) in NEW_THREAD_CHORDS {
+            let path = repository_path(keymap);
+            let raw = std::fs::read_to_string(&path)
+                .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
+            let sections: serde_json::Value = serde_json::from_str(&strip_jsonc(&raw))
+                .unwrap_or_else(|error| panic!("cannot parse {}: {error}", path.display()));
+            let sections = sections
+                .as_array()
+                .unwrap_or_else(|| panic!("{keymap} is not an array of sections"));
+
+            let bound: Vec<(Option<&str>, Option<&str>)> = sections
+                .iter()
+                .filter_map(|section| {
+                    let binding = section.get("bindings")?.get(*chord)?;
+                    Some((
+                        section.get("context").and_then(serde_json::Value::as_str),
+                        binding.as_str(),
+                    ))
+                })
+                .collect();
+
+            let global: Vec<&(Option<&str>, Option<&str>)> = bound
+                .iter()
+                .filter(|(context, _)| {
+                    context.is_none_or(|context| WINDOW_GLOBAL_KEYMAP_CONTEXTS.contains(&context))
+                })
+                .collect();
+            assert_eq!(
+                global.len(),
+                1,
+                "OMEGA-DELTA-0013: {keymap} must bind {chord:?} window-globally \
+                 exactly once. Found: {global:?}"
+            );
+            assert_eq!(
+                global[0].1,
+                Some("agent::NewThread"),
+                "OMEGA-DELTA-0013: {keymap} binds {chord:?} window-globally to \
+                 something other than the new agent thread, so omega#76's \
+                 chord no longer reaches the front door."
+            );
+
+            for (context, action) in &bound {
+                let Some(context) = context else { continue };
+                if WINDOW_GLOBAL_KEYMAP_CONTEXTS.contains(context) {
+                    continue;
+                }
+                assert!(
+                    NEW_THREAD_CHORD_NARROW_CONTEXTS.contains(context),
+                    "OMEGA-DELTA-0013: {keymap} binds {chord:?} to {action:?} in \
+                     context {context:?}, which shadows the window-global new-thread \
+                     chord while that surface has focus. omega#76 asked for the \
+                     shadowed bindings to be resolved deliberately; a new one \
+                     appearing is not a deliberate resolution. Admitted: \
+                     {NEW_THREAD_CHORD_NARROW_CONTEXTS:?}"
+                );
+            }
+        }
+    }
+
+    /// OMEGA-DELTA-0040. A first-ever launch lands on identity onboarding, and
+    /// finishing it opens the front door.
+    ///
+    /// The owner decided the ordering: Omega is identity-first, so an agent
+    /// thread before an identity would invert the thing omega#9's packet exists
+    /// to establish. That decision is only sound while the handoff is real —
+    /// "onboarding first" and "onboarding instead" are the same picture on a
+    /// first launch and completely different products on the second.
+    ///
+    /// So the chain is checked link by link, because each link fails silently
+    /// on its own:
+    ///
+    /// - the startup path *waits* — without the await, the front door would
+    ///   open behind onboarding and Omega would be asking for an identity over
+    ///   the top of a composer;
+    /// - finishing *releases* the wait — without the release, completing setup
+    ///   would leave the user on the launchpad with nothing else ever opening,
+    ///   and no test that only looks at the front door would notice;
+    /// - releasing *completes the channel* the startup path is parked on —
+    ///   without that, `release_identity_waiters` is a call that returns.
+    #[test]
+    fn first_run_onboarding_hands_the_startup_off_to_the_front_door() {
+        let startup_path = repository_path(STARTUP_PATH);
+        let startup = std::fs::read_to_string(&startup_path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", startup_path.display()));
+        let restore = function_body(&startup, "restore_or_create_workspace").unwrap_or_else(|| {
+            panic!(
+                "OMEGA-DELTA-0040: {} no longer has a `restore_or_create_workspace`. \
+                 A check that cannot find its subject passes for the wrong reason.",
+                startup_path.display()
+            )
+        });
+
+        let waits_at = restore.find("await_identity_ready(").unwrap_or_else(|| {
+            panic!(
+                "OMEGA-DELTA-0040: `restore_or_create_workspace` in {} no longer \
+                 waits for identity. The front door would open behind first-run \
+                 onboarding, which is Omega asking for an identity on top of a \
+                 composer — the inversion the owner's ordering decision rejects.",
+                startup_path.display()
+            )
+        });
+        let opens_at = restore
+            .find("AgentPanel::open_front_door(")
+            .unwrap_or_else(|| {
+                panic!(
+                    "OMEGA-DELTA-0040: `restore_or_create_workspace` in {} no \
+                     longer opens the front door at all (OMEGA-DELTA-0019).",
+                    startup_path.display()
+                )
+            });
+        assert!(
+            waits_at < opens_at,
+            "OMEGA-DELTA-0040: {} opens the front door before it waits for \
+             identity. Onboarding is first *and* the agent is what follows it; \
+             reversing them makes the first-run window a race.",
+            startup_path.display()
+        );
+
+        let onboarding_path = repository_path(ONBOARDING_PATH);
+        let onboarding = std::fs::read_to_string(&onboarding_path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", onboarding_path.display()));
+        let finish = function_body(&onboarding, "on_finish").unwrap_or_else(|| {
+            panic!(
+                "OMEGA-DELTA-0040: {} no longer has an `on_finish` to check.",
+                onboarding_path.display()
+            )
+        });
+        // The **first-run** arm specifically. `on_finish` releases the waiters
+        // on both journeys, and the editor-setup journey is not the one the
+        // startup path is parked on — asserting against the whole function
+        // would let the first-run release be deleted while the check stayed
+        // green on the other arm's copy of the same call.
+        let first_run_arm = finish
+            .split_once("OnboardingMode::FirstRun(window_handle) => {")
+            .and_then(|(_, rest)| rest.split_once("OnboardingMode::EditorSetup"))
+            .map(|(arm, _)| arm)
+            .unwrap_or_else(|| {
+                panic!(
+                    "OMEGA-DELTA-0040: `on_finish` in {} no longer has a \
+                     first-run arm to check.",
+                    onboarding_path.display()
+                )
+            });
+        assert!(
+            first_run_arm.contains("release_identity_waiters(cx)"),
+            "OMEGA-DELTA-0040: finishing first-run onboarding in {} no longer \
+             releases the startup path. Setup would complete and nothing would \
+             open: the user is left on the launchpad, the agent dock closed, \
+             and the only way forward is relaunching the app.",
+            onboarding_path.display()
+        );
+        assert!(
+            first_run_arm.contains("window.remove_window()"),
+            "OMEGA-DELTA-0040: the first-run branch of `on_finish` in {} no \
+             longer closes its own window, so the front door would open beside \
+             a finished onboarding screen rather than instead of it.",
+            onboarding_path.display()
+        );
+
+        let coordinator_path = repository_path(IDENTITY_STARTUP_PATH);
+        let coordinator = std::fs::read_to_string(&coordinator_path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", coordinator_path.display()));
+        let release = function_body(&coordinator, "release_identity_waiters").unwrap_or_else(|| {
+            panic!(
+                "OMEGA-DELTA-0040: {} no longer has a `release_identity_waiters`.",
+                coordinator_path.display()
+            )
+        });
+        assert!(
+            release.contains("finish(Ok(()), cx)"),
+            "OMEGA-DELTA-0040: `release_identity_waiters` in {} no longer \
+             completes the startup channel, so it releases nobody.",
+            coordinator_path.display()
+        );
     }
 
     /// OMEGA-DELTA-0035. The router is what the native agent entry resolves to.

@@ -97,6 +97,80 @@ pub fn publish_engine_lane_run_for_tests(thread_id: ThreadId, operation_ref: Str
     }
 }
 
+/// Persist one lane correlation through the production writer, for a harness
+/// that has no engine to run.
+///
+/// [`publish_engine_lane_run_for_tests`] writes the process-local index, which
+/// a restart empties. This writes the durable half — the same
+/// `CorrelationJournal`, in the same schema, at the same path
+/// [`omega_effectd_host_handler`] reads at startup — so a *second process* can
+/// be shown rebuilding the disclosure from disk rather than from a static that
+/// happened to survive. Behind `test-support`, so no shipped build can reach it.
+#[cfg(any(test, feature = "test-support"))]
+pub fn persist_engine_lane_run_for_tests(
+    thread_id: ThreadId,
+    operation_ref: String,
+) -> anyhow::Result<()> {
+    let state = HostBridgeState {
+        workspace: None,
+        threads: vec![HostThread {
+            workspace_ref: SUPERVISED_WORKSPACE_REF.to_string(),
+            lane: CODEX_LOCAL_LANE.to_string(),
+            operation_ref,
+            thread_id,
+            conversation: None,
+            turns: Vec::new(),
+            revision: 1,
+        }],
+        correlation_path: correlation_journal_path(),
+        load_error: None,
+        sarah_conversation: None,
+    };
+    persist_correlation_journal(&state)
+}
+
+/// Where the correlation journal lives.
+fn correlation_journal_path() -> PathBuf {
+    paths::data_dir().join("openagents").join(CORRELATION_FILE)
+}
+
+/// Read the correlation journal and refill the lane index from it.
+///
+/// OMEGA-DELTA-0021's restart edge, in one place. A freshly started process has
+/// an empty lane index, and this is what refills it, so a thread resumed after
+/// a restart still discloses the lane that owns it.
+///
+/// [`omega_effectd_host_handler`] calls this at startup and keeps the threads
+/// for its own state; [`reload_engine_lane_runs_from_disk`] calls it for a
+/// caller that only needs the index. Neither is a copy of the other, so what a
+/// cold process is observed doing here is what the shipped startup does.
+fn load_journal_and_republish(path: &Path) -> (Vec<HostThread>, Option<String>) {
+    let (threads, load_error) = match load_correlation_journal(path) {
+        Ok(threads) => (threads, None),
+        Err(error) => (Vec::new(), Some(error.to_string())),
+    };
+    republish_engine_lane_runs(&threads);
+    (threads, load_error)
+}
+
+/// Refill the lane index from the correlation journal on disk.
+///
+/// Returns the number of lane-bound threads the journal named. The error, if
+/// the journal cannot be read, is returned rather than logged: a caller that
+/// asked for the restart edge explicitly needs to know it did not happen, and
+/// an empty index is indistinguishable from a journal with nothing in it.
+pub fn reload_engine_lane_runs_from_disk() -> anyhow::Result<usize> {
+    let path = correlation_journal_path();
+    let (threads, load_error) = load_journal_and_republish(&path);
+    if let Some(error) = load_error {
+        anyhow::bail!(
+            "correlation journal at {} is unreadable: {error}",
+            path.display()
+        );
+    }
+    Ok(threads.len())
+}
+
 /// The `omega-effectd` lane run this thread belongs to, if it is one.
 ///
 /// Returns `None` for every thread the user started themselves, which is what
@@ -247,15 +321,11 @@ struct AppendSystemNoteParams {
 pub fn omega_effectd_host_handler(cx: &App) -> OmegaEffectdHostHandler {
     let async_cx = cx.to_async();
     let openagents_session = omega_effectd::openagents_session(cx);
-    let correlation_path = paths::data_dir().join("openagents").join(CORRELATION_FILE);
-    let (threads, load_error) = match load_correlation_journal(&correlation_path) {
-        Ok(threads) => (threads, None),
-        Err(error) => (Vec::new(), Some(error.to_string())),
-    };
+    let correlation_path = correlation_journal_path();
     // OMEGA-DELTA-0021. This is the restart edge: the lane index is empty in a
     // freshly started process, and the journal on disk is what refills it, so a
     // thread resumed after a restart still discloses the lane that owns it.
-    republish_engine_lane_runs(&threads);
+    let (threads, load_error) = load_journal_and_republish(&correlation_path);
     let state = Rc::new(RefCell::new(HostBridgeState {
         workspace: None,
         threads,

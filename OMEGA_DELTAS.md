@@ -303,8 +303,15 @@ cargo test -p omega_deltas
   that test, but it leaves the model string unpinned: a rebase could change
   `gemini-3.6-flash` to any other Google model and every check would stay
   green.
-- **Enforced by:** `the_agent_ships_enabled` and
-  `the_default_model_is_pinned`.
+- **Enforced by:** `the_agent_ships_enabled`, `the_default_model_is_pinned`, and
+  `the_new_thread_chord_is_window_global`, which asserts the chord is bound
+  window-globally to `agent::NewThread` in all three default keymaps and that
+  every narrower binding of it is one of the deliberately admitted surfaces —
+  the toolchain and recent-projects pickers, and (on Linux and Windows, where
+  the chord is `ctrl-shift-a`) a terminal's select-all. omega#76 asked for the
+  shadowed lower-priority bindings to be resolved deliberately; this is that
+  resolution written down, so a *new* shadow fails rather than quietly making
+  the chord focus-dependent again.
 
 ### OMEGA-DELTA-0014 — A protected recovery offers replacement, not protection
 
@@ -1645,20 +1652,26 @@ than it sounds, because the harness omega#81's acceptance sentence names —
   `test_empty_workspace_opens_the_front_door` in `crates/agent_ui`; the rendered
   proofs `omega_front_door_no_project` and `omega_front_door_typing` in
   `crates/zed/src/visual_test_runner.rs`.
-- **What this does not cover.** A **first-ever** launch still lands on the
-  Onboarding tab, not on the agent — observed on a packaged build with a fresh
+- **What this does not cover.** A **first-ever** launch lands on the Onboarding
+  tab, not on the agent — observed on a packaged build with a fresh
   `--user-data-dir`, where the front door is behind onboarding and the agent
-  dock is closed until it is dismissed. Every launch after that lands on the
-  agent. So omega#76's exit holds for its second half (typing starts a real
-  thread) and for every launch but the first; the first-run ordering is a
-  separate, untouched surface. A projectless thread is also not yet *bound* to a
+  dock is closed until it is finished. Every launch after that lands on the
+  agent. That ordering was left open here as a question for the owner; it is
+  now decided and recorded as `OMEGA-DELTA-0040`, which tests the handoff from
+  onboarding to this front door. A projectless thread is also not yet *bound* to a
   project on its first workspace-touching action, which is the rest of omega#76's
   project-optional deliverable. Today it simply has no worktree: file mentions
   find nothing and a tool that needs a path fails the way it would in any
-  worktree-less window. The `cmd-shift-a` editor-context collision and the
-  shadowed lower-priority bindings named in omega#76 are also untouched; the
-  two `cmd-shift-a` bindings that remain are inside modal pickers
-  (`ToolchainSelector`, `RecentProjects`) and fire only while those are open.
+  worktree-less window. The `cmd-shift-a` bindings named in omega#76 are
+  resolved rather than changed, and the resolution is now checked by
+  `the_new_thread_chord_is_window_global` under `OMEGA-DELTA-0013`: on macOS
+  there is no editor-context collision to fix — upstream's
+  `editor::SelectToBeginningOfLine` is on `ctrl-shift-a`, a different chord —
+  and the only narrower `cmd-shift-a` bindings are inside modal pickers
+  (`ToolchainSelector`, `RecentProjects`) that fire while the user has opened
+  them on purpose. On Linux and Windows the chord is `ctrl-shift-a` and a
+  terminal's select-all shadows it there, which is admitted for the same
+  reason and enumerated rather than left to be discovered.
 
 ### OMEGA-DELTA-0035 — The router is wired, and a pin is a gesture
 
@@ -1926,3 +1939,48 @@ than it sounds, because the harness omega#81's acceptance sentence names —
   pass, a dropped pixel threshold, a removed pixel diff and fabricated OCR lines
   — each failed the self-test. Every falsification was probed against a pristine
   copy before its test ran.
+
+### OMEGA-DELTA-0040 — A first-ever launch lands on identity onboarding, and finishing it opens the front door
+
+- **Upstream Zed:** first-run onboarding is a page you may open, skip, or close;
+  nothing in the startup path waits for it, and the window opens regardless.
+- **Omega, before this:** the ordering existed and nothing named it. Identity
+  onboarding gates startup (`await_identity_ready`), `OMEGA-DELTA-0019` and
+  `OMEGA-DELTA-0034` open the front door on a window with nothing to restore,
+  and no test connected the two. A packaged first-ever launch therefore lands on
+  Onboarding rather than the agent, which reads as `OMEGA-DELTA-0034` failing
+  its own exit unless somebody decides on purpose that it does not.
+- **The owner's decision, recorded rather than assumed.** Omega is
+  identity-first by design: omega#9's packet exists to put identity before
+  editor setup, and an agent thread before an identity would invert it. "Fresh
+  launch lands on the surface" is satisfied by the front door being the surface
+  a *usable* session opens on. A genuinely first-ever launch legitimately lands
+  on onboarding first, and every launch after it lands on the agent. The owner
+  may veto this; it is written down so a veto has something to point at.
+- **The decision is only sound while the handoff is real,** so the handoff is
+  the thing that is tested. "Onboarding first" and "onboarding instead" are the
+  same picture on a first launch and completely different products on the
+  second. Three links, each of which fails silently on its own:
+  `restore_or_create_workspace` **waits** on `await_identity_ready` before it
+  opens anything; the first-run branch of `on_finish` **closes its own window
+  and releases** that wait; and `release_identity_waiters` **completes the
+  channel** the startup path is parked on. Remove the middle link and setup
+  completes into a launchpad that never becomes an agent — a failure no check on
+  the front door alone can see.
+- **Enforced by:** `first_run_onboarding_hands_the_startup_off_to_the_front_door`
+  in `crates/omega_deltas`, alongside `a_fresh_window_opens_on_the_agent`
+  (`OMEGA-DELTA-0019`) and `the_front_door_does_not_require_an_open_project`
+  (`OMEGA-DELTA-0034`).
+- **What this does not cover.** **Abandoning** onboarding is a dead end in that
+  launch. The first-run onboarding page is an ordinary closeable item; closing
+  it calls `Item::on_removed` → `onboarding_closed`, which clears the
+  "onboarding is open" flag and **does not** complete the startup channel. So a
+  user who closes the tab instead of finishing setup keeps the launchpad window
+  the onboarding page was hosted in, with the agent dock closed and no window
+  ever created behind it. Identity is still not ready, so relaunching shows
+  onboarding again and nothing is lost but the session — and refusing to
+  continue without an identity is the identity-first posture working, not
+  failing. Making the page unclosable, or making a close mean "quit", is an
+  onboarding-surface decision (omega#9) and not this delta's to take. This delta
+  also does not cover *what* onboarding asks for, or the editor-setup journey,
+  which reaches the welcome page rather than the front door and is unchanged.

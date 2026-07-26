@@ -55,13 +55,22 @@ fn main() {
     // test that exercises real on-disk state — omega#81's harness pins and
     // receipts do — would otherwise write into the developer's own Omega
     // installation. Set before anything can read `data_dir`.
-    let data_dir = tempfile::tempdir().expect("Failed to create data directory");
-    paths::set_custom_data_dir(
-        data_dir
-            .keep()
-            .to_str()
-            .expect("Data directory path is not UTF-8"),
-    );
+    //
+    // `OMEGA_VISUAL_DATA_DIR` overrides the temporary directory so that two
+    // *processes* can share one data directory. That is what makes omega#77's
+    // restart captures a restart: the second process is a genuinely cold one —
+    // empty statics, nothing carried in memory — and the only thing it has of
+    // the first is what the first left on disk. It is still never the
+    // developer's own data directory; `script/omega-visual-proof` creates a
+    // temporary one and passes it in.
+    let data_dir = match std::env::var("OMEGA_VISUAL_DATA_DIR") {
+        Ok(path) if !path.is_empty() => std::path::PathBuf::from(path),
+        _ => tempfile::tempdir()
+            .expect("Failed to create data directory")
+            .keep(),
+    };
+    std::fs::create_dir_all(&data_dir).expect("Failed to create data directory");
+    paths::set_custom_data_dir(data_dir.to_str().expect("Data directory path is not UTF-8"));
 
     env_logger::builder()
         .filter_level(log::LevelFilter::Info)
@@ -93,7 +102,13 @@ fn main() {
     match test_result {
         Ok(Ok(())) => {}
         Ok(Err(e)) => {
-            eprintln!("Visual tests failed: {}", e);
+            // `{:#}` and not `{}`: every failure here is wrapped in the name of
+            // the suite that produced it, and `{}` prints only that wrapper.
+            // A run that failed because a restored record named the wrong run
+            // would report "omega_agent_surfaces" and nothing else, which is
+            // the same class of unreadable failure this file already carries a
+            // comment about.
+            eprintln!("Visual tests failed: {:#}", e);
             std::process::exit(1);
         }
         Err(_) => {
@@ -416,8 +431,18 @@ fn run_visual_tests(project_path: PathBuf, update_baseline: bool) -> Result<()> 
     // status they already had: present, and not standing up.
     #[cfg(feature = "visual-tests")]
     if std::env::var("OMEGA_VISUAL_ONLY").is_ok() {
-        println!("\n--- Omega: front door, executor disclosure, route pin ---");
-        let outcome = run_omega_agent_visual_tests(app_state.clone(), &mut cx, update_baseline);
+        // `OMEGA_VISUAL_PHASE=restart` is the second process of omega#77's
+        // restart proof. It captures nothing the first process captured: it
+        // reopens two threads the first process left on disk and photographs
+        // the executor lines a cold process derives for them.
+        let restart_phase = std::env::var("OMEGA_VISUAL_PHASE").as_deref() == Ok("restart");
+        let outcome = if restart_phase {
+            println!("\n--- Omega: executor disclosure after a restart ---");
+            run_omega_restart_visual_tests(app_state.clone(), &mut cx, update_baseline)
+        } else {
+            println!("\n--- Omega: front door, executor disclosure, route pin ---");
+            run_omega_agent_visual_tests(app_state.clone(), &mut cx, update_baseline)
+        };
         // The shared window this function opened above is torn down here as
         // well as at the end of the full run. Returning early without it left
         // the sample project's buffers alive, GPUI's leaked-handle check
@@ -2475,6 +2500,57 @@ fn run_omega_agent_visual_tests_inner(
         update_baseline,
     )?;
 
+    // omega#77's restart proof, first half: leave behind what a relaunch would
+    // find, and then end. Everything below the captures writes; nothing below
+    // them photographs, so no committed baseline can move because of it.
+    //
+    // A *second* external thread, because the two restart cases have to be
+    // distinguishable. The correlation journal names the first thread and not
+    // this one, so a cold process that confused them would disclose a lane run
+    // on a thread that never had one — a failure a single-thread shape could
+    // not see.
+    let plain_stub: Rc<dyn AgentServer> = Rc::new(StubAgentServer::new(StubAgentConnection::new()));
+    cx.update_window(workspace_window.into(), |_, window, cx| {
+        panel.update(cx, |panel, cx| {
+            panel.open_external_thread_with_server(plain_stub, window, cx);
+        });
+    })?;
+    cx.run_until_parked();
+
+    let plain_thread_id = cx
+        .read(|cx| panel.read(cx).active_thread_id(cx))
+        .ok_or_else(|| anyhow::anyhow!("the second external thread has no id"))?;
+    anyhow::ensure!(
+        plain_thread_id != external_thread_id,
+        "the restart phase needs two distinct threads; both ids are {plain_thread_id:?}"
+    );
+    let plain_record = cx
+        .read(|cx| omega_executor_record(&panel, cx))
+        .ok_or_else(|| anyhow::anyhow!("the second external thread has no disclosure"))?;
+    anyhow::ensure!(
+        plain_record.class == omega_front_door::ExecutorClass::ExternalAcp
+            && plain_record.run_ref.is_none(),
+        "the second external thread must carry no lane run before the restart: {plain_record:?}"
+    );
+
+    // The durable half. `publish_engine_lane_run_for_tests` above wrote a
+    // process-local index that a restart empties; this writes the correlation
+    // journal itself, in the production schema, at the path the shipped startup
+    // reads. The next process gets this and nothing else.
+    agent_ui::omega_host_bridge::persist_engine_lane_run_for_tests(
+        external_thread_id,
+        "operation.full-auto.visual".to_string(),
+    )?;
+
+    write_restart_handoff(&RestartHandoff {
+        lane_thread: external_thread_id,
+        lane_line,
+        external_thread: plain_thread_id,
+        external_line: plain_record.label(),
+        agent_id: plain_record.agent_id,
+        operation_ref: "operation.full-auto.visual".to_string(),
+    })?;
+
     cx.update_window(workspace_window.into(), |_, window, _cx| {
         window.remove_window();
     })
@@ -2508,6 +2584,20 @@ fn run_omega_agent_visual_tests_inner(
 /// the assertion and the pixels cannot disagree about what the line says.
 #[cfg(all(target_os = "macos", feature = "visual-tests"))]
 fn omega_executor_line(panel: &Entity<agent_ui::AgentPanel>, cx: &App) -> Option<String> {
+    Some(omega_executor_record(panel, cx)?.label())
+}
+
+/// The executor *record* the agent panel's active thread would render from.
+///
+/// The record rather than the line, because omega#77's condition is that
+/// disclosure is a typed record a label renders. A restart proof that compared
+/// only rendered strings could not tell a restored record from a restored
+/// string, which is the distinction the condition exists to protect.
+#[cfg(all(target_os = "macos", feature = "visual-tests"))]
+fn omega_executor_record(
+    panel: &Entity<agent_ui::AgentPanel>,
+    cx: &App,
+) -> Option<omega_front_door::ExecutorDisclosure> {
     let disclosure = panel
         .read(cx)
         .active_thread_view_for_tests()?
@@ -2524,7 +2614,317 @@ fn omega_executor_line(panel: &Entity<agent_ui::AgentPanel>, cx: &App) -> Option
         disclosure.is_coherent(),
         "the rendered executor record is incoherent: {disclosure:?}"
     );
-    Some(disclosure.label())
+    Some(disclosure)
+}
+
+/// What the recording process leaves for the restarted one. omega#77.
+///
+/// The two thread ids and the agent id are the identifiers a real relaunch
+/// reads back out of `sidebar_threads`; the runner sets `ZED_STATELESS=1`, which
+/// deliberately keeps that table in memory, so the harness carries them in this
+/// file instead. The lane run is **not** here: it goes through the production
+/// correlation journal, at the production path, and the restarted process reads
+/// it with the production loader. The lines are here so the restarted process
+/// can assert it rendered *the same disclosure*, not merely a plausible one.
+#[cfg(all(target_os = "macos", feature = "visual-tests"))]
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RestartHandoff {
+    lane_thread: agent_ui::ThreadId,
+    lane_line: String,
+    external_thread: agent_ui::ThreadId,
+    external_line: String,
+    agent_id: String,
+    operation_ref: String,
+}
+
+#[cfg(all(target_os = "macos", feature = "visual-tests"))]
+fn restart_handoff_path() -> std::path::PathBuf {
+    paths::data_dir().join("omega-visual-restart-handoff.json")
+}
+
+#[cfg(all(target_os = "macos", feature = "visual-tests"))]
+fn write_restart_handoff(handoff: &RestartHandoff) -> Result<()> {
+    let path = restart_handoff_path();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&path, serde_json::to_vec_pretty(handoff)?)
+        .with_context(|| format!("writing the restart handoff to {}", path.display()))?;
+    Ok(())
+}
+
+#[cfg(all(target_os = "macos", feature = "visual-tests"))]
+fn read_restart_handoff() -> Result<RestartHandoff> {
+    let path = restart_handoff_path();
+    let bytes = std::fs::read(&path).with_context(|| {
+        format!(
+            "no restart handoff at {} — the restart phase must run in the same \
+             data directory as the phase that recorded it, and after it",
+            path.display()
+        )
+    })?;
+    Ok(serde_json::from_slice(&bytes)?)
+}
+
+/// omega#77: the executor line on a `codex-acp`-class thread and on an
+/// engine-lane thread, **after a restart**.
+///
+/// This runs in a second process. Every process-local thing the first process
+/// built is gone — the lane index, the router's recorded routes, the panel, the
+/// threads themselves — so anything this renders came from disk or was never
+/// durable in the first place. That is the whole point: the previous lane
+/// demonstrated a real relaunch for the native kind and could not reach these
+/// two, and "the mechanism is shared, so I expect them to hold" is not the
+/// standard the issue set.
+#[cfg(all(target_os = "macos", feature = "visual-tests"))]
+fn run_omega_restart_visual_tests(
+    app_state: Arc<AppState>,
+    cx: &mut VisualTestAppContext,
+    update_baseline: bool,
+) -> Result<TestResult> {
+    let outcome = run_omega_restart_visual_tests_inner(app_state, cx, update_baseline);
+    cx.run_until_parked();
+    outcome
+}
+
+#[cfg(all(target_os = "macos", feature = "visual-tests"))]
+fn run_omega_restart_visual_tests_inner(
+    app_state: Arc<AppState>,
+    cx: &mut VisualTestAppContext,
+    update_baseline: bool,
+) -> Result<TestResult> {
+    use agent_ui::AgentPanel;
+
+    let handoff = read_restart_handoff()?;
+
+    // A cold process knows nothing until it reads the journal. Asserted before
+    // the read, because the read is what is under test: if a static had somehow
+    // survived, or the harness had published the run itself, every assertion
+    // below would pass for the wrong reason and the pictures would be of a
+    // process that never restarted anything.
+    anyhow::ensure!(
+        agent_ui::omega_host_bridge::engine_lane_run(handoff.lane_thread).is_none(),
+        "this process already knows a lane run for {:?} before reading the \
+         journal, so it is not a cold start",
+        handoff.lane_thread
+    );
+
+    // The production restart edge — the same function `omega_effectd_host_handler`
+    // calls at startup, not a copy of it.
+    let restored = agent_ui::omega_host_bridge::reload_engine_lane_runs_from_disk()?;
+    anyhow::ensure!(
+        restored == 1,
+        "the correlation journal named {restored} lane-bound thread(s); the \
+         recording phase wrote exactly one"
+    );
+    let restored_run = agent_ui::omega_host_bridge::engine_lane_run(handoff.lane_thread)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "the reloaded journal does not name {:?}, so nothing survived \
+                 the restart",
+                handoff.lane_thread
+            )
+        })?;
+    anyhow::ensure!(
+        restored_run == handoff.operation_ref,
+        "the reloaded run is {restored_run:?}, not {:?}",
+        handoff.operation_ref
+    );
+    anyhow::ensure!(
+        agent_ui::omega_host_bridge::engine_lane_run(handoff.external_thread).is_none(),
+        "the journal named the plain external thread as a lane run; a restart \
+         must not invent an engine lane for a thread the user started"
+    );
+
+    let project = cx.update(|cx| {
+        project::Project::local(
+            app_state.client.clone(),
+            app_state.node_runtime.clone(),
+            app_state.user_store.clone(),
+            app_state.languages.clone(),
+            app_state.fs.clone(),
+            None,
+            project::LocalProjectFlags {
+                init_worktree_trust: false,
+                ..Default::default()
+            },
+            cx,
+        )
+    });
+
+    let window_size = size(px(900.0), px(720.0));
+    let bounds = Bounds {
+        origin: point(px(0.0), px(0.0)),
+        size: window_size,
+    };
+    let workspace_window: WindowHandle<Workspace> = cx
+        .update(|cx| {
+            cx.open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(bounds)),
+                    focus: false,
+                    show: false,
+                    ..Default::default()
+                },
+                |window, cx| {
+                    cx.new(|cx| Workspace::new(None, project.clone(), app_state.clone(), window, cx))
+                },
+            )
+        })
+        .context("Failed to open the restarted window")?;
+
+    cx.run_until_parked();
+
+    let (weak_workspace, async_window_cx) = workspace_window
+        .update(cx, |workspace, window, cx| {
+            (workspace.weak_handle(), window.to_async(cx))
+        })
+        .context("Failed to get workspace handle")?;
+
+    cx.background_executor.allow_parking();
+    let panel = cx
+        .foreground_executor
+        .block_test(AgentPanel::load(weak_workspace, async_window_cx))
+        .context("Failed to load AgentPanel")?;
+    cx.background_executor.forbid_parking();
+
+    workspace_window
+        .update(cx, |workspace, window, cx| {
+            workspace.add_panel(panel.clone(), window, cx);
+            workspace.open_panel::<AgentPanel>(window, cx);
+        })
+        .context("Failed to add the agent panel")?;
+
+    cx.run_until_parked();
+
+    // Zoomed for the same reason the recording phase zooms: the line is long by
+    // design, and a picture of a truncated line is not a picture of the line.
+    cx.update_window(workspace_window.into(), |_, window, cx| {
+        panel.update(cx, |panel, cx| {
+            use workspace::dock::Panel as _;
+            panel.set_zoomed(true, window, cx);
+        });
+    })
+    .log_err();
+    cx.run_until_parked();
+
+    // The `codex-acp`-class thread, reopened under the id and agent id the
+    // previous process left behind — the two things `restore_new_draft` reads
+    // out of the metadata store on a real relaunch.
+    let agent_id = AgentId::new(handoff.agent_id.clone());
+    let external_stub: Rc<dyn AgentServer> = Rc::new(StubAgentServer::new(
+        StubAgentConnection::new().with_agent_id(agent_id.clone()),
+    ));
+    cx.update_window(workspace_window.into(), |_, window, cx| {
+        panel.update(cx, |panel, cx| {
+            panel.open_external_thread_with_server_under_id(
+                external_stub,
+                handoff.external_thread,
+                window,
+                cx,
+            );
+        });
+    })?;
+    cx.run_until_parked();
+
+    let reopened_external = cx
+        .read(|cx| panel.read(cx).active_thread_id(cx))
+        .ok_or_else(|| anyhow::anyhow!("the reopened external thread has no id"))?;
+    anyhow::ensure!(
+        reopened_external == handoff.external_thread,
+        "the reopened thread is {reopened_external:?}, not the persisted \
+         {:?} — a new thread wearing the same content proves nothing about a \
+         restart",
+        handoff.external_thread
+    );
+
+    let external_line = cx
+        .read(|cx| omega_executor_line(&panel, cx))
+        .ok_or_else(|| anyhow::anyhow!("the reopened external thread has no disclosure"))?;
+    anyhow::ensure!(
+        external_line == handoff.external_line,
+        "the restarted process discloses {external_line:?}, where the process \
+         that owned this thread disclosed {:?}",
+        handoff.external_line
+    );
+    anyhow::ensure!(
+        external_line.starts_with("external_acp"),
+        "a thread on a connection Omega did not build must not be disclosed as \
+         first-party output after a restart either: {external_line:?}"
+    );
+    println!("  external-acp executor line after restart: {external_line}");
+
+    let external_after_restart = run_visual_test(
+        "omega_executor_disclosure_external_acp_after_restart",
+        workspace_window.into(),
+        cx,
+        update_baseline,
+    )?;
+
+    // The engine-lane thread. Same reopen, different id — and this one the
+    // journal on disk names, so the line has to carry the run.
+    let lane_stub: Rc<dyn AgentServer> = Rc::new(StubAgentServer::new(
+        StubAgentConnection::new().with_agent_id(agent_id),
+    ));
+    cx.update_window(workspace_window.into(), |_, window, cx| {
+        panel.update(cx, |panel, cx| {
+            panel.open_external_thread_with_server_under_id(
+                lane_stub,
+                handoff.lane_thread,
+                window,
+                cx,
+            );
+        });
+    })?;
+    cx.run_until_parked();
+
+    let reopened_lane = cx
+        .read(|cx| panel.read(cx).active_thread_id(cx))
+        .ok_or_else(|| anyhow::anyhow!("the reopened lane thread has no id"))?;
+    anyhow::ensure!(
+        reopened_lane == handoff.lane_thread,
+        "the reopened lane thread is {reopened_lane:?}, not the persisted {:?}",
+        handoff.lane_thread
+    );
+
+    let lane_record = cx
+        .read(|cx| omega_executor_record(&panel, cx))
+        .ok_or_else(|| anyhow::anyhow!("the reopened lane thread has no disclosure"))?;
+    anyhow::ensure!(
+        lane_record.run_ref.as_deref() == Some(handoff.operation_ref.as_str()),
+        "the restored record names run {:?}, not {:?}",
+        lane_record.run_ref,
+        handoff.operation_ref
+    );
+    let lane_line = lane_record.label();
+    anyhow::ensure!(
+        lane_line == handoff.lane_line,
+        "the restarted process discloses {lane_line:?}, where the process that \
+         owned this thread disclosed {:?}",
+        handoff.lane_line
+    );
+    println!("  engine-lane executor line after restart: {lane_line}");
+
+    let lane_after_restart = run_visual_test(
+        "omega_executor_disclosure_engine_lane_after_restart",
+        workspace_window.into(),
+        cx,
+        update_baseline,
+    )?;
+
+    cx.update_window(workspace_window.into(), |_, window, _cx| {
+        window.remove_window();
+    })
+    .log_err();
+    cx.run_until_parked();
+
+    for result in [&external_after_restart, &lane_after_restart] {
+        if let TestResult::BaselineUpdated(path) = result {
+            return Ok(TestResult::BaselineUpdated(path.clone()));
+        }
+    }
+    Ok(TestResult::Passed)
 }
 
 /// A stub AgentServer for visual testing that returns a pre-programmed connection.

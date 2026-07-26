@@ -6772,6 +6772,45 @@ impl AgentPanel {
         self.set_base_view(thread.into(), true, window, cx);
     }
 
+    /// Opens an external thread on an arbitrary `AgentServer` under a
+    /// `ThreadId` a previous process wrote down.
+    ///
+    /// The restore path a real relaunch takes: `restore_new_draft` reads the
+    /// persisted `ThreadId` and `agent_id` out of the metadata store and hands
+    /// the id to `create_agent_thread_with_server`, which is the one argument
+    /// that makes the reopened thread *the same thread* rather than a new one
+    /// with the same content. A harness proving disclosure after a restart
+    /// needs exactly that: the lane correlation on disk is keyed by `ThreadId`,
+    /// so a thread reopened under a fresh id would silently stop being the
+    /// thread the journal names, and the capture would show a lane run missing
+    /// for the wrong reason.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn open_external_thread_with_server_under_id(
+        &mut self,
+        server: Rc<dyn AgentServer>,
+        thread_id: ThreadId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let ext_agent = Agent::Custom {
+            id: server.agent_id(),
+        };
+
+        let thread = self.create_agent_thread_with_server(
+            ext_agent,
+            Some(server),
+            Some(thread_id),
+            None,
+            None,
+            None,
+            None,
+            AgentThreadSource::AgentPanel,
+            window,
+            cx,
+        );
+        self.set_base_view(thread.into(), true, window, cx);
+    }
+
     /// Opens a restored external thread with an arbitrary AgentServer and
     /// a specific `resume_session_id` — as if we just restored from the KVP.
     ///

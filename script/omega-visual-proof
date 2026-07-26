@@ -10,6 +10,16 @@
 #   script/omega-visual-proof              compare against the baselines
 #   script/omega-visual-proof --update     rewrite the baselines
 #
+# Two processes, not one. The first captures the front door, the typing path and
+# the executor line on three thread kinds, then leaves on disk what a relaunch
+# would find: the correlation journal in its production schema at its production
+# path, plus the thread ids and agent id that `ZED_STATELESS=1` deliberately
+# keeps out of a database. The second process is a genuinely cold one — empty
+# statics, no threads, no panel — and photographs the executor line it derives
+# for a `codex-acp`-class thread and an engine-lane thread from that disk state
+# alone. omega#77 asks for those two "after restart", and a second phase of the
+# same process could not answer it.
+#
 # Baselines live in crates/zed/test_fixtures/visual_tests/ and were generated on
 # Apple Silicon with the Metal renderer. A materially different GPU may need
 # --update and a human looking at the result before the new baselines are
@@ -21,4 +31,22 @@ if [[ "${1:-}" == "--update" ]]; then
 fi
 
 export OMEGA_VISUAL_ONLY=1
-exec cargo run --release -p zed --bin zed_visual_test_runner --features visual-tests
+
+# One data directory, shared by both processes and by neither the developer's
+# Omega installation nor a previous run of this script. A stale directory would
+# let the restart phase read a handoff the recording phase did not write, which
+# is the one way this proof could pass without a restart having happened.
+OMEGA_VISUAL_DATA_DIR="$(mktemp -d "${TMPDIR:-/tmp}/omega-visual-proof.XXXXXX")"
+export OMEGA_VISUAL_DATA_DIR
+trap 'rm -rf "${OMEGA_VISUAL_DATA_DIR}"' EXIT
+
+cargo build --release -p zed --bin zed_visual_test_runner --features visual-tests
+runner="$(cargo metadata --format-version 1 --no-deps | \
+  python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')/release/zed_visual_test_runner"
+
+echo "==> phase 1: the surfaces, and the disk state a relaunch would find"
+"${runner}"
+
+echo
+echo "==> phase 2: a cold process, disclosing from that disk state"
+OMEGA_VISUAL_PHASE=restart "${runner}"
