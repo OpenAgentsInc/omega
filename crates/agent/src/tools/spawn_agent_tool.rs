@@ -8,7 +8,10 @@ use serde::{Deserialize, Deserializer, Serialize};
 use std::rc::Rc;
 use std::sync::Arc;
 
-use crate::{AgentTool, ThreadEnvironment, ToolCallEventStream, ToolInput};
+use crate::{
+    AgentTool, ExecutorResolution, ThreadEnvironment, ToolCallEventStream, ToolInput,
+    resolve_requested_executor,
+};
 
 /// Spawn a sub-agent for a well-scoped task.
 ///
@@ -30,8 +33,16 @@ use crate::{AgentTool, ThreadEnvironment, ToolCallEventStream, ToolInput};
 /// - When a plan has multiple independent steps, prefer delegating those steps in parallel rather than serializing them unnecessarily.
 /// - Reuse the returned session_id when you want to follow up on the same delegated subproblem instead of creating a duplicate session.
 ///
+/// ### Choosing what runs the agent
+/// - By default a sub-agent runs on the same model you are running on. Omit `executor` for that; it is the right choice for most delegation.
+/// - Set `executor` to run the sub-agent as a *different* agent entirely — Codex or Claude Code, each with its own login, its own tools and its own loop. Use this when the task suits another agent better, or when you want a second opinion from a genuinely independent one.
+/// - Accepted values are agent ids: `codex-acp` (Codex) and `claude-acp` (Claude Code). Only agents actually installed on this machine can be used; asking for one that is not installed fails and tells you which agents are available, so you can retry with one of those.
+/// - `executor` names an agent, not a language model. A model name such as `gpt-5` is not accepted and will fail rather than silently running on your own model.
+/// - You may give different sub-agents different executors in the same turn, and they run concurrently.
+///
 /// ### Output
 /// - You will receive only the agent's final message as output.
+/// - The result also names the `executor` that produced it, so you can tell which agent gave you which answer.
 /// - Successful calls return a session_id that you can use for follow-up messages.
 /// - Error results may also include a session_id if a session was already created.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -44,6 +55,9 @@ pub struct SpawnAgentToolInput {
     /// Session ID of an existing agent session to continue instead of creating a new one. Omit to create a new agent.
     #[serde(default, deserialize_with = "deserialize_session_id")]
     pub session_id: Option<acp::SessionId>,
+    /// Which agent should run this sub-agent: `codex-acp` or `claude-acp`. Omit to run it on your own model, which is the default. This names an agent, not a language model.
+    #[serde(default)]
+    pub executor: Option<String>,
 }
 
 fn deserialize_session_id<'de, D>(deserializer: D) -> Result<Option<acp::SessionId>, D::Error>
@@ -74,6 +88,10 @@ pub enum SpawnAgentToolOutput {
         session_id: acp::SessionId,
         output: String,
         session_info: SubagentSessionInfo,
+        /// What actually ran this subagent. Reported by the handle, so a mixed
+        /// fan-out is attributable result by result.
+        #[serde(default)]
+        executor: Option<String>,
     },
     Error {
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -81,6 +99,8 @@ pub enum SpawnAgentToolOutput {
         session_id: Option<acp::SessionId>,
         error: String,
         session_info: Option<SubagentSessionInfo>,
+        #[serde(default)]
+        executor: Option<String>,
     },
 }
 
@@ -91,8 +111,11 @@ impl From<SpawnAgentToolOutput> for LanguageModelToolResultContent {
                 session_id,
                 output,
                 session_info: _, // Don't show this to the model
+                executor,
             } => serde_json::to_string(
-                &serde_json::json!({ "session_id": session_id, "output": output }),
+                // The executor *is* shown to the model. Without it a mixed
+                // fan-out comes back as three anonymous answers.
+                &serde_json::json!({ "session_id": session_id, "output": output, "executor": executor }),
             )
             .unwrap_or_else(|e| format!("Failed to serialize spawn_agent output: {e}"))
             .into(),
@@ -100,8 +123,9 @@ impl From<SpawnAgentToolOutput> for LanguageModelToolResultContent {
                 session_id,
                 error,
                 session_info: _, // Don't show this to the model
+                executor,
             } => serde_json::to_string(
-                &serde_json::json!({ "session_id": session_id, "error": error }),
+                &serde_json::json!({ "session_id": session_id, "error": error, "executor": executor }),
             )
             .unwrap_or_else(|e| format!("Failed to serialize spawn_agent output: {e}"))
             .into(),
@@ -159,19 +183,67 @@ impl AgentTool for SpawnAgentTool {
                     session_id: None,
                     error: e.to_string(),
                     session_info: None,
+                    executor: None,
                 })?;
 
-            let (subagent, mut session_info) = cx.update(|cx| {
-                let subagent = if let Some(session_id) = input.session_id {
-                    self.environment.resume_subagent(session_id, cx)
-                } else {
-                    self.environment.create_subagent(input.label, cx)
-                };
-                let subagent = subagent.map_err(|err| SpawnAgentToolOutput::Error {
+            // Decide what runs this before creating anything. A named agent
+            // that is not installed must fail here, naming itself, rather than
+            // reaching a fallback further down.
+            let executor = match resolve_requested_executor(input.executor.as_deref()) {
+                ExecutorResolution::Resolved(executor) => executor,
+                ExecutorResolution::Refused(reason) => {
+                    return Err(SpawnAgentToolOutput::Error {
+                        session_id: None,
+                        error: reason,
+                        session_info: None,
+                        executor: None,
+                    });
+                }
+            };
+
+            // Resuming runs on whatever already created that session. Honouring
+            // `executor` here is impossible, so accepting it silently would drop
+            // the request — the same silent-fallback defect, arriving by a
+            // different door.
+            if input.session_id.is_some() && executor.is_external() {
+                return Err(SpawnAgentToolOutput::Error {
+                    session_id: input.session_id.clone(),
+                    error: "Cannot set `executor` when continuing an existing \
+                            session: the session already belongs to the agent \
+                            that created it. Omit `executor` to follow up on \
+                            this session, or omit `session_id` to start a new \
+                            subagent on the executor you named."
+                        .to_owned(),
+                    session_info: None,
+                    executor: None,
+                });
+            }
+
+            let subagent = if let Some(session_id) = input.session_id {
+                cx.update(|cx| self.environment.resume_subagent(session_id, cx))
+                    .map_err(|err| SpawnAgentToolOutput::Error {
+                        session_id: None,
+                        error: err.to_string(),
+                        session_info: None,
+                        executor: None,
+                    })?
+            } else {
+                cx.update(|cx| {
+                    self.environment
+                        .create_subagent(input.label, executor.clone(), cx)
+                })
+                .await
+                .map_err(|err| SpawnAgentToolOutput::Error {
                     session_id: None,
                     error: err.to_string(),
                     session_info: None,
-                })?;
+                    executor: None,
+                })?
+            };
+
+            let executor_label = subagent.executor_label();
+
+            let mut session_info = cx.update(|cx| {
                 let session_info = SubagentSessionInfo {
                     session_id: subagent.id(),
                     message_start_index: subagent.num_entries(cx),
@@ -187,8 +259,8 @@ impl AgentTool for SpawnAgentTool {
                     )])),
                 );
 
-                Ok((subagent, session_info))
-            })?;
+                session_info
+            });
 
             let send_result = subagent.send(input.message, cx).await;
 
@@ -201,6 +273,7 @@ impl AgentTool for SpawnAgentTool {
                 "Subagent Completed",
                 subagent_session = session_info.session_id.to_string(),
                 status,
+                executor = executor_label.clone(),
             );
 
             session_info.message_end_index =
@@ -218,6 +291,7 @@ impl AgentTool for SpawnAgentTool {
                         session_id: session_info.session_id.clone(),
                         session_info,
                         output,
+                        executor: Some(executor_label),
                     }),
                 ),
                 Err(e) => {
@@ -228,6 +302,7 @@ impl AgentTool for SpawnAgentTool {
                             session_id: Some(session_info.session_id.clone()),
                             error,
                             session_info: Some(session_info),
+                            executor: Some(executor_label),
                         }),
                     )
                 }

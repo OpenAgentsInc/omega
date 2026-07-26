@@ -84,6 +84,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0054",
     "OMEGA-DELTA-0055",
     "OMEGA-DELTA-0060",
+    "OMEGA-DELTA-0061",
     "OMEGA-DELTA-0070",
     "OMEGA-DELTA-0080",
     "OMEGA-DELTA-0090",
@@ -109,6 +110,21 @@ pub const TOOL_OUTPUT_CEILING_LINES: usize = 16;
 /// `TerminalView::MAX_EMBEDDED_LINES`. A result under it renders at its natural
 /// height, so forty lines of JSON take forty lines of the window.
 pub const UPSTREAM_TOOL_OUTPUT_CEILING_LINES: usize = 1_000;
+/// OMEGA-DELTA-0061. Where a per-spawn executor request is resolved.
+pub const SUBAGENT_EXECUTOR_PATH: &str = "crates/agent/src/tools/subagent_executor.rs";
+
+/// OMEGA-DELTA-0061. The tool that accepts the request and reports what ran.
+pub const SUBAGENT_SPAWN_TOOL_PATH: &str = "crates/agent/src/tools/spawn_agent_tool.rs";
+
+/// OMEGA-DELTA-0061. Where an external ACP subagent is opened and driven.
+pub const SUBAGENT_EXTERNAL_HANDLE_PATH: &str = "crates/agent/src/agent.rs";
+
+/// OMEGA-DELTA-0061. Every outcome of resolving a requested executor.
+///
+/// A closed pair. The invariant is that there is no third answer meaning
+/// "could not honour this, ran something else", so a new variant must fail by
+/// existing rather than pass by not being on a denylist.
+pub const SUBAGENT_EXECUTOR_OUTCOMES: &[&str] = &["Resolved", "Refused"];
 
 /// OMEGA-DELTA-0060. The tool that reads a subagent's transcript.
 pub const SUBAGENT_TRANSCRIPT_TOOL_PATH: &str =
@@ -9878,6 +9894,275 @@ mod tests {
             history.contains("fn without_the_artifact_read_the_history_loses_its_tool_results"),
             "OMEGA-DELTA-0091: the falsifier — remove the artifact read, and the \
              tool results must go with it — is no longer run as a test."
+        );
+    }
+
+    /// OMEGA-DELTA-0061. A named executor is honoured or refused by name.
+    ///
+    /// This is the whole risk of per-spawn executors. The parent asks for
+    /// Codex; it must get Codex or an error saying it could not. What must
+    /// never happen is the third thing — running on the parent's own model and
+    /// reporting success — because the parent then believes an independent
+    /// agent looked at the problem when the same agent looked at it twice.
+    /// That is the same defect class as an undisclosed provider handoff, and it
+    /// is invisible at exactly the moment it matters.
+    ///
+    /// So the resolver has two outcomes and no fallthrough, and the silence
+    /// case is pinned in both directions: omitting the field must still inherit
+    /// the parent, or every existing spawn changes behaviour.
+    #[test]
+    fn a_named_executor_is_honoured_or_refused_by_name() {
+        let path = repository_path(SUBAGENT_EXECUTOR_PATH);
+        let source = std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
+        let compact = without_whitespace(&source);
+
+        for outcome in SUBAGENT_EXECUTOR_OUTCOMES {
+            assert!(
+                source.contains(&format!("ExecutorResolution::{outcome}")),
+                "OMEGA-DELTA-0061: {} no longer names the `{outcome}` outcome. \
+                 Resolving an executor has exactly two answers; a third would \
+                 be the silent fallback this delta exists to prevent.",
+                path.display()
+            );
+        }
+
+        // Refusal carries a sentence, not a unit. A refusal the model cannot
+        // read is a failure it cannot act on.
+        assert!(
+            compact.contains(&without_whitespace("Refused(String)")),
+            "OMEGA-DELTA-0061: {} no longer carries a reason on refusal.",
+            path.display()
+        );
+
+        // The two refusal paths must name what was asked for, and the
+        // not-installed one must say it did not fall back.
+        assert!(
+            source.contains("Cannot spawn a `{}` subagent")
+                && source.contains("Cannot spawn a `{requested}` subagent"),
+            "OMEGA-DELTA-0061: {} no longer names the requested executor when \
+             it refuses. \"That agent is unavailable\" does not tell the parent \
+             which of its three subagents failed.",
+            path.display()
+        );
+        assert!(
+            source.contains("will not silently run this on the parent's own model"),
+            "OMEGA-DELTA-0061: {} no longer states that it refused rather than \
+             falling back. The promise not to substitute is the delta.",
+            path.display()
+        );
+
+        // An unrecognised name refuses. Reading "or a model for the native
+        // loop" as "anything unknown is a model" makes the typo `codex-acpp` a
+        // silent inherit.
+        assert!(
+            source.contains("not an executor Omega knows"),
+            "OMEGA-DELTA-0061: {} no longer refuses unrecognised executors. An \
+             unknown name must fail, not be guessed as a model.",
+            path.display()
+        );
+        assert!(
+            !compact.contains(&without_whitespace("_ => ExecutorResolution::Resolved")),
+            "OMEGA-DELTA-0061: {} resolves from a catch-all arm. Every \
+             resolution must name the case it is resolving.",
+            path.display()
+        );
+
+        // Every path that inherits the parent, counted.
+        //
+        // Asserting that the refusal *strings* exist proves nothing about which
+        // branch runs: a fallback added above them leaves every string in place
+        // and the file still reads correctly. What cannot be faked is the
+        // number of ways the function can answer "inherit". There are exactly
+        // two legitimate ones — the field was omitted, and the field was blank
+        // — and a third is a request for a named executor being answered with
+        // something else.
+        let production = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("the file must have production code");
+        let inherit_paths = production
+            .matches("ExecutorResolution::Resolved(SubagentExecutor::InheritParent)")
+            .count();
+        assert_eq!(
+            inherit_paths,
+            2,
+            "OMEGA-DELTA-0061: {} has {inherit_paths} paths that inherit the \
+             parent, not 2. Inheriting is only ever correct when nothing was \
+             asked for (omitted or blank). A third path means a request for a \
+             named executor is being answered with the parent's own model, \
+             which is the substitution this delta forbids.",
+            path.display()
+        );
+
+        // Silence still means today's behaviour.
+        assert!(
+            compact.contains(&without_whitespace(
+                "let Some(requested) = requested else {
+                    return ExecutorResolution::Resolved(SubagentExecutor::InheritParent);"
+            )),
+            "OMEGA-DELTA-0061: {} no longer inherits the parent when the field \
+             is omitted. Every spawn that does not ask for an executor must \
+             behave exactly as it did before this delta.",
+            path.display()
+        );
+
+        // Resuming cannot quietly drop a requested executor either — the same
+        // fallback arriving by a different door.
+        let tool_path = repository_path(SUBAGENT_SPAWN_TOOL_PATH);
+        let tool = std::fs::read_to_string(&tool_path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", tool_path.display()));
+        assert!(
+            tool.contains("Cannot set `executor` when continuing an existing"),
+            "OMEGA-DELTA-0061: {} accepts `executor` alongside `session_id` \
+             without refusing. A resumed session runs on whatever created it, \
+             so honouring the request is impossible and accepting it silently \
+             drops it.",
+            tool_path.display()
+        );
+    }
+
+    /// OMEGA-DELTA-0061. Only agents actually installed here can be asked for.
+    ///
+    /// `AllAgentServersSettings` records what is *configured*, which is not
+    /// evidence of presence — a fresh `--user-data-dir` has no settings written
+    /// whatever is on disk, so a settings-based check offers nothing on exactly
+    /// the machine a new person is using, and offers a missing agent on one
+    /// where the settings outlived the binary. Presence comes from the `PATH`
+    /// probe in `omega_agent_detect`.
+    ///
+    /// Presence is also decided *once*. Re-checking it at connect time from a
+    /// different source is how two answers to "is Codex installed" get to
+    /// disagree.
+    #[test]
+    fn only_detected_agents_are_offered() {
+        let path = repository_path(SUBAGENT_EXECUTOR_PATH);
+        let source = std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
+
+        assert!(
+            source.contains("omega_agent_detect::detected()"),
+            "OMEGA-DELTA-0061: {} no longer takes the installed set from \
+             `omega_agent_detect`. Presence must come from the PATH probe.",
+            path.display()
+        );
+        // Checked against code only. The doc comments in that file *name*
+        // `AllAgentServersSettings` to explain why it is the wrong source, and
+        // a check that cannot tell an explanation from a use would forbid
+        // writing the reason down.
+        let code_only: String = source
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            !code_only.contains("AllAgentServersSettings"),
+            "OMEGA-DELTA-0061: {} decides availability from agent-server \
+             settings. Settings record configuration, not presence.",
+            path.display()
+        );
+
+        // Known and installed are separate inputs, so "not installed here" and
+        // "no such agent" stay different sentences.
+        assert!(
+            without_whitespace(&source).contains(&without_whitespace(
+                "pub fn resolve_subagent_executor(
+                    requested: Option<&str>,
+                    known: &[InstalledAgent],
+                    installed: &[InstalledAgent],
+                ) -> ExecutorResolution"
+            )),
+            "OMEGA-DELTA-0061: the resolver in {} changed shape. It takes the \
+             known set and the installed set separately so that a real agent \
+             that is merely absent gets a different sentence from a name that \
+             does not exist.",
+            path.display()
+        );
+
+        let handle_path = repository_path(SUBAGENT_EXTERNAL_HANDLE_PATH);
+        let handle = std::fs::read_to_string(&handle_path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", handle_path.display()));
+        assert!(
+            handle.contains("Presence is *not* rechecked here."),
+            "OMEGA-DELTA-0061: {} no longer records that presence was already \
+             decided. A second presence check from another source is a second \
+             answer to the same question.",
+            handle_path.display()
+        );
+    }
+
+    /// OMEGA-DELTA-0061. Every subagent result names the executor that produced it.
+    ///
+    /// A mixed fan-out the parent cannot attribute is not finished. Three
+    /// results come back from one turn; if they are anonymous, the parent
+    /// cannot tell Codex's answer from Claude's from its own, and the entire
+    /// reason for spawning different executors is gone.
+    ///
+    /// The label is asked of the **handle**, not of the request. A label taken
+    /// from what was asked for would still read "Codex" on a subagent that
+    /// silently ran as something else — it would report the intention rather
+    /// than the fact, which is precisely the failure the other check forbids.
+    #[test]
+    fn every_subagent_result_names_its_executor() {
+        let registration_path = repository_path(SUBAGENT_TRANSCRIPT_REGISTRATION_PATH);
+        let registration = std::fs::read_to_string(&registration_path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", registration_path.display()));
+        assert!(
+            registration.contains("fn executor_label(&self) -> String;"),
+            "OMEGA-DELTA-0061: {} no longer requires a subagent handle to say \
+             what ran it. Without it a mixed fan-out is three anonymous \
+             answers.",
+            registration_path.display()
+        );
+
+        let tool_path = repository_path(SUBAGENT_SPAWN_TOOL_PATH);
+        let tool = std::fs::read_to_string(&tool_path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", tool_path.display()));
+
+        // Taken from the handle, so it reports the fact and not the request.
+        assert!(
+            tool.contains("subagent.executor_label()"),
+            "OMEGA-DELTA-0061: {} no longer asks the handle what ran the \
+             subagent. A label derived from the request reports the intention, \
+             not what happened.",
+            tool_path.display()
+        );
+        // And it reaches the model, which is the only reader that can act on it.
+        // Both arms. A success that is attributed and a failure that is not
+        // leaves the parent unable to tell which of three subagents died.
+        let attributed = tool.matches(r#""executor": executor"#).count();
+        assert_eq!(
+            attributed,
+            2,
+            "OMEGA-DELTA-0061: {} puts the executor in {attributed} of the 2 \
+             results the model reads. Attribution the parent cannot see is not \
+             attribution, and an unattributed *failure* is the case that \
+             matters most in a mixed fan-out.",
+            tool_path.display()
+        );
+
+        let handle_path = repository_path(SUBAGENT_EXTERNAL_HANDLE_PATH);
+        let handle = std::fs::read_to_string(&handle_path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", handle_path.display()));
+        // The two handles must not report the same thing, or attribution is
+        // uniform and therefore useless.
+        assert!(
+            handle.contains(r#""Omega (native loop, inherited from parent)""#),
+            "OMEGA-DELTA-0061: {} no longer distinguishes an inherited subagent \
+             in its own label.",
+            handle_path.display()
+        );
+        // Whitespace-insensitive: `cargo fmt` wraps this `format!`, and a check
+        // pinned to the single-line form would fail on formatting rather than
+        // on behaviour.
+        assert!(
+            without_whitespace(&handle).contains(&without_whitespace(
+                r#"format!("{} ({}, external ACP agent)", self.agent_name, self.agent_id)"#
+            )),
+            "OMEGA-DELTA-0061: {} no longer names the external agent in its own \
+             label. Two subagents given different executors must not report the \
+             same thing.",
+            handle_path.display()
         );
     }
 }

@@ -3083,6 +3083,82 @@ impl NativeThreadEnvironment {
         self.prompt_subagent(session_id, subagent_thread, acp_thread)
     }
 
+    /// Open a subagent that runs as an external ACP agent.
+    ///
+    /// The route is the same one the panel uses to open a Codex or Claude
+    /// thread — `CustomAgentServer` → `connect` → `new_session` — rather than a
+    /// second path built beside it. Reusing it is what makes the external
+    /// subagent a real session with the agent's own login, tools and loop
+    /// instead of an imitation.
+    ///
+    /// Presence is *not* rechecked here. It was decided before this call, from
+    /// `omega_agent_detect`, and re-deciding it from a different source is how
+    /// two answers to "is Codex installed" get to disagree. What can still fail
+    /// here is connecting, and that failure names the agent.
+    fn create_external_acp_subagent(
+        &self,
+        agent_id: String,
+        agent_name: String,
+        cx: &mut App,
+    ) -> Task<Result<Rc<dyn SubagentHandle>>> {
+        let Some(parent_thread_entity) = self.thread.upgrade() else {
+            return Task::ready(Err(anyhow!("Parent thread no longer exists")));
+        };
+        let parent_thread = parent_thread_entity.read(cx);
+
+        if parent_thread.depth() >= MAX_SUBAGENT_DEPTH {
+            return Task::ready(Err(anyhow!(
+                "Maximum subagent depth ({MAX_SUBAGENT_DEPTH}) reached"
+            )));
+        }
+
+        let project = parent_thread.project().clone();
+        let server: Rc<dyn agent_servers::AgentServer> =
+            Rc::new(agent_servers::CustomAgentServer::new(
+                project::agent_server_store::AgentId::new(agent_id.clone()),
+            ));
+        let delegate = agent_servers::AgentServerDelegate::new(
+            project.read(cx).agent_server_store().clone(),
+            None,
+            None,
+        );
+        let connect = server.connect(delegate, project.clone(), cx);
+
+        cx.spawn(async move |cx| {
+            // Both failures name the agent. "failed to connect" on its own
+            // sends the reader looking at Omega rather than at the agent that
+            // did not start.
+            let connection = connect.await.with_context(|| {
+                format!(
+                    "Could not start the {agent_name} (`{agent_id}`) agent server for this subagent"
+                )
+            })?;
+
+            let acp_thread = cx
+                .update(|cx| {
+                    connection
+                        .clone()
+                        .new_session(project.clone(), PathList::default(), cx)
+                })
+                .await
+                .with_context(|| {
+                    format!(
+                        "Could not open a {agent_name} (`{agent_id}`) session for this subagent"
+                    )
+                })?;
+
+            let session_id = cx.update(|cx| acp_thread.read(cx).session_id().clone());
+
+            Ok(Rc::new(ExternalAcpSubagentHandle {
+                session_id,
+                acp_thread,
+                agent_id,
+                agent_name,
+                _connection: connection,
+            }) as Rc<dyn SubagentHandle>)
+        })
+    }
+
     pub(crate) fn resume_subagent_thread(
         &self,
         session_id: acp::SessionId,
@@ -3234,8 +3310,18 @@ impl ThreadEnvironment for NativeThreadEnvironment {
         })
     }
 
-    fn create_subagent(&self, label: String, cx: &mut App) -> Result<Rc<dyn SubagentHandle>> {
-        self.create_subagent_thread(label, cx)
+    fn create_subagent(
+        &self,
+        label: String,
+        executor: SubagentExecutor,
+        cx: &mut App,
+    ) -> Task<Result<Rc<dyn SubagentHandle>>> {
+        match executor {
+            SubagentExecutor::InheritParent => Task::ready(self.create_subagent_thread(label, cx)),
+            SubagentExecutor::ExternalAcp { id, name } => {
+                self.create_external_acp_subagent(id, name, cx)
+            }
+        }
     }
 
     fn resume_subagent(
@@ -3277,9 +3363,18 @@ impl ThreadEnvironment for NativeThreadEnvironment {
             .get(&session_id)
             .map(|session| session.thread.clone())
             .ok_or_else(|| {
+                // An external ACP subagent is a real session that this map
+                // genuinely does not hold — its transcript lives in the agent
+                // server's own process. Saying only "not loaded" would read as
+                // "you got the ID wrong" and send the caller checking a correct
+                // ID.
                 format!(
-                    "No session {session_id} is loaded. Session IDs come from \
-                     `spawn_agent`; check the ID you were given."
+                    "No transcript is available for session {session_id}. If \
+                     this was a subagent you ran on an external executor such \
+                     as `codex-acp`, its transcript belongs to that agent and \
+                     Omega cannot read it; you have its final message only. \
+                     Otherwise, check the ID — session IDs come from \
+                     `spawn_agent`."
                 )
             })?;
 
@@ -3369,9 +3464,131 @@ impl NativeSubagentHandle {
     }
 }
 
+/// A subagent that *is* an external ACP agent — Codex, Claude Code — rather
+/// than the parent's own loop wearing a label.
+///
+/// It holds only an `AcpThread`. There is no native `Thread` behind it and no
+/// entry in `NativeAgent::sessions`: the session belongs to the external agent
+/// server, which runs its own loop with its own login and its own tools. That
+/// is the whole point, and it is also the reason this cannot reuse
+/// `NativeSubagentHandle` — that handle reads a native `Thread` for the final
+/// message, and here there is not one.
+pub struct ExternalAcpSubagentHandle {
+    session_id: acp::SessionId,
+    acp_thread: Entity<AcpThread>,
+    agent_id: String,
+    agent_name: String,
+    /// Kept alive for the life of the subagent. Dropping the connection drops
+    /// the child process, which would end the session mid-turn.
+    _connection: Rc<dyn acp_thread::AgentConnection>,
+}
+
+impl ExternalAcpSubagentHandle {
+    /// The last thing the agent said, as text.
+    ///
+    /// Thought chunks are skipped: they are the external agent's reasoning, not
+    /// its answer, and the parent asked for a result. An agent that ends a turn
+    /// having said nothing gets an explicit sentence rather than an empty
+    /// string, because "" reads to the parent as a successful empty answer.
+    fn final_message(acp_thread: &Entity<AcpThread>, cx: &App) -> String {
+        let thread = acp_thread.read(cx);
+        let text = thread
+            .entries()
+            .iter()
+            .rev()
+            .find_map(|entry| match entry {
+                acp_thread::AgentThreadEntry::AssistantMessage(message) => {
+                    let text = message
+                        .chunks
+                        .iter()
+                        .filter_map(|chunk| match chunk {
+                            acp_thread::AssistantMessageChunk::Message { block, .. } => {
+                                Some(block.to_markdown(cx).to_string())
+                            }
+                            acp_thread::AssistantMessageChunk::Thought { .. } => None,
+                        })
+                        .collect::<Vec<_>>()
+                        .join("");
+                    Some(text)
+                }
+                _ => None,
+            })
+            .unwrap_or_default();
+
+        if text.trim().is_empty() {
+            return "The agent finished its turn without producing a final \
+                    message."
+                .to_owned();
+        }
+        text
+    }
+}
+
+impl SubagentHandle for ExternalAcpSubagentHandle {
+    fn id(&self) -> acp::SessionId {
+        self.session_id.clone()
+    }
+
+    fn executor_label(&self) -> String {
+        format!(
+            "{} ({}, external ACP agent)",
+            self.agent_name, self.agent_id
+        )
+    }
+
+    fn num_entries(&self, cx: &App) -> usize {
+        self.acp_thread.read(cx).entries().len()
+    }
+
+    fn send(&self, message: String, cx: &AsyncApp) -> Task<Result<String>> {
+        let acp_thread = self.acp_thread.clone();
+        let agent_name = self.agent_name.clone();
+        cx.spawn(async move |cx| {
+            let send = cx.update(|cx| {
+                acp_thread.update(cx, |acp_thread, cx| {
+                    acp_thread.send(vec![message.into()], cx)
+                })
+            });
+
+            // A stop reason is not an error, but most of them mean the parent
+            // did not get what it asked for. Saying which one keeps a truncated
+            // answer from reading like a complete one.
+            match send.await {
+                Ok(Some(response)) => match response.stop_reason {
+                    acp::StopReason::EndTurn => {}
+                    acp::StopReason::Cancelled => {
+                        anyhow::bail!("The {agent_name} subagent was cancelled.")
+                    }
+                    acp::StopReason::MaxTokens => anyhow::bail!(
+                        "The {agent_name} subagent reached its maximum number of tokens."
+                    ),
+                    acp::StopReason::MaxTurnRequests => anyhow::bail!(
+                        "The {agent_name} subagent reached its maximum number of requests."
+                    ),
+                    acp::StopReason::Refusal => {
+                        anyhow::bail!("The {agent_name} subagent refused to process that prompt.")
+                    }
+                    _ => {}
+                },
+                Ok(None) => anyhow::bail!("No response from the {agent_name} subagent."),
+                Err(error) => anyhow::bail!("The {agent_name} subagent failed: {error}"),
+            }
+
+            Ok(cx.update(|cx| Self::final_message(&acp_thread, cx)))
+        })
+    }
+}
+
 impl SubagentHandle for NativeSubagentHandle {
     fn id(&self) -> acp::SessionId {
         self.session_id.clone()
+    }
+
+    fn executor_label(&self) -> String {
+        // Named as inherited rather than as a model. The parent knows its own
+        // model; what it cannot otherwise tell is whether this subagent was
+        // routed somewhere else.
+        "Omega (native loop, inherited from parent)".to_owned()
     }
 
     fn num_entries(&self, cx: &App) -> usize {

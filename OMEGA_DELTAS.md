@@ -3318,3 +3318,69 @@ than it sounds, because the harness omega#81's acceptance sentence names —
   merging the decisions would widen this one — but the enumeration and the pin
   it was read at belong in a single place, and neither lane should move it while
   the other is in flight.
+### OMEGA-DELTA-0061 — A subagent can be a different executor from its parent, chosen per spawn
+
+- **Upstream behaviour.** `Thread::new_subagent` copies the parent's model, so
+  every subagent is the parent wearing the same face. `subagent_model` can
+  override it, but it is one global setting for all subagents; it cannot say
+  "this one is Codex and that one is Claude". `SpawnAgentToolInput` was
+  `{label, message, session_id}` with no field for what should run the work.
+- **Why Omega diverges.** Delegating to a copy of yourself is not delegating to
+  a second opinion. Codex and Claude Code are not models — they are external ACP
+  agents with their own logins, tools and loops — so a parent that can route one
+  subagent to Codex and another to Claude gets work done by agents that are
+  actually independent of it. `spawn_agent` now takes an optional `executor`, and
+  a subagent named `codex-acp` runs a real ACP session against the Codex agent
+  server through the same `CustomAgentServer` → `connect` → `new_session` path
+  the panel uses, not a second path built beside it.
+- **The law: honoured, or refused by name. Never substituted.** Resolution is
+  `resolve_subagent_executor`, a pure function of what was asked for, what Omega
+  knows, and what is installed. It has two outcomes — `Resolved` and `Refused` —
+  and deliberately no third meaning "could not honour this, ran something else".
+  - A request for `codex-acp` on a machine without Codex **fails, naming Codex**,
+    and says it did not fall back. The alternative is a subagent that reports as
+    Codex and is not, which is the same defect class as an undisclosed provider
+    handoff: the parent believes an independent agent looked at the problem when
+    the same agent looked at it twice.
+  - **An unrecognised name is refused, not guessed.** The tempting reading of
+    "or a model for the native loop" is that anything which is not an agent id is
+    a model name. That makes the typo `codex-acpp` a silent inherit. Per-spawn
+    native *model* selection is therefore not accepted at all here — it needs a
+    validated model lookup, and adding it as a fallthrough would reintroduce
+    exactly the substitution this delta forbids.
+  - Matching is by **exact id** against a closed set. No prefix or case
+    matching, so `codex` does not become `codex-acp` and one agent's name cannot
+    capture another's request.
+  - `executor` together with `session_id` is **refused**, not ignored. A resumed
+    session runs on whatever created it, so honouring the request is impossible
+    and accepting it silently would drop it — the same fallback through a
+    different door.
+  - Omitting the field still inherits the parent, unchanged. That is the
+    compatibility promise, and it is pinned in both directions.
+- **The law: presence, not configuration.** The installed set comes from
+  `omega_agent_detect`, a `PATH` probe, and never from `AllAgentServersSettings`.
+  Settings record what is *configured*, which is a different fact: a fresh
+  `--user-data-dir` has no settings written whatever is on disk, so a
+  settings-based check offers nothing on exactly the machine a new person is
+  using — and offers a missing agent on one whose settings outlived the binary.
+  Presence is decided once, before anything is created; the connect path does not
+  re-derive it, because two sources for one question eventually disagree.
+- **The law: every result names what produced it.** A mixed fan-out the parent
+  cannot attribute is not finished. Each result carries an `executor` label in
+  the JSON the model reads, and the label is asked of the **handle**, not of the
+  request — a label taken from what was asked for would still read "Codex" on a
+  subagent that ran as something else, reporting the intention rather than the
+  fact.
+- **What this does not cover.** No external subagent has been run against a real
+  Codex or Claude binary — the resolution law, the refusals and the wiring are
+  unit- and compile-tested, but the live ACP session, its streaming and its
+  teardown have never executed here, and nothing about this has been seen in a
+  window. `ExecutorDisclosure` in the thread record is not populated for external
+  subagents: they have no native `Thread`, and the disclosure surface belongs to
+  another change. Their transcripts are not readable through
+  `read_subagent_transcript` either — the session lives in the agent server's
+  process, and OMEGA-DELTA-0060's lookup says so rather than implying a bad ID.
+- **Enforced by:** `a_named_executor_is_honoured_or_refused_by_name`,
+  `only_detected_agents_are_offered`, and
+  `every_subagent_result_names_its_executor` in `crates/omega_deltas`; plus the
+  suite in `crates/agent/src/tools/subagent_executor.rs`.

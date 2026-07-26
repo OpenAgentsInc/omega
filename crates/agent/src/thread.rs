@@ -4,7 +4,7 @@ use crate::{
     FetchTool, FindPathTool, FindReferencesTool, GetCodeActionsTool, GoToDefinitionTool, GrepTool,
     ListAgentsAndModelsTool, ListDirectoryTool, MovePathTool, ProjectSnapshot, ReadFileTool,
     ReadSubagentTranscriptTool, RenameTool, SandboxedTerminalTool, SpawnAgentTool,
-    SubagentTranscript, SystemPromptTemplate, Template, Templates, TerminalTool,
+    SubagentExecutor, SubagentTranscript, SystemPromptTemplate, Template, Templates, TerminalTool,
     ToolPermissionDecision, TranscriptBlock, TranscriptEntry, TranscriptRole,
     TranscriptWindowRequest, WebSearchTool, WriteFileTool, decide_permission_from_settings,
 };
@@ -815,6 +815,14 @@ pub trait SubagentHandle {
     fn num_entries(&self, cx: &App) -> usize;
     /// Runs a turn for a given message and returns both the response and the index of that output message.
     fn send(&self, message: String, cx: &AsyncApp) -> Task<Result<String>>;
+    /// What actually ran this subagent, for the parent to attribute the result.
+    ///
+    /// A mixed fan-out where the parent cannot tell which result came from
+    /// which executor is not finished, so every handle must be able to say
+    /// what it is. This is the handle's own answer, not the request that
+    /// produced it: if the two could differ, the label would be a claim rather
+    /// than a report.
+    fn executor_label(&self) -> String;
 }
 
 pub trait ThreadEnvironment {
@@ -828,7 +836,21 @@ pub trait ThreadEnvironment {
         cx: &mut AsyncApp,
     ) -> Task<Result<Rc<dyn TerminalHandle>>>;
 
-    fn create_subagent(&self, label: String, cx: &mut App) -> Result<Rc<dyn SubagentHandle>>;
+    /// Create a subagent to be run by `executor`.
+    ///
+    /// Returns a `Task` because an external executor has to connect to its
+    /// agent server before there is a session at all. The native path resolves
+    /// immediately.
+    ///
+    /// A failure here must name the executor that was asked for. Falling back
+    /// to the parent's model would produce a subagent that reports as one thing
+    /// and is another.
+    fn create_subagent(
+        &self,
+        label: String,
+        executor: SubagentExecutor,
+        cx: &mut App,
+    ) -> Task<Result<Rc<dyn SubagentHandle>>>;
 
     /// Read a window of the transcript of a subagent **this thread**
     /// spawned.

@@ -18,6 +18,8 @@ workspace = true
 
 [dependencies]
 acp_thread.workspace = true
+omega_agent_detect.workspace = true
+omega_front_door.workspace = true
 action_log.workspace = true
 async-channel.workspace = true
 agent-client-protocol.workspace = true

@@ -167,6 +167,10 @@ struct FakeSubagentHandle {
 }
 
 impl SubagentHandle for FakeSubagentHandle {
+    fn executor_label(&self) -> String {
+        "Fake (test)".to_owned()
+    }
+
     fn id(&self) -> acp::SessionId {
         self.session_id.clone()
     }
@@ -227,12 +231,17 @@ impl crate::ThreadEnvironment for FakeThreadEnvironment {
         Task::ready(Ok(handle as Rc<dyn crate::TerminalHandle>))
     }
 
-    fn create_subagent(&self, _label: String, _cx: &mut App) -> Result<Rc<dyn SubagentHandle>> {
-        Ok(self
+    fn create_subagent(
+        &self,
+        _label: String,
+        _executor: crate::SubagentExecutor,
+        _cx: &mut App,
+    ) -> Task<Result<Rc<dyn SubagentHandle>>> {
+        Task::ready(Ok(self
             .subagent_handle
             .clone()
             .expect("Subagent handle not available on FakeThreadEnvironment")
-            as Rc<dyn SubagentHandle>)
+            as Rc<dyn SubagentHandle>))
     }
 }
 
@@ -268,7 +277,12 @@ impl crate::ThreadEnvironment for MultiTerminalEnvironment {
         Task::ready(Ok(handle as Rc<dyn crate::TerminalHandle>))
     }
 
-    fn create_subagent(&self, _label: String, _cx: &mut App) -> Result<Rc<dyn SubagentHandle>> {
+    fn create_subagent(
+        &self,
+        _label: String,
+        _executor: crate::SubagentExecutor,
+        _cx: &mut App,
+    ) -> Task<Result<Rc<dyn SubagentHandle>>> {
         unimplemented!()
     }
 }
@@ -5522,6 +5536,7 @@ async fn test_subagent_tool_call_end_to_end(cx: &mut TestAppContext) {
     cx.run_until_parked();
     model.send_last_completion_stream_text_chunk("spawning subagent");
     let subagent_tool_input = SpawnAgentToolInput {
+        executor: None,
         label: "label".to_string(),
         message: "subagent task prompt".to_string(),
         session_id: None,
@@ -5658,6 +5673,7 @@ async fn test_subagent_tool_output_does_not_include_thinking(cx: &mut TestAppCon
     cx.run_until_parked();
     model.send_last_completion_stream_text_chunk("spawning subagent");
     let subagent_tool_input = SpawnAgentToolInput {
+        executor: None,
         label: "label".to_string(),
         message: "subagent task prompt".to_string(),
         session_id: None,
@@ -5807,6 +5823,7 @@ async fn test_subagent_tool_call_cancellation_during_task_prompt(cx: &mut TestAp
     cx.run_until_parked();
     model.send_last_completion_stream_text_chunk("spawning subagent");
     let subagent_tool_input = SpawnAgentToolInput {
+        executor: None,
         label: "label".to_string(),
         message: "subagent task prompt".to_string(),
         session_id: None,
@@ -5938,6 +5955,7 @@ async fn test_subagent_tool_resume_session(cx: &mut TestAppContext) {
     cx.run_until_parked();
     model.send_last_completion_stream_text_chunk("spawning subagent");
     let subagent_tool_input = SpawnAgentToolInput {
+        executor: None,
         label: "initial task".to_string(),
         message: "do the first task".to_string(),
         session_id: None,
@@ -6001,6 +6019,7 @@ async fn test_subagent_tool_resume_session(cx: &mut TestAppContext) {
     cx.run_until_parked();
     model.send_last_completion_stream_text_chunk("resuming subagent");
     let resume_tool_input = SpawnAgentToolInput {
+        executor: None,
         label: "follow-up task".to_string(),
         message: "do the follow-up task".to_string(),
         session_id: Some(subagent_session_id.clone()),
@@ -6589,6 +6608,7 @@ async fn test_subagent_context_window_warning(cx: &mut TestAppContext) {
     cx.run_until_parked();
     model.send_last_completion_stream_text_chunk("spawning subagent");
     let subagent_tool_input = SpawnAgentToolInput {
+        executor: None,
         label: "label".to_string(),
         message: "subagent task prompt".to_string(),
         session_id: None,
@@ -6716,6 +6736,7 @@ async fn test_subagent_no_context_window_warning_when_already_at_warning(cx: &mu
     cx.run_until_parked();
     model.send_last_completion_stream_text_chunk("spawning subagent");
     let subagent_tool_input = SpawnAgentToolInput {
+        executor: None,
         label: "initial task".to_string(),
         message: "do the first task".to_string(),
         session_id: None,
@@ -6784,6 +6805,7 @@ async fn test_subagent_no_context_window_warning_when_already_at_warning(cx: &mu
     cx.run_until_parked();
     model.send_last_completion_stream_text_chunk("resuming subagent");
     let resume_tool_input = SpawnAgentToolInput {
+        executor: None,
         label: "follow-up task".to_string(),
         message: "do the follow-up task".to_string(),
         session_id: Some(subagent_session_id.clone()),
@@ -6893,6 +6915,7 @@ async fn test_subagent_error_propagation(cx: &mut TestAppContext) {
     cx.run_until_parked();
     model.send_last_completion_stream_text_chunk("spawning subagent");
     let subagent_tool_input = SpawnAgentToolInput {
+        executor: None,
         label: "label".to_string(),
         message: "subagent task prompt".to_string(),
         session_id: None,

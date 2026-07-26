@@ -23,6 +23,7 @@ mod read_subagent_transcript_tool;
 mod rename_tool;
 mod skill_tool;
 mod spawn_agent_tool;
+mod subagent_executor;
 mod symbol_locator;
 mod terminal_tool;
 mod tool_permissions;
@@ -85,6 +86,7 @@ pub use read_subagent_transcript_tool::*;
 pub use rename_tool::*;
 pub use skill_tool::*;
 pub use spawn_agent_tool::*;
+pub use subagent_executor::*;
 pub use symbol_locator::*;
 
 pub use terminal_tool::*;
