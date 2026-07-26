@@ -23,6 +23,7 @@ mod message_editor;
 mod mode_selector;
 mod model_selector;
 mod model_selector_popover;
+pub mod omega_agent_attach;
 pub mod omega_audience_control;
 pub mod omega_executor_disclosure;
 pub mod omega_exo_connection;
@@ -523,6 +524,30 @@ impl Agent {
                     std::env::temp_dir().join(format!("omega-exo-lane-{}.json", std::process::id()))
                 } else {
                     crate::omega_exo_connection::ExoLaneConfig::data_dir_path()
+                },
+                // OMEGA-DELTA-0095, omega#106. The coding agents actually
+                // installed on this machine, which the router attaches one of
+                // as its external ACP executor.
+                //
+                // The read happens here rather than inside the router because
+                // the router is not allowed to read the environment — see
+                // `NON_DETERMINISTIC_ROUTING_TOKENS` in `crates/omega_deltas` —
+                // and because only this file knows which runs are a person's.
+                //
+                // A stateless run and a test build both get an empty set, for
+                // the same reason a stateless run gets a temporary Exo lane
+                // path above: neither is a person's session, and a process that
+                // is not a person's session must not spawn that person's real
+                // Codex. Unlike the Exo lane, which is inert in a test because
+                // no lane file exists, detection is not inert: the machine
+                // running the tests is a developer machine and really does have
+                // `codex` on `PATH`.
+                if std::env::var("ZED_STATELESS").is_ok()
+                    || cfg!(any(test, feature = "test-support"))
+                {
+                    Vec::new()
+                } else {
+                    omega_agent_detect::detected().to_vec()
                 },
             )),
             Self::Custom { id: name } => {

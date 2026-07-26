@@ -871,6 +871,12 @@ pub struct OmegaRouterServer {
     /// `OMEGA-DELTA-0042`. Chosen by the caller for the same reason the journal
     /// path is: a harness must not read the owner's real data directory.
     exo_lane_path: PathBuf,
+    /// The coding agents found on this machine, in preference order.
+    /// `OMEGA-DELTA-0095`, omega#106. Passed in rather than read here, for the
+    /// two reasons the paths above are: this file may not read the
+    /// environment, and a rendering harness must be able to attach nothing
+    /// without the router knowing what a harness is.
+    installed_agents: Vec<omega_agent_detect::DetectedAgent>,
 }
 
 impl OmegaRouterServer {
@@ -880,11 +886,13 @@ impl OmegaRouterServer {
         native: agent::NativeAgentServer,
         journal_path: PathBuf,
         exo_lane_path: PathBuf,
+        installed_agents: Vec<omega_agent_detect::DetectedAgent>,
     ) -> Self {
         Self {
             native,
             journal_path,
             exo_lane_path,
+            installed_agents,
         }
     }
 
@@ -914,6 +922,7 @@ impl agent_servers::AgentServer for OmegaRouterServer {
         let native = self.native.connect(delegate, project.clone(), cx);
         let journal_path = self.journal_path.clone();
         let exo_lane_path = self.exo_lane_path.clone();
+        let installed_agents = self.installed_agents.clone();
         cx.spawn(async move |cx| {
             let native = native.await?;
             let mut router = OmegaAgentConnection::new(native, RouteJournal::at(journal_path));
@@ -926,13 +935,31 @@ impl agent_servers::AgentServer for OmegaRouterServer {
             // `RouteReason::ExternalAcpUnavailable`.
             if let Some(exo) = crate::omega_exo_connection::connect_configured_lane(
                 &exo_lane_path,
+                project.clone(),
+                agent_server_store.clone(),
+                cx,
+            )
+            .await?
+            {
+                router = router.with_external_acp(exo);
+            // `OMEGA-DELTA-0095`, omega#106. Otherwise the coding agent that is
+            // actually installed — Codex first, then Claude. Second, because an
+            // Exo lane is a file the owner wrote and detection is only a
+            // binary that happens to be on `PATH`: explicit configuration wins
+            // over what was found. A machine with neither attaches nothing and
+            // every thread stays on the native loop with its visible fallback
+            // reason. A machine where the chosen agent cannot be reached fails
+            // here naming it, rather than producing a thread that reports one
+            // executor and runs another.
+            } else if let Some(installed) = crate::omega_agent_attach::connect_detected_executor(
+                &installed_agents,
                 project,
                 agent_server_store,
                 cx,
             )
             .await?
             {
-                router = router.with_external_acp(exo);
+                router = router.with_external_acp(installed);
             }
             let router = Rc::new(router);
             publish_active_router(&router);

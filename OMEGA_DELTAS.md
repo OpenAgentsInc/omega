@@ -3685,3 +3685,90 @@ than it sounds, because the harness omega#81's acceptance sentence names —
   `a_thread_keeps_the_audience_it_was_started_in`, and
   `the_audience_is_recorded_where_a_thread_starts` in `crates/omega_deltas`;
   plus the 17 unit tests in `crates/omega_audience/src/omega_audience.rs`.
+
+### OMEGA-DELTA-0095 — The coding agent that is installed runs the turn
+
+- **Upstream Zed:** an external ACP agent runs a thread only when a person
+  picks it from the agent panel, and the picked agent then owns that thread.
+  There is no first-party router above the executors, so there is nothing for a
+  detected agent to be attached *to*.
+- **Omega:** on a machine where `omega_agent_detect` finds Codex or Claude on
+  `PATH`, that agent is connected as `OmegaAgentConnection`'s external ACP
+  executor when the router is built. `OMEGA-DELTA-0055` already sends an
+  unpinned thread to the attached external agent, so the first message a person
+  types executes on Codex — no lane file, no pin, no flag — and
+  `OMEGA-DELTA-0021`'s disclosure line names `codex-acp` rather than
+  `native_loop`.
+- **Why:** omega#106. Every part of this existed and one call did not.
+  Detection landed on omega#100, the onboarding grid lists both agents,
+  `agent_servers` hosts `codex-acp` and `claude-acp` over ACP, and the routing
+  law already prefers an attached external agent. The only production site that
+  registered an external executor could register the Exo harness lane and
+  nothing else, so `codex-acp` and `claude-acp` appeared in the tree only as
+  `stub("codex-acp")` inside tests. The visible symptom was a machine with
+  Codex installed running every turn on the native loop against a
+  model-provider key, and saying so in the disclosure line.
+- **Presence decides, configuration does not.** The gate is an executable file
+  on `PATH`, never `AllAgentServersSettings`. That map records what is
+  *configured*, and Omega ships `codex-acp` in its own defaults
+  (`OMEGA-DELTA-0027`), so it is non-empty on a machine that has never had
+  Codex. Attaching from it would attach Codex everywhere and the failure would
+  arrive as a thread that reports one executor and runs another — the defect
+  class the disclosure line exists to prevent.
+- **Codex first, then Claude, and the order cannot move.** The chosen agent is
+  the first entry of `omega_agent_detect::CANDIDATES` that is both present and
+  drivable. That is the candidate order, not `PATH` order, so the shell Omega
+  was launched from cannot change which agent runs a turn. GitHub Copilot and
+  Cursor are detected and are not drivable, because Omega hosts no ACP server
+  for either; they are passed over by name in the log line.
+- **`omega_agent_detect::preferred` is deliberately not used.** It answers the
+  stricter question omega#100 asked — "is Codex here?" — and returns `None`
+  when Codex is absent even though Claude is present, so that a missing Codex
+  is never substituted for silently. omega#106 asks the wider question and
+  answers it out loud instead: acceptance 3 is Codex absent, Claude present,
+  the turn running on Claude, and the line saying so. The disclosure carries
+  the agent id of the connection that ran, so `codex-acp` and `claude-acp` are
+  distinguishable in the window without a second record that could drift.
+- **An explicit Exo lane still wins.** The router tries
+  `omega_exo_connection::connect_configured_lane` first and the detected agent
+  only if that found nothing. A lane file is something the owner wrote; a
+  binary on `PATH` is something that happens to be there.
+- **A chosen agent that cannot start is an error naming it, never a
+  fallback.** Once an agent has been chosen, the store going away, the ACP
+  server never registering, and the ACP server failing to start all return an
+  error carrying the agent's name and the file detection found. `Ok(None)` has
+  exactly one meaning — nothing drivable is installed — and the check counts
+  its occurrences to keep it that way. The no-agent case is the ordinary case
+  for a new person and is unchanged: no external executor is registered, the
+  native loop runs, and the composer shows its existing fallback reason.
+- **`claude-acp` joins `codex-acp` in the shipped defaults.** Configured is not
+  installed; this only means that when detection *does* find Claude there is an
+  ACP server for it to be hosted by. Without the entry, acceptance 3 could not
+  be reached on any machine.
+- **The detected set is passed into the router, not read by it.** The router
+  may not read the environment (`NON_DETERMINISTIC_ROUTING_TOKENS`), and a
+  stateless run must attach nothing so a rendering harness never spawns
+  somebody's real Codex — the same rule the Exo lane path beside it follows.
+  Both are decisions of the factory in `crates/agent_ui/src/agent_ui.rs`.
+- **The bridge is `CustomAgentServer`.** `AgentServerStore::get_external_agent`
+  returns a `&mut dyn ExternalAgentServer`, which is a command source rather
+  than something `connect` can take. `CustomAgentServer` is the `AgentServer`
+  that resolves that borrow inside its own `connect`, and it is what the agent
+  panel already goes through, so the attach path and the hand-picked path start
+  the same process the same way.
+
+- **Enforced by:** `the_installed_coding_agent_is_attached_as_the_thread_executor`
+  in `crates/omega_deltas/`, which pins the connect sequence, the drivable ids,
+  the absence of a settings-keyed gate, the single `Ok(None)`, the registration
+  call in the router, the `ZED_STATELESS` guard in the factory, and both
+  registry entries in the shipped defaults. The choice itself runs through its
+  real function in `choose_executor`'s tests in `crates/agent_ui/`.
+- **What this does not cover.** No check starts a process, so none of this
+  proves that `codex-acp` launches, that it finds the Codex login, or that a
+  turn streams. The acceptance is a rendered window. The bounded wait for the
+  ACP server to register is 5 seconds, which is a race the check cannot
+  observe: on a machine where the ACP registry never loads — no network and no
+  cached registry — a detected agent spends that bound and then fails naming
+  itself, and the agent panel reports the failure rather than opening on the
+  native loop. That is the stated rule, and it is the one behaviour here worth
+  watching in a window first.

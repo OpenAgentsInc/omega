@@ -92,6 +92,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0092",
     "OMEGA-DELTA-0093",
     "OMEGA-DELTA-0094",
+    "OMEGA-DELTA-0095",
 ];
 
 /// OMEGA-DELTA-0094. The audience rules, which know nothing about a window.
@@ -116,6 +117,36 @@ pub const CONVERSATION_VIEW_PATH: &str = "crates/agent_ui/src/conversation_view.
 /// Serialisation is admitted because a record that does not survive a restart
 /// is inferred after one.
 pub const AUDIENCE_ALLOWED_DEPENDENCIES: &[&str] = &["serde"];
+/// OMEGA-DELTA-0095. Where a detected coding agent becomes the router's
+/// external ACP executor.
+pub const DETECTED_EXECUTOR_ATTACH_PATH: &str = "crates/agent_ui/src/omega_agent_attach.rs";
+
+/// OMEGA-DELTA-0095. The connect sequence a detected agent is attached
+/// through.
+///
+/// The same three steps `agent_connection_store` uses when a person picks an
+/// agent by hand — the store, a delegate over it, and the server's own
+/// `connect`. `CustomAgentServer` is the bridge that makes this possible at
+/// all: `AgentServerStore::get_external_agent` hands back a
+/// `&mut dyn ExternalAgentServer`, which is a command source and not something
+/// `connect` can take, and `CustomAgentServer` is the `AgentServer` that
+/// resolves that borrow inside its own `connect`. Building a command here
+/// instead would be a second, divergent copy of that resolution.
+pub const DETECTED_EXECUTOR_CONNECT_STEPS: &[&str] = &[
+    "CustomAgentServer::new(AgentId::new(agent.id))",
+    "AgentServerDelegate::new(store, None, None)",
+    "server.connect(delegate, project, cx)",
+];
+
+/// OMEGA-DELTA-0095. The agents the attach path will drive, named as
+/// `agent_servers` names them.
+pub const DETECTED_EXECUTOR_DRIVABLE_TOKENS: &[&str] =
+    &["agent_servers::CODEX_ID", "agent_servers::CLAUDE_AGENT_ID"];
+
+/// OMEGA-DELTA-0095. Settings keys that must declare a registry ACP server, so
+/// a detected agent has something to be hosted by.
+pub const DETECTED_EXECUTOR_SETTINGS_KEYS: &[&str] =
+    &["agent_servers.codex-acp", "agent_servers.claude-acp"];
 
 /// OMEGA-DELTA-0080. Where the agent panel declares its result-body ceiling and
 /// applies it to every terminal it creates.
@@ -8594,8 +8625,7 @@ mod tests {
             detect_path.display()
         );
         assert!(
-            detect.contains("searched: Vec<PathBuf>,")
-                && !detect.contains("expected: PathBuf,"),
+            detect.contains("searched: Vec<PathBuf>,") && !detect.contains("expected: PathBuf,"),
             "OMEGA-DELTA-0092: {} reports an absent root as one expected path \
              again. A refusal that names one place gets read as a statement \
              about every place, which is exactly how this went wrong.",
@@ -10910,5 +10940,140 @@ mod tests {
         let path = repository_path(relative);
         std::fs::read_to_string(&path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()))
+    }
+
+    /// OMEGA-DELTA-0095. The coding agent that is installed runs the turn.
+    ///
+    /// omega#106. Detection, the onboarding grid, ACP hosting for `codex-acp`
+    /// and `claude-acp`, and auto-routing to the attached external agent all
+    /// existed already. Nothing attached one, so a machine with Codex on
+    /// `PATH` ran every turn on the native loop and the disclosure named
+    /// `native_loop`. This is the same failure shape as `OMEGA-DELTA-0035` and
+    /// `OMEGA-DELTA-0042`: a complete mechanism reachable by nobody, which
+    /// compiles, passes its own tests, and does nothing.
+    ///
+    /// The four parts checked here are the four ways it can revert to that:
+    /// the attach can stop being called, the choice can stop being made from
+    /// presence, the failure can start degrading to the native loop, or the
+    /// ACP servers can stop being configured so nothing can be hosted.
+    #[test]
+    fn the_installed_coding_agent_is_attached_as_the_thread_executor() {
+        let attach_path = repository_path(DETECTED_EXECUTOR_ATTACH_PATH);
+        let attach = std::fs::read_to_string(&attach_path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", attach_path.display()));
+        // The tests in that file name several of these tokens while showing
+        // why the production path does not use them, so the scan reads the
+        // production half only.
+        let production = code_of(
+            attach
+                .split("#[cfg(test)]")
+                .next()
+                .expect("splitting always yields a first part"),
+        );
+        let compact = without_whitespace(&production);
+
+        for step in DETECTED_EXECUTOR_CONNECT_STEPS {
+            assert!(
+                compact.contains(&without_whitespace(step)),
+                "OMEGA-DELTA-0095: {} lost `{step}` from the connect sequence. \
+                 That is the path `agent_connection_store` already uses, and \
+                 the only bridge from a registered external agent to an \
+                 `Rc<dyn AgentConnection>`; a second way of starting the same \
+                 agent would diverge from it silently.",
+                attach_path.display()
+            );
+        }
+
+        for token in DETECTED_EXECUTOR_DRIVABLE_TOKENS {
+            assert!(
+                compact.contains(&without_whitespace(token)),
+                "OMEGA-DELTA-0095: {} no longer names `{token}` among the \
+                 agents it will attach, so that agent can never run a turn.",
+                attach_path.display()
+            );
+        }
+
+        for signature in [
+            "pub fn choose_executor(detected: &[DetectedAgent])",
+            "detected: &[DetectedAgent],",
+        ] {
+            assert!(
+                compact.contains(&without_whitespace(signature)),
+                "OMEGA-DELTA-0095: {} no longer takes `{signature}`, so it no \
+                 longer decides from what detection found on disk.",
+                attach_path.display()
+            );
+        }
+        assert!(
+            !production.contains("AllAgentServersSettings"),
+            "OMEGA-DELTA-0095: {} reads the configured-agents map. That records \
+             what is configured, not what is present — Omega ships `codex-acp` \
+             in its own defaults — so attaching from it would attach Codex on a \
+             machine that has never had it, and the failure would arrive as a \
+             thread that reports one executor and runs another.",
+            attach_path.display()
+        );
+
+        assert_eq!(
+            production.matches("Ok(None)").count(),
+            1,
+            "OMEGA-DELTA-0095: {} returns `Ok(None)` from somewhere other than \
+             the one place that means \"nothing drivable is installed\". Every \
+             other way of not reaching a chosen agent must be an error naming \
+             it: a second `Ok(None)` is a silent fallback to the native loop on \
+             a machine whose owner believes Codex is running.",
+            attach_path.display()
+        );
+
+        let router_path = repository_path(ROUTER_DISPATCH_PATH);
+        let router = std::fs::read_to_string(&router_path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", router_path.display()));
+        assert!(
+            router.contains("omega_agent_attach::connect_detected_executor")
+                && router.contains("with_external_acp(installed)"),
+            "OMEGA-DELTA-0095: {} no longer registers the installed coding \
+             agent as the router's external executor, so an unpinned thread \
+             falls to the native loop on a machine with Codex.",
+            router_path.display()
+        );
+
+        let factory_path = repository_path(AGENT_SERVER_FACTORY_PATH);
+        let factory = std::fs::read_to_string(&factory_path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", factory_path.display()));
+        assert!(
+            without_whitespace(&factory).contains(&without_whitespace(
+                "if std::env::var(\"ZED_STATELESS\").is_ok()
+                    || cfg!(any(test, feature = \"test-support\"))
+                {
+                    Vec::new()
+                } else {
+                    omega_agent_detect::detected().to_vec()
+                },"
+            )),
+            "OMEGA-DELTA-0095: {} no longer hands the router the detected \
+             agents, or no longer empties that set for a run that is not a \
+             person's session. The first leaves the attach unreachable; the \
+             second lets a rendering harness or a test spawn somebody's real \
+             Codex, which is the rule the Exo lane path beside it already \
+             follows.",
+            factory_path.display()
+        );
+
+        let settings = default_settings().expect("default settings parse");
+        for key in DETECTED_EXECUTOR_SETTINGS_KEYS {
+            let entry = default_setting(&settings, key).unwrap_or_else(|| {
+                panic!(
+                    "OMEGA-DELTA-0095: {key} is absent from the shipped \
+                     defaults, so its ACP server never registers and a machine \
+                     with that agent installed cannot run a turn on it."
+                )
+            });
+            assert_eq!(
+                entry.get("type").and_then(serde_json::Value::as_str),
+                Some("registry"),
+                "OMEGA-DELTA-0095: {key} must resolve from the ACP registry, \
+                 which is the source the endpoint allow-list approved."
+            );
+        }
     }
 }
