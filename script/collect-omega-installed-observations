@@ -59,6 +59,8 @@ from omega_identity_evidence import (  # noqa: E402
     INSTALLED_OBSERVATIONS_SCHEMA,
     MANUAL_JOURNEY_CHECKS,
     WAIVABLE_CHECKS,
+    IdentityEvidenceError,
+    validate_observation_facts,
 )
 
 OBSERVATIONS_SCHEMA = INSTALLED_OBSERVATIONS_SCHEMA
@@ -125,6 +127,23 @@ FOCUS_RETURN_RATIO = 10
 #: unreadable fails here.
 CONTRAST_LEGIBLE_LINES = 12
 CONTRAST_LEGIBLE_CONFIDENCE = 0.5
+
+#: How many lines of text have to be recognised off the rendered window in an
+#: appearance before that appearance counts as legible, and the confidence
+#: below which a recognised line is not counted. `content_legible` is a claim
+#: about what a person can read in that appearance, so it is read off the
+#: pixels exactly the way the increased-contrast claim is. It used to be a
+#: literal `True`.
+APPEARANCE_LEGIBLE_LINES = 12
+APPEARANCE_LEGIBLE_CONFIDENCE = 0.5
+
+#: How many pixels the light capture and the dark capture have to differ by
+#: before the pair counts as two appearances rather than one. A window that
+#: ignored the host, and a frozen or blank one, return nearly the same image
+#: twice and cannot clear this; a theme change repaints the background of every
+#: pane and clears it by orders of magnitude. Without this the two checks can
+#: be satisfied by a single unchanging picture taken twice.
+APPEARANCE_DIFFERENCE_PIXELS = 50_000
 
 #: How long the reduced-motion journey waits after each input before calling a
 #: state settled, and by how much the frame taken as soon as the harness could
@@ -319,6 +338,62 @@ def ocr_lines(path: Path) -> list[dict[str, Any]] | None:
         return json.loads(output).get("lines")
     except (json.JSONDecodeError, AttributeError):
         return None
+
+
+def confident_lines(
+    lines: list[dict[str, Any]] | None, minimum_confidence: float
+) -> list[dict[str, Any]] | None:
+    """The recognised lines a reader would actually be able to read.
+
+    `None` in means the read could not be made and `None` comes back out; a
+    read that could not be made never becomes a pass.
+    """
+    if lines is None:
+        return None
+    return [
+        line
+        for line in lines
+        if isinstance(line.get("text"), str)
+        and line["text"].strip()
+        and float(line.get("confidence", 0.0)) >= minimum_confidence
+    ]
+
+
+def appearance_observed(
+    name: str,
+    lines: list[dict[str, Any]] | None,
+    difference_pixels: int | None,
+) -> tuple[bool, str]:
+    """Whether one appearance was observed on the product, and why not if not.
+
+    Two facts, both read off the pixels. The window has to be legible in this
+    appearance, and the two appearances have to be different pictures. The host
+    being in the appearance is the precondition of the observation and is never
+    the observation: a frozen, blank, or appearance-ignoring window satisfies
+    the host and fails here.
+    """
+    if lines is None:
+        return False, (
+            f"{name}-theme: the rendered window could not be read, so its "
+            "legibility in this appearance was not observed"
+        )
+    if len(lines) < APPEARANCE_LEGIBLE_LINES:
+        return False, (
+            f"{name}-theme: legible_lines={len(lines)} "
+            f"(minimum {APPEARANCE_LEGIBLE_LINES})"
+        )
+    if difference_pixels is None:
+        return False, (
+            f"{name}-theme: the light and dark captures could not be compared, "
+            "so the window was not shown to follow the host appearance"
+        )
+    if difference_pixels < APPEARANCE_DIFFERENCE_PIXELS:
+        return False, (
+            f"{name}-theme: the light and dark captures differ by "
+            f"{difference_pixels} pixels (minimum {APPEARANCE_DIFFERENCE_PIXELS}), "
+            "so the window did not follow the host appearance"
+        )
+    return True, ""
 
 
 def first_position(lines: list[dict[str, Any]], phrase: str) -> float | None:
@@ -756,12 +831,155 @@ def load_upstream_parity(path: Path | None) -> tuple[dict[str, str] | None, str]
     return parity, ""  # type: ignore[return-value]
 
 
+def self_test() -> int:
+    """The appearance pair has to be able to fail, or every run records it green.
+
+    Nothing here drives the host or the candidate. It exercises the decision the
+    appearance block makes from a capture, which is the part that was missing:
+    the old block wrote `content_legible: True` as a literal and never read a
+    pixel or a character, so a window that never repainted passed both checks.
+    """
+    import tempfile
+
+    failures: list[str] = []
+
+    def expect(condition: bool, description: str) -> None:
+        if not condition:
+            failures.append(description)
+
+    # A read that could not be made stays unmade, and lines a reader could not
+    # read are not counted as read.
+    expect(confident_lines(None, 0.5) is None, "an unreadable capture became a line list")
+    filtered = confident_lines(
+        [
+            {"text": "legible", "confidence": 0.9},
+            {"text": "   ", "confidence": 0.9},
+            {"text": "smudged", "confidence": 0.2},
+            {"text": None, "confidence": 0.9},
+        ],
+        0.5,
+    )
+    expect(filtered is not None and len(filtered) == 1, "confident_lines counted the wrong lines")
+
+    readable = [
+        {"text": f"line {index}", "confidence": 0.9}
+        for index in range(APPEARANCE_LEGIBLE_LINES)
+    ]
+    thin = readable[:-1]
+    cases = [
+        ("a legible pair of different pictures", readable, APPEARANCE_DIFFERENCE_PIXELS, True),
+        ("a capture nothing could read", None, APPEARANCE_DIFFERENCE_PIXELS, False),
+        ("a capture with too little legible text", thin, APPEARANCE_DIFFERENCE_PIXELS, False),
+        ("a pair that could not be compared", readable, None, False),
+        ("two captures of the same picture", readable, 0, False),
+        (
+            "a pair just under the stated difference",
+            readable,
+            APPEARANCE_DIFFERENCE_PIXELS - 1,
+            False,
+        ),
+    ]
+    for description, lines, difference, expected in cases:
+        observed, reason = appearance_observed("light", lines, difference)
+        expect(observed is expected, f"{description} was judged {observed}")
+        expect(expected or bool(reason), f"{description} failed without saying why")
+
+    # The pixel comparison the pair rests on, run over real images.
+    with tempfile.TemporaryDirectory() as directory:
+        workspace = Path(directory)
+        try:
+            from PIL import Image
+        except ImportError:
+            expect(
+                appearance_observed("light", readable, differing_pixels(workspace, workspace))[0]
+                is False,
+                "an uncomparable pair passed",
+            )
+        else:
+            light = workspace / "light.png"
+            dark = workspace / "dark.png"
+            same = workspace / "same.png"
+            Image.new("RGB", (400, 400), (255, 255, 255)).save(light)
+            Image.new("RGB", (400, 400), (255, 255, 255)).save(same)
+            Image.new("RGB", (400, 400), (16, 16, 16)).save(dark)
+            unchanged = differing_pixels(light, same)
+            changed = differing_pixels(light, dark)
+            expect(unchanged == 0, f"two identical captures differed by {unchanged} pixels")
+            expect(
+                changed is not None and changed >= APPEARANCE_DIFFERENCE_PIXELS,
+                f"a full repaint counted only {changed} differing pixels",
+            )
+            expect(
+                appearance_observed("dark", readable, unchanged)[0] is False,
+                "an unchanged pair of captures passed",
+            )
+            expect(
+                appearance_observed("dark", readable, changed)[0] is True,
+                "a repainted pair of captures did not pass",
+            )
+
+    # The block that records the pair has to take its facts from the capture.
+    # This is the exact regression that stood: `content_legible: True` beside a
+    # screenshot, with zero `ocr_lines()` calls and zero `differing_pixels()`
+    # calls in the whole block. A decision function nothing calls is not a
+    # check, so the wiring is asserted as well as the decision.
+    source = Path(__file__).resolve().read_text(encoding="utf-8")
+    # The marker is assembled so that this line is not itself the thing it
+    # looks for. A search that can find its own source would still pass with
+    # the block deleted.
+    marker = "# ---- appearanc" + "e ------"
+    expect(source.count(marker) == 1, "the appearance block header is not where it was")
+    start = source.index(marker)
+    block = source[start : source.index("if blocked:", start)]
+    for call in (
+        "ocr_lines(",
+        "differing_pixels(",
+        "confident_lines(",
+        "appearance_observed(",
+    ):
+        expect(call in block, f"the appearance block no longer calls {call}")
+
+    # The facts this check records are the ones the receipt validator demands.
+    # A drift here would block the proof at validation instead of here.
+    for name in ("light", "dark"):
+        try:
+            validate_observation_facts(
+                f"{name}-theme", {"appearance": name, "content_legible": True}
+            )
+        except IdentityEvidenceError as error:
+            failures.append(f"{name}-theme facts are not the validated shape: {error}")
+
+    if failures:
+        for failure in failures:
+            print(f"self-test failure: {failure}", file=sys.stderr)
+        return 1
+    print(
+        json.dumps(
+            {
+                "schema": OBSERVATIONS_SCHEMA,
+                "status": "self-test-passed",
+                "appearance_legible_lines": APPEARANCE_LEGIBLE_LINES,
+                "appearance_difference_pixels": APPEARANCE_DIFFERENCE_PIXELS,
+            }
+        )
+    )
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--app", type=Path, default=Path("/Applications/Omega.app"))
-    parser.add_argument("--candidate-evidence", type=Path, required=True)
-    parser.add_argument("--evidence-root", type=Path, required=True)
-    parser.add_argument("--zed-before", required=True, help="digest captured before install")
+    parser.add_argument("--candidate-evidence", type=Path)
+    parser.add_argument("--evidence-root", type=Path)
+    parser.add_argument("--zed-before", help="digest captured before install")
+    parser.add_argument(
+        "--self-test",
+        action="store_true",
+        help=(
+            "exercise the decisions this collector makes from a capture, "
+            "without driving the host or the candidate"
+        ),
+    )
     parser.add_argument(
         "--config-name",
         default="omega-rc",
@@ -832,8 +1050,23 @@ def main() -> int:
         default=None,
         help="name of the emulated profile these observations were performed in",
     )
-    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--output", type=Path)
     args = parser.parse_args()
+
+    if args.self_test:
+        return self_test()
+
+    # These are required for a collection run. They are not declared required
+    # on the parser only so that `--self-test` can be run without inventing a
+    # candidate; a run that is missing one still refuses here.
+    for flag, value in (
+        ("--candidate-evidence", args.candidate_evidence),
+        ("--evidence-root", args.evidence_root),
+        ("--zed-before", args.zed_before),
+        ("--output", args.output),
+    ):
+        if value is None:
+            parser.error(f"{flag} is required")
 
     global PROCESS_PID, WINDOW_ID, OCR_TOOL, WINDOW_LIST_TOOL, PERFORMED_BY, PROFILE
     PROCESS_PID = args.pid
@@ -1774,11 +2007,23 @@ def main() -> int:
     # Both appearances are driven and observed. Recording only whichever the
     # host happened to be in leaves half of a pair the release has to hold in
     # both states.
+    #
+    # The host appearance is the *precondition* of these two checks, exactly as
+    # the increased-contrast flag is the precondition of that one. It is not the
+    # observation. `content_legible` used to be a literal `True` written beside
+    # a screenshot that nothing read, so a frozen, blank, or
+    # appearance-ignoring window passed both `light-theme` and `dark-theme`.
+    # Legibility is now recognised off each rendered capture at a stated line
+    # count and confidence, and the light and dark captures have to be
+    # different pictures by a stated number of pixels. One unchanging image
+    # taken twice satisfies neither.
     initial_dark = appearance_is_dark()
     if initial_dark is None:
         blocked.append("light-theme/dark-theme: cannot read system appearance")
     else:
         captured: dict[str, dict[str, str]] = {}
+        capture_paths: dict[str, Path] = {}
+        legible: dict[str, list[dict[str, Any]] | None] = {}
         for name, dark in (("light", False), ("dark", True)):
             if not set_appearance_dark(dark):
                 blocked.append(f"{name}-theme: the host refused the {name} appearance")
@@ -1788,9 +2033,23 @@ def main() -> int:
                 blocked.append(f"{name}-theme: the window could not be captured")
                 continue
             captured[name] = reference
+            capture_paths[name] = root / reference["path"]
+            legible[name] = confident_lines(
+                ocr_lines(capture_paths[name]), APPEARANCE_LEGIBLE_CONFIDENCE
+            )
         set_appearance_dark(initial_dark)
+        appearance_difference = (
+            differing_pixels(capture_paths["light"], capture_paths["dark"])
+            if {"light", "dark"} <= set(capture_paths)
+            else None
+        )
         for name in ("light", "dark"):
             if name not in captured:
+                continue
+            lines = legible.get(name)
+            observed, reason = appearance_observed(name, lines, appearance_difference)
+            if not observed or lines is None:
+                blocked.append(reason)
                 continue
             record_performed(
                 "accessibility",
@@ -1803,9 +2062,30 @@ def main() -> int:
                         {
                             "system_dark_mode": name == "dark",
                             "restored_to": "dark" if initial_dark else "light",
+                            "legible_line_count": len(lines),
+                            "legible_line_minimum": APPEARANCE_LEGIBLE_LINES,
+                            "legible_confidence_minimum": APPEARANCE_LEGIBLE_CONFIDENCE,
+                            "legible_lines": [line["text"] for line in lines][:40],
+                            "appearance_difference_pixels": appearance_difference,
+                            "appearance_difference_minimum": APPEARANCE_DIFFERENCE_PIXELS,
                             "legibility_basis": (
+                                "Optical character recognition over a capture of the "
+                                "candidate's own window taken while the host was in "
+                                "this appearance. Lines below the stated confidence "
+                                "are not counted."
+                            ),
+                            "appearance_difference_basis": (
+                                "The light capture and the dark capture were compared "
+                                "pixel by pixel. A window that ignored the host "
+                                "appearance, and a frozen or blank one, return the "
+                                "same image twice and do not clear the stated "
+                                "minimum."
+                            ),
+                            "method": (
                                 "The host was driven into this appearance and the "
-                                "candidate window was captured in it."
+                                "candidate window was captured and read in it. The "
+                                "host appearance is the precondition of this "
+                                "observation, not the observation."
                             ),
                         },
                     ),

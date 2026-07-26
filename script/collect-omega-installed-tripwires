@@ -1,25 +1,53 @@
 #!/usr/bin/env python3
-"""Prove an installed Omega candidate never wrote a secret to a public surface.
+"""Search the surfaces an installed Omega writes for a marked secret.
 
 The installed proof requires a tripwire receipt and nothing produced one, so
-that input was permanently blocked. This produces it.
+that input was permanently blocked. This produces it. The method is a
+marked-secret search: the disposable canary the candidate was given during the
+journey is searched for on every surface a secret could plausibly escape onto,
+and the receipt records which surfaces were read and that none of them carried
+it. The needle's value is never written to the receipt or to any log — recording
+the secret you are proving was not leaked would defeat the exercise — so only
+its length is kept.
 
-The method is a marked-secret search. A random needle is handed to the
-candidate through a file descriptor the operating system protects, the six
-surfaces a secret could plausibly escape onto are scanned for it, and the
-receipt records that no surface matched. The needle's value is never written
-to the receipt or to any log — recording the secret you are proving was not
-leaked would defeat the exercise, so only its length is kept.
+Three properties keep this receipt from being a formality.
 
-An absent surface is recorded as `absent` rather than `pass`. "The directory
-does not exist" and "the directory exists and is clean" are different claims,
-and collapsing them would let a missing data root read as a clean one.
+**The needle is not this script's to invent.** It is read from a descriptor the
+caller opened on the canary file, and a run without `--needle-fd` refuses rather
+than minting a fresh secret no other process has ever seen. An earlier version
+generated its own needle, wrote it into a pipe, closed both ends of that pipe in
+the same function, and then searched the disk for it. Nothing could ever have
+written that value anywhere, so `pass` was guaranteed by construction whatever
+the product did. A receipt that cannot fail is worse than no receipt.
+
+**The scan is proved able to fire on this run.** Before any surface is read the
+needle is planted in a private file and the same scanner is pointed at it. If
+that file does not come back as a match the run blocks, so a scanner that has
+been broken — by an edit, by an unreadable temporary directory, by a needle that
+arrived empty — cannot report that nothing was found.
+
+**Every surface is read where Omega actually writes, through the interface that
+surface actually has.** `crates/paths/src/paths.rs` puts `logs_dir()` and the
+telemetry log under `~/Library/Logs/<storage slug>` and `crashes_dir()` under
+`~/Library/Logs/DiagnosticReports`; none of those is under the application
+support root an earlier version scanned, so four of the six surfaces were being
+searched for in directories the product never creates. The clipboard is a
+pasteboard and the accessibility surface is a tree; neither is ever a file in a
+data directory, so each is captured through its own API into a private file that
+is deleted when the run ends.
+
+A surface that exists and does not carry the needle records `pass`. A surface
+whose location is right and whose file the product has not written records
+`absent`. A surface that could not be observed at all records `blocked`, which
+the receipt validator refuses — "nothing was found there" and "nobody looked"
+must not read the same, and only one of them may support a release.
 
 Usage:
     collect-omega-installed-tripwires \\
         --app /Applications/Omega.app \\
         --candidate-evidence <path> \\
-        --output <path>
+        --output <path> \\
+        --needle-fd 3 3<"$OMEGA_PRIVATE_PROOF_DIR/disposable-canary"
 """
 
 from __future__ import annotations
@@ -28,32 +56,40 @@ import argparse
 import hashlib
 import json
 import os
-import secrets
+import platform
+import shutil
 import stat
+import subprocess
 import sys
+import tempfile
+from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 TRIPWIRE_SCHEMA = "openagents.omega.installed-secret-tripwires.v1"
 
-#: Needle length in bytes before hex expansion. Inside the 16..4096 bound the
-#: validator enforces, and long enough that a chance collision is impossible.
-NEEDLE_BYTES = 32
+#: Bounds the receipt validator enforces on the needle, mirrored here so a
+#: canary that could not support a receipt is refused before anything is
+#: scanned rather than after.
+MINIMUM_NEEDLE_BYTES = 16
+MAXIMUM_NEEDLE_BYTES = 4096
 
-#: Every surface a secret could plausibly reach. Names are fixed by the
-#: validator; the paths are where an installed Omega actually writes.
-SURFACE_ROOTS: dict[str, list[str]] = {
-    "logs": ["logs", "hang_traces"],
-    "telemetry": ["telemetry"],
-    "clipboard": ["clipboard"],
-    "accessibility": ["accessibility"],
-    "diagnostics": ["diagnostics", "db"],
-    "crashes": ["crashes", "crash_reports"],
-}
+#: `AppChannel::storage_slug` for the RC channel, and the display name
+#: `app_name()` uses for the data root. The two differ, and using either where
+#: the other belongs is what put four surfaces in directories that do not
+#: exist.
+STORAGE_SLUG = "omega-rc"
+DISPLAY_NAME = "Omega RC"
 
 #: Refuse to read anything enormous; a scan that hangs is a scan nobody runs.
 MAX_FILE_BYTES = 64 * 1024 * 1024
+
+#: Surfaces whose file the product writes only under a condition the journey
+#: may not have met. A missing telemetry log or an empty crash directory is a
+#: fact about the run, not a gap in the search, and records `absent`. Every
+#: other surface must be observed or blocked.
+OPTIONAL_SURFACES = frozenset({"telemetry", "crashes"})
 
 
 class TripwireError(Exception):
@@ -64,133 +100,612 @@ def sha256_hex(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def data_root() -> Path:
-    """The installed RC's data root."""
-    return Path.home() / "Library" / "Application Support" / "Omega RC"
+def data_root(override: Path | None = None) -> Path:
+    """`paths::data_dir()` on macOS: the application support root."""
+    return override or Path.home() / "Library" / "Application Support" / DISPLAY_NAME
 
 
-def scan_surface(name: str, roots: list[Path], needle: bytes) -> dict[str, Any]:
-    """Scan one surface for the needle, counting exactly what was inspected.
+def logs_root(override: Path | None = None) -> Path:
+    """`paths::logs_dir()` on macOS.
+
+    Not the data root. `paths.rs` sends macOS logs to `~/Library/Logs/<slug>`,
+    and the live log file and the telemetry log are both there.
+    """
+    return override or Path.home() / "Library" / "Logs" / STORAGE_SLUG
+
+
+def crashes_root(override: Path | None = None) -> Path:
+    """`paths::crashes_dir()` on macOS."""
+    return override or Path.home() / "Library" / "Logs" / "DiagnosticReports"
+
+
+def telemetry_file(logs: Path) -> Path:
+    """`client::telemetry` writes `telemetry.log` inside the logs directory."""
+    return logs / "telemetry.log"
+
+
+def filesystem_surfaces(
+    data: Path, logs: Path, crashes: Path
+) -> dict[str, dict[str, Any]]:
+    """Where each file-backed surface actually lives.
+
+    `anchor` is the directory that must exist for the search to have happened
+    in the right place at all. An absent anchor is not an empty surface: it
+    means this run looked somewhere the product does not write, which is the
+    defect this table was rewritten to remove, so it blocks.
+    """
+    return {
+        "logs": {
+            "anchor": logs,
+            "roots": [logs],
+            # The telemetry log lives in the same directory and is its own
+            # surface below. Excluding it here keeps the two counts disjoint so
+            # neither borrows the other's coverage.
+            "exclude": frozenset({telemetry_file(logs)}),
+        },
+        "telemetry": {
+            "anchor": logs,
+            "roots": [telemetry_file(logs)],
+            "exclude": frozenset(),
+        },
+        "diagnostics": {
+            "anchor": data,
+            "roots": [data / "db", data / "hang_traces"],
+            "exclude": frozenset(),
+        },
+        "crashes": {
+            "anchor": crashes.parent,
+            "roots": [crashes],
+            "exclude": frozenset(),
+        },
+    }
+
+
+class ScanCounts:
+    """Exactly what a scan inspected, and what it found."""
+
+    def __init__(self) -> None:
+        self.files_scanned = 0
+        self.symlinks_skipped = 0
+        self.bytes_scanned = 0
+        self.errors = 0
+        self.match_detected = False
+        self.present = False
+
+
+def scan_paths(
+    roots: list[Path],
+    needle: bytes,
+    exclude: frozenset[Path] = frozenset(),
+) -> ScanCounts:
+    """Scan a set of files and directories for the needle, counting the reads.
 
     Symlinks are skipped rather than followed. Following them would let a link
-    out of the data root inflate the byte count with files this candidate never
+    out of the surface inflate the byte count with files this candidate never
     wrote, which would make the receipt claim more coverage than it earned.
     """
-    files_scanned = 0
-    symlinks_skipped = 0
-    bytes_scanned = 0
-    errors = 0
-    match_detected = False
-    present = False
+    counts = ScanCounts()
+
+    def read_file(path: Path) -> None:
+        try:
+            file_stat = path.lstat()
+            if not stat.S_ISREG(file_stat.st_mode):
+                return
+            if file_stat.st_size > MAX_FILE_BYTES:
+                counts.errors += 1
+                return
+            payload = path.read_bytes()
+        except OSError:
+            counts.errors += 1
+            return
+        counts.files_scanned += 1
+        counts.bytes_scanned += len(payload)
+        if needle in payload:
+            counts.match_detected = True
 
     for root in roots:
+        if root.is_symlink():
+            counts.symlinks_skipped += 1
+            continue
         if not root.exists():
             continue
-        present = True
+        counts.present = True
+        if root.is_file():
+            if root not in exclude:
+                read_file(root)
+            continue
         for current, directories, files in os.walk(root, followlinks=False):
             current_path = Path(current)
             for directory in list(directories):
                 if (current_path / directory).is_symlink():
-                    symlinks_skipped += 1
+                    counts.symlinks_skipped += 1
                     directories.remove(directory)
             for file_name in files:
                 path = current_path / file_name
-                try:
-                    if path.is_symlink():
-                        symlinks_skipped += 1
-                        continue
-                    file_stat = path.lstat()
-                    if not stat.S_ISREG(file_stat.st_mode):
-                        continue
-                    if file_stat.st_size > MAX_FILE_BYTES:
-                        errors += 1
-                        continue
-                    payload = path.read_bytes()
-                except OSError:
-                    errors += 1
+                if path in exclude:
                     continue
-                files_scanned += 1
-                bytes_scanned += len(payload)
-                if needle in payload:
-                    match_detected = True
+                if path.is_symlink():
+                    counts.symlinks_skipped += 1
+                    continue
+                read_file(path)
 
-    return {
+    return counts
+
+
+def surface_record(
+    name: str, path_label: str, status: str, counts: ScanCounts | None = None
+) -> dict[str, Any]:
+    """One surface's line in the receipt, in the exact shape the validator reads."""
+    counts = counts or ScanCounts()
+    body = {
         "name": name,
-        "path_digest": sha256_hex(
-            "\n".join(sorted(str(root) for root in roots)).encode("utf-8")
-        ),
-        "status": "pass" if present else "absent",
-        "files_scanned": files_scanned,
-        "symlinks_skipped": symlinks_skipped,
-        "bytes_scanned": bytes_scanned,
-        "errors": errors,
-        "match_detected": match_detected,
-        "evidence_digest": sha256_hex(
-            json.dumps(
-                {
-                    "name": name,
-                    "files_scanned": files_scanned,
-                    "symlinks_skipped": symlinks_skipped,
-                    "bytes_scanned": bytes_scanned,
-                    "errors": errors,
-                    "match_detected": match_detected,
-                },
-                sort_keys=True,
-            ).encode("utf-8")
-        ),
+        "status": status,
+        "files_scanned": counts.files_scanned,
+        "symlinks_skipped": counts.symlinks_skipped,
+        "bytes_scanned": counts.bytes_scanned,
+        "errors": counts.errors,
+        "match_detected": counts.match_detected,
+    }
+    return {
+        **body,
+        "path_digest": sha256_hex(path_label.encode("utf-8")),
+        "evidence_digest": sha256_hex(json.dumps(body, sort_keys=True).encode("utf-8")),
     }
 
 
-def deliver_needle_through_protected_fd(needle: bytes) -> None:
-    """Hand the needle to the candidate through an O_CLOEXEC pipe.
+def resolve_status(name: str, counts: ScanCounts, anchor_present: bool) -> str:
+    """Turn a scan into one of the four things that can honestly be said.
 
-    The point of the protected descriptor is that the secret never exists as a
-    file, an argument, or an environment variable that some unrelated process
-    could read. It lives in the pipe buffer and in this process's memory, and
-    both die with this run.
+    `blocked` is the answer whenever the search could not be made where it had
+    to be made. It is deliberately a status the receipt validator refuses.
     """
-    read_fd, write_fd = os.pipe()
+    if not anchor_present:
+        return "blocked"
+    if counts.errors:
+        return "error"
+    if counts.match_detected:
+        return "match"
+    if not counts.present:
+        return "absent" if name in OPTIONAL_SURFACES else "blocked"
+    return "pass"
+
+
+def scan_filesystem_surface(
+    name: str, plan: dict[str, Any], needle: bytes
+) -> tuple[dict[str, Any], str]:
+    anchor: Path = plan["anchor"]
+    roots: list[Path] = plan["roots"]
+    counts = scan_paths(roots, needle, plan["exclude"])
+    anchor_present = anchor.is_dir()
+    status = resolve_status(name, counts, anchor_present)
+    label = "\n".join(sorted(str(root) for root in roots))
+    detail = f"{status} at {label}"
+    if not anchor_present:
+        detail = (
+            f"blocked: {anchor} does not exist, so this run did not look where "
+            "the product writes"
+        )
+    return surface_record(name, label, status, counts), detail
+
+
+def appkit_pasteboard_bytes() -> bytes | None:
+    """Every flavour of every item on the general pasteboard, through PyObjC.
+
+    `None` means this interface was not available or did not answer, which
+    falls through to `pbpaste`. It never falls through to a pass.
+    """
     try:
-        os.set_inheritable(read_fd, False)
-        os.set_inheritable(write_fd, False)
-        os.write(write_fd, needle)
-    finally:
-        os.close(write_fd)
-        os.close(read_fd)
+        from AppKit import NSPasteboard  # type: ignore[import-not-found]
+    except ImportError:
+        return None
+    try:
+        pasteboard = NSPasteboard.generalPasteboard()
+        payload = bytearray()
+        for item in pasteboard.pasteboardItems() or []:
+            for kind in item.types() or []:
+                data = item.dataForType_(kind)
+                if data is not None:
+                    payload += bytes(data)
+    except Exception:  # noqa: BLE001 - any failed read is a read that did not happen
+        return None
+    return bytes(payload)
+
+
+def pasteboard_bytes() -> tuple[bytes | None, str]:
+    """Read the general pasteboard through its own interface.
+
+    PyObjC reads every flavour of every item when it is available. Where it is
+    not, `pbpaste` reads the text flavours, which is a real read of the same
+    pasteboard and is recorded as exactly that much coverage. A pasteboard is
+    never a file in a data directory, so there is no third option that reads
+    one.
+    """
+    through_appkit = appkit_pasteboard_bytes()
+    if through_appkit is not None:
+        return through_appkit, "NSPasteboard general pasteboard, every type of every item"
+
+    if shutil.which("pbpaste") is None:
+        return None, ""
+    payload = bytearray()
+    read_any = False
+    for flavour in ("txt", "rtf"):
+        try:
+            result = subprocess.run(
+                ["pbpaste", "-Prefer", flavour],
+                capture_output=True,
+                timeout=30,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            continue
+        if result.returncode == 0:
+            read_any = True
+            payload += result.stdout
+    if not read_any:
+        return None, ""
+    return bytes(payload), "pbpaste general pasteboard, text and rich-text flavours"
+
+
+def pasteboard_inventory() -> int | None:
+    """How many bytes the pasteboard itself says it is holding.
+
+    `clipboard info` answers with a flavour and a size for everything on the
+    general pasteboard. It is the corroboration for an empty read: a read that
+    came back with nothing while the pasteboard says it holds something means
+    the flavours were not all reachable, not that the surface is clean.
+    """
+    try:
+        result = subprocess.run(
+            ["osascript", "-e", "clipboard info"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    total = 0
+    for token in result.stdout.split(","):
+        token = token.strip()
+        if token.isdigit():
+            total += int(token)
+    return total
+
+
+def pasteboard_capture_status(
+    payload: bytes | None, declared: int | None
+) -> tuple[bool, str]:
+    """Whether a pasteboard read may be recorded as an observation of the surface.
+
+    An empty read is only an observation when the pasteboard agrees it is
+    empty. Otherwise this run saw less than the surface holds, and a partial
+    look at a surface is not a clean one.
+    """
+    if payload is None:
+        return False, "the general pasteboard could not be read through any interface"
+    if payload:
+        return True, ""
+    if declared is None:
+        return False, (
+            "the pasteboard read returned nothing and the pasteboard's own "
+            "inventory could not be read to confirm it is empty"
+        )
+    if declared > 0:
+        return False, (
+            f"the pasteboard holds {declared} bytes in flavours this read "
+            "cannot see, so it was not fully scanned"
+        )
+    return True, ""
+
+
+def capture_pasteboard(directory: Path) -> tuple[Path | None, str, str]:
+    if platform.system() != "Darwin":
+        return None, "", "the pasteboard is a macOS interface and this host is not macOS"
+    payload, method = pasteboard_bytes()
+    readable, reason = pasteboard_capture_status(
+        payload, pasteboard_inventory() if not payload else None
+    )
+    if not readable or payload is None:
+        return None, "", reason
+    destination = directory / "pasteboard.bin"
+    handle = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(handle, "wb") as capture:
+        capture.write(payload)
+    return destination, method, ""
+
+
+def candidate_pid(app: Path | None, explicit: int | None) -> int | None:
+    """The running candidate this run reads the accessibility tree of."""
+    if explicit is not None:
+        return explicit
+    if app is None:
+        return None
+    executables = str(app / "Contents" / "MacOS")
+    try:
+        result = subprocess.run(
+            ["pgrep", "-f", executables],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    for line in result.stdout.split():
+        try:
+            return int(line)
+        except ValueError:
+            continue
+    return None
+
+
+def accessibility_tree(pid: int) -> tuple[str | None, str]:
+    """Every label and value the process publishes to assistive technology.
+
+    This is the surface a screen reader consumes, read through the same
+    `AXUIElement` interface it uses. It is never a file in a data directory,
+    and a run that cannot reach it says so rather than recording an empty
+    directory as a clean surface.
+    """
+    script = f"""
+    tell application "System Events"
+        if not (exists (first process whose unix id is {pid})) then return "NOPROC"
+        tell (first process whose unix id is {pid})
+            set out to ""
+            try
+                repeat with w in windows
+                    repeat with e in (entire contents of w)
+                        try
+                            set d to description of e
+                            if d is not missing value then set out to out & d & linefeed
+                        end try
+                        try
+                            set v to value of e
+                            if v is not missing value then set out to out & (v as text) & linefeed
+                        end try
+                    end repeat
+                end repeat
+            end try
+            return out
+        end tell
+    end tell
+    """
+    try:
+        result = subprocess.run(
+            ["osascript", "-e", script],
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None, "the accessibility tree could not be read; osascript did not answer"
+    if result.returncode != 0:
+        return None, (
+            "the accessibility tree could not be read. Grant this terminal "
+            "Accessibility in System Settings > Privacy & Security > Accessibility"
+        )
+    if result.stdout.strip() == "NOPROC":
+        return None, "the candidate is not running, so it publishes no accessibility tree"
+    return result.stdout, ""
+
+
+def capture_accessibility(directory: Path, pid: int | None) -> tuple[Path | None, str, str]:
+    if platform.system() != "Darwin":
+        return None, "", "the accessibility tree is a macOS interface and this host is not macOS"
+    if pid is None:
+        return None, "", "no running candidate was found to read an accessibility tree from"
+    tree, reason = accessibility_tree(pid)
+    if tree is None:
+        return None, "", reason
+    destination = directory / "accessibility.txt"
+    handle = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(handle, "wb") as capture:
+        capture.write(tree.encode("utf-8", errors="surrogateescape"))
+    return destination, f"AXUIElement tree of pid {pid} through System Events", ""
+
+
+def scan_captured_surface(
+    name: str,
+    label: str,
+    capture: Path | None,
+    reason: str,
+    needle: bytes,
+) -> tuple[dict[str, Any], str]:
+    """A surface that had to be captured through an API before it could be read."""
+    if capture is None:
+        return surface_record(name, label, "blocked"), f"blocked: {reason}"
+    counts = scan_paths([capture], needle)
+    status = resolve_status(name, counts, anchor_present=True)
+    return surface_record(name, label, status, counts), f"{status}: {reason}"
+
+
+def read_needle(file_descriptor: int) -> bytes:
+    """Read the canary from the descriptor the caller opened on it.
+
+    The descriptor is the whole point: the secret never becomes an argument an
+    unrelated process can read out of the process table, and this script never
+    invents one. A needle nothing has ever seen cannot be leaked, so searching
+    for one proves nothing at all.
+    """
+    chunks: list[bytes] = []
+    remaining = MAXIMUM_NEEDLE_BYTES + 2
+    while remaining > 0:
+        try:
+            chunk = os.read(file_descriptor, remaining)
+        except OSError as error:
+            raise TripwireError(f"--needle-fd {file_descriptor} could not be read") from error
+        if not chunk:
+            break
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    needle = b"".join(chunks).rstrip(b"\r\n")
+    if not MINIMUM_NEEDLE_BYTES <= len(needle) <= MAXIMUM_NEEDLE_BYTES:
+        raise TripwireError(
+            f"the canary must carry {MINIMUM_NEEDLE_BYTES}..{MAXIMUM_NEEDLE_BYTES} "
+            f"bytes; this descriptor carried {len(needle)}"
+        )
+    return needle
+
+
+def verify_scanner_can_fire(
+    needle: bytes,
+    directory: Path,
+    scanner: Callable[[list[Path], bytes], ScanCounts] | None = None,
+) -> bool:
+    """Plant this run's needle and require the scanner to find it.
+
+    Without this, every way the search can be silently disabled — a needle that
+    arrived empty, an edit that broke the comparison, a walk that reads nothing
+    — reports the same `pass` as a clean product.
+    """
+    control = directory / "scanner-control"
+    control.mkdir(mode=0o700)
+    planted = control / "planted"
+    handle = os.open(planted, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(handle, "wb") as target:
+        target.write(b"prefix" + needle + b"suffix")
+    counts = (scanner or scan_paths)([control], needle)
+    shutil.rmtree(control, ignore_errors=True)
+    return counts.match_detected and counts.files_scanned == 1
 
 
 def self_test() -> None:
-    """The scanner has to be able to find a needle, or every run passes."""
-    import tempfile
-
-    needle = secrets.token_hex(NEEDLE_BYTES).encode("ascii")
+    """Every property this receipt rests on has to be able to fail here."""
     with tempfile.TemporaryDirectory() as directory:
-        root = Path(directory) / "logs"
+        workspace = Path(directory)
+        needle = b"canary-" + b"0123456789abcdef" * 2
+
+        # The scanner finds a planted needle, and distinguishes clean from
+        # missing. A scanner that cannot do this makes every run pass.
+        root = workspace / "logs"
         root.mkdir()
         (root / "clean.log").write_bytes(b"nothing to see")
-        clean = scan_surface("logs", [root], needle)
-        if clean["match_detected"] or clean["status"] != "pass":
+        clean = scan_paths([root], needle)
+        if clean.match_detected or not clean.present or clean.files_scanned != 1:
             raise TripwireError("scanner reported a clean surface incorrectly")
-        if clean["files_scanned"] != 1:
-            raise TripwireError("scanner did not count the file it read")
-
         (root / "leaked.log").write_bytes(b"secret=" + needle)
-        dirty = scan_surface("logs", [root], needle)
-        if not dirty["match_detected"]:
+        dirty = scan_paths([root], needle)
+        if not dirty.match_detected:
             raise TripwireError("scanner failed to detect a planted needle")
-
-        absent = scan_surface("logs", [Path(directory) / "missing"], needle)
-        if absent["status"] != "absent" or absent["files_scanned"] != 0:
+        missing = scan_paths([workspace / "missing"], needle)
+        if missing.present or missing.files_scanned != 0:
             raise TripwireError("scanner did not distinguish absent from clean")
+
+        # An excluded path is not counted by the surface that excludes it.
+        excluded = scan_paths([root], needle, frozenset({root / "leaked.log"}))
+        if excluded.match_detected or excluded.files_scanned != 1:
+            raise TripwireError("scanner did not honour the exclusion")
+
+        # The live-fire control has to catch a scanner that cannot match.
+        if not verify_scanner_can_fire(needle, workspace):
+            raise TripwireError("the scanner control failed on a working scanner")
+        blind = verify_scanner_can_fire(
+            needle, workspace, scanner=lambda roots, needle: ScanCounts()
+        )
+        if blind:
+            raise TripwireError("the scanner control passed a scanner that never matches")
+
+        # An empty pasteboard read is an observation only when the pasteboard
+        # agrees it is empty.
+        for payload, declared, expected in (
+            (b"something", None, True),
+            (None, None, False),
+            (b"", None, False),
+            (b"", 0, True),
+            (b"", 12, False),
+        ):
+            readable, _ = pasteboard_capture_status(payload, declared)
+            if readable is not expected:
+                raise TripwireError(
+                    f"a pasteboard read of {payload!r} against {declared} was "
+                    f"judged {readable}"
+                )
+
+        # A needle outside the receipt's bounds is refused before anything is
+        # scanned, and a short one is refused too.
+        short_path = workspace / "short-canary"
+        short_path.write_bytes(b"tooshort")
+        with open(short_path, "rb") as short:
+            try:
+                read_needle(short.fileno())
+            except TripwireError:
+                pass
+            else:
+                raise TripwireError("a canary below the minimum length was accepted")
+        long_path = workspace / "canary"
+        long_path.write_bytes(needle + b"\n")
+        with open(long_path, "rb") as canary:
+            if read_needle(canary.fileno()) != needle:
+                raise TripwireError("the canary read back differently than it was written")
+
+        # The surfaces resolve where `paths.rs` writes, not under the
+        # application support root. This is the regression that let four of six
+        # surfaces record `absent` while the product logged 191 KB elsewhere.
+        logs = logs_root()
+        if logs != Path.home() / "Library" / "Logs" / STORAGE_SLUG:
+            raise TripwireError("the logs surface does not resolve to paths::logs_dir()")
+        if "Application Support" in str(logs):
+            raise TripwireError("the logs surface resolves under the data root again")
+        if crashes_root() != Path.home() / "Library" / "Logs" / "DiagnosticReports":
+            raise TripwireError("the crash surface does not resolve to paths::crashes_dir()")
+        plan = filesystem_surfaces(data_root(), logs, crashes_root())
+        if plan["telemetry"]["roots"] != [logs / "telemetry.log"]:
+            raise TripwireError("the telemetry surface does not resolve to the telemetry log")
+        if set(plan) | {"clipboard", "accessibility"} != {
+            "logs",
+            "telemetry",
+            "diagnostics",
+            "crashes",
+            "clipboard",
+            "accessibility",
+        }:
+            raise TripwireError("the surface inventory is not the six the validator requires")
+
+        # A required surface whose anchor does not exist blocks; it never
+        # reports the absence as a clean scan.
+        empty = ScanCounts()
+        if resolve_status("logs", empty, anchor_present=False) != "blocked":
+            raise TripwireError("a missing logs anchor did not block")
+        if resolve_status("logs", empty, anchor_present=True) != "blocked":
+            raise TripwireError("a missing required surface did not block")
+        if resolve_status("crashes", empty, anchor_present=True) != "absent":
+            raise TripwireError("an optional absent surface did not record absent")
+        scanned = ScanCounts()
+        scanned.present = True
+        if resolve_status("logs", scanned, anchor_present=True) != "pass":
+            raise TripwireError("a scanned clean surface did not pass")
+        scanned.match_detected = True
+        if resolve_status("logs", scanned, anchor_present=True) != "match":
+            raise TripwireError("a matched surface did not report the match")
 
     print(json.dumps({"schema": TRIPWIRE_SCHEMA, "status": "self-test-passed"}))
 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--app", type=Path)
+    parser.add_argument(
+        "--app",
+        type=Path,
+        default=Path("/Applications/Omega.app"),
+        help="the installed candidate whose accessibility tree is read",
+    )
     parser.add_argument("--candidate-evidence", type=Path)
+    parser.add_argument(
+        "--needle-fd",
+        type=int,
+        default=None,
+        help=(
+            "descriptor already open on the disposable canary the candidate was "
+            "given. Required: this script does not invent a secret nothing has seen."
+        ),
+    )
+    parser.add_argument("--candidate-pid", type=int, default=None)
     parser.add_argument("--data-root", type=Path, default=None)
+    parser.add_argument("--logs-root", type=Path, default=None)
+    parser.add_argument("--crashes-root", type=Path, default=None)
     parser.add_argument("--output", type=Path)
     parser.add_argument("--self-test", action="store_true")
     args = parser.parse_args()
@@ -201,6 +716,14 @@ def main() -> int:
 
     if args.candidate_evidence is None or args.output is None:
         raise TripwireError("--candidate-evidence and --output are required")
+    if args.needle_fd is None:
+        raise TripwireError(
+            "--needle-fd is required. Pass the descriptor of the disposable "
+            "canary the candidate was actually given, for example "
+            "`--needle-fd 3 3<\"$OMEGA_PRIVATE_PROOF_DIR/disposable-canary\"`. "
+            "A needle this script generates itself has never been seen by any "
+            "other process, so searching for it can only ever pass."
+        )
 
     evidence = json.loads(args.candidate_evidence.read_text(encoding="utf-8"))
     # The candidate evidence records a structured digest, not a bare string;
@@ -211,22 +734,68 @@ def main() -> int:
             "candidate evidence has no usable candidate_digest to bind to"
         )
 
-    needle_text = secrets.token_hex(NEEDLE_BYTES)
-    needle = needle_text.encode("ascii")
-    deliver_needle_through_protected_fd(needle)
+    needle = read_needle(args.needle_fd)
 
-    root = args.data_root or data_root()
-    surfaces = [
-        scan_surface(name, [root / part for part in parts], needle)
-        for name, parts in SURFACE_ROOTS.items()
-    ]
+    surfaces: list[dict[str, Any]] = []
+    details: dict[str, str] = {}
+    workspace = Path(tempfile.mkdtemp(prefix="omega-tripwires-"))
+    os.chmod(workspace, 0o700)
+    try:
+        if not verify_scanner_can_fire(needle, workspace):
+            raise TripwireError(
+                "the scanner did not detect a needle planted in front of it, so "
+                "nothing this run could report about the product would mean "
+                "anything"
+            )
+
+        plan = filesystem_surfaces(
+            data_root(args.data_root),
+            logs_root(args.logs_root),
+            crashes_root(args.crashes_root),
+        )
+        for name in sorted(plan):
+            record, detail = scan_filesystem_surface(name, plan[name], needle)
+            surfaces.append(record)
+            details[name] = detail
+
+        capture, method, reason = capture_pasteboard(workspace)
+        record, detail = scan_captured_surface(
+            "clipboard", "NSPasteboard:general", capture, method or reason, needle
+        )
+        surfaces.append(record)
+        details["clipboard"] = detail
+
+        capture, method, reason = capture_accessibility(
+            workspace, candidate_pid(args.app, args.candidate_pid)
+        )
+        record, detail = scan_captured_surface(
+            "accessibility",
+            f"AXUIElement:{args.app}",
+            capture,
+            method or reason,
+            needle,
+        )
+        surfaces.append(record)
+        details["accessibility"] = detail
+    finally:
+        shutil.rmtree(workspace, ignore_errors=True)
 
     leaked = [surface["name"] for surface in surfaces if surface["match_detected"]]
+    blocked = [
+        surface["name"] for surface in surfaces if surface["status"] in ("blocked", "error")
+    ]
+    if leaked:
+        status = "fail"
+    elif blocked:
+        status = "blocked"
+    else:
+        status = "pass"
+
     receipt = {
         "schema": TRIPWIRE_SCHEMA,
         "candidate_digest": candidate_digest,
         "generated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
-        "status": "fail" if leaked else "pass",
+        "status": status,
         # The value is deliberately absent. Recording the secret you are proving
         # was not leaked would defeat the exercise.
         "needle": {
@@ -238,20 +807,31 @@ def main() -> int:
     }
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    args.output.write_text(
+        json.dumps(receipt, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
 
     print(
         json.dumps(
             {
                 "schema": TRIPWIRE_SCHEMA,
-                "status": receipt["status"],
+                "status": status,
                 "surfaces_scanned": len(surfaces),
                 "leaked_surfaces": leaked,
+                "blocked_surfaces": blocked,
+                # How each surface was read, so a reader can see the coverage
+                # the receipt's counts came from. The receipt itself carries no
+                # free-text field the validator would have to trust.
+                "surface_detail": details,
                 "output": str(args.output),
-            }
+            },
+            indent=2,
+            sort_keys=True,
         )
     )
-    return 1 if leaked else 0
+    if leaked:
+        return 1
+    return 3 if blocked else 0
 
 
 if __name__ == "__main__":

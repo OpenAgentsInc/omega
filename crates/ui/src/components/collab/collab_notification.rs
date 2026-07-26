@@ -126,7 +126,7 @@ impl Component for CollabNotification {
                             "a_very_long_username_that_might_overflow is sharing a project in Omega:",
                         ))
                         .child(
-                            Label::new("zed-cloud, zed, edit-prediction-bench, zed.dev")
+                            Label::new("omega-cloud, omega, edit-prediction-bench, openagents.com")
                                 .color(Color::Muted),
                         ),
                     )
@@ -171,7 +171,7 @@ impl Component for CollabNotification {
                             Button::new("decline", "Decline"),
                         )
                         .child(Label::new(
-                            "maxbrunsfeld invited you to join the #zed channel",
+                            "maxbrunsfeld invited you to join the #omega channel",
                         )),
                     )
                     .into_any_element(),

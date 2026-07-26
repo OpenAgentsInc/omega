@@ -711,7 +711,7 @@ pub fn run_launcher_if_invoked() {
     let invocation = match invocation {
         Ok(invocation) => invocation,
         Err(error) => {
-            eprintln!("zed: malformed sandbox launcher invocation: {error:#}");
+            eprintln!("omega: malformed sandbox launcher invocation: {error:#}");
             std::process::exit(127);
         }
     };
@@ -814,7 +814,7 @@ fn run_launcher(invocation: LauncherInvocation) -> ! {
         if let Err(error) = validate_binds(socket, &invocation.validation_paths) {
             // Fail closed: a redirected (or unverifiable) writable bind means the
             // command must not run at all.
-            eprintln!("zed: sandbox bind validation failed: {error:#}");
+            eprintln!("omega: sandbox bind validation failed: {error:#}");
             std::process::exit(SANDBOX_SETUP_FAILED_EXIT_CODE);
         }
     }
@@ -981,11 +981,11 @@ fn exec_command(program: &OsStr, args: &[OsString]) -> ! {
     // Lock down socket/io_uring/ptrace syscalls right before handing control to
     // the untrusted command; the filter survives `exec`.
     if let Err(error) = install_command_seccomp_filter() {
-        eprintln!("zed: failed to install sandbox seccomp filter: {error:#}");
+        eprintln!("omega: failed to install sandbox seccomp filter: {error:#}");
         std::process::exit(SANDBOX_SETUP_FAILED_EXIT_CODE);
     }
     let error = Command::new(program).args(args).exec();
-    eprintln!("zed: failed to exec sandboxed command: {error}");
+    eprintln!("omega: failed to exec sandboxed command: {error}");
     std::process::exit(SANDBOX_SETUP_FAILED_EXIT_CODE);
 }
 
@@ -997,7 +997,7 @@ fn run_bridge(socket_path: PathBuf, port: u16, program: &OsStr, program_args: &[
     let listener = match TcpListener::bind((Ipv4Addr::LOCALHOST, port)) {
         Ok(listener) => listener,
         Err(error) => {
-            eprintln!("zed: failed to bind sandbox proxy bridge: {error}");
+            eprintln!("omega: failed to bind sandbox proxy bridge: {error}");
             std::process::exit(SANDBOX_SETUP_FAILED_EXIT_CODE);
         }
     };
@@ -1007,7 +1007,7 @@ fn run_bridge(socket_path: PathBuf, port: u16, program: &OsStr, program_args: &[
         .stack_size(128 * 1024)
         .spawn(move || run_bridge_listener(listener, socket_path))
     {
-        eprintln!("zed: failed to spawn sandbox proxy bridge: {error}");
+        eprintln!("omega: failed to spawn sandbox proxy bridge: {error}");
         std::process::exit(SANDBOX_SETUP_FAILED_EXIT_CODE);
     }
 
@@ -1018,7 +1018,7 @@ fn run_bridge(socket_path: PathBuf, port: u16, program: &OsStr, program_args: &[
     let seccomp_program = match build_command_seccomp_program() {
         Ok(program) => program,
         Err(error) => {
-            eprintln!("zed: failed to build sandbox seccomp filter: {error:#}");
+            eprintln!("omega: failed to build sandbox seccomp filter: {error:#}");
             std::process::exit(SANDBOX_SETUP_FAILED_EXIT_CODE);
         }
     };
@@ -1039,7 +1039,7 @@ fn run_bridge(socket_path: PathBuf, port: u16, program: &OsStr, program_args: &[
     let mut child = match command.spawn() {
         Ok(child) => child,
         Err(error) => {
-            eprintln!("zed: failed to spawn sandboxed command: {error}");
+            eprintln!("omega: failed to spawn sandboxed command: {error}");
             std::process::exit(SANDBOX_SETUP_FAILED_EXIT_CODE);
         }
     };
@@ -1053,7 +1053,7 @@ fn run_bridge(socket_path: PathBuf, port: u16, program: &OsStr, program_args: &[
             std::process::exit(128 + signal);
         }
         Err(error) => {
-            eprintln!("zed: failed to wait for sandboxed command: {error}");
+            eprintln!("omega: failed to wait for sandboxed command: {error}");
             std::process::exit(SANDBOX_SETUP_FAILED_EXIT_CODE);
         }
     }
@@ -1172,7 +1172,7 @@ pub fn run_wsl_helper_if_invoked() {
     let invocation = match invocation {
         Ok(invocation) => invocation,
         Err(error) => {
-            eprintln!("zed: malformed WSL sandbox helper invocation: {error:#}");
+            eprintln!("omega: malformed WSL sandbox helper invocation: {error:#}");
             std::process::exit(127);
         }
     };
@@ -1252,7 +1252,7 @@ fn run_wsl_helper(invocation: WslHelperInvocation) -> ! {
             Err(error) => {
                 // Fail closed: a writable bind we can't pin can't be verified.
                 eprintln!(
-                    "zed: WSL sandbox helper could not open writable bind {}: {error}",
+                    "omega: WSL sandbox helper could not open writable bind {}: {error}",
                     path.display()
                 );
                 std::process::exit(SANDBOX_SETUP_FAILED_EXIT_CODE);
@@ -1266,7 +1266,7 @@ fn run_wsl_helper(invocation: WslHelperInvocation) -> ! {
         match ValidationFdSender::spawn(fds) {
             Ok(sender) => Some(sender),
             Err(error) => {
-                eprintln!("zed: WSL sandbox helper could not start the bind validator: {error}");
+                eprintln!("omega: WSL sandbox helper could not start the bind validator: {error}");
                 std::process::exit(SANDBOX_SETUP_FAILED_EXIT_CODE);
             }
         }
@@ -1275,7 +1275,7 @@ fn run_wsl_helper(invocation: WslHelperInvocation) -> ! {
     let current_exe = match std::env::current_exe() {
         Ok(path) => path,
         Err(error) => {
-            eprintln!("zed: WSL sandbox helper could not resolve its own path: {error}");
+            eprintln!("omega: WSL sandbox helper could not resolve its own path: {error}");
             std::process::exit(SANDBOX_SETUP_FAILED_EXIT_CODE);
         }
     };
@@ -1323,7 +1323,7 @@ fn run_wsl_helper(invocation: WslHelperInvocation) -> ! {
     let mut child = match Command::new(&invocation.bwrap_path).args(&args).spawn() {
         Ok(child) => child,
         Err(error) => {
-            eprintln!("zed: WSL sandbox helper could not spawn bwrap: {error}");
+            eprintln!("omega: WSL sandbox helper could not spawn bwrap: {error}");
             std::process::exit(SANDBOX_SETUP_FAILED_EXIT_CODE);
         }
     };
@@ -1341,7 +1341,7 @@ fn run_wsl_helper(invocation: WslHelperInvocation) -> ! {
             std::process::exit(128 + signal);
         }
         Err(error) => {
-            eprintln!("zed: WSL sandbox helper failed waiting for bwrap: {error}");
+            eprintln!("omega: WSL sandbox helper failed waiting for bwrap: {error}");
             std::process::exit(SANDBOX_SETUP_FAILED_EXIT_CODE);
         }
     }
@@ -1357,10 +1357,10 @@ fn run_bridge_listener(listener: TcpListener, socket_path: PathBuf) {
                     .stack_size(128 * 1024)
                     .spawn(move || forward_bridge_connection(stream, socket_path))
                 {
-                    eprintln!("zed: failed to spawn sandbox bridge connection thread: {error}");
+                    eprintln!("omega: failed to spawn sandbox bridge connection thread: {error}");
                 }
             }
-            Err(error) => eprintln!("zed: sandbox bridge accept failed: {error}"),
+            Err(error) => eprintln!("omega: sandbox bridge accept failed: {error}"),
         }
     }
 }
@@ -1370,7 +1370,7 @@ fn forward_bridge_connection(tcp_stream: TcpStream, socket_path: PathBuf) {
         Ok(stream) => stream,
         Err(error) => {
             eprintln!(
-                "zed: sandbox bridge failed to connect to proxy socket {}: {error}",
+                "omega: sandbox bridge failed to connect to proxy socket {}: {error}",
                 socket_path.display()
             );
             return;
@@ -1383,14 +1383,14 @@ fn copy_bidirectional(tcp_stream: TcpStream, unix_stream: UnixStream) {
     let tcp_read = match tcp_stream.try_clone() {
         Ok(stream) => stream,
         Err(error) => {
-            eprintln!("zed: sandbox bridge failed to clone TCP stream: {error}");
+            eprintln!("omega: sandbox bridge failed to clone TCP stream: {error}");
             return;
         }
     };
     let unix_read = match unix_stream.try_clone() {
         Ok(stream) => stream,
         Err(error) => {
-            eprintln!("zed: sandbox bridge failed to clone Unix stream: {error}");
+            eprintln!("omega: sandbox bridge failed to clone Unix stream: {error}");
             return;
         }
     };
@@ -1404,13 +1404,13 @@ fn copy_bidirectional(tcp_stream: TcpStream, unix_stream: UnixStream) {
     {
         Ok(handle) => handle,
         Err(error) => {
-            eprintln!("zed: failed to spawn sandbox bridge pump thread: {error}");
+            eprintln!("omega: failed to spawn sandbox bridge pump thread: {error}");
             return;
         }
     };
     copy_one_way(unix_read, tcp_write);
     if to_proxy.join().is_err() {
-        eprintln!("zed: sandbox bridge pump thread panicked");
+        eprintln!("omega: sandbox bridge pump thread panicked");
     }
 }
 

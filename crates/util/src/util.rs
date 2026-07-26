@@ -314,7 +314,7 @@ pub fn get_shell_safe_zed_path(shell_kind: shell::ShellKind) -> anyhow::Result<S
     use anyhow::Context as _;
     use paths::PathExt;
     let mut zed_path =
-        std::env::current_exe().context("Failed to determine current zed executable path.")?;
+        std::env::current_exe().context("Failed to determine current Omega executable path.")?;
     if cfg!(target_os = "linux")
         && !zed_path.is_file()
         && let Some(truncated) = zed_path
@@ -337,10 +337,10 @@ pub fn get_shell_safe_zed_path(shell_kind: shell::ShellKind) -> anyhow::Result<S
 pub fn get_zed_cli_path() -> Result<PathBuf> {
     use anyhow::Context as _;
     let zed_path =
-        std::env::current_exe().context("Failed to determine current zed executable path.")?;
+        std::env::current_exe().context("Failed to determine current Omega executable path.")?;
     let parent = zed_path
         .parent()
-        .context("Failed to determine parent directory of zed executable path.")?;
+        .context("Failed to determine parent directory of the Omega executable path.")?;
 
     let possible_locations: &[&str] = if cfg!(target_os = "macos") {
         // On macOS, the zed executable and zed-cli are inside the app bundle,
@@ -353,7 +353,7 @@ pub fn get_zed_cli_path() -> Result<PathBuf> {
         // bin is the standard, ./cli is for the target directory in development builds.
         &["../bin/zed", "./cli"]
     } else {
-        anyhow::bail!("unsupported platform for determining zed-cli path");
+        anyhow::bail!("unsupported platform for determining the Omega CLI path");
     };
 
     possible_locations
@@ -367,7 +367,7 @@ pub fn get_zed_cli_path() -> Result<PathBuf> {
         })
         .with_context(|| {
             format!(
-                "could not find zed-cli from any of: {}",
+                "could not find the Omega CLI from any of: {}",
                 possible_locations.join(", ")
             )
         })

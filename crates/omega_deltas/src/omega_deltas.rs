@@ -63,7 +63,26 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0033",
     "OMEGA-DELTA-0034",
     "OMEGA-DELTA-0035",
+    "OMEGA-DELTA-0036",
+    "OMEGA-DELTA-0037",
+    "OMEGA-DELTA-0038",
+    "OMEGA-DELTA-0039",
 ];
+
+/// OMEGA-DELTA-0036. The uninstall script embedded in the shipped `cli`.
+pub const UNINSTALL_SCRIPT_PATH: &str = "script/uninstall.sh";
+
+/// OMEGA-DELTA-0036. Where the removal plan is derived from `paths::`.
+pub const UNINSTALL_PLAN_PATH: &str = "crates/cli/src/uninstall.rs";
+
+/// OMEGA-DELTA-0037. Outbound attribution on OpenRouter requests.
+pub const OPEN_ROUTER_PATH: &str = "crates/open_router/src/open_router.rs";
+
+/// OMEGA-DELTA-0039. The installed-proof secret tripwire collector.
+pub const INSTALLED_TRIPWIRE_PATH: &str = "script/collect-omega-installed-tripwires";
+
+/// OMEGA-DELTA-0039. The installed-proof observation collector.
+pub const INSTALLED_OBSERVATION_PATH: &str = "script/collect-omega-installed-observations";
 
 /// OMEGA-DELTA-0025. The file that declares the measured digest.
 pub const MEASURED_DIGEST_PATH: &str = "crates/omega_harness/src/measured.rs";
@@ -1590,7 +1609,7 @@ pub fn action_doc_lines(source: &str) -> std::collections::BTreeSet<usize> {
         while cursor > 0 {
             cursor -= 1;
             let trimmed = lines[cursor].trim_start();
-            if trimmed.starts_with("///") || trimmed.starts_with("//!") {
+            if doc_comment_body(lines[cursor]).is_some() {
                 out.insert(cursor + 1);
             } else if !trimmed.starts_with("#[") {
                 break;
@@ -1600,11 +1619,54 @@ pub fn action_doc_lines(source: &str) -> std::collections::BTreeSet<usize> {
     out
 }
 
+/// The text of a doc comment, however it was spelled.
+///
+/// `///` and `//!` are sugar. `#[doc = "..."]` and
+/// `#[cfg_attr(<predicate>, doc = "...")]` are the same thing written the long
+/// way, and both clap and schemars read them identically. This function did not,
+/// which is why every candidate up to `0.2.0-rc14` printed
+/// `~/Library/Application Support/Zed` as the data directory from `cli --help`
+/// while the gate reported green: the line is a `cfg_attr`, and nothing here
+/// had ever looked inside one (omega#89).
 fn doc_comment_body(line: &str) -> Option<&str> {
     let trimmed = line.trim_start();
-    trimmed
+    if let Some(body) = trimmed
         .strip_prefix("///")
         .or_else(|| trimmed.strip_prefix("//!"))
+    {
+        return Some(body);
+    }
+    attribute_doc_body(trimmed)
+}
+
+/// The string in a `doc = "..."` attribute, or the `doc = "..."` line of an
+/// attribute written across several lines.
+///
+/// Anchored at the start of the trimmed line so a Rust `let doc = "..."`
+/// binding is not mistaken for documentation.
+fn attribute_doc_body(trimmed: &str) -> Option<&str> {
+    let rest = if let Some(rest) = trimmed.strip_prefix("#[") {
+        let at = rest.find("doc")?;
+        &rest[at..]
+    } else if trimmed.starts_with("doc") {
+        trimmed
+    } else {
+        return None;
+    };
+    let rest = rest.strip_prefix("doc")?;
+    let rest = rest.trim_start();
+    let rest = rest.strip_prefix('=')?.trim_start();
+    let rest = rest.strip_prefix('"')?;
+    let mut end = 0;
+    let bytes = rest.as_bytes();
+    while end < bytes.len() {
+        match bytes[end] {
+            b'\\' => end += 2,
+            b'"' => return Some(&rest[..end]),
+            _ => end += 1,
+        }
+    }
+    None
 }
 
 /// Every brand-bearing prose literal that can reach a user, plus read counts.
@@ -5322,6 +5384,359 @@ mod tests {
         );
     }
 
+    /// OMEGA-DELTA-0036. `--uninstall` removes Omega and nothing else.
+    ///
+    /// The shipped, signed `0.2.0-rc14` advertised `--uninstall` as "Uninstall
+    /// Omega from user system" and ran upstream's uninstaller verbatim: it
+    /// deleted the other editor's application bundle, its whole
+    /// application-support tree, its logs, caches, preferences and saved state,
+    /// asked whether to keep *that* product's preferences, printed that *that*
+    /// product had been uninstalled — and removed no Omega path at all
+    /// (omega#88).
+    ///
+    /// The end-to-end proof lives in `crates/cli/src/uninstall.rs`, where the
+    /// real script runs against a fabricated home holding both an Omega
+    /// installation and another product's, and both halves are read back. This
+    /// asserts the two structural properties that made the defect possible: the
+    /// script names no other product, and it has no path table of its own.
+    #[test]
+    fn the_uninstall_path_removes_omega_and_names_no_competitor() {
+        let policy = brand_policy().expect("brand policy parses");
+        let script_path = repository_path(UNINSTALL_SCRIPT_PATH);
+        let script = std::fs::read_to_string(&script_path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", script_path.display()));
+
+        let hits = brand_hits(&script, &policy);
+        assert!(
+            hits.is_empty(),
+            "OMEGA-DELTA-0036: {UNINSTALL_SCRIPT_PATH} names {hits:?}. It is \
+             embedded in the signed `cli` binary with include_bytes! and it \
+             removes whatever it names, so a competitor's directory appearing \
+             here is a destructive regression, not a copy regression."
+        );
+
+        for required in ["OMEGA_UNINSTALL_PATHS", "OMEGA_UNINSTALL_PRODUCT"] {
+            assert!(
+                script.contains(required),
+                "OMEGA-DELTA-0036: {UNINSTALL_SCRIPT_PATH} no longer reads \
+                 {required} from the caller, so it has a hand-written path \
+                 table again. A table disconnected from the code that creates \
+                 those directories is exactly how omega#88 shipped."
+            );
+        }
+
+        // Every root the plan removes is read from the function that writes it.
+        let plan_path = repository_path(UNINSTALL_PLAN_PATH);
+        let plan = std::fs::read_to_string(&plan_path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", plan_path.display()));
+        let constructor = plan
+            .split("pub fn from_installed_paths")
+            .nth(1)
+            .expect("OMEGA-DELTA-0036: from_installed_paths is gone");
+        let derived = constructor.matches("paths::").count();
+        assert!(
+            derived >= 6,
+            "OMEGA-DELTA-0036: from_installed_paths makes only {derived} \
+             `paths::` calls. Every root has to come from the function that \
+             writes it; a literal path here is a second source of truth, and \
+             the first one that disagreed cost a user their other editor."
+        );
+        assert!(
+            plan.contains("let Self {"),
+            "OMEGA-DELTA-0036: {} no longer destructures UninstallRoots \
+             exhaustively in `plan`, so a root can be added to the struct and \
+             silently left out of the plan.",
+            plan_path.display()
+        );
+
+        // The script itself, run for real, refuses a plan it cannot trust.
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "A gate that only reads the script cannot tell whether it \
+                      refuses; this one runs it. There is no async runtime here."
+        )]
+        let output = std::process::Command::new("sh")
+            .arg(&script_path)
+            .env("OMEGA_UNINSTALL_PRODUCT", "Omega RC")
+            .env("OMEGA_UNINSTALL_PATHS", "")
+            .output()
+            .expect("run the uninstall script");
+        assert!(
+            !output.status.success(),
+            "OMEGA-DELTA-0036: the uninstall script accepted an empty plan. \
+             Refusing is the safe direction; every default this file has ever \
+             had belonged to somebody else's product."
+        );
+    }
+
+    /// OMEGA-DELTA-0037. Omega identifies itself to third parties as Omega.
+    ///
+    /// `X-Title` is displayed to the account holder in their own OpenRouter
+    /// dashboard, so it is outbound product identity rather than a wire
+    /// contract. Every request Omega made through `0.2.0-rc14` announced a
+    /// different editor, and `HTTP-Referer` pointed at that editor's site
+    /// (omega#89).
+    #[test]
+    fn outbound_attribution_names_omega() {
+        let path = repository_path(OPEN_ROUTER_PATH);
+        let source = std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
+        let titles = source.matches(".header(\"X-Title\"").count();
+        assert!(
+            titles >= 2,
+            "OMEGA-DELTA-0037: {} sets X-Title on {titles} request paths; both \
+             the streaming and the non-streaming call carry it.",
+            path.display()
+        );
+        assert!(
+            !source.contains("\"Zed Editor\"") && !source.contains("\"https://zed.dev\""),
+            "OMEGA-DELTA-0037: {} identifies Omega to OpenRouter as a different \
+             product. The user reads this value in their own dashboard.",
+            path.display()
+        );
+        assert_eq!(
+            source.matches("app_identity::PRODUCT_NAME").count(),
+            titles,
+            "OMEGA-DELTA-0037: every X-Title must come from the identity \
+             constant, so a rebase cannot restore a literal on one path only."
+        );
+    }
+
+    /// OMEGA-DELTA-0038. The packaged gate opens every executable that ships,
+    /// and reads help as clap renders it.
+    ///
+    /// Both halves of this delta are the same failure. `script/bundle-omega-rc`
+    /// copies and signs three binaries into `Contents/MacOS`; every packaged
+    /// check in the brand gate opened one of them, so the uninstaller inside
+    /// `cli` was outside every check that had ever run (omega#88). And every
+    /// prose stream reads *source*, while clap builds the sentence a person
+    /// reads at run time — joining doc lines, resolving `cfg_attr`, printing
+    /// the flag name beside the text — so `--zed <ZED>`, `Run zed in the
+    /// foreground` and a `--user-data-dir` line naming the wrong product's data
+    /// directory all shipped under a green gate (omega#89).
+    #[test]
+    fn the_packaged_gate_opens_every_shipped_executable_and_reads_rendered_help() {
+        let verifier =
+            std::fs::read_to_string(repository_path(BRAND_VERIFIER_PATH)).expect("brand verifier");
+        let bundler =
+            std::fs::read_to_string(repository_path(RC_BUNDLE_SCRIPT_PATH)).expect("bundle script");
+
+        // Derived, not listed: whatever the packaging script writes into
+        // Contents/MacOS is what the gate has to be able to open.
+        let marker = "${app_path}/Contents/MacOS/";
+        let mut shipped: Vec<&str> = bundler
+            .match_indices(marker)
+            .filter_map(|(at, _)| {
+                bundler[at + marker.len()..]
+                    .split(['"', '\'', ' ', '\n'])
+                    .next()
+                    .filter(|name| !name.is_empty() && !name.contains('/'))
+            })
+            .collect();
+        shipped.sort_unstable();
+        shipped.dedup();
+        assert!(
+            shipped.len() >= 3,
+            "OMEGA-DELTA-0038: only {shipped:?} were found being written into \
+             Contents/MacOS by {RC_BUNDLE_SCRIPT_PATH}; the parser broke and \
+             this check is reporting green about nothing."
+        );
+
+        let policy = brand_policy().expect("brand policy parses");
+        let floor = policy["packaged"]["minimum_executables"]
+            .as_u64()
+            .expect("packaged.minimum_executables") as usize;
+        assert!(
+            floor >= shipped.len(),
+            "OMEGA-DELTA-0038: the bundle ships {} executables ({shipped:?}) \
+             but the gate's floor is {floor}. A bundle that ships a companion \
+             binary and a scan that expects fewer is the shape omega#88 \
+             shipped in.",
+            shipped.len()
+        );
+
+        assert!(
+            verifier.contains("def bundle_executables("),
+            "OMEGA-DELTA-0038: {BRAND_VERIFIER_PATH} no longer derives the set \
+             of executables it opens by walking the bundle."
+        );
+        // One accessor names the main binary; nothing else may name a binary.
+        // The code form is counted, not the prose form, so the docstring that
+        // explains why is not itself a violation.
+        let hardcoded = verifier.matches("app / \"Contents/MacOS/").count();
+        assert_eq!(
+            hardcoded, 1,
+            "OMEGA-DELTA-0038: {BRAND_VERIFIER_PATH} names a path under \
+             Contents/MacOS {hardcoded} times. Exactly one — the `main_binary` \
+             accessor — is allowed; every other check reads the derived \
+             inventory, because a check that opens one remembered binary is \
+             what let a destructive uninstaller ship twice."
+        );
+        for required in [
+            "def check_rendered_help(",
+            "def check_packaged_first_party_agent(",
+            "def check_packaged_executable_inventory(",
+            "check_rendered_help(APP)",
+            "check_packaged_first_party_agent(APP)",
+            "check_packaged_executable_inventory(APP)",
+        ] {
+            assert!(
+                verifier.contains(required),
+                "OMEGA-DELTA-0038: {BRAND_VERIFIER_PATH} is missing {required:?}. \
+                 A check that is defined and never called is the state \
+                 first_party_agent.phrases was in for four release candidates."
+            );
+        }
+        assert!(
+            verifier.contains("\"--version\"") && verifier.contains("\"--help\""),
+            "OMEGA-DELTA-0038: the rendered-output gate no longer runs the \
+             shipped binaries with --help and --version, so it is reading \
+             source again."
+        );
+    }
+
+    /// OMEGA-DELTA-0031, widened. Lowercase `zed`, and doc comments written the
+    /// long way.
+    ///
+    /// Two structural causes behind omega#89, both of which would have survived
+    /// a fix that only edited the offending strings.
+    ///
+    /// `brand.words` held `Zed` alone, and the reason recorded for excluding
+    /// the lowercase spelling — that it is a substring of `authorized` — was
+    /// false, because the boundary rule already excludes that. The exclusion is
+    /// what hid the rendered `--help` of both shipped binaries.
+    ///
+    /// And the doc scanner matched `///` and `//!` only, so it never read
+    /// `#[cfg_attr(target_os = "macos", doc = "…")]` — which is exactly where
+    /// `cli --help` took the wrong product's data directory from.
+    #[test]
+    fn the_doc_scanner_reads_every_spelling_of_a_doc_comment() {
+        let policy = brand_policy().expect("brand policy parses");
+        let words: Vec<&str> = policy["brand"]["words"]
+            .as_array()
+            .expect("brand.words")
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .collect();
+        assert!(
+            words.contains(&"zed"),
+            "OMEGA-DELTA-0031: brand.words is {words:?}. The lowercase spelling \
+             is what `Run zed in the foreground` is written in, and it is the \
+             boundary rule — not the case — that keeps `authorized` out."
+        );
+        for benign in ["authorized", "normalized", "organized", "customized"] {
+            assert!(
+                brand_hits(benign, &policy).is_empty(),
+                "OMEGA-DELTA-0031: {benign:?} is reported as a brand hit. The \
+                 boundary rule has to carry the lowercase word, or the gate \
+                 cries wolf and gets deleted."
+            );
+        }
+        assert_eq!(
+            brand_hits("Run zed in the foreground", &policy),
+            vec!["zed".to_owned()],
+            "OMEGA-DELTA-0031: the sentence that shipped in two published \
+             prereleases is not reported as a hit"
+        );
+
+        assert_eq!(
+            doc_comment_body(r#"    #[cfg_attr(target_os = "macos", doc = "`~/Library/x`.")]"#),
+            Some("`~/Library/x`."),
+            "a cfg_attr doc attribute is a doc comment"
+        );
+        assert_eq!(
+            doc_comment_body(r#"        doc = "the long way""#),
+            Some("the long way"),
+            "an attribute written across several lines is still a doc comment"
+        );
+        assert_eq!(
+            doc_comment_body(r#"    #[doc = "plain"]"#),
+            Some("plain"),
+            "a plain doc attribute is a doc comment"
+        );
+        assert_eq!(doc_comment_body("    /// sugar"), Some(" sugar"));
+        assert_eq!(
+            doc_comment_body(r#"    let doc = "not documentation";"#),
+            None,
+            "a Rust binding named `doc` is not documentation"
+        );
+        assert_eq!(doc_comment_body("    let x = 1;"), None);
+    }
+
+    /// OMEGA-DELTA-0039. The installed-proof harness observes what it records.
+    ///
+    /// Three checks in the harness could not fail (omega#90). The secret
+    /// tripwire made a pipe, wrote a fresh random needle into it, closed both
+    /// ends in the same function and then searched the disk for it, so `pass`
+    /// was guaranteed by construction. Four of its six surfaces resolved under
+    /// the data root, where Omega writes no logs, no telemetry and no crash
+    /// reports, and recorded `absent` — which did not fail the receipt. And the
+    /// `light-theme` / `dark-theme` observations wrote `content_legible: True`
+    /// as a literal, with zero OCR calls and zero pixel comparisons, so a
+    /// frozen or blank window passed both.
+    ///
+    /// This asserts the shape of the corrections. The scripts' own
+    /// `--self-test` paths carry the behavioural oracles.
+    #[test]
+    fn the_installed_proof_harness_observes_what_it_records() {
+        let tripwires = std::fs::read_to_string(repository_path(INSTALLED_TRIPWIRE_PATH))
+            .expect("tripwire collector");
+        assert!(
+            !tripwires.contains("secrets.token_hex"),
+            "OMEGA-DELTA-0039: {INSTALLED_TRIPWIRE_PATH} mints its own needle \
+             again. A needle no other process has ever seen cannot be found, \
+             so the scan passes whatever the product does."
+        );
+        assert!(
+            tripwires.contains("--needle-fd"),
+            "OMEGA-DELTA-0039: {INSTALLED_TRIPWIRE_PATH} no longer takes the \
+             needle from the caller through a descriptor."
+        );
+        for required in ["Library/Logs", "DiagnosticReports"] {
+            assert!(
+                tripwires.contains(required),
+                "OMEGA-DELTA-0039: {INSTALLED_TRIPWIRE_PATH} no longer scans \
+                 {required:?}. On macOS `paths::logs_dir()` is \
+                 ~/Library/Logs/<slug> and `paths::crashes_dir()` is \
+                 ~/Library/Logs/DiagnosticReports; a surface resolved anywhere \
+                 else records `absent` about a directory the product never \
+                 writes."
+            );
+        }
+        assert!(
+            tripwires.contains("blocked"),
+            "OMEGA-DELTA-0039: a surface that cannot be observed has to block. \
+             'nothing was found there' and 'nobody looked' must not read the \
+             same in a receipt."
+        );
+
+        let observations = std::fs::read_to_string(repository_path(INSTALLED_OBSERVATION_PATH))
+            .expect("observation collector");
+        let appearance = observations
+            .split("# ---- appearance ---")
+            .nth(1)
+            .expect("OMEGA-DELTA-0039: the appearance block is gone");
+        for required in ["ocr_lines(", "differing_pixels("] {
+            assert!(
+                appearance.contains(required),
+                "OMEGA-DELTA-0039: the appearance block does not call \
+                 {required:?}. `content_legible` was a Python literal there \
+                 through 0.2.0-rc14: a fact about the host's appearance setting \
+                 and about a file existing, filed as a fact about the product."
+            );
+        }
+        assert!(
+            !appearance.contains("\"content_legible\": True,"),
+            "OMEGA-DELTA-0039: `content_legible` is a constant in the \
+             appearance block again."
+        );
+
+        let bundler =
+            std::fs::read_to_string(repository_path(RC_BUNDLE_SCRIPT_PATH)).expect("bundle script");
+        assert!(
+            !bundler.contains("\"dirty\": False"),
+            "OMEGA-DELTA-0039: the release record states `dirty` as a literal. \
+             It is a field that reads like an observation, so it has to be one."
+        );
+    }
 }
-
-

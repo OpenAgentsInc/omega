@@ -457,7 +457,28 @@ def check_action_labels() -> None:
 
 PROSE_CLASSIFIED = PROSE["classified"]
 PROSE_CORPUS = set(PROSE["corpus_files"])
-DOC_LINE = re.compile(r"^\s*(?:///|//!)(.*)$")
+SUGAR_DOC_LINE = re.compile(r"^\s*(?:///|//!)(.*)$")
+# `#[doc = "..."]` and `#[cfg_attr(<predicate>, doc = "...")]` are doc comments
+# written the long way, and clap and schemars read them exactly the same. The
+# gate did not, which is why `~/Library/Application Support/Zed` was printed as
+# the data directory by `cli --help` in every candidate up to 0.2.0-rc14 while
+# this file reported green -- the line is a `cfg_attr`, and nothing here had
+# ever looked inside one (omega#89).
+# Either `#[... doc = "..."]` on one line, or the `doc = "..."` line of an
+# attribute written across several. Anchoring on the line start keeps a Rust
+# `let doc = "..."` binding out.
+ATTR_DOC_LINE = re.compile(r'^\s*(?:#\[.*?)?\bdoc\s*=\s*"((?:[^"\\]|\\.)*)"')
+
+
+def doc_line_body(line: str) -> str | None:
+    """The text of a doc comment, however it was spelled."""
+    match = SUGAR_DOC_LINE.match(line)
+    if match is not None:
+        return match.group(1)
+    match = ATTR_DOC_LINE.match(line)
+    if match is not None:
+        return match.group(1)
+    return None
 DERIVES_SCHEMA = re.compile(r"#\[derive\([^)]*JsonSchema")
 DERIVES_CLAP = re.compile(r"#\[derive\([^)]*(?:Parser|Args|Subcommand)|#\[command\(|clap::Parser")
 PLAIN_WORD = re.compile(r"[A-Za-z']+")
@@ -619,8 +640,11 @@ def action_doc_lines(text: str) -> set[int]:
         if "#[action(" not in line:
             continue
         cursor = index - 1
-        while cursor >= 0 and (DOC_LINE.match(lines[cursor]) or lines[cursor].strip().startswith("#[")):
-            if DOC_LINE.match(lines[cursor]):
+        while cursor >= 0 and (
+            doc_line_body(lines[cursor]) is not None
+            or lines[cursor].strip().startswith("#[")
+        ):
+            if doc_line_body(lines[cursor]) is not None:
                 out.add(cursor + 1)
             cursor -= 1
     return out
@@ -642,12 +666,12 @@ def prose_inventory() -> tuple[tuple[tuple[str, str, int, str], ...], dict[str, 
         literals = rust_string_literals(text)
         read["literals"] += len(literals)
         lines = text.splitlines()
-        code = "\n".join("" if DOC_LINE.match(line) else line for line in lines)
+        code = "\n".join("" if doc_line_body(line) is not None else line for line in lines)
         schema = bool(DERIVES_SCHEMA.search(code))
         clap = bool(DERIVES_CLAP.search(code))
         actions = action_doc_lines(text)
         for number, line in enumerate(lines, 1):
-            if not DOC_LINE.match(line):
+            if doc_line_body(line) is None:
                 continue
             if number in actions:
                 read["action_docs"] += 1
@@ -667,8 +691,8 @@ def prose_inventory() -> tuple[tuple[tuple[str, str, int, str], ...], dict[str, 
         for number, line in enumerate(lines, 1):
             if is_test_file or number in skipped:
                 continue
-            doc = DOC_LINE.match(line)
-            if doc is None or not brand_hits(doc.group(1)) or not is_prose(doc.group(1)):
+            doc = doc_line_body(line)
+            if doc is None or not brand_hits(doc) or not is_prose(doc):
                 continue
             if number in actions:
                 kind = "action_doc"
@@ -678,7 +702,7 @@ def prose_inventory() -> tuple[tuple[tuple[str, str, int, str], ...], dict[str, 
                 kind = "clap_doc"
             else:
                 continue
-            items.append((kind, relative, number, normalize_prose(doc.group(1))))
+            items.append((kind, relative, number, normalize_prose(doc)))
 
     for relative in embedded_asset_inventory():
         read["embedded"] += 1
@@ -780,6 +804,293 @@ def check_packaged_info_plist(app: Path) -> None:
                 )
 
 
+# ---------------------------------- OMEGA-DELTA-0038, every shipped executable
+
+
+MACHO_MAGIC = (
+    b"\xcf\xfa\xed\xfe",  # 64-bit little-endian
+    b"\xce\xfa\xed\xfe",  # 32-bit little-endian
+    b"\xca\xfe\xba\xbe",  # universal
+    b"\xbe\xba\xfe\xca",  # universal, byte-swapped
+)
+
+
+@functools.lru_cache(maxsize=None)
+def bundle_executables(app: Path) -> tuple[Path, ...]:
+    """Every Mach-O executable the bundle ships, found by walking it.
+
+    Not a list of binary names. `script/bundle-omega-rc` copies and signs
+    `cli` and `omega-identity-proof` into `Contents/MacOS` beside `omega`, and
+    every packaged check here used to open `Contents/MacOS/omega` and nothing
+    else. That is why `cli` shipped an uninstaller that deleted a competitor's
+    application and none of ours through two published prereleases (omega#88),
+    with the gate reporting green about the bundle: the defect was never in a
+    file any check opened.
+
+    A helper added to the bundle tomorrow is inside the gate the day it is
+    added, the same way rust-embed's `#[folder]` declarations made the asset
+    inventory derived rather than remembered.
+    """
+    found: list[Path] = []
+    for path in sorted(app.rglob("*")):
+        if path.is_symlink() or not path.is_file():
+            continue
+        try:
+            head = path.open("rb").read(4)
+        except OSError:
+            continue
+        if head in MACHO_MAGIC:
+            found.append(path)
+    return tuple(found)
+
+
+def main_binary(app: Path) -> Path:
+    return app / "Contents/MacOS/omega"
+
+
+def check_packaged_executable_inventory(app: Path) -> None:
+    """Anti-vacuity for the walk above, and for the bundle it walked."""
+    executables = bundle_executables(app)
+    if not executables:
+        fail(
+            "OMEGA-DELTA-0038: no Mach-O executable was found anywhere in "
+            f"{app}. The walk broke, and every packaged check below is "
+            "reporting green about nothing."
+        )
+        return
+    if main_binary(app) not in executables:
+        fail(
+            f"OMEGA-DELTA-0038: {main_binary(app)} is not among the "
+            "executables found in the bundle"
+        )
+    minimum = POLICY.get("packaged", {}).get("minimum_executables", 2)
+    if len(executables) < minimum:
+        fail(
+            f"OMEGA-DELTA-0038: only {len(executables)} executables were found "
+            f"in the bundle, below the {minimum} floor. A bundle that ships a "
+            "companion binary and a scan that sees one binary is exactly the "
+            "shape omega#88 shipped in."
+        )
+
+
+def printable_runs(data: bytes, minimum: int = 8):
+    """Every printable ASCII run in a binary, as (start offset, text)."""
+    for run in re.finditer(rb"[\x20-\x7e]{%d,}" % minimum, data):
+        yield run.start(), run.group(0).decode("ascii")
+
+
+def check_packaged_first_party_agent(app: Path) -> None:
+    """OMEGA-DELTA-0024, packaged side.
+
+    `first_party_agent.phrases` had been applied to nothing by either half of
+    this gate since it was written: `grep -c first_party_agent
+    script/verify-omega-brand` returned 0, and the only reader was a Rust test
+    over the source tree. A reviewer had to run it by hand against a package
+    every time, which is the same as not having it (omega#89).
+    """
+    agent = POLICY["first_party_agent"]
+    phrases = [phrase.lower() for phrase in agent["phrases"]]
+    symbols = agent.get("symbols", [])
+    if not phrases:
+        fail("OMEGA-DELTA-0024: first_party_agent.phrases is empty; check vacuous")
+        return
+    identity = agent["identity"]
+    carried = False
+    for binary in bundle_executables(app):
+        data = binary.read_bytes()
+        if identity.encode() in data:
+            carried = True
+        for _offset, blob in printable_runs(data):
+            lowered = blob.lower()
+            for phrase in phrases:
+                if phrase in lowered:
+                    at = lowered.index(phrase)
+                    window = blob[max(0, at - 60) : at + len(phrase) + 60]
+                    fail(
+                        f"OMEGA-DELTA-0024: packaged "
+                        f"{binary.relative_to(app.parent)} presents somebody "
+                        f"else's agent as the first-party one: ...{window}..."
+                    )
+        for symbol in symbols:
+            if symbol.encode() in data:
+                fail(
+                    f"OMEGA-DELTA-0024: packaged "
+                    f"{binary.relative_to(app.parent)} still carries the "
+                    f"symbol {symbol!r}"
+                )
+    if not carried:
+        fail(
+            f"OMEGA-DELTA-0024: no packaged executable carries {identity!r}, so "
+            "this scan found nothing because it read nothing"
+        )
+
+
+# ------------------------------- OMEGA-DELTA-0038, help as the user reads it
+
+
+HELP_SUBCOMMAND = re.compile(r"^\s{2,}([a-z][a-z0-9-]*)(?:\s|$)")
+
+
+def rendered_output(binary: Path, arguments: list[str]) -> str | None:
+    """Run the shipped binary and return what it printed, or None if it could
+    not be run at all."""
+    import subprocess
+
+    try:
+        completed = subprocess.run(
+            [str(binary), *arguments],
+            capture_output=True,
+            timeout=120,
+            check=False,
+            cwd="/",
+            env={"PATH": "/usr/bin:/bin", "HOME": "/nonexistent-omega-brand-gate"},
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return (completed.stdout + completed.stderr).decode("utf-8", errors="replace")
+
+
+def help_subcommands(text: str) -> list[str]:
+    """Subcommand names out of a clap `Commands:` block."""
+    names: list[str] = []
+    inside = False
+    for line in text.splitlines():
+        if line.rstrip().endswith(":"):
+            inside = line.strip() in ("Commands:", "Subcommands:")
+            continue
+        if not inside:
+            continue
+        if not line.strip():
+            continue
+        match = HELP_SUBCOMMAND.match(line)
+        if match and match.group(1) not in ("help",):
+            names.append(match.group(1))
+    return names
+
+
+def help_units(text: str) -> list[str]:
+    """What a person reads, as they read it: whole descriptions, not lines.
+
+    clap wraps a description to the terminal width, so the sentence the user
+    sees arrives split across several lines. Reading line by line hid exactly
+    the defect this gate was written for: `~/Library/Application Support/Zed`
+    lands as `... location: \`~/Library/Application` on one line and
+    `Support/Zed\`` on the next, and neither fragment is three words. Blocks
+    are joined back before anything is judged, and the individual lines are
+    kept too, so a short label is still read on its own.
+    """
+    units: list[str] = []
+    block: list[str] = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped:
+            units.append(stripped)
+            block.append(stripped)
+            continue
+        if block:
+            units.append(" ".join(block))
+            block = []
+    if block:
+        units.append(" ".join(block))
+    return units
+
+
+def check_rendered_help(app: Path) -> None:
+    """OMEGA-DELTA-0038. The `--help` a person actually sees.
+
+    Every other stream in OMEGA-DELTA-0031 reads *source*: the doc line, the
+    literal, the schema comment. clap does not print source. It joins several
+    doc lines into one sentence, resolves `cfg_attr` for the platform it was
+    built for, prints the flag *name* beside the description, and lays the
+    whole thing out at run time. Nothing had ever read that output, which is
+    how `--zed <ZED>`, `Run zed in the foreground` and a `--user-data-dir`
+    line naming the wrong product's data directory all shipped in
+    `0.2.0-rc14` under a green gate (omega#89).
+
+    This runs the binaries that ship, with `--help`, and reads what comes back.
+    Subcommands are enumerated from the output rather than listed, so a
+    subcommand added tomorrow is read the day it is added.
+    """
+    executables = bundle_executables(app)
+    if not executables:
+        return
+    rendered = 0
+    for binary in executables:
+        pending: list[list[str]] = [["--help"], ["--version"]]
+        seen: set[tuple[str, ...]] = set()
+        while pending:
+            arguments = pending.pop(0)
+            key = tuple(arguments)
+            if key in seen:
+                continue
+            seen.add(key)
+            text = rendered_output(binary, arguments)
+            if text is None:
+                continue
+            rendered += 1
+            if arguments[-1] == "--help":
+                for name in help_subcommands(text):
+                    if len(arguments) < 4:
+                        pending.append([*arguments[:-1], name, "--help"])
+            where = f"{binary.relative_to(app.parent)} {' '.join(arguments)}"
+
+            # A flag name, a value placeholder and a subcommand are labels, not
+            # sentences, so the prose rule below cannot see them -- `--zed
+            # <ZED>` is two tokens. They are read here on their own terms, the
+            # way an action namespace is: the palette shows `omega: about`, and
+            # `--help` shows `--zed`, and both are copy the user reads.
+            for token in set(re.findall(r"--[A-Za-z0-9][A-Za-z0-9-]*", text)):
+                if brand_hits(token):
+                    fail(
+                        f"OMEGA-DELTA-0038: `{where}` offers the option "
+                        f"{token!r}, which names a competitor. An option name is "
+                        "a user-facing label; renaming the description and "
+                        "leaving the flag is half a rename."
+                    )
+            for token in set(re.findall(r"<([A-Za-z0-9_]+)>", text)):
+                if brand_hits(token) or brand_hits(token.capitalize()):
+                    fail(
+                        f"OMEGA-DELTA-0038: `{where}` names the value "
+                        f"placeholder <{token}>, which carries a competitor's "
+                        "name."
+                    )
+            if arguments[-1] == "--help":
+                for name in help_subcommands(text):
+                    if brand_hits(name):
+                        fail(
+                            f"OMEGA-DELTA-0038: `{where}` offers the subcommand "
+                            f"{name!r}, which names a competitor."
+                        )
+
+            for stripped in help_units(text):
+                if not brand_hits(stripped):
+                    continue
+                normalized = normalize_prose(stripped)
+                if normalized in PROSE_CLASSIFIED:
+                    continue
+                if any(
+                    fragment in normalized
+                    for fragment in packaged_covering_fragments()
+                ):
+                    continue
+                if not is_prose(normalized):
+                    continue
+                fail(
+                    f"OMEGA-DELTA-0038: `{where}` prints a line naming a "
+                    f"competitor: {normalized!r}. This is the sentence the user "
+                    "reads; clap builds it at run time out of doc lines the "
+                    "source scan sees separately, so fixing it means fixing the "
+                    "text, not the check."
+                )
+    minimum = POLICY.get("packaged", {}).get("minimum_rendered_invocations", 4)
+    if rendered < minimum:
+        fail(
+            f"OMEGA-DELTA-0038: only {rendered} rendered outputs were read, "
+            f"below the {minimum} floor. The binaries did not run, and a gate "
+            "that reads nothing reports green about nothing."
+        )
+
+
 def check_packaged_icons(app: Path) -> None:
     """OMEGA-DELTA-0018, packaged side.
 
@@ -787,22 +1098,33 @@ def check_packaged_icons(app: Path) -> None:
     has no assets directory. Both the asset path literals and the raw SVG
     bytes survive in the binary, so this checks the names AND the artwork.
     """
-    binary = app / "Contents/MacOS/omega"
+    binary = main_binary(app)
     if not binary.is_file():
         fail(f"packaged Omega binary is missing: {binary}")
         return
     data = binary.read_bytes()
 
-    embedded = sorted({match.decode() for match in re.findall(rb"icons/[A-Za-z0-9_]+\.svg", data)})
-    if not embedded:
+    # The name rule runs over every executable in the bundle; the artwork pin
+    # runs over the one that embeds the assets.
+    embedded_anywhere: set[str] = set()
+    for executable in bundle_executables(app):
+        blob = executable.read_bytes()
+        embedded = sorted(
+            {match.decode() for match in re.findall(rb"icons/[A-Za-z0-9_]+\.svg", blob)}
+        )
+        embedded_anywhere.update(embedded)
+        for relative in embedded:
+            stem = relative[len("icons/") : -len(".svg")]
+            if stem_is_forbidden(stem):
+                fail(
+                    f"OMEGA-DELTA-0018: packaged "
+                    f"{executable.relative_to(app.parent)} embeds {relative}"
+                )
+    if not embedded_anywhere:
         fail(
-            "no embedded icon asset paths were found in the packaged binary; "
+            "no embedded icon asset paths were found in any packaged binary; "
             "this check would be vacuous"
         )
-    for relative in embedded:
-        stem = relative[len("icons/") : -len(".svg")]
-        if stem_is_forbidden(stem):
-            fail(f"OMEGA-DELTA-0018: packaged Omega embeds {relative}")
 
     for relative, expected in sorted(REVIEWED_MARKS.items()):
         source = ROOT / relative
@@ -830,7 +1152,7 @@ def check_packaged_assets_and_actions(app: Path) -> None:
     listed, so a directory added tomorrow is read the same way assets/images/
     now is -- it was the missing directory in rc11, not a missing rule.
     """
-    binary = app / "Contents/MacOS/omega"
+    binary = main_binary(app)
     if not binary.is_file():
         fail(f"packaged Omega binary is missing: {binary}")
         return
@@ -861,10 +1183,15 @@ def check_packaged_assets_and_actions(app: Path) -> None:
         )
     token_group = "|".join(re.escape(token) for token in tokens)
     pattern = rf"(?:{directory_group})/[\w./-]*(?:{token_group})[\w./-]*".encode()
-    for match in sorted({found.decode() for found in re.findall(pattern, data)}):
-        if any(match.startswith(entry) for entry in allowed):
-            continue
-        fail(f"OMEGA-DELTA-0022: packaged Omega embeds {match}")
+    for executable in bundle_executables(app):
+        blob = executable.read_bytes()
+        for match in sorted({found.decode() for found in re.findall(pattern, blob)}):
+            if any(match.startswith(entry) for entry in allowed):
+                continue
+            fail(
+                f"OMEGA-DELTA-0022: packaged "
+                f"{executable.relative_to(app.parent)} embeds {match}"
+            )
 
     # Action labels, checked by presence of the current ones.
     #
@@ -891,6 +1218,7 @@ def check_packaged_assets_and_actions(app: Path) -> None:
 
 
 
+@functools.lru_cache(maxsize=None)
 def packaged_covering_fragments() -> list[str]:
     """Classified prose as it survives compilation, normalized.
 
@@ -911,7 +1239,12 @@ def packaged_covering_fragments() -> list[str]:
     fragments: list[str] = []
     for text in PROSE_CLASSIFIED:
         joined = text.replace("\\ ", " ")
-        for part in re.split(r"\\[nrt]|[^\x20-\x7e]+", joined):
+        # A `{}` placeholder is not in the binary either: rustc splits a format
+        # string at every placeholder and stores the pieces, so a classified
+        # sentence written with one could never cover its own occurrence in the
+        # string table. Splitting there is conservative in the same direction as
+        # the rules above -- shorter fragments cover less, never more.
+        for part in re.split(r"\\[nrt]|\{[^{}]*\}|[^\x20-\x7e]+", joined):
             part = normalize_prose(part)
             if part and brand_hits(part):
                 fragments.append(part)
@@ -952,26 +1285,56 @@ def check_packaged_prose(app: Path) -> None:
     reports one only when the brand sits in running text AND no classified
     sentence spans that position.
     """
-    binary = app / "Contents/MacOS/omega"
+    binary = main_binary(app)
     if not binary.is_file():
         fail(f"packaged Omega binary is missing: {binary}")
         return
-    data = binary.read_bytes()
 
     covering = packaged_covering_fragments()
     if not covering:
         fail("OMEGA-DELTA-0031: no classified prose carries a brand; check vacuous")
         return
 
-    # A brand occurrence only counts as prose when it is written as a word in
-    # running text. `/Zed/` in a path list, `ENV=Zed` in a task-template
-    # placeholder and `X-Zed-Predict-Edits-Mode` in an HTTP header are all
-    # neighbours of real sentences in a stripped string table, and reporting
-    # them is how a gate earns the reputation that gets it deleted.
-    before_ok = set(" (\"'`\t*[|>\u2014-")
-    after_ok = set(" .,:;!?)]}'\"`<>/\u2014\u2026\t-")
-
     scanned, offenders = 0, set()
+    main_scanned = 0
+    for executable in bundle_executables(app):
+        data = executable.read_bytes()
+        before = scanned
+        scanned, found = scan_binary_prose(data, covering, scanned)
+        if executable == binary:
+            main_scanned = scanned - before
+        for window in found:
+            offenders.add((str(executable.relative_to(app.parent)), window))
+    if scanned == 0 or main_scanned == 0:
+        fail(
+            "OMEGA-DELTA-0031: no brand-bearing prose was found in the packaged "
+            "binaries at all, not even the classified third-party references. "
+            "The string scan broke; a clean package still carries those."
+        )
+    for where, window in sorted(offenders):
+        fail(
+            f"OMEGA-DELTA-0031: packaged {where} carries unclassified prose: "
+            f"...{window}... The package was built from a tree that still "
+            "presents a competitor as the product, whatever the source scan "
+            "above says about this checkout."
+        )
+
+
+# A brand occurrence only counts as prose when it is written as a word in
+# running text. `/Zed/` in a path list, `ENV=Zed` in a task-template
+# placeholder and `X-Zed-Predict-Edits-Mode` in an HTTP header are all
+# neighbours of real sentences in a stripped string table, and reporting them
+# is how a gate earns the reputation that gets it deleted.
+BEFORE_OK = set(" (\"'`\t*[|>\u2014-")
+AFTER_OK = set(" .,:;!?)]}'\"`<>/\u2014\u2026\t-")
+
+
+def scan_binary_prose(
+    data: bytes, covering: list[str], scanned: int
+) -> tuple[int, set[str]]:
+    """Brand occurrences in one executable's string table that no classified
+    sentence spans. Returns the running scanned count and the offenders."""
+    offenders: set[str] = set()
     for run in re.finditer(rb"[\x20-\x7e]{8,}", data):
         blob = run.group(0).decode("ascii")
         if not any(word in blob for word in WORDS):
@@ -984,7 +1347,7 @@ def check_packaged_prose(app: Path) -> None:
                 after = blob[end] if end < len(blob) else " "
                 if before.isalnum() or after.isalnum():
                     continue
-                if before not in before_ok or after not in after_ok:
+                if before not in BEFORE_OK or after not in AFTER_OK:
                     continue
                 # A brand hyphenated on both sides is part of an identifier.
                 if before == "-" and after == "-":
@@ -1009,19 +1372,7 @@ def check_packaged_prose(app: Path) -> None:
                         break
                 if not covered:
                     offenders.add(normalize_prose(window))
-    if scanned == 0:
-        fail(
-            "OMEGA-DELTA-0031: no brand-bearing prose was found in the packaged "
-            "binary at all, not even the classified third-party references. The "
-            "string scan broke; a clean package still carries those."
-        )
-    for window in sorted(offenders):
-        fail(
-            f"OMEGA-DELTA-0031: packaged Omega carries unclassified prose: "
-            f"...{window}... The package was built from a tree that still "
-            "presents a competitor as the product, whatever the source scan "
-            "above says about this checkout."
-        )
+    return scanned, offenders
 
 
 check_info_plist_fragments()
@@ -1034,10 +1385,13 @@ if APP is not None:
     if not APP.is_dir():
         fail(f"packaged application is missing: {APP}")
     else:
+        check_packaged_executable_inventory(APP)
         check_packaged_info_plist(APP)
         check_packaged_icons(APP)
         check_packaged_assets_and_actions(APP)
         check_packaged_prose(APP)
+        check_packaged_first_party_agent(APP)
+        check_rendered_help(APP)
 
 if failures:
     print("Omega brand gate FAILED:", file=sys.stderr)

@@ -870,7 +870,26 @@ write_release_record() {
   python3 <<'PY'
 import json
 import os
+import subprocess
 from pathlib import Path
+
+
+def worktree_is_dirty() -> bool:
+    """Ask git whether the tree this candidate was built from was recorded.
+
+    `require_clean_checkout` refuses to start a build from a dirty tree, so
+    this normally answers false — but it has to be *read*, not asserted. It was
+    a Python literal, which made a provenance field that cannot disagree with
+    the build no matter what the tree held.
+    """
+    status = subprocess.run(
+        ["git", "status", "--porcelain"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return bool(status.stdout.strip())
+
 
 icons = json.loads(os.environ["OMEGA_RC_ICON_JSON"])
 packaged_bindings = json.loads(os.environ["OMEGA_RC_PACKAGED_BINDINGS_JSON"])
@@ -913,7 +932,7 @@ record = {
     "source": {
         "commit": os.environ["OMEGA_RC_COMMIT"],
         "upstream_commit": upstream,
-        "dirty": False,
+        "dirty": worktree_is_dirty(),
         "repository": "https://github.com/OpenAgentsInc/omega",
     },
     "toolchains": {

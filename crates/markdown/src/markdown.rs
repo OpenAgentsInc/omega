@@ -2918,7 +2918,7 @@ fn image_fallback_element(
         .min_w_0()
         .child(Label::new(label).color(Color::Warning).underline())
         .tooltip(Tooltip::text(
-            "Image failed to load. Open `zed: log` for more details.",
+            "Image failed to load. Open `workspace: open log` for more details.",
         ))
         .when(open_image_url_on_click, |this| {
             this.cursor_pointer()

@@ -1742,8 +1742,8 @@
     // When the resolved directory is outside the project root, the
     // project's directory name is automatically appended so that
     // sibling repos don't collide. For example, with the default
-    // "../worktrees" and a project at ~/code/zed, worktrees are
-    // created under ~/code/worktrees/zed/.
+    // "../worktrees" and a project at ~/code/omega, worktrees are
+    // created under ~/code/worktrees/omega/.
     //
     // When the resolved directory is inside the project root, no
     // extra component is added (it's already project-scoped).
@@ -2635,7 +2635,7 @@
     //   }
     // ]
     //
-    // Default rules are viewable via the "zed: show default semantic token rules" action.
+    // Default rules are viewable via the "omega: show default semantic token rules" action.
     "semantic_token_rules": [],
   },
   // Jupyter settings
@@ -2859,7 +2859,7 @@
   // Configuration for developer-oriented instrumentation tools that can be
   // toggled at runtime.
   "instrumentation": {
-    // Performance profiler, accessed via the `zed: open performance profiler`
+    // Performance profiler, accessed via the `omega: open performance profiler`
     // action. Collects timing data for foreground and background executor
     // tasks. Enabling this may lead to increased memory usage, hence it's
     // disabled by default for regular builds.

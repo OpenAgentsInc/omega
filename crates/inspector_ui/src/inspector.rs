@@ -173,11 +173,11 @@ async fn open_zed_source_location(
         .arg(&path_arg)
         .output()
         .await
-        .with_context(|| format!("running zed to open {path_arg} failed"))?;
+        .with_context(|| format!("running omega to open {path_arg} failed"))?;
 
     if !output.status.success() {
         Err(anyhow!(
-            "running zed to open {path_arg} failed with stderr: {}",
+            "running omega to open {path_arg} failed with stderr: {}",
             String::from_utf8_lossy(&output.stderr)
         ))
     } else {

@@ -246,8 +246,12 @@ fn connect_denied_host_returns_511_with_via_header() {
         response.starts_with("HTTP/1.1 511 "),
         "expected 511, got: {response}"
     );
-    assert!(response.contains("Via: 1.1 zed-sandbox-proxy"));
-    assert!(response.contains("Proxy-Status: zed-sandbox-proxy"));
+    // OMEGA-DELTA-0031. The refusal a blocked request reads names Omega's
+    // proxy, not the upstream fork's. This assertion carried the upstream
+    // value; the delta is the policy record, so it is updated rather than
+    // deleted.
+    assert!(response.contains("Via: 1.1 omega-sandbox-proxy"));
+    assert!(response.contains("Proxy-Status: omega-sandbox-proxy"));
     assert!(response.contains("denied.example"));
     assert!(response.contains("not in this conversation's network allowlist"));
 

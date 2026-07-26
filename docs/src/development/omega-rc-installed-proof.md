@@ -614,6 +614,60 @@ crash or diagnostics surface is recorded as `absent`, not
 silently treated as scanned. The independent reviewer must decide whether each
 absence is expected for the exercised journey before admitting the attestation.
 
+### Collecting the receipt in one command
+
+`script/collect-omega-installed-tripwires` produces the same receipt without
+the operator naming six paths. It resolves them from `crates/paths/src/paths.rs`
+instead:
+
+| surface | where it is read |
+| --- | --- |
+| logs | `paths::logs_dir()` — `~/Library/Logs/omega-rc`, less the telemetry log |
+| telemetry | `~/Library/Logs/omega-rc/telemetry.log` |
+| diagnostics | `paths::database_dir()` and `paths::hang_traces_dir()` |
+| crashes | `paths::crashes_dir()` — `~/Library/Logs/DiagnosticReports` |
+| clipboard | the general `NSPasteboard`, through PyObjC or `pbpaste` |
+| accessibility | the running candidate's `AXUIElement` tree |
+
+```sh
+script/collect-omega-installed-tripwires \
+  --app /Applications/Omega.app \
+  --candidate-evidence target/omega-identity-evidence/candidate-evidence.json \
+  --output "$OMEGA_PRIVATE_PROOF_DIR/installed-secret-tripwires.json" \
+  --needle-fd 3 3<"$OMEGA_PRIVATE_PROOF_DIR/disposable-canary"
+```
+
+Three rules make the receipt worth reading.
+
+`--needle-fd` is required. The canary is the one the candidate was actually
+given during the journey, read from a descriptor the caller opened on the
+mode-0600 file, and the collector will not generate one of its own. A secret no
+other process has ever seen cannot have been leaked by anything, so a search
+for it passes by construction — which is what an earlier version of this
+command did, and what made its `pass` worth nothing.
+
+The scan is proved able to fire before it is trusted. The needle is planted in
+a private file and the same scanner is pointed at it; a scanner that does not
+come back with that match ends the run at exit 2 with no receipt written,
+rather than reporting that nothing was found.
+
+A surface that could not be observed records `blocked` and the run exits 3.
+That includes a logs or diagnostics root that does not exist — which means the
+run looked somewhere the product does not write — a pasteboard that holds
+flavours the read cannot see, and an accessibility tree that could not be read
+because no candidate is running or because the terminal has not been granted
+Accessibility in System Settings. `validate_installed_tripwires` refuses any
+receipt carrying a `blocked` surface, because "nothing was found there" and
+"nobody looked" must not read the same. The clipboard and accessibility
+captures are written mode-0600 into a private temporary directory and deleted
+when the run ends.
+
+`script/collect-omega-installed-tripwires --self-test` checks the scanner on a
+planted needle, checks that the live-fire control catches a scanner that never
+matches, checks the canary length bounds, and checks that the surfaces still
+resolve to `paths::logs_dir()` and `paths::crashes_dir()` rather than under the
+application support root.
+
 ## Installed observations
 
 `script/collect-omega-installed-observations` performs the eleven installed
@@ -640,6 +694,23 @@ script/collect-omega-installed-observations \
 
 The parity probe is a separate command because it starts upstream Zed, and
 Zed's own writes must fall outside the window the isolation check measures.
+
+`light-theme` and `dark-theme` take their facts from the captures, not from the
+host. The host appearance is their precondition, exactly as the increased-
+contrast flag is the precondition of `high-contrast`: the window has to be
+legible in each appearance — twelve lines recognised at confidence 0.5 off the
+rendered capture — and the light and dark captures have to differ by at least
+50,000 pixels. A frozen, blank, or appearance-ignoring window returns the same
+image twice and blocks both checks. `content_legible` was a hardcoded literal
+until omega#90, so a window that never repainted passed both.
+
+`script/collect-omega-installed-observations --self-test` exercises that
+decision offline, without driving the host or the candidate: it requires an
+unreadable capture, a capture with too little legible text, an uncomparable
+pair, and two captures of the same picture each to fail, and it asserts that
+the appearance block still calls `ocr_lines`, `confident_lines`, and
+`differing_pixels`, so the decision cannot quietly stop being wired to the
+pixels.
 
 Every keystroke the collector sends brings the candidate to the front first and
 refuses if it is not there. macOS routes a synthesized key to whichever

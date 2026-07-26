@@ -801,8 +801,8 @@ fn deny_request(
     );
     let response = format!(
         "HTTP/1.1 511 Network Authentication Required\r\n\
-         Via: 1.1 zed-sandbox-proxy\r\n\
-         Proxy-Status: zed-sandbox-proxy; error={}; details=\"{}\"\r\n\
+         Via: 1.1 omega-sandbox-proxy\r\n\
+         Proxy-Status: omega-sandbox-proxy; error={}; details=\"{}\"\r\n\
          Content-Type: text/plain; charset=utf-8\r\n\
          Content-Length: {}\r\n\
          Connection: close\r\n\r\n{body}",

@@ -494,8 +494,12 @@ pub async fn stream_completion(
         .uri(uri)
         .header("Content-Type", "application/json")
         .header("Authorization", format!("Bearer {}", api_key))
-        .header("HTTP-Referer", "https://zed.dev")
-        .header("X-Title", "Zed Editor")
+        // OMEGA-DELTA-0037. OpenRouter shows X-Title to the account holder in
+        // their own dashboard, so this is Omega identifying itself, by name, to
+        // a third party and back to the user. Up to 0.2.0-rc14 every request
+        // Omega made announced it was a different editor.
+        .header("HTTP-Referer", app_identity::PRODUCT_REPOSITORY_URL)
+        .header("X-Title", app_identity::PRODUCT_NAME)
         .extra_headers(extra_headers)
         .body(AsyncBody::from(
             serde_json::to_string(&request).map_err(OpenRouterError::SerializeRequest)?,
@@ -587,8 +591,12 @@ pub async fn list_models(
         .uri(uri)
         .header("Accept", "application/json")
         .header("Authorization", format!("Bearer {}", api_key))
-        .header("HTTP-Referer", "https://zed.dev")
-        .header("X-Title", "Zed Editor")
+        // OMEGA-DELTA-0037. OpenRouter shows X-Title to the account holder in
+        // their own dashboard, so this is Omega identifying itself, by name, to
+        // a third party and back to the user. Up to 0.2.0-rc14 every request
+        // Omega made announced it was a different editor.
+        .header("HTTP-Referer", app_identity::PRODUCT_REPOSITORY_URL)
+        .header("X-Title", app_identity::PRODUCT_NAME)
         .extra_headers(extra_headers)
         .body(AsyncBody::default())
         .map_err(OpenRouterError::BuildRequestBody)?;

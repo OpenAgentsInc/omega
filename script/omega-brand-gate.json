@@ -22,12 +22,26 @@
   "brand": {
     "_comment": [
       "words are matched case-sensitively at ASCII alphanumeric boundaries, so",
-      "'Zed' and \"Zed's\" match while 'Zedd' does not. Lowercase 'zed' is NOT a",
-      "word here on purpose: it is a substring of 'authorized', 'organized' and",
-      "'normalized', and a gate that cries wolf gets deleted."
+      "'Zed' and \"Zed's\" match while 'Zedd' does not.",
+      "",
+      "Lowercase 'zed' used to be excluded here, and the reason written down was",
+      "that it is a substring of 'authorized', 'organized' and 'normalized'. That",
+      "reason was wrong: the boundary rule already excludes all three, because",
+      "the 'zed' in 'authorized' has an 'i' before it. The exclusion cost nothing",
+      "it claimed to save and hid the rendered --help of both shipped binaries --",
+      "'Run zed in the foreground', 'Run zed in dev-server mode', 'Instructs zed",
+      "to run as a dev server' -- through 0.2.0-rc14 (omega#89).",
+      "",
+      "It is in now. Measured on this tree, the lowercase hits are dominated by",
+      "identifiers -- zed_actions, zed::, .zed/, zed://, ZED_* -- and is_prose()",
+      "drops those, because a token is not a sentence. What survives the prose",
+      "filter is copy, and copy is what this gate is for. An inherited identifier",
+      "that does reach a sentence is classified as fork_seam with the reason,",
+      "not filtered away silently."
     ],
     "words": [
-      "Zed"
+      "Zed",
+      "zed"
     ],
     "substrings": [
       "zed.dev",
@@ -560,7 +574,158 @@
       "// Upstream Zed ships this empty. Omega configures codex-acp because Full Auto": {
         "class": "omega_contrast",
         "reason": "Omega-authored comment naming the upstream default this replaces (OMEGA-DELTA-0026)."
+      },
+      "\"**/.zed/settings.json\", // zed project settings": {
+        "class": "fork_seam",
+        "reason": "Default private-files glob over the inherited `.zed/` project settings folder. Omega still reads project settings out of `.zed/`, so the folder name is a lookup, not a claim; renaming it would stop matching the files it exists to keep private."
+      },
+      "\"/**/zed/settings.json\", // zed user settings": {
+        "class": "zed_product",
+        "reason": "Default private-files glob over the upstream editor's user settings directory. It protects somebody else's settings file from being read into context; Omega's own roots are named by their own slug."
+      },
+      "// Currently busted: https://github.com/zed-industries/feedback/issues/898": {
+        "class": "zed_product",
+        "reason": "Inherited keymap comment linking Zed's own feedback tracker for a Sublime-preset binding that is broken there. A fact about Zed's issue tracker, not about Omega."
+      },
+      "<nul set /p zed_init_ready={INIT_COMMAND_STARTUP_MARKER_PREFIX}&echo {marker_id}{INIT_COMMAND_STARTUP_MARKER_SUFFIX}": {
+        "class": "fork_seam",
+        "reason": "Windows shell variable the terminal integration sets and then reads back to detect that the init command has started. The name IS the handshake; renaming one side without the other breaks startup detection."
+      },
+      "Couldn't get project path for .zed/debug.json in active worktree": {
+        "class": "fork_seam",
+        "reason": "Names the inherited `.zed/` project configuration folder, which Omega still reads debug configurations out of."
+      },
+      "Failed to read crates/zed/Cargo.toml": {
+        "class": "fork_seam",
+        "reason": "Build-script message naming the `zed` crate by its directory. The crate name is an inherited identifier; renaming the crate is a separate change with its own blast radius, and this message would be wrong either way if only the sentence moved."
+      },
+      "Note: This setting is still experimental. See [this tracking issue](https://github.com/zed-industries/zed/issues/18078)": {
+        "class": "zed_product",
+        "reason": "Settings-schema note linking Zed's own tracking issue for an upstream experiment Omega inherited. The issue really is on Zed's tracker."
+      },
+      "SELECT ep_request_id AS request_id, device_id AS device_id, requested_at::string AS continuation_time, requested_at::string AS time, input_payload AS input, prompt AS prompt, requested_output AS output, settled_editable_region AS settled_editable_region, is_ep_shown_before_rejected AS was_shown, ep_rejected_reason AS reason, zed_version AS zed_version FROM ZED_DBT.DBT_PROD.fct_edit_prediction_examples WHERE ep_outcome LIKE ? AND is_ep_shown_before_rejected = true AND requested_at > TRY_TO_TIMESTAMP_NTZ(?) AND (? IS NULL OR ( COALESCE(TRY_CAST(SPLIT_PART(zed_version, '.', 1) AS INTEGER), 0) * 1000000 + COALESCE(TRY_CAST(SPLIT_PART(zed_version, '.', 2) AS INTEGER), 0) * 1000 + COALESCE(TRY_CAST(SPLIT_PART(SPLIT_PART(zed_version, '.', 3), '+', 1) AS INTEGER), 0) ) >= ?) ORDER BY requested_at ASC LIMIT ? OFFSET ?": {
+        "class": "zed_service",
+        "reason": "Analytics query against Zed's own Snowflake warehouse (ZED_DBT.DBT_PROD) for the edit-prediction dataset, selecting that warehouse's zed_version column. The table, the column and the data are Zed's; substituting Omega would name a warehouse Omega does not have. Reached only by the edit-prediction developer CLI, never by the shipped editor."
+      },
+      "SELECT ep_request_id AS request_id, device_id AS device_id, requested_at::string AS continuation_time, requested_at::string AS time, input_payload AS input, prompt AS prompt, requested_output AS output, settled_editable_region AS settled_editable_region, zed_version AS zed_version FROM ZED_DBT.DBT_PROD.fct_edit_prediction_examples WHERE ep_outcome = 'Accepted' AND requested_at > TRY_TO_TIMESTAMP_NTZ(?) AND (? IS NULL OR ( COALESCE(TRY_CAST(SPLIT_PART(zed_version, '.', 1) AS INTEGER), 0) * 1000000 + COALESCE(TRY_CAST(SPLIT_PART(zed_version, '.', 2) AS INTEGER), 0) * 1000 + COALESCE(TRY_CAST(SPLIT_PART(SPLIT_PART(zed_version, '.', 3), '+', 1) AS INTEGER), 0) ) >= ?) ORDER BY requested_at ASC LIMIT ? OFFSET ?": {
+        "class": "zed_service",
+        "reason": "Analytics query against Zed's own Snowflake warehouse (ZED_DBT.DBT_PROD) for the edit-prediction dataset, selecting that warehouse's zed_version column. The table, the column and the data are Zed's; substituting Omega would name a warehouse Omega does not have. Reached only by the edit-prediction developer CLI, never by the shipped editor."
+      },
+      "SELECT ep_request_id AS request_id, device_id AS device_id, requested_at::string AS continuation_time, requested_at::string AS time, input_payload AS input, requested_output AS requested_output, settled_editable_region AS settled_editable_region, requested_format AS requested_format, zed_version AS zed_version FROM ZED_DBT.DBT_PROD.fct_edit_prediction_examples WHERE settled_editable_region IS NOT NULL AND requested_at > TRY_TO_TIMESTAMP_NTZ(?) ORDER BY requested_at ASC LIMIT ? OFFSET ?": {
+        "class": "zed_service",
+        "reason": "Analytics query against Zed's own Snowflake warehouse (ZED_DBT.DBT_PROD) for the edit-prediction dataset, selecting that warehouse's zed_version column. The table, the column and the data are Zed's; substituting Omega would name a warehouse Omega does not have. Reached only by the edit-prediction developer CLI, never by the shipped editor."
+      },
+      "SELECT ep_request_id AS request_id, device_id AS device_id, requested_at::string AS continuation_time, requested_at::string AS time, input_payload AS input, settled_editable_region AS settled_editable_region, example_payload AS example, zed_version AS zed_version FROM ZED_DBT.DBT_PROD.fct_edit_prediction_examples WHERE settled_editable_region IS NOT NULL AND example_payload IS NOT NULL AND requested_at > TRY_TO_TIMESTAMP_NTZ(?) AND (? IS NULL OR ( COALESCE(TRY_CAST(SPLIT_PART(zed_version, '.', 1) AS INTEGER), 0) * 1000000 + COALESCE(TRY_CAST(SPLIT_PART(zed_version, '.', 2) AS INTEGER), 0) * 1000 + COALESCE(TRY_CAST(SPLIT_PART(SPLIT_PART(zed_version, '.', 3), '+', 1) AS INTEGER), 0) ) >= ?) ORDER BY requested_at ASC LIMIT ? OFFSET ?": {
+        "class": "zed_service",
+        "reason": "Analytics query against Zed's own Snowflake warehouse (ZED_DBT.DBT_PROD) for the edit-prediction dataset, selecting that warehouse's zed_version column. The table, the column and the data are Zed's; substituting Omega would name a warehouse Omega does not have. Reached only by the edit-prediction developer CLI, never by the shipped editor."
+      },
+      "SELECT ep_request_id AS request_id, device_id AS device_id, requested_at::string AS continuation_time, requested_at::string AS time, input_payload AS input, zed_version AS zed_version FROM ZED_DBT.DBT_PROD.fct_edit_prediction_examples WHERE requested_at > TRY_TO_TIMESTAMP_NTZ(?) AND (? IS NULL OR ( COALESCE(TRY_CAST(SPLIT_PART(zed_version, '.', 1) AS INTEGER), 0) * 1000000 + COALESCE(TRY_CAST(SPLIT_PART(zed_version, '.', 2) AS INTEGER), 0) * 1000 + COALESCE(TRY_CAST(SPLIT_PART(SPLIT_PART(zed_version, '.', 3), '+', 1) AS INTEGER), 0) ) >= ?) ORDER BY requested_at ASC LIMIT ? OFFSET ?": {
+        "class": "zed_service",
+        "reason": "Analytics query against Zed's own Snowflake warehouse (ZED_DBT.DBT_PROD) for the edit-prediction dataset, selecting that warehouse's zed_version column. The table, the column and the data are Zed's; substituting Omega would name a warehouse Omega does not have. Reached only by the edit-prediction developer CLI, never by the shipped editor."
+      },
+      "SELECT ep_request_id AS request_id, rated_inputs AS inputs, rated_output AS output, settled_editable_region AS settled_editable_region, rating AS rating, feedback AS feedback, device_id AS device_id, requested_at::string AS continuation_time, requested_at::string AS time, NULL AS experiment_name, NULL AS environment, zed_version AS zed_version FROM ZED_DBT.DBT_PROD.fct_edit_prediction_examples WHERE rating IS NOT NULL AND (? IS NULL OR rating = ?) AND requested_at > TRY_TO_TIMESTAMP_NTZ(?) AND rated_inputs IS NOT NULL AND rated_inputs:cursor_excerpt IS NOT NULL AND rated_output IS NOT NULL ORDER BY requested_at ASC LIMIT ? OFFSET ?": {
+        "class": "zed_service",
+        "reason": "Analytics query against Zed's own Snowflake warehouse (ZED_DBT.DBT_PROD) for the edit-prediction dataset, selecting that warehouse's zed_version column. The table, the column and the data are Zed's; substituting Omega would name a warehouse Omega does not have. Reached only by the edit-prediction developer CLI, never by the shipped editor."
+      },
+      "SettingsObserver observers changes to .zed/{settings, task}.json files in local worktrees": {
+        "class": "fork_seam",
+        "reason": "Names the inherited `.zed/` project settings folder that this observer watches. The neighbouring `~/.config/` line named Zed's user directory and was wrong for Omega; it now names Omega's own channel directory."
+      },
+      "URLs can use `file://`, the current Omega channel scheme, or the legacy `zed://` scheme.": {
+        "class": "omega_contrast",
+        "reason": "Omega-authored --help line naming the legacy `zed://` scheme Omega still accepts alongside its own, so an existing link keeps working."
+      },
+      "Version not found in crates/zed/Cargo.toml": {
+        "class": "fork_seam",
+        "reason": "Build-script message naming the `zed` crate by its directory. The crate name is an inherited identifier; renaming the crate is a separate change with its own blast radius, and this message would be wrong either way if only the sentence moved."
+      },
+      "Windows only: resolve the `(release channel, version)` of the Linux `zed` to": {
+        "class": "zed_product",
+        "reason": "The WSL sandbox helper really is Zed's released Linux build, downloaded from cloud.zed.dev — see the helper script classified above. Substituting Omega would name a binary this path does not fetch."
+      },
+      "`zed://` scheme kept for compatibility with existing links.": {
+        "class": "omega_contrast",
+        "reason": "Omega-authored action description recording why the legacy scheme is still resolved."
+      },
+      "compiled wasm did not contain a valid zed extension api version": {
+        "class": "fork_seam",
+        "reason": "`zed:api-version` is the custom WASM section name every published extension is compiled with. It is a wire key, not a claim; renaming it would make Omega unable to load any existing extension."
+      },
+      "downloading zed-remote-server {os} {arch} version {}": {
+        "class": "fork_seam",
+        "reason": "The remote-server artifact and its directory on the host are both named `zed-remote-server` / `zed_remote_server` on either end of an SSH session. The name is how the two halves find each other."
+      },
+      "extension {extension_id} has no zed:api-version section": {
+        "class": "fork_seam",
+        "reason": "`zed:api-version` is the custom WASM section name every published extension is compiled with. It is a wire key, not a claim; renaming it would make Omega unable to load any existing extension."
+      },
+      "extension {} has invalid zed:api-version section: {:?}": {
+        "class": "fork_seam",
+        "reason": "`zed:api-version` is the custom WASM section name every published extension is compiled with. It is a wire key, not a claim; renaming it would make Omega unable to load any existing extension."
+      },
+      "failed to change ownership for zed_remote_server via chown: {}": {
+        "class": "fork_seam",
+        "reason": "The remote-server artifact and its directory on the host are both named `zed-remote-server` / `zed_remote_server` on either end of an SSH session. The name is how the two halves find each other."
+      },
+      "failed to parse zed Cargo.toml": {
+        "class": "fork_seam",
+        "reason": "Build-script message naming the `zed` crate by its directory. The crate name is an inherited identifier; renaming the crate is a separate change with its own blast radius, and this message would be wrong either way if only the sentence moved."
+      },
+      "failed to provision a Linux `zed` sandbox helper in {}{}": {
+        "class": "zed_product",
+        "reason": "The WSL sandbox helper really is Zed's released Linux build, downloaded from cloud.zed.dev — see the helper script classified above. Substituting Omega would name a binary this path does not fetch."
+      },
+      "interpreted as input redirection. See zed-industries/zed#55921.": {
+        "class": "zed_product",
+        "reason": "Settings-schema note citing the upstream issue that documents the behaviour. It really is Zed's issue number."
+      },
+      "invalid zed url: {:?}": {
+        "class": "fork_seam",
+        "reason": "Rejects a malformed mention URL on the inherited `zed://` scheme, naming the scheme that was actually parsed."
+      },
+      "provision the Linux `zed` sandbox helper": {
+        "class": "zed_product",
+        "reason": "The WSL sandbox helper really is Zed's released Linux build, downloaded from cloud.zed.dev — see the helper script classified above. Substituting Omega would name a binary this path does not fetch."
+      },
+      "the WSL `zed` sandbox helper resolved to {path:?} rather than an absolute path": {
+        "class": "zed_product",
+        "reason": "The WSL sandbox helper really is Zed's released Linux build, downloaded from cloud.zed.dev — see the helper script classified above. Substituting Omega would name a binary this path does not fetch."
+      },
+      "zed build.rs: {lib} not found in pkg-config's path": {
+        "class": "fork_seam",
+        "reason": "Names the `zed` crate's own build script by the crate directory it runs in."
+      },
+      "zed-html output defined": {
+        "class": "fork_seam",
+        "reason": "`zed-html` is the mdbook renderer key configured as `[output.zed-html]` in docs/book.toml. The string is the key the renderer is looked up by."
+      },
+      "zed://agent received but the AgentPanel is not registered \\ (is `disable_ai` enabled?)": {
+        "class": "fork_seam",
+        "reason": "Log line naming the legacy `zed://` scheme by the scheme it received. Substituting Omega's own scheme would report a different URL than the one that arrived."
       }
     }
+  },
+  "packaged": {
+    "_comment": [
+      "OMEGA-DELTA-0038. What the packaged half opens, and how much of it.",
+      "",
+      "Until omega#89 every packaged check in script/verify-omega-brand opened",
+      "Contents/MacOS/omega and nothing else, while script/bundle-omega-rc copied",
+      "and signed `cli` and `omega-identity-proof` into the same directory. That",
+      "is why `cli` shipped an uninstaller that deleted a competitor's editor and",
+      "no Omega path at all through two published prereleases, under a green gate",
+      "(omega#88): the defect was never inside a file any check opened.",
+      "",
+      "The executable inventory is now derived by walking the bundle for Mach-O",
+      "magic, so a helper added tomorrow is inside the gate the day it is added.",
+      "The floors are on what the scans READ, not on what they find.",
+      "",
+      "minimum_rendered_invocations is the guard on the rendered-help scan: it",
+      "runs the shipped binaries with --help and --version and reads what comes",
+      "back, because clap builds the sentence a person sees at run time out of",
+      "doc lines the source scan only ever sees separately."
+    ],
+    "minimum_executables": 3,
+    "minimum_rendered_invocations": 6
   }
 }

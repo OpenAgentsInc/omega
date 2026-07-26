@@ -144,6 +144,94 @@
       "owner": "OpenAgents",
       "disposition": "approved_compatibility",
       "expiry": "until-omega-scheme-only"
+    },
+    {
+      "match": "x-zed-* / X-Zed-Predict-* request headers",
+      "path": "crates/cloud_llm_client",
+      "reason": "Header names on Zed's own hosted LLM and edit-prediction endpoints. The name is the wire contract of somebody else's service; renaming it would make the request unroutable rather than un-branded. Only sent when a user has deliberately configured that provider.",
+      "owner": "OpenAgents",
+      "disposition": "approved_compatibility",
+      "expiry": "none"
+    },
+    {
+      "match": "HTTP-Referer / X-Title on OpenRouter requests",
+      "path": "crates/open_router/src/open_router.rs",
+      "reason": "OpenRouter shows X-Title to the account holder in their own dashboard, so this is outbound product identity, not a compatibility seam. It said 'Zed Editor' and 'https://zed.dev' on every request through 0.2.0-rc14 (omega#89); it now sends app_identity::PRODUCT_NAME and PRODUCT_REPOSITORY_URL. Recorded here so a rebase that restores the upstream values is a policy change with a named owner.",
+      "owner": "OpenAgents",
+      "disposition": "blocked",
+      "expiry": "none"
+    },
+    {
+      "match": ".ZedMono / .ZedSans font aliases",
+      "path": "crates/gpui/src/platform/mac",
+      "reason": "PostScript family names recorded inside the shipped font files themselves. A name that does not match the font's own family name resolves to nothing, so this is a lookup key, not a claim (same reason as the classified 'Zed Plex Sans' prose entry).",
+      "owner": "OpenAgents",
+      "disposition": "approved_compatibility",
+      "expiry": "until-owned-font-family"
+    },
+    {
+      "match": "base_keymap values 'Zed' and 'Zed (Default)'",
+      "path": "crates/settings_content",
+      "reason": "Names Zed's own keymap preset, sitting beside VS Code, JetBrains, Sublime Text and Atom. The value is what a user writes in keymap settings and what ai_zed.svg labels; substituting Omega would claim a preset that is not Omega's.",
+      "owner": "OpenAgents",
+      "disposition": "required_attribution",
+      "expiry": "none"
+    },
+    {
+      "match": "Zed.dmg in the macOS update path",
+      "path": "crates/auto_update",
+      "reason": "Inherited disk-image file name in the updater's download path. Omega's updater is disabled by default (OMEGA-DELTA-0026) and no Omega release publishes this artifact; the name survives only in the inherited code path.",
+      "owner": "OpenAgents",
+      "disposition": "approved_compatibility",
+      "expiry": "until-owned-update-artifact"
+    },
+    {
+      "match": "ZedPredictModal keymap context",
+      "path": "crates/edit_prediction_ui",
+      "reason": "A keymap context users type into keymap.json, so renaming it silently breaks any existing binding. Internal identifier with a user-typed surface, not rendered copy.",
+      "owner": "OpenAgents",
+      "disposition": "approved_compatibility",
+      "expiry": "until-omega-predict-context"
+    },
+    {
+      "match": "'zed.dev' settings provider key and ZedDotDev* settings types",
+      "path": "crates/language_models",
+      "reason": "The provider id a user writes in settings to select Zed's hosted models. It identifies Zed's service the way 'anthropic' identifies Anthropic's; the service is disabled under Omega's isolation default, and the key stays so an inherited settings file still parses.",
+      "owner": "OpenAgents",
+      "disposition": "approved_compatibility",
+      "expiry": "none"
+    },
+    {
+      "match": "zed-remote-server / zed_remote_server artifact and host directory",
+      "path": "crates/remote",
+      "reason": "Both ends of an SSH session look each other up by this name, together with ~/.zed_server. Renaming one end alone strands the other.",
+      "owner": "OpenAgents",
+      "disposition": "approved_compatibility",
+      "expiry": "until-omega-remote-rename"
+    },
+    {
+      "match": "zed:api-version WASM section in extensions",
+      "path": "crates/extension",
+      "reason": "The custom section name every published extension is compiled with. It is a wire key; renaming it would make Omega unable to load any existing extension.",
+      "owner": "OpenAgents",
+      "disposition": "approved_compatibility",
+      "expiry": "none"
+    },
+    {
+      "match": "/Applications/Zed*.app, dev.zed.Zed, ~/.zed_server, ~/.config/zed in the uninstall path",
+      "path": "script/uninstall.sh",
+      "reason": "Recorded as BLOCKED. Through 0.2.0-rc14 the shipped `omega --uninstall` ran upstream's uninstaller verbatim: it removed the other editor's bundle, application-support tree, logs, caches and preferences, announced that editor had been uninstalled, and removed no Omega path at all (omega#88). The script now holds no path of its own; the plan is derived from paths:: on the Rust side and handed to it. A path table returning to this file is a policy change, not a rebase artefact.",
+      "owner": "OpenAgents",
+      "disposition": "blocked",
+      "expiry": "none"
+    },
+    {
+      "match": "--zed as a hidden alias of --omega on the CLI",
+      "path": "crates/cli/src/main.rs",
+      "reason": "The flag was named --zed and printed as `--zed <ZED>` in the rendered help of the signed 0.2.0-rc14 (omega#89). It is now --omega, with `zed` kept as a clap alias so an existing script or shell function keeps working. An alias is never printed in --help, which is why the rendered-output gate does not report it; it is recorded here so removing the compatibility is a decision rather than a cleanup.",
+      "owner": "OpenAgents",
+      "disposition": "approved_compatibility",
+      "expiry": "until-cli-flag-cleanup"
     }
   ]
 }

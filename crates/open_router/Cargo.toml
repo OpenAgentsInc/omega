@@ -17,6 +17,7 @@ schemars = ["dep:schemars"]
 
 [dependencies]
 anyhow.workspace = true
+app_identity.workspace = true
 futures.workspace = true
 http_client.workspace = true
 language_model_core.workspace = true

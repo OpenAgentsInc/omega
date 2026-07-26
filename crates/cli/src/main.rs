@@ -36,7 +36,7 @@ const URL_PREFIX: [&'static str; 5] = ["zed://", "http://", "https://", "file://
 struct Detect;
 
 trait InstalledApp {
-    fn zed_version_string(&self) -> String;
+    fn app_version_string(&self) -> String;
     fn launch(&self, ipc_url: String, user_data_dir: Option<&str>) -> anyhow::Result<()>;
     fn run_foreground(
         &self,
@@ -87,11 +87,14 @@ struct Args {
     classic: bool,
     /// Sets a custom directory for all user data (e.g., database, extensions, logs).
     /// This overrides the default platform-specific data directory location:
-    #[cfg_attr(target_os = "macos", doc = "`~/Library/Application Support/Zed`.")]
-    #[cfg_attr(target_os = "windows", doc = "`%LOCALAPPDATA%\\Zed`.")]
+    #[cfg_attr(
+        target_os = "macos",
+        doc = "`~/Library/Application Support/<Omega channel>`."
+    )]
+    #[cfg_attr(target_os = "windows", doc = "`%LOCALAPPDATA%\\<Omega channel>`.")]
     #[cfg_attr(
         not(any(target_os = "windows", target_os = "macos")),
-        doc = "`$XDG_DATA_HOME/zed`."
+        doc = "`$XDG_DATA_HOME/<omega-channel>`."
     )]
     #[arg(long, value_name = "DIR", value_hint = clap::ValueHint::DirPath)]
     user_data_dir: Option<String>,
@@ -103,13 +106,13 @@ struct Args {
     /// Print Omega's version and the app path.
     #[arg(short, long)]
     version: bool,
-    /// Run zed in the foreground (useful for debugging)
+    /// Run Omega in the foreground (useful for debugging)
     #[arg(long)]
     foreground: bool,
     /// Custom path to Omega.app or the omega binary
-    #[arg(long)]
-    zed: Option<PathBuf>,
-    /// Run zed in dev-server mode
+    #[arg(long = "omega", alias = "zed")]
+    omega: Option<PathBuf>,
+    /// Run Omega in dev-server mode
     #[arg(long)]
     dev_server_token: Option<String>,
     /// The username and WSL distribution to use when opening paths. If not specified,
@@ -161,7 +164,7 @@ struct Args {
 /// If a part of path doesn't exist, it will canonicalize the
 /// existing part and append the non-existing part.
 ///
-/// This method must return an absolute path, as many zed
+/// This method must return an absolute path, as many Omega
 /// crates assume absolute paths.
 fn parse_path_with_position(argument_str: &str) -> anyhow::Result<String> {
     match Path::new(argument_str).canonicalize() {
@@ -204,7 +207,7 @@ fn parse_path_with_position(argument_str: &str) -> anyhow::Result<String> {
 
 /// Returns whether a `--diff` argument refers to an existing path, allowing a
 /// trailing `:line:column` suffix (parsed later by the Omega side, matching how
-/// regular `zed path:line:column` arguments are handled).
+/// regular `omega path:line:column` arguments are handled).
 fn diff_path_exists(diff_path: &str) -> bool {
     Path::new(diff_path).exists() || PathWithPosition::parse_str(diff_path).path.exists()
 }
@@ -527,7 +530,7 @@ fn run() -> Result<()> {
     #[cfg(target_os = "linux")]
     let args = flatpak::set_bin_if_no_escape(args);
 
-    let app = Detect::detect(args.zed.as_deref()).context("Bundle detection")?;
+    let app = Detect::detect(args.omega.as_deref()).context("Bundle detection")?;
 
     if let Some(shell) = &args.completions {
         let file_path = std::env::current_exe()?;
@@ -544,7 +547,7 @@ fn run() -> Result<()> {
     }
 
     if args.version {
-        println!("{}", app.zed_version_string());
+        println!("{}", app.app_version_string());
         return Ok(());
     }
 
@@ -563,6 +566,12 @@ fn run() -> Result<()> {
         not(feature = "no-bundled-uninstall")
     ))]
     if args.uninstall {
+        // OMEGA-DELTA-0036. The plan is built here, from the same `paths::`
+        // functions the running application writes those directories with, and
+        // handed to the script. The script has no paths of its own, because a
+        // hand-written path table disconnected from the code that creates the
+        // directories is exactly how `0.2.0-rc14` shipped an "Uninstall Omega"
+        // that kept Omega and deleted another editor instead.
         static UNINSTALL_SCRIPT: &[u8] = include_bytes!("../../../script/uninstall.sh");
 
         let tmp_dir = tempfile::tempdir()?;
@@ -572,9 +581,14 @@ fn run() -> Result<()> {
         use std::os::unix::fs::PermissionsExt as _;
         fs::set_permissions(&script_path, fs::Permissions::from_mode(0o755))?;
 
+        let plan = cli::uninstall::UninstallRoots::from_installed_paths(Some(app.path()))
+            .plan(paths::app_name());
+
         let status = std::process::Command::new("sh")
             .arg(&script_path)
-            .env("ZED_CHANNEL", &*release_channel::RELEASE_CHANNEL_NAME)
+            .env("OMEGA_UNINSTALL_PRODUCT", &plan.product)
+            .env("OMEGA_UNINSTALL_PATHS", plan.paths_env())
+            .env("OMEGA_UNINSTALL_CONFIG_DIR", &plan.config_dir)
             .status()
             .context("Failed to execute uninstall script")?;
 
@@ -841,7 +855,7 @@ fn anonymous_fd(path: &str) -> Option<fs::File> {
 }
 
 /// Shows an interactive prompt asking the user to choose the default open
-/// behavior for `zed <path>`. Returns `None` if the prompt cannot be shown
+/// behavior for `omega <path>`. Returns `None` if the prompt cannot be shown
 /// (e.g. stdin is not a terminal) or the user cancels.
 fn prompt_open_behavior() -> Option<cli::CliBehaviorSetting> {
     if !std::io::stdin().is_terminal() {
@@ -926,9 +940,9 @@ mod linux {
     }
 
     impl InstalledApp for App {
-        fn zed_version_string(&self) -> String {
+        fn app_version_string(&self) -> String {
             format!(
-                "Zed {}{}{} – {}",
+                "Omega {}{}{} – {}",
                 if *release_channel::RELEASE_CHANNEL_NAME == "stable" {
                     "".to_string()
                 } else {
@@ -1059,7 +1073,7 @@ mod flatpak {
         if let Some(flatpak_dir) = get_flatpak_dir() {
             let mut args = vec!["/usr/bin/flatpak-spawn".into(), "--host".into()];
             args.append(&mut get_xdg_env_args());
-            args.push("--env=ZED_UPDATE_EXPLANATION=Please use flatpak to update zed".into());
+            args.push("--env=ZED_UPDATE_EXPLANATION=Please use flatpak to update omega".into());
             args.push(
                 format!(
                     "--env={EXTRA_LIB_ENV_NAME}={}",
@@ -1089,9 +1103,9 @@ mod flatpak {
     pub fn set_bin_if_no_escape(mut args: super::Args) -> super::Args {
         if env::var(NO_ESCAPE_ENV_NAME).is_ok()
             && env::var("FLATPAK_ID").is_ok_and(|id| id.starts_with("com.openagents.omega"))
-            && args.zed.is_none()
+            && args.omega.is_none()
         {
-            args.zed = Some("/app/libexec/omega-editor".into());
+            args.omega = Some("/app/libexec/omega-editor".into());
             unsafe {
                 env::set_var(
                     "ZED_UPDATE_EXPLANATION",
@@ -1178,9 +1192,9 @@ mod windows {
     struct App(PathBuf);
 
     impl InstalledApp for App {
-        fn zed_version_string(&self) -> String {
+        fn app_version_string(&self) -> String {
             format!(
-                "Zed {}{}{} – {}",
+                "Omega {}{}{} – {}",
                 if *release_channel::RELEASE_CHANNEL_NAME == "stable" {
                     "".to_string()
                 } else {
@@ -1356,8 +1370,8 @@ mod mac_os {
     }
 
     impl InstalledApp for Bundle {
-        fn zed_version_string(&self) -> String {
-            format!("Zed {} – {}", self.version(), self.path().display(),)
+        fn app_version_string(&self) -> String {
+            format!("Omega {} – {}", self.version(), self.path().display(),)
         }
 
         fn launch(&self, url: String, user_data_dir: Option<&str>) -> anyhow::Result<()> {
@@ -1393,7 +1407,7 @@ mod mac_os {
                     anyhow::ensure!(
                         status == 0,
                         "cannot start app bundle {}",
-                        self.zed_version_string()
+                        self.app_version_string()
                     );
                 }
 

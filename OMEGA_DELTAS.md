@@ -1726,3 +1726,203 @@ than it sounds, because the harness omega#81's acceptance sentence names —
   router decides per session, not per turn. And the pin menu is rendered on the
   thread's disclosure line, so a surface with no thread on it has no pin
   control.
+### OMEGA-DELTA-0036 — `--uninstall` removes Omega, and no part of anybody else
+
+- **Upstream Zed:** ships `script/uninstall.sh` to remove a Zed installed by
+  `install.sh`. Correct for Zed, and inherited wholesale by a fork.
+- **Omega, before this:** `crates/cli/src/main.rs` embedded that file with
+  `include_bytes!` and ran it, advertised in `--help` as **"Uninstall Omega from
+  user system"**. It contained zero occurrences of `Omega` or `omega`. With
+  `ZED_CHANNEL` unset it removed `/Applications/Zed.app`, the whole
+  `~/Library/Application Support/Zed` tree, `~/Library/Logs/Zed`, the caches,
+  HTTP storage, preferences plist and saved application state under
+  `dev.zed.Zed`, and `~/.zed_server`; it asked whether to keep *"your Zed
+  preferences"*; and it printed **`Zed has been uninstalled`**. It removed no
+  Omega path at all — not the bundle, not `~/Library/Application Support/Omega
+  RC`, not `~/Library/Logs/omega-rc`. A user who ran the advertised "Uninstall
+  Omega" kept Omega and lost their other editor. This shipped in the signed,
+  notarized `0.2.0-rc13` and `0.2.0-rc14` (omega#88).
+- **Why nothing caught it.** The paths lived in a hand-written table in a shell
+  script, disconnected from the code that creates those directories, so nothing
+  in the tree could observe that the two had never agreed. And
+  `script/verify-omega-brand` opened `Contents/MacOS/omega` at three places and
+  `Contents/MacOS/cli` at none, although `script/bundle-omega-rc` copies and
+  signs `cli` into the bundle — the file the defect was in had never been opened
+  by any check. That half is `OMEGA-DELTA-0038`.
+- **Omega now:** there is no path table. `crates/cli/src/uninstall.rs` builds an
+  `UninstallRoots` — one field per place Omega writes — where every field is
+  read from the `paths::` function that writes it: `data_dir`, `config_dir`,
+  `logs_dir`, `temp_dir`, `state_dir`, the CLI symlink under
+  `paths::BINARY_NAME`, and the bundle-identifier paths from
+  `release_channel::RELEASE_CHANNEL.app_id()`. The app bundle comes from the
+  bundle this CLI was launched out of, not from a literal. `plan` destructures
+  the struct **exhaustively**, so a root added to it and left out of the plan
+  does not compile. The script receives the plan in `OMEGA_UNINSTALL_PATHS`, one
+  absolute path per line, and removes exactly those; unset or empty exits
+  non-zero rather than falling back to a default, because every default this
+  file has ever had belonged to somebody else's product. `/`, `/Applications`,
+  `$HOME` and a relative path are refused before anything is removed.
+- **Settings are asked for, never taken.** `config_dir` is held out of the
+  automatic list and prompted for by name, because it is the user's
+  `settings.json` and keymap and the one root somebody may want to keep.
+- **Enforced by:** `the_uninstall_path_removes_omega_and_names_no_competitor` in
+  `crates/omega_deltas/` (the script names no other product; it still reads its
+  plan from the caller; `from_installed_paths` makes at least one `paths::` call
+  per root; `plan` still destructures exhaustively; the script refuses an empty
+  plan), and by three tests in `crates/cli/src/uninstall.rs` — including
+  `the_script_removes_omega_and_leaves_the_other_editor_untouched`, which runs
+  the shipped script against a fabricated home holding **both** an Omega
+  installation and another product's, and reads both halves back afterwards.
+- **Falsified.** Adding a competitor's directory to the script failed the name
+  assertion. Removing `paths::logs_dir()` from the plan failed both the plan
+  test and the end-to-end test, which reads the roots rather than the plan
+  precisely so a forgotten root cannot pass. Adding a hard-coded removal outside
+  the plan failed the "left untouched" assertion byte-for-byte. Each
+  falsification was probed against a pristine copy of the file before its test
+  ran, so an edit that did not apply is a hard error rather than a green run.
+- **Paid for once, in the worst way.** The first falsification of this delta
+  restored the `0.2.0-rc14` script over the rewritten one and ran the suite. The
+  refusal test did not override `HOME` at the time, the restored script ignores
+  the plan entirely, and it destroyed the real machine's other editor and its
+  application-support tree — the exact damage this entry describes. Every test
+  in that module now runs with a `HOME` of its own, whatever the script under it
+  happens to be that minute.
+
+### OMEGA-DELTA-0037 — Omega identifies itself to third parties as Omega
+
+- **Upstream Zed:** sends `HTTP-Referer: https://zed.dev` and
+  `X-Title: Zed Editor` on every OpenRouter request. Correct for Zed.
+- **Omega, before this:** sent the same two headers, unchanged, on both the
+  streaming and the non-streaming call. OpenRouter **displays the `X-Title`
+  value to the account holder in their own dashboard**, so this is not a wire
+  contract that happens to carry a name — it is Omega telling a third party, and
+  the user, that it is a different product. Every request through `0.2.0-rc14`
+  did it, and `strings` on the shipped binary found exactly one occurrence,
+  classified nowhere (omega#89).
+- **Omega now:** both call sites send `app_identity::PRODUCT_NAME` and
+  `app_identity::PRODUCT_REPOSITORY_URL`. The values come from the identity
+  constants rather than from literals, so a rebase cannot restore the old value
+  on one path and leave the other correct.
+- **Enforced by:** `outbound_attribution_names_omega` in `crates/omega_deltas/`,
+  which asserts both request paths set the header, that neither literal is back,
+  and that the count of `PRODUCT_NAME` uses equals the count of `X-Title`
+  headers. The pair is also recorded as `blocked` in
+  `crates/app_identity/fixtures/compatibility_allowlist.json`.
+- **Falsified.** Restoring `"Zed Editor"` on one of the two call sites failed
+  the test; restoring it on both failed it; the packaged scan reports it out of
+  the built binary independently.
+
+### OMEGA-DELTA-0038 — The packaged gate opens every executable that ships, and reads help as clap renders it
+
+- **Upstream Zed:** has no equivalent; this is entirely about Omega's own gate.
+- **Omega, before this:** `script/verify-omega-brand --app` opened
+  `Contents/MacOS/omega` and nothing else. `script/bundle-omega-rc` copies and
+  signs **three** binaries into `Contents/MacOS` — `omega`, `cli` and
+  `omega-identity-proof`. Two of the three had never been opened by any check,
+  which is why a destructive uninstaller (`OMEGA-DELTA-0036`) shipped in two
+  published prereleases with the gate reporting green about the bundle.
+  Separately, every prose stream in `OMEGA-DELTA-0031` reads **source**: a doc
+  line, a literal, a schema comment. clap does not print source. It joins
+  several doc lines into one sentence, resolves `cfg_attr` for the platform it
+  was built for, prints the flag *name* beside the description, and lays the
+  whole thing out at run time. Nothing had ever read that output, so
+  `--zed <ZED>`, `Run zed in the foreground`, `Run zed in dev-server mode`,
+  `Instructs zed to run as a dev server` and a `--user-data-dir` line naming a
+  different product's data directory as Omega's own all shipped under a green
+  gate (omega#89).
+- **Omega now, three derived inventories where there were three lists:**
+  - **Every executable in the bundle.** `bundle_executables` walks the app and
+    keeps every file whose first four bytes are Mach-O magic. The icon-name
+    rule, the embedded-asset rule, the prose scan and the first-party-agent scan
+    all run over that set; only the two *presence* checks — the reviewed artwork
+    and the required action labels — stay on the main binary, because only it
+    embeds them. A helper added to the bundle tomorrow is inside the gate the
+    day it is added.
+  - **Rendered output.** Every executable is run with `--help` and `--version`,
+    subcommands are enumerated **from the help text itself** rather than listed,
+    and each is run in turn. Every line of the result is read as prose. The
+    floor is on invocations *read*, not on findings.
+  - **`first_party_agent.phrases`, applied to something.** `grep -c
+    first_party_agent script/verify-omega-brand` returned **0**: the key existed,
+    a Rust test read it against the source tree, and no gate had ever applied it
+    to a package. A reviewer had to run it by hand every time, which is the same
+    as not having it. It now runs over every executable, with the identity
+    string itself as the anti-vacuity guard.
+- **A classified sentence is matched as the compiler leaves it.** Splitting
+  already handled `\` continuations, `\n` and non-ASCII; a `{}` format
+  placeholder is not in the binary either, because rustc splits a format string
+  at every placeholder. Classified entries are now split there too — conservative
+  in the same direction, since shorter fragments cover less, never more.
+- **Enforced by:**
+  `the_packaged_gate_opens_every_shipped_executable_and_reads_rendered_help` in
+  `crates/omega_deltas/`, which derives the shipped binary set by parsing what
+  `script/bundle-omega-rc` writes into `Contents/MacOS`, asserts the gate's floor
+  covers it, asserts the gate names a binary path in exactly one place, and
+  asserts each new check is both defined and called.
+- **Falsified against a real candidate.** The rewritten gate was run against the
+  installed, signed, notarized `0.2.0-rc15` in `/Applications`, which the
+  previous gate passed. It rejects it on 42 findings, including the uninstall
+  script's text inside `Contents/MacOS/cli` — a file the old gate never opened —
+  and on `cli --help` and `omega --help` printing three of the sentences above.
+  The rebuilt `cli` from this tree passes the same scan. Lowering
+  `minimum_executables` below what the bundler ships fails the delta test;
+  deleting either new check's call fails it.
+
+### OMEGA-DELTA-0039 — The installed-proof harness observes what it records
+
+- **Upstream Zed:** has no equivalent; this is Omega's own installed-candidate
+  harness.
+- **Omega, before this:** three checks in it could not fail, and a check that
+  cannot fail is worse than no check, because it produces a clean evidence table
+  (omega#90).
+  - **The secret tripwire.** `deliver_needle_through_protected_fd` made a pipe,
+    wrote a fresh `secrets.token_hex(32)` into it, and closed **both ends in the
+    same function**. No process was spawned; `--app` appeared only in the
+    docstring. The needle had never been seen by anything but the script, which
+    then searched the disk for it. `status: "pass"` was guaranteed by
+    construction, whatever the product did.
+  - **Four of six surfaces watched directories Omega never writes.** `logs`,
+    `telemetry`, `crashes` and `clipboard` resolved under
+    `~/Library/Application Support/Omega RC/…`, while `paths::logs_dir()` is
+    `~/Library/Logs/omega-rc` and `paths::crashes_dir()` is
+    `~/Library/Logs/DiagnosticReports`. The live 191 KB log was never opened.
+    They recorded `absent`, and `absent` did not fail the receipt.
+  - **`light-theme` and `dark-theme` wrote `content_legible: True` as a Python
+    literal**, with zero `ocr_lines()` calls and zero `differing_pixels()` calls,
+    never comparing the light capture against the dark one. A frozen, blank or
+    appearance-ignoring window passed both. This is the same shape as the
+    `defaults read` defect `5ce7f9855f` already corrected for `high-contrast`
+    and `reduced-motion`: a fact about the *host* filed as a fact about the
+    *product*.
+- **Omega now:**
+  - The needle is **read from the caller** through `--needle-fd` — the canary the
+    candidate was actually given — and a run without one refuses rather than
+    inventing a secret nothing has seen. Before any surface is trusted, the same
+    scanner is pointed at a needle planted in a private `0600` file; no match
+    ends the run with no receipt.
+  - Surfaces resolve from `crates/paths/src/paths.rs`: `logs_dir()`, the
+    telemetry log beside it, `database_dir()` plus `hang_traces_dir()`, and
+    `crashes_dir()`. Clipboard and accessibility are read through their own
+    interfaces — NSPasteboard (corroborated by `clipboard info`) and the
+    `AXUIElement` tree of the running candidate — because neither was ever a file
+    in a data directory. A surface that **cannot** be observed records `blocked`
+    and the validator refuses the receipt, so "nothing was found there" and
+    "nobody looked" no longer read the same.
+  - The host appearance is only the **precondition**. Legibility is OCR'd off
+    each capture against a stated line count and confidence, and the light and
+    dark captures must differ by a stated pixel threshold. Every failure routes
+    to `blocked`.
+  - `script/bundle-omega-rc` derived `"dirty": False` from nothing; it now reads
+    `git status --porcelain`, so a provenance field that reads like an
+    observation is one.
+- **Enforced by:** `the_installed_proof_harness_observes_what_it_records` in
+  `crates/omega_deltas/`, plus each collector's own `--self-test`.
+- **Falsified.** Breaking the needle comparison ended the run at exit 2 with no
+  receipt, where the old code would have written `"status": "pass"`. Repointing
+  the surfaces back at the data root blocked the receipt and the untouched
+  validator refused it; planting the needle in the real `~/Library/Logs/omega-rc`
+  produced `status: fail` over 193,984 bytes, which the old table could not have
+  seen. Four separate plants against the appearance block — an unconditional
+  pass, a dropped pixel threshold, a removed pixel diff and fabricated OCR lines
+  — each failed the self-test. Every falsification was probed against a pristine
+  copy before its test ran.

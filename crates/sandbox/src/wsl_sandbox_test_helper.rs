@@ -175,7 +175,7 @@ mod imp {
         // GRANT: writing into a writable bind succeeds and lands on the host.
         let writable_file = format!("{writable_wsl}/from-sandbox.txt");
         let write_writable = run_in_sandbox(
-            &format!("echo zed > {}", shell_quote(&writable_file)),
+            &format!("echo omega > {}", shell_quote(&writable_file)),
             &[PathBuf::from(writable_wsl)],
             default,
         )?;
@@ -189,7 +189,7 @@ mod imp {
         // root, and must not leak to the host.
         let forbidden_file = format!("{forbidden_wsl}/escaped.txt");
         let write_forbidden = run_in_sandbox(
-            &format!("echo zed > {}", shell_quote(&forbidden_file)),
+            &format!("echo omega > {}", shell_quote(&forbidden_file)),
             &[],
             default,
         )?;
@@ -228,7 +228,7 @@ mod imp {
         // not leak to the WSL distro's real `/tmp`.
         let tmp_path = format!("/tmp/zed-sandbox-ephemeral-{pid}");
         let write_tmp = run_in_sandbox(
-            &format!("echo zed > {}", shell_quote(&tmp_path)),
+            &format!("echo omega > {}", shell_quote(&tmp_path)),
             &[],
             default,
         )?;
@@ -288,7 +288,7 @@ mod imp {
         // anywhere, and the write reaches the host.
         let escape_file = format!("{forbidden_wsl}/escape-hatch.txt");
         let write_escape = run_in_sandbox(
-            &format!("echo zed > {}", shell_quote(&escape_file)),
+            &format!("echo omega > {}", shell_quote(&escape_file)),
             &[],
             fs_write_all,
         )?;
@@ -360,7 +360,7 @@ mod imp {
 
         let write = run_in_sandbox(
             &format!(
-                "echo zed > {}",
+                "echo omega > {}",
                 shell_quote(&format!("{writable_wsl}/from-sandbox.txt"))
             ),
             std::slice::from_ref(&writable),
@@ -443,13 +443,13 @@ mod imp {
         // value; it must not be.
         env.insert(
             "PATH".to_string(),
-            "/zed-sentinel-should-not-win".to_string(),
+            "/omega-sentinel-should-not-win".to_string(),
         );
         let outcome = drive_sandbox(
             "/bin/sh",
             &[
                 "-c",
-                "[ \"$ZED_TEST_FORWARDED\" = yes ] && [ \"$PATH\" != /zed-sentinel-should-not-win ]",
+                "[ \"$ZED_TEST_FORWARDED\" = yes ] && [ \"$PATH\" != /omega-sentinel-should-not-win ]",
             ],
             &[],
             SandboxPermissions::default(),
