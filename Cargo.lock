@@ -11952,6 +11952,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "omega_agent_detect"
+version = "0.1.0"
+dependencies = [
+ "tempfile",
+]
+
+[[package]]
 name = "omega_deltas"
 version = "0.1.0"
 dependencies = [
