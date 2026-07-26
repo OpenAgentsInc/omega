@@ -692,9 +692,16 @@ impl Render for ComponentPreview {
                     ),
             )
             .child(
+                // `size_full` would set width to 100% of the whole row, not of
+                // the space the sidebar leaves, so the pane rendered one
+                // sidebar-width too wide and its content ran off the right
+                // edge. `min_w_0` is what lets a flex child shrink below its
+                // content width; without it `flex_1` still cannot pull the
+                // pane in.
                 v_flex()
                     .flex_1()
-                    .size_full()
+                    .min_w_0()
+                    .h_full()
                     .child(
                         div()
                             .p_2()

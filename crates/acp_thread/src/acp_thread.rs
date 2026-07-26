@@ -2225,6 +2225,15 @@ pub enum LoadError {
         status: ExitStatus,
         stderr: Option<SharedString>,
     },
+    /// The agent no longer holds the session this thread names.
+    ///
+    /// Omega's thread record outlives the external agent's session store, so
+    /// reopening an old thread after the agent has forgotten it is ordinary
+    /// rather than exceptional. It surfaced as "Failed to Launch: Resource not
+    /// found: <uuid>", which names a thing the reader cannot act on and reads
+    /// like the agent failed to start. Nothing failed to launch: the
+    /// conversation is gone and a new one is the way forward.
+    SessionGone,
     Other(SharedString),
 }
 
@@ -2243,6 +2252,10 @@ impl Display for LoadError {
             }
             LoadError::FailedToInstall(msg) => write!(f, "Failed to install: {msg}"),
             LoadError::Exited { status, .. } => write!(f, "Server exited with status {status}"),
+            LoadError::SessionGone => write!(
+                f,
+                "the agent no longer has this conversation; start a new thread to keep going"
+            ),
             LoadError::Other(msg) => write!(f, "{msg}"),
         }
     }

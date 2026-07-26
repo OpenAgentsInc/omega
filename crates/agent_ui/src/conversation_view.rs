@@ -1533,6 +1533,8 @@ impl ConversationView {
                     format!("Failed to Install {}", self.agent.agent_id()).into()
                 }
                 LoadError::Exited { .. } => format!("{} Exited", self.agent.agent_id()).into(),
+                // Deliberately not "Error Loading <agent>": the agent loaded.
+                LoadError::SessionGone => "Conversation No Longer Available".into(),
                 LoadError::Other(_) => format!("Error Loading {}", self.agent.agent_id()).into(),
             },
         }
@@ -2617,6 +2619,7 @@ impl ConversationView {
             LoadError::Unsupported { .. } => "unsupported",
             LoadError::FailedToInstall(_) => "failed_to_install",
             LoadError::Exited { .. } => "exited",
+            LoadError::SessionGone => "session_gone",
             LoadError::Other(_) => "other",
         };
 
@@ -2659,6 +2662,27 @@ impl ConversationView {
                     .is_some()
                     .then(|| self.create_copy_button(message.clone()).into_any_element());
                 ("Failed to Launch", message.into(), action_slot)
+            }
+            // Nothing failed to launch. The agent started fine and does not
+            // have this conversation any more, which is ordinary once a thread
+            // outlives the agent's own session store. Say that, and give the
+            // reader the one action that moves them forward, instead of a
+            // launch failure carrying a session id they cannot use.
+            LoadError::SessionGone => {
+                return Callout::new()
+                    .severity(Severity::Warning)
+                    .icon(IconName::Info)
+                    .title("Conversation No Longer Available")
+                    .description(
+                        "The agent no longer has this conversation. Its history is still here to \
+                         read, and a new thread will pick up where you left off.",
+                    )
+                    .actions_slot(
+                        Button::new("session-gone-new-thread", "New Thread")
+                            .on_click(|_, window, cx| window.dispatch_action(NewThread.boxed_clone(), cx))
+                            .into_any_element(),
+                    )
+                    .into_any_element();
             }
             LoadError::Other(msg) => (
                 "Failed to Launch",

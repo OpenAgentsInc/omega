@@ -1743,7 +1743,7 @@ impl AgentConnection for AcpConnection {
                         )
                         .block_task()
                         .await
-                        .map_err(map_acp_error)?;
+                        .map_err(map_session_open_error)?;
                     Ok(SessionConfigResponse {
                         modes: response.modes,
                         config_options: response.config_options,
@@ -1788,7 +1788,7 @@ impl AgentConnection for AcpConnection {
                         )
                         .block_task()
                         .await
-                        .map_err(map_acp_error)?;
+                        .map_err(map_session_open_error)?;
                     Ok(SessionConfigResponse {
                         modes: response.modes,
                         config_options: response.config_options,
@@ -2072,6 +2072,24 @@ fn map_acp_error(err: acp::Error) -> anyhow::Error {
     } else {
         anyhow!(err)
     }
+}
+
+/// Map an error from a `session/load` or `session/resume` call.
+///
+/// `ResourceNotFound` from these two calls means one specific thing: the agent
+/// does not have the session we named. Omega keeps its own thread record, and
+/// that record outlives the agent's session store, so this is an ordinary end
+/// of life rather than a failure to start. Left as a generic error it rendered
+/// as "Failed to Launch: Resource not found: <uuid>" — a title that blames
+/// startup and a body that names an identifier the reader cannot act on.
+///
+/// Only the session-scoped calls get this treatment. `ResourceNotFound` from a
+/// file read means a missing file and must keep saying so.
+fn map_session_open_error(err: acp::Error) -> anyhow::Error {
+    if err.code == acp::ErrorCode::ResourceNotFound {
+        return anyhow!(LoadError::SessionGone);
+    }
+    map_acp_error(err)
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -5097,4 +5115,48 @@ fn handle_wait_for_terminal_exit(
         respond_result(responder, result.map(acp::WaitForTerminalExitResponse::new));
     })
     .detach();
+}
+
+#[cfg(test)]
+mod session_open_error_tests {
+    use super::*;
+
+    /// A vanished session must not read as a failure to start.
+    ///
+    /// This shipped as "Failed to Launch: Resource not found: <uuid>" — a
+    /// title that blames startup for something startup did not do, and a body
+    /// naming an identifier the reader cannot act on.
+    #[test]
+    fn a_missing_session_is_reported_as_gone_not_as_a_launch_failure() {
+        let mapped = map_session_open_error(acp::Error::resource_not_found(Some(
+            "1297dcfa-027c-422c-9b56-acb526144c93".into(),
+        )));
+        let load_error = mapped
+            .downcast_ref::<LoadError>()
+            .expect("a missing session must map to a LoadError");
+        assert!(
+            matches!(load_error, LoadError::SessionGone),
+            "expected SessionGone, got {load_error:?}"
+        );
+        let rendered = load_error.to_string();
+        assert!(
+            !rendered.contains("1297dcfa"),
+            "the session id is not actionable and must not be shown: {rendered}"
+        );
+        assert!(
+            rendered.contains("new thread"),
+            "the reader needs the way forward: {rendered}"
+        );
+    }
+
+    /// Only the session-scoped calls get this treatment. `ResourceNotFound`
+    /// from a file read still means a missing file.
+    #[test]
+    fn other_errors_are_left_alone() {
+        let mapped = map_session_open_error(acp::Error::internal_error());
+        assert!(
+            mapped.downcast_ref::<LoadError>().is_none(),
+            "an unrelated error must not be rewritten into SessionGone"
+        );
+    }
 }
