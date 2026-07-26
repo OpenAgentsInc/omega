@@ -339,12 +339,7 @@ impl QueueItemState {
 
     #[must_use]
     pub const fn all() -> &'static [Self] {
-        &[
-            Self::Queued,
-            Self::Promoted,
-            Self::Cancelled,
-            Self::Failed,
-        ]
+        &[Self::Queued, Self::Promoted, Self::Cancelled, Self::Failed]
     }
 
     /// Whether this item can still be promoted.
@@ -491,11 +486,7 @@ mod tests {
     #[test]
     fn an_engine_lane_steer_is_refused_whatever_the_engine_can_do() {
         for capability in SteerCapability::all() {
-            let decided = disposition(
-                SendCommand::Steer,
-                ExecutorClass::EngineLane,
-                *capability,
-            );
+            let decided = disposition(SendCommand::Steer, ExecutorClass::EngineLane, *capability);
             assert_eq!(
                 decided,
                 SendDisposition::Refused {
@@ -519,7 +510,10 @@ mod tests {
                 let decided = disposition(SendCommand::Steer, *class, *capability);
                 if let SendDisposition::Refused { refusal, fallback } = decided {
                     let phrase = decided.phrase();
-                    assert!(phrase.contains(refusal.phrase()), "{phrase} hides the reason");
+                    assert!(
+                        phrase.contains(refusal.phrase()),
+                        "{phrase} hides the reason"
+                    );
                     assert!(
                         phrase.contains("Queued"),
                         "{phrase} does not say the message was queued"
@@ -543,11 +537,7 @@ mod tests {
                     assert_eq!(*quiescence, Quiescence::Proven);
                 }
                 if !state.is_open() {
-                    assert!(
-                        !promoted,
-                        "{} promoted a second time",
-                        state.token()
-                    );
+                    assert!(!promoted, "{} promoted a second time", state.token());
                 }
             }
         }
@@ -572,7 +562,10 @@ mod tests {
         tokens.sort();
         let before = tokens.len();
         tokens.dedup();
-        assert!(tokens.len() < before, "the triples should collapse to a smaller answer set");
+        assert!(
+            tokens.len() < before,
+            "the triples should collapse to a smaller answer set"
+        );
         assert!(
             tokens.contains(&"steer_at_message_boundary".to_owned()),
             "the native loop's boundary stop is not reachable"

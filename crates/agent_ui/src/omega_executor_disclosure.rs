@@ -137,10 +137,13 @@ fn classify_connection(
         let identity = exo.identity();
         return ExecutorDisclosure {
             class: omega_exo_lane::EXO_EXECUTOR_CLASS,
-            agent_id: identity
+            agent_id: identity.as_ref().map_or_else(
+                || agent_id.clone(),
+                omega_exo_lane::ExoLaneIdentity::agent_id,
+            ),
+            provider: identity
                 .as_ref()
-                .map_or_else(|| agent_id.clone(), omega_exo_lane::ExoLaneIdentity::agent_id),
-            provider: identity.as_ref().and_then(|identity| identity.provider.clone()),
+                .and_then(|identity| identity.provider.clone()),
             model: identity.and_then(|identity| identity.model),
             run_ref: None,
             route: crate::omega_router::recorded_route(session_id),

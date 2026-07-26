@@ -543,7 +543,9 @@ pub enum Entry {
     UserMessage(Entity<MessageEditor>),
     AssistantMessage(AssistantMessageEntry),
     ToolCall(ToolCallEntry),
-    Elicitation { focus_handle: FocusHandle },
+    Elicitation {
+        focus_handle: FocusHandle,
+    },
     CompletedPlan,
     ContextCompaction,
     /// OMEGA-DELTA-0045. The view side of [`AgentThreadEntry::SystemNote`].

@@ -2112,8 +2112,7 @@ impl AgentPanel {
     /// what those guards were protecting, and it is protected here now, where
     /// the requirement actually is.
     pub fn should_create_terminal_for_new_entry(&self, cx: &App) -> bool {
-        self.last_created_entry_kind == AgentPanelEntryKind::Terminal
-            && self.supports_terminal(cx)
+        self.last_created_entry_kind == AgentPanelEntryKind::Terminal && self.supports_terminal(cx)
     }
 
     fn set_last_created_entry_kind_from_user_action(
@@ -4773,8 +4772,8 @@ impl AgentPanel {
         // OMEGA-DELTA-0035. Wrapped or bare, the native agent gets the thread
         // store; a bare downcast here would silently hand the router `None` and
         // lose native thread persistence.
-        let thread_store = crate::omega_router::is_native_agent_server(&server)
-            .then(|| self.thread_store.clone());
+        let thread_store =
+            crate::omega_router::is_native_agent_server(&server).then(|| self.thread_store.clone());
 
         let connection_store = self.connection_store.clone();
 

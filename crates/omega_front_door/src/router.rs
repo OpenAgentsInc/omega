@@ -535,10 +535,9 @@ impl RouteDecision {
     #[must_use]
     pub fn is_coherent(&self) -> bool {
         let lane_matches_class = match self.chosen {
-            ExecutorClass::EngineLane => self
-                .lane_ref
-                .as_deref()
-                .is_some_and(lane_ref_is_recordable),
+            ExecutorClass::EngineLane => {
+                self.lane_ref.as_deref().is_some_and(lane_ref_is_recordable)
+            }
             ExecutorClass::NativeLoop | ExecutorClass::ExternalAcp => self.lane_ref.is_none(),
         };
         let fallback_lands_native = !self.reason.is_fallback()
@@ -801,7 +800,11 @@ mod tests {
             .with_external_acp("codex-acp")
             .with_engine_lane("codex-local");
 
-        let native = route(&base.clone().pinned(ExecutorPin::new(ExecutorClass::NativeLoop)));
+        let native = route(
+            &base
+                .clone()
+                .pinned(ExecutorPin::new(ExecutorClass::NativeLoop)),
+        );
         assert_eq!(native.chosen, ExecutorClass::NativeLoop);
         assert_eq!(native.reason, RouteReason::PinHonored);
 
@@ -908,7 +911,11 @@ mod tests {
         ));
 
         for (engine, expected) in cases {
-            let decision = route(&RouteInputs::native_only().with_engine(engine.clone()).pinned(pin.clone()));
+            let decision = route(
+                &RouteInputs::native_only()
+                    .with_engine(engine.clone())
+                    .pinned(pin.clone()),
+            );
             assert_eq!(
                 decision.chosen,
                 ExecutorClass::NativeLoop,
@@ -948,9 +955,8 @@ mod tests {
     /// the engine does, rather than waiting or erroring.
     #[test]
     fn a_disconnected_external_agent_falls_closed_to_the_native_loop() {
-        let decision = route(
-            &RouteInputs::native_only().pinned(ExecutorPin::new(ExecutorClass::ExternalAcp)),
-        );
+        let decision =
+            route(&RouteInputs::native_only().pinned(ExecutorPin::new(ExecutorClass::ExternalAcp)));
         assert_eq!(decision.chosen, ExecutorClass::NativeLoop);
         assert_eq!(decision.reason, RouteReason::ExternalAcpUnavailable);
         assert!(decision.is_coherent());
@@ -1380,8 +1386,7 @@ mod tests {
         tokens.dedup();
         assert_eq!(tokens.len(), count, "two reasons share a token");
         assert_eq!(
-            count,
-            9,
+            count, 9,
             "the reason set changed. Every reason is a thing the router can \
              tell a user; adding one is a deliberate edit, and removing one \
              means a route it used to explain is now unexplained."

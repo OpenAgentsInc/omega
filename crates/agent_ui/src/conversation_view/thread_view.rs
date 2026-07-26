@@ -4407,16 +4407,43 @@ impl ThreadView {
         let composer_fills_panel = !has_messages && !omega_zero_base::is_active();
         let fills_container = composer_fills_panel || editor_expanded;
 
+        // omega#100. The composer's surface is the width of the conversation,
+        // not the width of the window.
+        //
+        // The background and the rule above it used to sit on this outer row,
+        // which spans the whole window, while `max_content_width` sat on the
+        // column inside it. So the messages were a readable column down the
+        // middle and the input was a band of colour edge to edge under them,
+        // with a rule running the full width of the screen. In a dock-sized
+        // panel the difference is small. Zoomed to the window, which is what
+        // zero base does, the input read as a separate strip rather than as
+        // part of the conversation. The owner asked for it to end where the
+        // messages end.
+        //
+        // So the colour and the border move onto the column that already
+        // carries the width, and the outer row goes back to being a centring
+        // container with no appearance of its own. The box is closed on all
+        // four sides rather than open-ended with a rule on top, because a
+        // shape that stops has to stop somewhere a person can see.
         h_flex()
-            .py_2()
-            .bg(editor_bg_color)
+            // Padding below the box, none above it.
+            //
+            // omega#100. `py_2` put the same gap on both sides, so the
+            // transcript stopped a few pixels short of the composer and the
+            // last line of a reply sat in a band of empty colour. The owner
+            // asked for the text to run up against it. Below the box the
+            // padding stays, because there the gap is the window edge rather
+            // than the conversation.
+            .pb_2()
+            // Without this the box touches the window edges when no
+            // `max_content_width` is configured, and a border that runs into
+            // the frame reads as no border at all.
+            .px_2()
             .justify_center()
             .on_action(cx.listener(Self::handle_message_editor_move_up))
             .map(|this| {
                 if !composer_fills_panel {
                     this.on_action(cx.listener(Self::expand_message_editor))
-                        .border_t_1()
-                        .border_color(cx.theme().colors().border)
                         .when(editor_expanded, |this| this.h(vh(0.8, window)))
                 } else {
                     this.flex_1().size_full()
@@ -4428,6 +4455,10 @@ impl ThreadView {
                     .when(max_content_width.is_none(), |this| this.w_full())
                     .min_w_0()
                     .when(fills_container, |this| this.h_full())
+                    .bg(editor_bg_color)
+                    .border_1()
+                    .border_color(cx.theme().colors().border)
+                    .rounded_lg()
                     .px_2()
                     .flex_shrink_1()
                     .flex_grow_0()
@@ -4438,42 +4469,78 @@ impl ThreadView {
                             .relative()
                             .w_full()
                             .min_h_0()
+                            // omega#100. The field never collapses below one
+                            // readable line.
+                            //
+                            // `min_h_0` lets this column shrink to nothing,
+                            // which is what allows the expanded composer to
+                            // give its space back. On an empty thread in zero
+                            // base nothing else claims a height here — the
+                            // transcript above takes the remaining space so the
+                            // composer sits at the bottom — so the column
+                            // shrank to a sliver and the placeholder had no
+                            // room to draw. The owner saw a caret and no
+                            // prompt, and only after sending a first message
+                            // did the field look like a field.
+                            //
+                            // A floor rather than a fixed height: the editor
+                            // still grows with what is typed, and the expanded
+                            // state still overrides it.
+                            //
+                            // The floor is the same before and after the first
+                            // message. It was first set at one line, which
+                            // stopped the field collapsing to a caret but left
+                            // the new-thread composer visibly shorter than the
+                            // same composer one message later. The owner read
+                            // that as a bug, and it was: nothing about an empty
+                            // thread justifies a smaller field, and the first
+                            // message is the one most likely to be long,
+                            // because it is the one that states the task.
+                            .min_h(rems_from_px(96.))
                             .when(fills_container, |this| this.flex_1())
                             .pt_1()
                             .pr_2p5()
                             .child(self.message_editor.clone())
-                            .when(has_messages, |this| {
-                                this.child(
-                                    h_flex()
-                                        .absolute()
-                                        .top_0()
-                                        .right_0()
-                                        .opacity(0.5)
-                                        .hover(|s| s.opacity(1.0))
-                                        .child(
-                                            IconButton::new("toggle-height", expand_icon)
-                                                .icon_size(IconSize::Small)
-                                                .icon_color(Color::Muted)
-                                                .tooltip({
-                                                    move |_window, cx| {
-                                                        Tooltip::for_action_in(
-                                                            expand_tooltip,
-                                                            &ExpandMessageEditor,
-                                                            &focus_handle,
-                                                            cx,
-                                                        )
-                                                    }
-                                                })
-                                                .on_click(cx.listener(|this, _, window, cx| {
-                                                    this.expand_message_editor(
+                            // omega#100. The expand control is not conditional
+                            // on the thread having messages.
+                            //
+                            // It was drawn only `when(has_messages)`, so the
+                            // first message in a thread — the one most likely
+                            // to be long, because it is the one that states the
+                            // task — was the one message that could not be
+                            // written in an expanded field. The control
+                            // appeared only after it was no longer needed for
+                            // that message.
+                            .child(
+                                h_flex()
+                                    .absolute()
+                                    .top_0()
+                                    .right_0()
+                                    .opacity(0.5)
+                                    .hover(|s| s.opacity(1.0))
+                                    .child(
+                                        IconButton::new("toggle-height", expand_icon)
+                                            .icon_size(IconSize::Small)
+                                            .icon_color(Color::Muted)
+                                            .tooltip({
+                                                move |_window, cx| {
+                                                    Tooltip::for_action_in(
+                                                        expand_tooltip,
                                                         &ExpandMessageEditor,
-                                                        window,
+                                                        &focus_handle,
                                                         cx,
-                                                    );
-                                                })),
-                                        ),
-                                )
-                            }),
+                                                    )
+                                                }
+                                            })
+                                            .on_click(cx.listener(|this, _, window, cx| {
+                                                this.expand_message_editor(
+                                                    &ExpandMessageEditor,
+                                                    window,
+                                                    cx,
+                                                );
+                                            })),
+                                    ),
+                            ),
                     )
                     // omega#99. Zero base's composer bar is one row: what this
                     // thread is talking to, the model, the executor pin, send.

@@ -3,7 +3,7 @@ use std::{
     sync::Arc,
 };
 
-use agent::{ThreadStore, OMEGA_AGENT_ID};
+use agent::{OMEGA_AGENT_ID, ThreadStore};
 use agent_client_protocol::schema::v1 as acp;
 use anyhow::Context as _;
 use chrono::{DateTime, Utc};

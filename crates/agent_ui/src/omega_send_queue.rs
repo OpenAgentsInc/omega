@@ -323,11 +323,7 @@ impl SendQueueJournal {
         }
     }
 
-    fn transition(
-        &self,
-        key: &str,
-        state: QueueItemState,
-    ) -> Result<QueuedSend, SendQueueRefusal> {
+    fn transition(&self, key: &str, state: QueueItemState) -> Result<QueuedSend, SendQueueRefusal> {
         let updated = {
             let mut items = self.items.borrow_mut();
             let item = items.get_mut(key).ok_or(SendQueueRefusal::UnknownItem)?;
@@ -492,7 +488,14 @@ mod tests {
         capability: SteerCapability,
     ) -> QueuedSend {
         journal
-            .admit("thread-1", item_id, "look at the other file too", command, class, capability)
+            .admit(
+                "thread-1",
+                item_id,
+                "look at the other file too",
+                command,
+                class,
+                capability,
+            )
             .expect("admitted")
     }
 
@@ -570,7 +573,11 @@ mod tests {
             journal.promote("thread-1", "item-1", Quiescence::Running),
             Err(SendQueueRefusal::NotQuiescent)
         );
-        assert!(journal.promote("thread-1", "item-1", Quiescence::Proven).is_ok());
+        assert!(
+            journal
+                .promote("thread-1", "item-1", Quiescence::Proven)
+                .is_ok()
+        );
     }
 
     /// Ordering is the item's own, not the map's. Two items admitted in order
@@ -592,7 +599,10 @@ mod tests {
             ExecutorClass::NativeLoop,
             SteerCapability::Unknown,
         );
-        assert_eq!(journal.head_for("thread-1").expect("head").item_id, "zzz-first");
+        assert_eq!(
+            journal.head_for("thread-1").expect("head").item_id,
+            "zzz-first"
+        );
     }
 
     /// Two threads, one file, no crossing. A queue that leaked between threads

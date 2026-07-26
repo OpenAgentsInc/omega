@@ -519,8 +519,7 @@ impl Agent {
                 // the journal above, and the same reason the choice is made
                 // here rather than inside the router.
                 if std::env::var("ZED_STATELESS").is_ok() {
-                    std::env::temp_dir()
-                        .join(format!("omega-exo-lane-{}.json", std::process::id()))
+                    std::env::temp_dir().join(format!("omega-exo-lane-{}.json", std::process::id()))
                 } else {
                     crate::omega_exo_connection::ExoLaneConfig::data_dir_path()
                 },

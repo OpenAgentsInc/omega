@@ -22,8 +22,9 @@ pub use send_during_turn::{
 };
 
 pub use router::{
-    EngineLane, EngineReadiness, EngineUnreachable, ExecutorPin, LaneState, RESERVED_RECORD_CHARACTERS,
-    RouteDecision, RouteInputs, RouteReason, lane_ref_is_recordable, route, select_lane,
+    EngineLane, EngineReadiness, EngineUnreachable, ExecutorPin, LaneState,
+    RESERVED_RECORD_CHARACTERS, RouteDecision, RouteInputs, RouteReason, lane_ref_is_recordable,
+    route, select_lane,
 };
 
 // -------------------------------------------------------------------------
@@ -191,15 +192,34 @@ impl ExecutorDisclosure {
             (None, Some(model)) => format!("provider not disclosed/{model}"),
             (None, None) => "model not disclosed".to_owned(),
         };
-        let mut line = format!("{} · {} · {model}", self.class.token(), self.agent_id);
+        // omega#100. The class token is not shown to a person.
+        //
+        // `native_loop`, `external_acp` and `engine_lane` are wire tokens. They
+        // are persisted and compared, and the doc on `token` already says they
+        // are never shown to a user on their own — but this line showed one
+        // anyway, first in the row. The owner read it and said so: "i have no
+        // fucking clue what youre talking about so the user won't". The agent
+        // id beside it already answers the question a person is actually
+        // asking, which is who ran this. The token stays in the record, where
+        // machines read it.
+        let mut line = format!("{} · {model}", self.agent_id);
         if let Some(run_ref) = &self.run_ref {
             line.push_str(" · ");
             line.push_str(run_ref);
         }
-        // omega#78. An unrouted thread says nothing here rather than claiming a
-        // reason nobody recorded; a routed one always says why, including — and
-        // especially — when a pin could not be honoured.
-        if let Some(route) = self.route {
+        // omega#78, narrowed by omega#100. A fallback is still always said. An
+        // ordinary route is not.
+        //
+        // This said "routed: unpinned" on every ordinary turn, which is the
+        // steady state and therefore tells a reader nothing. Saying it
+        // everywhere also spends the reader's attention on the case that does
+        // not matter, which is how the case that does matter stops being read.
+        // `is_fallback` already draws exactly this line: `UnpinnedDefault` and
+        // `PinHonored` are the two non-events, and every other reason is an
+        // executor the thread did not get.
+        if let Some(route) = self.route
+            && route.is_fallback()
+        {
             line.push_str(" · routed: ");
             line.push_str(route.phrase());
         }
@@ -249,9 +269,8 @@ impl ExecutorDisclosure {
 /// binding condition of the owner's 2026-07-25 identity decision is that
 /// disclosure is a *record a label renders*, and a stored rendering under any
 /// name breaks it, not just one spelled `label`.
-pub const EXECUTOR_DISCLOSURE_FIELDS: &[&str] = &[
-    "class", "agent_id", "provider", "model", "run_ref", "route",
-];
+pub const EXECUTOR_DISCLOSURE_FIELDS: &[&str] =
+    &["class", "agent_id", "provider", "model", "run_ref", "route"];
 
 // -------------------------------------------------------------------------
 // Where a session was reached from
@@ -784,28 +803,63 @@ mod tests {
             run_ref: Some("run.abc".into()),
             route: None,
         };
+        // omega#100. The class token is no longer rendered. It stays a field,
+        // and machines still read it; the reader sees the agent id, which is
+        // the answer to the question a person is asking.
         assert_eq!(
             disclosure.label(),
-            "engine_lane · codex-local · google/gemini-3.6-flash · run.abc"
+            "codex-local · google/gemini-3.6-flash · run.abc"
         );
 
         // Change one field and the rendered line follows, which is only true
-        // because nothing cached it.
+        // because nothing cached it. `run_ref` carries the change here, since
+        // the class no longer reaches the line.
         let mut moved = disclosure;
         moved.class = ExecutorClass::NativeLoop;
         moved.run_ref = None;
-        assert_eq!(
-            moved.label(),
-            "native_loop · codex-local · google/gemini-3.6-flash"
-        );
+        assert_eq!(moved.label(), "codex-local · google/gemini-3.6-flash");
+    }
+
+    /// The class token is a wire token, and stays off the rendered line.
+    ///
+    /// omega#100. `ExecutorClass::token` already documents that it is "never
+    /// shown to a user on its own", and the line was leading with one anyway:
+    /// `native_loop · Omega Agent · google/gemini-3.6-flash`. The owner read it
+    /// and said "i have no fucking clue what youre talking about so the user
+    /// won't".
+    ///
+    /// The record keeps the class. Only the rendering drops it, so a reader is
+    /// not asked to learn three internal words to find out who answered them.
+    #[test]
+    fn the_class_token_is_not_rendered_for_any_class() {
+        for class in ExecutorClass::all() {
+            let disclosure = ExecutorDisclosure {
+                class: *class,
+                agent_id: "codex-local".into(),
+                provider: Some("google".into()),
+                model: Some("gemini-3.6-flash".into()),
+                run_ref: None,
+                route: None,
+            };
+            let label = disclosure.label();
+            assert!(
+                !label.contains(class.token()),
+                "OMEGA-DELTA-0021: the label for {class:?} still names its wire \
+                 token: {label}"
+            );
+            assert!(
+                label.contains("codex-local"),
+                "the agent id must survive: {label}"
+            );
+        }
     }
 
     /// An executor that does not report a model is disclosed as not reporting
     /// one. omega#77.
     ///
     /// The failure this guards is a line that reads as complete while a part
-    /// of it is missing: `external_acp · codex-acp` alone gives the reader no
-    /// way to tell a fully disclosed thread from a partly disclosed one.
+    /// of it is missing: `codex-acp` alone gives the reader no way to tell a
+    /// fully disclosed thread from a partly disclosed one.
     #[test]
     fn an_undisclosed_model_is_said_rather_than_skipped() {
         let disclosure = ExecutorDisclosure {
@@ -817,10 +871,7 @@ mod tests {
             route: None,
         };
         assert!(disclosure.is_coherent());
-        assert_eq!(
-            disclosure.label(),
-            "external_acp · codex-acp · model not disclosed"
-        );
+        assert_eq!(disclosure.label(), "codex-acp · model not disclosed");
 
         let half_known = ExecutorDisclosure {
             provider: Some("openai".into()),
@@ -828,7 +879,7 @@ mod tests {
         };
         assert_eq!(
             half_known.label(),
-            "external_acp · codex-acp · openai/model not disclosed"
+            "codex-acp · openai/model not disclosed"
         );
     }
 
@@ -926,7 +977,10 @@ pub struct Other {
 
         let origin = SessionOrigin::loopback_acp(Some("Zed".into()), Some("1.12.0".into()));
         assert!(origin.is_coherent());
-        assert_eq!(origin.label(), "loopback_acp · Zed 1.12.0 · unauthenticated");
+        assert_eq!(
+            origin.label(),
+            "loopback_acp · Zed 1.12.0 · unauthenticated"
+        );
         assert_eq!(origin.ingress.token(), "loopback_acp");
 
         let quiet = SessionOrigin::loopback_acp(None, None);
