@@ -895,15 +895,23 @@ def packaged_covering_fragments() -> list[str]:
     """Classified prose as it survives compilation, normalized.
 
     A classified entry is the literal as written; the binary holds the value.
-    Two differences matter and both produced false failures the first time this
-    ran: a `\\` line continuation joins two lines with no separator, and a
-    `\\n` becomes a real newline that splits the printable run in half, so only
-    a fragment of the sentence is ever contiguous in the string table.
+    Three differences matter and each produced a false failure the first time
+    it was hit: a `\\` line continuation joins two lines with no separator, a
+    `\\n` becomes a real newline that splits the printable run in half, and a
+    non-ASCII character does the same thing. The packaged scan matches
+    `[\\x20-\\x7e]` runs, so an em-dash or a curly quote inside a classified
+    sentence ends the run there. A sentence whose brand mention sits past such
+    a character could never cover its own occurrence, and the gate reported an
+    offender that had been correctly classified all along.
+
+    Splitting is conservative rather than permissive: coverage requires a
+    fragment to *span* the brand occurrence, so shorter fragments cover less,
+    never more.
     """
     fragments: list[str] = []
     for text in PROSE_CLASSIFIED:
         joined = text.replace("\\ ", " ")
-        for part in re.split(r"\\[nrt]", joined):
+        for part in re.split(r"\\[nrt]|[^\x20-\x7e]+", joined):
             part = normalize_prose(part)
             if part and brand_hits(part):
                 fragments.append(part)
