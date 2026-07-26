@@ -87,6 +87,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0070",
     "OMEGA-DELTA-0080",
     "OMEGA-DELTA-0090",
+    "OMEGA-DELTA-0091",
 ];
 
 /// OMEGA-DELTA-0080. Where the agent panel declares its result-body ceiling and
@@ -2325,6 +2326,112 @@ pub const NON_DETERMINISTIC_QUEUE_TOKENS: &[(&str, &str)] = &[
 
 /// OMEGA-DELTA-0032. Every executor class the send law must answer for.
 pub const SEND_LAW_EXECUTOR_TOKENS: &[&str] = &["NativeLoop", "ExternalAcp", "EngineLane"];
+
+// ------ OMEGA-DELTA-0091
+
+/// OMEGA-DELTA-0091. Every source file of the read-only Exo log client.
+///
+/// Scanned as a set rather than one file, because "this crate cannot name a
+/// write" is a property of the crate. A write kind moved into a helper module
+/// would satisfy a check that only read the query type.
+pub const EXO_LOG_SOURCE_PATHS: &[&str] = &[
+    "crates/omega_exo_log/src/omega_exo_log.rs",
+    "crates/omega_exo_log/src/client.rs",
+    "crates/omega_exo_log/src/history.rs",
+    "crates/omega_exo_log/src/query.rs",
+    "crates/omega_exo_log/src/record.rs",
+];
+
+/// OMEGA-DELTA-0091. The closed set of request kinds the client may name.
+///
+/// Eight of Exo's fifty-two. Counted off `Request::kind` in
+/// `crates/exoharness/src/protocol.rs` at the pin `omega_exo_lane::EXO_PIN`,
+/// not quoted from a teardown.
+pub const EXO_LOG_ADMITTED_KINDS: &[&str] = &[
+    "get_agent",
+    "agent_list_artifacts",
+    "agent_read_artifact",
+    "get_conversation",
+    "conversation_get_events",
+    "conversation_get_event",
+    "conversation_list_artifacts",
+    "conversation_read_artifact",
+];
+
+/// OMEGA-DELTA-0091. The other forty-four, none of which may appear.
+///
+/// Not "the writes": *the unadmitted*. Ten of these are reads — `list_agents`,
+/// `list_conversations`, `get_sandbox_process_events`, `wait_sandbox_process`,
+/// and the six binding list-and-get variants — and they are refused anyway,
+/// because the issue scoped this client to a conversation's own record and a
+/// list of every agent on the host is not that. A denylist of writes would have
+/// admitted all ten silently.
+///
+/// The union of this list and [`EXO_LOG_ADMITTED_KINDS`] was transcribed from
+/// `Request::kind` at the pin, and it agrees exactly with the independent
+/// transcription `omega_exo_episode::family::EXO_REQUEST_FAMILIES` made for
+/// `OMEGA-DELTA-0090`. Two copies of a 52-line list is one copy too many; the
+/// note in the registry says where it should live.
+pub const EXO_LOG_UNADMITTED_KINDS: &[&str] = &[
+    "list_agents",
+    "new_agent",
+    "delete_agent",
+    "list_bindings",
+    "put_binding",
+    "get_binding",
+    "list_secrets",
+    "put_secret",
+    "get_secret",
+    "list_conversations",
+    "new_conversation",
+    "delete_conversation",
+    "agent_write_artifact",
+    "create_sandbox",
+    "snapshot_sandbox",
+    "start_sandbox",
+    "stop_sandbox",
+    "start_sandbox_process",
+    "write_sandbox_process_input",
+    "close_sandbox_process_input",
+    "get_sandbox_process_events",
+    "wait_sandbox_process",
+    "cancel_sandbox_process",
+    "agent_list_bindings",
+    "agent_put_binding",
+    "agent_get_binding",
+    "agent_list_secrets",
+    "agent_put_secret",
+    "agent_get_secret",
+    "conversation_start_session",
+    "conversation_end_session",
+    "conversation_begin_turn",
+    "conversation_add_events",
+    "conversation_fork",
+    "conversation_write_artifact",
+    "conversation_list_bindings",
+    "conversation_put_binding",
+    "conversation_get_binding",
+    "conversation_list_secrets",
+    "conversation_put_secret",
+    "conversation_get_secret",
+    "turn_add_events",
+    "turn_write_artifact",
+    "turn_finish",
+];
+
+/// OMEGA-DELTA-0091. Headers and vocabulary that would assert an authentication
+/// Exo does not have.
+///
+/// `exo serve` accepts a bearer token and never checks it — its own HTTP client
+/// has `with_bearer_token`, and the server reads no `Authorization` header at
+/// all. Sending one would leave a capture in which the endpoint looks protected.
+pub const EXO_LOG_FALSE_AUTH_TOKENS: &[&str] = &["Authorization", "bearer", "Bearer"];
+
+/// OMEGA-DELTA-0091. The type Exo-reported cost and token counts must keep.
+pub const EXO_LOG_USAGE_TYPE: &str = "HarnessReportedUsage";
+
+/// OMEGA-DELTA-0091. What every rendering of those numbers must say.
+pub const EXO_LOG_USAGE_PROVENANCE: &str = "harness-reported";
 
 #[cfg(test)]
 mod tests {
@@ -9474,6 +9581,303 @@ mod tests {
             "OMEGA-DELTA-0090: the two reset refusals are gone from {}. Removing them \
              does not make the filesystem reset work; it makes the failure silent.",
             path.display()
+        );
+    }
+
+    // ------ OMEGA-DELTA-0091
+
+    /// OMEGA-DELTA-0091. Every string literal in a source file, outside
+    /// comments and outside the test module beside it.
+    ///
+    /// Exact literals rather than substrings, because Exo's event tags overlap
+    /// its request kinds: the event `conversation_forked` contains the request
+    /// `conversation_fork`, and a `contains` check would refuse a decoder for
+    /// naming an event it must decode. An equality check on whole literals has
+    /// no such collision.
+    fn string_literals(source: &str) -> Vec<String> {
+        let production = production_source(source);
+        let characters: Vec<char> = production.chars().collect();
+        let mut literals = Vec::new();
+        let mut index = 0usize;
+        while index < characters.len() {
+            match characters[index] {
+                '/' if characters.get(index + 1) == Some(&'/') => {
+                    while index < characters.len() && characters[index] != '\n' {
+                        index += 1;
+                    }
+                }
+                '/' if characters.get(index + 1) == Some(&'*') => {
+                    index += 2;
+                    while index + 1 < characters.len()
+                        && !(characters[index] == '*' && characters[index + 1] == '/')
+                    {
+                        index += 1;
+                    }
+                    index += 2;
+                }
+                '"' => {
+                    index += 1;
+                    let mut literal = String::new();
+                    while index < characters.len() && characters[index] != '"' {
+                        if characters[index] == '\\' {
+                            index += 1;
+                        }
+                        if index < characters.len() {
+                            literal.push(characters[index]);
+                            index += 1;
+                        }
+                    }
+                    index += 1;
+                    literals.push(literal);
+                }
+                _ => index += 1,
+            }
+        }
+        literals
+    }
+
+    fn exo_log_source(relative: &str) -> String {
+        let path = repository_path(relative);
+        std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()))
+    }
+
+    /// OMEGA-DELTA-0091. The client cannot name a request it may not send.
+    ///
+    /// The issue asked for a shape where the wrong call cannot be expressed
+    /// rather than one that refuses at runtime, so this reads the whole crate
+    /// for the forty-four unadmitted kinds and for the eight admitted ones. A
+    /// denylist consulted at a call site would pass this check while a caller
+    /// that forgot to consult it sent a fork; a closed enum that never spells
+    /// the kind cannot.
+    #[test]
+    fn the_exo_log_client_can_name_only_the_eight_read_variants() {
+        assert_eq!(
+            EXO_LOG_ADMITTED_KINDS.len() + EXO_LOG_UNADMITTED_KINDS.len(),
+            52,
+            "OMEGA-DELTA-0091: the two halves no longer partition Exo's \
+             52-variant protocol, so one of them stopped being a partition of \
+             anything."
+        );
+        for kind in EXO_LOG_ADMITTED_KINDS {
+            assert!(
+                !EXO_LOG_UNADMITTED_KINDS.contains(kind),
+                "OMEGA-DELTA-0091: `{kind}` is on both lists."
+            );
+        }
+
+        for relative in EXO_LOG_SOURCE_PATHS {
+            let source = exo_log_source(relative);
+            for literal in string_literals(&source) {
+                if let Some(kind) = EXO_LOG_UNADMITTED_KINDS
+                    .iter()
+                    .find(|kind| ***kind == *literal)
+                {
+                    panic!(
+                        "OMEGA-DELTA-0091: {relative} names Exo's `{kind}` \
+                         request. This crate is read-only and reaches eight \
+                         query variants; a ninth is a policy change, not a \
+                         convenience."
+                    );
+                }
+            }
+        }
+
+        // The positive half is read off the closed type and nowhere else. An
+        // earlier version of this check scanned the whole crate for the eight
+        // admitted kinds, which the crate's own `EXO_ADMITTED_READ_KINDS` table
+        // satisfies on its own — so a variant could stop sending a read and the
+        // check would still pass, reading the list rather than the code. Whole
+        // literals, again: `conversation_get_event` is a prefix of
+        // `conversation_get_events`, and a `contains` test cannot tell a variant
+        // that lost its kind from one that kept it.
+        let query = exo_log_source("crates/omega_exo_log/src/query.rs");
+        let body = function_body(&query, "wire_kind")
+            .expect("OMEGA-DELTA-0091: the query type no longer maps variants to wire kinds");
+        let mut sent: Vec<String> = string_literals(body);
+        sent.sort();
+        sent.dedup();
+        let mut admitted: Vec<String> = EXO_LOG_ADMITTED_KINDS
+            .iter()
+            .map(|kind| (*kind).to_owned())
+            .collect();
+        admitted.sort();
+        assert_eq!(
+            sent, admitted,
+            "OMEGA-DELTA-0091: the request kinds the query type can produce are \
+             no longer exactly the eight admitted reads. A kind that vanished is \
+             a read the workspace can no longer perform; a kind that appeared is \
+             a capability nobody granted."
+        );
+
+        // And the table beside it agrees, in the crate that publishes it.
+        let lib = exo_log_source("crates/omega_exo_log/src/omega_exo_log.rs");
+        let table = lib
+            .split_once("pub const EXO_ADMITTED_READ_KINDS")
+            .and_then(|(_, rest)| rest.split_once("\n];"))
+            .expect("OMEGA-DELTA-0091: the crate no longer publishes its admitted set")
+            .0;
+        let mut published = string_literals(table);
+        published.sort();
+        published.dedup();
+        assert_eq!(
+            published, admitted,
+            "OMEGA-DELTA-0091: the published admitted set and the registry \
+             disagree."
+        );
+    }
+
+    /// OMEGA-DELTA-0091. Exo stays on this machine, and the refusal is a
+    /// sentence.
+    ///
+    /// Two checks in one because they fail together. `exo serve` has no
+    /// authentication at all, so the address is the boundary — and `localhost`
+    /// is a *name*, which means the parse is not the end of it. The resolved
+    /// socket address is checked again before the connection opens, so a hosts
+    /// file that points `localhost` at a Tailnet address gets a refusal rather
+    /// than a connection.
+    #[test]
+    fn the_exo_log_client_reaches_exo_only_on_this_machine() {
+        let client = exo_log_source("crates/omega_exo_log/src/client.rs");
+
+        let open = function_body(&client, "open")
+            .expect("OMEGA-DELTA-0091: the client no longer has one construction path");
+        assert!(
+            open.contains("LoopbackEndpoint::parse(address)"),
+            "OMEGA-DELTA-0091: the client no longer parses *its own argument* \
+             through the type that refuses a non-loopback one. An earlier \
+             version of this check asked only that the call appear somewhere in \
+             the constructor, which a constructor that parsed a hardcoded \
+             loopback string and ignored `address` satisfies."
+        );
+        // `-> Self {` is a return type followed by a body brace, not a struct
+        // literal, and the builders that adjust a timeout return one.
+        let production = production_source(&client);
+        let built = production.match_indices("Self {").count()
+            - production.match_indices("-> Self {").count();
+        assert_eq!(
+            built, 1,
+            "OMEGA-DELTA-0091: the client is constructed in {built} places. One \
+             checked constructor is the whole argument for the type; a second \
+             is a way to hold an address nobody parsed."
+        );
+
+        let resolve = function_body(&client, "resolve").expect(
+            "OMEGA-DELTA-0091: the client no longer resolves before it connects. \
+             `localhost` is a name, and a name is not a guarantee.",
+        );
+        assert!(
+            resolve.contains("is_loopback"),
+            "OMEGA-DELTA-0091: the resolved address is no longer checked. A \
+             hosts file is enough to move `localhost` off this machine."
+        );
+
+        let post = function_body(&client, "post")
+            .expect("OMEGA-DELTA-0091: the client no longer has one send path");
+        let resolved_at = post
+            .find("self.resolve()")
+            .expect("OMEGA-DELTA-0091: the send path no longer resolves through the check");
+        let connected_at = post
+            .find("TcpStream::connect")
+            .expect("OMEGA-DELTA-0091: the send path no longer opens a connection");
+        assert!(
+            resolved_at < connected_at,
+            "OMEGA-DELTA-0091: the client connects before it checks where it is \
+             connecting."
+        );
+
+        for relative in EXO_LOG_SOURCE_PATHS {
+            let source = exo_log_source(relative);
+            for token in EXO_LOG_FALSE_AUTH_TOKENS {
+                assert!(
+                    !named_in_code(&source, token),
+                    "OMEGA-DELTA-0091: {relative} names `{token}` in code. Exo \
+                     accepts a bearer token and never checks it, so sending one \
+                     asserts a protection that does not exist."
+                );
+            }
+            for (what, token) in EXO_OFF_MACHINE_TOKENS {
+                assert!(
+                    !named_in_code(&source, token),
+                    "OMEGA-DELTA-0091: {relative} names {what} (`{token}`) in \
+                     code. Omega must never carry Exo's unauthenticated \
+                     endpoint off this machine."
+                );
+            }
+        }
+    }
+
+    /// OMEGA-DELTA-0091. What Exo says a turn cost is what Exo says.
+    ///
+    /// Exo never makes the model call through an attested path; its own cost
+    /// design document calls the numbers "agent-reported telemetry, not an
+    /// attested ledger". So the type is named for its provenance, the rendering
+    /// says it, and there is no conversion out of it — a `From` impl is exactly
+    /// how a harness number reaches a ledger without anybody deciding it should.
+    #[test]
+    fn exo_reported_usage_is_never_accounting_truth() {
+        let record = exo_log_source("crates/omega_exo_log/src/record.rs");
+        assert!(
+            record.contains(&format!("pub struct {EXO_LOG_USAGE_TYPE}")),
+            "OMEGA-DELTA-0091: Exo's usage record is no longer typed as \
+             `{EXO_LOG_USAGE_TYPE}`. A name that does not say `harness` is a \
+             number that reads as a measurement."
+        );
+        assert!(
+            record.contains(&format!("\"{EXO_LOG_USAGE_PROVENANCE}\"")),
+            "OMEGA-DELTA-0091: the usage record no longer carries its \
+             provenance string."
+        );
+        for relative in EXO_LOG_SOURCE_PATHS {
+            let source = exo_log_source(relative);
+            assert!(
+                !source.contains(&format!("impl From<{EXO_LOG_USAGE_TYPE}>")),
+                "OMEGA-DELTA-0091: {relative} converts {EXO_LOG_USAGE_TYPE} into \
+                 another type. Harness telemetry must not become an Omega usage, \
+                 cost, or credit value by a conversion nobody had to ask for."
+            );
+        }
+
+        let history = exo_log_source("crates/omega_exo_log/src/history.rs");
+        let render = function_body(&history, "to_text")
+            .expect("OMEGA-DELTA-0091: the history no longer renders");
+        assert!(
+            render.contains(&format!("{EXO_LOG_USAGE_TYPE}::PROVENANCE")),
+            "OMEGA-DELTA-0091: the rendering prints usage without its \
+             provenance, so a token count sits beside a message reading as a \
+             measurement Omega made."
+        );
+    }
+
+    /// OMEGA-DELTA-0091. A history missing its artifacts says so.
+    ///
+    /// The falsifier for this issue: Exo's event log names artifacts and never
+    /// contains them, so a history built without artifact reads keeps every
+    /// name and loses every body. The render must make that visible rather than
+    /// producing an empty tool result, which is indistinguishable from a tool
+    /// that returned nothing.
+    #[test]
+    fn an_exo_history_without_its_artifacts_says_what_is_missing() {
+        let history = exo_log_source("crates/omega_exo_log/src/history.rs");
+        for required in ["NotRead", "unread_artifact_rows", "unresolved_artifact_ids"] {
+            assert!(
+                history.contains(required),
+                "OMEGA-DELTA-0091: the history no longer declares `{required}`. \
+                 Without it an unread artifact renders as a tool result with no \
+                 body, which reads as a tool that returned nothing."
+            );
+        }
+        let resolve = function_body(&history, "resolve")
+            .expect("OMEGA-DELTA-0091: the history no longer resolves artifact references");
+        assert!(
+            resolve.contains("Self::NotRead"),
+            "OMEGA-DELTA-0091: an artifact that was not read no longer produces \
+             the variant that says so."
+        );
+        assert!(
+            history.contains("fn without_the_artifact_read_the_history_loses_its_tool_results"),
+            "OMEGA-DELTA-0091: the falsifier — remove the artifact read, and the \
+             tool results must go with it — is no longer run as a test."
         );
     }
 }

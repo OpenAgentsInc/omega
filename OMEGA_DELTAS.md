@@ -3205,3 +3205,116 @@ than it sounds, because the harness omega#81's acceptance sentence names —
   `the_episode_reset_records_that_a_fork_does_not_carry_snapshots` in
   `crates/omega_deltas`; plus the 42 unit tests in
   `crates/omega_exo_episode/src/`.
+
+### OMEGA-DELTA-0091 — Omega reads Exo's durable log, and can name nothing else
+
+- **Upstream Zed:** no Exo, no exoharness, no external agent whose durable
+  record Zed reads. There is no upstream behaviour to revert to here; the
+  divergence is that Omega talks to a second agent runtime at all, and this
+  entry records the shape of that conversation rather than a changed default.
+- **Omega before this change:** Omega attached to Exo over ACP
+  (`OMEGA-DELTA-0042`, omega#87) and saw the live turn — text, tool calls, tool
+  results as ACP framed them, one completion record. Beside that stream sat
+  Exo's actual record, a durable replayable event log with versioned artifacts
+  and sandbox snapshots, and Omega read none of it. On 2026-07-26 a
+  `read_subagent_transcript` tool was built here from scratch
+  (`OMEGA-DELTA-0060`) because a parent thread could see only a subagent's final
+  message. That tool is right for Omega's own native subagents. For an
+  Exo-backed thread it was a second, weaker record beside a complete one, on a
+  socket Omega already talks to.
+- **Omega now:** `crates/omega_exo_log` is a read-only client for `exo serve`.
+  An Exo thread's events can be read after the turn ends, an artifact an event
+  references resolves, and a non-loopback endpoint is refused with a reason.
+- **The wrong call cannot be expressed, rather than being refused.** `exo serve`
+  answers **52** request variants — counted off `Request::kind` at the pin
+  `omega_exo_lane::EXO_PIN`, not quoted; Omega's own `omega_exo_lane::endpoint`
+  prose says 53 and is one out. `ExoQuery` is closed at eight of them:
+  `get_agent`, `get_conversation`, `conversation_get_events`,
+  `conversation_get_event`, and the four artifact list/read variants. There is
+  no `from_kind(&str)`, no public wire-string constructor, and every reader
+  takes an `ExoQuery`. A caller that wants `conversation_fork` has to add a
+  variant to a file whose diff a reviewer reads. The check is a partition
+  rather than a denylist, and it reads the two halves in different places for a
+  reason found by falsifying it: the negative half scans every source file in
+  the crate for the forty-four, and the positive half reads *only* the closed
+  type's variant-to-kind map. An earlier version scanned the whole crate for the
+  eight as well, which the crate's own published table satisfies on its own — so
+  a variant could stop sending a read and the check would still pass, reading
+  the list instead of the code. Whole string literals, not substrings: Exo's
+  event tag `conversation_forked` contains its request kind `conversation_fork`,
+  and `conversation_get_event` is a prefix of `conversation_get_events`.
+- **Ten of the forty-four are reads, and they are refused anyway.** Exo's
+  protocol has eighteen query variants; this client admits eight. The other ten
+  — `list_agents`, `list_conversations`, `get_sandbox_process_events`,
+  `wait_sandbox_process`, and the six binding list-and-get variants — read, and
+  are refused. The issue scoped this client to *a conversation's own record*,
+  and a list of every agent on the host is not that. A denylist of writes would
+  have admitted all ten without anyone deciding to. The count is not a guess:
+  `omega_exo_episode::family` (`OMEGA-DELTA-0090`, omega#103) transcribed the
+  same 52 variants independently for a different purpose, and the two
+  transcriptions agree exactly — see the note below on where the shared list
+  should eventually live.
+- **Loopback is checked twice, because `localhost` is a name.** The address is
+  parsed by `LoopbackEndpoint`, so a client value cannot hold a remote host.
+  Then the *resolved* socket address is checked again before the connection
+  opens: a hosts file or resolver that points `localhost` somewhere else is
+  enough to move it, and the parse cannot see that. Exo's CLI refuses a
+  non-loopback `--bind`; this is the other half of the same law, on the
+  destination.
+- **No bearer token, ever.** Exo's HTTP client has `with_bearer_token` and Exo's
+  server never reads an `Authorization` header — its own documentation says so.
+  Sending one would leave a capture in which the endpoint looks protected. The
+  check refuses the vocabulary in code.
+- **The artifact read is what carries tool results, and its absence is
+  visible.** Exo's event log names artifacts — `artifact_written` carries an id,
+  a path, and a version — and never contains their bytes; Exo's own scheduler
+  writes a run's whole stdout into an artifact and leaves a preview behind. So a
+  history built from events alone keeps every name and loses every body, and
+  `ExoBody::NotRead` says which artifact is missing rather than rendering a tool
+  result with no body, which reads as a tool that returned nothing. The
+  falsifier is run as a test: the same events rendered with and without the
+  artifact set produce the same number of rows and different content.
+- **Exo-reported usage is typed as unattested.** Exo never makes the model call
+  through an attested path and its own cost design document calls the numbers
+  "agent-reported telemetry, not an attested ledger". The type is
+  `HarnessReportedUsage`, every rendering prints its provenance, and there is
+  deliberately no `From` impl out of it — a conversion is how a harness number
+  reaches a ledger without anybody deciding it should.
+- **An event this build does not know is kept, not dropped.** Exo declares
+  itself unstable and writes "do not write fallback code" into its own
+  `AGENTS.md`, so it will add variants. An unknown variant becomes a row naming
+  its tag. A decoder that failed the page would lose the forty rows around it,
+  which is the opposite of reading the durable record.
+- **Read-only, and it grants nothing else.** No write, no fork, no snapshot, no
+  sandbox, no secret. Forking and snapshotting are omega#103 and are scoped
+  there. Secrets stay Exo-owned; the env-var injection paths are Exo's to run.
+- **Enforced by:** `the_exo_log_client_can_name_only_the_eight_read_variants`,
+  `the_exo_log_client_reaches_exo_only_on_this_machine`,
+  `exo_reported_usage_is_never_accounting_truth`, and
+  `an_exo_history_without_its_artifacts_says_what_is_missing` in
+  `crates/omega_deltas/`; plus the suite in `crates/omega_exo_log/`, which
+  includes a real loopback round trip over a real socket with Exo's documented
+  HTTP envelope.
+- **What this does not cover.** No pixel. This crate is a leaf with no GPUI, for
+  the same reason `omega_exo_lane` has none: a law that needs a window to check
+  is a law nobody checks. It produces rows and a plain-text rendering, and the
+  Exo workspace in `crates/agent_ui/src/omega_exo_connection.rs` is where those
+  rows become a surface — one call this entry does not make. Nothing here has
+  been run against a live `exo serve`: the wire format is taken from three
+  witnesses in the pinned tree (`crates/exoharness/src/protocol.rs`,
+  `typescript/harness/runner.ts`, and `docs/exoharness-http.md`) and exercised
+  against a loopback server this repository writes, which is agreement with the
+  source and not agreement with a running Exo. The transport is blocking
+  `std::net`, so a caller runs it off the main thread; nothing here enforces
+  that. And paging is the caller's business: the client returns one page and its
+  cursor, and never decides how much of somebody's history to hold.
+- **The 52 request types are now written down twice, and should not stay that
+  way.** `omega_exo_episode::family::EXO_REQUEST_FAMILIES` (`OMEGA-DELTA-0090`)
+  and the two lists behind this entry are independent transcriptions of the same
+  `Request::kind` at the same pin. They agree today, which is the argument for
+  trusting both of them and also the argument for keeping one: a 53rd variant
+  upstream has to be noticed twice. The *decisions* stay separate — the episode
+  crate's `Query` family is eighteen variants and this client admits eight, so
+  merging the decisions would widen this one — but the enumeration and the pin
+  it was read at belong in a single place, and neither lane should move it while
+  the other is in flight.

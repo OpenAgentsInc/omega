@@ -152,6 +152,7 @@ members = [
     "crates/omega_effectd",
     "crates/omega_exo_episode",
     "crates/omega_exo_lane",
+    "crates/omega_exo_log",
     "crates/omega_workdir",
     "crates/omega_zero_base",
     "crates/full_auto_ui",
@@ -431,6 +432,7 @@ omega_harness = { path = "crates/omega_harness" }
 omega_effectd = { path = "crates/omega_effectd" }
 omega_exo_episode = { path = "crates/omega_exo_episode" }
 omega_exo_lane = { path = "crates/omega_exo_lane" }
+omega_exo_log = { path = "crates/omega_exo_log" }
 omega_workdir = { path = "crates/omega_workdir" }
 omega_zero_base = { path = "crates/omega_zero_base" }
 full_auto_ui = { path = "crates/full_auto_ui" }

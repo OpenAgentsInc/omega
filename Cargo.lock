@@ -12017,6 +12017,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "omega_exo_log"
+version = "0.1.0"
+dependencies = [
+ "omega_exo_lane",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "omega_front_door"
 version = "0.1.0"
 
