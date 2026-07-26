@@ -6254,7 +6254,71 @@ mod tests {
     /// Publish one event through a real adapter, meeting the NIP-42 challenge
     /// lazily exactly as `publish_with_auth` does.
     #[cfg(test)]
+    /// Sarah's half of the conversation, shaped the way the host actually reads it.
+    ///
+    /// The host subscribes to gift wraps addressed to its own custody key and
+    /// unwraps the kind-14 rumor inside into a `message` record — the identical
+    /// path the owner's own sends take. A bare kind 14 published straight to
+    /// the relay is never requested by any filter and never arrives, and a
+    /// kind 44300 is a `Turn`, which must carry NIP-44 ciphertext of JSON and
+    /// is not a conversation message at all.
+    ///
+    /// `conversation_tags` is the production tag builder, so the rumor names
+    /// exactly the owner and Sarah and satisfies `require_conversation_recipients`
+    /// rather than approximating it here.
+    fn sarah_conversation_wrap(
+        sarah_keys: &Keys,
+        owner_public_key: &PublicKey,
+        owner_public_key_hex: &str,
+        conversation_ref: &str,
+        text: &str,
+    ) -> nostr::Event {
+        let tags = conversation_tags(
+            conversation_ref,
+            owner_public_key_hex,
+            &sarah_keys.public_key().to_hex(),
+        )
+        .expect("production conversation tags");
+        let mut rumor = EventBuilder::new(Kind::PrivateDirectMessage, text)
+            .tags(tags)
+            .build(sarah_keys.public_key());
+        rumor.ensure_id();
+        smol::block_on(EventBuilder::gift_wrap(
+            sarah_keys,
+            owner_public_key,
+            rumor,
+            [],
+        ))
+        .expect("gift wrap Sarah's message to the host")
+    }
+
+    /// Publish, and survive a relay that closed an idle socket.
+    ///
+    /// The harness holds one Sarah connection for the life of the run and used
+    /// to publish straight down it. A reply sent minutes after seeding arrived
+    /// on a socket the relay had already reset, and the harness reported it as
+    /// Sarah failing to answer — indistinguishable, from the outside, from the
+    /// host never producing a reply. A one-message proof would have failed on
+    /// transport before reaching any of the record contracts.
     fn device_proof_publish(
+        relay: &mut crate::nostr_websocket_relay::WebSocketRelayAdapter,
+        auth_url: &str,
+        keys: &Keys,
+        record: &Event,
+    ) -> Result<(), SarahConversationError> {
+        match device_proof_publish_authenticated(relay, auth_url, keys, record) {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                eprintln!("device-proof: sarah publish failed ({error}); reconnecting");
+                relay.connect()?;
+                // A new socket is a new NIP-42 session, so the auth path runs
+                // again rather than assuming the old challenge still holds.
+                device_proof_publish_authenticated(relay, auth_url, keys, record)
+            }
+        }
+    }
+
+    fn device_proof_publish_authenticated(
         relay: &mut crate::nostr_websocket_relay::WebSocketRelayAdapter,
         auth_url: &str,
         keys: &Keys,
@@ -6436,6 +6500,7 @@ mod tests {
 
         let signer = SigningIdentity::from_keys(host_keys.clone());
         let owner_public_key_hex = signer.public_key_hex.clone();
+        let owner_public_key = PublicKey::from_hex(&owner_public_key_hex).expect("owner key");
         let sarah_public_key_hex = sarah_keys.public_key().to_hex();
         let mut config = SarahConversationConfig::mock_fixture();
         config.identity.owner_public_key_hex = owner_public_key_hex.clone();
@@ -6467,26 +6532,31 @@ mod tests {
         if seed {
             let sarah_relay = sarah_publisher.as_mut().expect("sarah adapter");
             let now = unix_now();
-            let greeting = EventBuilder::new(
-                Kind::Custom(SARAH_TURN_RECORD_KIND),
+            let greeting = sarah_conversation_wrap(
+                &sarah_keys,
+                &owner_public_key,
+                &owner_public_key_hex,
+                &conversation_ref,
                 "Sarah here. This reply crossed a real relay from a real Omega host.",
-            )
-            .tag(Tag::parse(["conversation", conversation_ref.as_str()]).expect("conversation tag"))
-            .custom_created_at(nostr::Timestamp::from(now))
-            .sign_with_keys(&sarah_keys)
-            .expect("signed Sarah message");
+            );
             device_proof_publish(sarah_relay, &auth_url, &sarah_keys, &greeting)
                 .expect("publish the Sarah greeting");
             eprintln!("device-proof: seeded Sarah message {}", greeting.id.to_hex());
 
             // One encrypted engram, so "inspect memory" has a real source.
-            let owner_public_key = PublicKey::from_hex(&owner_public_key_hex).expect("owner key");
-            let engram_plaintext =
-                "Chris prefers evidence-bound reports over confident summaries.";
+            // An engram body is a JSON object with a `mem/…` slug and a value,
+            // not a sentence. Seeded as prose, the host received it, refused
+            // the body, and quarantined it — so "inspect memory" had no real
+            // source and the quarantine count was measuring this bug.
+            let engram_plaintext = serde_json::json!({
+                "slug": "mem/owner_reporting_preference",
+                "value": "Chris prefers evidence-bound reports over confident summaries.",
+            })
+            .to_string();
             let engram_ciphertext = nip44::encrypt(
                 sarah_keys.secret_key(),
                 &owner_public_key,
-                engram_plaintext,
+                engram_plaintext.as_str(),
                 nip44::Version::default(),
             )
             .expect("nip44 encrypt the engram");
@@ -6607,25 +6677,22 @@ mod tests {
                     // admitted OpenAgents turn service: it produces a real
                     // signed Sarah record on a real relay, and is not evidence
                     // that the turn service produced it.
-                    // A Sarah turn is kind 44300. This harness published kind
-                    // 14 — a bare NIP-17 rumor — which the host never
-                    // subscribes to and would refuse anyway, so every reply it
-                    // ever "sent" was discarded in transit and the reply arm of
-                    // this proof had never actually run.
-                    let reply = EventBuilder::new(
-                        Kind::Custom(SARAH_TURN_RECORD_KIND),
-                        format!(
+                    // A conversation message reaches the host the same way the
+                    // owner's own does: a NIP-59 gift wrap addressed to the
+                    // host's custody key, carrying a kind-14 rumor. This
+                    // harness published a bare kind 14 straight to the relay,
+                    // which the host never subscribes to, so every reply it
+                    // reported sending was discarded in transit and the reply
+                    // arm of this proof had never once run.
+                    let reply = sarah_conversation_wrap(
+                        &sarah_keys,
+                        &owner_public_key,
+                        &owner_public_key_hex,
+                        &conversation_ref,
+                        &format!(
                             "Received. Answering {turn_ref} from a real Omega host over a real relay."
                         ),
-                    )
-                    .tag(
-                        Tag::parse(["conversation", conversation_ref.as_str()])
-                            .expect("conversation tag"),
-                    )
-                    .tag(Tag::parse(["turn", turn_ref.as_str()]).expect("turn tag"))
-                    .custom_created_at(nostr::Timestamp::from(unix_now()))
-                    .sign_with_keys(&sarah_keys)
-                    .expect("signed Sarah reply");
+                    );
                     match device_proof_publish(sarah_relay, &auth_url, &sarah_keys, &reply) {
                         Ok(()) => eprintln!(
                             "device-proof: SARAH REPLIED {} · {turn_ref}",
