@@ -12874,23 +12874,83 @@ impl ThreadView {
             .into_any_element()
     }
 
-    /// The one line zero base says when there is genuinely no provider.
+    /// The one line zero base says when something is genuinely missing.
     ///
-    /// omega#99. `None` whenever a provider is configured, which is the point:
-    /// auto-detection means the surface says nothing when there is nothing to
-    /// decide. When there is, this is a line in the bar a person is already
-    /// looking at rather than a card in the middle of the window — the card is
-    /// a decision point, and this is a fact.
+    /// omega#99. `None` whenever there is nothing to say, which is the point:
+    /// the surface detects rather than asks, so it stays quiet when there is
+    /// nothing to decide. When there is, this is a line in the bar a person is
+    /// already looking at rather than a card in the middle of the window — the
+    /// card is a decision point, and each of these is a fact.
+    ///
+    /// omega#100 replaced what this used to say. The line read "No AI provider
+    /// configured — leave zero base to add one", and the zero-base baselines
+    /// caught it rendered directly beneath a turn that had just completed
+    /// through `exo/basic`. It was true of *model providers* and false of what
+    /// the person had just watched happen, and it offered a way out of a mode
+    /// that `OMEGA-DELTA-0052` has since removed. So the question changed: not
+    /// "is a model provider configured" but "is there anything here that can
+    /// run a turn", answered by `omega_agent_detect` reading `PATH` as well as
+    /// by the provider registry.
+    ///
+    /// The two facts are ordered, and only one is ever shown. A thread with no
+    /// executor cannot use a folder, so telling a person about the folder first
+    /// would send them to fix the second problem.
     fn render_zero_base_provider_notice(&self, cx: &Context<Self>) -> Option<AnyElement> {
-        if ai_onboarding::has_configured_ai_provider(cx) {
-            return None;
+        // Nothing on the machine can run a turn. Not "nothing is configured":
+        // an installed agent needs no configuration, and the settings-keyed
+        // predicate the onboarding grid used reads a written setting rather
+        // than a binary that exists.
+        if omega_agent_detect::detected().is_empty()
+            && !ai_onboarding::has_configured_ai_provider(cx)
+        {
+            return Some(
+                Label::new("No coding agent found on PATH, and no model provider configured")
+                    .size(LabelSize::XSmall)
+                    .color(Color::Warning)
+                    .into_any_element(),
+            );
         }
-        Some(
-            Label::new("No AI provider configured — leave zero base to add one")
-                .size(LabelSize::XSmall)
-                .color(Color::Warning)
-                .into_any_element(),
-        )
+
+        // OMEGA-DELTA-0054. A thread with no worktree holds file tools that
+        // have nothing to operate on. The owner met this as several searches
+        // that all returned nothing and an agent reporting that his workspace
+        // appeared to be empty — which was true of the workspace and false of
+        // his code.
+        let has_project = self
+            .project
+            .upgrade()
+            .is_some_and(|project| project.read(cx).visible_worktrees(cx).next().is_some());
+        if !has_project {
+            return Some(
+                h_flex()
+                    .gap_1()
+                    .child(
+                        Label::new(
+                            "No folder open — file search and terminal have nothing to read",
+                        )
+                        .size(LabelSize::XSmall)
+                        .color(Color::Warning),
+                    )
+                    .child(
+                        Button::new("omega-zero-base-open-folder", "Open Folder")
+                            .label_size(LabelSize::XSmall)
+                            .tooltip(Tooltip::text(
+                                "Choose the folder this thread can search, read and run in",
+                            ))
+                            .on_click(|_, window, cx| {
+                                window.dispatch_action(
+                                    Box::new(workspace::Open {
+                                        create_new_window: Some(false),
+                                    }),
+                                    cx,
+                                );
+                            }),
+                    )
+                    .into_any_element(),
+            );
+        }
+
+        None
     }
 
     /// The executor line, rendered from the record.

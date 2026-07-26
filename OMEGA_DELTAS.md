@@ -2763,3 +2763,64 @@ than it sounds, because the harness omega#81's acceptance sentence names —
   checked by a compiler: the seal is reached only in a process that started in
   zero base and answered the identity gate, so `cargo check`, `cargo test` and
   clippy say nothing about whether the window looks right. Only opening it does.
+
+### OMEGA-DELTA-0054 — Zero base opens the directory it was started in, or says it opened none
+
+- **Upstream Zed:** a workspace with no paths has no worktrees, and that is
+  correct for an editor. A person opens a folder when they want one.
+- **Omega, before this:** zero base opened no project, and
+  `crates/zed/src/zed.rs` said so in its own comment — "no project is opened, so
+  there is no buffer for them to show". The missing buffer was not the problem.
+  The workspace had no worktrees, so `grep`, `find_path`, `list_directory`,
+  `read_file` and `terminal` all had nothing to operate on. The owner ran
+  several searches, every one returned no matches, and the agent concluded that
+  the workspace appeared to be empty. That is literally correct about the
+  workspace and completely useless about his code. His words: *"grep is finding
+  no files why???????? what the fuck is the working dir"*.
+- **Omega now:** in zero base, a working directory somebody chose is opened as
+  the project. `crates/omega_workdir/` decides what "somebody chose" means, and
+  when the answer is no the composer says so in one line with a control that
+  opens a folder picker. There is no setup page: nothing is asked before the
+  thread opens.
+- **Why the test is plausibility and not project-ness.** Requiring a marker — a
+  `.git`, a `Cargo.toml` — would refuse a plain folder of files, which is a
+  legitimate thing to point an agent at and the case a person is most likely in.
+  So the rule runs the other way: reject the directories a launcher hands over
+  and accept the rest. What is rejected is the filesystem root (which is what
+  Finder and the Dock give), the home directory itself (opening it means
+  scanning everything a person owns to answer one question), a relative path, a
+  path that is not a directory, and the bundle and system prefixes in
+  `LAUNCHER_PREFIXES`. A directory under `$HOME` is accepted, because almost
+  every real checkout is one.
+- **Only in zero base.** `omega --full-editor` opens an empty workspace exactly
+  as it always has. The editor is a surface a person then chooses a folder in,
+  and choosing for them would be a change nobody asked for.
+- **The composer line changed with it.** It used to read "No AI provider
+  configured — leave zero base to add one", and the zero-base baselines caught
+  it rendered directly beneath a turn that had just completed through
+  `exo/basic`. It was true of *model providers* and false of what the person had
+  just watched happen, and it offered a way out of a mode `OMEGA-DELTA-0052` has
+  since removed. The line now asks whether anything on the machine can run a
+  turn — `omega_agent_detect` reading `PATH` as well as the provider registry —
+  and, when something can, whether the thread has a folder. Only one is ever
+  shown, executor first, because a thread with no executor cannot use a folder.
+- **The Open Folder control is admitted, deliberately.** `workspace::Open` is in
+  the admitted set, because a control that is drawn and refused at dispatch is
+  the same "looks one way, is another" failure as the hidden editor, pointing
+  the other way. `workspace::OpenFiles` and the rest of that namespace stay
+  refused: choosing what the thread can see is one thing, and opening the
+  editor's file surfaces inside a mode that does not render them is another.
+- **Why no test saw this.** The visual baselines photograph a workspace the
+  runner builds itself, and the runner hands it a lane path. The scenes had a
+  project while the shipped launch path did not. That is the same class of gap
+  `OMEGA-DELTA-0049` already records about `install_on_workspace` — a proof that
+  reaches a surface without reaching the path that builds it — and it has now
+  cost something twice.
+- **Enforced by:** `zero_base_opens_the_directory_it_was_started_in` in
+  `crates/omega_deltas/`, and the seven unit tests in `crates/omega_workdir/`.
+- **What this does not cover.** It does not decide which executor the turn runs
+  on, which is `OMEGA-DELTA-0049`'s and the routing delta's business. It does
+  not persist the choice — a folder chosen with the control lasts as long as the
+  workspace does, and restoring a previous session already restores its paths
+  ahead of this. And it cannot be checked by a compiler: the path runs only in a
+  process that started in zero base with no restorable workspace.

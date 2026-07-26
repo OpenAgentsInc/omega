@@ -83,6 +83,7 @@ omega_effectd.workspace = true
 omega_exo_lane.workspace = true
 omega_front_door.workspace = true
 omega_harness.workspace = true
+omega_agent_detect.workspace = true
 omega_zero_base.workspace = true
 omega_identity.workspace = true
 ordered-float.workspace = true

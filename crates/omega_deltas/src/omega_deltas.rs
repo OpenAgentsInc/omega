@@ -81,6 +81,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0051",
     "OMEGA-DELTA-0052",
     "OMEGA-DELTA-0053",
+    "OMEGA-DELTA-0054",
 ];
 
 /// OMEGA-DELTA-0036. The uninstall script embedded in the shipped `cli`.
@@ -2017,6 +2018,12 @@ pub const WORKSPACE_INITIALIZATION_PATH: &str = "crates/zed/src/zed.rs";
 /// OMEGA-DELTA-0053. The workspace render, which draws no editor pane, no
 /// title bar and no status bar once zero base is sealed.
 pub const WORKSPACE_RENDER_PATH: &str = "crates/workspace/src/workspace.rs";
+
+/// OMEGA-DELTA-0054. The plausibility test for a working directory.
+pub const WORKDIR_PATH: &str = "crates/omega_workdir/src/omega_workdir.rs";
+
+/// OMEGA-DELTA-0054, 0052. The argument parser and the startup open path.
+pub const STARTUP_OPEN_PATH: &str = "crates/zed/src/main.rs";
 
 /// OMEGA-DELTA-0048. The palette filter the restriction extends.
 pub const COMMAND_PALETTE_FILTER_PATH: &str =
@@ -7763,6 +7770,158 @@ mod tests {
              workspace renders no centre pane, so a fresh profile would have \
              nowhere to answer the gate `OMEGA-DELTA-0040` puts in front of it.",
             panels_path.display()
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // OMEGA-DELTA-0054 — Zero base opens the directory it was started in
+    // ---------------------------------------------------------------------
+
+    /// OMEGA-DELTA-0054. A thread that holds file tools has something to point
+    /// them at, or says so in one line.
+    ///
+    /// Zero base opened no project. `crates/zed/src/zed.rs` said so in its own
+    /// comment — "no project is opened, so there is no buffer for them to show"
+    /// — and the consequence was not a missing buffer. The workspace had no
+    /// worktrees, so `grep`, `find_path`, `list_directory`, `read_file` and
+    /// `terminal` had nothing to operate on. Several searches returned nothing
+    /// and the agent reported that the workspace appeared to be empty, which was
+    /// true of the workspace and false of the owner's code.
+    ///
+    /// Why no test saw it: the visual baselines photograph a workspace the
+    /// runner builds itself, and the runner hands it a lane path. The scenes had
+    /// a project while the shipped launch path did not. That is the same class
+    /// of gap `OMEGA-DELTA-0049` already records about `install_on_workspace`,
+    /// and it has now cost something twice.
+    #[test]
+    fn zero_base_opens_the_directory_it_was_started_in() {
+        let workdir_path = repository_path(WORKDIR_PATH);
+        let workdir = std::fs::read_to_string(&workdir_path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", workdir_path.display()));
+        assert!(
+            workdir.contains("pub fn plausible_project_root(")
+                && workdir.contains("home: Option<&Path>"),
+            "OMEGA-DELTA-0054: {} no longer offers the plausibility test, or no \
+             longer takes the home directory as a parameter. Reading the ambient \
+             process state would make the rule testable only on a machine that \
+             happens to be in the right state, and startup is the one path no \
+             test in this repository reaches.",
+            workdir_path.display()
+        );
+        // A marker requirement would refuse a plain folder of files, which is a
+        // legitimate thing to point an agent at and the case a person is most
+        // likely in. The rule rejects what a launcher hands over and accepts
+        // the rest.
+        let rule = function_body(&workdir, "plausible_project_root").unwrap_or_else(|| {
+            panic!(
+                "OMEGA-DELTA-0054: cannot find the rule in {}",
+                workdir_path.display()
+            )
+        });
+        assert!(
+            rule.len() > 200,
+            "OMEGA-DELTA-0054: the body read for the rule is too short to be the \
+             real one, so the check below would pass without reading it"
+        );
+        for marker in ["\".git\"", "Cargo.toml", "package.json"] {
+            assert!(
+                !rule.contains(marker),
+                "OMEGA-DELTA-0054: the rule in {} requires {marker} of a project \
+                 root. A plain folder of files is a legitimate thing to open, and \
+                 a rule that refused it would refuse the ordinary case.",
+                workdir_path.display()
+            );
+        }
+
+        let startup_path = repository_path(STARTUP_OPEN_PATH);
+        let startup = std::fs::read_to_string(&startup_path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", startup_path.display()));
+        assert!(
+            startup.contains("if open_zero_base_project(&app_state, cx).await {"),
+            "OMEGA-DELTA-0054: {} no longer tries to open a project before \
+             falling back to an empty workspace, so zero base opens with no \
+             worktrees and every file tool the thread holds reads nothing.",
+            startup_path.display()
+        );
+        assert!(
+            startup.contains("if !omega_zero_base::is_active() {\n        return false;\n    }"),
+            "OMEGA-DELTA-0054: {} opens the working directory outside zero base \
+             too. `omega --full-editor` opening whatever directory a shell \
+             happened to be in is a change nobody asked for.",
+            startup_path.display()
+        );
+
+        // The empty case is legible. A person must never again be told that
+        // their workspace appears to be empty as if it were a fact about their
+        // code.
+        let thread_path = repository_path(THREAD_VIEW_PATH);
+        let thread = std::fs::read_to_string(&thread_path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", thread_path.display()));
+        let notice =
+            function_body(&thread, "render_zero_base_provider_notice").unwrap_or_else(|| {
+                panic!(
+                    "OMEGA-DELTA-0054: cannot find the composer notice in {}",
+                    thread_path.display()
+                )
+            });
+        assert!(
+            notice.len() > 200,
+            "OMEGA-DELTA-0054: the body read for the composer notice is too \
+             short to be the real one, so this check would pass without reading \
+             it"
+        );
+        assert!(
+            notice.contains("No folder open") && notice.contains("visible_worktrees"),
+            "OMEGA-DELTA-0054: the composer notice in {} no longer says when \
+             there is no folder, or no longer asks the project. A thread that \
+             silently searches nothing is how \"the workspace appears to be \
+             empty\" gets said to somebody about their own code.",
+            thread_path.display()
+        );
+
+        // The line the baselines caught. It said "No AI provider configured"
+        // directly beneath a turn that had just completed through `exo/basic`,
+        // and it offered a way out of the mode that `OMEGA-DELTA-0052` removed.
+        assert!(
+            !thread.contains("No AI provider configured"),
+            "OMEGA-DELTA-0054: {} still says \"No AI provider configured\". That \
+             was true of model providers and false of the turn the person had \
+             just watched run, and detection now answers the question the line \
+             was asking badly.",
+            thread_path.display()
+        );
+        assert!(
+            notice.contains("omega_agent_detect::detected()"),
+            "OMEGA-DELTA-0054: the composer notice in {} no longer asks what is \
+             installed. The settings-keyed predicate it replaced reads a written \
+             setting, not a binary that exists, and a fresh profile has no \
+             settings however many agents are on the machine.",
+            thread_path.display()
+        );
+
+        // The control the notice draws is admitted, because a drawn control the
+        // gate refuses is the "Close Left Dock" defect in the other direction.
+        let mode_path = repository_path(ZERO_BASE_MODE_PATH);
+        let mode = std::fs::read_to_string(&mode_path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", mode_path.display()));
+        let admitted = mode
+            .split_once("pub const ADMITTED_ACTIONS: &[&str] = &[")
+            .map(|(_, rest)| rest)
+            .unwrap_or_default();
+        let admitted = admitted.split_once("];").map_or(admitted, |(list, _)| list);
+        assert!(
+            admitted.contains("\"workspace::Open\","),
+            "OMEGA-DELTA-0054: {} does not admit `workspace::Open`, so the \
+             composer's Open Folder control is drawn and refused at dispatch — \
+             the same failure as a status-bar button that does nothing.",
+            mode_path.display()
+        );
+        assert!(
+            !admitted.contains("\"workspace::OpenFiles\""),
+            "OMEGA-DELTA-0054: {} admits `workspace::OpenFiles`. Choosing what \
+             the thread can see is one control; opening the editor's file \
+             surfaces inside a mode that does not render them is another.",
+            mode_path.display()
         );
     }
 

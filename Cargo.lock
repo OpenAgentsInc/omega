@@ -545,6 +545,7 @@ dependencies = [
  "multi_buffer",
  "node_runtime",
  "notifications",
+ "omega_agent_detect",
  "omega_effectd",
  "omega_exo_lane",
  "omega_front_door",
@@ -12043,6 +12044,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "omega_workdir"
+version = "0.1.0"
+dependencies = [
+ "tempfile",
+]
+
+[[package]]
 name = "omega_zero_base"
 version = "0.1.0"
 
@@ -22431,6 +22439,7 @@ dependencies = [
  "notifications",
  "omega_effectd",
  "omega_front_door",
+ "omega_workdir",
  "omega_zero_base",
  "onboarding",
  "outline",

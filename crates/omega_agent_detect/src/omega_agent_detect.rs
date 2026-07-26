@@ -112,6 +112,19 @@ pub fn detect_from_env() -> Vec<DetectedAgent> {
     }
 }
 
+/// [`detect_from_env`], computed once for the life of the process.
+///
+/// omega#100. A surface asks this on every draw, and the answer costs one
+/// `stat` per candidate binary per `PATH` entry. `PATH` does not change inside
+/// a process, so a per-frame filesystem walk would be a syscall storm answering
+/// the same question. The cost of the cache is that installing an agent while
+/// Omega is running is not noticed until it restarts, which is the same
+/// staleness a `PATH` read has anyway.
+pub fn detected() -> &'static [DetectedAgent] {
+    static DETECTED: std::sync::OnceLock<Vec<DetectedAgent>> = std::sync::OnceLock::new();
+    DETECTED.get_or_init(detect_from_env)
+}
+
 /// The agent the first message should route to, if it is here.
 ///
 /// Deliberately not "the first thing found": omega#100 asks for Codex

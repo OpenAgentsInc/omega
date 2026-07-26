@@ -1578,6 +1578,19 @@ pub(crate) async fn restore_or_create_workspace(
             .await?;
         }
     } else {
+        // OMEGA-DELTA-0054, omega#100. Zero base opens the directory it was
+        // started in, when that is a directory somebody chose.
+        //
+        // Without this the workspace has no worktrees, so every file tool the
+        // thread holds — `grep`, `find_path`, `list_directory`, `read_file`,
+        // `terminal` — has nothing to operate on. The owner ran several
+        // searches, every one returned no matches, and the agent reported that
+        // the workspace appeared to be empty. Routing the first message to a
+        // coding agent is worth nothing if the agent opens on nothing.
+        if open_zero_base_project(&app_state, cx).await {
+            return Ok(());
+        }
+
         cx.update(|cx| {
             workspace::open_new(
                 Default::default(),
@@ -1600,6 +1613,57 @@ pub(crate) async fn restore_or_create_workspace(
     }
 
     Ok(())
+}
+
+/// Open the working directory as zero base's project, if it is one.
+///
+/// `OMEGA-DELTA-0054`, omega#100. Returns whether a workspace was opened, so
+/// the caller falls through to its ordinary empty workspace when the answer is
+/// no. It never guesses: an implausible working directory opens no project and
+/// the composer says so in one line, because putting an agent's file tools in a
+/// directory nobody named is worse than having none.
+///
+/// Only in zero base. With `--full-editor` a bare `omega` opens an empty
+/// workspace exactly as it always has, because the editor is a surface a person
+/// then chooses a folder in, and choosing for them would be the change nobody
+/// asked for.
+async fn open_zero_base_project(app_state: &Arc<AppState>, cx: &mut AsyncApp) -> bool {
+    if !omega_zero_base::is_active() {
+        return false;
+    }
+    let root = match omega_workdir::from_env() {
+        Ok(root) => root,
+        Err(reason) => {
+            log::info!(
+                "OMEGA-DELTA-0054: no project opened; the working directory is \
+                 not one somebody chose ({reason:?})"
+            );
+            return false;
+        }
+    };
+    log::info!(
+        "OMEGA-DELTA-0054: opening {} as zero base's project",
+        root.display()
+    );
+    let opening = cx.update(|cx| {
+        workspace::open_paths(
+            &[root.clone()],
+            app_state.clone(),
+            workspace::OpenOptions::default(),
+            cx,
+        )
+    });
+    match opening.await {
+        Ok(_) => true,
+        Err(error) => {
+            log::warn!(
+                "OMEGA-DELTA-0054: {} could not be opened ({error:#}); zero base \
+                 opens with no project",
+                root.display()
+            );
+            false
+        }
+    }
 }
 
 async fn restorable_workspaces(

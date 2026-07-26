@@ -151,6 +151,21 @@ pub const ADMITTED_ACTIONS: &[&str] = &[
     "omega::ResetUiFontSize",
     "omega::ToggleFullScreen",
     "onboarding::Finish",
+    // OMEGA-DELTA-0054, omega#100. The one control that gives the thread a
+    // folder to work in.
+    //
+    // Zero base opens the directory it was started in, and from Finder or the
+    // Dock there is no such directory. A thread whose file tools have nothing
+    // to read is the state the owner met, and a person must be able to leave it
+    // without restarting Omega from a shell. This admits a system folder
+    // picker, which is not a setup page: nothing is asked before the thread
+    // opens, and the control is beside the composer only while there is no
+    // folder.
+    //
+    // `workspace::OpenFiles` and the rest of the namespace stay refused. The
+    // point is choosing what the thread can see, not opening the editor's file
+    // surfaces inside a mode that does not render them.
+    "workspace::Open",
 ];
 
 /// Enter zero base, from the parsed command line and from nowhere else.
