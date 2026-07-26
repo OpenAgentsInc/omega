@@ -1333,8 +1333,15 @@ mod tests {
         let text = update["params"]["update"]["content"]["text"]
             .as_str()
             .expect("the disclosure is rendered for the operator");
-        assert!(text.contains("native_loop · Omega Agent"), "{text}");
-        assert!(text.contains("routed: unpinned"), "{text}");
+        // The label lost its class token and its `routed:` fragment when the
+        // owner asked for the line to stop leading with a wire token and to
+        // stop saying "routed: unpinned" on every ordinary turn. What a person
+        // is entitled to know is who ran the turn and on what model, so that is
+        // what is asserted. `OMEGA-DELTA-0055` is why the route fragment would
+        // now be meaningless anyway: there is no pin to be unpinned from.
+        assert!(text.contains("executor: Omega Agent"), "{text}");
+        assert!(!text.contains("native_loop"), "{text}");
+        assert!(!text.contains("routed:"), "{text}");
         assert!(
             text.contains("loopback_acp · Zed 1.12.0 · unauthenticated"),
             "{text}"
@@ -1574,7 +1581,7 @@ mod tests {
             update["params"]["update"]["content"]["text"]
                 .as_str()
                 .expect("text")
-                .contains("native_loop · Omega Agent")
+                .contains("executor: Omega Agent")
         );
         let answered = read(&mut reader);
         assert_eq!(answered["result"]["stopReason"], "end_turn");
@@ -1654,11 +1661,8 @@ mod tests {
             transcript.contains("Omega Agent, served over ACP"),
             "the upstream client read no disclosure: {transcript:?}"
         );
-        assert!(
-            transcript.contains("native_loop \u{b7} Omega Agent"),
-            "{transcript}"
-        );
-        assert!(transcript.contains("routed: unpinned"), "{transcript}");
+        assert!(transcript.contains("executor: Omega Agent"), "{transcript}");
+        assert!(!transcript.contains("routed:"), "{transcript}");
         assert!(
             transcript.contains("loopback_acp \u{b7} omega-conformance-client"),
             "the origin the host is disclosed under must name the host: {transcript}"
