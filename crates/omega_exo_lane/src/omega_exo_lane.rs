@@ -253,7 +253,22 @@ gpt5mini  gpt-5-mini      openai  default
         assert!(line.contains("basic"), "{line}");
         assert!(line.contains("gpt-5-mini"), "{line}");
         assert!(line.contains("provider not disclosed"), "{line}");
-        assert!(line.starts_with(EXO_EXECUTOR_CLASS.token()), "{line}");
+        // omega#100. The line no longer leads with the wire token.
+        //
+        // This asserted `starts_with(EXO_EXECUTOR_CLASS.token())`, which was
+        // right while `external_acp` was rendered. `ExecutorClass::token`
+        // documents that a token is "never shown to a user on its own", and the
+        // line was leading with one; the owner read it and could not tell what
+        // it meant. The class stays on the record and is asserted below.
+        //
+        // What this test is named for survives: an Exo thread names Exo as its
+        // executor, and its model.
+        assert_eq!(disclosure.class, EXO_EXECUTOR_CLASS);
+        assert!(line.starts_with("exo/"), "{line}");
+        assert!(
+            !line.contains(ExecutorClass::NativeLoop.token()),
+            "an Exo thread must never read as the native loop: {line}"
+        );
     }
 
     /// The class decision, as an oracle rather than a comment. An Exo thread

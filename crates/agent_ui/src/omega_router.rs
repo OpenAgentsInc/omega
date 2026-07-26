@@ -615,8 +615,99 @@ impl AgentConnection for OmegaAgentConnection {
         })
     }
 
+    // omega#100. Reopening a thread goes to the executor that owns it.
+    //
+    // The router answered `supports_load_session` with the *native*
+    // connection's answer and then never implemented `load_session`, so the
+    // trait default ran and every restore failed with "Loading sessions is not
+    // supported". The router was advertising a capability it did not have.
+    //
+    // It stayed hidden while an unpinned thread was always native and zero base
+    // always opened a fresh thread. `OMEGA-DELTA-0055` routes unpinned threads
+    // to an attached external agent, and `OMEGA-DELTA-0054` gives the window a
+    // project to restore into — so there is now a session to reopen, and the
+    // window came up empty with "Failed to Launch".
+    //
+    // `executor_for` already resolves a session to the connection that owns it,
+    // from the durable route record. Both the capability answer and the call
+    // route through it, so they cannot disagree: the thing asked whether it can
+    // reopen a session is the thing that will be asked to do it.
     fn supports_load_session(&self) -> bool {
+        // Asked without a session in hand — before a thread exists, and by
+        // surfaces deciding whether to offer reopening at all. True if any
+        // attached executor can, because the answer for a *particular* session
+        // is `session_supports_load`.
         self.native.supports_load_session()
+            || self
+                .external_acp
+                .as_ref()
+                .is_some_and(|executor| executor.supports_load_session())
+            || self
+                .engine_lane
+                .as_ref()
+                .is_some_and(|executor| executor.supports_load_session())
+    }
+
+    fn load_session(
+        self: Rc<Self>,
+        session_id: acp::SessionId,
+        project: Entity<Project>,
+        work_dirs: PathList,
+        title: Option<SharedString>,
+        cx: &mut App,
+    ) -> Task<Result<Entity<AcpThread>>> {
+        // `supports_load_session` above cannot name a session, so it answers
+        // for the router rather than for this thread. That leaves a gap: the
+        // caller may be told yes because *some* executor can load, and then
+        // this session's own executor cannot.
+        //
+        // So the gap is closed here rather than left to the caller. The
+        // executor that owns the session is asked what it can do, in the same
+        // order the caller would have tried: load, then resume, then say so.
+        // Resuming loses the earlier messages, which is worse than loading and
+        // much better than an empty window with "Failed to Launch".
+        let executor = self.executor_for(&session_id);
+        if executor.supports_load_session() {
+            executor.load_session(session_id, project, work_dirs, title, cx)
+        } else if executor.supports_resume_session() {
+            log::info!(
+                "reopening session {} by resume: {} cannot load sessions, so the \
+                 earlier messages are not restored",
+                session_id.0,
+                executor.telemetry_id()
+            );
+            executor.resume_session(session_id, project, work_dirs, title, cx)
+        } else {
+            Task::ready(Err(anyhow::anyhow!(
+                "{} cannot reopen a thread it ran: it supports neither loading \
+                 nor resuming a session",
+                executor.telemetry_id()
+            )))
+        }
+    }
+
+    fn supports_resume_session(&self) -> bool {
+        self.native.supports_resume_session()
+            || self
+                .external_acp
+                .as_ref()
+                .is_some_and(|executor| executor.supports_resume_session())
+            || self
+                .engine_lane
+                .as_ref()
+                .is_some_and(|executor| executor.supports_resume_session())
+    }
+
+    fn resume_session(
+        self: Rc<Self>,
+        session_id: acp::SessionId,
+        project: Entity<Project>,
+        work_dirs: PathList,
+        title: Option<SharedString>,
+        cx: &mut App,
+    ) -> Task<Result<Entity<AcpThread>>> {
+        self.executor_for(&session_id)
+            .resume_session(session_id, project, work_dirs, title, cx)
     }
 
     fn auth_methods(&self) -> &[acp::AuthMethod] {

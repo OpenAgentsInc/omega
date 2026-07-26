@@ -2,7 +2,7 @@
 //!
 //! `exo serve` is a single unary HTTP endpoint with **no authentication**. Its
 //! own documentation says so: a client may send a bearer token and the server
-//! never checks it. It exposes the full 53-variant request protocol, which
+//! never checks it. It exposes the full 52-variant request protocol, which
 //! includes reading secrets. Loopback is the entire boundary, and Exo knows it.
 //!
 //! Omega therefore treats "where Exo listens" and "where Omega talks to Exo" as

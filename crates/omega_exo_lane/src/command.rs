@@ -167,10 +167,7 @@ pub enum ExoCommand {
         limit: u32,
     },
     /// Read a conversation's record, for the model it resolves to.
-    ShowConversation {
-        agent: String,
-        conversation: String,
-    },
+    ShowConversation { agent: String, conversation: String },
     /// Read an agent's record, for its executor and its capability set. This is
     /// what [`crate::capability`] refuses a turn on.
     ShowAgent { agent: String },
@@ -409,8 +406,18 @@ mod tests {
             .collect();
         assert_eq!(admitted, ["send", "events", "show", "show", "list"]);
         for forbidden in [
-            "create", "update", "delete", "mount", "set", "register", "configure", "serve", "repl",
-            "adapters", "fork", "run",
+            "create",
+            "update",
+            "delete",
+            "mount",
+            "set",
+            "register",
+            "configure",
+            "serve",
+            "repl",
+            "adapters",
+            "fork",
+            "run",
         ] {
             for (name, argv) in ADMITTED_LANE_ARGV {
                 assert!(
@@ -434,7 +441,13 @@ mod tests {
             .expect("ExoRoot has an impl block")
             .0;
         for writing in [
-            "fs::", "File", "create", "remove", "write", "OpenOptions", "std::io",
+            "fs::",
+            "File",
+            "create",
+            "remove",
+            "write",
+            "OpenOptions",
+            "std::io",
         ] {
             assert!(
                 !impl_block.contains(writing),
