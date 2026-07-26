@@ -21,7 +21,7 @@ use workroom_receipts::{
     Issue31CommandStateInput, Issue31FullAutoAdjunct, Issue31FullAutoAdjunctError,
     Issue31HostAdjunct, Issue31HostAdjunctError, Issue31HostProjectionInput, Issue31HostSources,
     Issue31ObservedGap, Issue31RoleInput, MAX_ISSUE31_PROJECTION_REFS, ProjectionFreshness,
-    build_issue31_full_auto_adjunct, build_issue31_host_adjunct,
+    build_issue31_full_auto_adjunct_document, build_issue31_host_adjunct_document,
 };
 
 use crate::provider_roster::parse_provider_accounts;
@@ -200,6 +200,13 @@ pub struct Issue31FullAutoLiveSources<'a> {
 pub fn project_issue31_full_auto_adjunct(
     sources: &Issue31FullAutoLiveSources<'_>,
 ) -> Result<Issue31FullAutoAdjunct, Issue31FullAutoProjectionError> {
+    project_issue31_full_auto_adjunct_document(sources).map(|(adjunct, _)| adjunct)
+}
+
+/// The same detail projection, plus the exact bytes the contract accepted.
+pub fn project_issue31_full_auto_adjunct_document(
+    sources: &Issue31FullAutoLiveSources<'_>,
+) -> Result<(Issue31FullAutoAdjunct, Value), Issue31FullAutoProjectionError> {
     let runs = sources
         .run_details
         .iter()
@@ -223,7 +230,7 @@ pub fn project_issue31_full_auto_adjunct(
         })
         .collect();
 
-    build_issue31_full_auto_adjunct(
+    build_issue31_full_auto_adjunct_document(
         sources.host_ref,
         sources.snapshot_ref,
         sources.generated_at_ms,
@@ -268,6 +275,13 @@ pub struct Issue31HostIdentitySource<'a> {
 pub struct Issue31HostPublication {
     pub host: Issue31HostAdjunct,
     pub detail: Issue31FullAutoAdjunct,
+    /// The exact bytes the host contract accepted, ready for the wire.
+    ///
+    /// Re-encoding the typed values would introduce a second serializer that
+    /// can disagree with the one the decoder validated, so what is published
+    /// is what was checked.
+    pub host_document: Value,
+    pub detail_document: Value,
 }
 
 /// Why a live host state could not be published as a `host.v1` snapshot.
@@ -318,8 +332,8 @@ pub fn publish_issue31_host_snapshot(
 ) -> Result<Issue31HostPublication, Issue31HostProjectionError> {
     // Built first: a snapshot must never advertise records whose detail the
     // host would refuse to project.
-    let detail =
-        project_issue31_full_auto_adjunct(sources).map_err(Issue31HostProjectionError::Detail)?;
+    let (detail, detail_document) = project_issue31_full_auto_adjunct_document(sources)
+        .map_err(Issue31HostProjectionError::Detail)?;
 
     let run_refs: Vec<String> = detail
         .runs
@@ -373,7 +387,7 @@ pub fn publish_issue31_host_snapshot(
     let granted = identity.owner_grant_ref.is_some();
     let empty: &[&str] = &[];
 
-    let host_snapshot = build_issue31_host_adjunct(
+    let (host_snapshot, host_document) = build_issue31_host_adjunct_document(
         sources.host_ref,
         sources.snapshot_ref,
         sources.generated_at_ms,
@@ -440,6 +454,8 @@ pub fn publish_issue31_host_snapshot(
     Ok(Issue31HostPublication {
         host: host_snapshot,
         detail,
+        host_document,
+        detail_document,
     })
 }
 

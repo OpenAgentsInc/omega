@@ -35,7 +35,9 @@ use thiserror::Error;
 
 use crate::protocol::{MAX_FRAME_BYTES, PROTOCOL_SCHEMA};
 use crate::{
-    ISSUE31_COMMAND_SCHEMA, ISSUE31_COMMAND_SCHEMA_V2, ISSUE31_HOST_DISCOVERY_KIND,
+    ISSUE31_ADJUNCT_DELIVERY_KEYS, ISSUE31_COMMAND_SCHEMA, ISSUE31_COMMAND_SCHEMA_V2,
+    ISSUE31_FULL_AUTO_ADJUNCT_RECORD_TYPE, ISSUE31_FULL_AUTO_ADJUNCT_SCHEMA,
+    ISSUE31_HOST_ADJUNCT_RECORD_TYPE, ISSUE31_HOST_ADJUNCT_SCHEMA, ISSUE31_HOST_DISCOVERY_KIND,
     ISSUE31_PAIRING_SCHEMA, Issue31AuthorityDecisionProjection, Issue31CommandArguments,
     Issue31CommandEvent, Issue31CommandExecution, Issue31CommandExecutionV2,
     Issue31CommandHandlingStatus, Issue31CommandRecord, Issue31CommandRecordV2,
@@ -941,6 +943,50 @@ impl SarahConversationConfig {
 }
 
 /// Nostr conversation client owned by omega-effectd for the Sarah lane.
+/// One admitted device's standing, handed to the Full Auto reader (omega#49).
+///
+/// The host pump owns this shape rather than the panel: the panel knows what
+/// the runs are, and only the pump knows which devices are entitled to see
+/// them and under which grant. Building the snapshot per grant is what makes
+/// `connection_identity` a statement about *this* reader instead of a generic
+/// one.
+#[derive(Clone, Copy, Debug)]
+pub struct Issue31HostProjectionRequest<'a> {
+    pub host_ref: &'a str,
+    pub host_public_key_hex: &'a str,
+    pub device_public_key_hex: &'a str,
+    pub grant_ref: &'a str,
+    pub expected_generation: u64,
+    /// The pump's reading time, in epoch milliseconds.
+    pub observed_at_ms: u64,
+}
+
+/// The two omega#47 documents `publish_issue31_host_snapshot` produces.
+///
+/// They travel as JSON because the builder lives in `full_auto_ui`, which
+/// depends on this crate. Inverting that to call the builder from here would
+/// make the dependency circular, so the reading crosses the seam as data.
+#[derive(Clone, Debug)]
+pub struct Issue31HostProjectionDocuments {
+    pub host: Value,
+    pub detail: Value,
+}
+
+/// A live reading of Full Auto host state, or `None`.
+///
+/// `None` means this host cannot presently state its Full Auto view — no
+/// supervisor attached, no panel reading, nothing observed. It is not an empty
+/// view: an empty view is a `Some` carrying zero runs, which the device renders
+/// as "this host is running nothing". Publishing an invented empty projection
+/// for an unobserved host would be exactly the false claim omega#49 forbids.
+pub type Issue31HostProjectionSource = Arc<
+    dyn Fn(
+            &Issue31HostProjectionRequest<'_>,
+        ) -> Result<Option<Issue31HostProjectionDocuments>, String>
+        + Send
+        + Sync,
+>;
+
 pub struct SarahConversationClient {
     config: SarahConversationConfig,
     relay: Box<dyn RelayTransport>,
@@ -965,6 +1011,13 @@ pub struct SarahConversationClient {
     /// so a re-run that observed the same world does not republish it with only
     /// a new timestamp.
     issue31_withheld_emissions: BTreeMap<String, (String, Vec<Issue31WithheldSourceCount>)>,
+    /// The digest of the last omega#47 publication sent to each
+    /// `grant_ref:generation`, so a pump run that observed the same host state
+    /// does not re-send the same snapshot with only a fresh timestamp.
+    issue31_host_adjunct_emissions: BTreeMap<String, String>,
+    /// The live Full Auto reading, supplied by whoever holds the supervisor.
+    /// Absent means this host publishes no omega#47 records at all.
+    issue31_host_projection_source: Option<Issue31HostProjectionSource>,
     issue31_state_path: Option<PathBuf>,
     #[cfg(test)]
     issue31_fail_commit_after: Cell<Option<usize>>,
@@ -1001,6 +1054,8 @@ struct DurableIssue31HostState {
     projection_cursor: Option<String>,
     #[serde(default)]
     quarantined_events: BTreeMap<String, String>,
+    #[serde(default)]
+    host_adjunct_emissions: BTreeMap<String, String>,
     command_results: BTreeMap<String, (String, Value)>,
     #[serde(default)]
     active_turn_ref: Option<String>,
@@ -1051,6 +1106,8 @@ impl SarahConversationClient {
             issue31_projection_cursor: None,
             issue31_quarantined_events: BTreeMap::new(),
             issue31_withheld_emissions: BTreeMap::new(),
+            issue31_host_adjunct_emissions: BTreeMap::new(),
+            issue31_host_projection_source: None,
             issue31_state_path: None,
             #[cfg(test)]
             issue31_fail_commit_after: Cell::new(None),
@@ -1148,6 +1205,10 @@ impl SarahConversationClient {
             .as_ref()
             .map(|persisted| persisted.quarantined_events.clone())
             .unwrap_or_default();
+        let issue31_host_adjunct_emissions = persisted
+            .as_ref()
+            .map(|persisted| persisted.host_adjunct_emissions.clone())
+            .unwrap_or_default();
         let active_turn_ref = persisted
             .as_ref()
             .and_then(|persisted| persisted.active_turn_ref.clone());
@@ -1186,6 +1247,8 @@ impl SarahConversationClient {
             issue31_projection_cursor,
             issue31_quarantined_events,
             issue31_withheld_emissions: BTreeMap::new(),
+            issue31_host_adjunct_emissions,
+            issue31_host_projection_source: None,
             issue31_state_path: Some(issue31_state_path),
             #[cfg(test)]
             issue31_fail_commit_after: Cell::new(None),
@@ -1876,6 +1939,10 @@ impl SarahConversationClient {
             }
         }
         self.project_issue31_sources(controller, now)?;
+        // The omega#47 documents ride the same durable outbox as every other
+        // owner-private record, so a device that was offline for this pass gets
+        // them on the next flush rather than losing the snapshot entirely.
+        self.publish_issue31_host_adjuncts(controller, now)?;
         self.persist_issue31_host_state_with_controller(controller)?;
         self.flush_issue31_outbox()?;
         self.persist_issue31_host_state_with_controller(controller)?;
@@ -2186,6 +2253,7 @@ impl SarahConversationClient {
                 control_cursor: self.issue31_control_cursor.clone(),
                 projection_cursor: self.issue31_projection_cursor.clone(),
                 quarantined_events: self.issue31_quarantined_events.clone(),
+                host_adjunct_emissions: self.issue31_host_adjunct_emissions.clone(),
                 command_results: self.command_results.clone(),
                 active_turn_ref: self.active_turn_ref.clone(),
                 run_state: self.run_state.clone(),
@@ -2714,6 +2782,209 @@ impl SarahConversationClient {
             self.issue31_projection_cursor = Some(last_scanned_cursor);
         }
         self.emit_issue31_withheld_sources(&grants, scan_bound_reached, now)?;
+        Ok(())
+    }
+
+    /// Install the live Full Auto reading this host publishes to devices.
+    ///
+    /// Without one the host publishes no omega#47 records at all, and a paired
+    /// phone reads `no_host_projection` — which is the honest answer for a host
+    /// that is not observing its own Full Auto state, and is exactly what the
+    /// phone showed before this existed. The difference is that the silence is
+    /// now a stated condition rather than a dropped record.
+    pub fn set_issue31_host_projection_source(&mut self, source: Issue31HostProjectionSource) {
+        self.issue31_host_projection_source = Some(source);
+    }
+
+    /// Bind the issue-31 host controller this client pumps.
+    ///
+    /// `new_production` builds one from custody. A headless harness cannot
+    /// reach custody and still has to drive the shipped pump, so the binding is
+    /// a real operation rather than a field only this module can reach.
+    pub fn attach_issue31_host_controller(&mut self, controller: Issue31HostController) {
+        self.issue31_host = Some(controller);
+    }
+
+    /// The `grant_ref:generation` keys this host has published omega#47
+    /// documents to. A key is recorded only after both records were committed
+    /// to the durable outbox.
+    pub fn issue31_published_host_adjunct_grants(&self) -> Vec<String> {
+        self.issue31_host_adjunct_emissions.keys().cloned().collect()
+    }
+
+    /// Owner-private records still waiting for a relay acknowledgement.
+    ///
+    /// An empty list after a pump pass means every relay the host is
+    /// configured for stored every record; a non-empty one is an exact,
+    /// resumable backlog rather than a lost publish.
+    pub fn issue31_pending_private_publish_refs(&self) -> Vec<String> {
+        self.issue31_private_outbox.keys().cloned().collect()
+    }
+
+    /// Address one omega#47 document to one device.
+    ///
+    /// The pump — not the reading — states the binding, because the reading
+    /// knows the host's runs and knows nothing about who may read them. A
+    /// document that arrives already claiming a delivery binding is refused
+    /// rather than overwritten: whoever wrote it was making a claim about a
+    /// device it has no standing to make.
+    fn address_issue31_adjunct(
+        document: &Value,
+        schema: &str,
+        record_type: &str,
+        grant: &Issue31GrantState,
+    ) -> Result<Value, SarahConversationError> {
+        let object = document.as_object().ok_or_else(|| {
+            SarahConversationError::Internal("Issue 31 adjunct is not a record".into())
+        })?;
+        if object.get("schema").and_then(Value::as_str) != Some(schema) {
+            return Err(SarahConversationError::Internal(
+                "Issue 31 adjunct does not carry its own schema".into(),
+            ));
+        }
+        // The seal proves who signed; it cannot prove which host the body
+        // describes. The grant is the only statement that relates this host key
+        // to a host reference, so the body must agree with it or the device
+        // would bind another machine's state to this pairing.
+        if object.get("hostRef").and_then(Value::as_str) != Some(grant.host_ref.as_str()) {
+            return Err(SarahConversationError::Internal(
+                "Issue 31 adjunct describes a host this grant does not name".into(),
+            ));
+        }
+        if ISSUE31_ADJUNCT_DELIVERY_KEYS
+            .iter()
+            .any(|key| object.contains_key(*key))
+        {
+            return Err(SarahConversationError::Internal(
+                "Issue 31 adjunct arrived already claiming a delivery binding".into(),
+            ));
+        }
+        let mut addressed = object.clone();
+        addressed.insert("recordType".into(), json!(record_type));
+        addressed.insert(
+            "hostPublicKeyHex".into(),
+            json!(grant.host_public_key_hex.clone()),
+        );
+        addressed.insert(
+            "devicePublicKeyHex".into(),
+            json!(grant.device_public_key_hex.clone()),
+        );
+        addressed.insert("grantRef".into(), json!(grant.grant_ref.clone()));
+        addressed.insert("expectedGeneration".into(), json!(grant.generation));
+        Ok(Value::Object(addressed))
+    }
+
+    /// Publish the omega#47 host snapshot and its Full Auto detail to every
+    /// admitted device (omega#49).
+    ///
+    /// The two documents are published together or not at all. The detail is
+    /// bound to the snapshot that advertised it, and a device that held one
+    /// without the other would either render a detail nothing vouches for or
+    /// advertise capabilities it cannot open.
+    fn publish_issue31_host_adjuncts(
+        &mut self,
+        controller: &Issue31HostController,
+        now: u64,
+    ) -> Result<(), SarahConversationError> {
+        let Some(source) = self.issue31_host_projection_source.clone() else {
+            return Ok(());
+        };
+        let grants = controller.active_grants(now).map_err(issue31_error)?;
+        let observed_at_ms = now.saturating_mul(1_000);
+        for grant in grants {
+            let documents = match source(&Issue31HostProjectionRequest {
+                host_ref: &grant.host_ref,
+                host_public_key_hex: &grant.host_public_key_hex,
+                device_public_key_hex: &grant.device_public_key_hex,
+                grant_ref: &grant.grant_ref,
+                expected_generation: grant.generation,
+                observed_at_ms,
+            }) {
+                Ok(Some(documents)) => documents,
+                // Nothing observed is said by saying nothing. Publishing an
+                // empty projection here would claim the host had looked and
+                // found no runs, which is a different fact.
+                Ok(None) => continue,
+                Err(_) => {
+                    // The host could not read its own Full Auto state. The
+                    // owner's view may therefore be short, and that has to be
+                    // visible rather than inferred from an absent record.
+                    self.last_gap_state =
+                        strongest_gap_state(self.last_gap_state, GapState::Possible);
+                    continue;
+                }
+            };
+            let host = Self::address_issue31_adjunct(
+                &documents.host,
+                ISSUE31_HOST_ADJUNCT_SCHEMA,
+                ISSUE31_HOST_ADJUNCT_RECORD_TYPE,
+                &grant,
+            )?;
+            let detail = Self::address_issue31_adjunct(
+                &documents.detail,
+                ISSUE31_FULL_AUTO_ADJUNCT_SCHEMA,
+                ISSUE31_FULL_AUTO_ADJUNCT_RECORD_TYPE,
+                &grant,
+            )?;
+            // "Beside" is the contract's word for the relation between the two
+            // documents. A detail carrying a different snapshot reference is
+            // one the device would refuse as `snapshot_mismatch`, so sending it
+            // would publish a refusal rather than a projection.
+            if host.get("snapshotRef") != detail.get("snapshotRef") {
+                return Err(SarahConversationError::Internal(
+                    "Issue 31 Full Auto detail is not bound to the snapshot beside it".into(),
+                ));
+            }
+            let host_content = serde_json::to_string(&host)
+                .map_err(|error| SarahConversationError::Internal(error.to_string()))?;
+            let detail_content = serde_json::to_string(&detail)
+                .map_err(|error| SarahConversationError::Internal(error.to_string()))?;
+            let key = format!("{}:{}", grant.grant_ref, grant.generation);
+            let digest = format!(
+                "{:x}",
+                Sha256::digest(
+                    [host_content.as_bytes(), detail_content.as_bytes()].concat()
+                )
+            );
+            if self.issue31_host_adjunct_emissions.get(&key) == Some(&digest) {
+                continue;
+            }
+            let enqueued_host = self.enqueue_issue31_private_content(
+                ISSUE31_HOST_ADJUNCT_SCHEMA,
+                &host_content,
+                &grant.device_public_key_hex,
+            )?;
+            let enqueued_detail = match self.enqueue_issue31_private_content(
+                ISSUE31_FULL_AUTO_ADJUNCT_SCHEMA,
+                &detail_content,
+                &grant.device_public_key_hex,
+            ) {
+                Ok(enqueued) => enqueued,
+                Err(error) => {
+                    self.rollback_issue31_enqueue(&enqueued_host);
+                    return Err(error);
+                }
+            };
+            let previous = self
+                .issue31_host_adjunct_emissions
+                .insert(key.clone(), digest);
+            // The bookkeeping is committed with the outbox, not after it: a
+            // crash between the two would either resend forever or, worse,
+            // record a publication that never happened.
+            if let Err(error) = self.persist_issue31_host_state_with_controller(controller) {
+                match previous {
+                    Some(previous) => {
+                        self.issue31_host_adjunct_emissions.insert(key, previous);
+                    }
+                    None => {
+                        self.issue31_host_adjunct_emissions.remove(&key);
+                    }
+                }
+                self.rollback_issue31_enqueue(&enqueued_detail);
+                self.rollback_issue31_enqueue(&enqueued_host);
+                return Err(error);
+            }
+        }
         Ok(())
     }
 
@@ -3694,6 +3965,7 @@ fn load_issue31_host_state(
         || state.command_results.len() > MAX_COMMAND_RESULTS
         || state.relay_acknowledgements.len() > MAX_RELAY_ACKNOWLEDGEMENTS
         || state.quarantined_events.len() > MAX_QUARANTINED_ISSUE31_EVENTS
+        || state.host_adjunct_emissions.len() > MAX_QUARANTINED_ISSUE31_EVENTS
         || state
             .control_cursor
             .as_deref()
@@ -4524,6 +4796,252 @@ mod tests {
             .issue31_withheld_emissions
             .get(&format!("{grant_ref}:{generation}"))
             .cloned()
+    }
+
+    // -----------------------------------------------------------------
+    // omega#49: the omega#47 documents actually leaving the host.
+    //
+    // `full_auto_ui` built both documents from live host state and nothing
+    // ever published them, so a paired phone rendered `no_host_projection` on
+    // every device. These cover the pump half: who the records are addressed
+    // to, what binding they carry, and when they are NOT sent.
+    // -----------------------------------------------------------------
+
+    fn adjunct_outbox_refs(client: &SarahConversationClient, schema: &str) -> Vec<String> {
+        client
+            .issue31_private_outbox
+            .keys()
+            .filter(|outbox_ref| outbox_ref.starts_with(schema))
+            .cloned()
+            .collect()
+    }
+
+    /// A reading the pump can publish, carrying no delivery claim of its own.
+    fn host_documents(host_ref: &str, snapshot_ref: &str) -> Issue31HostProjectionDocuments {
+        Issue31HostProjectionDocuments {
+            host: json!({
+                "schema": ISSUE31_HOST_ADJUNCT_SCHEMA,
+                "hostRef": host_ref,
+                "snapshotRef": snapshot_ref,
+                "generatedAtMs": 1_784_894_400_000_u64,
+                "projections": [],
+            }),
+            detail: json!({
+                "schema": ISSUE31_FULL_AUTO_ADJUNCT_SCHEMA,
+                "hostRef": host_ref,
+                "snapshotRef": snapshot_ref,
+                "generatedAtMs": 1_784_894_400_000_u64,
+                "runs": [],
+            }),
+        }
+    }
+
+    fn paired_adjunct_client(
+        source: Option<Issue31HostProjectionSource>,
+    ) -> (SarahConversationClient, Issue31HostController, String) {
+        let signer = SigningIdentity::generate();
+        let mut config = SarahConversationConfig::mock_fixture();
+        config.identity.owner_public_key_hex = signer.public_key_hex.clone();
+        let owner_public_key_hex = signer.public_key_hex.clone();
+        let sarah_public_key_hex = config.identity.sarah_public_key_hex.clone();
+        let conversation_ref = config.conversation_ref();
+        let mut client =
+            SarahConversationClient::with_relay(config, Box::new(MockRelayAdapter::new()), signer);
+        if let Some(source) = source {
+            client.set_issue31_host_projection_source(source);
+        }
+        let device_public_key_hex = "2".repeat(64);
+        let controller = pair_issue31_device(
+            Issue31HostConfiguration {
+                host_ref: "omega.host.local".into(),
+                host_public_key_hex: owner_public_key_hex,
+                sarah_public_key_hex,
+                conversation: conversation_ref,
+                display_name: "Omega host".into(),
+                relay_urls: vec!["wss://relay.example.com".into()],
+                generation: 1,
+            },
+            &device_public_key_hex,
+        );
+        (client, controller, device_public_key_hex)
+    }
+
+    /// The gap itself: both omega#47 documents must reach every admitted
+    /// device, addressed to that device and to the grant it holds.
+    #[test]
+    fn the_host_snapshot_and_its_detail_are_addressed_to_each_admitted_device() {
+        let source: Issue31HostProjectionSource = Arc::new(|request| {
+            Ok(Some(host_documents(request.host_ref, "snapshot.omega.issue31.aa")))
+        });
+        let (mut client, controller, device_public_key_hex) =
+            paired_adjunct_client(Some(source));
+        let grant = controller.active_grants(200).expect("grants")[0].clone();
+        client.ensure_connected().expect("connect the mock relay");
+        client
+            .publish_issue31_host_adjuncts(&controller, 200)
+            .expect("the pump publishes both documents");
+
+        assert_eq!(
+            adjunct_outbox_refs(&client, ISSUE31_HOST_ADJUNCT_SCHEMA).len(),
+            1,
+        );
+        assert_eq!(
+            adjunct_outbox_refs(&client, ISSUE31_FULL_AUTO_ADJUNCT_SCHEMA).len(),
+            1,
+        );
+        assert!(
+            client
+                .issue31_host_adjunct_emissions
+                .contains_key(&format!("{}:{}", grant.grant_ref, grant.generation)),
+            "the pump must remember what it sent, or it resends forever",
+        );
+
+        // The binding the device checks the envelope against.
+        let addressed = SarahConversationClient::address_issue31_adjunct(
+            &host_documents("omega.host.local", "snapshot.omega.issue31.aa").host,
+            ISSUE31_HOST_ADJUNCT_SCHEMA,
+            ISSUE31_HOST_ADJUNCT_RECORD_TYPE,
+            &grant,
+        )
+        .expect("the snapshot is addressable to this grant");
+        assert_eq!(
+            addressed.get("recordType").and_then(Value::as_str),
+            Some(ISSUE31_HOST_ADJUNCT_RECORD_TYPE),
+        );
+        assert_eq!(
+            addressed.get("devicePublicKeyHex").and_then(Value::as_str),
+            Some(device_public_key_hex.as_str()),
+        );
+        assert_eq!(
+            addressed.get("grantRef").and_then(Value::as_str),
+            Some(grant.grant_ref.as_str()),
+        );
+        assert_eq!(
+            addressed.get("hostPublicKeyHex").and_then(Value::as_str),
+            Some(grant.host_public_key_hex.as_str()),
+        );
+    }
+
+    /// A pass that observed the same world must not re-send the snapshot. The
+    /// device would otherwise be handed an identical record forever, and every
+    /// one of them would cost it a decrypt.
+    #[test]
+    fn an_unchanged_reading_is_not_republished() {
+        let source: Issue31HostProjectionSource = Arc::new(|request| {
+            Ok(Some(host_documents(request.host_ref, "snapshot.omega.issue31.aa")))
+        });
+        let (mut client, controller, _device) = paired_adjunct_client(Some(source));
+        client.ensure_connected().expect("connect the mock relay");
+        client
+            .publish_issue31_host_adjuncts(&controller, 200)
+            .expect("first pass");
+        client.issue31_private_outbox.clear();
+        client
+            .publish_issue31_host_adjuncts(&controller, 260)
+            .expect("second pass");
+        assert!(
+            client.issue31_private_outbox.is_empty(),
+            "an unchanged reading must not be republished",
+        );
+
+        // A changed reading is a different snapshot and does go out again.
+        let changed: Issue31HostProjectionSource = Arc::new(|request| {
+            Ok(Some(host_documents(request.host_ref, "snapshot.omega.issue31.bb")))
+        });
+        client.set_issue31_host_projection_source(changed);
+        client
+            .publish_issue31_host_adjuncts(&controller, 320)
+            .expect("third pass");
+        assert_eq!(
+            adjunct_outbox_refs(&client, ISSUE31_HOST_ADJUNCT_SCHEMA).len(),
+            1,
+        );
+    }
+
+    /// A host that is not observing its Full Auto state says nothing rather
+    /// than publishing an empty snapshot. Silence and "I looked and found
+    /// nothing" are different claims and the device renders them differently.
+    #[test]
+    fn a_host_with_no_reading_publishes_nothing_at_all() {
+        let (mut client, controller, _device) = paired_adjunct_client(None);
+        client.ensure_connected().expect("connect the mock relay");
+        client
+            .publish_issue31_host_adjuncts(&controller, 200)
+            .expect("a host with no reading still completes its pass");
+        assert!(client.issue31_private_outbox.is_empty());
+
+        let silent: Issue31HostProjectionSource = Arc::new(|_| Ok(None));
+        client.set_issue31_host_projection_source(silent);
+        client
+            .publish_issue31_host_adjuncts(&controller, 200)
+            .expect("an unobserved host still completes its pass");
+        assert!(client.issue31_private_outbox.is_empty());
+    }
+
+    /// The one substitution a signed seal cannot rule out. A snapshot labelled
+    /// with another machine's host reference would be bound by the device to
+    /// this pairing, so the pump refuses to address it at all.
+    #[test]
+    fn a_snapshot_naming_another_host_is_never_addressed_to_this_device() {
+        let (mut client, controller, _device) = paired_adjunct_client(None);
+        let grant = controller.active_grants(200).expect("grants")[0].clone();
+        let foreign = host_documents("omega.host.some-other-machine", "snapshot.omega.issue31.aa");
+        assert!(
+            SarahConversationClient::address_issue31_adjunct(
+                &foreign.host,
+                ISSUE31_HOST_ADJUNCT_SCHEMA,
+                ISSUE31_HOST_ADJUNCT_RECORD_TYPE,
+                &grant,
+            )
+            .is_err(),
+        );
+
+        // And a reading that arrives already claiming who may read it is
+        // refused rather than silently overwritten.
+        let mut presumptuous = host_documents("omega.host.local", "snapshot.omega.issue31.aa").host;
+        presumptuous
+            .as_object_mut()
+            .expect("object")
+            .insert("devicePublicKeyHex".into(), json!("3".repeat(64)));
+        assert!(
+            SarahConversationClient::address_issue31_adjunct(
+                &presumptuous,
+                ISSUE31_HOST_ADJUNCT_SCHEMA,
+                ISSUE31_HOST_ADJUNCT_RECORD_TYPE,
+                &grant,
+            )
+            .is_err(),
+        );
+
+        let source: Issue31HostProjectionSource = Arc::new(|_| {
+            Ok(Some(host_documents(
+                "omega.host.some-other-machine",
+                "snapshot.omega.issue31.aa",
+            )))
+        });
+        client.set_issue31_host_projection_source(source);
+        client.ensure_connected().expect("connect the mock relay");
+        assert!(client.publish_issue31_host_adjuncts(&controller, 200).is_err());
+        assert!(client.issue31_private_outbox.is_empty());
+    }
+
+    /// The snapshot advertises the capabilities; the detail is what the owner
+    /// opens. A detail bound to a different snapshot is one the phone refuses
+    /// as `snapshot_mismatch`, so publishing it would publish a refusal.
+    #[test]
+    fn a_detail_not_bound_to_the_snapshot_beside_it_is_never_sent() {
+        let source: Issue31HostProjectionSource = Arc::new(|request| {
+            let mut documents = host_documents(request.host_ref, "snapshot.omega.issue31.aa");
+            documents
+                .detail
+                .as_object_mut()
+                .expect("object")
+                .insert("snapshotRef".into(), json!("snapshot.omega.issue31.bb"));
+            Ok(Some(documents))
+        });
+        let (mut client, controller, _device) = paired_adjunct_client(Some(source));
+        client.ensure_connected().expect("connect the mock relay");
+        assert!(client.publish_issue31_host_adjuncts(&controller, 200).is_err());
     }
 
     /// Pair one device with the host so the projection pass has somewhere to
@@ -5639,6 +6157,7 @@ mod tests {
                 "9".repeat(64),
                 "reason.omega.invalid_pairing_record".into(),
             )]),
+            host_adjunct_emissions: BTreeMap::new(),
             command_results: BTreeMap::from([(
                 "idempotency.restart.admin".into(),
                 ("fingerprint".into(), json!({ "eventId": "1".repeat(64) })),

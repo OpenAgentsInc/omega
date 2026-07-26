@@ -22,6 +22,18 @@ use omega_effectd::{
     AttentionDecision, OpenAgentsSession, OpenAgentsSessionPhase, SharedOmegaEffectdSupervisor,
     openagents_session, shared_supervisor,
 };
+
+use crate::issue31_delivery::{Issue31FullAutoReading, set_issue31_live_reading};
+
+/// The omega#47 contract carries at most this many runs in one projection.
+const MAX_ISSUE31_PROJECTED_RUNS: usize = 16;
+
+fn unix_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX))
+        .unwrap_or_default()
+}
 use omega_front_door::LaunchOrigin;
 use serde_json::Value;
 use settings::{NotifyWhenAgentWaiting, Settings as _};
@@ -320,6 +332,51 @@ impl FullAutoPanel {
             } else {
                 (None, None, None)
             };
+            // omega#49: the same poll feeds the phone. The Sarah host pump
+            // publishes whatever reading is recorded here, so a Full Auto view
+            // the desktop can see is one the owner's paired device can see too.
+            // The reading is stored only when the daemon actually answered:
+            // recording a partial one would publish a shorter run list than the
+            // host has, which reads on the phone as runs that ended.
+            if let (Ok(runs), Some(capacity)) = (&listed, &capacity) {
+                let generation = {
+                    let guard = supervisor.lock().await;
+                    guard.generation()
+                };
+                let mut run_details = Vec::new();
+                let mut evidence = Vec::new();
+                let mut complete = true;
+                for run in runs.iter().take(MAX_ISSUE31_PROJECTED_RUNS) {
+                    let mut guard = supervisor.lock().await;
+                    match guard.get_run(&run.run_ref).await {
+                        Ok(detail) => run_details.push(detail),
+                        Err(_) => {
+                            complete = false;
+                            break;
+                        }
+                    }
+                    if let (Ok(report), Ok(receipt)) = (
+                        guard.get_report(&run.run_ref).await,
+                        guard.get_receipt(&run.run_ref).await,
+                    ) {
+                        evidence.push((report, receipt));
+                    }
+                }
+                if complete {
+                    set_issue31_live_reading(Issue31FullAutoReading {
+                        generated_at_ms: unix_millis(),
+                        host_generation: generation,
+                        run_details,
+                        capacity: capacity.clone(),
+                        // Provider connection handoffs are host-owned and this
+                        // daemon does not yet report them. An empty list is the
+                        // honest statement that none is in flight, not a claim
+                        // that the host refused one.
+                        handoffs: Vec::new(),
+                        evidence,
+                    });
+                }
+            }
             this.update(cx, |this, cx| {
                 if should_refresh_attention {
                     this.attention_refresh_in_flight = false;

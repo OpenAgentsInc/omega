@@ -34,6 +34,12 @@ url.workspace = true
 util.workspace = true
 zed_credentials_provider.workspace = true
 
+[features]
+default = []
+# Headless proof harnesses: supply the owner key directly instead of reading it
+# from GPUI-backed identity custody. Never enabled by a shipped build.
+test-support = []
+
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
 

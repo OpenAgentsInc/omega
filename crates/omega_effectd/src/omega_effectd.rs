@@ -43,7 +43,8 @@ pub use sarah_conversation::{
     SARAH_METHOD_DEVICE_GRANTS, SARAH_METHOD_INTERRUPT_TURN, SARAH_METHOD_READMIT_DEVICE,
     SARAH_METHOD_RENEW_DEVICE_GRANT, SARAH_METHOD_REVOKE_DEVICE_GRANT,
     SARAH_METHOD_ROOM_SNAPSHOT, SARAH_METHOD_SEND_MESSAGE,
-    SARAH_METHOD_SESSION_STATUS, SarahConversationClient, SarahConversationConfig,
+    SARAH_METHOD_SESSION_STATUS, Issue31HostProjectionDocuments, Issue31HostProjectionRequest,
+    Issue31HostProjectionSource, SarahConversationClient, SarahConversationConfig,
     SarahConversationError, SendMessageResult, SessionStatusResult, SigningIdentity,
     asserts_no_khala_sync_client,
 };

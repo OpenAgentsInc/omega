@@ -322,8 +322,20 @@ fn production_sarah_conversation() -> Result<SarahConversationClient, HostRespon
         community_group_ids,
         community_public_key_hexes,
     };
-    SarahConversationClient::new_production(config, relay_urls, identity_service)
-        .map_err(|error| unavailable(format!("Sarah Nostr transport is unavailable: {error}")))
+    let mut conversation = SarahConversationClient::new_production(
+        config,
+        relay_urls,
+        identity_service,
+    )
+    .map_err(|error| unavailable(format!("Sarah Nostr transport is unavailable: {error}")))?;
+    // omega#49: the host pump publishes the omega#47 snapshot and its Full Auto
+    // detail to every admitted device. Without this the two documents are built
+    // by the desktop panel and never leave the machine, and a paired phone
+    // reports `no_host_projection` for a host that is running work.
+    conversation.set_issue31_host_projection_source(
+        full_auto_ui::issue31_host_projection_source(),
+    );
+    Ok(conversation)
 }
 
 async fn sarah_request(

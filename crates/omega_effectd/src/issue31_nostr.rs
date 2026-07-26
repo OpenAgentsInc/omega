@@ -11,6 +11,25 @@ pub const ISSUE31_COMMAND_SCHEMA: &str = "openagents.omega.issue31.command.v1";
 pub const ISSUE31_COMMAND_SCHEMA_V2: &str = "openagents.omega.issue31.command.v2";
 pub const ISSUE31_OWNER_PROJECTION_SCHEMA: &str = "openagents.omega.issue31.owner_projection.v1";
 pub const ISSUE31_WITHHELD_SOURCES_SCHEMA: &str = "openagents.omega.issue31.withheld_sources.v1";
+/// The omega#47 host snapshot, as an owner-private record (omega#49).
+pub const ISSUE31_HOST_ADJUNCT_SCHEMA: &str = "openagents.omega.issue31.host.v1";
+/// The omega#47 Full Auto detail projection, as an owner-private record.
+pub const ISSUE31_FULL_AUTO_ADJUNCT_SCHEMA: &str = "openagents.omega.issue31.fullauto.v1";
+pub const ISSUE31_HOST_ADJUNCT_RECORD_TYPE: &str = "host_snapshot";
+pub const ISSUE31_FULL_AUTO_ADJUNCT_RECORD_TYPE: &str = "full_auto_detail";
+/// The fields the host pump adds when it addresses an adjunct to a device.
+///
+/// An omega#47 adjunct describes a host; on its own it names neither the key
+/// that signed it nor the device it is for, so the device's envelope check has
+/// nothing to compare the seal author and the gift wrap recipient against. The
+/// pump states all five together or the record is not delivered at all.
+pub const ISSUE31_ADJUNCT_DELIVERY_KEYS: [&str; 5] = [
+    "recordType",
+    "hostPublicKeyHex",
+    "devicePublicKeyHex",
+    "grantRef",
+    "expectedGeneration",
+];
 pub const ISSUE31_HOST_DISCOVERY_KIND: u16 = 31_990;
 pub const ISSUE31_PRIVATE_RUMOR_KIND: u16 = 14;
 pub const ISSUE31_PRIVATE_SEAL_KIND: u16 = 13;

@@ -7,6 +7,7 @@ mod dispatch;
 mod draft;
 mod evidence_chain;
 mod issue31_adjunct;
+mod issue31_delivery;
 mod panel;
 mod provider_roster;
 mod thread_run_link;
@@ -21,6 +22,10 @@ pub use issue31_adjunct::{
     publish_issue31_host_snapshot, Issue31HostIdentitySource, Issue31HostProjectionError,
     Issue31HostPublication,
     project_issue31_full_auto_adjunct, Issue31FullAutoLiveSources, Issue31FullAutoProjectionError,
+};
+pub use issue31_delivery::{
+    issue31_host_projection_documents, issue31_host_projection_source,
+    latest_issue31_live_reading, set_issue31_live_reading, Issue31FullAutoReading,
 };
 pub use panel::FullAutoPanel;
 pub use provider_roster::{parse_provider_accounts, ProviderAccountRow};

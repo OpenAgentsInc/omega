@@ -950,6 +950,28 @@ pub fn build_issue31_full_auto_adjunct(
     handoffs: &serde_json::Value,
     evidence: &[(serde_json::Value, serde_json::Value)],
 ) -> AdjunctResult<Issue31FullAutoAdjunct> {
+    build_issue31_full_auto_adjunct_document(
+        host_ref,
+        snapshot_ref,
+        generated_at_ms,
+        runs,
+        accounts,
+        handoffs,
+        evidence,
+    )
+    .map(|(adjunct, _)| adjunct)
+}
+
+/// The same detail projection, plus the exact bytes the decoder accepted.
+pub fn build_issue31_full_auto_adjunct_document(
+    host_ref: &str,
+    snapshot_ref: &str,
+    generated_at_ms: u64,
+    runs: &serde_json::Value,
+    accounts: &serde_json::Value,
+    handoffs: &serde_json::Value,
+    evidence: &[(serde_json::Value, serde_json::Value)],
+) -> AdjunctResult<(Issue31FullAutoAdjunct, serde_json::Value)> {
     let document = serde_json::json!({
         "schema": ISSUE31_FULL_AUTO_ADJUNCT_SCHEMA,
         "hostRef": host_ref,
@@ -962,7 +984,8 @@ pub fn build_issue31_full_auto_adjunct(
     });
     let serialized =
         serde_json::to_string(&document).map_err(|_| Issue31FullAutoAdjunctError::InvalidJson)?;
-    decode_issue31_full_auto_adjunct(&serialized)
+    let adjunct = decode_issue31_full_auto_adjunct(&serialized)?;
+    Ok((adjunct, document))
 }
 
 /// Map an Omega Full Auto panel state onto the contract lifecycle.

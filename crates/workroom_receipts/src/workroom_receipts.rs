@@ -28,7 +28,8 @@ pub use issue31_full_auto::{
     Issue31ProviderAccount, Issue31ProviderHandoff, Issue31ProviderHandoffState,
     Issue31ProviderQuota, Issue31ProviderReadiness, MAX_ISSUE31_FULL_AUTO_ACCOUNTS,
     MAX_ISSUE31_FULL_AUTO_CONTROLS, MAX_ISSUE31_FULL_AUTO_HANDOFFS, MAX_ISSUE31_FULL_AUTO_RUNS,
-    MAX_ISSUE31_UNATTENDED_MS, build_issue31_full_auto_adjunct, decode_issue31_full_auto_adjunct,
+    MAX_ISSUE31_UNATTENDED_MS, build_issue31_full_auto_adjunct,
+    build_issue31_full_auto_adjunct_document, decode_issue31_full_auto_adjunct,
     is_issue31_public_text, project_issue31_evidence_pair,
 };
 pub use issue31_host::{
@@ -38,7 +39,7 @@ pub use issue31_host::{
     Issue31ProjectionCapability, Issue31ProjectionSource, Issue31Role, Issue31RoleInput,
     Issue31RoleKind, Issue31RoleStatus, Issue31SourceKind, Issue31TerminalState,
     MAX_ISSUE31_PROJECTION_REFS, MAX_ISSUE31_TIMESTAMP_MS, ProjectionFreshness,
-    build_issue31_host_adjunct, decode_issue31_host_adjunct,
+    build_issue31_host_adjunct, build_issue31_host_adjunct_document, decode_issue31_host_adjunct,
 };
 pub use public_ref::{PUBLIC_REF_MAX_LEN, PublicRef, is_public_safe_ref, sanitize_public_ref};
 pub use receipt::{

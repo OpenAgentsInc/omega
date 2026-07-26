@@ -8,8 +8,18 @@ use async_tungstenite::async_std::{ConnectStream, connect_async};
 use async_tungstenite::tungstenite::Message;
 use futures::{FutureExt, StreamExt, pin_mut, select};
 use nostr::{Event, EventBuilder, JsonUtil, Kind, PublicKey, RelayUrl};
-#[cfg(test)]
-use nostr::{Keys, nips::nip59};
+#[cfg(any(test, feature = "test-support"))]
+use nostr::Keys;
+#[cfg(any(test, feature = "test-support"))]
+use nostr::nips::nip59;
+
+#[cfg(any(test, feature = "test-support"))]
+async fn nip59_extract_rumor(
+    keys: &Keys,
+    event: &Event,
+) -> Result<nip59::UnwrappedGift, nostr::nips::nip59::Error> {
+    nip59::extract_rumor(keys, event).await
+}
 use omega_identity::{
     AdmittedSigningRequest, IdentityService, ReceiptRef, SigningPurpose, UnsignedEventTemplate,
 };
@@ -99,7 +109,7 @@ pub struct WebSocketRelayAdapter {
 
 enum RelayCustody {
     Omega(Arc<IdentityService>),
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     Keys(Keys),
 }
 
@@ -127,8 +137,14 @@ impl WebSocketRelayAdapter {
         )
     }
 
-    #[cfg(test)]
-    pub(crate) fn new_for_keys(
+    /// A relay adapter whose owner key is supplied directly.
+    ///
+    /// Production custody goes through `new`, which reads the key from
+    /// `omega_identity::IdentityService`. This exists for proof harnesses that
+    /// must run without the GPUI app, and is compiled only under `test` or the
+    /// explicit `test-support` feature so it can never reach a shipped build.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn new_for_keys(
         relay_urls: Vec<String>,
         keys: Keys,
     ) -> Result<Self, SarahConversationError> {
@@ -143,8 +159,9 @@ impl WebSocketRelayAdapter {
         )
     }
 
-    #[cfg(test)]
-    pub(crate) fn new_for_keys_with_policy(
+    /// The same headless adapter, with Sarah and community policy stated.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn new_for_keys_with_policy(
         relay_urls: Vec<String>,
         owner_keys: Keys,
         sarah_public_key_hex: String,
@@ -237,7 +254,7 @@ impl WebSocketRelayAdapter {
                 .identity
                 .map(|identity| identity.public_key_hex().as_str().to_string())
                 .ok_or(SarahConversationError::IdentityRequired),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             RelayCustody::Keys(keys) => Ok(keys.public_key().to_hex()),
         }
     }
@@ -718,7 +735,7 @@ impl WebSocketRelayAdapter {
                 Event::from_json(signed.signed_event_json)
                     .map_err(|error| SarahConversationError::Identity(error.to_string()))
             }
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             RelayCustody::Keys(keys) => EventBuilder::auth(challenge, relay)
                 .sign_with_keys(keys)
                 .map_err(|error| SarahConversationError::Identity(error.to_string())),
@@ -804,9 +821,11 @@ impl WebSocketRelayAdapter {
                             gift.content,
                         )
                     }
-                    #[cfg(test)]
+                    #[cfg(any(test, feature = "test-support"))]
                     RelayCustody::Keys(keys) => {
-                        let gift = smol::block_on(nip59::extract_rumor(keys, event))
+                        let gift = smol::block_on(crate::nostr_websocket_relay::nip59_extract_rumor(
+                            keys, event,
+                        ))
                             .map_err(|error| SarahConversationError::Relay(error.to_string()))?;
                         if gift.rumor.kind != Kind::PrivateDirectMessage {
                             return Ok(None);

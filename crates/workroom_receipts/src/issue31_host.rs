@@ -601,6 +601,22 @@ pub fn build_issue31_host_adjunct(
     generated_at_ms: u64,
     sources: &Issue31HostSources<'_>,
 ) -> Result<Issue31HostAdjunct, Issue31HostAdjunctError> {
+    build_issue31_host_adjunct_document(host_ref, snapshot_ref, generated_at_ms, sources)
+        .map(|(adjunct, _)| adjunct)
+}
+
+/// The same snapshot, plus the exact bytes the decoder accepted.
+///
+/// A caller that has to put the snapshot on a wire would otherwise have to
+/// re-encode the typed value, which is a second serializer that can disagree
+/// with the one the contract validated. Returning the validated document means
+/// what is published is what was checked.
+pub fn build_issue31_host_adjunct_document(
+    host_ref: &str,
+    snapshot_ref: &str,
+    generated_at_ms: u64,
+    sources: &Issue31HostSources<'_>,
+) -> Result<(Issue31HostAdjunct, serde_json::Value), Issue31HostAdjunctError> {
     let document = serde_json::json!({
         "schema": ISSUE31_HOST_ADJUNCT_SCHEMA,
         "hostRef": host_ref,
@@ -627,7 +643,8 @@ pub fn build_issue31_host_adjunct(
     });
     let serialized =
         serde_json::to_string(&document).map_err(|_| Issue31HostAdjunctError::InvalidJson)?;
-    decode_issue31_host_adjunct(&serialized)
+    let adjunct = decode_issue31_host_adjunct(&serialized)?;
+    Ok((adjunct, document))
 }
 
 fn build_projection(
