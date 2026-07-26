@@ -7182,29 +7182,28 @@ mod tests {
         let thread_path = repository_path(THREAD_VIEW_PATH);
         let thread = std::fs::read_to_string(&thread_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", thread_path.display()));
-        // OMEGA-DELTA-0055 removed `render_executor_pin` from this loop, along
-        // with the function itself. See the `drawn` list below.
-        for drawing in ["render_executor_disclosure"] {
-            let body = function_body(&thread, drawing).unwrap_or_else(|| {
-                panic!(
-                    "OMEGA-DELTA-0049: cannot find `{drawing}` in {}",
-                    thread_path.display()
-                )
-            });
-            assert!(
-                body.len() > 40,
-                "OMEGA-DELTA-0049: the body read for `{drawing}` is too short to \
-                 be the real one, so this check would pass without reading it",
-            );
-            assert!(
-                !body.contains("omega_zero_base"),
-                "OMEGA-DELTA-0049: `{drawing}` in {} now branches on zero base. \
-                 The disclosure line and its pin are the same code on both \
-                 surfaces; a mode-aware branch here is a second way to draw the \
-                 line, and the cheaper one always wins eventually.",
+        // OMEGA-DELTA-0055 removed `render_executor_pin` from this check, along
+        // with the function itself, which left one name behind. See the `drawn`
+        // list below.
+        let drawing = "render_executor_disclosure";
+        let body = function_body(&thread, drawing).unwrap_or_else(|| {
+            panic!(
+                "OMEGA-DELTA-0049: cannot find `{drawing}` in {}",
                 thread_path.display()
-            );
-        }
+            )
+        });
+        assert!(
+            body.len() > 40,
+            "OMEGA-DELTA-0049: the body read for `{drawing}` is too short to \
+             be the real one, so this check would pass without reading it",
+        );
+        assert!(
+            !body.contains("omega_zero_base"),
+            "OMEGA-DELTA-0049: `{drawing}` in {} now branches on zero base. A \
+             mode-aware branch here is a second way to draw the line, and the \
+             cheaper one always wins eventually.",
+            thread_path.display()
+        );
         // OMEGA-DELTA-0055 removed `self.render_executor_pin(cx)` from this
         // list. The reasoning it carried — "removing the executor line removes
         // the door into the Exo lane" — was true while the pin *was* the door.

@@ -1,3 +1,4 @@
+use chrono::{DateTime, Utc};
 use std::cmp::Reverse;
 use std::ops::Range;
 use std::path::PathBuf;
@@ -325,6 +326,36 @@ impl Match {
 pub struct SessionMatch {
     session_id: acp::SessionId,
     title: SharedString,
+    /// When the thread was last touched, for the age shown beside its title.
+    ///
+    /// omega#100. Threads are named by a summarisation model, so two different
+    /// conversations often carry the same title. The owner hit exactly that:
+    /// "if the last two chats have same name i cant tell the difference". The
+    /// list is already ordered by this field; showing it is what makes the
+    /// order legible.
+    updated_at: DateTime<Utc>,
+}
+
+/// A short age, for sitting beside a thread title.
+///
+/// Deliberately compact — `3s`, `4m`, `2h`, `5d`. This shares a row with a
+/// title in a narrow popup, so "4 minutes ago" would push the title out of
+/// view, which is the opposite of telling two same-named threads apart.
+///
+/// A future timestamp reads as `now` rather than a negative age. Clocks move
+/// backwards, and a thread claiming to be `-3s` old would look like a defect in
+/// the list rather than a defect in the clock.
+fn short_age(updated_at: DateTime<Utc>, now: DateTime<Utc>) -> String {
+    let seconds = now.signed_duration_since(updated_at).num_seconds();
+    if seconds <= 0 {
+        return "now".to_string();
+    }
+    match seconds {
+        0..=59 => format!("{seconds}s"),
+        60..=3599 => format!("{}m", seconds / 60),
+        3600..=86_399 => format!("{}h", seconds / 3600),
+        _ => format!("{}d", seconds / 86_400),
+    }
 }
 
 pub struct EntryMatch {
@@ -536,6 +567,7 @@ impl<T: PromptCompletionProviderDelegate> PromptCompletionProvider<T> {
     fn completion_for_thread(
         session_id: acp::SessionId,
         title: Option<SharedString>,
+        updated_at: Option<DateTime<Utc>>,
         source_range: Range<Anchor>,
         recent: bool,
         source: Arc<T>,
@@ -562,7 +594,26 @@ impl<T: PromptCompletionProviderDelegate> PromptCompletionProvider<T> {
         Completion {
             replace_range: source_range.clone(),
             new_text,
-            label: CodeLabel::plain(title.to_string(), None),
+            // omega#100. The age rides along as dimmed detail.
+            //
+            // `CodeLabel::filtered` treats everything past `label_len` as
+            // secondary, so the title stays the label and the age renders
+            // quietly after it. The filter text is the title alone: typing
+            // `4m` must not match a thread because of how old it is.
+            label: match updated_at {
+                Some(updated_at) => {
+                    let title = title.to_string();
+                    let label_len = title.len();
+                    let age = short_age(updated_at, Utc::now());
+                    CodeLabel::filtered(
+                        format!("{title}  {age}"),
+                        label_len,
+                        Some(&title),
+                        Vec::new(),
+                    )
+                }
+                None => CodeLabel::plain(title.to_string(), None),
+            },
             documentation: None,
             insert_text_mode: None,
             source: project::CompletionSource::Custom,
@@ -1801,6 +1852,7 @@ impl<T: PromptCompletionProviderDelegate> CompletionProvider for PromptCompletio
                                     Match::Thread(thread) => Some(Self::completion_for_thread(
                                         thread.session_id,
                                         Some(thread.title),
+                                        Some(thread.updated_at),
                                         source_range.clone(),
                                         false,
                                         source.clone(),
@@ -1813,6 +1865,7 @@ impl<T: PromptCompletionProviderDelegate> CompletionProvider for PromptCompletio
                                         Some(Self::completion_for_thread(
                                             thread.session_id,
                                             Some(thread.title),
+                                            Some(thread.updated_at),
                                             source_range.clone(),
                                             true,
                                             source.clone(),
@@ -2434,6 +2487,7 @@ fn collect_session_matches(cx: &App) -> Vec<SessionMatch> {
             SessionMatch {
                 session_id: info.session_id,
                 title: session_title(info.title),
+                updated_at: metadata.updated_at,
             }
         })
         .collect()
@@ -3250,10 +3304,12 @@ mod tests {
         let alpha = SessionMatch {
             session_id: acp::SessionId::new("session-alpha"),
             title: "Alpha Session".into(),
+            updated_at: Utc::now(),
         };
         let beta = SessionMatch {
             session_id: acp::SessionId::new("session-beta"),
             title: "Beta Session".into(),
+            updated_at: Utc::now(),
         };
 
         let sessions = vec![alpha.clone(), beta];
@@ -3416,5 +3472,40 @@ mod tests {
             // fallback is suppressed and read_selection should return None.
             assert!(source.read_selection(workspace, false, cx).is_none());
         });
+    }
+
+    /// omega#100. Two threads with the same title are told apart by age.
+    ///
+    /// The boundaries are the point. A naive implementation reports `60s` at
+    /// one minute and `0m` just after, and both read as broken to someone
+    /// watching a list refresh.
+    #[test]
+    fn short_age_is_compact_and_has_no_gaps_at_the_boundaries() {
+        let now = DateTime::parse_from_rfc3339("2026-07-26T12:00:00Z")
+            .expect("a fixed instant")
+            .with_timezone(&Utc);
+        let ago = |seconds: i64| short_age(now - chrono::Duration::seconds(seconds), now);
+
+        assert_eq!(ago(1), "1s");
+        assert_eq!(ago(59), "59s");
+        // One minute is minutes, not "60s".
+        assert_eq!(ago(60), "1m");
+        assert_eq!(ago(3599), "59m");
+        // One hour is hours, not "60m".
+        assert_eq!(ago(3600), "1h");
+        assert_eq!(ago(86_399), "23h");
+        // One day is days, not "24h".
+        assert_eq!(ago(86_400), "1d");
+        assert_eq!(ago(86_400 * 9), "9d");
+    }
+
+    /// A clock that moved backwards is not reported as a negative age.
+    #[test]
+    fn a_future_timestamp_reads_as_now() {
+        let now = DateTime::parse_from_rfc3339("2026-07-26T12:00:00Z")
+            .expect("a fixed instant")
+            .with_timezone(&Utc);
+        assert_eq!(short_age(now, now), "now");
+        assert_eq!(short_age(now + chrono::Duration::seconds(30), now), "now");
     }
 }

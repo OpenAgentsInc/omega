@@ -195,8 +195,14 @@ mod tests {
 
         let line = delegated.label();
         assert!(line.contains("codex-acp"), "{line:?}");
-        assert!(line.contains("engine_lane"), "{line:?}");
+        // omega#100. The class is no longer rendered, so what the reader is
+        // told is *who* ran it and *which run* it belongs to. The class stays
+        // on the record and is asserted above.
         assert!(line.contains("operation.full-auto.77"), "{line:?}");
+        assert!(
+            !line.contains(ExecutorClass::NativeLoop.token()),
+            "a delegated line must never read as the native loop: {line:?}"
+        );
     }
 
     /// The honest-attribution rule as an oracle: only the native loop is
@@ -216,10 +222,24 @@ mod tests {
             };
             assert!(disclosure.is_coherent(), "{class:?}");
             assert_ne!(disclosure.class, ExecutorClass::NativeLoop);
+            // omega#100. The record still carries the class; the line no
+            // longer leads with it.
+            //
+            // This asserted `label().starts_with(class.token())`, which was
+            // right while the wire token was rendered. The owner asked for the
+            // token to go — `ExecutorClass::token` documents that it is "never
+            // shown to a user on its own", and the line was leading with one.
+            // What the test is really for survives: a routed or delegated
+            // record must not read as the native loop. So it now asserts the
+            // agent id is named and the native-loop token appears nowhere.
+            let label = disclosure.label();
             assert!(
-                disclosure.label().starts_with(class.token()),
-                "the line must lead with the class that ran the work: {}",
-                disclosure.label()
+                label.starts_with("codex-acp"),
+                "the line must name the agent that ran the work: {label}"
+            );
+            assert!(
+                !label.contains(ExecutorClass::NativeLoop.token()),
+                "a {class:?} record must never read as the native loop: {label}"
             );
         }
     }

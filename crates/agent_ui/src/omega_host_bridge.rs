@@ -1786,7 +1786,10 @@ mod tests {
 
         let line = disclosure.label();
         assert!(line.contains(CODEX_AGENT_ID), "{line:?}");
-        assert!(line.contains("engine_lane"), "{line:?}");
+        // omega#100. The class is asserted on the record above, not on the
+        // line: the wire token is no longer rendered. What survives here is
+        // the property the test is named for — a restarted process still
+        // discloses the run that owns the thread.
         assert!(line.contains("operation.full-auto.77"), "{line:?}");
     }
 

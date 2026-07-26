@@ -1099,7 +1099,36 @@ mod tests {
             AgentId::new("codex-local")
         );
 
+        // OMEGA-DELTA-0055 changed what unpinned means. This router has an
+        // external ACP agent attached, and an unpinned thread now goes to it
+        // rather than to the native loop — that is the whole point of removing
+        // the pin control: a person no longer has to know the word
+        // `external_acp` to reach Codex.
+        //
+        // The property this test is named for is unchanged: dispatch follows
+        // the recorded decision. So the assertion still pairs the chosen class
+        // with the executor actually dispatched to.
         let unpinned = router.decide("s-unpinned", None);
+        assert_eq!(unpinned.chosen, ExecutorClass::ExternalAcp);
+        assert_eq!(
+            router.executor(unpinned.chosen).agent_id(),
+            AgentId::new("codex-acp")
+        );
+    }
+
+    /// With nothing attached, an unpinned thread is still the native loop.
+    ///
+    /// OMEGA-DELTA-0055 routes unpinned threads to an attached external agent.
+    /// The case above proves that. This proves the other half: automatic
+    /// routing must not invent an executor that is not there, or a machine
+    /// with no coding agent installed would dispatch into nothing.
+    #[test]
+    fn an_unpinned_thread_with_nothing_attached_is_the_native_loop() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let router = OmegaAgentConnection::new(stub("omega-agent"), journal_in(&directory));
+
+        let unpinned = router.decide("s-alone", None);
+
         assert_eq!(unpinned.chosen, ExecutorClass::NativeLoop);
         assert_eq!(
             router.executor(unpinned.chosen).agent_id(),
@@ -1229,13 +1258,18 @@ mod tests {
         // Its own session id; see `an_unhonourable_pin_is_kept_and_explained`.
         let session = acp::SessionId::new("s-human-pin");
 
+        // OMEGA-DELTA-0055. An external agent is attached here, so an unpinned
+        // thread is routed to it and the reason recorded is
+        // `DetectedExternalAcp`, not `UnpinnedDefault`. What this test is for
+        // is the *move* that follows — a human pin relocating a live thread and
+        // saying why — and that is unchanged.
         assert_eq!(
             router.decide(session.0.as_ref(), None).reason,
-            RouteReason::UnpinnedDefault
+            RouteReason::DetectedExternalAcp
         );
         assert_eq!(
             router.executor_for(&session).agent_id(),
-            AgentId::new("omega-agent")
+            AgentId::new("codex-acp")
         );
 
         let decision = router.pin_session(
