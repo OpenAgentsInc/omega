@@ -5705,4 +5705,305 @@ mod tests {
             }
         ));
     }
+
+    // ---------------------------------------------------------------------
+    // omega#49 device-proof host
+    // ---------------------------------------------------------------------
+
+    /// Read a `Keys` from a 64-hex secret in the environment.
+    #[cfg(test)]
+    fn device_proof_keys(variable: &str) -> Keys {
+        let secret = std::env::var(variable)
+            .unwrap_or_else(|_| panic!("{variable} must be a 64-hex secret key"));
+        Keys::parse(secret.trim()).unwrap_or_else(|error| panic!("{variable}: {error}"))
+    }
+
+    /// Publish one event through a real adapter, meeting the NIP-42 challenge
+    /// lazily exactly as `publish_with_auth` does.
+    #[cfg(test)]
+    fn device_proof_publish(
+        relay: &mut crate::nostr_websocket_relay::WebSocketRelayAdapter,
+        auth_url: &str,
+        keys: &Keys,
+        record: &Event,
+    ) -> Result<(), SarahConversationError> {
+        match relay.publish(record) {
+            Err(SarahConversationError::IdentityRequired) => {
+                let challenge = relay
+                    .auth_challenge()
+                    .expect("relay must expose a challenge after refusing the publish");
+                let auth_event = EventBuilder::new(Kind::Custom(22242), "")
+                    .tag(Tag::parse(["relay", auth_url]).expect("relay tag"))
+                    .tag(
+                        Tag::parse(["challenge", challenge.challenge.as_str()])
+                            .expect("challenge tag"),
+                    )
+                    .sign_with_keys(keys)
+                    .expect("signed auth event");
+                relay
+                    .authenticate(&auth_event)
+                    .expect("NIP-42 authenticate");
+                relay.publish(record)
+            }
+            other => other,
+        }
+    }
+
+    /// The real production issue #31 host pump, run headless against a live relay.
+    ///
+    /// This is the host half of the omega#49 device proof. Everything downstream
+    /// of the signer is the production path: `sync_issue31_host` is the same
+    /// entry point `bootstrap` calls, so discovery v2, the pairing state machine,
+    /// command execution, source projection and the withheld-source statement are
+    /// all the shipped code. The only substitution is identity custody — the
+    /// owner key is supplied as a keypair rather than drawn from
+    /// `omega_identity::IdentityService`, because custody needs the GPUI app and
+    /// this harness must run without a window. That substitution is recorded on
+    /// the issue rather than hidden here: a run of this harness proves the host
+    /// protocol, not owner key custody.
+    ///
+    /// Sarah's own turns are authored by a second keypair the harness holds. The
+    /// admitted OpenAgents turn service is out of scope for a device proof and is
+    /// deliberately not stood up; a reply published this way is a real signed
+    /// Sarah record on a real relay, and is not evidence that the turn service
+    /// produced it.
+    ///
+    /// ```sh
+    /// OMEGA_DEVICE_PROOF_RELAY=wss://relay.openagents.com \
+    /// OMEGA_DEVICE_PROOF_HOST_SECRET=<64 hex> \
+    /// OMEGA_DEVICE_PROOF_SARAH_SECRET=<64 hex> \
+    /// OMEGA_DEVICE_PROOF_DEVICE_PUBKEY=<64 hex> \
+    /// OMEGA_DEVICE_PROOF_STATE=/path/to/state.json \
+    ///   cargo test -p omega_effectd --lib live_device_proof_host -- --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore = "device proof host; set OMEGA_DEVICE_PROOF_RELAY"]
+    fn live_device_proof_host() {
+        let Ok(relay_url) = std::env::var("OMEGA_DEVICE_PROOF_RELAY") else {
+            eprintln!("OMEGA_DEVICE_PROOF_RELAY unset; skipping");
+            return;
+        };
+        let auth_url =
+            std::env::var("OMEGA_DEVICE_PROOF_AUTH_URL").unwrap_or_else(|_| relay_url.clone());
+        let host_keys = device_proof_keys("OMEGA_DEVICE_PROOF_HOST_SECRET");
+        let sarah_keys = device_proof_keys("OMEGA_DEVICE_PROOF_SARAH_SECRET");
+        let device_public_key_hex = std::env::var("OMEGA_DEVICE_PROOF_DEVICE_PUBKEY")
+            .expect("OMEGA_DEVICE_PROOF_DEVICE_PUBKEY must be the simulator's 64-hex device key")
+            .trim()
+            .to_string();
+        let state_path = std::path::PathBuf::from(
+            std::env::var("OMEGA_DEVICE_PROOF_STATE")
+                .expect("OMEGA_DEVICE_PROOF_STATE must be a durable state file path"),
+        );
+        let seconds: u64 = std::env::var("OMEGA_DEVICE_PROOF_SECONDS")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(180);
+        let revoke_after: Option<u64> = std::env::var("OMEGA_DEVICE_PROOF_REVOKE_AFTER")
+            .ok()
+            .and_then(|value| value.parse().ok());
+        let seed = std::env::var("OMEGA_DEVICE_PROOF_SEED").is_ok();
+        let quarantine = std::env::var("OMEGA_DEVICE_PROOF_QUARANTINE").is_ok();
+
+        let signer = SigningIdentity::from_keys(host_keys.clone());
+        let owner_public_key_hex = signer.public_key_hex.clone();
+        let sarah_public_key_hex = sarah_keys.public_key().to_hex();
+        let mut config = SarahConversationConfig::mock_fixture();
+        config.identity.owner_public_key_hex = owner_public_key_hex.clone();
+        config.identity.sarah_public_key_hex = sarah_public_key_hex.clone();
+        config.conversation_digest = owner_public_key_hex[..24].to_string();
+        config.relay_url = Some(relay_url.clone());
+        config.admitted_device_public_key_hexes = vec![device_public_key_hex.clone()];
+        config.approved_device_scopes = vec![
+            crate::Issue31PairingScope::ObserveIssue31,
+            crate::Issue31PairingScope::SendMessage,
+            crate::Issue31PairingScope::InterruptTurn,
+        ];
+        let conversation_ref = config.conversation_ref();
+
+        // Seed the owner-private sources before the host starts, so the very
+        // first projection pass has something to fan out.
+        if seed {
+            let mut sarah_relay = crate::nostr_websocket_relay::WebSocketRelayAdapter::new_for_keys(
+                vec![relay_url.clone()],
+                sarah_keys.clone(),
+            )
+            .expect("sarah adapter");
+            sarah_relay.connect().expect("sarah connect");
+            let now = unix_now();
+            let greeting = EventBuilder::new(
+                Kind::Custom(crate::ISSUE31_PRIVATE_RUMOR_KIND),
+                "Sarah here. This reply crossed a real relay from a real Omega host.",
+            )
+            .tag(Tag::parse(["conversation", conversation_ref.as_str()]).expect("conversation tag"))
+            .custom_created_at(nostr::Timestamp::from(now))
+            .sign_with_keys(&sarah_keys)
+            .expect("signed Sarah message");
+            device_proof_publish(&mut sarah_relay, &auth_url, &sarah_keys, &greeting)
+                .expect("publish the Sarah greeting");
+            eprintln!("device-proof: seeded Sarah message {}", greeting.id.to_hex());
+
+            // One encrypted engram, so "inspect memory" has a real source.
+            let owner_public_key = PublicKey::from_hex(&owner_public_key_hex).expect("owner key");
+            let engram_plaintext =
+                "Chris prefers evidence-bound reports over confident summaries.";
+            let engram_ciphertext = nip44::encrypt(
+                sarah_keys.secret_key(),
+                &owner_public_key,
+                engram_plaintext,
+                nip44::Version::default(),
+            )
+            .expect("nip44 encrypt the engram");
+            let engram = EventBuilder::new(
+                Kind::Custom(crate::SARAH_ENGRAM_KIND),
+                engram_ciphertext,
+            )
+            .tag(Tag::parse(["d", &"1".repeat(64)]).expect("d tag"))
+            .tag(Tag::parse(["p", owner_public_key_hex.as_str()]).expect("p tag"))
+            .tag(Tag::parse(["alt", "encrypted agent memory record"]).expect("alt tag"))
+            .tag(Tag::parse(["conversation", conversation_ref.as_str()]).expect("conversation tag"))
+            .custom_created_at(nostr::Timestamp::from(now))
+            .sign_with_keys(&sarah_keys)
+            .expect("signed engram");
+            device_proof_publish(&mut sarah_relay, &auth_url, &sarah_keys, &engram)
+                .expect("publish the engram");
+            eprintln!("device-proof: seeded engram {}", engram.id.to_hex());
+
+            if quarantine {
+                // Inside every record-level bound and outside the projection body
+                // contract, so the host quarantines it and must say so.
+                let unreadable = EventBuilder::new(
+                    Kind::Custom(crate::ISSUE31_PRIVATE_RUMOR_KIND),
+                    "",
+                )
+                .tag(
+                    Tag::parse(["conversation", conversation_ref.as_str()])
+                        .expect("conversation tag"),
+                )
+                .custom_created_at(nostr::Timestamp::from(now + 1))
+                .sign_with_keys(&sarah_keys)
+                .expect("signed unreadable source");
+                device_proof_publish(&mut sarah_relay, &auth_url, &sarah_keys, &unreadable)
+                    .expect("publish the unreadable source");
+                eprintln!(
+                    "device-proof: seeded quarantine source {}",
+                    unreadable.id.to_hex()
+                );
+            }
+        }
+
+        let relay = crate::nostr_websocket_relay::WebSocketRelayAdapter::new_for_keys(
+            vec![relay_url.clone()],
+            host_keys,
+        )
+        .expect("host adapter");
+        let host_configuration = Issue31HostConfiguration {
+            host_ref: "omega.host.local".into(),
+            host_public_key_hex: owner_public_key_hex.clone(),
+            sarah_public_key_hex: sarah_public_key_hex.clone(),
+            conversation: conversation_ref.clone(),
+            display_name: "Local Omega".into(),
+            relay_urls: vec![relay_url.clone()],
+            generation: ISSUE31_NOSTR_HOST_GENERATION,
+        };
+        let persisted =
+            load_issue31_host_state(&state_path, &host_configuration).expect("load durable state");
+        let mut controller = match persisted {
+            Some(persisted) => {
+                eprintln!("device-proof: resumed durable host state at {state_path:?}");
+                persisted.controller
+            }
+            None => Issue31HostController::new(host_configuration).expect("host controller"),
+        };
+        controller
+            .set_admitted_device_policy(
+                config.admitted_device_public_key_hexes.clone(),
+                config.approved_device_scopes.clone(),
+            )
+            .expect("admit the device");
+
+        let mut client = SarahConversationClient::with_relay(config, Box::new(relay), signer);
+        client.issue31_host = Some(controller);
+        client.issue31_state_path = Some(state_path);
+
+        eprintln!("device-proof: host  npub/hex {owner_public_key_hex}");
+        eprintln!("device-proof: sarah hex      {sarah_public_key_hex}");
+        eprintln!("device-proof: device hex     {device_public_key_hex}");
+        eprintln!("device-proof: conversation   {conversation_ref}");
+        eprintln!("device-proof: relay          {relay_url}");
+
+        let started = std::time::Instant::now();
+        let mut revoked = false;
+        let mut announced_grants: BTreeMap<String, String> = BTreeMap::new();
+        while started.elapsed().as_secs() < seconds {
+            match client.sync_issue31_host() {
+                Ok(()) => {}
+                Err(error) => eprintln!("device-proof: sync error {error}"),
+            }
+            let now = unix_now();
+            for (event_id, reason) in &client.issue31_quarantined_events {
+                if announced_grants
+                    .insert(format!("quarantine:{event_id}"), reason.clone())
+                    .as_ref()
+                    != Some(reason)
+                {
+                    eprintln!("device-proof: QUARANTINED {} · {reason}", &event_id[..16]);
+                }
+            }
+            for (key, substance) in &client.issue31_withheld_emissions {
+                let line = format!("{substance:?}");
+                if announced_grants.insert(format!("withheld:{key}"), line.clone()).as_ref()
+                    != Some(&line)
+                {
+                    eprintln!("device-proof: withheld {key} · {line}");
+                }
+            }
+            if let Some(host) = client.issue31_host.as_ref() {
+                for projection in host.grant_projections(now).unwrap_or_default() {
+                    let line = format!(
+                        "{} · {} · generation {} · scopes {:?}",
+                        projection.device_fingerprint,
+                        projection.status,
+                        projection.generation,
+                        projection.scopes
+                    );
+                    if announced_grants.get(&projection.grant_ref) != Some(&line) {
+                        eprintln!("device-proof: grant {} · {line}", projection.grant_ref);
+                        announced_grants.insert(projection.grant_ref.clone(), line);
+                    }
+                }
+            }
+            if let Some(revoke_after) = revoke_after {
+                if !revoked && started.elapsed().as_secs() >= revoke_after {
+                    let grant_refs: Vec<String> = client
+                        .issue31_host
+                        .as_ref()
+                        .map(|host| {
+                            host.grant_projections(now)
+                                .unwrap_or_default()
+                                .into_iter()
+                                .filter(|projection| projection.status == "active")
+                                .map(|projection| projection.grant_ref)
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    for grant_ref in grant_refs {
+                        match client.revoke_issue31_grant(
+                            &grant_ref,
+                            Some("reason.omega.owner_revoked".to_string()),
+                            format!("idempotency.device_proof.revoke.{grant_ref}"),
+                            grant_ref.clone(),
+                        ) {
+                            Ok(_) => eprintln!("device-proof: REVOKED {grant_ref}"),
+                            Err(error) => eprintln!("device-proof: revoke failed {error}"),
+                        }
+                        revoked = true;
+                    }
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_secs(3));
+        }
+        eprintln!("device-proof: host stopped after {seconds}s");
+    }
+
 }

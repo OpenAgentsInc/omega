@@ -128,7 +128,10 @@ impl WebSocketRelayAdapter {
     }
 
     #[cfg(test)]
-    fn new_for_keys(relay_urls: Vec<String>, keys: Keys) -> Result<Self, SarahConversationError> {
+    pub(crate) fn new_for_keys(
+        relay_urls: Vec<String>,
+        keys: Keys,
+    ) -> Result<Self, SarahConversationError> {
         let public_key_hex = keys.public_key().to_hex();
         Self::with_custody(
             relay_urls,
