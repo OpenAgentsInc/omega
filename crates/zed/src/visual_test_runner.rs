@@ -124,6 +124,7 @@ use {
     acp_thread::{AgentConnection, StubAgentConnection},
     agent_client_protocol::schema::v1 as acp,
     agent_servers::{AgentServer, AgentServerDelegate},
+    agent_ui::Agent,
     anyhow::{Context as _, Result},
     assets::Assets,
     editor::display_map::DisplayRow,
@@ -419,6 +420,28 @@ fn run_visual_tests(project_path: PathBuf, update_baseline: bool) -> Result<()> 
     let mut passed = 0;
     let mut failed = 0;
     let mut updated = 0;
+
+    // `OMEGA_EXO_VISUAL_ONLY=1` runs the real Exo conversation workspace
+    // proof and nothing else. The lane file must name an isolated Exo install.
+    // This path connects over the shipped ACP stdio transport and sends a real
+    // turn before it captures the wide and narrow layouts.
+    #[cfg(feature = "visual-tests")]
+    if std::env::var("OMEGA_EXO_VISUAL_ONLY").is_ok() {
+        println!("\n--- Omega: real Exo conversation workspace ---");
+        let outcome = run_omega_exo_visual_tests(app_state.clone(), &mut cx, update_baseline);
+        teardown_shared_window(workspace_window, &mut cx);
+        return match outcome {
+            Ok(TestResult::Passed) => {
+                println!("\u{2713} omega_exo_workspace: PASSED");
+                Ok(())
+            }
+            Ok(TestResult::BaselineUpdated(_)) => {
+                println!("\u{2713} omega_exo_workspace: Baselines updated");
+                Ok(())
+            }
+            Err(error) => Err(error.context("omega_exo_workspace")),
+        };
+    }
 
     // `OMEGA_VISUAL_ONLY=1` runs Omega's own suite and nothing else.
     //
@@ -728,7 +751,10 @@ fn run_visual_tests(project_path: PathBuf, update_baseline: bool) -> Result<()> 
             updated += 1;
         }
         Err(e) => {
-            eprintln!("\u{2717} external_agent_harness_maintenance: FAILED - {}", e);
+            eprintln!(
+                "\u{2717} external_agent_harness_maintenance: FAILED - {}",
+                e
+            );
             failed += 1;
         }
     }
@@ -2174,7 +2200,9 @@ fn run_omega_agent_visual_tests_inner(
                     ..Default::default()
                 },
                 |window, cx| {
-                    cx.new(|cx| Workspace::new(None, project.clone(), app_state.clone(), window, cx))
+                    cx.new(|cx| {
+                        Workspace::new(None, project.clone(), app_state.clone(), window, cx)
+                    })
                 },
             )
         })
@@ -2768,7 +2796,9 @@ fn run_omega_restart_visual_tests_inner(
                     ..Default::default()
                 },
                 |window, cx| {
-                    cx.new(|cx| Workspace::new(None, project.clone(), app_state.clone(), window, cx))
+                    cx.new(|cx| {
+                        Workspace::new(None, project.clone(), app_state.clone(), window, cx)
+                    })
                 },
             )
         })
@@ -2963,6 +2993,321 @@ impl AgentServer for StubAgentServer {
     fn into_any(self: Rc<Self>) -> Rc<dyn Any> {
         self
     }
+}
+
+/// A visual-test server that connects to one real, explicitly named Exo lane.
+///
+/// The server stores only the lane path so it remains `Send`, as
+/// [`AgentServer`] requires. The connection itself stays on the GPUI thread.
+#[derive(Clone)]
+#[cfg(target_os = "macos")]
+struct ExoVisualAgentServer {
+    lane_path: PathBuf,
+}
+
+#[cfg(target_os = "macos")]
+impl AgentServer for ExoVisualAgentServer {
+    fn logo(&self) -> ui::IconName {
+        ui::IconName::OmegaAssistant
+    }
+
+    fn agent_id(&self) -> AgentId {
+        "Exo".into()
+    }
+
+    fn connect(
+        &self,
+        _delegate: AgentServerDelegate,
+        project: Entity<Project>,
+        cx: &mut App,
+    ) -> gpui::Task<gpui::Result<Rc<dyn AgentConnection>>> {
+        let lane_path = self.lane_path.clone();
+        let agent_server_store = project.read(cx).agent_server_store().downgrade();
+        cx.spawn(async move |cx| {
+            agent_ui::omega_exo_connection::connect_configured_lane(
+                &lane_path,
+                project,
+                agent_server_store,
+                cx,
+            )
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("the Exo visual lane file is not configured"))
+        })
+    }
+
+    fn into_any(self: Rc<Self>) -> Rc<dyn Any> {
+        self
+    }
+}
+
+#[cfg(all(target_os = "macos", feature = "visual-tests"))]
+fn run_omega_exo_visual_tests(
+    app_state: Arc<AppState>,
+    cx: &mut VisualTestAppContext,
+    update_baseline: bool,
+) -> Result<TestResult> {
+    let lane_path = PathBuf::from(
+        std::env::var("OMEGA_EXO_VISUAL_LANE_FILE")
+            .context("set OMEGA_EXO_VISUAL_LANE_FILE to an isolated Exo lane file")?,
+    );
+    anyhow::ensure!(
+        lane_path.is_file(),
+        "the Exo visual lane does not exist: {}",
+        lane_path.display()
+    );
+
+    // Use independent native windows instead of resizing one hidden Metal
+    // window. The macOS platform does not dispatch a bounds callback for that
+    // test-only resize, so a second screenshot can silently retain the first
+    // viewport. Two fresh windows prove both responsive branches directly.
+    let wide = run_omega_exo_visual_capture(
+        app_state.clone(),
+        cx,
+        lane_path.clone(),
+        "omega_exo_workspace_wide",
+        size(px(1320.), px(860.)),
+        update_baseline,
+    )?;
+    let narrow = run_omega_exo_visual_capture(
+        app_state,
+        cx,
+        lane_path,
+        "omega_exo_workspace_narrow",
+        size(px(720.), px(900.)),
+        update_baseline,
+    )?;
+
+    for result in [&wide, &narrow] {
+        if let TestResult::BaselineUpdated(path) = result {
+            return Ok(TestResult::BaselineUpdated(path.clone()));
+        }
+    }
+    Ok(TestResult::Passed)
+}
+
+#[cfg(all(target_os = "macos", feature = "visual-tests"))]
+fn run_omega_exo_visual_capture(
+    app_state: Arc<AppState>,
+    cx: &mut VisualTestAppContext,
+    lane_path: PathBuf,
+    test_name: &'static str,
+    window_size: gpui::Size<gpui::Pixels>,
+    update_baseline: bool,
+) -> Result<TestResult> {
+    use agent_ui::AgentPanel;
+
+    let project_dir = tempfile::tempdir()?.keep().canonicalize()?;
+    let project = cx.update(|cx| {
+        Project::local(
+            app_state.client.clone(),
+            app_state.node_runtime.clone(),
+            app_state.user_store.clone(),
+            app_state.languages.clone(),
+            app_state.fs.clone(),
+            None,
+            project::LocalProjectFlags {
+                init_worktree_trust: false,
+                ..Default::default()
+            },
+            cx,
+        )
+    });
+    let add_worktree = project.update(cx, |project, cx| {
+        project.find_or_create_worktree(&project_dir, true, cx)
+    });
+    cx.background_executor.allow_parking();
+    cx.foreground_executor
+        .block_test(add_worktree)
+        .context("failed to add the Exo visual worktree")?;
+    cx.background_executor.forbid_parking();
+    cx.run_until_parked();
+
+    let bounds = Bounds {
+        origin: point(px(-10_000.), px(-10_000.)),
+        size: window_size,
+    };
+    let workspace_window: WindowHandle<Workspace> = cx
+        .update(|cx| {
+            cx.open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(bounds)),
+                    focus: false,
+                    show: true,
+                    ..Default::default()
+                },
+                |window, cx| {
+                    cx.new(|cx| {
+                        Workspace::new(None, project.clone(), app_state.clone(), window, cx)
+                    })
+                },
+            )
+        })
+        .context("failed to open the Exo workspace window")?;
+    cx.run_until_parked();
+
+    let (weak_workspace, async_window_cx) = workspace_window
+        .update(cx, |workspace, window, cx| {
+            (workspace.weak_handle(), window.to_async(cx))
+        })
+        .context("failed to get the Exo workspace handle")?;
+    cx.background_executor.allow_parking();
+    let panel = cx
+        .foreground_executor
+        .block_test(AgentPanel::load(weak_workspace, async_window_cx))
+        .context("failed to load the Exo Agent panel")?;
+    cx.background_executor.forbid_parking();
+
+    workspace_window
+        .update(cx, |workspace, window, cx| {
+            workspace.add_panel(panel.clone(), window, cx);
+            workspace.open_panel::<AgentPanel>(window, cx);
+            panel.update(cx, |panel, cx| {
+                use workspace::dock::Panel as _;
+                panel.set_zoomed(true, window, cx);
+            });
+        })
+        .context("failed to open the Exo Agent panel")?;
+    cx.run_until_parked();
+
+    // Keep capture failures inside this closure so the real ACP connection is
+    // always removed below. Otherwise an early assertion or screenshot error
+    // masks its own cause with GPUI's leaked ElicitationStore check.
+    let capture = (|| -> Result<TestResult> {
+        let server: Rc<dyn AgentServer> = Rc::new(ExoVisualAgentServer { lane_path });
+        cx.update_window(workspace_window.into(), |_, window, cx| {
+            panel.update(cx, |panel, cx| {
+                panel.open_external_thread_with_server(server, window, cx);
+            });
+        })?;
+
+        // Connecting the child process and completing ACP initialization
+        // require real I/O. Poll the visible state for at most five seconds;
+        // one `run_until_parked` can return before stdio initialization wakes
+        // the foreground executor.
+        cx.background_executor.allow_parking();
+        for _ in 0..100 {
+            cx.run_until_parked();
+            if cx.read(|cx| {
+                panel
+                    .read(cx)
+                    .active_thread_view_for_tests()
+                    .is_some_and(|view| view.read(cx).active_thread().is_some())
+            }) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        cx.background_executor.forbid_parking();
+
+        let thread_view = cx
+            .read(|cx| panel.read(cx).active_thread_view_for_tests().cloned())
+            .ok_or_else(|| anyhow::anyhow!("the Exo workspace has no active thread"))?;
+        let thread = cx
+            .read(|cx| {
+                thread_view
+                    .read(cx)
+                    .active_thread()
+                    .map(|active| active.read(cx).thread.clone())
+            })
+            .ok_or_else(|| anyhow::anyhow!("the Exo workspace thread is not available"))?;
+
+        let marker = "OMEGA-EXO-PANE-READY";
+        let prompt =
+            format!("Run one tool that prints OMEGA-EXO-TOOL, then reply with exactly {marker}.");
+        let send = thread.update(cx, |thread, cx| thread.send(vec![prompt.into()], cx));
+        cx.background_executor.allow_parking();
+        let send_result = cx.foreground_executor.block_test(send);
+        cx.background_executor.forbid_parking();
+        send_result.context("the real Exo visual turn failed")?;
+        cx.run_until_parked();
+
+        let (transcript, turn) = cx.read(|cx| {
+            let thread = thread.read(cx);
+            let connection = thread
+                .connection()
+                .clone()
+                .downcast::<agent_ui::omega_exo_connection::ExoHarnessConnection>()
+                .expect("the visual thread must retain its Exo connection");
+            (thread.to_markdown(cx), connection.turn())
+        });
+        anyhow::ensure!(
+            transcript.contains(marker),
+            "the real Exo response did not reach the transcript:\n{transcript}"
+        );
+        anyhow::ensure!(
+            transcript.contains("Tool Call: shell"),
+            "the real Exo tool call did not reach the transcript:\n{transcript}"
+        );
+        anyhow::ensure!(
+            transcript.contains("OMEGA-EXO-TOOL"),
+            "the real Exo tool result did not reach the transcript:\n{transcript}"
+        );
+        anyhow::ensure!(
+            turn.phase == agent_ui::omega_exo_connection::ExoTurnPhase::Completed,
+            "the real Exo turn did not complete: {turn:?}"
+        );
+        anyhow::ensure!(
+            turn.exo_session_id.is_some()
+                && turn.exo_turn_id.is_some()
+                && turn.latest_event_id.is_some(),
+            "the real Exo turn did not return durable references: {turn:?}"
+        );
+
+        let actual_size = cx.update_window(workspace_window.into(), |_, window, _cx| {
+            window.viewport_size()
+        })?;
+        anyhow::ensure!(
+            actual_size == window_size,
+            "{test_name} opened at {actual_size:?}, expected {window_size:?}"
+        );
+
+        run_visual_test(test_name, workspace_window.into(), cx, update_baseline)
+    })();
+
+    // Drop every owner of the real ACP connection before the runner's leaked
+    // entity check. The panel's connection store retains a successful custom
+    // connection after its thread and window close. Replacing that cached
+    // entry first lets the Exo child and its ElicitationStore terminate.
+    panel.update(cx, |panel, cx| {
+        panel.connection_store().update(cx, |store, cx| {
+            store.restart_connection(
+                Agent::Custom { id: "Exo".into() },
+                Rc::new(StubAgentServer::new(StubAgentConnection::new())),
+                cx,
+            );
+        });
+    });
+    cx.run_until_parked();
+
+    workspace_window
+        .update(cx, |workspace, window, cx| {
+            workspace.remove_panel(&panel, window, cx);
+            let project = workspace.project().clone();
+            project.update(cx, |project, cx| {
+                let worktree_ids: Vec<_> = project
+                    .worktrees(cx)
+                    .map(|worktree| worktree.read(cx).id())
+                    .collect();
+                for id in worktree_ids {
+                    project.remove_worktree(id, cx);
+                }
+            });
+        })
+        .log_err();
+    cx.run_until_parked();
+    drop(panel);
+    drop(project);
+    cx.update_window(workspace_window.into(), |_, window, _cx| {
+        window.remove_window();
+    })
+    .log_err();
+    cx.run_until_parked();
+    for _ in 0..15 {
+        cx.advance_clock(Duration::from_millis(100));
+        cx.run_until_parked();
+    }
+
+    capture
 }
 
 #[cfg(all(target_os = "macos", feature = "visual-tests"))]
@@ -4578,11 +4923,11 @@ fn run_external_agent_maintenance_visual_tests(
     update_baseline: bool,
 ) -> Result<TestResult> {
     use ::collections::HashMap;
+    use gpui::UpdateGlobal as _;
     use project::agent_registry_store::{
         AgentRegistryStore, RegistryAgent, RegistryAgentMetadata, RegistryBinaryAgent,
         RegistryTargetConfig,
     };
-    use gpui::UpdateGlobal as _;
     use settings::SettingsStore;
 
     const HEALTHY: &str = "omega-visual-harness";
@@ -4741,8 +5086,7 @@ fn run_external_agent_maintenance_visual_tests(
     // has to be allowed to park while it waits for them. This test runs last.
     cx.executor().allow_parking();
 
-    let outcome: Arc<std::sync::Mutex<Option<Result<()>>>> =
-        Arc::new(std::sync::Mutex::new(None));
+    let outcome: Arc<std::sync::Mutex<Option<Result<()>>>> = Arc::new(std::sync::Mutex::new(None));
     let setup = cx.update(|cx| {
         let outcome = outcome.clone();
         cx.background_spawn(async move {

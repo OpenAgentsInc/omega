@@ -41,6 +41,7 @@ use language_model::{
     LanguageModelProvider, LanguageModelProviderId, LanguageModelRegistry, Speed,
 };
 use notifications::status_toast::StatusToast;
+use omega_exo_lane::ObservedExoCapabilityState;
 use omega_front_door::{ExecutorClass, ExecutorDisclosure, ExecutorPin, PinGesture};
 use settings::{update_settings_file, update_settings_file_with_completion};
 use ui::{
@@ -658,6 +659,8 @@ pub struct ThreadView {
     /// `OMEGA-DELTA-0030`. Polls the engine for the linked run. Present only
     /// on threads an engine lane executed.
     _omega_run_link_task: Option<Task<()>>,
+    exo_inspector_expanded: bool,
+    _exo_inspection_task: Option<Task<()>>,
 }
 impl Focusable for ThreadView {
     fn focus_handle(&self, cx: &App) -> FocusHandle {
@@ -1039,6 +1042,8 @@ impl ThreadView {
             _sandbox_status_refresh_task: None,
             omega_run_records: None,
             _omega_run_link_task: None,
+            exo_inspector_expanded: true,
+            _exo_inspection_task: None,
             hovered_edited_file_buttons: None,
             in_flight_prompt: None,
             message_editor,
@@ -12146,21 +12151,583 @@ impl ThreadView {
         )
     }
 
+    fn exo_connection(
+        &self,
+        cx: &App,
+    ) -> Option<Rc<crate::omega_exo_connection::ExoHarnessConnection>> {
+        self.thread
+            .read(cx)
+            .connection()
+            .clone()
+            .downcast::<crate::omega_exo_connection::ExoHarnessConnection>()
+    }
+
+    fn refresh_exo_inspection(&mut self, cx: &mut Context<Self>) {
+        if self._exo_inspection_task.is_some() {
+            return;
+        }
+        let Some(exo) = self.exo_connection(cx) else {
+            return;
+        };
+        let refresh = exo.refresh_inspection(cx);
+        self._exo_inspection_task = Some(cx.spawn(async move |this, cx| {
+            let result = refresh.await;
+            if let Err(error) = this.update(cx, |this, cx| {
+                this._exo_inspection_task = None;
+                cx.notify();
+            }) {
+                log::debug!("omega#95: Exo inspector closed during refresh: {error}");
+                return;
+            }
+            if let Err(error) = result {
+                log::warn!("omega#95: Exo inspection refresh failed: {error}");
+            }
+        }));
+        cx.notify();
+    }
+
+    fn ensure_exo_inspection(&mut self, cx: &mut Context<Self>) {
+        let needs_refresh = self.exo_connection(cx).is_some_and(|exo| {
+            exo.inspection().phase == crate::omega_exo_connection::ExoInspectionPhase::NotLoaded
+        });
+        if needs_refresh {
+            self.refresh_exo_inspection(cx);
+        }
+    }
+
+    fn authorize_exo_self_modification(
+        &mut self,
+        exo: Rc<crate::omega_exo_connection::ExoHarnessConnection>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (session_id, prompt) = {
+            let thread = self.thread.read(cx);
+            let prompt = thread
+                .draft_prompt()
+                .filter(|prompt| !prompt.is_empty())
+                .map(<[acp::ContentBlock]>::to_vec);
+            (thread.session_id().clone(), prompt)
+        };
+        let Some(prompt) = prompt else {
+            log::warn!("omega#95: a self-modification grant needs a non-empty draft");
+            return;
+        };
+        let objective = crate::omega_exo_connection::exo_prompt_objective(&prompt);
+        let Ok(turn_ref) = crate::omega_exo_connection::exo_turn_ref(&session_id, &prompt) else {
+            log::error!("omega#95: failed to bind the Exo draft to a turn");
+            return;
+        };
+        window
+            .spawn(cx, async move |cx| {
+                let request = exo.self_modification_request(objective, turn_ref).await?;
+                let detail = format!(
+                    "This grant expires in 60 seconds and applies only to this exact draft, Exo \
+                     generation, source tree, binary, tool modules, and read-write mounts.\n\n\
+                     Exact capabilities:\n{:#?}",
+                    request.capabilities
+                );
+                let answer = cx
+                    .prompt(
+                        PromptLevel::Warning,
+                        "Allow this Exo agent to modify itself for one turn?",
+                        Some(&detail),
+                        &["Authorize one turn", "Cancel"],
+                    )
+                    .await?;
+                if answer == 0 {
+                    exo.confirm_self_modification(request)?;
+                }
+                anyhow::Ok(())
+            })
+            .detach_and_log_err(cx);
+    }
+
+    fn exo_status_color(phase: crate::omega_exo_connection::ExoTurnPhase) -> Color {
+        use crate::omega_exo_connection::ExoTurnPhase;
+
+        match phase {
+            ExoTurnPhase::Idle | ExoTurnPhase::Completed => Color::Success,
+            ExoTurnPhase::Inspecting | ExoTurnPhase::Working => Color::Accent,
+            ExoTurnPhase::Cancelling => Color::Warning,
+            ExoTurnPhase::Cancelled => Color::Muted,
+            ExoTurnPhase::Refused | ExoTurnPhase::Failed => Color::Error,
+        }
+    }
+
+    fn exo_reference(value: &str) -> String {
+        const VISIBLE: usize = 12;
+        if value.chars().count() <= VISIBLE {
+            value.to_owned()
+        } else {
+            format!("{}…", value.chars().take(VISIBLE).collect::<String>())
+        }
+    }
+
+    fn render_exo_field(
+        label: &'static str,
+        value: impl Into<SharedString>,
+        tooltip: Option<SharedString>,
+        cx: &App,
+    ) -> AnyElement {
+        let value = value.into();
+        let field_id = format!("omega-exo-field-{label}-{value}");
+        h_flex()
+            .w_full()
+            .min_w_0()
+            .gap_1()
+            .child(
+                Label::new(label)
+                    .size(LabelSize::XSmall)
+                    .color(Color::Muted),
+            )
+            .child(div().flex_1())
+            .child(
+                div()
+                    .id(field_id)
+                    .min_w_0()
+                    .max_w(px(210.))
+                    .when_some(tooltip, |this, tooltip| {
+                        this.tooltip(Tooltip::text(tooltip))
+                    })
+                    .child(
+                        Label::new(value)
+                            .size(LabelSize::XSmall)
+                            .color(Color::Default)
+                            .truncate(),
+                    ),
+            )
+            .border_b_1()
+            .border_color(cx.theme().colors().border_variant.opacity(0.5))
+            .py_0p5()
+            .into_any_element()
+    }
+
+    fn render_exo_section(title: &'static str, rows: Vec<AnyElement>, cx: &App) -> AnyElement {
+        v_flex()
+            .w_full()
+            .gap_0p5()
+            .pb_2()
+            .child(
+                Label::new(title)
+                    .size(LabelSize::Small)
+                    .color(Color::Default),
+            )
+            .child(
+                v_flex()
+                    .w_full()
+                    .border_t_1()
+                    .border_color(cx.theme().colors().border_variant)
+                    .children(rows),
+            )
+            .into_any_element()
+    }
+
+    fn render_exo_header(
+        &self,
+        exo: Rc<crate::omega_exo_connection::ExoHarnessConnection>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let disclosure = self.executor_disclosure(cx);
+        let turn = exo.turn();
+        let is_generating = self.thread.read(cx).status() == ThreadStatus::Generating;
+        let inspector_open = self.exo_inspector_expanded;
+
+        h_flex()
+            .id("omega-exo-workspace-header")
+            .w_full()
+            .min_w_0()
+            .flex_wrap()
+            .px_2()
+            .py_1()
+            .gap_1()
+            .border_b_1()
+            .border_color(cx.theme().colors().border_variant)
+            .bg(cx.theme().colors().panel_background)
+            .child(
+                Icon::new(IconName::BoltOutlined)
+                    .size(IconSize::Small)
+                    .color(Color::Accent),
+            )
+            .child(
+                v_flex()
+                    .min_w_0()
+                    .gap_0p5()
+                    .child(
+                        Label::new("Exo workspace")
+                            .size(LabelSize::Small)
+                            .color(Color::Default),
+                    )
+                    .child(
+                        Label::new(disclosure.label())
+                            .size(LabelSize::XSmall)
+                            .color(Color::Muted)
+                            .truncate(),
+                    ),
+            )
+            .child(div().flex_1())
+            .child(
+                h_flex()
+                    .gap_0p5()
+                    .child(
+                        Icon::new(IconName::Circle)
+                            .size(IconSize::XSmall)
+                            .color(Self::exo_status_color(turn.phase)),
+                    )
+                    .child(
+                        Label::new(turn.phase.label())
+                            .size(LabelSize::XSmall)
+                            .color(Self::exo_status_color(turn.phase)),
+                    ),
+            )
+            .when(is_generating, |row| {
+                row.child(
+                    Button::new("omega-exo-cancel-turn", "Stop")
+                        .label_size(LabelSize::XSmall)
+                        .style(ButtonStyle::Tinted(TintColor::Error))
+                        .on_click(cx.listener(|this, _, _, cx| this.cancel_generation(cx))),
+                )
+            })
+            .child(
+                Button::new("omega-exo-toggle-inspector", "Inspector")
+                    .label_size(LabelSize::XSmall)
+                    .toggle_state(inspector_open)
+                    .selected_style(ButtonStyle::Outlined)
+                    .selected_label_color(Color::Default)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.exo_inspector_expanded = !this.exo_inspector_expanded;
+                        cx.notify();
+                    })),
+            )
+            .child(self.render_executor_pin(cx))
+            .into_any_element()
+    }
+
+    fn render_exo_inspector(
+        &self,
+        exo: Rc<crate::omega_exo_connection::ExoHarnessConnection>,
+        compact: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let inspection = exo.inspection();
+        let turn = exo.turn();
+        let config = exo.config();
+        let receipt = exo.tier_c_receipt();
+        let is_refreshing =
+            inspection.phase == crate::omega_exo_connection::ExoInspectionPhase::Refreshing;
+        let capabilities = inspection
+            .observed
+            .as_ref()
+            .map(ObservedExoCapabilityState::requested_capabilities)
+            .unwrap_or_default();
+        let needs_authority = !capabilities.is_empty();
+        let has_draft = self
+            .thread
+            .read(cx)
+            .draft_prompt()
+            .is_some_and(|prompt| !prompt.is_empty());
+        let exo_for_authorize = exo.clone();
+
+        let identity_rows = vec![
+            Self::render_exo_field("Agent", config.agent.clone(), None, cx),
+            Self::render_exo_field("Conversation", config.conversation.clone(), None, cx),
+            Self::render_exo_field(
+                "Executor",
+                inspection.identity.as_ref().map_or_else(
+                    || "Not observed".into(),
+                    |identity| identity.executor.clone(),
+                ),
+                None,
+                cx,
+            ),
+            Self::render_exo_field(
+                "Model",
+                inspection
+                    .identity
+                    .as_ref()
+                    .and_then(|identity| identity.model.clone())
+                    .unwrap_or_else(|| "Not observed".to_owned()),
+                None,
+                cx,
+            ),
+            Self::render_exo_field(
+                "Provider",
+                inspection
+                    .identity
+                    .as_ref()
+                    .and_then(|identity| identity.provider.clone())
+                    .unwrap_or_else(|| "Not disclosed".to_owned()),
+                None,
+                cx,
+            ),
+            Self::render_exo_field("Transport", "ACP v1 · stdio", None, cx),
+        ];
+
+        let mut runtime_rows = Vec::new();
+        runtime_rows.push(Self::render_exo_field(
+            "Turn",
+            turn.phase.label(),
+            turn.detail.clone().map(Into::into),
+            cx,
+        ));
+        for (label, reference) in [
+            ("Exo session", turn.exo_session_id.as_ref()),
+            ("Exo turn", turn.exo_turn_id.as_ref()),
+            ("Latest event", turn.latest_event_id.as_ref()),
+        ] {
+            if let Some(reference) = reference {
+                runtime_rows.push(Self::render_exo_field(
+                    label,
+                    Self::exo_reference(reference),
+                    Some(reference.clone().into()),
+                    cx,
+                ));
+            }
+        }
+        if let Some(observed) = inspection.observed.as_ref() {
+            runtime_rows.push(Self::render_exo_field(
+                "Source commit",
+                Self::exo_reference(&observed.source_commit),
+                Some(observed.source_commit.clone().into()),
+                cx,
+            ));
+            runtime_rows.push(Self::render_exo_field(
+                "Source tree",
+                Self::exo_reference(&observed.source_tree),
+                Some(observed.source_tree.clone().into()),
+                cx,
+            ));
+            runtime_rows.push(Self::render_exo_field(
+                "Binary",
+                Self::exo_reference(&observed.binary_digest),
+                Some(observed.binary_digest.clone().into()),
+                cx,
+            ));
+            runtime_rows.push(Self::render_exo_field(
+                "Generation",
+                observed.generation.to_string(),
+                None,
+                cx,
+            ));
+        } else {
+            runtime_rows.push(Self::render_exo_field(
+                "Inspection",
+                match inspection.phase {
+                    crate::omega_exo_connection::ExoInspectionPhase::NotLoaded => "Not loaded",
+                    crate::omega_exo_connection::ExoInspectionPhase::Refreshing => "Reading Exo",
+                    crate::omega_exo_connection::ExoInspectionPhase::Ready => "Ready",
+                    crate::omega_exo_connection::ExoInspectionPhase::Unavailable => "Unavailable",
+                },
+                inspection.error.clone().map(Into::into),
+                cx,
+            ));
+        }
+
+        let mut capability_rows =
+            vec![
+                Self::render_exo_field(
+                    "Agent-authored tools",
+                    inspection.observed.as_ref().map_or("Unknown", |observed| {
+                        if observed.agent_authored_tools {
+                            "Enabled"
+                        } else {
+                            "Off"
+                        }
+                    }),
+                    None,
+                    cx,
+                ),
+                Self::render_exo_field(
+                    "Network",
+                    inspection.networking.map_or("Unknown", |networking| {
+                        if networking { "Enabled" } else { "Off" }
+                    }),
+                    None,
+                    cx,
+                ),
+            ];
+        if let Some(observed) = inspection.observed.as_ref() {
+            capability_rows.push(Self::render_exo_field(
+                "Tool modules",
+                observed.tool_modules.len().to_string(),
+                None,
+                cx,
+            ));
+            capability_rows.extend(observed.tool_modules.iter().map(|module| {
+                Self::render_exo_field(
+                    "Module",
+                    module.path.clone(),
+                    Some(format!("{}\n{}", module.path, module.digest).into()),
+                    cx,
+                )
+            }));
+            capability_rows.push(Self::render_exo_field(
+                "Read-write mounts",
+                observed.read_write_mounts.len().to_string(),
+                None,
+                cx,
+            ));
+            capability_rows.extend(observed.read_write_mounts.iter().map(|mount| {
+                let mapping = format!("{} → {}", mount.host_path, mount.mount_path);
+                Self::render_exo_field("Mount", mapping.clone(), Some(mapping.into()), cx)
+            }));
+        }
+
+        let authority_rows = if let Some(receipt) = receipt {
+            vec![
+                Self::render_exo_field("Outcome", receipt.outcome, None, cx),
+                Self::render_exo_field(
+                    "Exo session",
+                    receipt
+                        .exo_session_id
+                        .as_deref()
+                        .map_or_else(|| "Pending".to_owned(), Self::exo_reference),
+                    receipt.exo_session_id.map(Into::into),
+                    cx,
+                ),
+                Self::render_exo_field(
+                    "Exo turn",
+                    receipt
+                        .exo_turn_id
+                        .as_deref()
+                        .map_or_else(|| "Pending".to_owned(), Self::exo_reference),
+                    receipt.exo_turn_id.map(Into::into),
+                    cx,
+                ),
+                Self::render_exo_field(
+                    "Latest event",
+                    receipt
+                        .latest_event_id
+                        .as_deref()
+                        .map_or_else(|| "Pending".to_owned(), Self::exo_reference),
+                    receipt.latest_event_id.map(Into::into),
+                    cx,
+                ),
+                Self::render_exo_field(
+                    "Verification",
+                    receipt.verification.clone(),
+                    Some(receipt.verification.into()),
+                    cx,
+                ),
+            ]
+        } else {
+            vec![Self::render_exo_field(
+                "Authority",
+                if needs_authority {
+                    "Required for this agent"
+                } else {
+                    "Not required"
+                },
+                None,
+                cx,
+            )]
+        };
+
+        v_flex()
+            .id("omega-exo-inspector")
+            .h_full()
+            .when(!compact, |this| this.w(px(336.)).min_w(px(288.)))
+            .when(compact, |this| this.w_full().max_h(px(300.)))
+            .border_l_1()
+            .when(compact, |this| this.border_l_0().border_b_1())
+            .border_color(cx.theme().colors().border_variant)
+            .bg(cx.theme().colors().surface_background)
+            .child(
+                h_flex()
+                    .w_full()
+                    .px_2()
+                    .py_1()
+                    .gap_1()
+                    .border_b_1()
+                    .border_color(cx.theme().colors().border_variant)
+                    .child(
+                        Label::new("Runtime inspector")
+                            .size(LabelSize::Small)
+                            .color(Color::Default),
+                    )
+                    .child(div().flex_1())
+                    .child(
+                        IconButton::new("omega-exo-refresh-inspection", IconName::RotateCw)
+                            .disabled(is_refreshing)
+                            .tooltip(Tooltip::text(if is_refreshing {
+                                "Reading Exo runtime"
+                            } else {
+                                "Refresh Exo runtime"
+                            }))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.refresh_exo_inspection(cx);
+                            })),
+                    ),
+            )
+            .child(
+                v_flex()
+                    .id("omega-exo-inspector-scroll")
+                    .flex_1()
+                    .overflow_y_scroll()
+                    .px_2()
+                    .pt_2()
+                    .children([
+                        Self::render_exo_section("Identity", identity_rows, cx),
+                        Self::render_exo_section("Runtime", runtime_rows, cx),
+                        Self::render_exo_section("Capabilities", capability_rows, cx),
+                        Self::render_exo_section("Authority receipt", authority_rows, cx),
+                    ])
+                    .child(
+                        v_flex()
+                            .w_full()
+                            .gap_1()
+                            .pb_2()
+                            .when(needs_authority, |this| {
+                                this.child(
+                                    Button::new(
+                                        "omega-exo-authorize-self-modification",
+                                        "Authorize this draft",
+                                    )
+                                    .style(ButtonStyle::Tinted(TintColor::Warning))
+                                    .label_size(LabelSize::XSmall)
+                                    .disabled(!has_draft)
+                                    .tooltip(Tooltip::text(if has_draft {
+                                        "Authorize one exact self-modifying Exo turn"
+                                    } else {
+                                        "Write the exact draft before authorizing it"
+                                    }))
+                                    .on_click(cx.listener(
+                                        move |this, _, window, cx| {
+                                            this.authorize_exo_self_modification(
+                                                exo_for_authorize.clone(),
+                                                window,
+                                                cx,
+                                            );
+                                        },
+                                    )),
+                                )
+                            })
+                            .when(!needs_authority, |this| {
+                                this.child(
+                                    Label::new(
+                                        "This agent has no observed self-modification capability. \
+                                         Normal turns need no additional grant.",
+                                    )
+                                    .size(LabelSize::XSmall)
+                                    .color(Color::Muted),
+                                )
+                            }),
+                    ),
+            )
+            .into_any_element()
+    }
+
     /// The executor line, rendered from the record.
     ///
     /// Unconditional, and above the entries rather than beside them, because
     /// omega#77's falsifier is a thread surface that shows work without naming
     /// its executor — including an empty thread, which is about to.
-    fn render_executor_disclosure(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_executor_disclosure(&self, cx: &mut Context<Self>) -> AnyElement {
         let disclosure = self.executor_disclosure(cx);
-        let exo = self
-            .thread
-            .read(cx)
-            .connection()
-            .clone()
-            .downcast::<crate::omega_exo_connection::ExoHarnessConnection>();
-        let receipt = exo.as_ref().and_then(|exo| exo.tier_c_receipt());
-        let thread = self.thread.clone();
+        if let Some(exo) = self.exo_connection(cx) {
+            return self.render_exo_header(exo, cx);
+        }
+
         h_flex()
             .w_full()
             .px_2()
@@ -12179,77 +12746,8 @@ impl ThreadView {
                     .color(Color::Muted),
             )
             .child(div().flex_1())
-            .when_some(receipt, |row, receipt| {
-                row.child(
-                    Label::new(format!(
-                        "self-modification {} · generation {} · event {}",
-                        receipt.outcome,
-                        receipt.observed.generation,
-                        receipt.latest_event_id.as_deref().unwrap_or("pending")
-                    ))
-                    .size(LabelSize::XSmall)
-                    .color(Color::Muted),
-                )
-            })
-            .when_some(exo, |row, exo| {
-                row.child(
-                    Button::new(
-                        "omega-exo-authorize-self-modification",
-                        "Authorize one self-modifying turn",
-                    )
-                    .label_size(LabelSize::XSmall)
-                    .color(Color::Warning)
-                    .on_click(move |_, window, cx| {
-                        let (session_id, prompt) = {
-                            let thread = thread.read(cx);
-                            let prompt = thread
-                                .draft_prompt()
-                                .filter(|prompt| !prompt.is_empty())
-                                .map(<[acp::ContentBlock]>::to_vec);
-                            (thread.session_id().clone(), prompt)
-                        };
-                        let Some(prompt) = prompt else {
-                            log::warn!(
-                                "omega#87: a self-modification grant needs a non-empty draft"
-                            );
-                            return;
-                        };
-                        let objective = crate::omega_exo_connection::exo_prompt_objective(&prompt);
-                        let Ok(turn_ref) =
-                            crate::omega_exo_connection::exo_turn_ref(&session_id, &prompt)
-                        else {
-                            log::error!("omega#87: failed to bind the Exo draft to a turn");
-                            return;
-                        };
-                        let exo = Rc::clone(&exo);
-                        window
-                            .spawn(cx, async move |cx| {
-                                let request =
-                                    exo.self_modification_request(objective, turn_ref).await?;
-                                let detail = format!(
-                                    "This grant expires in 60 seconds and applies only to this \
-                                     exact draft, Exo generation, source tree, binary, tool \
-                                     modules, and read-write mounts.\n\nExact capabilities:\n{:#?}",
-                                    request.capabilities
-                                );
-                                let answer = cx
-                                    .prompt(
-                                        PromptLevel::Warning,
-                                        "Allow this Exo agent to modify itself for one turn?",
-                                        Some(&detail),
-                                        &["Authorize one turn", "Cancel"],
-                                    )
-                                    .await?;
-                                if answer == 0 {
-                                    exo.confirm_self_modification(request)?;
-                                }
-                                anyhow::Ok(())
-                            })
-                            .detach_and_log_err(cx);
-                    }),
-                )
-            })
             .child(self.render_executor_pin(cx))
+            .into_any_element()
     }
 
     /// `OMEGA-DELTA-0035`. The pin, as a gesture rather than a mode.
@@ -12341,13 +12839,14 @@ impl Render for ThreadView {
         // engine what its run is doing, because the engine is the only thing
         // entitled to say.
         self.ensure_omega_run_link_refresh(cx);
+        self.ensure_exo_inspection(cx);
 
         let has_messages = self.list_state.item_count() > 0;
         let list_state = self.list_state.clone();
+        let exo = self.exo_connection(cx);
+        let compact_exo_layout = window.viewport_size().width < px(960.);
 
         let conversation = v_flex()
-            // OMEGA-DELTA-0021. Before anything the thread produced.
-            .child(self.render_executor_disclosure(cx))
             // OMEGA-DELTA-0030. The run behind the line, where there is one.
             .children(self.render_omega_run_link(cx))
             .when(self.resumed_without_history, |this| {
@@ -12364,6 +12863,28 @@ impl Render for ThreadView {
                     this.into_any()
                 }
             });
+        let conversation = match (exo, self.exo_inspector_expanded) {
+            (Some(exo), true) => {
+                let inspector = self.render_exo_inspector(exo, compact_exo_layout, cx);
+                if compact_exo_layout {
+                    v_flex()
+                        .flex_1()
+                        .size_full()
+                        .child(inspector)
+                        .child(conversation)
+                        .into_any_element()
+                } else {
+                    h_flex()
+                        .flex_1()
+                        .size_full()
+                        .min_w_0()
+                        .child(conversation)
+                        .child(inspector)
+                        .into_any_element()
+                }
+            }
+            _ => conversation.into_any_element(),
+        };
 
         v_flex()
             .key_context("AcpThread")
@@ -12673,6 +13194,8 @@ impl Render for ThreadView {
                     .flatten(),
                 |this, bar| this.child(bar),
             )
+            // OMEGA-DELTA-0021. Before anything the thread produced.
+            .child(self.render_executor_disclosure(cx))
             .child(conversation)
             .children(self.render_multi_root_callout(cx))
             .children(self.render_activity_bar(window, cx))
@@ -12898,6 +13421,19 @@ mod tests {
         acp::AvailableCommand::new(name, "").meta(acp_thread::meta_with_command_category(
             acp_thread::CommandCategory::Mcp,
         ))
+    }
+
+    #[test]
+    fn exo_runtime_references_stay_distinguishable_in_the_inspector() {
+        assert_eq!(ThreadView::exo_reference("short"), "short");
+        assert_eq!(
+            ThreadView::exo_reference("cd7c0d29db869e953fb7261d8390ca93007d36a6"),
+            "cd7c0d29db86…"
+        );
+        assert_ne!(
+            ThreadView::exo_reference("cd7c0d29db869e953fb7261d8390ca93007d36a6"),
+            ThreadView::exo_reference("c61846e3f44daaf445930d1a499432ca9b069306")
+        );
     }
 
     #[test]

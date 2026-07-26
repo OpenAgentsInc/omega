@@ -2383,3 +2383,40 @@ than it sounds, because the harness omega#81's acceptance sentence names —
 - **Scope.** This is the **source** half. `0.2.0-rc17` and every earlier
   candidate carry the refusal in their shipped bytes; the packaged half needs
   the next candidate.
+### OMEGA-DELTA-0046 — Exo threads have a native conversation workspace
+
+- **Before this change:** An Exo thread used the standard transcript and
+  composer, but its Exo-specific interface was one compressed disclosure row.
+  The row did not show the observed harness state, the current turn state, or
+  the exact authority boundary. A user could not inspect the Exo lane as one
+  coherent system.
+- **Omega now:** An Exo thread has a dedicated workspace header and runtime
+  inspector. The transcript and composer remain the standard Omega components.
+  Text, tool calls, tool results, errors, completion, queued prompts, and
+  cancellation therefore keep one rendering and control path.
+- **The inspector is a projection, not a second source of truth.** It reads the
+  exact observation that gates each turn. It shows the agent, conversation,
+  executor, model, provider disclosure, ACP transport, turn state, source pin,
+  binary digest, tool modules and digests, writable mounts, network state, and
+  the last one-turn authority receipt. Each terminal turn also shows the
+  durable Exo session, turn, and latest event references that Exo returned,
+  whether or not that turn needed self-modification authority. If observation
+  fails, the inspector reports that failure and does not invent runtime facts.
+- **The controls use existing authority.** Refresh runs the read-only Exo
+  observation. Stop uses the existing ACP cancellation path. The one-turn
+  self-modification control appears only when the observed capability set needs
+  it, and it uses the existing exact-draft confirmation and receipt path.
+  Omega does not add an Exo configuration command, listener, proxy, or Full
+  Auto route.
+- **The layout is responsive and native.** A wide window puts the inspector
+  beside the transcript. A narrow window puts a bounded inspector above it.
+  The interface uses the active Omega theme tokens and standard controls. It
+  does not add a separate dark theme or a web surface.
+- **Enforced by:**
+  `an_exo_thread_has_a_live_workspace_and_exact_runtime_inspector` in
+  `crates/omega_deltas/`, the Exo inspection and turn-state tests in
+  `crates/agent_ui/`, the real Exo acceptance path `drives_a_real_exo`, and
+  `omega_exo_workspace_wide` plus `omega_exo_workspace_narrow` in the native
+  Metal visual runner. The visual path starts the shipped ACP transport, sends
+  one real turn, requires the reply and all three durable references, and then
+  records both layouts.
