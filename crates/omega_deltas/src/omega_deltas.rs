@@ -73,6 +73,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0043",
     "OMEGA-DELTA-0044",
     "OMEGA-DELTA-0045",
+    "OMEGA-DELTA-0046",
 ];
 
 /// OMEGA-DELTA-0036. The uninstall script embedded in the shipped `cli`.
@@ -217,6 +218,9 @@ pub const THREAD_ENTRY_PATH: &str = "crates/acp_thread/src/acp_thread.rs";
 /// gone, so the scan reads `code_of` and not the raw file.
 pub const SYSTEM_NOTE_REFUSAL: &str =
     "Agent threads do not expose an owner-visible system-note authority.";
+
+/// OMEGA-DELTA-0046. The native Metal proof for the Exo workspace.
+pub const VISUAL_TEST_RUNNER_PATH: &str = "crates/zed/src/visual_test_runner.rs";
 
 /// OMEGA-DELTA-0030. The typed start command sent to `omega-effectd`.
 pub const FULL_AUTO_DISPATCH_PATH: &str = "crates/full_auto_ui/src/dispatch.rs";
@@ -6703,6 +6707,77 @@ mod tests {
             disclosure_path.display()
         );
     }
+
+    // ------ OMEGA-DELTA-0046
+
+    /// OMEGA-DELTA-0046. An Exo thread is a usable workspace, not one label.
+    ///
+    /// The workspace must keep Omega's standard transcript and composer. Its
+    /// inspector must project facts from the same preflight that gates a turn.
+    /// Its controls must reuse the existing cancel and exact one-turn authority
+    /// paths. This source check catches the cheap failure modes: a mock panel,
+    /// a second message implementation, or controls that only look active.
+    #[test]
+    fn an_exo_thread_has_a_live_workspace_and_exact_runtime_inspector() {
+        let thread_path = repository_path(THREAD_VIEW_PATH);
+        let thread = std::fs::read_to_string(&thread_path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", thread_path.display()));
+        for token in [
+            "omega-exo-workspace-header",
+            "omega-exo-inspector",
+            "Runtime inspector",
+            "render_entries(cx)",
+            "render_message_editor(window, cx)",
+            "cancel_generation",
+            "refresh_exo_inspection",
+            "authorize_exo_self_modification",
+            "ObservedExoCapabilityState::requested_capabilities",
+        ] {
+            assert!(
+                thread.contains(token),
+                "OMEGA-DELTA-0046: the Exo workspace lost `{token}`"
+            );
+        }
+
+        let connection_path = repository_path(EXO_CONNECTION_PATH);
+        let connection = std::fs::read_to_string(&connection_path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", connection_path.display()));
+        for token in [
+            "ExoInspectionSnapshot",
+            "ExoTurnPhase",
+            "driver.observe().await",
+            "driver.preflight().await",
+            "acp.prompt(params",
+            "meta_value(meta, \"exo.session_id\")",
+            "meta_value(meta, \"exo.turn_id\")",
+            "meta_value(meta, \"exo.latest_event_id\")",
+        ] {
+            assert!(
+                connection.contains(token),
+                "OMEGA-DELTA-0046: the Exo workspace state lost `{token}`"
+            );
+        }
+
+        let visual_path = repository_path(VISUAL_TEST_RUNNER_PATH);
+        let visual = std::fs::read_to_string(&visual_path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", visual_path.display()));
+        for token in [
+            "OMEGA_EXO_VISUAL_ONLY",
+            "run_omega_exo_visual_tests",
+            "omega_exo_workspace_wide",
+            "omega_exo_workspace_narrow",
+            "the real Exo visual turn failed",
+            "turn.exo_session_id.is_some()",
+            "turn.exo_turn_id.is_some()",
+            "turn.latest_event_id.is_some()",
+        ] {
+            assert!(
+                visual.contains(token),
+                "OMEGA-DELTA-0046: the real Exo visual proof lost `{token}`"
+            );
+        }
+    }
+
     // ---------------------------------------------------------------------
     // OMEGA-DELTA-0041 — Omega Agent served over ACP on a loopback socket
     // ---------------------------------------------------------------------

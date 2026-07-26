@@ -166,6 +166,88 @@ struct ExoDriver {
     generation: u64,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExoInspectionPhase {
+    NotLoaded,
+    Refreshing,
+    Ready,
+    Unavailable,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExoInspectionSnapshot {
+    pub phase: ExoInspectionPhase,
+    pub observed: Option<ObservedExoCapabilityState>,
+    pub identity: Option<ExoLaneIdentity>,
+    pub networking: Option<bool>,
+    pub refreshed_at_ms: Option<u64>,
+    pub error: Option<String>,
+}
+
+impl Default for ExoInspectionSnapshot {
+    fn default() -> Self {
+        Self {
+            phase: ExoInspectionPhase::NotLoaded,
+            observed: None,
+            identity: None,
+            networking: None,
+            refreshed_at_ms: None,
+            error: None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExoTurnPhase {
+    Idle,
+    Inspecting,
+    Working,
+    Cancelling,
+    Completed,
+    Cancelled,
+    Refused,
+    Failed,
+}
+
+impl ExoTurnPhase {
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Idle => "Ready",
+            Self::Inspecting => "Checking runtime",
+            Self::Working => "Working",
+            Self::Cancelling => "Cancelling",
+            Self::Completed => "Completed",
+            Self::Cancelled => "Cancelled",
+            Self::Refused => "Refused",
+            Self::Failed => "Failed",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExoTurnSnapshot {
+    pub phase: ExoTurnPhase,
+    pub detail: Option<String>,
+    pub exo_session_id: Option<String>,
+    pub exo_turn_id: Option<String>,
+    pub latest_event_id: Option<String>,
+    pub updated_at_ms: u64,
+}
+
+impl Default for ExoTurnSnapshot {
+    fn default() -> Self {
+        Self {
+            phase: ExoTurnPhase::Idle,
+            detail: None,
+            exo_session_id: None,
+            exo_turn_id: None,
+            latest_event_id: None,
+            updated_at_ms: now_ms(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub struct ExoTierCReceipt {
     pub schema: String,
@@ -190,6 +272,8 @@ pub struct ExoHarnessConnection {
     pending_grant: RefCell<Option<ExoSelfModificationGrant>>,
     tier_c_receipt: Rc<RefCell<Option<ExoTierCReceipt>>>,
     active_tier_c_turn: Rc<Cell<bool>>,
+    inspection: Rc<RefCell<ExoInspectionSnapshot>>,
+    turn: Rc<RefCell<ExoTurnSnapshot>>,
 }
 
 impl ExoHarnessConnection {
@@ -212,6 +296,8 @@ impl ExoHarnessConnection {
             pending_grant: RefCell::new(None),
             tier_c_receipt: Rc::new(RefCell::new(previous_receipt)),
             active_tier_c_turn: Rc::new(Cell::new(false)),
+            inspection: Rc::new(RefCell::new(ExoInspectionSnapshot::default())),
+            turn: Rc::new(RefCell::new(ExoTurnSnapshot::default())),
         }
     }
 
@@ -234,6 +320,58 @@ impl ExoHarnessConnection {
     #[must_use]
     pub fn tier_c_receipt(&self) -> Option<ExoTierCReceipt> {
         self.tier_c_receipt.borrow().clone()
+    }
+
+    #[must_use]
+    pub fn inspection(&self) -> ExoInspectionSnapshot {
+        self.inspection.borrow().clone()
+    }
+
+    #[must_use]
+    pub fn turn(&self) -> ExoTurnSnapshot {
+        self.turn.borrow().clone()
+    }
+
+    fn set_turn(&self, phase: ExoTurnPhase, detail: Option<String>) {
+        *self.turn.borrow_mut() = ExoTurnSnapshot {
+            phase,
+            detail,
+            exo_session_id: None,
+            exo_turn_id: None,
+            latest_event_id: None,
+            updated_at_ms: now_ms(),
+        };
+    }
+
+    pub fn refresh_inspection(&self, cx: &mut App) -> Task<Result<()>> {
+        {
+            let mut inspection = self.inspection.borrow_mut();
+            inspection.phase = ExoInspectionPhase::Refreshing;
+            inspection.error = None;
+        }
+        let driver = self.driver.clone();
+        let inspection = self.inspection.clone();
+        cx.spawn(async move |_| match driver.observe().await {
+            Ok(observed) => {
+                *inspection.borrow_mut() = ExoInspectionSnapshot {
+                    phase: ExoInspectionPhase::Ready,
+                    observed: Some(observed.observed),
+                    identity: Some(observed.identity),
+                    networking: Some(observed.networking),
+                    refreshed_at_ms: Some(now_ms()),
+                    error: None,
+                };
+                Ok(())
+            }
+            Err(error) => {
+                let message = error.to_string();
+                let mut snapshot = inspection.borrow_mut();
+                snapshot.phase = ExoInspectionPhase::Unavailable;
+                snapshot.refreshed_at_ms = Some(now_ms());
+                snapshot.error = Some(message.clone());
+                Err(anyhow!(message))
+            }
+        })
     }
 
     /// Observe the exact Exo capability state for a dedicated confirmation
@@ -275,6 +413,8 @@ impl ExoHarnessConnection {
 
 struct ObservedTurn {
     observed: ObservedExoCapabilityState,
+    identity: ExoLaneIdentity,
+    networking: bool,
 }
 
 fn now_ms() -> u64 {
@@ -283,6 +423,34 @@ fn now_ms() -> u64 {
         .map_or(0, |duration| {
             u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
         })
+}
+
+fn set_turn_snapshot(turn: &RefCell<ExoTurnSnapshot>, phase: ExoTurnPhase, detail: Option<String>) {
+    *turn.borrow_mut() = ExoTurnSnapshot {
+        phase,
+        detail,
+        exo_session_id: None,
+        exo_turn_id: None,
+        latest_event_id: None,
+        updated_at_ms: now_ms(),
+    };
+}
+
+fn set_terminal_turn_snapshot(
+    turn: &RefCell<ExoTurnSnapshot>,
+    phase: ExoTurnPhase,
+    detail: Option<String>,
+    response: &acp::PromptResponse,
+) {
+    let meta = response.meta.as_ref();
+    *turn.borrow_mut() = ExoTurnSnapshot {
+        phase,
+        detail,
+        exo_session_id: meta_value(meta, "exo.session_id"),
+        exo_turn_id: meta_value(meta, "exo.turn_id"),
+        latest_event_id: meta_value(meta, "exo.latest_event_id"),
+        updated_at_ms: now_ms(),
+    };
 }
 
 fn resolve_module_host_path(module: &str, mounts: &[ExoMount]) -> Option<PathBuf> {
@@ -482,6 +650,8 @@ impl ExoDriver {
                 tool_modules,
                 read_write_mounts,
             },
+            identity,
+            networking: agent.networking,
         })
     }
 
@@ -686,14 +856,45 @@ impl AgentConnection for ExoHarnessConnection {
         params: acp::PromptRequest,
         cx: &mut App,
     ) -> Task<Result<acp::PromptResponse>> {
+        self.set_turn(
+            ExoTurnPhase::Inspecting,
+            Some("Checking the pinned Exo runtime before this turn".to_owned()),
+        );
         let driver = Rc::clone(&self.driver);
         let acp = Rc::clone(&self.acp);
         let pending_grant = self.pending_grant.take();
         let receipt_cell = self.tier_c_receipt.clone();
         let active_tier_c_turn = self.active_tier_c_turn.clone();
+        let inspection_cell = self.inspection.clone();
+        let turn_cell = self.turn.clone();
         cx.spawn(async move |cx| {
             let turn_ref = exo_turn_ref(&params.session_id, &params.prompt)?;
-            let observed = driver.preflight().await?;
+            let observed = match driver.preflight().await {
+                Ok(observed) => observed,
+                Err(error) => {
+                    let message = error.to_string();
+                    {
+                        let mut inspection = inspection_cell.borrow_mut();
+                        inspection.phase = ExoInspectionPhase::Unavailable;
+                        inspection.refreshed_at_ms = Some(now_ms());
+                        inspection.error = Some(message.clone());
+                    }
+                    set_turn_snapshot(
+                        &turn_cell,
+                        ExoTurnPhase::Failed,
+                        Some(format!("Runtime check failed: {message}")),
+                    );
+                    return Err(error);
+                }
+            };
+            *inspection_cell.borrow_mut() = ExoInspectionSnapshot {
+                phase: ExoInspectionPhase::Ready,
+                observed: Some(observed.observed.clone()),
+                identity: Some(observed.identity.clone()),
+                networking: Some(observed.networking),
+                refreshed_at_ms: Some(now_ms()),
+                error: None,
+            };
             let capabilities = observed.observed.requested_capabilities();
             let authority_receipt = if capabilities.is_empty() {
                 None
@@ -708,6 +909,11 @@ impl AgentConnection for ExoHarnessConnection {
                     );
                     *receipt_cell.borrow_mut() = Some(receipt.clone());
                     persist_tier_c_receipt(receipt).await?;
+                    set_turn_snapshot(
+                        &turn_cell,
+                        ExoTurnPhase::Refused,
+                        Some(message.to_owned()),
+                    );
                     bail!("{message}");
                 };
                 let requested_objective = Some(grant.request().objective.clone());
@@ -725,6 +931,11 @@ impl AgentConnection for ExoHarnessConnection {
                         );
                         *receipt_cell.borrow_mut() = Some(receipt.clone());
                         persist_tier_c_receipt(receipt).await?;
+                        set_turn_snapshot(
+                            &turn_cell,
+                            ExoTurnPhase::Refused,
+                            Some(message.clone()),
+                        );
                         bail!("{message}");
                     }
                 }
@@ -755,8 +966,34 @@ impl AgentConnection for ExoHarnessConnection {
                     }
                 }
             }
+            set_turn_snapshot(
+                &turn_cell,
+                ExoTurnPhase::Working,
+                Some("Streaming this turn over ACP".to_owned()),
+            );
             let prompt = cx.update(|cx| acp.prompt(params, cx));
             let response = prompt.await;
+            match &response {
+                Ok(response) => match response.stop_reason {
+                    acp::StopReason::Cancelled => set_terminal_turn_snapshot(
+                        &turn_cell,
+                        ExoTurnPhase::Cancelled,
+                        Some("Exo confirmed cancellation".to_owned()),
+                        response,
+                    ),
+                    _ => set_terminal_turn_snapshot(
+                        &turn_cell,
+                        ExoTurnPhase::Completed,
+                        Some("Exo completed the streamed turn".to_owned()),
+                        response,
+                    ),
+                },
+                Err(error) => set_turn_snapshot(
+                    &turn_cell,
+                    ExoTurnPhase::Failed,
+                    Some(error.to_string()),
+                ),
+            }
             if is_tier_c_turn {
                 if let Some(receipt) = receipt_cell.borrow_mut().as_mut() {
                     match &response {
@@ -800,6 +1037,10 @@ impl AgentConnection for ExoHarnessConnection {
     }
 
     fn cancel(&self, session_id: &acp::SessionId, cx: &mut App) {
+        self.set_turn(
+            ExoTurnPhase::Cancelling,
+            Some("Waiting for Exo to confirm cancellation".to_owned()),
+        );
         let cancelled_pending_grant = self.pending_grant.borrow_mut().take().map(|grant| {
             let request = grant.request();
             refused_tier_c_receipt(
@@ -871,6 +1112,66 @@ mod tests {
         assert_eq!(config.agent, "omega-lane");
         assert_eq!(config.conversation, "tier-a");
         assert_eq!(config.root.as_str(), "/opt/exo/.exo");
+    }
+
+    #[test]
+    fn an_unread_inspector_claims_no_runtime_facts() {
+        let inspection = ExoInspectionSnapshot::default();
+        assert_eq!(inspection.phase, ExoInspectionPhase::NotLoaded);
+        assert_eq!(inspection.observed, None);
+        assert_eq!(inspection.identity, None);
+        assert_eq!(inspection.networking, None);
+        assert_eq!(inspection.refreshed_at_ms, None);
+        assert_eq!(inspection.error, None);
+    }
+
+    #[test]
+    fn every_exo_turn_phase_has_a_distinct_visible_label() {
+        let phases = [
+            ExoTurnPhase::Idle,
+            ExoTurnPhase::Inspecting,
+            ExoTurnPhase::Working,
+            ExoTurnPhase::Cancelling,
+            ExoTurnPhase::Completed,
+            ExoTurnPhase::Cancelled,
+            ExoTurnPhase::Refused,
+            ExoTurnPhase::Failed,
+        ];
+        let labels = phases.map(ExoTurnPhase::label);
+        for (index, label) in labels.iter().enumerate() {
+            assert!(!label.is_empty());
+            assert!(
+                !labels[..index].contains(label),
+                "duplicate Exo turn label: {label}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_turn_snapshot_records_terminal_state_and_detail() {
+        let turn = RefCell::new(ExoTurnSnapshot::default());
+        let response = acp::PromptResponse::new(acp::StopReason::EndTurn).meta(
+            [
+                ("exo.session_id".into(), serde_json::json!("session-1")),
+                ("exo.turn_id".into(), serde_json::json!("turn-1")),
+                ("exo.latest_event_id".into(), serde_json::json!("event-1")),
+            ]
+            .into_iter()
+            .collect::<serde_json::Map<String, serde_json::Value>>(),
+        );
+        set_terminal_turn_snapshot(
+            &turn,
+            ExoTurnPhase::Completed,
+            Some("durable event observed".into()),
+            &response,
+        );
+        let turn = turn.borrow();
+        assert_eq!(turn.phase, ExoTurnPhase::Completed);
+        assert_eq!(turn.detail.as_deref(), Some("durable event observed"));
+        assert_eq!(turn.exo_session_id.as_deref(), Some("session-1"));
+        assert_eq!(turn.exo_turn_id.as_deref(), Some("turn-1"));
+        assert_eq!(turn.latest_event_id.as_deref(), Some("event-1"));
+        assert!(turn.updated_at_ms > 0);
     }
 
     /// A machine with no Exo has no lane. This is the ordinary case, and it
@@ -1057,11 +1358,12 @@ mod tests {
             .expect("a session on the Exo lane");
 
         let session_id = thread.read_with(cx, |thread, _| thread.session_id().clone());
-        let marker = "OMEGA-EXO-ACP-STREAM";
+        let tool_marker = "OMEGA-EXO-TOOL";
+        let marker = "OMEGA-EXO-PANE-READY";
         let request = acp::PromptRequest::new(
             session_id,
             vec![acp::ContentBlock::Text(acp::TextContent::new(format!(
-                "Reply with exactly the word {marker} and nothing else."
+                "Run one tool that prints {tool_marker}, then reply with exactly {marker}."
             )))],
         );
         let response = cx
@@ -1075,6 +1377,10 @@ mod tests {
             rendered.contains(marker),
             "the Exo reply did not reach the thread: {rendered}"
         );
+        assert!(
+            rendered.contains(tool_marker),
+            "the Exo tool result did not reach the thread: {rendered}"
+        );
 
         let disclosure = thread.read_with(cx, |thread, cx| thread.omega_executor_disclosure(cx));
         assert!(disclosure.is_coherent(), "{disclosure:?}");
@@ -1085,6 +1391,18 @@ mod tests {
             .downcast::<ExoHarnessConnection>()
             .expect("the configured lane is Exo");
         let identity = exo.identity().expect("Exo told the lane who it is");
+        let inspection = exo.inspection();
+        assert_eq!(inspection.phase, ExoInspectionPhase::Ready);
+        assert_eq!(inspection.identity.as_ref(), Some(&identity));
+        assert!(
+            inspection.observed.is_some(),
+            "the workspace inspector did not retain the turn's exact preflight"
+        );
+        let turn = exo.turn();
+        assert_eq!(turn.phase, ExoTurnPhase::Completed, "{turn:?}");
+        assert!(turn.exo_session_id.is_some(), "{turn:?}");
+        assert!(turn.exo_turn_id.is_some(), "{turn:?}");
+        assert!(turn.latest_event_id.is_some(), "{turn:?}");
         assert!(disclosure.agent_id.starts_with("exo/"), "{disclosure:?}");
         // The parts that only the Exo arm of `classify_connection` can supply.
         // Without them this assertion set passes on the shared external-agent
