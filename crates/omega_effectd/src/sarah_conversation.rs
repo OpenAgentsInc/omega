@@ -2253,6 +2253,20 @@ impl SarahConversationClient {
                             expected_generation,
                         ) {
                             Ok(()) => accepted(Some(result.event_id)),
+                            // The owner record is already published by this
+                            // point. A transport failure reading it back is not
+                            // the same thing as a projection the host cannot
+                            // build, and reporting it as terminal `failed`
+                            // would tell the device a message that exists on
+                            // the relay does not — the same class of mistake as
+                            // reporting an authentication failure as a
+                            // discovery one. `unavailable` is retryable, and
+                            // the periodic source scan projects it either way.
+                            Err(
+                                SarahConversationError::Relay(_)
+                                | SarahConversationError::Identity(_)
+                                | SarahConversationError::IdentityRequired,
+                            ) => unavailable("reason.omega.transport_unavailable"),
                             Err(_) => failed("reason.omega.projection_failed"),
                         }
                     }
