@@ -59,6 +59,25 @@ pub enum MaintenanceAction {
     /// runs on every launch, and it is the reason a pin cannot be defeated by
     /// swapping the bytes after the install receipt was written.
     Verify,
+    /// Turn what the registry channel currently advertises into a concrete
+    /// candidate version.
+    ///
+    /// Separate from [`Self::Update`] because it happens when no bytes move and
+    /// no launch is pending: the registry document refreshes in the background
+    /// and the store decides whether to *offer* the version it now names. A
+    /// harness frozen at another version must not be offered an update Omega
+    /// would refuse to apply, and the resolution that decided so is the thing
+    /// worth recording — the update that never started leaves no other trace.
+    ResolveChannel,
+    /// Re-establish what an installed tree is after it changed, rather than
+    /// carrying the previous answer forward.
+    ///
+    /// Separate from [`Self::Verify`] because `Verify` is what the launch path
+    /// does on the way to spawning a harness, while this is what the owner's
+    /// front door does on demand with nothing about to run. Collapsing them
+    /// would make the log unable to say whether a measurement was taken because
+    /// something was about to execute or because a person asked.
+    ReprobeCapability,
 }
 
 /// Every admitted action, in declaration order.
@@ -69,6 +88,8 @@ pub const ADMITTED_MAINTENANCE_ACTIONS: &[MaintenanceAction] = &[
     MaintenanceAction::Install,
     MaintenanceAction::Update,
     MaintenanceAction::Verify,
+    MaintenanceAction::ResolveChannel,
+    MaintenanceAction::ReprobeCapability,
 ];
 
 // ---------------------------------------------------------------------------
@@ -131,6 +152,20 @@ pub enum MaintenanceRefusal {
     ProvenanceUnavailable { version: String },
     /// The pin ledger exists but could not be read.
     PinLedgerUnreadable,
+    /// The owner froze this harness, and this harness is distributed in a way
+    /// that gives Omega nothing to freeze.
+    ///
+    /// A package manager resolves the bytes at exec time into a cache Omega
+    /// owns no directory for, so there is no tree to hash and the version the
+    /// registry names is a ceiling rather than an exact request. A pin on such
+    /// a harness cannot be enforced. Launching anyway would make the pin a
+    /// decoration — the owner would have said *not that one* and Omega would
+    /// have run whatever `npm` chose — so the pin refuses the launch instead.
+    UnpinnableDistribution {
+        pinned_version: String,
+        /// The resolver that owns the bytes, e.g. `npx`.
+        resolver: String,
+    },
 }
 
 impl MaintenanceRefusal {
@@ -142,6 +177,7 @@ impl MaintenanceRefusal {
             Self::PinnedDigest { .. } => "pinned_digest",
             Self::ProvenanceUnavailable { .. } => "provenance_unavailable",
             Self::PinLedgerUnreadable => "pin_ledger_unreadable",
+            Self::UnpinnableDistribution { .. } => "unpinnable_distribution",
         }
     }
 
@@ -179,6 +215,14 @@ impl MaintenanceRefusal {
                  you froze. Every maintenance action is held until it can."
                     .to_string()
             }
+            Self::UnpinnableDistribution {
+                pinned_version,
+                resolver,
+            } => format!(
+                "Pinned to {pinned_version}, but this agent runs through {resolver}, which \
+                 resolves its own bytes at launch. Omega cannot hold it at a version, so it \
+                 will not run it while the pin stands. Remove the pin to run it unpinned."
+            ),
         }
     }
 }
@@ -290,6 +334,39 @@ pub fn admits_version(pin_state: PinState<'_>, candidate_version: &str) -> Optio
             })
         }
         PinState::Pinned(_) => None,
+    }
+}
+
+/// Whether a harness whose bytes no directory of Omega's holds may launch.
+///
+/// [`decide_maintenance`] cannot answer this: it needs a
+/// [`CandidateArtifact`], and for a package-manager-resolved harness there is
+/// no tree to build one from. Routing such a harness through the
+/// `Unmeasured` arm would refuse **every** npx agent on every machine, which
+/// is not what the pin ledger says and not what this issue asks for. So the
+/// question is narrowed to the one the ledger can actually answer:
+///
+/// * an unreadable ledger refuses, exactly as everywhere else — a machine whose
+///   pins are unknown does not launch a harness it cannot attest;
+/// * a **pinned** harness refuses, because the pin cannot be enforced and a pin
+///   that is silently ignored is worse than no pin at all;
+/// * an unpinned harness launches, unattested, and the front door says so.
+///
+/// The last line is the honest limit of this gate and is stated rather than
+/// hidden: it raises no bar on an unpinned npx harness. What it removes is the
+/// state where an owner froze one and Omega ran whatever `npm` resolved.
+#[must_use]
+pub fn admits_package_manager_launch(
+    pin_state: PinState<'_>,
+    resolver: &str,
+) -> Option<MaintenanceRefusal> {
+    match pin_state {
+        PinState::Unreadable => Some(MaintenanceRefusal::PinLedgerUnreadable),
+        PinState::Unpinned => None,
+        PinState::Pinned(pin) => Some(MaintenanceRefusal::UnpinnableDistribution {
+            pinned_version: pin.version.clone(),
+            resolver: resolver.to_string(),
+        }),
     }
 }
 
@@ -415,6 +492,7 @@ const ADMITTED_REASON_CLASSES: &[&str] = &[
     "pinned_digest",
     "provenance_unavailable",
     "pin_ledger_unreadable",
+    "unpinnable_distribution",
 ];
 
 /// Read a receipt.
@@ -589,6 +667,13 @@ fn refusal_detail(refusal: &MaintenanceRefusal) -> serde_json::Value {
             "version": version,
         }),
         MaintenanceRefusal::PinLedgerUnreadable => serde_json::json!({}),
+        MaintenanceRefusal::UnpinnableDistribution {
+            pinned_version,
+            resolver,
+        } => serde_json::json!({
+            "pinnedVersion": pinned_version,
+            "resolver": resolver,
+        }),
     }
 }
 
@@ -682,6 +767,15 @@ pub enum ProvenanceGap {
     LastActionRefused,
     /// The most recent record is one this Omega cannot read the provenance of.
     RecordUnreadable,
+    /// The installed tree could not be read, so there is no measurement to
+    /// judge a record against. Distinct from [`Self::Unattested`]: that one is
+    /// "nobody recorded these bytes", this one is "this host cannot read them".
+    TreeUnreadable,
+    /// The harness has no tree on disk to attest, by construction — a package
+    /// manager resolves its bytes at launch into a cache Omega owns no
+    /// directory for. Not a defect in this installation; a property of how the
+    /// harness is distributed.
+    ResolvedAtLaunch,
 }
 
 impl ProvenanceGap {
@@ -702,6 +796,14 @@ impl ProvenanceGap {
             Self::RecordUnreadable => {
                 "Omega cannot read the provenance record for this agent. It was written \
                  by a different version."
+            }
+            Self::TreeUnreadable => {
+                "Omega could not read this agent's installed files, so it cannot say what \
+                 would run. Reinstall it."
+            }
+            Self::ResolvedAtLaunch => {
+                "This agent's package manager resolves its own bytes when it starts, so \
+                 there is nothing installed for Omega to attest."
             }
         }
     }
@@ -904,6 +1006,56 @@ mod tests {
         );
     }
 
+    /// A package-manager harness nobody froze is not this gate's business. It
+    /// launches unattested, and the front door says so — refusing every npx
+    /// agent on every machine is a different change than omega#81 asks for, and
+    /// pretending otherwise here would hide which bar this actually raises.
+    #[test]
+    fn an_unpinned_package_manager_harness_is_admitted() {
+        assert_eq!(
+            admits_package_manager_launch(PinState::Unpinned, "npx"),
+            None
+        );
+    }
+
+    /// The gap this closes: before it, pinning an npx harness did nothing at
+    /// all. A pin Omega cannot enforce must refuse rather than be ignored,
+    /// because an ignored pin tells the owner their "not that one" was heard.
+    #[test]
+    fn a_pin_on_a_package_manager_harness_refuses_rather_than_being_ignored() {
+        let ledger = pinned_ledger();
+        let pin = ledger.pin("codex-acp").expect("pinned");
+        let refusal = admits_package_manager_launch(PinState::Pinned(pin), "npx")
+            .expect("a pinned package-manager harness refuses");
+        assert_eq!(refusal.reason_class(), "unpinnable_distribution");
+        assert!(refusal.reason().contains("npx"));
+
+        // And the refusal is recordable: a gate whose refusal could not be
+        // written would enforce without leaving evidence it enforced.
+        let receipt = build_harness_maintenance_receipt(
+            HOST,
+            "codex-acp",
+            NOW,
+            MaintenanceAction::Verify,
+            &MaintenanceOutcomeInput::Refused(&refusal),
+        )
+        .expect("the refusal is a receipt");
+        assert_eq!(receipt.reason_class(), Some("unpinnable_distribution"));
+        assert_eq!(receipt.artifact_digest(), None);
+    }
+
+    /// An unreadable ledger refuses the package-manager path too. The gate that
+    /// fails closed everywhere else must not be the one place a corrupt file
+    /// buys a launch.
+    #[test]
+    fn an_unreadable_ledger_refuses_a_package_manager_launch_as_well() {
+        assert_eq!(
+            admits_package_manager_launch(PinState::Unreadable, "npx")
+                .map(|refusal| refusal.reason_class()),
+            Some("pin_ledger_unreadable")
+        );
+    }
+
     /// Every refusal a person can hit has a sentence, and the sentence says
     /// something. An empty or generic reason is the rc11 defect wearing a
     /// different shape.
@@ -923,6 +1075,10 @@ mod tests {
                 version: "0.9.5".into(),
             },
             MaintenanceRefusal::PinLedgerUnreadable,
+            MaintenanceRefusal::UnpinnableDistribution {
+                pinned_version: "1.2.3".into(),
+                resolver: "npx".into(),
+            },
         ];
         let mut classes = std::collections::BTreeSet::new();
         for refusal in &refusals {

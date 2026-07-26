@@ -982,6 +982,21 @@ pub struct SettingsWindow {
     /// show a focus ring when the page auto-focuses it on open (which happens via
     /// mouse, where `focus_visible` styling would otherwise be suppressed).
     pub(crate) external_agent_add_focus_handle: FocusHandle,
+    /// Harness maintenance state per external agent, for the External Agents
+    /// page. omega#81, `OMEGA-DELTA-0033`.
+    ///
+    /// Cached rather than computed during render because deciding it means
+    /// hashing an installed tree, and a settings row must not do that on every
+    /// frame. Refreshed when the window opens, when settings change, and after
+    /// any pin the owner takes or removes — the three moments it can differ.
+    pub(crate) harness_maintenance:
+        ::collections::HashMap<project::AgentId, omega_harness::HarnessFrontDoorState>,
+    pub(crate) harness_maintenance_task: Option<Task<()>>,
+    /// What went wrong the last time the owner pressed a maintenance control.
+    ///
+    /// Rendered beside the control. A pin write that fails silently is the same
+    /// defect as a refusal nobody can see.
+    pub(crate) harness_maintenance_error: Option<(project::AgentId, SharedString)>,
     skill_creator_page: Option<(Entity<pages::SkillCreatorPage>, Subscription)>,
 }
 
@@ -1787,6 +1802,10 @@ impl SettingsWindow {
         let mut ui_font_size = ThemeSettings::get_global(cx).ui_font_size(cx);
         cx.observe_global_in::<SettingsStore>(window, move |this, window, cx| {
             this.fetch_files(window, cx);
+            // omega#81. Adding, removing, or re-versioning an external agent is
+            // a settings change, and each of those changes what the External
+            // Agents page must say about pins and provenance.
+            this.refresh_harness_maintenance(cx);
 
             // Whenever settings are changed, it's possible that the changed
             // settings affects the rendering of the `SettingsWindow`, like is
@@ -2004,18 +2023,185 @@ impl SettingsWindow {
             mcp_add_server_focus_handle: cx.focus_handle(),
             custom_agent_form: None,
             external_agent_add_focus_handle: cx.focus_handle(),
+            harness_maintenance: Default::default(),
+            harness_maintenance_task: None,
+            harness_maintenance_error: None,
             skill_creator_page: None,
         };
 
         this.fetch_files(window, cx);
         this.build_ui(window, cx);
         this.build_search_index();
+        this.refresh_harness_maintenance(cx);
 
         this.search_bar.update(cx, |editor, cx| {
             editor.focus_handle(cx).focus(window, cx);
         });
 
         this
+    }
+
+    /// Recompute what the External Agents page shows about pins and
+    /// provenance. omega#81, `OMEGA-DELTA-0033`.
+    ///
+    /// Reads the pin ledger, measures each installed tree, and reads the
+    /// receipt log — the same three inputs the launch gate reads, through the
+    /// same function. The page renders the result and decides nothing.
+    ///
+    /// Off the render path deliberately: hashing an installed tree per frame
+    /// would make opening a settings page cost megabytes of disk reads a
+    /// second.
+    pub(crate) fn refresh_harness_maintenance(&mut self, cx: &mut Context<Self>) {
+        let Some(store) = pages::external_agents_page::agent_server_store(self, cx) else {
+            self.harness_maintenance.clear();
+            self.harness_maintenance_task = None;
+            return;
+        };
+        let targets = {
+            let store = store.read(cx);
+            store
+                .external_agents()
+                .cloned()
+                .collect::<Vec<_>>()
+                .into_iter()
+                .filter_map(|id| store.maintenance_target(&id).map(|target| (id, target)))
+                .collect::<Vec<_>>()
+        };
+        let fs = <dyn fs::Fs>::global(cx);
+
+        self.harness_maintenance_task = Some(cx.spawn(async move |this, cx| {
+            let mut states = ::collections::HashMap::default();
+            for (id, target) in targets {
+                let state = project::harness_maintenance::read_front_door_state(
+                    fs.as_ref(),
+                    target.harness_id.as_ref(),
+                    target.version.as_ref(),
+                    target.distribution,
+                    target.installed_dir.as_deref(),
+                )
+                .await;
+                states.insert(id, state);
+            }
+            this.update(cx, |this, cx| {
+                this.harness_maintenance = states;
+                cx.notify();
+            })
+            .ok();
+        }));
+    }
+
+    fn harness_maintenance_target(
+        &self,
+        id: &project::AgentId,
+        cx: &App,
+    ) -> Option<project::agent_server_store::HarnessMaintenanceTarget> {
+        let store = pages::external_agents_page::agent_server_store(self, cx)?;
+        store.read(cx).maintenance_target(id)
+    }
+
+    /// Freeze one harness at the bytes Omega measures now. omega#81.
+    ///
+    /// The whole write happens in `project::harness_maintenance`, through the
+    /// same gate the launch path runs, so a tree the gate would refuse cannot be
+    /// pinned from here. This method routes a click and shows what came back.
+    pub(crate) fn pin_harness(&mut self, id: &project::AgentId, cx: &mut Context<Self>) {
+        let Some(target) = self.harness_maintenance_target(id, cx) else {
+            return;
+        };
+        let fs = <dyn fs::Fs>::global(cx);
+        let id = id.clone();
+        self.harness_maintenance_error = None;
+        cx.spawn(async move |this, cx| {
+            let result = match target.installed_dir.as_deref() {
+                Some(dir) => {
+                    project::harness_maintenance::pin_installed_harness(
+                        fs,
+                        target.harness_id.as_ref(),
+                        target.version.as_ref(),
+                        dir,
+                        project::harness_maintenance::now_ms(),
+                    )
+                    .await
+                }
+                None => Err(anyhow::anyhow!(
+                    "Omega owns no installed directory for this agent, so there is nothing to pin."
+                )),
+            };
+            this.update(cx, |this, cx| {
+                this.set_harness_maintenance_result(&id, result, cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Unfreeze one harness. omega#81.
+    pub(crate) fn unpin_harness(&mut self, id: &project::AgentId, cx: &mut Context<Self>) {
+        let Some(target) = self.harness_maintenance_target(id, cx) else {
+            return;
+        };
+        let fs = <dyn fs::Fs>::global(cx);
+        let id = id.clone();
+        self.harness_maintenance_error = None;
+        cx.spawn(async move |this, cx| {
+            let result =
+                project::harness_maintenance::unpin_harness(fs, target.harness_id.as_ref()).await;
+            this.update(cx, |this, cx| {
+                this.set_harness_maintenance_result(&id, result, cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Re-measure one harness's installed tree on request, writing a receipt
+    /// under [`omega_harness::MaintenanceAction::ReprobeCapability`]. omega#81.
+    pub(crate) fn reprobe_harness(&mut self, id: &project::AgentId, cx: &mut Context<Self>) {
+        let Some(target) = self.harness_maintenance_target(id, cx) else {
+            return;
+        };
+        let fs = <dyn fs::Fs>::global(cx);
+        let id = id.clone();
+        self.harness_maintenance_error = None;
+        cx.spawn(async move |this, cx| {
+            let result = match target.installed_dir.as_deref() {
+                Some(dir) => project::harness_maintenance::reprobe_installed_harness(
+                    fs,
+                    target.harness_id.as_ref(),
+                    target.version.as_ref(),
+                    dir,
+                    project::harness_maintenance::now_ms(),
+                )
+                .await
+                .map(|_| ()),
+                None => Err(anyhow::anyhow!(
+                    "Omega owns no installed directory for this agent, so there is nothing to \
+                     re-check."
+                )),
+            };
+            this.update(cx, |this, cx| {
+                this.set_harness_maintenance_result(&id, result, cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Show what a maintenance control did, and re-read the state either way.
+    ///
+    /// A failed pin write that left the row unchanged and said nothing would be
+    /// the same defect the receipt contract exists to prevent, one layer up.
+    fn set_harness_maintenance_result(
+        &mut self,
+        id: &project::AgentId,
+        result: anyhow::Result<()>,
+        cx: &mut Context<Self>,
+    ) {
+        self.harness_maintenance_error = result
+            .err()
+            .map(|error| (id.clone(), SharedString::from(error.to_string())));
+        self.refresh_harness_maintenance(cx);
+        cx.notify();
     }
 
     fn handle_project_event(
@@ -5254,6 +5440,9 @@ pub mod test {
                 mcp_add_server_focus_handle: cx.focus_handle(),
                 custom_agent_form: None,
                 external_agent_add_focus_handle: cx.focus_handle(),
+                harness_maintenance: Default::default(),
+                harness_maintenance_task: None,
+                harness_maintenance_error: None,
                 skill_creator_page: None,
             }
         }
@@ -5393,6 +5582,9 @@ pub mod test {
             mcp_add_server_focus_handle: cx.focus_handle(),
             custom_agent_form: None,
             external_agent_add_focus_handle: cx.focus_handle(),
+            harness_maintenance: Default::default(),
+            harness_maintenance_task: None,
+            harness_maintenance_error: None,
             skill_creator_page: None,
         };
 

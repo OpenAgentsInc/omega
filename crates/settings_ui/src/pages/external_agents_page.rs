@@ -16,6 +16,7 @@ use ui::{
     AiSettingItem, AiSettingItemSource, AiSettingItemStatus, ContextMenu, ContextMenuEntry,
     Divider, PopoverMenu, Tooltip, prelude::*,
 };
+use omega_harness::{HarnessDistribution, HarnessFrontDoorState, PinControl, ProvenanceVerdict};
 use util::ResultExt as _;
 use workspace::{MultiWorkspace, Workspace, create_and_open_local_file};
 
@@ -27,14 +28,17 @@ pub(crate) fn render_external_agents_page(
     _window: &mut Window,
     cx: &mut Context<SettingsWindow>,
 ) -> AnyElement {
-    let agent_server_store = get_agent_server_store(settings_window, cx);
+    let agent_server_store = agent_server_store(settings_window, cx);
+
+    let maintenance = settings_window.harness_maintenance.clone();
+    let maintenance_error = settings_window.harness_maintenance_error.clone();
 
     let agent_list = if let Some(store) = agent_server_store.as_ref() {
         let agents = collect_agents(store, cx);
         if agents.is_empty() {
             render_empty_state(cx)
         } else {
-            render_agent_list(agents, cx)
+            render_agent_list(agents, &maintenance, maintenance_error.as_ref(), cx)
         }
     } else {
         render_no_project_state(cx)
@@ -58,7 +62,7 @@ pub(crate) fn render_external_agents_page(
         .into_any_element()
 }
 
-fn get_agent_server_store(
+pub(crate) fn agent_server_store(
     settings_window: &SettingsWindow,
     cx: &App,
 ) -> Option<Entity<AgentServerStore>> {
@@ -143,14 +147,27 @@ fn render_no_project_state(cx: &App) -> AnyElement {
         .into_any_element()
 }
 
-fn render_agent_list(agents: Vec<AgentRow>, cx: &mut Context<SettingsWindow>) -> AnyElement {
+fn render_agent_list(
+    agents: Vec<AgentRow>,
+    maintenance: &HashMap<AgentId, HarnessFrontDoorState>,
+    maintenance_error: Option<&(AgentId, SharedString)>,
+    cx: &mut Context<SettingsWindow>,
+) -> AnyElement {
     v_flex()
         .w_full()
         .gap_1()
         .children(itertools::intersperse_with(
-            agents.into_iter().map(|(id, icon, display_name, source)| {
-                render_agent(id, icon, display_name, source, cx).into_any_element()
-            }),
+            agents
+                .into_iter()
+                .map(|(id, icon, display_name, source)| {
+                    let state = maintenance.get(&id).cloned();
+                    let error = maintenance_error
+                        .filter(|(errored, _)| errored == &id)
+                        .map(|(_, message)| message.clone());
+                    render_agent(id, icon, display_name, source, state, error, cx)
+                        .into_any_element()
+                })
+                .collect::<Vec<_>>(),
             || Divider::horizontal().into_any_element(),
         ))
         .into_any_element()
@@ -161,6 +178,8 @@ fn render_agent(
     icon: Option<SharedString>,
     display_name: SharedString,
     source: ExternalAgentSource,
+    maintenance: Option<HarnessFrontDoorState>,
+    maintenance_error: Option<SharedString>,
     cx: &mut Context<SettingsWindow>,
 ) -> impl IntoElement {
     let id_string = id.0.clone();
@@ -201,6 +220,22 @@ fn render_agent(
         ExternalAgentSource::Custom => "Remove Custom Agent",
     };
 
+    let pin_button = maintenance
+        .as_ref()
+        .map(|state| render_pin_control(&id, state, cx));
+    let verify_button = maintenance
+        .as_ref()
+        .filter(|state| {
+            // Nothing to re-measure when no directory of Omega's holds the
+            // bytes, so the control is absent rather than present and inert.
+            matches!(state.distribution, HarnessDistribution::OwnedTree)
+        })
+        .map(|_| render_verify_control(&id, cx));
+
+    let details = maintenance
+        .as_ref()
+        .map(|state| render_maintenance_details(state, maintenance_error.clone()));
+
     let remove_button = IconButton::new(format!("uninstall-{}", id_string), IconName::Trash)
         .icon_color(Color::Muted)
         .icon_size(IconSize::Small)
@@ -222,8 +257,180 @@ fn render_agent(
         source_kind,
     )
     .icon(icon)
+    .when_some(
+        maintenance
+            .as_ref()
+            .map(|state| SharedString::from(format!("v{}", state.version))),
+        |this, version| this.detail_label(version),
+    )
+    .when_some(verify_button, |this, button| this.action(button))
+    .when_some(pin_button, |this, button| this.action(button))
     .when_some(configure_button, |this, button| this.action(button))
     .action(remove_button)
+    .when_some(details, |this, details| this.details(details))
+}
+
+/// The one pin control this harness's state admits.
+///
+/// The button that exists is decided by [`PinControl`], not here. This function
+/// turns each of its three cases into a widget and does not add a fourth: a
+/// control that appears because the page thought it should, rather than because
+/// the decision layer offered it, is exactly how a front door and a gate start
+/// disagreeing.
+fn render_pin_control(
+    id: &AgentId,
+    state: &HarnessFrontDoorState,
+    cx: &mut Context<SettingsWindow>,
+) -> AnyElement {
+    let button_id = SharedString::from(format!("harness-pin-{}", id.0));
+    match &state.pin_control {
+        PinControl::Take { version, .. } => {
+            let version = version.clone();
+            IconButton::new(button_id, IconName::Lock)
+                .icon_color(Color::Muted)
+                .icon_size(IconSize::Small)
+                .size(ButtonSize::Medium)
+                .tab_index(0isize)
+                .tooltip(move |_, cx| {
+                    Tooltip::with_meta(
+                        "Pin This Version",
+                        None,
+                        format!(
+                            "Freeze this agent at {version} and at the files Omega measures now. \
+                             Omega will refuse to run anything else until you remove the pin."
+                        ),
+                        cx,
+                    )
+                })
+                .on_click(cx.listener({
+                    let id = id.clone();
+                    move |this, _event, _window, cx| {
+                        this.pin_harness(&id, cx);
+                    }
+                }))
+                .into_any_element()
+        }
+        PinControl::Remove { pinned_version } => {
+            let pinned_version = pinned_version.clone();
+            IconButton::new(button_id, IconName::LockOff)
+                .icon_color(Color::Accent)
+                .icon_size(IconSize::Small)
+                .size(ButtonSize::Medium)
+                .tab_index(0isize)
+                .tooltip(move |_, cx| {
+                    Tooltip::with_meta(
+                        "Remove Pin",
+                        None,
+                        format!(
+                            "Pinned to {pinned_version}. Removing the pin lets Omega install and \
+                             run whatever version the registry offers."
+                        ),
+                        cx,
+                    )
+                })
+                .on_click(cx.listener({
+                    let id = id.clone();
+                    move |this, _event, _window, cx| {
+                        this.unpin_harness(&id, cx);
+                    }
+                }))
+                .into_any_element()
+        }
+        // Disabled, never absent: a row missing the control every other row has
+        // reads to an owner as a bug in Omega rather than as a fact about this
+        // agent. The sentence is the one the decision layer produced.
+        PinControl::Unavailable { reason } => {
+            let reason = reason.clone();
+            IconButton::new(button_id, IconName::Lock)
+                .icon_color(Color::Disabled)
+                .icon_size(IconSize::Small)
+                .size(ButtonSize::Medium)
+                .disabled(true)
+                .tooltip(move |_, cx| {
+                    Tooltip::with_meta("Cannot Pin", None, reason.clone(), cx)
+                })
+                .into_any_element()
+        }
+    }
+}
+
+/// Re-measure an installed tree on request, under its own maintenance action.
+fn render_verify_control(id: &AgentId, cx: &mut Context<SettingsWindow>) -> AnyElement {
+    IconButton::new(
+        SharedString::from(format!("harness-verify-{}", id.0)),
+        IconName::Check,
+    )
+    .icon_color(Color::Muted)
+    .icon_size(IconSize::Small)
+    .size(ButtonSize::Medium)
+    .tab_index(0isize)
+    .tooltip(move |_, cx| {
+        Tooltip::with_meta(
+            "Re-Check Installed Files",
+            None,
+            "Hash this agent's installed files again and write a receipt for what was found.",
+            cx,
+        )
+    })
+    .on_click(cx.listener({
+        let id = id.clone();
+        move |this, _event, _window, cx| {
+            this.reprobe_harness(&id, cx);
+        }
+    }))
+    .into_any_element()
+}
+
+/// The sentences under the row.
+///
+/// Every one of them is produced by `omega_harness`. This function chooses
+/// colour and order and writes no reason of its own, which is what keeps the
+/// page unable to soften a refusal the gate will enforce.
+fn render_maintenance_details(
+    state: &HarnessFrontDoorState,
+    error: Option<SharedString>,
+) -> AnyElement {
+    let mut lines: Vec<(SharedString, Color)> = Vec::new();
+
+    if let Some(reason) = state.launch.reason() {
+        lines.push((SharedString::from(reason.to_string()), Color::Error));
+    }
+    if let Some(pin) = state.pin.as_ref() {
+        lines.push((
+            SharedString::from(format!(
+                "Pinned to {} at {}.",
+                pin.version,
+                pin.digest.chars().take(12).collect::<String>()
+            )),
+            Color::Accent,
+        ));
+    }
+    match &state.provenance {
+        ProvenanceVerdict::Verified { digest } => lines.push((
+            SharedString::from(format!(
+                "Verified: the installed files hash to {}.",
+                digest.chars().take(12).collect::<String>()
+            )),
+            Color::Success,
+        )),
+        ProvenanceVerdict::Refused(gap) => lines.push((
+            SharedString::from(gap.reason().to_string()),
+            Color::Warning,
+        )),
+    }
+    if let Some(error) = error {
+        lines.push((error, Color::Error));
+    }
+
+    v_flex()
+        .gap_0p5()
+        .children(lines.into_iter().map(|(text, color)| {
+            Label::new(text)
+                .size(LabelSize::Small)
+                .color(color)
+                .into_any_element()
+        }))
+        .into_any_element()
 }
 
 fn remove_agent(id: &AgentId, source: ExternalAgentSource, cx: &mut App) {
@@ -745,7 +952,7 @@ fn save_custom_agent_form(
     // Reject names that would collide with a *different* existing agent. This
     // covers both adding a new agent and renaming an existing one.
     let collides_with_other_agent =
-        get_agent_server_store(settings_window, cx).is_some_and(|store| {
+        agent_server_store(settings_window, cx).is_some_and(|store| {
             let existing_ids = store
                 .read(cx)
                 .external_agents()

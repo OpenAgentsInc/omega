@@ -1512,3 +1512,80 @@ cargo test -p omega_deltas
   `crates/omega_deltas`; plus the suites in
   `crates/omega_front_door/src/send_during_turn.rs` and
   `crates/agent_ui/src/omega_send_queue.rs`.
+
+### OMEGA-DELTA-0033 — A pin is a control a person can press, and a refusal is a sentence they can read
+
+**Upstream:** an external agent's row in Settings shows a name, a source icon
+and a Remove button. There is no version pinning, no provenance, and nothing to
+say what bytes a wrapped harness will run with the thread's tool permissions.
+
+**Omega before this delta:** `OMEGA-DELTA-0025` (omega#81) built the whole
+decision layer and rendered none of it. `MaintenanceAffordance::Disabled`
+structurally could not exist without a sentence, and nothing put that sentence
+on a screen. A refusal reached the owner only as agent-launch error text. There
+was **no writer for the pin ledger in production code at all** —
+`HarnessPinLedger::set_pin` and `remove_pin` were called only by tests, so a
+"pin" was a JSON file the owner had to hand-edit. Two of the four maintenance
+actions omega#81 named did not exist. And `LocalRegistryNpxAgent` consulted
+nothing: pinning an npx harness did **nothing whatsoever**, which matters more
+than it sounds, because the harness omega#81's acceptance sentence names —
+`codex-acp` — is npx-distributed in the live ACP registry.
+
+**Omega now:**
+
+- **One control, never two.** `PinControl` offers exactly one of `Take`,
+  `Remove`, or `Unavailable { reason }` per harness. Re-pointing a freeze at
+  whatever is installed now is deliberately two actions, because one click that
+  silently moved a pin would undo the freeze in the exact case it exists for.
+  `Unavailable` carries its reason by construction, for the same reason
+  `Disabled` does: omega 0.2.0-rc11 shipped a refusal nobody could see.
+- **The row cannot disagree with the gate.** `harness_front_door_state` routes
+  every answer through the same `decide_maintenance` / `admits_version` /
+  `admits_package_manager_launch` the launch path enforces, and
+  `the_rendered_launch_state_equals_what_the_gate_would_decide` asserts equality
+  across the whole space of pin states and measurements. The settings page calls
+  none of those functions itself — it matches on the result and writes no
+  sentence of its own.
+- **A pin is taken at bytes, through the gate.** `pin_installed_harness` obtains
+  its digest from `authorize_installed_harness`, so taking a pin runs the real
+  gate, writes a real receipt, and cannot freeze a tree the gate would refuse.
+  An unreadable ledger refuses both controls rather than being rewritten from
+  the subset this build could parse — that is not removal, it is deletion of
+  everything unreadable.
+- **The npx path consults the pin.** There is no tree to hash, so the measured
+  gate cannot run; `admits_package_manager_launch` narrows the question to the
+  one the ledger can answer. A pinned harness refuses with a sentence naming the
+  resolver, and the refusal is recorded. **The honest limit, stated rather than
+  hidden:** this raises no bar on an *unpinned* npx harness, which still launches
+  unattested — the front door says so on the row.
+- **Resolving the channel and re-probing are their own actions.** Channel
+  resolution happens when nothing is about to launch, so a frozen harness is no
+  longer *offered* a version the next launch would refuse — and the resolution
+  that decided so is recorded, because an update that never starts leaves no
+  other trace. `ReprobeCapability` is what the owner's control does with nothing
+  about to run, kept distinct from `Verify` so the log can say whether a
+  measurement was taken because something was about to execute or because a
+  person asked.
+- **Proven live.**
+  `live_a_real_registry_install_produces_a_receipt_and_a_pin_blocks_the_next_version`
+  fetches the live ACP registry, downloads a real release through the same
+  downloader the launch path uses, gates the extracted tree, reads the receipt
+  off a real disk, pins it, watches the pin block a later version, and then adds
+  one file to the installed tree and watches the harness stop running. It is
+  `#[ignore]`d: a suite that silently depends on a third party's release assets
+  goes red for reasons that are not about this repository.
+- **What this does not do.** Neither the ledger nor the receipt log is signed;
+  anyone who can write to `paths::external_agents_dir()` can rewrite both. The
+  digest says the bytes did not change since Omega measured them, not that they
+  are the bytes the publisher built. And an owner-named custom binary has no
+  maintenance state at all, by design — Omega did not choose it and does not
+  update it.
+- **Enforced by:** `the_front_door_page_renders_decisions_it_did_not_make`,
+  `a_withheld_control_carries_a_sentence_all_the_way_to_the_widget`,
+  `the_pin_ledger_has_a_writer_the_owner_can_reach`,
+  `the_package_manager_launch_path_is_gated_on_the_pin`,
+  `resolving_a_channel_is_a_recorded_action_that_gates_the_offer`, and
+  `the_front_door_measures_the_tree_the_launch_path_gates` in
+  `crates/omega_deltas`; plus the suites in
+  `crates/omega_harness/src/front_door.rs` and
+  `crates/project/tests/integration/harness_maintenance.rs`.

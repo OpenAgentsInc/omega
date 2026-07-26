@@ -23,10 +23,14 @@
 //! and the GPUI entities live in `crates/project/src/agent_server_store.rs`,
 //! which is the only caller that enforces any of this.
 
+mod front_door;
 mod measured;
 mod pins;
 mod receipt;
 
+pub use front_door::{
+    HarnessDistribution, HarnessFrontDoorState, PinControl, harness_front_door_state,
+};
 pub use measured::MeasuredDigest;
 pub use pins::{
     HARNESS_PIN_LEDGER_FILE_NAME, HARNESS_PIN_LEDGER_SCHEMA, HarnessPin, HarnessPinLedger,
@@ -38,7 +42,7 @@ pub use receipt::{
     HarnessMaintenanceReceiptError, HarnessMaintenanceRecord, InstallationProvenance,
     MAX_HARNESS_REF_LEN, MAX_HARNESS_TIMESTAMP_MS, MaintenanceAction, MaintenanceAffordance,
     MaintenanceDecision, MaintenanceOutcome, MaintenanceOutcomeInput, MaintenanceRefusal,
-    PinState, ProvenanceGap, ProvenanceVerdict, admits_version,
+    PinState, ProvenanceGap, ProvenanceVerdict, admits_package_manager_launch, admits_version,
     build_harness_maintenance_receipt, decide_maintenance, decode_harness_maintenance_receipt,
     decode_harness_maintenance_record, receipt_for_decision, update_affordance,
     verify_installation,

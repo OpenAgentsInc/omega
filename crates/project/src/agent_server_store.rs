@@ -29,9 +29,10 @@ use util::{ResultExt as _, debug_panic};
 use crate::ProjectEnvironment;
 use crate::agent_registry_store::{AgentRegistryStore, RegistryAgent, RegistryTargetConfig};
 use crate::harness_maintenance::{
-    authorize_installed_harness, authorize_version_fetch, now_ms as harness_now_ms,
+    NPX_RESOLVER, authorize_installed_harness, authorize_package_manager_launch,
+    authorize_version_fetch, now_ms as harness_now_ms, resolve_channel,
 };
-use omega_harness::MaintenanceAction;
+use omega_harness::{HarnessDistribution, MaintenanceAction};
 
 use crate::worktree_store::WorktreeStore;
 
@@ -118,6 +119,23 @@ pub enum ExternalAgentSource {
     Registry,
 }
 
+/// What the front door needs in order to show one harness's maintenance state.
+///
+/// The store owns these facts and the settings page does not: the installed
+/// directory is derived from the version, the archive URL and its checksum, and
+/// re-deriving that anywhere else would let the page measure a different tree
+/// than the launch path gates.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HarnessMaintenanceTarget {
+    /// The registry id, as the receipt log and the pin ledger name it.
+    pub harness_id: Arc<str>,
+    /// The version the registry currently advertises.
+    pub version: SharedString,
+    pub distribution: HarnessDistribution,
+    /// The exact tree the launch path measures, when there is one.
+    pub installed_dir: Option<PathBuf>,
+}
+
 pub trait ExternalAgentServer {
     fn get_command(
         &mut self,
@@ -141,6 +159,16 @@ pub trait ExternalAgentServer {
     }
 
     fn set_loading_status_tx(&mut self, _tx: watch::Sender<Option<String>>) {}
+
+    /// What the front door shows for this harness, or `None` when there is
+    /// nothing Omega maintains.
+    ///
+    /// `None` is the honest answer for an owner-named custom binary: Omega did
+    /// not choose it, does not update it, and owns no directory it lives in, so
+    /// there is no pin to offer and no provenance to claim.
+    fn maintenance_target(&self) -> Option<HarnessMaintenanceTarget> {
+        None
+    }
 
     fn as_any(&self) -> &dyn Any;
     fn as_any_mut(&mut self) -> &mut dyn Any;
@@ -252,6 +280,18 @@ impl AgentServerStore {
 
     pub fn agent_source(&self, name: &AgentId) -> Option<ExternalAgentSource> {
         self.external_agents.get(name).map(|entry| entry.source)
+    }
+
+    /// What the front door needs to show one agent's maintenance state.
+    ///
+    /// `None` for an agent Omega does not maintain. The settings page renders
+    /// nothing rather than an empty maintenance section, because a section that
+    /// says nothing about a custom binary reads as a claim that there was
+    /// nothing to say.
+    pub fn maintenance_target(&self, name: &AgentId) -> Option<HarnessMaintenanceTarget> {
+        self.external_agents
+            .get(name)
+            .and_then(|entry| entry.server.maintenance_target())
     }
 }
 
@@ -463,8 +503,43 @@ impl AgentServerStore {
             };
 
             if new_version != &old_version {
-                if let Some(mut tx) = new_version_available_tx {
-                    tx.send(Some(new_version.to_string())).ok();
+                if let Some(tx) = new_version_available_tx {
+                    // omega#81. Resolving the channel is its own maintenance
+                    // action, and it happens here — no bytes move and nothing
+                    // is about to launch. A harness frozen at another version
+                    // must not be *offered* the one the registry now names: the
+                    // offer would lead to a refusal on the next launch, which
+                    // is the front door promising what the gate then takes
+                    // back. The refusal is recorded, because an update that
+                    // never starts leaves no other trace it was considered.
+                    let fs = fs.clone();
+                    let agent_id = name.clone();
+                    let version = new_version.to_string();
+                    cx.spawn(async move |this, cx| {
+                        let refusal = resolve_channel(
+                            fs,
+                            agent_id.0.as_ref(),
+                            version.as_str(),
+                            harness_now_ms(),
+                        )
+                        .await;
+                        let mut tx = tx;
+                        if refusal.is_none() {
+                            tx.send(Some(version)).ok();
+                            return;
+                        }
+                        // Hand the channel back rather than dropping it. A
+                        // dropped sender would close the announcement path for
+                        // the life of the connection, so removing the pin would
+                        // not bring the offer back.
+                        this.update(cx, |store, _| {
+                            if let Some(entry) = store.external_agents.get_mut(&agent_id) {
+                                entry.server.set_new_version_available_tx(tx);
+                            }
+                        })
+                        .ok();
+                    })
+                    .detach();
                 }
             } else {
                 if let Some(tx) = new_version_available_tx {
@@ -1119,6 +1194,31 @@ async fn remove_stale_versioned_archive_cache_dirs(
     Ok(())
 }
 
+/// The `<os>-<arch>` key the registry document's `targets` map is keyed by.
+///
+/// `None` on a platform the build does not name, which is the same condition
+/// `get_command` bails on. The front door then shows no installed tree rather
+/// than guessing at one.
+fn current_registry_platform_key() -> Option<String> {
+    let os = if cfg!(target_os = "macos") {
+        "darwin"
+    } else if cfg!(target_os = "linux") {
+        "linux"
+    } else if cfg!(target_os = "windows") {
+        "windows"
+    } else {
+        return None;
+    };
+    let arch = if cfg!(target_arch = "aarch64") {
+        "aarch64"
+    } else if cfg!(target_arch = "x86_64") {
+        "x86_64"
+    } else {
+        return None;
+    };
+    Some(format!("{os}-{arch}"))
+}
+
 struct LocalRegistryArchiveAgent {
     fs: Arc<dyn Fs>,
     http_client: Arc<dyn HttpClient>,
@@ -1137,9 +1237,38 @@ struct LocalRegistryArchiveAgent {
     loading_status_tx: Option<watch::Sender<Option<String>>>,
 }
 
+impl LocalRegistryArchiveAgent {
+    /// The tree `get_command` measures, derived the same way it derives it.
+    ///
+    /// One function would be better than two call sites agreeing; the launch
+    /// path computes this inside an async block that also resolves the
+    /// environment, so the shared thing here is
+    /// [`versioned_archive_cache_dir`] and the platform key, not the whole
+    /// expression. `the_front_door_measures_the_tree_the_launch_path_gates` in
+    /// `crates/omega_deltas` fails if the two stop agreeing.
+    fn installed_version_dir(&self) -> Option<PathBuf> {
+        let target_config = self.targets.get(&current_registry_platform_key()?)?;
+        Some(versioned_archive_cache_dir(
+            &self.installation_dir,
+            Some(self.version.as_ref()),
+            &target_config.archive,
+            target_config.sha256.as_deref(),
+        ))
+    }
+}
+
 impl ExternalAgentServer for LocalRegistryArchiveAgent {
     fn version(&self) -> Option<&SharedString> {
         Some(&self.version)
+    }
+
+    fn maintenance_target(&self) -> Option<HarnessMaintenanceTarget> {
+        Some(HarnessMaintenanceTarget {
+            harness_id: self.registry_id.clone(),
+            version: self.version.clone(),
+            distribution: HarnessDistribution::OwnedTree,
+            installed_dir: self.installed_version_dir(),
+        })
     }
 
     fn take_new_version_available_tx(&mut self) -> Option<watch::Sender<Option<String>>> {
@@ -1400,6 +1529,21 @@ impl ExternalAgentServer for LocalRegistryNpxAgent {
         Some(&self.version)
     }
 
+    fn maintenance_target(&self) -> Option<HarnessMaintenanceTarget> {
+        Some(HarnessMaintenanceTarget {
+            harness_id: self.registry_id.clone(),
+            version: self.version.clone(),
+            distribution: HarnessDistribution::PackageManager {
+                resolver: NPX_RESOLVER.to_string(),
+            },
+            // There is no tree Omega owns. `npm exec` resolves the package into
+            // its own cache at launch, so there is nothing here to measure and
+            // no directory to name — which is the fact the front door shows,
+            // rather than an absence it leaves the owner to infer.
+            installed_dir: None,
+        })
+    }
+
     fn take_new_version_available_tx(&mut self) -> Option<watch::Sender<Option<String>>> {
         self.new_version_available_tx.take()
     }
@@ -1424,6 +1568,18 @@ impl ExternalAgentServer for LocalRegistryNpxAgent {
         let settings_env = self.settings_env.clone();
 
         cx.spawn(async move |cx| {
+            // omega#81. The npx path has no tree to hash, so the measured gate
+            // cannot run here. What can run is the pin: a harness the owner
+            // froze does not launch through a resolver that would pick its own
+            // version. Before this, pinning an npx harness did nothing at all.
+            authorize_package_manager_launch(
+                fs.clone(),
+                registry_id.as_ref(),
+                NPX_RESOLVER,
+                harness_now_ms(),
+            )
+            .await?;
+
             let mut env = project_environment
                 .update(cx, |project_environment, cx| {
                     project_environment.default_environment(cx)

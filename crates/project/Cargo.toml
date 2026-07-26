@@ -122,9 +122,11 @@ lsp = { workspace = true, features = ["test-support"] }
 prettier = { workspace = true, features = ["test-support"] }
 pretty_assertions.workspace = true
 project = {workspace = true, features = ["test-support"]}
+reqwest_client.workspace = true
 rpc = { workspace = true, features = ["test-support"] }
 settings = { workspace = true, features = ["test-support"] }
 snippet_provider = { workspace = true, features = ["test-support"] }
+tempfile.workspace = true
 unindent.workspace = true
 util = { workspace = true, features = ["test-support"] }
 worktree = { workspace = true, features = ["test-support"] }

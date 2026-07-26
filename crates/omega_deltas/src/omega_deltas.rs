@@ -60,6 +60,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0030",
     "OMEGA-DELTA-0031",
     "OMEGA-DELTA-0032",
+    "OMEGA-DELTA-0033",
 ];
 
 /// OMEGA-DELTA-0025. The file that declares the measured digest.
@@ -79,6 +80,13 @@ pub const HARNESS_MAINTENANCE_PATH: &str = "crates/project/src/harness_maintenan
 
 /// OMEGA-DELTA-0025. The launch path the provenance gate sits in.
 pub const AGENT_SERVER_STORE_PATH: &str = "crates/project/src/agent_server_store.rs";
+
+/// OMEGA-DELTA-0033. The decision layer for what the owner's front door shows.
+pub const HARNESS_FRONT_DOOR_PATH: &str = "crates/omega_harness/src/front_door.rs";
+
+/// OMEGA-DELTA-0033. The page that renders it.
+pub const EXTERNAL_AGENTS_PAGE_PATH: &str =
+    "crates/settings_ui/src/pages/external_agents_page.rs";
 
 /// OMEGA-DELTA-0026. Shipped defaults that would otherwise point a running
 /// Omega at one of Zed's production hosts, as
@@ -4708,6 +4716,285 @@ mod tests {
         assert!(
             !source.contains("Entity<MessageEditor>"),
             "OMEGA-DELTA-0032: a live GPUI handle cannot be a durable fact.              That is exactly what made the upstream queue renderer-only."
+        );
+    }
+
+
+    // ------------------------------------------------------ OMEGA-DELTA-0033
+
+    /// OMEGA-DELTA-0033. The front door renders the decision; it does not make
+    /// one.
+    ///
+    /// omega#81 landed a decision layer nothing rendered, and the settings page
+    /// is the first thing to render it. The risk that creates is a page that
+    /// starts deciding: an `if` on a pin, a locally composed reason, a control
+    /// enabled because the widget thought it should be. Any of those and the
+    /// front door and the launch gate can disagree, which shows up to an owner
+    /// as a button that looks live and then fails.
+    ///
+    /// So the page may match on the decision layer's types and may not call the
+    /// decision functions itself.
+    #[test]
+    fn the_front_door_page_renders_decisions_it_did_not_make() {
+        let path = repository_path(EXTERNAL_AGENTS_PAGE_PATH);
+        let source = std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
+
+        assert!(
+            source.contains("PinControl::Take")
+                && source.contains("PinControl::Remove")
+                && source.contains("PinControl::Unavailable"),
+            "OMEGA-DELTA-0033: {} must render all three pin-control states. A \
+             page that renders two of them silently drops the case where the \
+             control is withheld, which is the case that needs a sentence most.",
+            path.display()
+        );
+        for decider in [
+            "decide_maintenance(",
+            "admits_version(",
+            "admits_package_manager_launch(",
+            "update_affordance(",
+            "harness_front_door_state(",
+        ] {
+            assert!(
+                !source.contains(decider),
+                "OMEGA-DELTA-0033: {} calls {decider} itself. The page must \
+                 render the state the store computed, or the row and the gate \
+                 become two answers to the same question.",
+                path.display()
+            );
+        }
+        assert!(
+            !source.contains("MaintenanceAffordance::Disabled"),
+            "OMEGA-DELTA-0033: {} constructs a refusal of its own. Every \
+             sentence on this page comes from omega_harness.",
+            path.display()
+        );
+    }
+
+    /// OMEGA-DELTA-0033. A withheld control still says why.
+    ///
+    /// The reason `MaintenanceAffordance::Disabled` carries a `String` rather
+    /// than an `Option<String>` is that omega 0.2.0-rc11 shipped a refusal
+    /// nobody could see. [`PinControl`] has to hold the same shape, and the
+    /// page has to put both sentences somewhere a person reads.
+    #[test]
+    fn a_withheld_control_carries_a_sentence_all_the_way_to_the_widget() {
+        let decisions = repository_path(HARNESS_FRONT_DOOR_PATH);
+        let source = std::fs::read_to_string(&decisions)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", decisions.display()));
+        assert!(
+            source.contains("Unavailable { reason: String }")
+                || source.contains("Unavailable {\n        /// The sentence")
+                || source.contains("Unavailable { reason: String },"),
+            "OMEGA-DELTA-0033: {} must make the withheld pin control carry its \
+             reason by construction. An `Option` here is a control that can be \
+             withheld silently.",
+            decisions.display()
+        );
+
+        let page = repository_path(EXTERNAL_AGENTS_PAGE_PATH);
+        let rendered = std::fs::read_to_string(&page)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", page.display()));
+        assert!(
+            rendered.contains("state.launch.reason()"),
+            "OMEGA-DELTA-0033: {} no longer renders the launch refusal. A \
+             refusal that reaches the owner only as agent-launch error text is \
+             the gap omega#81 stayed open for.",
+            page.display()
+        );
+        assert!(
+            rendered.contains("PinControl::Unavailable { reason }")
+                && rendered.contains("Tooltip::with_meta(\"Cannot Pin\", None, reason.clone(), cx)"),
+            "OMEGA-DELTA-0033: {} must show the withheld control's reason. A \
+             disabled button with no sentence reads as a bug in Omega rather \
+             than as a fact about the owner's machine.",
+            page.display()
+        );
+    }
+
+    /// OMEGA-DELTA-0033. The pin controls exist in production code.
+    ///
+    /// `HarnessPinLedger::set_pin` and `remove_pin` existed before this delta
+    /// and were called only by tests: the ledger was a JSON file with no writer
+    /// Omega shipped. A "pin" an owner can only take by hand-editing a file is
+    /// not a control, and the standing rule is that owner-facing operations get
+    /// working controls rather than a runbook.
+    #[test]
+    fn the_pin_ledger_has_a_writer_the_owner_can_reach() {
+        let filesystem = repository_path(HARNESS_MAINTENANCE_PATH);
+        let source = std::fs::read_to_string(&filesystem)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", filesystem.display()));
+        for writer in ["pub async fn pin_installed_harness(", "pub async fn unpin_harness("] {
+            assert!(
+                source.contains(writer),
+                "OMEGA-DELTA-0033: {} no longer offers {writer}. Without it the \
+                 ledger is a file the owner must edit by hand.",
+                filesystem.display()
+            );
+        }
+        assert!(
+            source.contains("encode_harness_pin_ledger(ledger)?"),
+            "OMEGA-DELTA-0033: {} must write the ledger through its own \
+             encoder, which routes back through the reader. A writer that can \
+             emit a file its reader refuses turns the next restart into the \
+             moment every pin fails closed.",
+            filesystem.display()
+        );
+
+        let page = repository_path(EXTERNAL_AGENTS_PAGE_PATH);
+        let rendered = std::fs::read_to_string(&page)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", page.display()));
+        assert!(
+            rendered.contains("this.pin_harness(&id, cx)")
+                && rendered.contains("this.unpin_harness(&id, cx)"),
+            "OMEGA-DELTA-0033: {} must wire both pin controls to something a \
+             person can press.",
+            page.display()
+        );
+    }
+
+    /// OMEGA-DELTA-0033. The npx launch path consults the ledger.
+    ///
+    /// `LocalRegistryNpxAgent` resolves its package inside the node runtime's
+    /// own cache, so there is no tree for the measured gate to hash — and
+    /// before this delta that meant pinning such a harness did nothing at all.
+    /// The owner's "not that one" has to refuse even where Omega cannot verify
+    /// the bytes, or the pin is a decoration.
+    #[test]
+    fn the_package_manager_launch_path_is_gated_on_the_pin() {
+        let path = repository_path(AGENT_SERVER_STORE_PATH);
+        let source = std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
+
+        let gate = source
+            .find("authorize_package_manager_launch(")
+            .unwrap_or_else(|| {
+                panic!(
+                    "OMEGA-DELTA-0033: {} no longer consults the pin on the \
+                     package-manager launch path",
+                    path.display()
+                )
+            });
+        // Same rule as OMEGA-DELTA-0025: the refusal must stop the launch, not
+        // be logged beside it.
+        let tail = &source[gate..];
+        let end = tail.find(';').expect("the call statement ends");
+        assert!(
+            tail[..end].contains(".await?"),
+            "OMEGA-DELTA-0033: the result of authorize_package_manager_launch \
+             is not propagated in {}. A refusal that does not stop the launch \
+             is not a refusal.",
+            path.display()
+        );
+
+        let npx_command = source
+            .find("let command = AgentServerCommand {")
+            .map(|_| {
+                source[gate..]
+                    .find("let command = AgentServerCommand {")
+                    .map(|offset| gate + offset)
+                    .expect("the npx command is constructed after the gate")
+            })
+            .expect("a command is constructed somewhere");
+        assert!(
+            gate < npx_command,
+            "OMEGA-DELTA-0033: the package-manager gate no longer precedes the \
+             command it gates in {}",
+            path.display()
+        );
+    }
+
+    /// OMEGA-DELTA-0033. Resolving the channel is its own recorded action.
+    ///
+    /// omega#81's first deliverable named four actions and landed three.
+    /// Resolving what the channel advertises happens when nothing is about to
+    /// launch, so if it is not recorded there it is not recorded at all — and a
+    /// frozen harness offered an update it will refuse is the front door
+    /// promising what the gate takes back.
+    #[test]
+    fn resolving_a_channel_is_a_recorded_action_that_gates_the_offer() {
+        let filesystem = repository_path(HARNESS_MAINTENANCE_PATH);
+        let source = std::fs::read_to_string(&filesystem)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", filesystem.display()));
+        assert!(
+            source.contains("MaintenanceAction::ResolveChannel"),
+            "OMEGA-DELTA-0033: {} no longer records channel resolution under \
+             its own action.",
+            filesystem.display()
+        );
+        assert!(
+            source.contains("MaintenanceAction::ReprobeCapability"),
+            "OMEGA-DELTA-0033: {} no longer records a re-probe under its own \
+             action. Collapsing it into Verify would leave the log unable to \
+             say whether a measurement was taken because something was about \
+             to run or because a person asked.",
+            filesystem.display()
+        );
+
+        let store = repository_path(AGENT_SERVER_STORE_PATH);
+        let launch = std::fs::read_to_string(&store)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", store.display()));
+        let resolve = launch.find("resolve_channel(").unwrap_or_else(|| {
+            panic!(
+                "OMEGA-DELTA-0033: {} no longer resolves the channel before \
+                 announcing a new version",
+                store.display()
+            )
+        });
+        let announce = launch[resolve..]
+            .find("tx.send(Some(version))")
+            .map(|offset| resolve + offset)
+            .unwrap_or_else(|| {
+                panic!(
+                    "OMEGA-DELTA-0033: no version is announced after the \
+                     channel is resolved in {}. Either the announcement moved \
+                     above the gate or it moved out of reach of this check.",
+                    store.display()
+                )
+            });
+        assert!(
+            resolve < announce,
+            "OMEGA-DELTA-0033: a version is announced before the pin is \
+             consulted in {}",
+            store.display()
+        );
+    }
+
+    /// OMEGA-DELTA-0033. The front door measures the tree the launch path
+    /// gates.
+    ///
+    /// The measured tree is not the installation directory — it is a version
+    /// directory whose name is derived from the version, the archive URL and
+    /// its checksum. A settings page that measured the parent would attest a
+    /// different set of bytes than the gate reads, and would then show
+    /// "verified" for an installation the launch path refuses.
+    #[test]
+    fn the_front_door_measures_the_tree_the_launch_path_gates() {
+        let path = repository_path(AGENT_SERVER_STORE_PATH);
+        let source = std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
+        // Tests call it freely; production must not. Two derivations of the
+        // measured tree outside the test module are the launch path's and the
+        // front door's, and they are what this check pins.
+        let production = source
+            .split_once("#[cfg(test)]")
+            .map(|(before, _)| before)
+            .unwrap_or(source.as_str());
+        assert_eq!(
+            production.matches("versioned_archive_cache_dir(").count(),
+            3,
+            "OMEGA-DELTA-0033: {} must derive the measured tree in exactly the \
+             places this check knows about — the definition, the launch path, \
+             and the front door's target. A new caller is a new way for the row \
+             and the gate to disagree.",
+            path.display()
+        );
+        assert!(
+            source.contains("fn installed_version_dir(&self) -> Option<PathBuf>"),
+            "OMEGA-DELTA-0033: {} no longer tells the front door which tree the \
+             launch path measures.",
+            path.display()
         );
     }
 
