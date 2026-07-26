@@ -2900,3 +2900,73 @@ than it sounds, because the harness omega#81's acceptance sentence names —
   spending budget on a thread routed elsewhere. The owner was asked and accepted
   it directly: *"i am ok with gemini flash being used for thread titles to api
   key"*.
+### OMEGA-DELTA-0060 — A parent can read the transcript of a subagent it spawned
+
+- **Upstream behaviour.** `spawn_agent` returns the subagent's final message and
+  nothing else. `SubagentSessionInfo` is attached to the tool call for the UI,
+  and the `From<SpawnAgentToolOutput>` conversion drops it with the comment
+  "Don't show this to the model". The parent receives `{session_id, output}`.
+  There is no tool that turns that `session_id` into the work behind it.
+- **Why Omega diverges.** A parent delegates a task and gets one paragraph. If
+  that paragraph is thin, or wrong, or contradicts something the parent knows,
+  the parent cannot look at what the subagent did. It can only delegate again
+  and hope for a better paragraph. The information exists — `Thread` keeps its
+  messages, and `SubagentContext` records the thread that spawned it — but
+  nothing exposes it. `read_subagent_transcript` is that path.
+- **The law: a thread reads only what it delegated.** Access is
+  `subagent_transcript_access`, a total function of the caller, the target, and
+  the target's immediate parent. Four named outcomes and no catch-all arm.
+  - The caller is **not a parameter of the tool**. `ThreadEnvironment::
+    read_subagent_transcript` takes a session ID and a window; the environment
+    reads the caller from its own thread. The tool therefore cannot name the
+    thread whose subagents it may read. Scope is a property of the signature,
+    not of the tool's care.
+  - Access is decided from the target's stored parent **before any message is
+    read**. A shape that assembles a transcript and filters afterwards is one
+    early return away from a leak.
+  - A refusal says the thread belongs to somebody else. It does not report a
+    real session as missing. The caller already holds the ID, so the lie
+    protects nothing and sends a caller who is debugging its own delegation
+    after a defect that is not there.
+  - **Direct children only. The ancestor chain is never walked.** Today
+    `MAX_SUBAGENT_DEPTH` is 1, so no grandchild exists. The rule is written for
+    the day that constant changes, because this tool is what creates the
+    problem: once a parent can read its child's transcript, every session ID
+    the child mentions becomes quotable by the parent. Transitive access would
+    turn "read what you delegated" into "read anything named by anything you
+    delegated", and it would arrive as a side effect of raising a depth
+    constant rather than as a decision. Nested reads, if ever wanted, are a
+    separate change to that one function.
+- **The law: a bound that fires must be visible.** The reason the subagent's
+  work is not in the parent's context is that it costs too much to put there,
+  so an unbounded read hands that cost straight back and can exhaust the
+  parent's window in one call. Three bounds apply, and each announces itself.
+  - A message window. `offset` and `limit`, defaulting to 20 messages and
+    capped at 100. The header always states the range returned and the total,
+    so paging is a decision made with the total in hand.
+  - A per-block clip, 200 bytes in `outline` detail and 2000 in `full`, marked
+    with the bytes shown and the bytes there were.
+  - A whole-response cap of 24000 bytes. When it fires, the rendering stops and
+    names the messages it dropped and the `offset` to resume from. Room for
+    that marker is reserved out of the cap, so the cap can never be the reason
+    the reader is not told about the cap.
+  - Silence is the failure mode being designed against. A reader who cannot see
+    the cut concludes the subagent never did the thing and re-delegates work
+    that was already done.
+- **`outline` is the default, and the description says so.** The description
+  tells the model that the final message from `spawn_agent` is usually enough
+  and that this is for checking delegated work, not a routine follow-up. A
+  cheap default matters more than the sentence: `outline` lists tool calls,
+  input, and result sizes, and it does not spend the parent's context on the
+  subagent's thinking text.
+- **What this does not cover.** Nothing here reads a rendered pixel; the tool
+  produces text for the model and the panel, and no check confirms how a
+  transcript looks on screen. Access is decided from the in-memory session map,
+  so a subagent whose thread is not loaded is reported as absent rather than
+  refused — the two are distinguishable to the caller only by the wording.
+  Image content becomes a marker rather than being carried. And the byte caps
+  are counts of bytes, not tokens: they bound the cost, they do not measure it.
+- **Enforced by:** `a_thread_reads_only_the_subagents_it_spawned`,
+  `a_truncated_transcript_says_that_it_was_truncated`, and
+  `the_transcript_tool_reaches_the_model` in `crates/omega_deltas`; plus the
+  suite in `crates/agent/src/tools/read_subagent_transcript_tool.rs`.

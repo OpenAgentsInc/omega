@@ -3246,6 +3246,63 @@ impl ThreadEnvironment for NativeThreadEnvironment {
         self.resume_subagent_thread(session_id, cx)
     }
 
+    /// Read a window of a subagent's transcript, refusing anything this thread
+    /// did not spawn.
+    ///
+    /// The order here matters. The access decision is made from the *stored*
+    /// parent of the target thread, before any content is read, and a refusal
+    /// returns without ever touching the messages. There is no path that
+    /// assembles a transcript first and filters afterwards, because that shape
+    /// is one early `return` away from leaking.
+    fn read_subagent_transcript(
+        &self,
+        session_id: acp::SessionId,
+        window: TranscriptWindowRequest,
+        cx: &mut App,
+    ) -> Result<SubagentTranscript, String> {
+        let caller = self
+            .thread
+            .upgrade()
+            .ok_or_else(|| "This thread no longer exists".to_string())?
+            .read(cx)
+            .id()
+            .clone();
+
+        let target = self
+            .agent
+            .upgrade()
+            .ok_or_else(|| "The agent is no longer running".to_string())?
+            .read(cx)
+            .sessions
+            .get(&session_id)
+            .map(|session| session.thread.clone())
+            .ok_or_else(|| {
+                format!(
+                    "No session {session_id} is loaded. Session IDs come from \
+                     `spawn_agent`; check the ID you were given."
+                )
+            })?;
+
+        let target = target.read(cx);
+        let access =
+            subagent_transcript_access(&caller, target.id(), target.parent_thread_id().as_ref());
+        if let Some(refusal) = access.refusal(&session_id) {
+            return Err(refusal);
+        }
+        debug_assert!(access.is_granted());
+
+        let (entries, total_messages) = target.transcript_window(window);
+        Ok(SubagentTranscript {
+            session_id,
+            title: target
+                .title()
+                .map_or_else(|| "untitled".to_string(), |title| title.to_string()),
+            total_messages,
+            first_index: window.offset,
+            entries,
+        })
+    }
+
     fn create_sibling_thread(
         &self,
         request: SiblingThreadRequest,

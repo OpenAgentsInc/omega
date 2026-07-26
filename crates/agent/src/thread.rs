@@ -3,9 +3,10 @@ use crate::{
     CreateThreadTool, DbLanguageModel, DbThread, DeletePathTool, DiagnosticsTool, EditFileTool,
     FetchTool, FindPathTool, FindReferencesTool, GetCodeActionsTool, GoToDefinitionTool, GrepTool,
     ListAgentsAndModelsTool, ListDirectoryTool, MovePathTool, ProjectSnapshot, ReadFileTool,
-    RenameTool, SandboxedTerminalTool, SpawnAgentTool, SystemPromptTemplate, Template, Templates,
-    TerminalTool, ToolPermissionDecision, WebSearchTool, WriteFileTool,
-    decide_permission_from_settings,
+    ReadSubagentTranscriptTool, RenameTool, SandboxedTerminalTool, SpawnAgentTool,
+    SubagentTranscript, SystemPromptTemplate, Template, Templates, TerminalTool,
+    ToolPermissionDecision, TranscriptBlock, TranscriptEntry, TranscriptRole,
+    TranscriptWindowRequest, WebSearchTool, WriteFileTool, decide_permission_from_settings,
 };
 use acp_thread::{ClientUserMessageId, MentionUri};
 use action_log::ActionLog;
@@ -254,6 +255,72 @@ impl Message {
         match self {
             Message::User(_) | Message::Resume | Message::Compaction(_) => Role::User,
             Message::Agent(_) => Role::Assistant,
+        }
+    }
+}
+
+/// Flatten one message into the neutral blocks a transcript reader renders.
+///
+/// Deliberately lossy in one direction only: it drops nothing silently. Image
+/// content becomes a marker rather than being omitted, and redacted thinking
+/// stays redacted, so the reader can tell "there was something here" from
+/// "there was nothing here".
+fn transcript_blocks(message: &Message) -> Vec<TranscriptBlock> {
+    match message {
+        Message::User(user) => user
+            .content
+            .iter()
+            .map(|content| match content {
+                UserMessageContent::Text(text) => TranscriptBlock::Text(text.clone()),
+                UserMessageContent::Image(_) => TranscriptBlock::Image,
+                UserMessageContent::Mention { uri, content } => {
+                    TranscriptBlock::Text(format!("{} {}", uri.as_link(), content))
+                }
+            })
+            .collect(),
+        Message::Agent(agent) => {
+            let mut blocks: Vec<TranscriptBlock> = agent
+                .content
+                .iter()
+                .map(|content| match content {
+                    AgentMessageContent::Text(text) => TranscriptBlock::Text(text.clone()),
+                    AgentMessageContent::Thinking { text, .. } => {
+                        TranscriptBlock::Thinking(text.clone())
+                    }
+                    AgentMessageContent::RedactedThinking(_) => {
+                        TranscriptBlock::Thinking("<redacted>".into())
+                    }
+                    AgentMessageContent::ToolUse(tool_use) => TranscriptBlock::ToolUse {
+                        name: tool_use.name.to_string(),
+                        id: tool_use.id.to_string(),
+                        input: format!("{}", tool_use.input.to_display_json()),
+                    },
+                })
+                .collect();
+            blocks.extend(agent.tool_results.values().map(|result| {
+                let mut text = String::new();
+                for part in &result.content {
+                    match part {
+                        LanguageModelToolResultContent::Text(part) => {
+                            text.push_str(part);
+                        }
+                        LanguageModelToolResultContent::Image(_) => {
+                            text.push_str("<image>");
+                        }
+                    }
+                }
+                TranscriptBlock::ToolResult {
+                    name: result.tool_name.to_string(),
+                    id: result.tool_use_id.to_string(),
+                    is_error: result.is_error,
+                    text,
+                }
+            }));
+            blocks
+        }
+        Message::Resume => vec![TranscriptBlock::Text("[resumed]".into())],
+        Message::Compaction(_) => {
+            vec![TranscriptBlock::Text("[context compacted]".into())]
         }
     }
 }
@@ -762,6 +829,25 @@ pub trait ThreadEnvironment {
     ) -> Task<Result<Rc<dyn TerminalHandle>>>;
 
     fn create_subagent(&self, label: String, cx: &mut App) -> Result<Rc<dyn SubagentHandle>>;
+
+    /// Read a window of the transcript of a subagent **this thread**
+    /// spawned.
+    ///
+    /// The caller is not a parameter. The environment already knows which
+    /// thread is asking, so the tool cannot name a thread and therefore
+    /// cannot ask for one it did not spawn. Scoping is a property of the
+    /// signature, not of the tool's discipline.
+    ///
+    /// The error is the sentence shown to the model, so a refusal always
+    /// arrives already explained.
+    fn read_subagent_transcript(
+        &self,
+        _session_id: acp::SessionId,
+        _window: TranscriptWindowRequest,
+        _cx: &mut App,
+    ) -> Result<SubagentTranscript, String> {
+        Err("Reading subagent transcripts is not supported in this environment".into())
+    }
 
     fn resume_subagent(
         &self,
@@ -2155,6 +2241,10 @@ impl Thread {
 
         if self.depth() < MAX_SUBAGENT_DEPTH {
             self.add_tool(SpawnAgentTool::new(environment.clone()));
+            // Gated with the spawn tool deliberately: a thread that cannot
+            // spawn subagents has none to read, so the read tool is absent
+            // for the same reason rather than present and always refusing.
+            self.add_tool(ReadSubagentTranscriptTool::new(environment.clone()));
         }
 
         // Sibling-thread tools are exposed at every depth: a subagent should
@@ -4234,6 +4324,37 @@ impl Thread {
 
     pub fn is_subagent(&self) -> bool {
         self.subagent_context.is_some()
+    }
+
+    /// Flatten a window of this thread's messages for a parent that is
+    /// reading the delegated work.
+    ///
+    /// Returns the entries and the total message count. Narrowing happens here
+    /// so the whole transcript is never materialised; the byte bounds are the
+    /// renderer's job.
+    pub fn transcript_window(
+        &self,
+        window: TranscriptWindowRequest,
+    ) -> (Vec<TranscriptEntry>, usize) {
+        let total = self.messages.len();
+        let entries = self
+            .messages
+            .iter()
+            .enumerate()
+            .skip(window.offset)
+            .take(window.limit)
+            .map(|(index, message)| TranscriptEntry {
+                index,
+                role: match message.as_ref() {
+                    Message::User(_) => TranscriptRole::User,
+                    Message::Agent(_) => TranscriptRole::Assistant,
+                    Message::Resume => TranscriptRole::Resume,
+                    Message::Compaction(_) => TranscriptRole::Compaction,
+                },
+                blocks: transcript_blocks(message),
+            })
+            .collect();
+        (entries, total)
     }
 
     pub fn parent_thread_id(&self) -> Option<acp::SessionId> {

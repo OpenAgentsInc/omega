@@ -1423,6 +1423,10 @@ mod tests {
             // tool calls inside the spawned thread, not the spawning itself.
             "create_thread",
             "spawn_agent",
+            // Reading a subagent transcript is scoped structurally: the thread
+            // can only ask for subagents it spawned, so there is no per-call
+            // permission to configure.
+            "read_subagent_transcript",
         ];
 
         let tool_info_ids: Vec<&str> = TOOLS.iter().map(|t| t.id).collect();
