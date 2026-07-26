@@ -1,4 +1,4 @@
-//! The Exo harness lane, Tier A. `OMEGA-DELTA-0042`, omega#87.
+//! The Exo harness lane. `OMEGA-DELTA-0042`, omega#87.
 //!
 //! Omega drives **`exoharness/exo`** — the recursive-self-improvement agent
 //! harness from the Braintrust orbit — as one more executor lane beneath Omega
@@ -16,21 +16,16 @@
 //! router's decision half lives here and its dispatch half lives there: a law
 //! that needs GPUI to check is a law nobody checks.
 //!
-//! # Tier A, and what it is not
+//! # Streaming and self-modification authority
 //!
-//! Tier A is coarse by design: one shot per turn, no live text deltas, tool
-//! activity visible after the fact. That is Exo's limit at this pin — its turn
-//! streaming exists only as an in-process enum consumed by its own REPL and
-//! serialised to no transport at all. Tier A proves the lane, the identity
-//! binding, and the disclosure before any wire work.
+//! Exo sends live text, tool calls, tool results, and completion records through
+//! its ACP standard-input transport. Omega attaches that transport through
+//! `crates/agent_servers`.
 //!
-//! **Tier B** — a streaming transport contributed to Exo, attached through
-//! `crates/agent_servers` like `codex-acp` — is not started here. Exo's adapter
-//! types are a closed Rust enum, so it is an upstream contribution or a
-//! maintained fork, not a configuration.
-//!
-//! **Tier C** — Exo's self-modification — is out of scope and stays out.
-//! [`capability`] is the part of that exclusion this tier owes.
+//! Self-modification is off by default. A person can authorize one exact turn
+//! in a dedicated confirmation dialog. The grant binds the source, binary,
+//! agent, conversation, tool modules, mounts, draft, generation, and expiry.
+//! The send path consumes the grant once and writes a durable receipt.
 //!
 //! # Which executor class an Exo thread reports, and why
 //!
@@ -91,13 +86,14 @@
 //! and it is better than deriving "openai" from the absence of a URL, which
 //! would be Omega inventing a fact about somebody else's configuration.
 
+pub mod authority;
 pub mod capability;
 pub mod command;
 pub mod endpoint;
 pub mod pin;
 pub mod turn;
 
-pub use capability::{ExoAgent, ExoAgentReadError, SelfModification};
+pub use capability::{ExoAgent, ExoAgentReadError, ExoConversation, ExoMount, SelfModification};
 pub use command::{ADMITTED_LANE_ARGV, ARGUMENT_TERMINATOR, ExoArg, ExoCommand, ExoRoot};
 pub use endpoint::{EXO_SERVE_DEFAULT_BIND, LoopbackEndpoint, OffLoopback};
 pub use pin::{EXO_HARNESS_ID, EXO_PIN, ExoPin, ExoPinMismatch, ObservedExoCheckout, admits_bytes};
@@ -222,7 +218,9 @@ gpt5mini  gpt-5-mini      openai  default
             model: "gpt5mini".into(),
             agent_authored_tools: false,
             tool_modules: 0,
+            tool_module_paths: Vec::new(),
             read_write_mount: false,
+            mounts: Vec::new(),
             networking: false,
         }
     }
@@ -310,3 +308,8 @@ gpt5mini  gpt-5-mini      openai  default
         assert!(identity.disclosure(None).is_coherent());
     }
 }
+pub use authority::{
+    ExoGrantRefusal, ExoSelfModificationCapability, ExoSelfModificationConsentOrigin,
+    ExoSelfModificationGrant, ExoSelfModificationGrantRequest, ExoSelfModificationReceipt,
+    ObservedExoCapabilityState, ObservedReadWriteMount, ObservedToolModule,
+};

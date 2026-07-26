@@ -43,11 +43,10 @@ pub const EXO_HARNESS_ID: &str = "exo";
 
 /// The Exo this lane drives.
 ///
-/// **`exoharness/exo`, the recursive-self-improvement agent harness** — not exo
-/// labs' `exo-explore/exo` cluster-inference appliance, which shares only a
-/// name. omega#86 was closed for targeting the wrong one. The upstream URL is
-/// part of the pin so the distinction is a field a test can read rather than a
-/// sentence in a doc.
+/// **The maintained `OpenAgentsInc/exo` fork of `exoharness/exo`**, the
+/// recursive-self-improvement agent harness. This is not exo labs'
+/// `exo-explore/exo` cluster-inference appliance. The fork contains the ACP
+/// transport that Omega needs while the upstream change is under review.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ExoPin {
     /// The repository, in full. See the type documentation for why.
@@ -64,9 +63,9 @@ pub struct ExoPin {
 /// `docs/teardowns/2026-07-25-exoharness-exo-teardown.md` and driven for real
 /// by omega#87.
 pub const EXO_PIN: ExoPin = ExoPin {
-    upstream: "https://github.com/exoharness/exo",
-    source_commit: "baa07f6785547080d99bd2a7d3eab6d76b984e35",
-    source_tree: "0aff9139a166414fa51a09b66ba4785bae05b46b",
+    upstream: "https://github.com/OpenAgentsInc/exo",
+    source_commit: "cd7c0d29db869e953fb7261d8390ca93007d36a6",
+    source_tree: "c61846e3f44daaf445930d1a499432ca9b069306",
     version: "0.1.0",
 };
 
@@ -89,7 +88,7 @@ pub enum ExoPinMismatch {
 impl std::fmt::Display for ExoPinMismatch {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(match self {
-            Self::Upstream => "the Exo checkout is not exoharness/exo",
+            Self::Upstream => "the Exo checkout is not the maintained exoharness/exo fork",
             Self::Commit => "the Exo checkout is not at the pinned commit",
             Self::Tree => "the Exo checkout's tree is not the pinned tree",
             Self::Bytes => "the Exo binary is not the bytes frozen in the pin ledger",
@@ -134,7 +133,10 @@ impl ExoPin {
         if !same_repository(self.upstream, &observed.upstream) {
             return Err(ExoPinMismatch::Upstream);
         }
-        if !self.source_commit.eq_ignore_ascii_case(observed.commit.trim()) {
+        if !self
+            .source_commit
+            .eq_ignore_ascii_case(observed.commit.trim())
+        {
             return Err(ExoPinMismatch::Commit);
         }
         if !self.source_tree.eq_ignore_ascii_case(observed.tree.trim()) {
@@ -205,7 +207,9 @@ mod tests {
         for value in [EXO_PIN.source_commit, EXO_PIN.source_tree] {
             assert_eq!(value.len(), 40, "{value} is not a full object id");
             assert!(
-                value.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+                value
+                    .chars()
+                    .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
                 "{value} is not a lowercase hexadecimal object id"
             );
         }
@@ -219,7 +223,7 @@ mod tests {
     /// else, and the one this lane drives is the harness.
     #[test]
     fn the_pin_names_the_harness_exo_and_not_the_cluster_one() {
-        assert_eq!(EXO_PIN.upstream, "https://github.com/exoharness/exo");
+        assert_eq!(EXO_PIN.upstream, "https://github.com/OpenAgentsInc/exo");
         let cluster = ObservedExoCheckout {
             upstream: "https://github.com/exo-explore/exo".into(),
             ..pinned_checkout()
@@ -238,10 +242,10 @@ mod tests {
     #[test]
     fn the_same_repository_written_four_ways_is_the_same_repository() {
         for spelling in [
-            "https://github.com/exoharness/exo.git",
-            "https://github.com/exoharness/exo/",
-            "https://GitHub.com/ExoHarness/Exo",
-            "git@github.com:exoharness/exo.git",
+            "https://github.com/OpenAgentsInc/exo.git",
+            "https://github.com/OpenAgentsInc/exo/",
+            "https://GitHub.com/OpenAgentsInc/Exo",
+            "git@github.com:OpenAgentsInc/exo.git",
         ] {
             let observed = ObservedExoCheckout {
                 upstream: spelling.into(),

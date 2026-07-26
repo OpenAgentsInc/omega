@@ -8,11 +8,10 @@
 //! model is sandbox isolation, and Exo's threat model assumes you *want* the
 //! agent to modify itself.
 //!
-//! Omega supplies the authority gate Exo lacks. Tier C — surfacing that
-//! self-improvement loop — is out of scope and stays out; it needs its own
-//! packet, explicit typed authority, and per-run owner consent. What this file
-//! does is the negative half that Tier A owes: **the lane never silently enables
-//! Exo's self-modification tools.**
+//! Omega supplies the authority gate Exo lacks. The ordinary lane refuses
+//! self-modification. A separate, typed, one-use grant can authorize one exact
+//! turn after a visible human confirmation. The lane never silently enables
+//! Exo's self-modification tools.
 //!
 //! # Read the agent, do not assume it
 //!
@@ -61,10 +60,29 @@ pub struct ExoAgent {
     pub agent_authored_tools: bool,
     /// How many TypeScript tool modules are loaded into it.
     pub tool_modules: u32,
+    /// Exact TypeScript tool-module paths reported by Exo.
+    pub tool_module_paths: Vec<String>,
     /// Whether any sandbox mount is read-write.
     pub read_write_mount: bool,
+    /// Exact agent-level sandbox mounts.
+    pub mounts: Vec<ExoMount>,
     /// Whether the agent's sandbox has a network. Reported, never refused.
     pub networking: bool,
+}
+
+/// A mount observed in an Exo agent or conversation record.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExoMount {
+    pub host_path: String,
+    pub mount_path: String,
+    pub read_write: bool,
+}
+
+/// Capability-bearing fields from `exo conversation show`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExoConversation {
+    pub slug: String,
+    pub mounts: Vec<ExoMount>,
 }
 
 /// Why the lane will not run a turn on this agent.
@@ -183,13 +201,16 @@ impl ExoAgent {
             _ => return Err(ExoAgentReadError::UnreadableField("enable_networking")),
         };
 
+        let mounts = mounts(output, "sandbox_mounts")?;
         Ok(Self {
             slug: field("slug")?.to_owned(),
             harness: field("harness")?.to_owned(),
             model: field("model")?.to_owned(),
             agent_authored_tools: tool_creation,
             tool_modules,
-            read_write_mount: read_write_mount(output)?,
+            tool_module_paths: tool_module_paths(output, tool_modules)?,
+            read_write_mount: mounts.iter().any(|mount| mount.read_write),
+            mounts,
             networking,
         })
     }
@@ -214,38 +235,88 @@ impl ExoAgent {
     }
 }
 
+impl ExoConversation {
+    /// Parse the conversation record and retain exact mount paths.
+    pub fn parse(output: &str) -> Result<Self, ExoAgentReadError> {
+        let slug = output
+            .lines()
+            .find_map(|line| line.strip_prefix("slug:"))
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or(ExoAgentReadError::MissingField("slug"))?
+            .to_owned();
+        Ok(Self {
+            slug,
+            mounts: mounts(output, "mounts")?,
+        })
+    }
+
+    /// Whether the conversation itself can modify a mounted host path.
+    pub fn admits_lane_turn(&self) -> Result<(), SelfModification> {
+        if self.mounts.iter().any(|mount| mount.read_write) {
+            Err(SelfModification::ReadWriteMount)
+        } else {
+            Ok(())
+        }
+    }
+}
+
+fn tool_module_paths(output: &str, expected: u32) -> Result<Vec<String>, ExoAgentReadError> {
+    let mut lines = output.lines();
+    lines
+        .find(|line| line.starts_with("typescript_tool_modules:"))
+        .ok_or(ExoAgentReadError::MissingField("typescript_tool_modules"))?;
+    let paths = lines
+        .take_while(|line| line.starts_with("  - "))
+        .map(|line| line.trim_start_matches("  - ").to_owned())
+        .collect::<Vec<_>>();
+    if paths.len() != expected as usize {
+        return Err(ExoAgentReadError::UnreadableField(
+            "typescript_tool_modules",
+        ));
+    }
+    Ok(paths)
+}
+
 /// Read the `sandbox_mounts:` block.
 ///
 /// Exo prints `  none` for an empty set and `  <host> -> <path> (ro)` or
 /// `(rw[, internal])` per mount. A block this build cannot read is an error for
 /// the same reason a missing field is.
-fn read_write_mount(output: &str) -> Result<bool, ExoAgentReadError> {
+fn mounts(output: &str, field: &'static str) -> Result<Vec<ExoMount>, ExoAgentReadError> {
     let mut lines = output.lines();
     lines
-        .find(|line| line.trim_end() == "sandbox_mounts:")
-        .ok_or(ExoAgentReadError::MissingField("sandbox_mounts"))?;
+        .find(|line| line.trim_end() == format!("{field}:"))
+        .ok_or(ExoAgentReadError::MissingField(field))?;
 
-    let mut any = false;
+    let mut mounts = Vec::new();
     for line in lines {
         let Some(entry) = line.strip_prefix("  ") else {
             break;
         };
         let entry = entry.trim();
         if entry == "none" {
-            return Ok(false);
+            return Ok(Vec::new());
         }
-        let Some((_, mode)) = entry.rsplit_once('(') else {
-            return Err(ExoAgentReadError::UnreadableField("sandbox_mounts"));
+        let Some((paths, mode)) = entry.rsplit_once(" (") else {
+            return Err(ExoAgentReadError::UnreadableField(field));
         };
         let mode = mode.trim_end_matches(')');
-        match mode.split(',').next().map(str::trim) {
-            Some("rw") => return Ok(true),
-            Some("ro") => any = true,
-            _ => return Err(ExoAgentReadError::UnreadableField("sandbox_mounts")),
-        }
+        let read_write = match mode.split(',').next().map(str::trim) {
+            Some("rw") => true,
+            Some("ro") => false,
+            _ => return Err(ExoAgentReadError::UnreadableField(field)),
+        };
+        let Some((host_path, mount_path)) = paths.split_once(" -> ") else {
+            return Err(ExoAgentReadError::UnreadableField(field));
+        };
+        mounts.push(ExoMount {
+            host_path: host_path.to_owned(),
+            mount_path: mount_path.to_owned(),
+            read_write,
+        });
     }
-    let _ = any;
-    Ok(false)
+    Ok(mounts)
 }
 
 #[cfg(test)]
@@ -295,7 +366,10 @@ braintrust: none
     fn the_self_improving_exo_agent_is_refused() {
         let self_improving = DRIVEN_AGENT
             .replace("tool_creation: disabled", "tool_creation: enabled")
-            .replace("typescript_tool_modules: 0", "typescript_tool_modules: 1")
+            .replace(
+                "typescript_tool_modules: 0",
+                "typescript_tool_modules: 1\n  - /workspace/exo/examples/exo/guardian-tools.ts",
+            )
             .replace(
                 "sandbox_mounts:\n  none",
                 "sandbox_mounts:\n  /Users/x/exo -> /workspace/exo (rw)",
@@ -319,7 +393,7 @@ braintrust: none
             ),
             (
                 "typescript_tool_modules: 0",
-                "typescript_tool_modules: 2",
+                "typescript_tool_modules: 2\n  - /tools/one.ts\n  - /tools/two.ts",
                 SelfModification::ToolModule,
             ),
             (
@@ -352,11 +426,27 @@ braintrust: none
     /// Networking is reported and does not refuse. See the module docs.
     #[test]
     fn a_networked_agent_is_reported_and_not_refused() {
-        let agent =
-            ExoAgent::parse(&DRIVEN_AGENT.replace("enable_networking: false", "enable_networking: true"))
-                .expect("parses");
+        let agent = ExoAgent::parse(
+            &DRIVEN_AGENT.replace("enable_networking: false", "enable_networking: true"),
+        )
+        .expect("parses");
         assert!(agent.networking);
         assert_eq!(agent.admits_lane_turn(), Ok(()));
+    }
+
+    #[test]
+    fn a_conversation_only_read_write_mount_is_refused() {
+        let shown = "\
+slug: omega-lane
+mounts:
+  /Users/x/exo -> /workspace/exo (rw)
+";
+        let conversation = ExoConversation::parse(shown).expect("conversation parses");
+        assert_eq!(
+            conversation.admits_lane_turn(),
+            Err(SelfModification::ReadWriteMount)
+        );
+        assert_eq!(conversation.mounts[0].host_path, "/Users/x/exo");
     }
 
     /// The upstream-rename failure, which is the realistic one. A field the
@@ -389,7 +479,10 @@ braintrust: none
     fn an_unreadable_value_is_refused_rather_than_read_as_false() {
         for (from, to) in [
             ("tool_creation: disabled", "tool_creation: maybe"),
-            ("typescript_tool_modules: 0", "typescript_tool_modules: some"),
+            (
+                "typescript_tool_modules: 0",
+                "typescript_tool_modules: some",
+            ),
             ("enable_networking: false", "enable_networking: yes"),
         ] {
             assert!(

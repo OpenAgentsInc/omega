@@ -2374,6 +2374,16 @@ impl AcpThread {
         &self.connection
     }
 
+    /// Replace the connection facade while keeping the established ACP
+    /// session.
+    ///
+    /// An adapter can delegate session creation to an inner ACP connection and
+    /// then install its policy-enforcing facade here. All later prompts,
+    /// cancellation, and executor disclosure must go through that facade.
+    pub fn replace_connection(&mut self, connection: Rc<dyn AgentConnection>) {
+        self.connection = connection;
+    }
+
     pub fn action_log(&self) -> &Entity<ActionLog> {
         &self.action_log
     }

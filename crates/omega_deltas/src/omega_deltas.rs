@@ -115,8 +115,7 @@ pub const AGENT_SERVER_STORE_PATH: &str = "crates/project/src/agent_server_store
 pub const HARNESS_FRONT_DOOR_PATH: &str = "crates/omega_harness/src/front_door.rs";
 
 /// OMEGA-DELTA-0033. The page that renders it.
-pub const EXTERNAL_AGENTS_PAGE_PATH: &str =
-    "crates/settings_ui/src/pages/external_agents_page.rs";
+pub const EXTERNAL_AGENTS_PAGE_PATH: &str = "crates/settings_ui/src/pages/external_agents_page.rs";
 
 /// OMEGA-DELTA-0026. Shipped defaults that would otherwise point a running
 /// Omega at one of Zed's production hosts, as
@@ -1493,7 +1492,12 @@ pub fn is_prose(text: &str) -> bool {
 pub fn is_command_form(text: &str, policy: &serde_json::Value) -> bool {
     let words: Vec<&str> = policy["brand"]["words"]
         .as_array()
-        .map(|values| values.iter().filter_map(serde_json::Value::as_str).collect())
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .collect()
+        })
         .unwrap_or_default();
     let tokens: Vec<&str> = text.split_whitespace().collect();
     if tokens.len() < 2 || !words.contains(&tokens[0]) {
@@ -1572,7 +1576,8 @@ pub fn rust_string_literals(source: &str) -> Vec<(usize, String)> {
             // A char literal or a lifetime; neither can hold prose. Only
             // `'"'` has to be stepped over as a unit, so that its quote does
             // not read as the start of a string.
-            index += if rest.as_bytes().get(1) == Some(&b'"') && rest.as_bytes().get(2) == Some(&b'\'')
+            index += if rest.as_bytes().get(1) == Some(&b'"')
+                && rest.as_bytes().get(2) == Some(&b'\'')
             {
                 3
             } else {
@@ -1804,7 +1809,13 @@ pub fn prose_inventory(policy: &serde_json::Value) -> (Vec<ProseLiteral>, ProseR
         let lines: Vec<&str> = source.lines().collect();
         let code: String = lines
             .iter()
-            .map(|line| if doc_comment_body(line).is_some() { "" } else { *line })
+            .map(|line| {
+                if doc_comment_body(line).is_some() {
+                    ""
+                } else {
+                    *line
+                }
+            })
             .collect::<Vec<_>>()
             .join("\n");
         let schema = derives_any(&code, &["JsonSchema"]);
@@ -1827,9 +1838,10 @@ pub fn prose_inventory(policy: &serde_json::Value) -> (Vec<ProseLiteral>, ProseR
         if brand_hits(source, policy).is_empty() {
             return;
         }
-        let relative = normalize_path(path)
-            .strip_prefix(&repository)
-            .map_or_else(|_| path.display().to_string(), |tail| tail.display().to_string());
+        let relative = normalize_path(path).strip_prefix(&repository).map_or_else(
+            |_| path.display().to_string(),
+            |tail| tail.display().to_string(),
+        );
         let is_test_file = is_test_path(&relative);
         let skipped = if is_test_file {
             std::collections::BTreeSet::new()
@@ -1930,7 +1942,6 @@ fn is_test_path(relative: &str) -> bool {
             .any(|segment| normalized.contains(segment))
 }
 
-
 // ------ OMEGA-DELTA-0042
 
 /// OMEGA-DELTA-0042. The Exo harness lane's law. A leaf, checkable in a second.
@@ -1952,6 +1963,10 @@ pub const EXO_CONNECTION_PATH: &str = "crates/agent_ui/src/omega_exo_connection.
 /// with `exoharness/exo`, the agent harness. A repository name is a cheap thing
 /// to get wrong twice, so it is a checked fact rather than a remembered one.
 pub const EXO_HARNESS_UPSTREAM: &str = "exoharness/exo";
+
+/// OMEGA-DELTA-0042. The maintained fork can carry the ACP transport while
+/// its contribution is under review upstream.
+pub const EXO_HARNESS_MAINTAINED_FORK: &str = "OpenAgentsInc/exo";
 
 /// OMEGA-DELTA-0042. The other Exo, which must appear nowhere as a target.
 pub const EXO_CLUSTER_UPSTREAM: &str = "exo-explore";
@@ -4089,7 +4104,10 @@ mod tests {
             .map(|(line, body)| (*line, body.as_str()))
             .collect();
         assert_eq!(found[0], (3, "first"), "single-line literal and its line");
-        assert_eq!(found[1].0, 4, "a continued literal starts on its first line");
+        assert_eq!(
+            found[1].0, 4,
+            "a continued literal starts on its first line"
+        );
         assert!(
             found[1].1.contains("continued"),
             "the continuation is part of the literal: {:?}",
@@ -4100,13 +4118,19 @@ mod tests {
             (6, "raw \"quoted\" body"),
             "a raw literal keeps its inner quotes"
         );
-        assert_eq!(found[3], (7, "after"), "the line count survives the raw literal");
+        assert_eq!(
+            found[3],
+            (7, "after"),
+            "the line count survives the raw literal"
+        );
         assert!(
             !found.iter().any(|(_, body)| body.contains("not a literal")),
             "a comment is not a literal"
         );
 
-        assert!(is_prose("Click 'Connect' below to start using Ollama in Omega"));
+        assert!(is_prose(
+            "Click 'Connect' below to start using Ollama in Omega"
+        ));
         assert!(!is_prose("crates/zed/src/main.rs"));
         assert!(!is_prose("X-Zed-Predict-Edits-Mode"));
         assert!(
@@ -4224,7 +4248,9 @@ mod tests {
             .lines()
             .filter(|line| {
                 let trimmed = line.trim_start();
-                !trimmed.starts_with("//") || trimmed.starts_with("///") || trimmed.starts_with("//!")
+                !trimmed.starts_with("//")
+                    || trimmed.starts_with("///")
+                    || trimmed.starts_with("//!")
             })
             .collect::<Vec<_>>()
             .join("\n");
@@ -5325,12 +5351,13 @@ mod tests {
         let coordinator_path = repository_path(IDENTITY_STARTUP_PATH);
         let coordinator = std::fs::read_to_string(&coordinator_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", coordinator_path.display()));
-        let release = function_body(&coordinator, "release_identity_waiters").unwrap_or_else(|| {
-            panic!(
-                "OMEGA-DELTA-0040: {} no longer has a `release_identity_waiters`.",
-                coordinator_path.display()
-            )
-        });
+        let release =
+            function_body(&coordinator, "release_identity_waiters").unwrap_or_else(|| {
+                panic!(
+                    "OMEGA-DELTA-0040: {} no longer has a `release_identity_waiters`.",
+                    coordinator_path.display()
+                )
+            });
         assert!(
             release.contains("finish(Ok(()), cx)"),
             "OMEGA-DELTA-0040: `release_identity_waiters` in {} no longer \
@@ -5364,8 +5391,7 @@ mod tests {
         let panel = std::fs::read_to_string(&panel_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", panel_path.display()));
         assert!(
-            panel.contains("observe_capacity(Ok(capacity))")
-                && panel.contains("get_capacity()"),
+            panel.contains("observe_capacity(Ok(capacity))") && panel.contains("get_capacity()"),
             "OMEGA-DELTA-0035: {} no longer feeds the engine's framed \
              get_capacity answer into the router. Without it every engine-lane \
              pin is decided against a default of \"not running\" whatever \
@@ -5643,7 +5669,6 @@ mod tests {
         );
     }
 
-
     // ------------------------------------------------------ OMEGA-DELTA-0033
 
     /// OMEGA-DELTA-0033. The front door renders the decision; it does not make
@@ -5729,7 +5754,8 @@ mod tests {
         );
         assert!(
             rendered.contains("PinControl::Unavailable { reason }")
-                && rendered.contains("Tooltip::with_meta(\"Cannot Pin\", None, reason.clone(), cx)"),
+                && rendered
+                    .contains("Tooltip::with_meta(\"Cannot Pin\", None, reason.clone(), cx)"),
             "OMEGA-DELTA-0033: {} must show the withheld control's reason. A \
              disabled button with no sentence reads as a bug in Omega rather \
              than as a fact about the owner's machine.",
@@ -5749,7 +5775,10 @@ mod tests {
         let filesystem = repository_path(HARNESS_MAINTENANCE_PATH);
         let source = std::fs::read_to_string(&filesystem)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", filesystem.display()));
-        for writer in ["pub async fn pin_installed_harness(", "pub async fn unpin_harness("] {
+        for writer in [
+            "pub async fn pin_installed_harness(",
+            "pub async fn unpin_harness(",
+        ] {
             assert!(
                 source.contains(writer),
                 "OMEGA-DELTA-0033: {} no longer offers {writer}. Without it the \
@@ -6358,9 +6387,12 @@ mod tests {
             .expect("EXO_PIN names an upstream")
             .0;
         assert!(
-            upstream.ends_with(EXO_HARNESS_UPSTREAM),
-            "OMEGA-DELTA-0042: the Exo pin names {upstream}, which is not \
-             {EXO_HARNESS_UPSTREAM}. omega#86 made this mistake once."
+            [EXO_HARNESS_UPSTREAM, EXO_HARNESS_MAINTAINED_FORK]
+                .iter()
+                .any(|repository| upstream.ends_with(repository)),
+            "OMEGA-DELTA-0042: the Exo pin names {upstream}, which is neither \
+             {EXO_HARNESS_UPSTREAM} nor its reviewed maintained fork \
+             {EXO_HARNESS_MAINTAINED_FORK}. omega#86 made this mistake once."
         );
 
         for relative in [EXO_LANE_LAW_PATH, EXO_LANE_PIN_PATH, EXO_CONNECTION_PATH] {
@@ -6441,7 +6473,11 @@ mod tests {
     /// added rather than required.
     #[test]
     fn the_exo_lane_exposes_no_endpoint_off_this_machine() {
-        for relative in [EXO_CONNECTION_PATH, EXO_LANE_LAW_PATH, EXO_LANE_COMMAND_PATH] {
+        for relative in [
+            EXO_CONNECTION_PATH,
+            EXO_LANE_LAW_PATH,
+            EXO_LANE_COMMAND_PATH,
+        ] {
             let path = repository_path(relative);
             let source = std::fs::read_to_string(&path)
                 .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
@@ -6494,10 +6530,15 @@ mod tests {
             "OMEGA-DELTA-0042: `check_endpoint` no longer parses the inherited \
              endpoint through the type that refuses a non-loopback one."
         );
-        let turn = function_body(&connection, "drive_turn").expect("the turn path exists");
+        let turn = function_body(&connection, "observe").expect("the ACP observation exists");
         assert!(
             turn.contains("self.check_endpoint()"),
-            "OMEGA-DELTA-0042: the turn path no longer checks where Exo is."
+            "OMEGA-DELTA-0042: the ACP preflight no longer checks where Exo is."
+        );
+        let prompt = function_body(&connection, "prompt").expect("the ACP prompt path exists");
+        assert!(
+            prompt.contains("driver.preflight().await") && prompt.contains("acp.prompt(params"),
+            "OMEGA-DELTA-0042: the ACP prompt must finish its preflight before it sends."
         );
     }
 
@@ -6538,29 +6579,71 @@ mod tests {
         let path = repository_path(EXO_CONNECTION_PATH);
         let source = std::fs::read_to_string(&path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
-        let body = function_body(&source, "drive_turn").unwrap_or_else(|| {
+        let body = function_body(&source, "observe").unwrap_or_else(|| {
             panic!(
-                "OMEGA-DELTA-0042: {} has no `drive_turn`, so nothing in this \
-                 file is the turn path any more.",
+                "OMEGA-DELTA-0042: {} has no exact Exo observation, so nothing \
+                 gates the streamed turn any more.",
                 path.display()
             )
         });
         let pin = body
             .find("self.check_pin()")
             .expect("OMEGA-DELTA-0042: a turn no longer checks which Exo it is driving");
-        let agent = body.find("self.check_agent()").expect(
-            "OMEGA-DELTA-0042: a turn no longer reads the Exo agent, so it \
-             cannot refuse self-modification capability",
-        );
-        let send = body
-            .find("ExoCommand::SendTurn")
-            .expect("OMEGA-DELTA-0042: a turn no longer sends");
+        let agent = body
+            .find("ExoCommand::ShowAgent")
+            .expect("OMEGA-DELTA-0042: a turn no longer reads the exact Exo agent");
+        let conversation = body
+            .find("ExoCommand::ShowConversation")
+            .expect("OMEGA-DELTA-0042: a turn no longer reads the exact Exo conversation");
+        let prompt = function_body(&source, "prompt")
+            .expect("OMEGA-DELTA-0042: the streamed ACP prompt path is absent");
+        let preflight = prompt
+            .find("driver.preflight().await")
+            .expect("OMEGA-DELTA-0042: an ACP turn no longer runs its preflight");
+        let send = prompt
+            .find("acp.prompt(params")
+            .expect("OMEGA-DELTA-0042: an ACP turn no longer sends");
         assert!(
-            pin < agent && agent < send,
-            "OMEGA-DELTA-0042: the turn path runs its refusals out of order \
-             (pin {pin}, agent {agent}, send {send}). A capability read after \
-             the send describes a turn that already happened."
+            pin < agent && agent < conversation && preflight < send,
+            "OMEGA-DELTA-0042: the exact pin, agent, and conversation checks \
+             must run before the complete preflight permits the ACP send."
         );
+    }
+
+    #[test]
+    fn an_exo_turn_streams_cancels_and_requires_exact_one_use_authority() {
+        let connection_path = repository_path(EXO_CONNECTION_PATH);
+        let connection = std::fs::read_to_string(&connection_path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", connection_path.display()));
+        let compact_connection = without_whitespace(&connection);
+        for token in [
+            "AcpConnection::stdio",
+            "\"acp\".to_owned()",
+            "acp.prompt(params",
+            "self.acp.cancel(session_id",
+            "grant.consume(&observed.observed, &turn_ref",
+            "persist_tier_c_receipt",
+        ] {
+            assert!(
+                compact_connection.contains(&without_whitespace(token)),
+                "OMEGA-DELTA-0042: the Exo ACP and authority path lost `{token}`"
+            );
+        }
+
+        let thread_path = repository_path(THREAD_VIEW_PATH);
+        let thread = std::fs::read_to_string(&thread_path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", thread_path.display()));
+        for token in [
+            "omega-exo-authorize-self-modification",
+            "Allow this Exo agent to modify itself for one turn?",
+            "self_modification_request",
+            "confirm_self_modification",
+        ] {
+            assert!(
+                thread.contains(token),
+                "OMEGA-DELTA-0042: the visible one-turn Exo confirmation lost `{token}`"
+            );
+        }
     }
 
     /// OMEGA-DELTA-0042. The lane is wired, not merely built.
@@ -6740,8 +6823,12 @@ mod tests {
             if trimmed.starts_with("//") {
                 continue;
             }
-            for pin_reaching in ["PinGesture", "pin_session(", "pin_next_session(", "ExecutorPin::"]
-            {
+            for pin_reaching in [
+                "PinGesture",
+                "pin_session(",
+                "pin_next_session(",
+                "ExecutorPin::",
+            ] {
                 assert!(
                     !trimmed.contains(pin_reaching),
                     "OMEGA-DELTA-0041: the served ACP surface names                      {pin_reaching}. Nothing an external host can reach may                      set a pin: a pin is the only door to an engine lane and                      an engine lane is Full Auto authority, which owner gate 8                      admits only an explicit human action into."
@@ -6781,7 +6868,9 @@ mod tests {
             .expect("crates/agent declares OMEGA_AGENT_ID as a literal");
 
         assert!(
-            served.contains(&format!("pub const SERVED_AGENT_ID: &str = \"{declared}\";")),
+            served.contains(&format!(
+                "pub const SERVED_AGENT_ID: &str = \"{declared}\";"
+            )),
             "OMEGA-DELTA-0041: the served ACP surface presents an identity              other than {declared:?}, which is what crates/agent declares. An              attached host would be disclosed an agent that does not exist."
         );
     }

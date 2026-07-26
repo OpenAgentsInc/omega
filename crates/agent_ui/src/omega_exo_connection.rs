@@ -1,9 +1,8 @@
-//! Driving Exo. `OMEGA-DELTA-0042`, omega#87, Tier A.
+//! Driving Exo. `OMEGA-DELTA-0042`, omega#87.
 //!
-//! The law lives in `crates/omega_exo_lane`, which is a leaf and can be checked
-//! in a second. This is the half that needs a process and a thread: it runs the
-//! `exo` binary, reads what it printed, and pushes the result into an
-//! `AcpThread` so the existing agent panel renders it like any other lane.
+//! The law lives in `crates/omega_exo_lane`, which is a leaf. This file starts
+//! `exo acp` on standard input and output. `AcpConnection` puts each text delta,
+//! tool call, tool result, and completion record into the existing `AcpThread`.
 //!
 //! # How the lane is reached
 //!
@@ -31,11 +30,9 @@
 //!    no-backwards-compatibility house rule.
 //! 3. **Which bytes.** The binary is hashed and compared against the owner's
 //!    pin ledger entry for `exo`, when the owner froze one.
-//! 4. **Which agent.** `exo agent show` is read, and a turn is refused when the
-//!    agent carries self-modification capability — runtime tool authoring, a
-//!    tool module (which is how `guardian_action` is installed), or a
-//!    read-write mount. Tier C is out of scope, and this is the enforcement of
-//!    that rather than a promise about it.
+//! 4. **Which capability.** Omega reads the agent and conversation. The normal
+//!    path refuses self-modification. A one-use grant can authorize one exact
+//!    draft after a visible human confirmation.
 //!
 //! # What is deliberately absent
 //!
@@ -48,37 +45,39 @@
 //! is checking.
 
 use std::any::Any;
-use std::cell::RefCell;
-use std::collections::HashMap;
+use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use acp_thread::{AcpThread, AgentConnection};
-use action_log::ActionLog;
 use agent_client_protocol::schema::v1 as acp;
+use agent_servers::AcpConnection;
 use anyhow::{Context as _, Result, anyhow, bail};
-use gpui::{App, AppContext as _, Entity, SharedString, Task, WeakEntity};
+use gpui::{App, AsyncApp, Entity, SharedString, Task, WeakEntity};
 use omega_exo_lane::{
-    EXO_HARNESS_ID, EXO_PIN, ExoAgent, ExoCommand, ExoLaneIdentity, ExoModelBinding, ExoRoot,
-    ExoTurn, LoopbackEndpoint, ObservedExoCheckout, admits_bytes,
+    EXO_HARNESS_ID, EXO_PIN, ExoAgent, ExoCommand, ExoConversation, ExoLaneIdentity,
+    ExoModelBinding, ExoMount, ExoRoot, ExoSelfModificationConsentOrigin, ExoSelfModificationGrant,
+    ExoSelfModificationGrantRequest, ExoSelfModificationReceipt, LoopbackEndpoint,
+    ObservedExoCapabilityState, ObservedExoCheckout, ObservedReadWriteMount, ObservedToolModule,
+    admits_bytes,
 };
 use omega_harness::MeasuredDigest;
-use project::{AgentId, Project};
+use project::{
+    AgentId, Project,
+    agent_server_store::{AgentServerCommand, AgentServerStore},
+};
 use util::path_list::PathList;
-
-/// How many events the lane reads back from Exo's durable log after a turn.
-///
-/// A bound rather than "everything": Exo's log is append-only and a long-lived
-/// conversation accumulates without limit, and a lane that read all of it to
-/// render one turn would get slower for the whole life of the conversation.
-const TOOL_ACTIVITY_EVENT_LIMIT: u32 = 64;
 
 /// Where the lane's configuration lives, under the Omega data directory.
 const EXO_LANE_FILE: &str = "omega-exo-lane.json";
 
 /// The schema that file carries.
 const EXO_LANE_SCHEMA: &str = "openagents.omega.exo_lane.v1";
+
+static NEXT_EXO_CONNECTION_GENERATION: AtomicU64 = AtomicU64::new(1);
 
 /// Everything Omega needs to reach one Exo install.
 ///
@@ -119,7 +118,9 @@ impl ExoLaneConfig {
         let file = std::fs::read_to_string(path).ok()?;
         let value: serde_json::Value = serde_json::from_str(&file)
             .inspect_err(|error| {
-                log::warn!("OMEGA-DELTA-0042: the Exo lane file is not JSON ({error}); no Exo lane");
+                log::warn!(
+                    "OMEGA-DELTA-0042: the Exo lane file is not JSON ({error}); no Exo lane"
+                );
             })
             .ok()?;
         if value.get("schema").and_then(serde_json::Value::as_str) != Some(EXO_LANE_SCHEMA) {
@@ -160,26 +161,57 @@ struct ExoDriver {
     /// The digest the owner froze for `exo`, if any. Read once at construction
     /// from the harness pin ledger; a claim, never a measurement.
     frozen_digest: Option<String>,
+    /// This connection process's generation. A grant cannot survive a
+    /// reconnect because a new connection receives a new generation.
+    generation: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct ExoTierCReceipt {
+    pub schema: String,
+    pub recorded_at_ms: u64,
+    pub authority: Option<ExoSelfModificationReceipt>,
+    pub observed: ObservedExoCapabilityState,
+    pub turn_ref: String,
+    pub requested_objective: Option<String>,
+    pub outcome: String,
+    pub exo_session_id: Option<String>,
+    pub exo_turn_id: Option<String>,
+    pub latest_event_id: Option<String>,
+    pub verification: String,
+    pub reconnect: String,
+    pub rollback: String,
 }
 
 /// One Exo install, behind Omega Agent's router.
 pub struct ExoHarnessConnection {
     driver: Rc<ExoDriver>,
-    /// The threads this connection built, by session.
-    sessions: RefCell<HashMap<acp::SessionId, WeakEntity<AcpThread>>>,
+    acp: Rc<AcpConnection>,
+    pending_grant: RefCell<Option<ExoSelfModificationGrant>>,
+    tier_c_receipt: Rc<RefCell<Option<ExoTierCReceipt>>>,
+    active_tier_c_turn: Rc<Cell<bool>>,
 }
 
 impl ExoHarnessConnection {
     /// A connection to the Exo the lane file names.
     #[must_use]
-    pub fn new(config: ExoLaneConfig, frozen_digest: Option<String>) -> Self {
+    pub fn new(
+        config: ExoLaneConfig,
+        frozen_digest: Option<String>,
+        acp: Rc<AcpConnection>,
+    ) -> Self {
+        let previous_receipt = load_latest_tier_c_receipt(&config.agent, &config.conversation);
         Self {
             driver: Rc::new(ExoDriver {
                 config,
                 identity: RefCell::new(None),
                 frozen_digest,
+                generation: NEXT_EXO_CONNECTION_GENERATION.fetch_add(1, Ordering::Relaxed),
             }),
-            sessions: RefCell::new(HashMap::new()),
+            acp,
+            pending_grant: RefCell::new(None),
+            tier_c_receipt: Rc::new(RefCell::new(previous_receipt)),
+            active_tier_c_turn: Rc::new(Cell::new(false)),
         }
     }
 
@@ -198,6 +230,91 @@ impl ExoHarnessConnection {
     pub fn config(&self) -> &ExoLaneConfig {
         &self.driver.config
     }
+
+    #[must_use]
+    pub fn tier_c_receipt(&self) -> Option<ExoTierCReceipt> {
+        self.tier_c_receipt.borrow().clone()
+    }
+
+    /// Observe the exact Exo capability state for a dedicated confirmation
+    /// dialog. This does not mint authority.
+    pub async fn self_modification_request(
+        &self,
+        objective: String,
+        turn_ref: String,
+    ) -> Result<ExoSelfModificationGrantRequest> {
+        let observed = self.driver.observe().await?.observed;
+        let capabilities = observed.requested_capabilities();
+        if capabilities.is_empty() {
+            bail!("this Exo agent has no self-modification capability to authorize");
+        }
+        Ok(ExoSelfModificationGrantRequest {
+            objective,
+            turn_ref,
+            observed,
+            capabilities,
+            expires_at_ms: now_ms().saturating_add(60_000),
+        })
+    }
+
+    /// Mint the one-use grant after the visible confirmation action returns.
+    pub fn confirm_self_modification(
+        &self,
+        request: ExoSelfModificationGrantRequest,
+    ) -> Result<()> {
+        let grant = ExoSelfModificationGrant::mint(
+            request,
+            ExoSelfModificationConsentOrigin::HumanConfirmationDialog,
+            now_ms(),
+        )
+        .map_err(|refusal| anyhow!("Exo self-modification grant refused: {refusal:?}"))?;
+        *self.pending_grant.borrow_mut() = Some(grant);
+        Ok(())
+    }
+}
+
+struct ObservedTurn {
+    observed: ObservedExoCapabilityState,
+}
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| {
+            u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+        })
+}
+
+fn resolve_module_host_path(module: &str, mounts: &[ExoMount]) -> Option<PathBuf> {
+    let path = std::path::Path::new(module);
+    if path.is_file() {
+        return Some(path.to_path_buf());
+    }
+    mounts.iter().find_map(|mount| {
+        let suffix = path.strip_prefix(&mount.mount_path).ok()?;
+        Some(PathBuf::from(&mount.host_path).join(suffix))
+    })
+}
+
+#[must_use]
+pub fn exo_prompt_objective(prompt: &[acp::ContentBlock]) -> String {
+    prompt
+        .iter()
+        .filter_map(|block| match block {
+            acp::ContentBlock::Text(text) => Some(text.text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+pub fn exo_turn_ref(session_id: &acp::SessionId, prompt: &[acp::ContentBlock]) -> Result<String> {
+    let canonical = serde_json::to_vec(&(session_id, prompt))
+        .context("encoding the exact Exo turn for its authority grant")?;
+    Ok(format!(
+        "exo-turn:{}",
+        MeasuredDigest::measure(&canonical).as_str()
+    ))
 }
 
 impl ExoDriver {
@@ -213,7 +330,13 @@ impl ExoDriver {
             .stdin(Stdio::null())
             .output()
             .await
-            .with_context(|| format!("running {} {}", self.config.binary.display(), argv.join(" ")))?;
+            .with_context(|| {
+                format!(
+                    "running {} {}",
+                    self.config.binary.display(),
+                    argv.join(" ")
+                )
+            })?;
         if !output.status.success() {
             bail!(
                 "exo {} exited {}: {}",
@@ -257,7 +380,7 @@ impl ExoDriver {
     }
 
     /// Refuse an Exo that is not the pinned one.
-    async fn check_pin(&self) -> Result<()> {
+    async fn check_pin(&self) -> Result<(ObservedExoCheckout, MeasuredDigest)> {
         let git = async |args: &[&str]| -> Result<String> {
             let output = smol::process::Command::new("git")
                 .arg("-C")
@@ -288,13 +411,16 @@ impl ExoDriver {
         let bytes = smol::fs::read(&self.config.binary)
             .await
             .context("reading the exo binary")?;
-        admits_bytes(self.frozen_digest.as_deref(), &MeasuredDigest::measure(&bytes))
+        let digest = MeasuredDigest::measure(&bytes);
+        admits_bytes(self.frozen_digest.as_deref(), &digest)
             .map_err(|mismatch| anyhow!("{mismatch}"))?;
-        Ok(())
+        Ok((observed, digest))
     }
 
-    /// Read the agent, refuse self-modification, and resolve the disclosure.
-    async fn check_agent(&self) -> Result<ExoLaneIdentity> {
+    /// Read the exact agent and conversation capability state.
+    async fn observe(&self) -> Result<ObservedTurn> {
+        self.check_endpoint()?;
+        let (checkout, binary_digest) = self.check_pin().await?;
         let shown = self
             .run(&ExoCommand::ShowAgent {
                 agent: self.config.agent.clone(),
@@ -303,46 +429,66 @@ impl ExoDriver {
         let agent = ExoAgent::parse(&shown).map_err(|error| {
             anyhow!("{error}; the Omega lane refuses an Exo agent it cannot read")
         })?;
-        agent
-            .admits_lane_turn()
-            .map_err(|refusal| anyhow!("{refusal}"))?;
+        let shown_conversation = self
+            .run(&ExoCommand::ShowConversation {
+                agent: self.config.agent.clone(),
+                conversation: self.config.conversation.clone(),
+            })
+            .await?;
+        let conversation = ExoConversation::parse(&shown_conversation).map_err(|error| {
+            anyhow!("{error}; the Omega lane refuses an Exo conversation it cannot read")
+        })?;
 
         let bindings = ExoModelBinding::read_table(&self.run(&ExoCommand::ListModels).await?);
         let identity = ExoLaneIdentity::resolve(&agent, &bindings);
         *self.identity.borrow_mut() = Some(identity.clone());
-        Ok(identity)
+        let mut mounts = agent.mounts.clone();
+        mounts.extend(conversation.mounts.clone());
+        let read_write_mounts = mounts
+            .iter()
+            .filter(|mount| mount.read_write)
+            .map(|mount| ObservedReadWriteMount {
+                host_path: mount.host_path.clone(),
+                mount_path: mount.mount_path.clone(),
+            })
+            .collect::<Vec<_>>();
+        let mut tool_modules = Vec::new();
+        for module in &agent.tool_module_paths {
+            let host_path = resolve_module_host_path(module, &mounts).ok_or_else(|| {
+                anyhow!(
+                    "the Exo tool module {module} is not a readable host file or inside an observed mount"
+                )
+            })?;
+            let bytes = smol::fs::read(&host_path)
+                .await
+                .with_context(|| format!("reading Exo tool module {}", host_path.display()))?;
+            tool_modules.push(ObservedToolModule {
+                path: module.clone(),
+                digest: MeasuredDigest::measure(&bytes).as_str().to_owned(),
+            });
+        }
+        tool_modules.sort();
+        let mut read_write_mounts = read_write_mounts;
+        read_write_mounts.sort();
+        Ok(ObservedTurn {
+            observed: ObservedExoCapabilityState {
+                source_commit: checkout.commit,
+                source_tree: checkout.tree,
+                binary_digest: binary_digest.as_str().to_owned(),
+                agent: agent.slug,
+                conversation: conversation.slug,
+                generation: self.generation,
+                agent_authored_tools: agent.agent_authored_tools,
+                tool_modules,
+                read_write_mounts,
+            },
+        })
     }
 
-    /// Everything one turn does outside GPUI: the three refusals, the send, and
-    /// the read-back.
-    async fn drive_turn(&self, prompt: String) -> Result<ExoTurn> {
-        self.check_endpoint()?;
-        self.check_pin().await?;
-        self.check_agent().await?;
-        let stdout = self
-            .run(&ExoCommand::SendTurn {
-                agent: self.config.agent.clone(),
-                conversation: self.config.conversation.clone(),
-                prompt,
-            })
-            .await?;
-        let turn = ExoTurn::read(&stdout).map_err(|error| anyhow!("{error}"))?;
-        // The durable log is read for its own sake even though the send output
-        // already carried the tool lines: Exo's log is the record, the printed
-        // lines are a rendering of it, and a lane that only ever read the
-        // rendering could not tell a truncated turn from a complete one. Failure
-        // to read it does not fail the turn, because the turn already ran.
-        if let Err(error) = self
-            .run(&ExoCommand::ReadEvents {
-                agent: self.config.agent.clone(),
-                conversation: self.config.conversation.clone(),
-                limit: TOOL_ACTIVITY_EVENT_LIMIT,
-            })
-            .await
-        {
-            log::warn!("OMEGA-DELTA-0042: Exo's durable log could not be read back: {error:#}");
-        }
-        Ok(turn)
+    /// Re-observe the exact executable and agent immediately before a streamed
+    /// ACP turn. A self-modifying turn needs a matching one-use grant.
+    async fn preflight(&self) -> Result<ObservedTurn> {
+        self.observe().await
     }
 }
 
@@ -352,18 +498,53 @@ impl ExoDriver {
 /// `None` and the router registers no external executor — which is the ordinary
 /// case, and is why the return type is an `Option` rather than a `Result` that
 /// every caller would have to decide to ignore.
-#[must_use]
-pub fn connect_configured_lane(lane_path: &std::path::Path) -> Option<Rc<dyn AgentConnection>> {
-    let config = ExoLaneConfig::load(lane_path)?;
+pub async fn connect_configured_lane(
+    lane_path: &std::path::Path,
+    project: Entity<Project>,
+    agent_server_store: WeakEntity<AgentServerStore>,
+    cx: &mut AsyncApp,
+) -> Result<Option<Rc<dyn AgentConnection>>> {
+    let Some(config) = ExoLaneConfig::load(lane_path) else {
+        return Ok(None);
+    };
     let frozen = frozen_exo_digest();
     log::info!(
         "OMEGA-DELTA-0042: Exo harness lane configured at {} ({} {}), pin {}",
         config.root.as_str(),
         config.agent,
         config.conversation,
-        if frozen.is_some() { "frozen" } else { "unfrozen" }
+        if frozen.is_some() {
+            "frozen"
+        } else {
+            "unfrozen"
+        }
     );
-    Some(Rc::new(ExoHarnessConnection::new(config, frozen)))
+    let command = AgentServerCommand {
+        path: config.binary.clone(),
+        args: vec![
+            "--root".to_owned(),
+            config.root.as_str().to_owned(),
+            "acp".to_owned(),
+            config.agent.clone(),
+            config.conversation.clone(),
+        ],
+        env: None,
+    };
+    let acp = Rc::new(
+        AcpConnection::stdio(
+            AgentId::new(EXO_HARNESS_ID),
+            project,
+            command,
+            agent_server_store,
+            None,
+            Default::default(),
+            cx,
+        )
+        .await?,
+    );
+    Ok(Some(Rc::new(ExoHarnessConnection::new(
+        config, frozen, acp,
+    ))))
 }
 
 /// The digest the owner froze for `exo`, from the harness pin ledger.
@@ -380,9 +561,7 @@ fn frozen_exo_digest() -> Option<String> {
         .join(omega_harness::HARNESS_PIN_LEDGER_FILE_NAME);
     let file = std::fs::read_to_string(path).ok()?;
     match omega_harness::decode_harness_pin_ledger(&file) {
-        Ok(ledger) => ledger
-            .pin(EXO_HARNESS_ID)
-            .map(|pin| pin.digest.clone()),
+        Ok(ledger) => ledger.pin(EXO_HARNESS_ID).map(|pin| pin.digest.clone()),
         Err(error) => {
             log::warn!("OMEGA-DELTA-0042: the harness pin ledger could not be read ({error})");
             None
@@ -390,17 +569,71 @@ fn frozen_exo_digest() -> Option<String> {
     }
 }
 
-/// The prompt text a request carries, joined.
-fn prompt_text(request: &acp::PromptRequest) -> String {
-    request
-        .prompt
-        .iter()
-        .filter_map(|block| match block {
-            acp::ContentBlock::Text(text) => Some(text.text.as_str()),
-            _ => None,
+fn meta_value(meta: Option<&acp::Meta>, key: &str) -> Option<String> {
+    meta.and_then(|meta| meta.get(key))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
+}
+
+fn tier_c_receipt_path() -> PathBuf {
+    paths::data_dir()
+        .join("openagents")
+        .join("exo-self-modification-receipts.jsonl")
+}
+
+fn load_latest_tier_c_receipt(agent: &str, conversation: &str) -> Option<ExoTierCReceipt> {
+    std::fs::read_to_string(tier_c_receipt_path())
+        .ok()?
+        .lines()
+        .rev()
+        .filter_map(|line| serde_json::from_str::<ExoTierCReceipt>(line).ok())
+        .find(|receipt| {
+            receipt.observed.agent == agent && receipt.observed.conversation == conversation
         })
-        .collect::<Vec<_>>()
-        .join("\n")
+}
+
+fn refused_tier_c_receipt(
+    observed: ObservedExoCapabilityState,
+    turn_ref: String,
+    requested_objective: Option<String>,
+    outcome: String,
+) -> ExoTierCReceipt {
+    ExoTierCReceipt {
+        schema: "openagents.omega.exo_self_modification_receipt.v1".to_owned(),
+        recorded_at_ms: now_ms(),
+        authority: None,
+        observed,
+        turn_ref,
+        requested_objective,
+        outcome,
+        exo_session_id: None,
+        exo_turn_id: None,
+        latest_event_id: None,
+        verification: "Omega refused the turn before it crossed ACP".to_owned(),
+        reconnect: "not applicable; the turn did not start".to_owned(),
+        rollback: "not applicable; the turn did not start".to_owned(),
+    }
+}
+
+async fn persist_tier_c_receipt(receipt: ExoTierCReceipt) -> Result<()> {
+    let path = tier_c_receipt_path();
+    smol::unblock(move || -> Result<()> {
+        use std::io::Write as _;
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("creating {}", parent.display()))?;
+        }
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .with_context(|| format!("opening {}", path.display()))?;
+        serde_json::to_writer(&mut file, &receipt)?;
+        file.write_all(b"\n")?;
+        file.sync_data()?;
+        Ok(())
+    })
+    .await
 }
 
 impl AgentConnection for ExoHarnessConnection {
@@ -427,37 +660,15 @@ impl AgentConnection for ExoHarnessConnection {
         work_dirs: PathList,
         cx: &mut App,
     ) -> Task<Result<Entity<AcpThread>>> {
-        // The session is Exo's conversation. Tier A binds one Omega thread to
-        // one Exo conversation rather than minting a new conversation per
-        // thread, because minting one would mean Omega creating state inside
-        // `.exo`, which is the thing this lane does not do.
-        let session_id = acp::SessionId::new(format!(
-            "exo/{}/{}",
-            self.driver.config.agent, self.driver.config.conversation
-        ));
-        let action_log = cx.new(|_| ActionLog::new(project.clone()));
-        let thread = cx.new(|cx| {
-            AcpThread::new(
-                None,
-                Some(SharedString::from(format!(
-                    "Exo · {}",
-                    self.driver.config.conversation
-                ))),
-                Some(work_dirs),
-                self.clone(),
-                project,
-                action_log,
-                session_id.clone(),
-                watch::Receiver::constant(
-                    acp::PromptCapabilities::new().embedded_context(true),
-                ),
-                cx,
-            )
-        });
-        self.sessions
-            .borrow_mut()
-            .insert(session_id, thread.downgrade());
-        Task::ready(Ok(thread))
+        let inner_session = self.acp.clone().new_session(project, work_dirs, cx);
+        let facade: Rc<dyn AgentConnection> = self;
+        cx.spawn(async move |cx| {
+            let thread = inner_session.await?;
+            thread.update(cx, |thread, _| {
+                thread.replace_connection(facade);
+            });
+            Ok(thread)
+        })
     }
 
     fn auth_methods(&self) -> &[acp::AuthMethod] {
@@ -470,45 +681,159 @@ impl AgentConnection for ExoHarnessConnection {
         )))
     }
 
-    /// One shot. No deltas, by Exo's limit at this pin — see
-    /// `omega_exo_lane::turn`.
-    fn prompt(&self, params: acp::PromptRequest, cx: &mut App) -> Task<Result<acp::PromptResponse>> {
-        let Some(thread) = self.sessions.borrow().get(&params.session_id).cloned() else {
-            return Task::ready(Err(anyhow!("no Exo thread for {}", params.session_id.0)));
-        };
-        let prompt = prompt_text(&params);
-        // Cloned into the task rather than driven here: the turn must not run
-        // on the thread that draws the window. See `run`.
+    fn prompt(
+        &self,
+        params: acp::PromptRequest,
+        cx: &mut App,
+    ) -> Task<Result<acp::PromptResponse>> {
         let driver = Rc::clone(&self.driver);
+        let acp = Rc::clone(&self.acp);
+        let pending_grant = self.pending_grant.take();
+        let receipt_cell = self.tier_c_receipt.clone();
+        let active_tier_c_turn = self.active_tier_c_turn.clone();
         cx.spawn(async move |cx| {
-            let turn = driver.drive_turn(prompt).await?;
-            thread.update(cx, |thread, cx| {
-                for tool in &turn.tools {
-                    let update = acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new(
-                        format!("`{}` → {}", tool.name, tool.output).into(),
-                    ));
-                    let _ = thread.handle_session_update(update, cx);
+            let turn_ref = exo_turn_ref(&params.session_id, &params.prompt)?;
+            let observed = driver.preflight().await?;
+            let capabilities = observed.observed.requested_capabilities();
+            let authority_receipt = if capabilities.is_empty() {
+                None
+            } else {
+                let Some(grant) = pending_grant else {
+                    let message = "this Exo turn can modify itself; use the dedicated confirmation control for this exact draft";
+                    let receipt = refused_tier_c_receipt(
+                        observed.observed.clone(),
+                        turn_ref.clone(),
+                        None,
+                        format!("refused: {message}"),
+                    );
+                    *receipt_cell.borrow_mut() = Some(receipt.clone());
+                    persist_tier_c_receipt(receipt).await?;
+                    bail!("{message}");
+                };
+                let requested_objective = Some(grant.request().objective.clone());
+                match grant.consume(&observed.observed, &turn_ref, now_ms()) {
+                    Ok(authority) => Some(authority),
+                    Err(refusal) => {
+                        let message = format!(
+                            "Exo self-modification grant refused: {refusal:?}"
+                        );
+                        let receipt = refused_tier_c_receipt(
+                            observed.observed.clone(),
+                            turn_ref.clone(),
+                            requested_objective,
+                            format!("refused: {refusal:?}"),
+                        );
+                        *receipt_cell.borrow_mut() = Some(receipt.clone());
+                        persist_tier_c_receipt(receipt).await?;
+                        bail!("{message}");
+                    }
                 }
-                let _ = thread.handle_session_update(
-                    acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new(
-                        turn.text.clone().into(),
-                    )),
-                    cx,
-                );
-            })?;
-            Ok(acp::PromptResponse::new(acp::StopReason::EndTurn))
+            };
+            let is_tier_c_turn = authority_receipt.is_some();
+            if let Some(authority) = authority_receipt {
+                *receipt_cell.borrow_mut() = Some(ExoTierCReceipt {
+                    schema: "openagents.omega.exo_self_modification_receipt.v1".to_owned(),
+                    recorded_at_ms: now_ms(),
+                    observed: authority.observed.clone(),
+                    turn_ref: authority.turn_ref.clone(),
+                    requested_objective: Some(authority.objective.clone()),
+                    authority: Some(authority),
+                    outcome: "sent".to_owned(),
+                    exo_session_id: None,
+                    exo_turn_id: None,
+                    latest_event_id: None,
+                    verification: "waiting for Exo's durable completion receipt".to_owned(),
+                    reconnect: "not reported by Exo ACP".to_owned(),
+                    rollback: "not reported by Exo ACP".to_owned(),
+                });
+                active_tier_c_turn.set(true);
+                let receipt = receipt_cell.borrow().clone();
+                if let Some(receipt) = receipt {
+                    if let Err(error) = persist_tier_c_receipt(receipt).await {
+                        active_tier_c_turn.set(false);
+                        return Err(error);
+                    }
+                }
+            }
+            let prompt = cx.update(|cx| acp.prompt(params, cx));
+            let response = prompt.await;
+            if is_tier_c_turn {
+                if let Some(receipt) = receipt_cell.borrow_mut().as_mut() {
+                    match &response {
+                        Ok(response) => {
+                            receipt.outcome = match response.stop_reason {
+                                acp::StopReason::Cancelled => "cancelled",
+                                _ => "completed",
+                            }
+                            .to_owned();
+                            receipt.recorded_at_ms = now_ms();
+                            let meta = response.meta.as_ref();
+                            receipt.exo_session_id = meta_value(meta, "exo.session_id");
+                            receipt.exo_turn_id = meta_value(meta, "exo.turn_id");
+                            receipt.latest_event_id = meta_value(meta, "exo.latest_event_id");
+                            receipt.verification =
+                                if receipt.latest_event_id.is_some() {
+                                    "Exo returned its durable latest event reference".to_owned()
+                                } else {
+                                    "Exo returned no durable event reference".to_owned()
+                                };
+                        }
+                        Err(error) => {
+                            receipt.recorded_at_ms = now_ms();
+                            receipt.outcome = format!("failed: {error}");
+                            receipt.verification =
+                                "the ACP turn failed before verification".to_owned();
+                        }
+                    }
+                }
+                let receipt = receipt_cell.borrow().clone();
+                let persisted = if let Some(receipt) = receipt {
+                    persist_tier_c_receipt(receipt).await
+                } else {
+                    Ok(())
+                };
+                active_tier_c_turn.set(false);
+                persisted?;
+            }
+            response
         })
     }
 
-    /// Exo's turn is one blocking process. There is nothing to cancel that
-    /// would leave Exo's durable log consistent, so the lane says so rather
-    /// than pretending.
-    fn cancel(&self, session_id: &acp::SessionId, _cx: &mut App) {
-        log::info!(
-            "OMEGA-DELTA-0042: cancel is not available on the Exo lane; \
-             session {} runs one shot per turn",
-            session_id.0
-        );
+    fn cancel(&self, session_id: &acp::SessionId, cx: &mut App) {
+        let cancelled_pending_grant = self.pending_grant.borrow_mut().take().map(|grant| {
+            let request = grant.request();
+            refused_tier_c_receipt(
+                request.observed.clone(),
+                request.turn_ref.clone(),
+                Some(request.objective.clone()),
+                "refused: cancelled before send".to_owned(),
+            )
+        });
+        if let Some(receipt) = cancelled_pending_grant {
+            *self.tier_c_receipt.borrow_mut() = Some(receipt.clone());
+            cx.spawn(async move |_| {
+                if let Err(error) = persist_tier_c_receipt(receipt).await {
+                    log::error!("omega#87: failed to persist the cancellation receipt: {error}");
+                }
+            })
+            .detach();
+        } else if self.active_tier_c_turn.get() {
+            if let Some(receipt) = self.tier_c_receipt.borrow_mut().as_mut() {
+                receipt.recorded_at_ms = now_ms();
+                receipt.outcome = "cancellation requested".to_owned();
+            }
+            if let Some(receipt) = self.tier_c_receipt.borrow().clone() {
+                cx.spawn(async move |_| {
+                    if let Err(error) = persist_tier_c_receipt(receipt).await {
+                        log::error!(
+                            "omega#87: failed to persist the cancellation receipt: {error}"
+                        );
+                    }
+                })
+                .detach();
+            }
+        }
+        self.acp.cancel(session_id, cx);
     }
 
     fn into_any(self: Rc<Self>) -> Rc<dyn Any> {
@@ -571,6 +896,105 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_tier_c_grant_is_bound_to_the_exact_session_and_prompt() {
+        let session_a = acp::SessionId::new("session-a");
+        let session_b = acp::SessionId::new("session-b");
+        let prompt_a = vec![acp::ContentBlock::Text(acp::TextContent::new("edit"))];
+        let prompt_b = vec![acp::ContentBlock::Text(acp::TextContent::new("edit more"))];
+        let reference = exo_turn_ref(&session_a, &prompt_a).expect("turn ref");
+        assert_ne!(
+            reference,
+            exo_turn_ref(&session_b, &prompt_a).expect("session-bound ref")
+        );
+        assert_ne!(
+            reference,
+            exo_turn_ref(&session_a, &prompt_b).expect("prompt-bound ref")
+        );
+    }
+
+    #[test]
+    fn a_tier_c_receipt_round_trips_all_authority_and_outcome_fields() {
+        let observed = ObservedExoCapabilityState {
+            source_commit: "commit".into(),
+            source_tree: "tree".into(),
+            binary_digest: "sha256:binary".into(),
+            agent: "agent".into(),
+            conversation: "conversation".into(),
+            generation: 12,
+            agent_authored_tools: true,
+            tool_modules: Vec::new(),
+            read_write_mounts: Vec::new(),
+        };
+        let authority = ExoSelfModificationReceipt {
+            objective: "Update and verify Exo.".into(),
+            turn_ref: "turn".into(),
+            generation: observed.generation,
+            expires_at_ms: 200,
+            origin: ExoSelfModificationConsentOrigin::HumanConfirmationDialog,
+            capabilities: observed.requested_capabilities(),
+            observed: observed.clone(),
+        };
+        let receipt = ExoTierCReceipt {
+            schema: "openagents.omega.exo_self_modification_receipt.v1".into(),
+            recorded_at_ms: 150,
+            authority: Some(authority),
+            observed,
+            turn_ref: "turn".into(),
+            requested_objective: Some("Update and verify Exo.".into()),
+            outcome: "completed".into(),
+            exo_session_id: Some("session".into()),
+            exo_turn_id: Some("turn".into()),
+            latest_event_id: Some("event".into()),
+            verification: "verified".into(),
+            reconnect: "not reported by Exo ACP".into(),
+            rollback: "not reported by Exo ACP".into(),
+        };
+        let encoded = serde_json::to_string(&receipt).expect("serialize receipt");
+        let decoded = serde_json::from_str::<ExoTierCReceipt>(&encoded).expect("read receipt");
+        assert_eq!(decoded, receipt);
+    }
+
+    #[test]
+    fn a_refusal_receipt_has_no_authority_or_durable_exo_turn() {
+        let observed = ObservedExoCapabilityState {
+            source_commit: "commit".into(),
+            source_tree: "tree".into(),
+            binary_digest: "sha256:binary".into(),
+            agent: "agent".into(),
+            conversation: "conversation".into(),
+            generation: 12,
+            agent_authored_tools: true,
+            tool_modules: Vec::new(),
+            read_write_mounts: Vec::new(),
+        };
+        let receipt =
+            refused_tier_c_receipt(observed, "turn".into(), None, "refused: no grant".into());
+        assert!(receipt.authority.is_none());
+        assert!(receipt.exo_turn_id.is_none());
+        assert_eq!(
+            receipt.verification,
+            "Omega refused the turn before it crossed ACP"
+        );
+    }
+
+    #[test]
+    fn a_sandbox_module_resolves_only_through_an_observed_mount() {
+        let mount = ExoMount {
+            host_path: "/host/exo".into(),
+            mount_path: "/workspace/exo".into(),
+            read_write: true,
+        };
+        assert_eq!(
+            resolve_module_host_path("/workspace/exo/tools/guardian.ts", &[mount]),
+            Some(PathBuf::from("/host/exo/tools/guardian.ts"))
+        );
+        assert_eq!(
+            resolve_module_host_path("/other/tools/guardian.ts", &[]),
+            None
+        );
+    }
+
     /// The lane, against a real Exo. `#[ignore]`d because it needs one: a
     /// built `exo` at the pinned commit, a configured agent and conversation,
     /// and whatever credential that agent's model binding resolves to. Exo
@@ -594,9 +1018,6 @@ mod tests {
         let Ok(lane_file) = std::env::var("OMEGA_EXO_LANE_FILE") else {
             panic!("set OMEGA_EXO_LANE_FILE to a lane file; see this test's docs");
         };
-        let config = ExoLaneConfig::load(std::path::Path::new(&lane_file))
-            .expect("the lane file names an Exo install");
-
         // The turn runs a real process against a real model, so this test
         // waits on wall-clock I/O rather than on the deterministic scheduler.
         // That is the point of it: the same await that parks here is what keeps
@@ -605,21 +1026,38 @@ mod tests {
         cx.executor().allow_parking();
         crate::test_support::init_test(cx);
         let fs = fs::FakeFs::new(cx.executor());
-        let project = Project::test(fs, [], cx).await;
+        let lane_path = PathBuf::from(lane_file);
+        let process_cwd = lane_path
+            .parent()
+            .expect("the lane file has a parent")
+            .to_path_buf();
+        fs.insert_tree(&process_cwd, serde_json::json!({})).await;
+        let project = Project::test(fs, [process_cwd.as_path()], cx).await;
 
-        let connection: Rc<ExoHarnessConnection> =
-            Rc::new(ExoHarnessConnection::new(config, None));
+        let agent_server_store =
+            project.read_with(cx, |project, _| project.agent_server_store().downgrade());
+        let connect_project = project.clone();
+        let connection = cx
+            .update(|cx| {
+                cx.spawn(async move |cx| {
+                    connect_configured_lane(&lane_path, connect_project, agent_server_store, cx)
+                        .await
+                })
+            })
+            .await
+            .expect("the Exo ACP lane connects")
+            .expect("the lane file names an Exo install");
         let thread = cx
             .update(|cx| {
                 connection
                     .clone()
-                    .new_session(project, PathList::default(), cx)
+                    .new_session(project, PathList::new(&[process_cwd]), cx)
             })
             .await
             .expect("a session on the Exo lane");
 
         let session_id = thread.read_with(cx, |thread, _| thread.session_id().clone());
-        let marker = "OMEGA-EXO-TIER-A";
+        let marker = "OMEGA-EXO-ACP-STREAM";
         let request = acp::PromptRequest::new(
             session_id,
             vec![acp::ContentBlock::Text(acp::TextContent::new(format!(
@@ -627,7 +1065,7 @@ mod tests {
             )))],
         );
         let response = cx
-            .update(|cx| AgentConnection::prompt(connection.as_ref(), request, cx))
+            .update(|cx| connection.prompt(request, cx))
             .await
             .expect("Exo ran the turn");
         assert_eq!(response.stop_reason, acp::StopReason::EndTurn);
@@ -642,7 +1080,11 @@ mod tests {
         assert!(disclosure.is_coherent(), "{disclosure:?}");
         assert_eq!(disclosure.class, omega_exo_lane::EXO_EXECUTOR_CLASS);
         assert_eq!(disclosure.run_ref, None);
-        let identity = connection.identity().expect("Exo told the lane who it is");
+        let exo = connection
+            .clone()
+            .downcast::<ExoHarnessConnection>()
+            .expect("the configured lane is Exo");
+        let identity = exo.identity().expect("Exo told the lane who it is");
         assert!(disclosure.agent_id.starts_with("exo/"), "{disclosure:?}");
         // The parts that only the Exo arm of `classify_connection` can supply.
         // Without them this assertion set passes on the shared external-agent
@@ -660,20 +1102,5 @@ mod tests {
         );
         println!("executor disclosure: {}", disclosure.label());
         println!("exo identity: {identity:?}");
-    }
-
-    /// The prompt reaches Exo as text and nothing else. A content block this
-    /// build does not carry is dropped rather than rendered into the command
-    /// line as a debug string.
-    #[test]
-    fn only_text_reaches_exos_command_line() {
-        let request = acp::PromptRequest::new(
-            acp::SessionId::new("exo/omega-lane/tier-a"),
-            vec![
-                acp::ContentBlock::Text(acp::TextContent::new(String::from("first"))),
-                acp::ContentBlock::Text(acp::TextContent::new(String::from("second"))),
-            ],
-        );
-        assert_eq!(prompt_text(&request), "first\nsecond");
     }
 }

@@ -454,7 +454,8 @@ impl OmegaAgentConnection {
     pub fn pin_next_session(&self, pin: Option<ExecutorPin>, gesture: PinGesture) {
         log::info!(
             "OMEGA-DELTA-0035: the next session is pinned to {} by {}",
-            pin.as_ref().map_or("nothing".to_owned(), ExecutorPin::token),
+            pin.as_ref()
+                .map_or("nothing".to_owned(), ExecutorPin::token),
             gesture.token()
         );
         *self.next_pin.borrow_mut() = pin;
@@ -607,7 +608,9 @@ impl AgentConnection for OmegaAgentConnection {
                     decision.explain()
                 );
             }
-            self.pins.borrow_mut().extend(pin.map(|pin| (session_id, pin)));
+            self.pins
+                .borrow_mut()
+                .extend(pin.map(|pin| (session_id, pin)));
             Ok(thread)
         })
     }
@@ -632,11 +635,18 @@ impl AgentConnection for OmegaAgentConnection {
         self.native.logout(cx)
     }
 
-    fn client_user_message_ids(&self, cx: &App) -> Option<Rc<dyn AgentSessionClientUserMessageIds>> {
+    fn client_user_message_ids(
+        &self,
+        cx: &App,
+    ) -> Option<Rc<dyn AgentSessionClientUserMessageIds>> {
         self.native.client_user_message_ids(cx)
     }
 
-    fn prompt(&self, params: acp::PromptRequest, cx: &mut App) -> Task<Result<acp::PromptResponse>> {
+    fn prompt(
+        &self,
+        params: acp::PromptRequest,
+        cx: &mut App,
+    ) -> Task<Result<acp::PromptResponse>> {
         self.executor_for(&params.session_id).prompt(params, cx)
     }
 
@@ -809,10 +819,11 @@ impl agent_servers::AgentServer for OmegaRouterServer {
         project: Entity<Project>,
         cx: &mut App,
     ) -> Task<Result<Rc<dyn AgentConnection>>> {
-        let native = self.native.connect(delegate, project, cx);
+        let agent_server_store = delegate.store().downgrade();
+        let native = self.native.connect(delegate, project.clone(), cx);
         let journal_path = self.journal_path.clone();
         let exo_lane_path = self.exo_lane_path.clone();
-        cx.spawn(async move |_cx| {
+        cx.spawn(async move |cx| {
             let native = native.await?;
             let mut router = OmegaAgentConnection::new(native, RouteJournal::at(journal_path));
             // `OMEGA-DELTA-0042`, omega#87. The Exo harness lane, when the owner
@@ -822,7 +833,13 @@ impl agent_servers::AgentServer for OmegaRouterServer {
             // engine lane. A machine with no Exo registers nothing, and a pin
             // to the external executor then falls back visibly with
             // `RouteReason::ExternalAcpUnavailable`.
-            if let Some(exo) = crate::omega_exo_connection::connect_configured_lane(&exo_lane_path)
+            if let Some(exo) = crate::omega_exo_connection::connect_configured_lane(
+                &exo_lane_path,
+                project,
+                agent_server_store,
+                cx,
+            )
+            .await?
             {
                 router = router.with_external_acp(exo);
             }
@@ -886,7 +903,10 @@ impl agent_servers::AgentServer for OmegaRouterServer {
 /// wrong `false`, which is why `omega_deltas` counts the bare downcasts.
 #[must_use]
 pub fn is_native_agent_server(server: &Rc<dyn agent_servers::AgentServer>) -> bool {
-    server.clone().downcast::<agent::NativeAgentServer>().is_some()
+    server
+        .clone()
+        .downcast::<agent::NativeAgentServer>()
+        .is_some()
         || server.clone().downcast::<OmegaRouterServer>().is_some()
 }
 
@@ -909,7 +929,12 @@ pub fn native_connection(
     connection
         .clone()
         .downcast::<OmegaAgentConnection>()
-        .and_then(|router| router.native.clone().downcast::<agent::NativeAgentConnection>())
+        .and_then(|router| {
+            router
+                .native
+                .clone()
+                .downcast::<agent::NativeAgentConnection>()
+        })
 }
 
 #[cfg(test)]
@@ -1016,10 +1041,7 @@ mod tests {
 
         let reopened = journal_in(&directory);
         assert_eq!(reopened.decision(session).as_ref(), Some(&decision));
-        assert_eq!(
-            reopened.decisions(),
-            vec![(session.to_owned(), decision)]
-        );
+        assert_eq!(reopened.decisions(), vec![(session.to_owned(), decision)]);
         assert_eq!(
             recorded_route(&acp::SessionId::new(session)),
             Some(RouteReason::EngineUnreachable),
@@ -1059,7 +1081,10 @@ mod tests {
             .with_engine_lane(stub("codex-local"));
         router.observe_capacity(Ok(&ready_capacity()));
 
-        let external = router.decide("s-external", Some(ExecutorPin::new(ExecutorClass::ExternalAcp)));
+        let external = router.decide(
+            "s-external",
+            Some(ExecutorPin::new(ExecutorClass::ExternalAcp)),
+        );
         assert_eq!(external.chosen, ExecutorClass::ExternalAcp);
         assert_eq!(
             router.executor(external.chosen).agent_id(),
@@ -1179,11 +1204,10 @@ mod tests {
             );
         }
         assert_eq!(
-            std::fs::read_to_string(
-                directory.path().join("openagents").join(ROUTE_JOURNAL_FILE)
-            )
-            .unwrap()
-            .matches("chosen=").count(),
+            std::fs::read_to_string(directory.path().join("openagents").join(ROUTE_JOURNAL_FILE))
+                .unwrap()
+                .matches("chosen=")
+                .count(),
             1,
             "one session must leave one record, not one per decision"
         );
@@ -1226,7 +1250,10 @@ mod tests {
             "a pin a person set must move the turn, or the control is decoration"
         );
         assert_eq!(
-            router.journal().decision(session.0.as_ref()).map(|d| d.chosen),
+            router
+                .journal()
+                .decision(session.0.as_ref())
+                .map(|d| d.chosen),
             Some(ExecutorClass::ExternalAcp)
         );
     }
@@ -1262,7 +1289,12 @@ mod tests {
             decision.pin.as_ref().map(ExecutorPin::token).as_deref(),
             Some("engine_lane")
         );
-        assert!(decision.reason.phrase().contains("fell back to the native loop"));
+        assert!(
+            decision
+                .reason
+                .phrase()
+                .contains("fell back to the native loop")
+        );
         assert_eq!(
             recorded_route(&session),
             Some(decision.reason),
@@ -1309,5 +1341,4 @@ mod tests {
         );
         assert_eq!(router.agent_id(), AgentId::new("omega-agent"));
     }
-
 }

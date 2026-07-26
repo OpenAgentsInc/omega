@@ -1026,7 +1026,8 @@ impl ConversationView {
         // server now, so "is this the native agent?" cannot be a bare downcast:
         // a wrapped native agent would read as external and be refused in a
         // shared project.
-        if project.read(cx).is_via_collab() && !crate::omega_router::is_native_agent_server(&agent) {
+        if project.read(cx).is_via_collab() && !crate::omega_router::is_native_agent_server(&agent)
+        {
             return ServerState::LoadError {
                 error: LoadError::Other(
                     "External agents are not yet supported in shared projects.".into(),
@@ -1236,11 +1237,23 @@ impl ConversationView {
             .downcast::<agent::NativeAgentConnection>()
             .map(|native_connection| native_available_skills(&native_connection, &session_id, cx))
             .unwrap_or_default();
-        let session_capabilities = Arc::new(RwLock::new(SessionCapabilities::new(
-            thread.read(cx).prompt_capabilities(),
-            thread.read(cx).available_commands().to_vec(),
-            available_skills,
-        )));
+        let omega_steer_capability = if connection
+            .clone()
+            .downcast::<crate::omega_exo_connection::ExoHarnessConnection>()
+            .is_some()
+        {
+            omega_front_door::SteerCapability::CannotSteer
+        } else {
+            omega_front_door::SteerCapability::Unknown
+        };
+        let session_capabilities = Arc::new(RwLock::new(
+            SessionCapabilities::new(
+                thread.read(cx).prompt_capabilities(),
+                thread.read(cx).available_commands().to_vec(),
+                available_skills,
+            )
+            .with_omega_steer_capability(omega_steer_capability),
+        ));
 
         let action_log = thread.read(cx).action_log().clone();
 
@@ -2679,7 +2692,9 @@ impl ConversationView {
                     )
                     .actions_slot(
                         Button::new("session-gone-new-thread", "New Thread")
-                            .on_click(|_, window, cx| window.dispatch_action(NewThread.boxed_clone(), cx))
+                            .on_click(|_, window, cx| {
+                                window.dispatch_action(NewThread.boxed_clone(), cx)
+                            })
                             .into_any_element(),
                     )
                     .into_any_element();

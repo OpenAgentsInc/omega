@@ -11993,6 +11993,7 @@ version = "0.1.0"
 dependencies = [
  "omega_front_door",
  "omega_harness",
+ "serde",
 ]
 
 [[package]]
