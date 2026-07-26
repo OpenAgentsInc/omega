@@ -6461,6 +6461,27 @@ impl AgentPanel {
     }
 
     fn should_render_new_user_onboarding(&mut self, cx: &mut Context<Self>) -> bool {
+        // omega#99. Zero base never draws the onboarding card.
+        //
+        // The card is the agent panel's own, not zero base's, but it appeared
+        // in zero base's window and so it was zero base's problem: it read
+        // `Configured AI providers: Ollama` while the disclosure line and the
+        // composer beside it both named `google/gemini-3.6-flash`. A window
+        // that gives two answers to "which model am I about to talk to" is
+        // worse than one that gives none, and the owner named it as the worst
+        // thing on the screen.
+        //
+        // Auto-detection replaces the question. `has_configured_ai_provider`
+        // is the onboarding screen's own enumeration, not a second one: when a
+        // usable provider exists the surface says nothing at all, and when
+        // none exists the composer says so in one line rather than a modal
+        // card, because a card is a decision point and the composer is where
+        // the person already is. `render_zero_base_provider_notice` in the
+        // thread view is that line.
+        if omega_zero_base::is_active() {
+            return false;
+        }
+
         if self
             .new_user_onboarding_upsell_dismissed
             .load(Ordering::Acquire)
@@ -6468,13 +6489,7 @@ impl AgentPanel {
             return false;
         }
 
-        let has_configured_non_zed_providers = LanguageModelRegistry::read_global(cx)
-            .visible_providers()
-            .iter()
-            .any(|provider| {
-                provider.is_authenticated(cx)
-                    && provider.id() != language_model::ZED_CLOUD_PROVIDER_ID
-            });
+        let has_configured_non_zed_providers = ai_onboarding::has_configured_ai_provider(cx);
 
         match &self.base_view {
             BaseView::Uninitialized | BaseView::Terminal { .. } => false,

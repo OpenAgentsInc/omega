@@ -12059,6 +12059,7 @@ dependencies = [
  "menu",
  "notifications",
  "omega_identity",
+ "omega_zero_base",
  "paths",
  "picker",
  "project",

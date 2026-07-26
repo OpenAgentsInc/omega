@@ -1042,7 +1042,14 @@ impl ThreadView {
             _sandbox_status_refresh_task: None,
             omega_run_records: None,
             _omega_run_link_task: None,
-            exo_inspector_expanded: true,
+            // omega#99. Closed in zero base, open everywhere else.
+            //
+            // Open-by-default is right for the Exo workspace, where the
+            // inspector is the point of the screen. In zero base it was the
+            // single largest thing between the owner and the composer, and the
+            // owner asked for minimal knobs. One click in the composer bar
+            // opens it, and it opens into the transcript.
+            exo_inspector_expanded: !omega_zero_base::is_active(),
             _exo_inspection_task: None,
             hovered_edited_file_buttons: None,
             in_flight_prompt: None,
@@ -4380,7 +4387,25 @@ impl ThreadView {
 
         let max_content_width = AgentSettings::get_global(cx).max_content_width;
         let has_messages = self.list_state.item_count() > 0;
-        let fills_container = !has_messages || editor_expanded;
+
+        // omega#99. The composer sits at the bottom in zero base, always.
+        //
+        // Upstream's empty thread gives the composer the whole panel —
+        // `flex_1().size_full()` here, `h_full()` on the column below, and
+        // `justify_between()` between them. In a dock-sized panel that reads as
+        // a roomy new-thread surface. In zero base the panel is zoomed to the
+        // whole window, so the same rule put the text field at the top of the
+        // screen, the model and pin dropdowns at the very bottom, and a field
+        // of dead black between them. The owner asked for the input to sit at
+        // the bottom, the way a chat surface puts it, rather than at the top.
+        //
+        // So in zero base the composer hugs its content and the transcript
+        // above it takes the remaining space — see the `conversation` branch in
+        // `Render`, which expands on an empty thread for the same reason. The
+        // editor and its footer row stay together, and the empty space is
+        // above them where it belongs.
+        let composer_fills_panel = !has_messages && !omega_zero_base::is_active();
+        let fills_container = composer_fills_panel || editor_expanded;
 
         h_flex()
             .py_2()
@@ -4388,7 +4413,7 @@ impl ThreadView {
             .justify_center()
             .on_action(cx.listener(Self::handle_message_editor_move_up))
             .map(|this| {
-                if has_messages {
+                if !composer_fills_panel {
                     this.on_action(cx.listener(Self::expand_message_editor))
                         .border_t_1()
                         .border_color(cx.theme().colors().border)
@@ -4450,39 +4475,57 @@ impl ThreadView {
                                 )
                             }),
                     )
-                    .child(
-                        h_flex()
-                            .w_full()
-                            .min_w_0()
-                            .flex_none()
-                            .flex_wrap()
-                            .justify_between()
-                            .child(
+                    // omega#99. Zero base's composer bar is one row: what this
+                    // thread is talking to, the model, the executor pin, send.
+                    //
+                    // The owner asked for the input bar to be the centre of
+                    // gravity, with "the options of which provider as dropdowns
+                    // inside it kinda", and for minimal knobs. So the ordinary
+                    // row's other controls — add context, follow, fast mode,
+                    // thinking, token usage, profile, mode — are *not rendered*
+                    // here. Not removed: without the flag the `else` below is
+                    // byte-identical to what shipped, and every one of those
+                    // controls keeps its action and its key binding, because an
+                    // unresolvable binding panics Omega before any window opens.
+                    .map(|this| {
+                        if omega_zero_base::is_active() {
+                            this.child(self.render_zero_base_executor_bar(cx))
+                        } else {
+                            this.child(
                                 h_flex()
+                                    .w_full()
                                     .min_w_0()
+                                    .flex_none()
                                     .flex_wrap()
-                                    .gap_0p5()
-                                    .child(self.render_add_context_button(cx))
-                                    .child(self.render_follow_toggle(cx))
-                                    .children(self.render_fast_mode_control(cx))
-                                    .children(self.render_thinking_control(cx)),
+                                    .justify_between()
+                                    .child(
+                                        h_flex()
+                                            .min_w_0()
+                                            .flex_wrap()
+                                            .gap_0p5()
+                                            .child(self.render_add_context_button(cx))
+                                            .child(self.render_follow_toggle(cx))
+                                            .children(self.render_fast_mode_control(cx))
+                                            .children(self.render_thinking_control(cx)),
+                                    )
+                                    .child(
+                                        h_flex()
+                                            .min_w_0()
+                                            .flex_wrap()
+                                            .gap_1()
+                                            .children(self.render_token_usage(cx))
+                                            .children(self.profile_selector.clone())
+                                            .map(|this| match self.config_options_view.clone() {
+                                                Some(config_view) => this.child(config_view),
+                                                None => this
+                                                    .children(self.mode_selector.clone())
+                                                    .children(self.model_selector.clone()),
+                                            })
+                                            .child(self.render_send_button(cx)),
+                                    ),
                             )
-                            .child(
-                                h_flex()
-                                    .min_w_0()
-                                    .flex_wrap()
-                                    .gap_1()
-                                    .children(self.render_token_usage(cx))
-                                    .children(self.profile_selector.clone())
-                                    .map(|this| match self.config_options_view.clone() {
-                                        Some(config_view) => this.child(config_view),
-                                        None => this
-                                            .children(self.mode_selector.clone())
-                                            .children(self.model_selector.clone()),
-                                    })
-                                    .child(self.render_send_button(cx)),
-                            ),
-                    ),
+                        }
+                    }),
             )
             .into_any()
     }
@@ -12717,6 +12760,139 @@ impl ThreadView {
             .into_any_element()
     }
 
+    /// `OMEGA-DELTA-0021` in zero base: the same record, in the composer bar.
+    ///
+    /// omega#99. The owner asked for the input bar to become the centre of
+    /// gravity — "the options of which provider as dropdowns inside it kinda" —
+    /// and for everything else to go. This is that row, and it is deliberately
+    /// four things: what this thread is talking to, the model, the executor
+    /// pin, and send.
+    ///
+    /// **It replaces the separate disclosure line; it does not drop the
+    /// disclosure.** The line is still rendered from
+    /// `omega_front_door::ExecutorDisclosure` by `Label::new(disclosure.label())`
+    /// on every draw, which is the binding half of `OMEGA-DELTA-0021`: a typed
+    /// record that a label renders, never a stored label string. Moving where a
+    /// person reads it does not touch that; deleting it would, and a mode whose
+    /// entire purpose is to show one executor doing work is the last place a
+    /// turn should go unattributed.
+    ///
+    /// **The pin stays the same gesture.** `render_executor_pin` is reused
+    /// verbatim rather than reimplemented, so a pin is still
+    /// `PinGesture::ExecutorPinMenuItem` — a menu item a person picks. Owner
+    /// gate 8's `pin_gestures_are_all_human_gestures` closes that list at two
+    /// and explicitly names "a composer mode flag" as inadmissible; a popover
+    /// that moved rows is not a mode flag, and no third variant is added here.
+    /// Nothing on this row pre-pins: pinning `ExternalAcp` is the door into the
+    /// Exo lane and it stays a human click.
+    fn render_zero_base_executor_bar(&self, cx: &mut Context<Self>) -> AnyElement {
+        let disclosure = self.executor_disclosure(cx);
+        let exo = self.exo_connection(cx);
+        let inspector_open = self.exo_inspector_expanded;
+        let turn_phase = exo.as_ref().map(|exo| exo.turn().phase);
+
+        h_flex()
+            .w_full()
+            .min_w_0()
+            .flex_none()
+            .flex_wrap()
+            .gap_1()
+            .justify_between()
+            .child(
+                h_flex()
+                    .min_w_0()
+                    .gap_1()
+                    .child(
+                        Icon::new(match exo {
+                            Some(_) => IconName::BoltOutlined,
+                            None => self.agent_icon,
+                        })
+                        .size(IconSize::XSmall)
+                        .color(Color::Muted),
+                    )
+                    // OMEGA-DELTA-0021. From the record, on every draw.
+                    .child(
+                        Label::new(disclosure.label())
+                            .size(LabelSize::XSmall)
+                            .color(Color::Muted)
+                            .truncate(),
+                    )
+                    // omega#99. The turn's own state, only while there is a
+                    // turn. Permanent chrome that says "idle" at a person all
+                    // day is a knob; a dot that appears when the executor
+                    // starts working is the turn talking.
+                    .when_some(turn_phase, |this, phase| {
+                        this.child(
+                            Icon::new(IconName::Circle)
+                                .size(IconSize::XSmall)
+                                .color(Self::exo_status_color(phase)),
+                        )
+                        .child(
+                            Label::new(phase.label())
+                                .size(LabelSize::XSmall)
+                                .color(Self::exo_status_color(phase)),
+                        )
+                    }),
+            )
+            .child(
+                h_flex()
+                    .min_w_0()
+                    .flex_wrap()
+                    .gap_1()
+                    .children(self.render_zero_base_provider_notice(cx))
+                    // omega#99. The inspector's contents are the conversation's
+                    // — identity, runtime, capabilities and the authority
+                    // receipt for the turn a person just watched — so in zero
+                    // base they render at the tail of the transcript rather
+                    // than in a permanent column, and this is the one knob that
+                    // opens them.
+                    .when(exo.is_some(), |this| {
+                        this.child(
+                            IconButton::new("omega-exo-toggle-inspector", IconName::Info)
+                                .icon_size(IconSize::Small)
+                                .toggle_state(inspector_open)
+                                .tooltip(Tooltip::text(
+                                    "Show what Exo reported for this conversation",
+                                ))
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.exo_inspector_expanded = !this.exo_inspector_expanded;
+                                    cx.notify();
+                                })),
+                        )
+                    })
+                    .map(|this| match self.config_options_view.clone() {
+                        Some(config_view) => this.child(config_view),
+                        None => this.children(self.model_selector.clone()),
+                    })
+                    .child(self.render_executor_pin(cx))
+                    // Stop lives here too: `render_send_button` already turns
+                    // into a stop control while a turn is generating, so the
+                    // Exo header's separate `Stop` was a second button for the
+                    // same act.
+                    .child(self.render_send_button(cx)),
+            )
+            .into_any_element()
+    }
+
+    /// The one line zero base says when there is genuinely no provider.
+    ///
+    /// omega#99. `None` whenever a provider is configured, which is the point:
+    /// auto-detection means the surface says nothing when there is nothing to
+    /// decide. When there is, this is a line in the bar a person is already
+    /// looking at rather than a card in the middle of the window — the card is
+    /// a decision point, and this is a fact.
+    fn render_zero_base_provider_notice(&self, cx: &Context<Self>) -> Option<AnyElement> {
+        if ai_onboarding::has_configured_ai_provider(cx) {
+            return None;
+        }
+        Some(
+            Label::new("No AI provider configured — leave zero base to add one")
+                .size(LabelSize::XSmall)
+                .color(Color::Warning)
+                .into_any_element(),
+        )
+    }
+
     /// The executor line, rendered from the record.
     ///
     /// Unconditional, and above the entries rather than beside them, because
@@ -12859,11 +13035,39 @@ impl Render for ThreadView {
                         .child(self.render_entries(cx))
                         .vertical_scrollbar_for(&list_state, window, cx)
                         .into_any()
+                } else if omega_zero_base::is_active() {
+                    // omega#99. An empty transcript still takes the space in
+                    // zero base, so the composer below it is pushed to the
+                    // bottom of the window rather than floating at the top.
+                    // Upstream lets the composer absorb this space instead;
+                    // see `render_message_editor` for why that inverts here.
+                    this.flex_1().size_full().into_any()
                 } else {
                     this.into_any()
                 }
             });
         let conversation = match (exo, self.exo_inspector_expanded) {
+            // omega#99. In zero base the inspector is conversation-resident.
+            //
+            // The owner asked for "all other exo shit largely handled in the
+            // conversation itself". What the inspector holds — identity,
+            // runtime, observed capabilities, and the authority receipt for the
+            // turn — is a report about the turn a person just watched, so it
+            // belongs after that turn rather than in a column that takes a
+            // third of the window whether or not anyone asked. It is the same
+            // `render_exo_inspector`, in compact form, as the last thing in the
+            // transcript, and it is closed until the composer's one control
+            // opens it.
+            (Some(exo), true) if omega_zero_base::is_active() => {
+                let inspector = self.render_exo_inspector(exo, true, cx);
+                v_flex()
+                    .flex_1()
+                    .size_full()
+                    .min_w_0()
+                    .child(conversation)
+                    .child(inspector)
+                    .into_any_element()
+            }
             (Some(exo), true) => {
                 let inspector = self.render_exo_inspector(exo, compact_exo_layout, cx);
                 if compact_exo_layout {
@@ -13195,7 +13399,17 @@ impl Render for ThreadView {
                 |this, bar| this.child(bar),
             )
             // OMEGA-DELTA-0021. Before anything the thread produced.
-            .child(self.render_executor_disclosure(cx))
+            //
+            // omega#99. Zero base draws the same record in the composer bar
+            // instead — see `render_zero_base_executor_bar`. The disclosure is
+            // *moved*, never dropped: a turn that does not name its executor is
+            // omega#77's falsifier, and it stays the falsifier in a mode whose
+            // whole purpose is to show one executor working. What changes is
+            // where a person reads it, which is now beside the model they are
+            // about to send to rather than a screen away from it.
+            .when(!omega_zero_base::is_active(), |this| {
+                this.child(self.render_executor_disclosure(cx))
+            })
             .child(conversation)
             .children(self.render_multi_root_callout(cx))
             .children(self.render_activity_bar(window, cx))

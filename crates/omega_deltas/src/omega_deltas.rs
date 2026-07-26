@@ -77,6 +77,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0047",
     "OMEGA-DELTA-0048",
     "OMEGA-DELTA-0050",
+    "OMEGA-DELTA-0051",
 ];
 
 /// OMEGA-DELTA-0036. The uninstall script embedded in the shipped `cli`.
@@ -1979,6 +1980,24 @@ pub const EXO_LANE_COMMAND_PATH: &str = "crates/omega_exo_lane/src/command.rs";
 
 /// OMEGA-DELTA-0042. The half that spawns a process and builds a thread.
 pub const EXO_CONNECTION_PATH: &str = "crates/agent_ui/src/omega_exo_connection.rs";
+
+/// OMEGA-DELTA-0051. The first-run page zero base reduces to its identity step.
+pub const ONBOARDING_BASICS_PAGE_PATH: &str = "crates/onboarding/src/basics_page.rs";
+
+/// OMEGA-DELTA-0051. The setup questions zero base answers from defaults
+/// instead of asking.
+///
+/// Named as the render functions rather than as the visible headings, because a
+/// heading is copy and these are the calls that put the sections on screen.
+pub const ONBOARDING_SECTIONS_ZERO_BASE_SKIPS: &[&str] = &[
+    "render_theme_section",
+    "render_base_keymap_section",
+    "render_ai_section",
+    "render_import_settings_section",
+    "render_vim_mode_switch",
+    "render_worktree_auto_trust_switch",
+    "render_telemetry_section",
+];
 
 /// OMEGA-DELTA-0047, 0048. The mode itself: what reads the command line, what
 /// the admitted set is, and what a refusal says.
@@ -4642,6 +4661,47 @@ mod tests {
              disclosure record in {}, not from a stored or hand-built string.",
             path.display()
         );
+
+        // omega#99. The disclosure became conditional on the mode, so one call
+        // site is no longer enough to establish that every thread names its
+        // executor. Zero base draws the record in the composer bar instead of
+        // above the entries; without the second half of this check, deleting
+        // that bar would leave the assertions above green while the mode whose
+        // entire purpose is to show one executor working stopped naming it.
+        assert!(
+            source.contains("fn render_zero_base_executor_bar("),
+            "OMEGA-DELTA-0021: {} must define zero base's composer bar. The \
+             ordinary disclosure line is skipped in that mode, so this is the \
+             only surface left that names the executor.",
+            path.display()
+        );
+        assert!(
+            source.contains(".child(self.render_zero_base_executor_bar(cx))"),
+            "OMEGA-DELTA-0021: {} must draw zero base's composer bar. Defining \
+             it without rendering it leaves a zero-base turn unattributed, \
+             which is omega#77's falsifier.",
+            path.display()
+        );
+        let bar = source
+            .split_once("fn render_zero_base_executor_bar(")
+            .map(|(_, rest)| rest)
+            .unwrap_or_default();
+        let bar = bar.split_once("\n    fn ").map_or(bar, |(body, _)| body);
+        assert!(
+            bar.contains("Label::new(disclosure.label())"),
+            "OMEGA-DELTA-0021: zero base's composer bar in {} must render the \
+             line from the disclosure record, like every other surface that \
+             discloses. A bar that names a model from the selector beside it \
+             and nothing else discloses the model, not the executor.",
+            path.display()
+        );
+        assert!(
+            bar.contains("self.render_executor_pin(cx)"),
+            "OMEGA-DELTA-0021: zero base's composer bar in {} must carry the \
+             executor pin. The pin is how a thread reaches the Exo lane, so a \
+             bar without it removes the door into the mode's one capability.",
+            path.display()
+        );
     }
 
     /// OMEGA-DELTA-0021. The disclosure rides an extension trait, not a fork.
@@ -7116,6 +7176,119 @@ mod tests {
                  a subtraction of the editor, not a second code path through \
                  the Exo lane or the launch gate.",
                 ui_path.display()
+            );
+        }
+    }
+
+    // ---------------------------------------------------------------------
+    // OMEGA-DELTA-0051 — Zero base derives its setup and can finish identity
+    // ---------------------------------------------------------------------
+
+    /// OMEGA-DELTA-0051. Zero base asks for the identity and derives the rest,
+    /// and the one thing it asks for can actually be finished.
+    ///
+    /// Two halves, and the second is the one that was broken in the shipped
+    /// mode. A page that asks fewer questions is a preference; a page whose
+    /// only remaining question cannot be answered is a dead end that no amount
+    /// of `cargo check` can see, because the mode is entered by a command-line
+    /// flag and no test that does not launch the binary with it runs any of
+    /// this code.
+    #[test]
+    fn zero_base_derives_setup_and_can_finish_identity_onboarding() {
+        let page_path = repository_path(ONBOARDING_BASICS_PAGE_PATH);
+        let page = std::fs::read_to_string(&page_path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", page_path.display()));
+
+        assert!(
+            page.contains("if omega_zero_base::is_active() {"),
+            "OMEGA-DELTA-0051: {} no longer has a zero-base branch, so the mode \
+             renders the whole first-run page again: a theme picker, a keymap \
+             picker offering eight other editors, an agent-install grid, import \
+             settings and two toggles, in a mode that claims to show one Exo \
+             thread and nothing else.",
+            page_path.display()
+        );
+
+        // The branch is pinned to the identity section specifically, rather
+        // than to "some shorter page". Reducing the page to nothing would
+        // satisfy a looser check and would skip the identity gate
+        // `OMEGA-DELTA-0040` puts in front of a first-ever launch.
+        let branch = page
+            .split_once("if omega_zero_base::is_active() {")
+            .map(|(_, rest)| rest)
+            .unwrap_or_default();
+        let branch = branch.split_once("\n    }").map_or(branch, |(body, _)| body);
+        assert!(
+            branch.contains("render_identity_section("),
+            "OMEGA-DELTA-0051: zero base's branch in {} does not render the \
+             identity section. `OMEGA-DELTA-0040` puts identity onboarding in \
+             front of a first-ever launch, and a mode that renders the page \
+             without it is that gate skipped in a layout's clothes — the same \
+             bypass a zoomed panel already committed once.",
+            page_path.display()
+        );
+        for skipped in ONBOARDING_SECTIONS_ZERO_BASE_SKIPS {
+            assert!(
+                !branch.contains(skipped),
+                "OMEGA-DELTA-0051: zero base's branch in {} renders \
+                 `{skipped}`. Every section it names has a shipped default, and \
+                 the owner asked for the mode to detect rather than ask.",
+                page_path.display()
+            );
+            assert!(
+                page.contains(skipped),
+                "OMEGA-DELTA-0051: `{skipped}` is gone from {} entirely. Zero \
+                 base does not render these sections; it does not delete them, \
+                 and without the flag the page is unchanged.",
+                page_path.display()
+            );
+        }
+
+        // The half that was actually broken. `OMEGA-DELTA-0040` parks startup
+        // on `await_identity_ready`, and only the first-run branch of
+        // `on_finish` releases it. With `onboarding::Finish` refused, a fresh
+        // profile in zero base reached the identity page, created an identity,
+        // pressed "Finish Setup", and stayed there permanently.
+        let mode_path = repository_path(ZERO_BASE_MODE_PATH);
+        let mode = std::fs::read_to_string(&mode_path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", mode_path.display()));
+        // Scoped to the constant, not the file. The same names appear in that
+        // crate's own tests as the *refused* list, so a file-wide scan would
+        // read a test's denial as an admission and fail on a correct tree.
+        let admitted = mode
+            .split_once("pub const ADMITTED_ACTIONS: &[&str] = &[")
+            .map(|(_, rest)| rest)
+            .unwrap_or_default();
+        let admitted = admitted
+            .split_once("];")
+            .map_or(admitted, |(list, _)| list);
+        assert!(
+            !admitted.is_empty(),
+            "OMEGA-DELTA-0051: no ADMITTED_ACTIONS list found in {}. The check \
+             below would be vacuous, so it fails instead.",
+            mode_path.display()
+        );
+        assert!(
+            admitted.contains("\"onboarding::Finish\","),
+            "OMEGA-DELTA-0051: {} no longer admits `onboarding::Finish`. That \
+             action is the only thing that releases `await_identity_ready`, so \
+             refusing it makes a fresh profile in zero base a dead end: \
+             identity never becomes ready and the mode never reaches a thread, \
+             across restarts.",
+            mode_path.display()
+        );
+        for hosted in [
+            "\"onboarding::SignIn\"",
+            "\"onboarding::OpenAccount\"",
+            "\"onboarding::ResetHints\"",
+        ] {
+            assert!(
+                !admitted.contains(hosted),
+                "OMEGA-DELTA-0051: {} admits {hosted}. Admitting the action \
+                 that finishes the identity gate must not drag the hosted \
+                 account path `OMEGA-DELTA-0010` and `OMEGA-DELTA-0011` \
+                 removed in with it.",
+                mode_path.display()
             );
         }
     }

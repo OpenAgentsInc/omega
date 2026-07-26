@@ -823,9 +823,31 @@ pub(crate) fn initialize_panels(
     // editor pane and the tab bar off the screen; no project is opened, so
     // there is no buffer for them to show.
     if omega_zero_base::is_active() {
-        let workspace_entity = cx.entity();
-        let app_state = workspace_entity.read(cx).app_state().clone();
         return cx.spawn_in(window, async move |workspace_handle, cx| {
+            // omega#99. Read the app state inside the task, not outside it.
+            //
+            // `initialize_panels` is called from `initialize_workspace`'s
+            // `observe_new` closure, which is already updating the workspace —
+            // so the entity is leased out of the entity map, and reading it
+            // here panicked with `cannot read workspace::Workspace while it is
+            // already being updated`. That killed `omega --zero-base` before
+            // any window opened, on every profile, in debug and release alike:
+            // `double_lease_panic` is not a debug assertion. Inside the task
+            // the lease is long since over, so the same value is simply asked
+            // for a moment later.
+            //
+            // Worth naming: `cargo check`, `cargo test -p omega_deltas` and
+            // `./script/clippy` were all green across this, exactly like the
+            // unresolvable-key-binding failure that `keymaps_name_no_deleted_action`
+            // exists for. A mode entered only by a command-line flag is not
+            // covered by any test that does not launch the binary with it.
+            let Some(app_state) = workspace_handle
+                .read_with(cx, |workspace, _| workspace.app_state().clone())
+                .log_err()
+            else {
+                return anyhow::Ok(());
+            };
+
             // `OMEGA-DELTA-0040` keeps its order. A first-ever launch lands on
             // identity onboarding, and zero base waits for it rather than
             // covering it with a zoomed panel — a mode that hid the identity

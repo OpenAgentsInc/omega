@@ -731,6 +731,41 @@ pub(crate) fn render_basics_page(
 ) -> impl IntoElement {
     let mut tab_index = 0;
 
+    // omega#99. Zero base asks for the identity and derives everything else.
+    //
+    // The owner's words were "there should be no connect screen if you can auto
+    // detect i have codex and all that shit like the onboarding screen". On a
+    // fresh profile zero base was landing on the whole page: a theme picker, a
+    // keymap picker with eight editors, an agent-install grid, import settings,
+    // and two toggles — a wall of setup between a person and the one thread the
+    // mode exists to show. Every one of those has a shipped default or is
+    // already detectable, so zero base takes the default instead of asking.
+    // The Codex entry in the agent grid was even showing a green check while
+    // asking to install it, which is the same "asking about something the app
+    // can already see" the banner was doing.
+    //
+    // **The identity section stays, and that is deliberate.**
+    // `OMEGA-DELTA-0040` puts a first-ever launch on identity onboarding, and
+    // the previous lane's own bug here was a zoomed panel *covering* that page
+    // — "a bypass of an identity gate wearing a layout's clothes". Rendering
+    // zero without the identity step would be that same bypass with better
+    // manners. The delta's scope note is what makes the rest of this cut legal:
+    // it binds the identity gate and its handoff and says in as many words that
+    // it "does not cover *what* onboarding asks for". So the gate stays, one
+    // click, and the preference chrome around it goes.
+    if omega_zero_base::is_active() {
+        return v_flex()
+            .id("basics-page")
+            .gap_6()
+            .child(render_identity_section(
+                &mut tab_index,
+                identity_section,
+                mode.identity_presentation(),
+                cx,
+            ))
+            .into_any_element();
+    }
+
     v_flex()
         .id("basics-page")
         .gap_6()
@@ -748,6 +783,7 @@ pub(crate) fn render_basics_page(
         .child(render_worktree_auto_trust_switch(&mut tab_index, cx))
         .child(Divider::horizontal().color(ui::DividerColor::BorderVariant))
         .child(render_telemetry_section(&mut tab_index, cx))
+        .into_any_element()
 }
 
 #[cfg(test)]

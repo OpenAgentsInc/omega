@@ -2,6 +2,35 @@ use gpui::{Action, IntoElement, ParentElement, RenderOnce};
 use language_model::{IconOrSvg, LanguageModelRegistry, ZED_CLOUD_PROVIDER_ID};
 use ui::{Divider, List, ListBulletItem, prelude::*};
 
+/// The AI providers a thread can actually talk to, as this screen enumerates
+/// them. omega#99.
+///
+/// One implementation, deliberately. The same predicate — visible,
+/// authenticated, and not the hosted cloud provider — used to be written out
+/// three times: here, in `AgentPanelOnboarding::has_configured_providers`, and
+/// again in the agent panel's decision to draw the onboarding card at all.
+/// Three copies of "is a provider configured" can disagree, and the way they
+/// disagreed was visible: the card said `Configured AI providers: Ollama`
+/// while the composer beside it named a different model, so the window gave
+/// two answers to "what am I about to talk to". Callers that need the answer
+/// call this.
+pub fn configured_ai_providers(cx: &App) -> Vec<(IconOrSvg, SharedString)> {
+    LanguageModelRegistry::read_global(cx)
+        .visible_providers()
+        .iter()
+        .filter(|provider| provider.is_authenticated(cx) && provider.id() != ZED_CLOUD_PROVIDER_ID)
+        .map(|provider| (provider.icon(), provider.name().0))
+        .collect()
+}
+
+/// Is there a provider a thread can actually talk to? omega#99.
+///
+/// The auto-detection behind zero base's silence: when this is true there is
+/// nothing to ask a person, so nothing is asked.
+pub fn has_configured_ai_provider(cx: &App) -> bool {
+    !configured_ai_providers(cx).is_empty()
+}
+
 pub struct ApiKeysWithProviders {
     configured_providers: Vec<(IconOrSvg, SharedString)>,
 }
@@ -29,14 +58,7 @@ impl ApiKeysWithProviders {
     }
 
     fn compute_configured_providers(cx: &App) -> Vec<(IconOrSvg, SharedString)> {
-        LanguageModelRegistry::read_global(cx)
-            .visible_providers()
-            .iter()
-            .filter(|provider| {
-                provider.is_authenticated(cx) && provider.id() != ZED_CLOUD_PROVIDER_ID
-            })
-            .map(|provider| (provider.icon(), provider.name().0))
-            .collect()
+        configured_ai_providers(cx)
     }
 }
 

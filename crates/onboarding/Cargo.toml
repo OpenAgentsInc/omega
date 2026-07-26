@@ -31,6 +31,7 @@ gpui.workspace = true
 menu.workspace = true
 notifications.workspace = true
 omega_identity.workspace = true
+omega_zero_base.workspace = true
 paths.workspace = true
 picker.workspace = true
 project.workspace = true

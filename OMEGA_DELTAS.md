@@ -692,6 +692,21 @@ cargo test -p omega_deltas
   `crates/agent_ui/src/omega_executor_disclosure.rs`. A rebase that reshapes
   the shared thread type breaks the `impl` and fails the build, rather than
   silently dropping the disclosure.
+- **Where the line is drawn is not part of the rule; that it is drawn is.**
+  omega#99. In zero base the line is not above the entries — it is the left
+  half of the composer bar, beside the model dropdown and the executor pin.
+  The owner asked for the input bar to become the centre of gravity and for
+  everything else to go, and the disclosure went *with* the composer rather
+  than away: it is still built from `ExecutorDisclosure` and still rendered by
+  `Label::new(disclosure.label())` on every draw. Reading it beside the model
+  a person is about to send to is, if anything, the better place for it. What
+  changed is that the disclosure is now **conditional on the mode**, and a
+  conditional obligation needs both branches checked — so
+  `the_thread_surface_renders_the_executor_line_from_the_record` now pins the
+  zero-base call site and the record inside it as well as the ordinary one.
+  With only the original assertions, deleting zero base's bar would have left
+  the check green while the mode whose whole purpose is to show one executor
+  working stopped naming it.
 - **What this does not cover.** The executor line is on the thread surface. A
   thread listed in the sidebar, exported, or shared shows its agent name and no
   executor line. The model is disclosed only where the executor reports it, so
@@ -2511,3 +2526,54 @@ than it sounds, because the harness omega#81's acceptance sentence names —
      hangs before its second scene. That is a defect in the shipped suite, not
      in zero base, and it blocks re-recording `omega_exo_workspace_narrow` just
      as much. See omega#99. -->
+
+### OMEGA-DELTA-0051 — Zero base derives its setup, and can finish the one step it still asks for
+
+- **Upstream Zed:** first-run onboarding is one page that asks for a theme, a
+  base keymap, editor imports, vim mode, and telemetry, then hands off to the
+  editor. Every question is a preference with a shipped default behind it.
+- **Omega, before this:** `--zero-base` rendered that entire page. On a fresh
+  `--user-data-dir` the mode advertised as "one Exo thread and nothing else"
+  opened on a theme picker, a keymap picker offering eight other editors, an
+  agent-install grid, an import-settings row, and two toggles. The owner named
+  it directly: *"there should be no connect screen if you can auto detect i
+  have codex and all that shit like the onboarding screen"*. The agent grid was
+  the sharpest version of the complaint — it showed Codex with a green check,
+  meaning detection had already happened, and asked about it anyway.
+- **Omega now:** in zero base `render_basics_page` renders the identity section
+  and nothing else. Theme, base keymap, agent install, import settings, vim
+  mode, worktree auto-trust and telemetry are **not rendered**; each has a
+  shipped default, and zero base takes it rather than asking. Nothing is
+  deleted — without the flag the page is byte-identical to what shipped.
+- **The identity step stays, and the delta boundary is why.** `OMEGA-DELTA-0040`
+  binds two things: that a first-ever launch lands on identity onboarding, and
+  that the first-run `on_finish` releases the startup wait. It says in as many
+  words that it "does not cover *what* onboarding asks for". So the preference
+  chrome is outside that delta and may go; the identity gate is inside it and
+  stays. Rendering zero base with no identity step would be the same bypass the
+  previous lane already caught itself committing with a zoomed panel — an
+  identity gate skipped while wearing a layout's clothes.
+- **The dead end this fixes, which is the part that was actually broken.**
+  Zero base's action gate refused `onboarding::Finish`. `OMEGA-DELTA-0040`
+  parks startup on `await_identity_ready`, and the *only* thing that releases
+  it is the first-run branch of `on_finish`, reached from that action. So a
+  fresh profile in zero base landed on identity onboarding, created an
+  identity, pressed "Finish Setup" — and nothing happened, permanently, across
+  restarts, because identity never became ready. Observed as the log line
+  `onboarding::Finish is off in zero base`. `onboarding::Finish` is now
+  admitted. That admits *completing* the identity gate, which is the opposite
+  of bypassing it, and `SignIn`, `OpenAccount` and `ResetHints` stay refused.
+- **Why this was not caught.** Zero base is entered only by a command-line flag,
+  so no test that does not launch the binary with that flag can see any of it.
+  `cargo check`, `cargo test -p omega_deltas` and `./script/clippy` were green
+  across both this dead end and a startup panic in the same branch. The same
+  shape as `keymaps_name_no_deleted_action`: a mode whose failures are invisible
+  to a compiler needs a check that reads the mode's own admitted set.
+- **Enforced by:** `zero_base_derives_setup_and_can_finish_identity_onboarding`
+  in `crates/omega_deltas/`, which pins the identity-only branch in
+  `crates/onboarding/src/basics_page.rs` and the `onboarding::Finish`
+  admission, alongside the unchanged `OMEGA-DELTA-0040` checks.
+- **What this does not cover.** Leaving zero base restores the full page for
+  any later visit, and the editor-setup journey outside a first run is
+  unchanged. This does not make onboarding unclosable, and closing it is still
+  the dead end `OMEGA-DELTA-0040` already records.

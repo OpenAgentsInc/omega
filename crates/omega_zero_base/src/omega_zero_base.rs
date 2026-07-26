@@ -81,9 +81,27 @@ pub const ADMITTED_NAMESPACES: &[&str] = &[
 
 /// The individually admitted actions, by full name.
 ///
-/// Window management and font size only. Admitting the whole `omega` namespace
-/// would admit the extensions and settings surfaces with it, and section 4 of
-/// the design note records that those reach nothing in Omega today.
+/// Window management, font size, and the one control that finishes identity
+/// onboarding. Admitting the whole `omega` namespace would admit the extensions
+/// and settings surfaces with it, and section 4 of the design note records that
+/// those reach nothing in Omega today.
+///
+/// # Why `onboarding::Finish` is here
+///
+/// omega#99. Without it, zero base is a **dead end on a fresh profile**.
+/// `OMEGA-DELTA-0040` puts a first-ever launch on identity onboarding and parks
+/// startup on `await_identity_ready`; the only thing that releases that wait is
+/// the first-run branch of `on_finish`, which runs from `onboarding::Finish`.
+/// The gate refused that action, so a new user reached the identity page,
+/// created an identity, pressed "Finish Setup", and nothing happened —
+/// forever, across restarts, because identity never became ready. Observed
+/// directly: the log line reads `onboarding::Finish is off in zero base`.
+///
+/// This admits *completing* the identity gate, which is the opposite of
+/// bypassing it. `SignIn` and `OpenAccount` stay refused — they are the hosted
+/// account path `OMEGA-DELTA-0010` and `OMEGA-DELTA-0011` removed — and
+/// `ResetHints` stays refused because it belongs to the welcome-screen journey
+/// zero base does not render.
 pub const ADMITTED_ACTIONS: &[&str] = &[
     "omega::DecreaseBufferFontSize",
     "omega::DecreaseUiFontSize",
@@ -96,6 +114,7 @@ pub const ADMITTED_ACTIONS: &[&str] = &[
     "omega::ResetBufferFontSize",
     "omega::ResetUiFontSize",
     "omega::ToggleFullScreen",
+    "onboarding::Finish",
 ];
 
 /// Enter zero base, from the parsed command line and from nowhere else.
@@ -193,6 +212,10 @@ mod tests {
             "command_palette::Toggle",
             "omega_zero_base::Leave",
             "omega::Quit",
+            // omega#99. The action that releases `await_identity_ready`.
+            // Without it a fresh profile can reach identity onboarding and
+            // never leave it, which is a dead end rather than a subtraction.
+            "onboarding::Finish",
         ] {
             assert!(admits_action(admitted), "{admitted} must be admitted");
         }
@@ -209,6 +232,12 @@ mod tests {
             "omega::Extensions",
             "omega::OpenSettings",
             "workspace::ToggleLeftDock",
+            // The hosted-account path OMEGA-DELTA-0010 and OMEGA-DELTA-0011
+            // removed. Admitting `onboarding::Finish` must not drag the rest of
+            // its namespace in with it.
+            "onboarding::SignIn",
+            "onboarding::OpenAccount",
+            "onboarding::ResetHints",
         ] {
             assert!(!admits_action(refused), "{refused} must be refused");
         }
