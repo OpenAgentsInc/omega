@@ -1228,6 +1228,36 @@ mod tests {
         device_public_key_hex: &str,
         scopes: &[omega_effectd::Issue31PairingScope],
     ) -> omega_effectd::Issue31HostController {
+        live_paired_controller_with_records(
+            host_public_key_hex,
+            sarah_public_key_hex,
+            conversation_ref,
+            relay_url,
+            device_public_key_hex,
+            scopes,
+        )
+        .0
+    }
+
+    /// The same paired controller, plus the four pairing records it is built
+    /// from, in the `(event id, record)` shape a device folds a grant out of.
+    ///
+    /// Nothing in the shipped host needs these: the controller holds them. A
+    /// *device* in another process does, because the grant is what entitles it
+    /// to read this host at all, and these four records were never published —
+    /// `record_emitted_pairing` files them, it does not put them on a relay.
+    /// omega#97's device half reads them out of the handoff written below.
+    fn live_paired_controller_with_records(
+        host_public_key_hex: &str,
+        sarah_public_key_hex: &str,
+        conversation_ref: &str,
+        relay_url: &str,
+        device_public_key_hex: &str,
+        scopes: &[omega_effectd::Issue31PairingScope],
+    ) -> (
+        omega_effectd::Issue31HostController,
+        Vec<(String, omega_effectd::Issue31PairingRecord)>,
+    ) {
         use omega_effectd::{
             Issue31HostConfiguration, Issue31HostController, Issue31PairingEvent,
             Issue31PairingRecord,
@@ -1247,20 +1277,21 @@ mod tests {
             .set_admitted_device_policy(vec![device_public_key_hex.to_string()], scopes.to_vec())
             .expect("admit the device");
         let now = unix_seconds();
+        let request = Issue31PairingRecord::PairingRequest {
+            schema: "openagents.omega.issue31.pairing.v1".into(),
+            host_ref: host_ref.clone(),
+            host_public_key_hex: host_public_key_hex.to_string(),
+            device_public_key_hex: device_public_key_hex.to_string(),
+            issued_at: now,
+            pairing_request_ref: "pairing_request.live".into(),
+            requested_scopes: scopes.to_vec(),
+            expires_at: now + 86_400,
+        };
         let challenge = controller
             .handle_pairing_event(
                 Issue31PairingEvent {
                     event_id: "a".repeat(64),
-                    record: Issue31PairingRecord::PairingRequest {
-                        schema: "openagents.omega.issue31.pairing.v1".into(),
-                        host_ref: host_ref.clone(),
-                        host_public_key_hex: host_public_key_hex.to_string(),
-                        device_public_key_hex: device_public_key_hex.to_string(),
-                        issued_at: now,
-                        pairing_request_ref: "pairing_request.live".into(),
-                        requested_scopes: scopes.to_vec(),
-                        expires_at: now + 86_400,
-                    },
+                    record: request.clone(),
                 },
                 now,
             )
@@ -1274,33 +1305,44 @@ mod tests {
             panic!("expected a pairing challenge");
         };
         let challenge_value = challenge_value.clone();
+        let emitted_challenge = challenge.clone();
         controller
             .record_emitted_pairing("b".repeat(64), challenge)
             .expect("record the challenge");
+        let response = Issue31PairingRecord::PairingResponse {
+            schema: "openagents.omega.issue31.pairing.v1".into(),
+            host_ref,
+            host_public_key_hex: host_public_key_hex.to_string(),
+            device_public_key_hex: device_public_key_hex.to_string(),
+            issued_at: now + 1,
+            pairing_response_ref: "pairing_response.live".into(),
+            pairing_challenge_event_id: "b".repeat(64),
+            challenge: challenge_value,
+            expires_at: now + 86_400,
+        };
         let grant = controller
             .handle_pairing_event(
                 Issue31PairingEvent {
                     event_id: "c".repeat(64),
-                    record: Issue31PairingRecord::PairingResponse {
-                        schema: "openagents.omega.issue31.pairing.v1".into(),
-                        host_ref,
-                        host_public_key_hex: host_public_key_hex.to_string(),
-                        device_public_key_hex: device_public_key_hex.to_string(),
-                        issued_at: now + 1,
-                        pairing_response_ref: "pairing_response.live".into(),
-                        pairing_challenge_event_id: "b".repeat(64),
-                        challenge: challenge_value,
-                        expires_at: now + 86_400,
-                    },
+                    record: response.clone(),
                 },
                 now + 1,
             )
             .expect("pairing response")
             .expect("scoped grant");
+        let emitted_grant = grant.clone();
         controller
             .record_emitted_pairing("d".repeat(64), grant)
             .expect("record the grant");
-        controller
+        (
+            controller,
+            vec![
+                ("a".repeat(64), request),
+                ("b".repeat(64), emitted_challenge),
+                ("c".repeat(64), response),
+                ("d".repeat(64), emitted_grant),
+            ],
+        )
     }
 
     #[test]
@@ -1493,9 +1535,21 @@ mod tests {
         );
 
         // Publish it, through the shipped pump, to a real paired device.
+        //
+        // `OMEGA_LIVE_DEVICE_PUBKEY` lets a device in another process — the
+        // openagents-mobile client, for omega#97's device half — be that
+        // device. It supplies only its public key: the secret never leaves the
+        // phone's process, so the gift wraps this host writes to the relay can
+        // be opened by exactly one reader, and it is not this one.
         let host_keys = nostr::Keys::generate();
         let sarah_keys = nostr::Keys::generate();
-        let device_public_key_hex = nostr::Keys::generate().public_key().to_hex();
+        let device_public_key_hex = std::env::var("OMEGA_LIVE_DEVICE_PUBKEY")
+            .ok()
+            .map(|value| value.trim().to_ascii_lowercase())
+            .filter(|value| {
+                value.len() == 64 && value.chars().all(|byte| byte.is_ascii_hexdigit())
+            })
+            .unwrap_or_else(|| nostr::Keys::generate().public_key().to_hex());
         let signer = omega_effectd::SigningIdentity::from_keys(host_keys.clone());
         let owner_public_key_hex = signer.public_key_hex.clone();
 
@@ -1514,12 +1568,16 @@ mod tests {
             Vec::new(),
         )
         .expect("host relay adapter");
-        let controller = live_paired_controller(
+        let (controller, pairing_records) = live_paired_controller_with_records(
             &owner_public_key_hex,
             &sarah_keys.public_key().to_hex(),
             &conversation_ref,
             &relay_url,
             &device_public_key_hex,
+            &[
+                omega_effectd::Issue31PairingScope::ObserveIssue31,
+                omega_effectd::Issue31PairingScope::ControlFullAuto,
+            ],
         );
         let grant = controller
             .active_grants(unix_seconds())
@@ -1527,6 +1585,34 @@ mod tests {
             .first()
             .cloned()
             .expect("the paired device holds an active grant");
+
+        // The handoff a device in another process needs, and nothing more: the
+        // host's identity and the four pairing records the grant folds out of.
+        // No secret and no adjunct body — the adjuncts are on the relay, which
+        // is the whole point of the exercise. A device that could be handed the
+        // reading directly would prove nothing about delivery.
+        if let Ok(path) = std::env::var("OMEGA_LIVE_PAIRING_OUT") {
+            let handoff = json!({
+                "relayUrl": relay_url,
+                "hostPublicKeyHex": owner_public_key_hex,
+                "sarahPublicKeyHex": sarah_keys.public_key().to_hex(),
+                "devicePublicKeyHex": device_public_key_hex,
+                "grantRef": grant.grant_ref,
+                "pairingRecords": pairing_records
+                    .iter()
+                    .map(|(event_id, record)| json!({
+                        "canonicalRecordId": event_id,
+                        "record": record,
+                    }))
+                    .collect::<Vec<_>>(),
+            });
+            std::fs::write(
+                &path,
+                serde_json::to_string_pretty(&handoff).expect("serialize the pairing handoff"),
+            )
+            .expect("write the pairing handoff");
+            eprintln!("omega#97: wrote the device pairing handoff to {path}");
+        }
 
         let mut client =
             omega_effectd::SarahConversationClient::with_relay(config, Box::new(relay), signer);
