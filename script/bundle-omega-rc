@@ -1372,7 +1372,36 @@ PACKAGED_BINDINGS_JSON="$(collect_staged_packaged_bindings_json "${dmg_source_di
 
 echo "Creating DMG ${DMG_PATH}"
 rm -f "${DMG_PATH}"
-hdiutil create -volname "${OMEGA_VOLUME_NAME}" -srcfolder "${dmg_source_directory}" -ov -format UDZO "${DMG_PATH}"
+
+# `hdiutil create -srcfolder` mounts its staging volume under /Volumes and
+# copies there. On this host that copy began failing with
+#
+#   could not access /Volumes/Omega RC/Omega.app - Operation not permitted
+#
+# after 0.2.0-rc16 had built the same way from the same directory. The source
+# tree is readable, carries no special flags, and /Volumes holds no stale
+# mount; the refusal is on the destination, which is the shape of a privacy
+# restriction on mounted volumes rather than anything about the artifact.
+#
+# A release must not depend on whether this machine will let a tool write
+# under /Volumes, so the image is built at a mountpoint we choose. Same
+# contents, same compressed format, no /Volumes involvement.
+dmg_scratch_image="${OUTPUT_DIR}/.dmg-scratch.dmg"
+dmg_scratch_mount="${OUTPUT_DIR}/.dmg-mnt"
+rm -f "${dmg_scratch_image}"
+rm -rf "${dmg_scratch_mount}"
+mkdir -p "${dmg_scratch_mount}"
+
+dmg_staged_megabytes="$(du -sm "${dmg_source_directory}" | cut -f1)"
+hdiutil create -size "$(( dmg_staged_megabytes + 120 ))m" -fs HFS+ \
+  -volname "${OMEGA_VOLUME_NAME}" -layout NONE "${dmg_scratch_image}" >/dev/null
+hdiutil attach "${dmg_scratch_image}" -nobrowse -quiet -mountpoint "${dmg_scratch_mount}"
+cp -R "${dmg_source_directory}/." "${dmg_scratch_mount}/"
+hdiutil detach "${dmg_scratch_mount}" -quiet
+hdiutil convert "${dmg_scratch_image}" -format UDZO -o "${DMG_PATH}" >/dev/null
+rm -f "${dmg_scratch_image}"
+rmdir "${dmg_scratch_mount}" 2>/dev/null || true
+
 rm -f "${dmg_source_directory}/Applications"
 
 /usr/bin/codesign --deep --force --timestamp --options runtime \
