@@ -30,7 +30,7 @@ pub use issue31_full_auto::{
     MAX_ISSUE31_FULL_AUTO_CONTROLS, MAX_ISSUE31_FULL_AUTO_HANDOFFS, MAX_ISSUE31_FULL_AUTO_RUNS,
     MAX_ISSUE31_UNATTENDED_MS, build_issue31_full_auto_adjunct,
     build_issue31_full_auto_adjunct_document, decode_issue31_full_auto_adjunct,
-    is_issue31_public_text, project_issue31_evidence_pair,
+    decode_issue31_provider_handoff, is_issue31_public_text, project_issue31_evidence_pair,
 };
 pub use issue31_host::{
     ISSUE31_HOST_ADJUNCT_SCHEMA, Issue31AbsentGap, Issue31CommandState, Issue31CommandStateInput,

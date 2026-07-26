@@ -2842,7 +2842,7 @@ impl Issue31HostController {
         execute: F,
     ) -> Result<Option<Issue31CommandRecord>, Issue31NostrError>
     where
-        F: FnOnce(&str, &str) -> Issue31CommandExecution,
+        F: FnOnce(&str, &str, &str) -> Issue31CommandExecution,
     {
         if !valid_hex64(&event.event_id) {
             return Err(Issue31NostrError::Invalid(
@@ -2912,7 +2912,11 @@ impl Issue31HostController {
                 {
                     match required_scope(action_ref) {
                         Some(scope) if grant.scopes.contains(&scope) => {
-                            execute(action_ref, arguments_ref)
+                            // The idempotency reference travels with the action
+                            // so the executor can make one command map to one
+                            // host record however many times it is replayed
+                            // (omega#91).
+                            execute(action_ref, arguments_ref, idempotency_ref)
                         }
                         Some(_) => refusal("reason.omega.scope_denied"),
                         None => Issue31CommandExecution {
@@ -3254,8 +3258,15 @@ fn digest_ref_suffix(bytes: &[u8]) -> String {
     digest[..24].to_string()
 }
 
+/// One device paired all the way to a signed scoped grant, through the real
+/// pairing state machine.
+///
+/// Shared so a test that needs a differently-scoped grant does not grow a
+/// second, subtly different copy of the chain.
 #[cfg(test)]
-pub(crate) fn restart_fixture() -> (
+pub(crate) fn paired_fixture(
+    scopes: Vec<Issue31PairingScope>,
+) -> (
     Issue31HostConfiguration,
     Issue31HostController,
     String,
@@ -3274,10 +3285,7 @@ pub(crate) fn restart_fixture() -> (
     };
     let mut controller = Issue31HostController::new(configuration.clone()).expect("controller");
     controller
-        .set_admitted_device_policy(
-            vec![device_public_key_hex.clone()],
-            vec![Issue31PairingScope::ControlFullAuto],
-        )
+        .set_admitted_device_policy(vec![device_public_key_hex.clone()], scopes.clone())
         .expect("admit device");
     let challenge = controller
         .handle_pairing_event(
@@ -3290,7 +3298,7 @@ pub(crate) fn restart_fixture() -> (
                     device_public_key_hex: device_public_key_hex.clone(),
                     issued_at: 100,
                     pairing_request_ref: "pairing_request.restart.device".into(),
-                    requested_scopes: vec![Issue31PairingScope::ControlFullAuto],
+                    requested_scopes: scopes,
                     expires_at: 1_000,
                 },
             },
@@ -3312,7 +3320,7 @@ pub(crate) fn restart_fixture() -> (
                 record: Issue31PairingRecord::PairingResponse {
                     schema: ISSUE31_PAIRING_SCHEMA.into(),
                     host_ref: configuration.host_ref.clone(),
-                    host_public_key_hex: host_public_key_hex.clone(),
+                    host_public_key_hex,
                     device_public_key_hex: device_public_key_hex.clone(),
                     issued_at: 102,
                     pairing_response_ref: "pairing_response.restart.device".into(),
@@ -3332,6 +3340,19 @@ pub(crate) fn restart_fixture() -> (
     controller
         .record_emitted_pairing("d".repeat(64), grant)
         .expect("record grant");
+    (configuration, controller, device_public_key_hex, grant_ref)
+}
+
+#[cfg(test)]
+pub(crate) fn restart_fixture() -> (
+    Issue31HostConfiguration,
+    Issue31HostController,
+    String,
+    String,
+) {
+    let (configuration, mut controller, device_public_key_hex, grant_ref) =
+        paired_fixture(vec![Issue31PairingScope::ControlFullAuto]);
+    let host_public_key_hex = configuration.host_public_key_hex.clone();
     controller
         .handle_command_event(
             Issue31CommandEvent {
@@ -3351,7 +3372,7 @@ pub(crate) fn restart_fixture() -> (
                 },
             },
             104,
-            |_, _| Issue31CommandExecution {
+            |_, _, _| Issue31CommandExecution {
                 status: Issue31CommandStatus::Stopped,
                 outcome_ref: "outcome.omega.stopped".into(),
                 reason_ref: None,
@@ -4734,7 +4755,7 @@ mod tests {
                     },
                 },
                 104,
-                |_, _| {
+                |_, _, _| {
                     executions.set(executions.get().saturating_add(1));
                     Issue31CommandExecution {
                         status: Issue31CommandStatus::Stopped,
@@ -4920,7 +4941,7 @@ mod tests {
                     },
                 },
                 101,
-                |_, _| {
+                |_, _, _| {
                     executed.set(true);
                     Issue31CommandExecution {
                         status: Issue31CommandStatus::Stopped,
@@ -4993,7 +5014,7 @@ mod tests {
                     },
                 },
                 101,
-                |_, _| {
+                |_, _, _| {
                     executed.set(true);
                     Issue31CommandExecution {
                         status: Issue31CommandStatus::Stopped,

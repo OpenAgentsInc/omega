@@ -25,6 +25,7 @@ pub use issue31_adjunct::{
 };
 pub use issue31_delivery::{
     issue31_host_projection_documents, issue31_host_projection_source,
+    issue31_provider_roster_source,
     latest_issue31_live_reading, set_issue31_live_reading, Issue31FullAutoReading,
 };
 pub use panel::FullAutoPanel;

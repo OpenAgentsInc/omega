@@ -49,6 +49,10 @@ use crate::{
     SARAH_ENGRAM_KIND, SARAH_READ_STATE_KIND, SARAH_REMINDER_KIND, emit_issue31_owner_projection,
     emit_issue31_withheld_sources,
 };
+use crate::issue31_provider_handoff::{
+    ISSUE31_ACTION_REQUEST_PROVIDER_HANDOFF, Issue31ProviderHandoffLedger,
+    Issue31ProviderRosterAccount,
+};
 
 pub use crate::openagents_binding::BindingState;
 
@@ -959,6 +963,19 @@ pub struct Issue31HostProjectionRequest<'a> {
     pub expected_generation: u64,
     /// The pump's reading time, in epoch milliseconds.
     pub observed_at_ms: u64,
+    /// The host's own provider connection handoff ledger (omega#91).
+    ///
+    /// This comes from the pump rather than from the Full Auto reading for the
+    /// same reason the delivery binding does: the ledger is durable host state
+    /// that survives a restart, and the panel's reading is a transient
+    /// observation of the daemon. One of them is the record; letting the other
+    /// also carry handoffs would give the phone two sources for one fact.
+    ///
+    /// The ledger is handed over unprojected on purpose. Only the builder knows
+    /// the `generatedAtMs` the documents will carry, and a handoff row must be
+    /// checked against exactly that stamp — projecting here, against the pump's
+    /// clock, would accept rows the assembled document then contradicts.
+    pub handoffs: &'a Issue31ProviderHandoffLedger,
 }
 
 /// The two omega#47 documents `publish_issue31_host_snapshot` produces.
@@ -986,6 +1003,16 @@ pub type Issue31HostProjectionSource = Arc<
         + Send
         + Sync,
 >;
+
+/// The host's own reading of its provider accounts, or `None` (omega#91).
+///
+/// `None` means the host has not looked at its roster. Nothing about a handoff
+/// advances on an unread roster: a binding decided against state nobody read
+/// would be a guess wearing a measurement's clothes. `Some(&[])` — the host
+/// looked and holds no accounts — is a real observation and does move a
+/// handoff's clock towards its deadline.
+pub type Issue31ProviderRosterSource =
+    Arc<dyn Fn() -> Option<Vec<Issue31ProviderRosterAccount>> + Send + Sync>;
 
 pub struct SarahConversationClient {
     config: SarahConversationConfig,
@@ -1018,6 +1045,11 @@ pub struct SarahConversationClient {
     /// The live Full Auto reading, supplied by whoever holds the supervisor.
     /// Absent means this host publishes no omega#47 records at all.
     issue31_host_projection_source: Option<Issue31HostProjectionSource>,
+    /// Host-owned provider connection handoffs (omega#91). Durable: this is the
+    /// record, not a cache of one.
+    issue31_provider_handoffs: Issue31ProviderHandoffLedger,
+    /// How the host reads its own provider roster when deciding a handoff.
+    issue31_provider_roster_source: Option<Issue31ProviderRosterSource>,
     issue31_state_path: Option<PathBuf>,
     #[cfg(test)]
     issue31_fail_commit_after: Cell<Option<usize>>,
@@ -1056,6 +1088,11 @@ struct DurableIssue31HostState {
     quarantined_events: BTreeMap<String, String>,
     #[serde(default)]
     host_adjunct_emissions: BTreeMap<String, String>,
+    /// omega#91. `#[serde(default)]` so a state file written before handoffs
+    /// existed still loads — as an empty ledger, which is the truth about a
+    /// host that never had one, not a set of rows invented at load.
+    #[serde(default)]
+    provider_handoffs: Issue31ProviderHandoffLedger,
     command_results: BTreeMap<String, (String, Value)>,
     #[serde(default)]
     active_turn_ref: Option<String>,
@@ -1108,6 +1145,8 @@ impl SarahConversationClient {
             issue31_withheld_emissions: BTreeMap::new(),
             issue31_host_adjunct_emissions: BTreeMap::new(),
             issue31_host_projection_source: None,
+            issue31_provider_handoffs: Issue31ProviderHandoffLedger::default(),
+            issue31_provider_roster_source: None,
             issue31_state_path: None,
             #[cfg(test)]
             issue31_fail_commit_after: Cell::new(None),
@@ -1195,6 +1234,18 @@ impl SarahConversationClient {
             .as_ref()
             .map(|persisted| persisted.command_results.clone())
             .unwrap_or_default();
+        // omega#91: a handoff that was in flight when the last host process
+        // ended is settled here, at load, before anything else can read the
+        // ledger. The isolated provider home and the login it was driving died
+        // with that process, so the terminal answer is that the handoff was
+        // interrupted. This can only under-claim — it never reports a
+        // connection the host did not make — and it is what stops a restart
+        // leaving the phone with a request that neither resolves nor fails.
+        let mut issue31_provider_handoffs = persisted
+            .as_ref()
+            .map(|persisted| persisted.provider_handoffs.clone())
+            .unwrap_or_default();
+        issue31_provider_handoffs.adopt_after_restart();
         let issue31_control_cursor = persisted
             .as_ref()
             .and_then(|persisted| persisted.control_cursor.clone());
@@ -1249,6 +1300,8 @@ impl SarahConversationClient {
             issue31_withheld_emissions: BTreeMap::new(),
             issue31_host_adjunct_emissions,
             issue31_host_projection_source: None,
+            issue31_provider_handoffs,
+            issue31_provider_roster_source: None,
             issue31_state_path: Some(issue31_state_path),
             #[cfg(test)]
             issue31_fail_commit_after: Cell::new(None),
@@ -1740,6 +1793,13 @@ impl SarahConversationClient {
             cursor = Some(next_cursor);
         }
 
+        // omega#91: one roster observation per pass, taken BEFORE this pass's
+        // commands are handled. A handoff opened by a command in this pass is
+        // therefore published as `requested` and only looked at against the
+        // roster on the next pass. Advancing after would mean the host bound a
+        // handoff using a roster reading older than the request itself, and the
+        // phone would never see the handoff appear before it bound.
+        self.advance_issue31_provider_handoffs(now);
         for event in records {
             if self
                 .issue31_quarantined_events
@@ -1908,8 +1968,8 @@ impl SarahConversationClient {
                         record,
                     },
                     now,
-                    |action_ref, arguments_ref| {
-                        self.execute_issue31_action(action_ref, arguments_ref)
+                    |action_ref, arguments_ref, idempotency_ref| {
+                        self.execute_issue31_action(action_ref, arguments_ref, idempotency_ref)
                     },
                 ) {
                     Ok(result) => result,
@@ -2254,6 +2314,7 @@ impl SarahConversationClient {
                 projection_cursor: self.issue31_projection_cursor.clone(),
                 quarantined_events: self.issue31_quarantined_events.clone(),
                 host_adjunct_emissions: self.issue31_host_adjunct_emissions.clone(),
+                provider_handoffs: self.issue31_provider_handoffs.clone(),
                 command_results: self.command_results.clone(),
                 active_turn_ref: self.active_turn_ref.clone(),
                 run_state: self.run_state.clone(),
@@ -2262,16 +2323,105 @@ impl SarahConversationClient {
         )
     }
 
+    /// Answer one admitted command-v1 intent (omega#91).
+    ///
+    /// The controller has already checked the host binding, the grant, the
+    /// generation, the lifetime, and the scope, so reaching here means the
+    /// device is entitled to this action.
+    ///
+    /// Only `action.omega.provider_handoff` is answered. The remaining v1
+    /// actions — Full Auto control and community action — still have no
+    /// generation-fenced controller behind them, and returning `unavailable`
+    /// for them is the honest answer rather than a silent success.
     fn execute_issue31_action(
         &mut self,
-        _action_ref: &str,
-        _arguments_ref: &str,
+        action_ref: &str,
+        arguments_ref: &str,
+        idempotency_ref: &str,
     ) -> Issue31CommandExecution {
-        Issue31CommandExecution {
-            status: Issue31CommandStatus::Unavailable,
-            outcome_ref: "outcome.omega.unavailable".into(),
-            reason_ref: Some("reason.omega.controller_not_bound".into()),
+        if action_ref != ISSUE31_ACTION_REQUEST_PROVIDER_HANDOFF {
+            return Issue31CommandExecution {
+                status: Issue31CommandStatus::Unavailable,
+                outcome_ref: "outcome.omega.unavailable".into(),
+                reason_ref: Some("reason.omega.controller_not_bound".into()),
+            };
         }
+        // One reading of the clock for this command. The stamp on the record
+        // and the deadline bounding it come from the same instant, and the
+        // device supplies neither: `argumentsRef` names a provider and nothing
+        // else, so there is no wire field a device could put a time in.
+        let now_ms = unix_now().saturating_mul(1_000);
+        match self
+            .issue31_provider_handoffs
+            .open(arguments_ref, idempotency_ref, now_ms)
+        {
+            Ok(record) => Issue31CommandExecution {
+                status: Issue31CommandStatus::Completed,
+                // The command was "open a provider connection handoff", and
+                // this is the record that opening produced — which is also how
+                // the device finds the row to watch. It is deliberately NOT a
+                // statement that the handoff completed: the handoff carries its
+                // own state and its own host-owned outcome, and at this moment
+                // that state is `requested`.
+                outcome_ref: record.handoff_ref,
+                reason_ref: None,
+            },
+            Err(error) => Issue31CommandExecution {
+                status: match error {
+                    crate::issue31_provider_handoff::Issue31ProviderHandoffError::BoundExhausted
+                    | crate::issue31_provider_handoff::Issue31ProviderHandoffError::Unprojectable(
+                        _,
+                    ) => Issue31CommandStatus::Unavailable,
+                    _ => Issue31CommandStatus::Refused,
+                },
+                outcome_ref: match error {
+                    crate::issue31_provider_handoff::Issue31ProviderHandoffError::BoundExhausted
+                    | crate::issue31_provider_handoff::Issue31ProviderHandoffError::Unprojectable(
+                        _,
+                    ) => "outcome.omega.unavailable".into(),
+                    _ => "outcome.omega.refused".into(),
+                },
+                reason_ref: Some(error.reason_ref().into()),
+            },
+        }
+    }
+
+    /// Install how this host reads its own provider roster (omega#91).
+    ///
+    /// Without one, no handoff ever binds: the host would be deciding against a
+    /// roster nobody read. Open handoffs still reach their deadline, so an
+    /// unwired host produces `expired` rather than a request that hangs.
+    pub fn set_issue31_provider_roster_source(&mut self, source: Issue31ProviderRosterSource) {
+        self.issue31_provider_roster_source = Some(source);
+    }
+
+    /// The host's provider connection handoffs, exactly as persisted.
+    pub fn issue31_provider_handoff_refs(&self) -> Vec<String> {
+        self.issue31_provider_handoffs
+            .records()
+            .map(|record| record.handoff_ref.clone())
+            .collect()
+    }
+
+    /// The contract rows this host would publish right now.
+    pub fn issue31_projected_provider_handoffs(&self, generated_at_ms: u64) -> Vec<Value> {
+        self.issue31_provider_handoffs
+            .projected(generated_at_ms)
+            .rows
+    }
+
+    /// Move every open handoff on by at most one observation of the roster.
+    ///
+    /// Run once per host pump pass, before the omega#47 documents are built, so
+    /// what the phone reads is this pass's state rather than the previous
+    /// pass's.
+    fn advance_issue31_provider_handoffs(&mut self, now: u64) {
+        let roster = self
+            .issue31_provider_roster_source
+            .as_ref()
+            .and_then(|source| source());
+        self.issue31_provider_handoffs
+            .advance(roster.as_deref(), now.saturating_mul(1_000));
     }
 
     fn execute_issue31_action_v2(
@@ -2891,6 +3041,12 @@ impl SarahConversationClient {
         };
         let grants = controller.active_grants(now).map_err(issue31_error)?;
         let observed_at_ms = now.saturating_mul(1_000);
+        // omega#91. A handoff the host holds and can never state — one whose
+        // request time was never measured — makes the owner's view short, and
+        // that has to be visible rather than read as "no handoff in flight".
+        if !self.issue31_provider_handoffs.unstateable_refs().is_empty() {
+            self.last_gap_state = strongest_gap_state(self.last_gap_state, GapState::Possible);
+        }
         for grant in grants {
             let documents = match source(&Issue31HostProjectionRequest {
                 host_ref: &grant.host_ref,
@@ -2899,6 +3055,7 @@ impl SarahConversationClient {
                 grant_ref: &grant.grant_ref,
                 expected_generation: grant.generation,
                 observed_at_ms,
+                handoffs: &self.issue31_provider_handoffs,
             }) {
                 Ok(Some(documents)) => documents,
                 // Nothing observed is said by saying nothing. Publishing an
@@ -5556,7 +5713,11 @@ mod tests {
             "action.omega.interrupt_turn",
             "action.omega.send_message",
         ] {
-            let execution = client.execute_issue31_action(action_ref, "arguments.omega.none");
+            let execution = client.execute_issue31_action(
+                action_ref,
+                "arguments.omega.none",
+                "idempotency.issue31.unbound",
+            );
             assert_eq!(execution.status, Issue31CommandStatus::Unavailable);
             assert_eq!(
                 execution.reason_ref.as_deref(),
@@ -5565,6 +5726,307 @@ mod tests {
         }
         assert_eq!(client.run_state, "running");
         assert_eq!(client.active_turn_ref.as_deref(), Some("turn.9"));
+    }
+
+    // ---------------------------------------------------------------------
+    // omega#91 provider connection handoffs
+    // ---------------------------------------------------------------------
+
+    /// A paired device holding exactly the scope the phone already asks for.
+    fn handoff_fixture_with(
+        scopes: Vec<crate::Issue31PairingScope>,
+    ) -> (
+        SarahConversationClient,
+        Issue31HostConfiguration,
+        Issue31HostController,
+        String,
+        String,
+    ) {
+        let (configuration, controller, device_public_key_hex, grant_ref) =
+            crate::issue31_nostr::paired_fixture(scopes);
+        let mut config = SarahConversationConfig::mock_fixture();
+        config.identity.owner_public_key_hex = configuration.host_public_key_hex.clone();
+        let client = SarahConversationClient::with_relay(
+            config,
+            Box::new(MockRelayAdapter::new()),
+            SigningIdentity::generate(),
+        );
+        (
+            client,
+            configuration,
+            controller,
+            device_public_key_hex,
+            grant_ref,
+        )
+    }
+
+    fn handoff_fixture() -> (
+        SarahConversationClient,
+        Issue31HostConfiguration,
+        Issue31HostController,
+        String,
+        String,
+    ) {
+        handoff_fixture_with(vec![crate::Issue31PairingScope::RequestProviderHandoff])
+    }
+
+    fn handoff_intent(
+        configuration: &Issue31HostConfiguration,
+        device_public_key_hex: &str,
+        grant_ref: &str,
+        event_id: &str,
+        idempotency_ref: &str,
+        arguments_ref: &str,
+    ) -> Issue31CommandEvent {
+        Issue31CommandEvent {
+            event_id: event_id.to_string(),
+            record: Issue31CommandRecord::CommandIntent {
+                schema: ISSUE31_COMMAND_SCHEMA.into(),
+                host_ref: configuration.host_ref.clone(),
+                host_public_key_hex: configuration.host_public_key_hex.clone(),
+                device_public_key_hex: device_public_key_hex.to_string(),
+                grant_ref: grant_ref.to_string(),
+                action_ref: ISSUE31_ACTION_REQUEST_PROVIDER_HANDOFF.into(),
+                idempotency_ref: idempotency_ref.to_string(),
+                expected_generation: 1,
+                arguments_ref: arguments_ref.to_string(),
+                issued_at: 103,
+                expires_at: 900,
+            },
+        }
+    }
+
+    #[test]
+    fn the_scope_the_phone_holds_now_produces_a_host_record() {
+        // Before omega#91 this exact command reached `execute_issue31_action`
+        // and came back `unavailable`/`controller_not_bound`, and the handoff
+        // vector on the wire stayed empty forever.
+        let (mut client, configuration, mut controller, device_public_key_hex, grant_ref) =
+            handoff_fixture();
+        let intent = handoff_intent(
+            &configuration,
+            &device_public_key_hex,
+            &grant_ref,
+            &"1".repeat(64),
+            "idempotency.issue31.handoff:first",
+            "arguments.omega.provider_handoff.anthropic",
+        );
+        let result = controller
+            .handle_command_event(
+                intent,
+                104,
+                |action_ref, arguments_ref, idempotency_ref| {
+                    client.execute_issue31_action(action_ref, arguments_ref, idempotency_ref)
+                },
+            )
+            .expect("the host answers an admitted handoff request")
+            .expect("a command result");
+        let Issue31CommandRecord::CommandResult {
+            status,
+            outcome_ref,
+            reason_ref,
+            ..
+        } = &result
+        else {
+            panic!("expected a command result");
+        };
+        assert_eq!(*status, Issue31CommandStatus::Completed);
+        assert_eq!(reason_ref.as_deref(), None);
+        // The command completed by producing this record; the record itself is
+        // not terminal. Reading one as the other is the mistake this asserts
+        // against.
+        assert_eq!(
+            client.issue31_provider_handoff_refs(),
+            vec![outcome_ref.clone()]
+        );
+        let record = client
+            .issue31_provider_handoffs
+            .get(outcome_ref)
+            .expect("the outcome names the record the host made")
+            .clone();
+        assert_eq!(record.state, workroom_receipts::Issue31ProviderHandoffState::Requested);
+        assert!(!record.is_terminal());
+        assert!(record.requested_at_ms.is_some(), "the host stamped it");
+        assert!(record.account_ref.is_none(), "nothing is bound yet");
+        assert!(record.outcome_ref.is_none(), "no outcome is claimed yet");
+    }
+
+    #[test]
+    fn a_scope_denied_request_leaves_no_handoff_at_all() {
+        // The failure-vs-never-started distinction, at the wire. A device
+        // without the scope gets a refusal — and the host makes no record, so
+        // the phone's handoff list is empty rather than showing a failed row
+        // for something that never began.
+        let (mut client, configuration, mut controller, device_public_key_hex, grant_ref) =
+            handoff_fixture_with(vec![crate::Issue31PairingScope::ObserveIssue31]);
+        let intent = handoff_intent(
+            &configuration,
+            &device_public_key_hex,
+            &grant_ref,
+            &"2".repeat(64),
+            "idempotency.issue31.handoff:denied",
+            "arguments.omega.provider_handoff.anthropic",
+        );
+        let result = controller
+            .handle_command_event(
+                intent,
+                104,
+                |action_ref, arguments_ref, idempotency_ref| {
+                    client.execute_issue31_action(action_ref, arguments_ref, idempotency_ref)
+                },
+            )
+            .expect("the controller answers")
+            .expect("a command result");
+        let Issue31CommandRecord::CommandResult { status, reason_ref, .. } = &result else {
+            panic!("expected a command result");
+        };
+        assert_eq!(*status, Issue31CommandStatus::Refused);
+        assert_eq!(reason_ref.as_deref(), Some("reason.omega.scope_denied"));
+        assert!(
+            client.issue31_provider_handoff_refs().is_empty(),
+            "a request the host never admitted is not a handoff that failed",
+        );
+        assert!(client.issue31_projected_provider_handoffs(1_000_000).is_empty());
+    }
+
+    #[test]
+    fn a_handoff_request_naming_no_provider_is_refused_without_a_record() {
+        let (mut client, configuration, mut controller, device_public_key_hex, grant_ref) =
+            handoff_fixture();
+        let intent = handoff_intent(
+            &configuration,
+            &device_public_key_hex,
+            &grant_ref,
+            &"3".repeat(64),
+            "idempotency.issue31.handoff:bad_arguments",
+            "arguments.omega.none",
+        );
+        let result = controller
+            .handle_command_event(
+                intent,
+                104,
+                |action_ref, arguments_ref, idempotency_ref| {
+                    client.execute_issue31_action(action_ref, arguments_ref, idempotency_ref)
+                },
+            )
+            .expect("the controller answers")
+            .expect("a command result");
+        let Issue31CommandRecord::CommandResult { status, reason_ref, .. } = &result else {
+            panic!("expected a command result");
+        };
+        assert_eq!(*status, Issue31CommandStatus::Refused);
+        assert_eq!(
+            reason_ref.as_deref(),
+            Some("reason.omega.handoff_arguments_invalid")
+        );
+        assert!(client.issue31_provider_handoff_refs().is_empty());
+    }
+
+    #[test]
+    fn a_handoff_in_flight_survives_a_restart_and_is_settled_rather_than_lost() {
+        let temporary = tempfile::tempdir().expect("tempdir");
+        let state_path = temporary.path().join("owner").join("issue31-state.json");
+        let (mut client, configuration, controller, _, _) = handoff_fixture();
+        client.issue31_state_path = Some(state_path.clone());
+        let opened = client
+            .issue31_provider_handoffs
+            .open(
+                "arguments.omega.provider_handoff.anthropic",
+                "idempotency.issue31.handoff:restart",
+                1_785_000_000_000,
+            )
+            .expect("the host opens a handoff");
+        client
+            .persist_issue31_host_state_with_controller(&controller)
+            .expect("the ledger is committed with the rest of host state");
+
+        // Exactly what a restarted process reads back off disk.
+        let reloaded = load_issue31_host_state(&state_path, &configuration)
+            .expect("load")
+            .expect("persisted state");
+        let mut ledger = reloaded.provider_handoffs;
+        assert_eq!(
+            ledger.get(&opened.handoff_ref).expect("the row survived"),
+            &opened,
+            "a handoff in flight is not lost across a restart",
+        );
+
+        // And a restart resolves it rather than leaving the phone with a
+        // request that neither resolves nor fails.
+        assert_eq!(ledger.adopt_after_restart(), 1);
+        let settled = ledger.get(&opened.handoff_ref).expect("row").clone();
+        assert_eq!(
+            settled.state,
+            workroom_receipts::Issue31ProviderHandoffState::Failed
+        );
+        assert_eq!(
+            settled.reason_class.as_deref(),
+            Some(crate::issue31_provider_handoff::ISSUE31_HANDOFF_REASON_HOST_RESTARTED)
+        );
+        assert!(settled.is_terminal());
+    }
+
+    #[test]
+    fn the_pump_advances_a_handoff_against_the_hosts_own_roster() {
+        let (mut client, _, _, _, _) = handoff_fixture();
+        let opened = client
+            .issue31_provider_handoffs
+            .open(
+                "arguments.omega.provider_handoff.anthropic",
+                "idempotency.issue31.handoff:roster",
+                1_000,
+            )
+            .expect("open");
+        client.set_issue31_provider_roster_source(Arc::new(|| {
+            Some(vec![Issue31ProviderRosterAccount {
+                account_ref: "account.claude.1".into(),
+                provider: "anthropic".into(),
+                lane_ref: "lane.claude-local".into(),
+                readiness: "ready".into(),
+            }])
+        }));
+        client.advance_issue31_provider_handoffs(2);
+        assert_eq!(
+            client
+                .issue31_provider_handoffs
+                .get(&opened.handoff_ref)
+                .expect("row")
+                .account_ref
+                .as_deref(),
+            Some("account.claude.1"),
+        );
+        client.advance_issue31_provider_handoffs(3);
+        assert_eq!(
+            client
+                .issue31_provider_handoffs
+                .get(&opened.handoff_ref)
+                .expect("row")
+                .state,
+            workroom_receipts::Issue31ProviderHandoffState::Completed,
+        );
+    }
+
+    #[test]
+    fn a_host_that_never_read_its_roster_binds_nothing() {
+        let (mut client, _, _, _, _) = handoff_fixture();
+        let opened = client
+            .issue31_provider_handoffs
+            .open(
+                "arguments.omega.provider_handoff.anthropic",
+                "idempotency.issue31.handoff:unread",
+                1_000,
+            )
+            .expect("open");
+        client.set_issue31_provider_roster_source(Arc::new(|| None));
+        client.advance_issue31_provider_handoffs(2);
+        assert_eq!(
+            client
+                .issue31_provider_handoffs
+                .get(&opened.handoff_ref)
+                .expect("row")
+                .state,
+            workroom_receipts::Issue31ProviderHandoffState::Requested,
+        );
     }
 
     #[test]
@@ -6158,6 +6620,7 @@ mod tests {
                 "reason.omega.invalid_pairing_record".into(),
             )]),
             host_adjunct_emissions: BTreeMap::new(),
+            provider_handoffs: Issue31ProviderHandoffLedger::default(),
             command_results: BTreeMap::from([(
                 "idempotency.restart.admin".into(),
                 ("fingerprint".into(), json!({ "eventId": "1".repeat(64) })),
@@ -6226,7 +6689,7 @@ mod tests {
                     },
                 },
                 107,
-                |_, _| panic!("revoked device command executed"),
+                |_, _, _| panic!("revoked device command executed"),
             )
             .expect("terminal refusal")
             .expect("result record");

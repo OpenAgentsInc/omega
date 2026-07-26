@@ -214,12 +214,74 @@ on, continues with later records, and advances the control cursor only through
 the scanned page. Transport, signature, custody, and durable-write failures
 still fail the whole synchronization.
 
-Legacy v1 Full Auto, provider-handoff, and community action intents do not yet
-dispatch into a generation-fenced real controller. Omega returns typed
-`unavailable` with `reason.omega.controller_not_bound` and leaves local state
-untouched. Command-v2 Sarah and owner-state actions use their real Nostr paths,
-but `accepted` is deliberately non-terminal. Neither a relay acknowledgement
-nor a host-side display mutation is reported as completed/stopped execution.
+Legacy v1 Full Auto and community action intents do not yet dispatch into a
+generation-fenced real controller. Omega returns typed `unavailable` with
+`reason.omega.controller_not_bound` and leaves local state untouched.
+Command-v2 Sarah and owner-state actions use their real Nostr paths, but
+`accepted` is deliberately non-terminal. Neither a relay acknowledgement nor a
+host-side display mutation is reported as completed/stopped execution.
+
+## Provider connection handoffs {#provider-connection-handoffs}
+
+`action.omega.provider_handoff` does dispatch (omega#91). A device holding the
+`request_provider_handoff` scope sends a command-v1 intent whose `argumentsRef`
+is `arguments.omega.provider_handoff.<provider>`; that prefix is the action's
+entire input surface, so there is no wire field through which a device could
+state a time, an account, a lane, or an outcome. The host answers by opening a
+record in `Issue31ProviderHandoffLedger` and returns `completed` with the new
+`handoffRef` as its `outcomeRef` — the record the device then watches. That
+`completed` describes the command, not the handoff: the handoff at that moment
+is `requested`.
+
+Each record has one lifecycle, and every field on it is a host measurement:
+
+| Field           | How the host measures it                                         |
+| --------------- | ---------------------------------------------------------------- |
+| `requestedAtMs` | One reading of `now`, taken when the host admitted the command    |
+| `accountRef`    | Chosen from the host's own provider roster, never supplied        |
+| `state`         | Advanced by at most one roster observation per host pump pass     |
+| `reasonClass`   | Why a non-successful handoff ended that way                       |
+| `outcomeRef`    | Present exactly when the handoff is terminal                      |
+
+Terminal outcomes are `outcome.omega.handoff_connected` (a ready account for
+that provider, bound to its lane), `outcome.omega.handoff_refused` with
+`reason.omega.handoff_account_revoked`, `outcome.omega.handoff_failed` with
+`reason.omega.handoff_account_lane_conflict` or
+`reason.omega.handoff_account_withdrawn`,
+`outcome.omega.handoff_interrupted` with
+`reason.omega.handoff_host_restarted`, and
+`outcome.omega.handoff_expired` with `reason.omega.handoff_deadline_passed`
+after fifteen minutes.
+
+Binding and completing are separate passes on purpose, so a phone observes the
+handoff appear, bind, and settle rather than seeing it jump. The roster is read
+through the same `parse_provider_accounts` the desktop provider roster renders,
+so the account a handoff chose and the lane it serves are the ones Omega shows;
+`handoff.accountRef` → `account.laneRef` is the account-to-lane relation
+omega#42 asked for, and the contract refuses a handoff naming an account the
+snapshot does not carry.
+
+The ledger is committed with the rest of the durable Issue 31 host state. On
+load, every handoff still in flight is settled as
+`failed`/`reason.omega.handoff_host_restarted`: the isolated provider home and
+the login it drove died with the previous process, so the honest terminal
+answer is that the handoff was interrupted. That direction can only
+under-claim; a restart never reports a connection the host did not make. A row
+persisted before `requestedAtMs` existed decodes, is reported unavailable, and
+is refused — never stamped at load time, which would give one field two
+provenances nothing on the wire distinguishes.
+
+A request the host never admitted — no scope, or an `argumentsRef` that names
+no provider — leaves **no record at all**. That is what makes a failed handoff
+distinguishable from one that never started: one is a row carrying a
+host-owned reason and outcome, the other is an empty list.
+
+A handoff record carries the fact of a connection and never the connection
+secret. Nothing in this path reads, writes, or names a provider credential, an
+isolated provider home, or a filesystem path, and every projected row is routed
+back through `workroom_receipts::decode_issue31_provider_handoff` — the exact
+function the whole-document decoder uses — so the host cannot write a handoff
+the phone would refuse.
 
 Pairing and command intake uses the same durability order. Omega applies an
 inbound record to a cloned controller, signs and inserts any terminal response
@@ -274,6 +336,11 @@ Rust owns the canonical fixture bytes under
 - `openagents.omega.issue31.host.v1.negative-unsafe-ref.json`
 - `openagents.omega.issue31.host.v1.negative-invalid-state.json`
 
+`openagents.omega.issue31.fullauto.v1.host-produced-handoffs.json` is shared the
+same way and is not written by hand: it is exactly what
+`Issue31ProviderHandoffLedger` emits when driven through all six lifecycle
+states, asserted on the Rust side and digest-pinned on the TypeScript side.
+
 The canonical fixture covers idle, pending, refused, and terminal states. The
 negative fixtures prove unknown private fields, unsafe references, and an
 incoherent unavailable projection fail closed.
@@ -302,12 +369,25 @@ change is therefore a cross-repository contract change, not formatting churn.
 cargo test -p workroom_receipts --lib
 cargo test -p omega_identity --lib
 cargo test -p omega_effectd --lib
+cargo test -p full_auto_ui --lib
 cargo test -p agent_ui -p workroom_ui --lib
 ./script/clippy -p omega_identity
 ./script/clippy -p omega_effectd
 ./script/clippy -p agent_ui
 ./script/clippy -p workroom_ui
 ./script/clippy -p workroom_receipts
+```
+
+Against the deployed relay (omega#91):
+
+```sh
+OMEGA_LIVE_RELAY_URL=wss://relay.openagents.com \
+  cargo test -p full_auto_ui --lib \
+  a_provider_handoff_appears_binds_and_settles_on_a_live_relay -- --ignored --nocapture
+OMEGA_LIVE_RELAY_URL=wss://relay.openagents.com \
+  cargo test -p full_auto_ui --lib \
+  a_refused_handoff_is_distinct_from_one_that_never_started_on_a_live_relay \
+  -- --ignored --nocapture
 ```
 
 ## Falsifiers {#falsifiers}
@@ -317,3 +397,8 @@ cargo test -p agent_ui -p workroom_ui --lib
 - A mobile REST route mirrors the Nostr record.
 - A fixture is presented as a connected host source.
 - A secret, private payload, exact local path, or raw tool output decodes.
+- A provider connection handoff states a time, an account, a lane, or an
+  outcome the device supplied.
+- A handoff in flight at shutdown is lost, or is reported as connected.
+- A handoff row missing its measured request time is shown with one filled in.
+- A request the host never admitted produces a handoff record.

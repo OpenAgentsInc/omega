@@ -11983,6 +11983,7 @@ dependencies = [
  "thiserror 2.0.17",
  "url",
  "util",
+ "workroom_receipts",
  "zed_credentials_provider",
 ]
 

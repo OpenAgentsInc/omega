@@ -34,6 +34,7 @@ smol.workspace = true
 thiserror.workspace = true
 url.workspace = true
 util.workspace = true
+workroom_receipts.workspace = true
 zed_credentials_provider.workspace = true
 
 [features]

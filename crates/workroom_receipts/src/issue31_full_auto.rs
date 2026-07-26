@@ -694,6 +694,25 @@ fn project_handoff(raw: RawHandoff, generated_at_ms: u64) -> AdjunctResult<Issue
     })
 }
 
+/// Decode exactly one provider connection handoff row.
+///
+/// This is the same `project_handoff` the whole-document decoder applies, with
+/// no second copy of the law: a producer that routes a row through this cannot
+/// write a handoff the reader of the assembled adjunct would then refuse.
+///
+/// It deliberately does not check the one law that is not local to a row — a
+/// bound `accountRef` must name an account the same snapshot carries. That
+/// relation belongs to the document, and a producer holding only a row cannot
+/// state it. `decode_issue31_full_auto_adjunct` still enforces it.
+pub fn decode_issue31_provider_handoff(
+    value: &serde_json::Value,
+    generated_at_ms: u64,
+) -> AdjunctResult<Issue31ProviderHandoff> {
+    let raw: RawHandoff = serde_json::from_value(value.clone())
+        .map_err(|_| Issue31FullAutoAdjunctError::InvalidJson)?;
+    project_handoff(raw, generated_at_ms)
+}
+
 fn project_evidence(raw: RawEvidence) -> AdjunctResult<Issue31EvidenceChain> {
     match raw {
         RawEvidence::Unavailable {
@@ -782,6 +801,45 @@ mod tests {
         assert_eq!(adjunct.accounts.len(), 3);
         assert_eq!(adjunct.handoffs.len(), 3);
         assert_eq!(adjunct.evidence.len(), 2);
+    }
+
+    /// The bytes `omega_effectd`'s handoff ledger actually emits (omega#91),
+    /// byte-shared with `packages/sarah`.
+    const HOST_PRODUCED_HANDOFFS: &str = include_str!(
+        "../fixtures/openagents.omega.issue31.fullauto.v1.host-produced-handoffs.json"
+    );
+
+    #[test]
+    fn decodes_every_host_produced_handoff_lifecycle() {
+        let adjunct =
+            decode_issue31_full_auto_adjunct(HOST_PRODUCED_HANDOFFS).expect("host-produced decodes");
+        let states: Vec<Issue31ProviderHandoffState> = adjunct
+            .handoffs
+            .iter()
+            .map(|handoff| handoff.state)
+            .collect();
+        for state in [
+            Issue31ProviderHandoffState::Requested,
+            Issue31ProviderHandoffState::Active,
+            Issue31ProviderHandoffState::Completed,
+            Issue31ProviderHandoffState::Refused,
+            Issue31ProviderHandoffState::Failed,
+            Issue31ProviderHandoffState::Expired,
+        ] {
+            assert!(states.contains(&state), "{state:?} is unrepresented");
+        }
+        // A bound handoff and the account it chose are readable together, so a
+        // viewer can follow the lane the host picked rather than infer it.
+        let accounts: HashSet<&str> = adjunct
+            .accounts
+            .iter()
+            .map(|account| account.account_ref.as_str())
+            .collect();
+        for handoff in &adjunct.handoffs {
+            if let Some(account_ref) = &handoff.account_ref {
+                assert!(accounts.contains(account_ref.as_str()));
+            }
+        }
     }
 
     #[test]

@@ -425,6 +425,12 @@ fn production_sarah_conversation() -> Result<SarahConversationClient, HostRespon
     conversation.set_issue31_host_projection_source(
         full_auto_ui::issue31_host_projection_source(),
     );
+    // omega#91: how the host reads its own provider accounts when it decides
+    // which one a connection handoff binds to. Without it no handoff can bind,
+    // and every one the phone opens runs to its deadline and expires.
+    conversation.set_issue31_provider_roster_source(
+        full_auto_ui::issue31_provider_roster_source(),
+    );
     Ok(conversation)
 }
 

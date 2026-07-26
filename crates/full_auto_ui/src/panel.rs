@@ -368,11 +368,11 @@ impl FullAutoPanel {
                         host_generation: generation,
                         run_details,
                         capacity: capacity.clone(),
-                        // Provider connection handoffs are host-owned and this
-                        // daemon does not yet report them. An empty list is the
-                        // honest statement that none is in flight, not a claim
-                        // that the host refused one.
-                        handoffs: Vec::new(),
+                        // Provider connection handoffs are not part of this
+                        // reading. They are durable host records owned by the
+                        // Sarah pump's ledger (omega#91) and survive a restart
+                        // that this poll does not; carrying them here as well
+                        // would give one fact two sources.
                         evidence,
                     });
                 }
