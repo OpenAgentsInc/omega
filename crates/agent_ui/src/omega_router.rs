@@ -766,15 +766,24 @@ pub struct OmegaRouterServer {
     /// Where decisions are written down. Chosen by the caller; see
     /// [`RouteJournal::data_dir_path`].
     journal_path: PathBuf,
+    /// Where the Exo harness lane is configured, if the owner configured one.
+    /// `OMEGA-DELTA-0042`. Chosen by the caller for the same reason the journal
+    /// path is: a harness must not read the owner's real data directory.
+    exo_lane_path: PathBuf,
 }
 
 impl OmegaRouterServer {
     /// A router server over the native agent server, journalling to `journal_path`.
     #[must_use]
-    pub fn new(native: agent::NativeAgentServer, journal_path: PathBuf) -> Self {
+    pub fn new(
+        native: agent::NativeAgentServer,
+        journal_path: PathBuf,
+        exo_lane_path: PathBuf,
+    ) -> Self {
         Self {
             native,
             journal_path,
+            exo_lane_path,
         }
     }
 
@@ -802,12 +811,22 @@ impl agent_servers::AgentServer for OmegaRouterServer {
     ) -> Task<Result<Rc<dyn AgentConnection>>> {
         let native = self.native.connect(delegate, project, cx);
         let journal_path = self.journal_path.clone();
+        let exo_lane_path = self.exo_lane_path.clone();
         cx.spawn(async move |_cx| {
             let native = native.await?;
-            let router = Rc::new(OmegaAgentConnection::new(
-                native,
-                RouteJournal::at(journal_path),
-            ));
+            let mut router = OmegaAgentConnection::new(native, RouteJournal::at(journal_path));
+            // `OMEGA-DELTA-0042`, omega#87. The Exo harness lane, when the owner
+            // configured one. Registered as the external executor rather than
+            // as its own class: see `omega_exo_lane`'s module docs for why an
+            // Exo thread reports `ExternalAcp` and why it must not report an
+            // engine lane. A machine with no Exo registers nothing, and a pin
+            // to the external executor then falls back visibly with
+            // `RouteReason::ExternalAcpUnavailable`.
+            if let Some(exo) = crate::omega_exo_connection::connect_configured_lane(&exo_lane_path)
+            {
+                router = router.with_external_acp(exo);
+            }
+            let router = Rc::new(router);
             publish_active_router(&router);
             Ok(router as Rc<dyn AgentConnection>)
         })

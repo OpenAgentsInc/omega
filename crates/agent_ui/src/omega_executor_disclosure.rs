@@ -119,6 +119,34 @@ fn classify_connection(
         };
     }
 
+    // `OMEGA-DELTA-0042`, omega#87. The Exo harness lane. Recognised by its
+    // concrete type for the same reason the native loop is: `agent_id()` on
+    // this connection is *derived from what Exo said about itself*, so
+    // classifying by it would let an Exo install decide its own class.
+    //
+    // Exo reports `ExternalAcp`. The reasoning — and the argument against a
+    // fourth class — is in `omega_exo_lane`'s module documentation. What is
+    // added here over the shared fallback below is the model: Exo does tell
+    // Omega which model served, so the lane says so instead of "not disclosed".
+    if let Some(exo) = connection
+        .clone()
+        .downcast::<crate::omega_exo_connection::ExoHarnessConnection>()
+    {
+        // `None` before Exo has been asked. An identity nobody observed is
+        // absent, never invented.
+        let identity = exo.identity();
+        return ExecutorDisclosure {
+            class: omega_exo_lane::EXO_EXECUTOR_CLASS,
+            agent_id: identity
+                .as_ref()
+                .map_or_else(|| agent_id.clone(), omega_exo_lane::ExoLaneIdentity::agent_id),
+            provider: identity.as_ref().and_then(|identity| identity.provider.clone()),
+            model: identity.and_then(|identity| identity.model),
+            run_ref: None,
+            route: crate::omega_router::recorded_route(session_id),
+        };
+    }
+
     // `AcpConnection` shares the fallback, but is recognised explicitly so an
     // unrecognised connection type leaves a trace instead of passing silently.
     if connection.downcast::<AcpConnection>().is_none() {

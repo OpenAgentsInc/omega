@@ -69,6 +69,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0039",
     "OMEGA-DELTA-0040",
     "OMEGA-DELTA-0041",
+    "OMEGA-DELTA-0042",
 ];
 
 /// OMEGA-DELTA-0036. The uninstall script embedded in the shipped `cli`.
@@ -1864,6 +1865,81 @@ fn is_test_path(relative: &str) -> bool {
             .any(|segment| normalized.contains(segment))
 }
 
+
+// ------ OMEGA-DELTA-0042
+
+/// OMEGA-DELTA-0042. The Exo harness lane's law. A leaf, checkable in a second.
+pub const EXO_LANE_LAW_PATH: &str = "crates/omega_exo_lane/src/omega_exo_lane.rs";
+
+/// OMEGA-DELTA-0042. Which Exo the lane admits.
+pub const EXO_LANE_PIN_PATH: &str = "crates/omega_exo_lane/src/pin.rs";
+
+/// OMEGA-DELTA-0042. Every command line the lane can produce.
+pub const EXO_LANE_COMMAND_PATH: &str = "crates/omega_exo_lane/src/command.rs";
+
+/// OMEGA-DELTA-0042. The half that spawns a process and builds a thread.
+pub const EXO_CONNECTION_PATH: &str = "crates/agent_ui/src/omega_exo_connection.rs";
+
+/// OMEGA-DELTA-0042. The two Exos, which share only a name.
+///
+/// omega#86 was closed for targeting the wrong one — exo labs'
+/// `exo-explore/exo` cluster-inference appliance — and omega#87 supersedes it
+/// with `exoharness/exo`, the agent harness. A repository name is a cheap thing
+/// to get wrong twice, so it is a checked fact rather than a remembered one.
+pub const EXO_HARNESS_UPSTREAM: &str = "exoharness/exo";
+
+/// OMEGA-DELTA-0042. The other Exo, which must appear nowhere as a target.
+pub const EXO_CLUSTER_UPSTREAM: &str = "exo-explore";
+
+/// OMEGA-DELTA-0042. Placeholders in `ADMITTED_LANE_ARGV` that stand for text
+/// reachable from a person or a model.
+///
+/// Exo accepts its global options *after* the subcommand, so an unterminated
+/// prompt is not a string Exo receives — it is Exo's command line. Driven
+/// against the pinned Exo, a prompt of `--help` exits 0, prints usage, and runs
+/// no turn.
+pub const EXO_LANE_USER_TEXT_SLOTS: &[&str] = &["<agent>", "<conversation>", "<prompt>"];
+
+/// OMEGA-DELTA-0042. Vocabulary that would mean Omega is standing between Exo's
+/// unauthenticated endpoint and something else.
+///
+/// `exo serve` has no authentication and full secret access; its own
+/// documentation says loopback is the entire boundary. Tier A needs no address
+/// at all — the CLI reaches the state root on disk — so any of this appearing in
+/// the lane is a surface nobody asked for.
+pub const EXO_OFF_MACHINE_TOKENS: &[(&str, &str)] = &[
+    ("a listener", "TcpListener"),
+    ("a listener", "bind("),
+    ("a listener", "0.0.0.0"),
+    ("a proxy", "proxy"),
+    ("a bearer token Exo never checks", "bearer"),
+];
+
+/// OMEGA-DELTA-0042. Flags that would point Exo somewhere other than the state
+/// root on disk.
+///
+/// Checked against the *argv table* rather than the whole lane, because the
+/// lane has to be able to name `EXO_EXOHARNESS_URL` in order to refuse an
+/// off-loopback one it inherited from the environment. Omega passing the flag
+/// and Omega refusing the variable are opposite acts that share a spelling.
+pub const EXO_REDIRECTING_FLAGS: &[&str] = &["exoharness-url", "--url", "serve", "bearer-env"];
+
+/// OMEGA-DELTA-0042, and owner gate 8 behind it.
+///
+/// *No model-initiated path may start Full Auto authority.* Three such paths
+/// were removed from OpenAgents Desktop on 2026-07-25, one of them a rename of
+/// another. An Exo agent has an unrestricted networked shell and can rebuild
+/// itself, which makes it exactly the caller that gate exists for — so adding an
+/// executor lane must not open a fourth door. The lane names none of this
+/// vocabulary, and the check is that it cannot start naming it quietly.
+pub const EXO_FULL_AUTO_TOKENS: &[&str] = &[
+    "LaunchOrigin",
+    "full_auto",
+    "FullAuto",
+    "PinGesture",
+    "EngineLane",
+    "run_ref: Some",
+];
 
 // ------ OMEGA-DELTA-0032
 
@@ -4799,6 +4875,31 @@ mod tests {
         None
     }
 
+    /// OMEGA-DELTA-0042. A source file with its test module removed.
+    ///
+    /// Every scan below asks "does the shipped lane name this?", and the tests
+    /// beside it must be free to name exactly the things it refuses — a test
+    /// that asserts the wrong Exo is rejected has to write the wrong Exo down.
+    /// Scanning the whole file would make those tests unwritable, which is the
+    /// wrong pressure: it would push the refusals out of the file rather than
+    /// into it.
+    fn production_source(source: &str) -> &str {
+        source
+            .split_once("\n#[cfg(test)]")
+            .map_or(source, |(before, _)| before)
+    }
+
+    /// OMEGA-DELTA-0042. Whether a token is named in code rather than in prose.
+    fn named_in_code(source: &str, token: &str) -> bool {
+        production_source(source)
+            .lines()
+            .filter(|line| line.contains(token))
+            .any(|line| {
+                let line = line.trim_start();
+                !line.starts_with("//") && !line.starts_with("*")
+            })
+    }
+
     /// OMEGA-DELTA-0034. The front door works with no project open.
     ///
     /// Checked in both directions. Upstream's guard restored on a front-door
@@ -5977,6 +6078,271 @@ mod tests {
             !bundler.contains("\"dirty\": False"),
             "OMEGA-DELTA-0039: the release record states `dirty` as a literal. \
              It is a field that reads like an observation, so it has to be one."
+        );
+    }
+
+    // ------ OMEGA-DELTA-0042
+
+    /// OMEGA-DELTA-0042. The Exo the lane drives is the agent harness.
+    ///
+    /// omega#86 was closed for integrating exo labs' cluster-inference
+    /// appliance, which shares a name with the harness and nothing else. The
+    /// pin therefore carries the repository as a *field*, and this reads it, so
+    /// the distinction survives somebody skimming a doc comment.
+    #[test]
+    fn the_exo_lane_drives_the_harness_exo_and_not_the_cluster_one() {
+        let path = repository_path(EXO_LANE_PIN_PATH);
+        let source = std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
+        let upstream = source
+            .split_once("upstream: \"")
+            .and_then(|(_, rest)| rest.split_once('"'))
+            .expect("EXO_PIN names an upstream")
+            .0;
+        assert!(
+            upstream.ends_with(EXO_HARNESS_UPSTREAM),
+            "OMEGA-DELTA-0042: the Exo pin names {upstream}, which is not \
+             {EXO_HARNESS_UPSTREAM}. omega#86 made this mistake once."
+        );
+
+        for relative in [EXO_LANE_LAW_PATH, EXO_LANE_PIN_PATH, EXO_CONNECTION_PATH] {
+            let path = repository_path(relative);
+            let source = std::fs::read_to_string(&path)
+                .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
+            let targeted = named_in_code(&source, EXO_CLUSTER_UPSTREAM);
+            assert!(
+                !targeted,
+                "OMEGA-DELTA-0042: {} names {EXO_CLUSTER_UPSTREAM} outside a \
+                 comment, which would make the wrong Exo a target rather than \
+                 a warning.",
+                path.display()
+            );
+        }
+    }
+
+    /// OMEGA-DELTA-0042. No text from outside Omega can become an Exo flag.
+    ///
+    /// Read off the written shapes rather than off the builder, because the
+    /// shapes are what a reviewer reads. Exo takes its global options after the
+    /// subcommand, so a shape that put `<prompt>` before the terminator would
+    /// hand the command line to whoever typed the prompt — and at this pin that
+    /// failure is *silent*: `--help` as a prompt exits 0 with usage text and no
+    /// turn.
+    #[test]
+    fn the_exo_lane_puts_no_user_text_before_the_argument_terminator() {
+        let path = repository_path(EXO_LANE_COMMAND_PATH);
+        let source = std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
+        let table = source
+            .split_once("pub const ADMITTED_LANE_ARGV")
+            .and_then(|(_, rest)| rest.split_once("\n];"))
+            .expect("the admitted argv table is present")
+            .0;
+
+        let mut shapes = 0usize;
+        for shape in table.split("    (\n").skip(1) {
+            shapes += 1;
+            let tokens: Vec<&str> = shape
+                .match_indices('"')
+                .map(|(offset, _)| offset)
+                .collect::<Vec<_>>()
+                .chunks_exact(2)
+                .map(|pair| &shape[pair[0] + 1..pair[1]])
+                .collect();
+            let terminator = tokens.iter().position(|token| *token == "--");
+            for slot in EXO_LANE_USER_TEXT_SLOTS {
+                let Some(at) = tokens.iter().position(|token| token == slot) else {
+                    continue;
+                };
+                let Some(terminator) = terminator else {
+                    panic!(
+                        "OMEGA-DELTA-0042: an admitted Exo command carries {slot} \
+                         and emits no argument terminator, so the value is Exo's \
+                         command line rather than its input: {tokens:?}"
+                    );
+                };
+                assert!(
+                    at > terminator,
+                    "OMEGA-DELTA-0042: an admitted Exo command puts {slot} \
+                     before the argument terminator: {tokens:?}"
+                );
+            }
+        }
+        assert!(
+            shapes >= 4,
+            "OMEGA-DELTA-0042: the admitted argv table parsed as {shapes} \
+             shapes, so this check is reading nothing."
+        );
+    }
+
+    /// OMEGA-DELTA-0042. Omega never puts Exo on a network.
+    ///
+    /// Exo's one server has no authentication and full access to its secrets;
+    /// loopback is the entire boundary and Exo's own documentation says so.
+    /// Tier A needs no address at all, so anything here is a surface that was
+    /// added rather than required.
+    #[test]
+    fn the_exo_lane_exposes_no_endpoint_off_this_machine() {
+        for relative in [EXO_CONNECTION_PATH, EXO_LANE_LAW_PATH, EXO_LANE_COMMAND_PATH] {
+            let path = repository_path(relative);
+            let source = std::fs::read_to_string(&path)
+                .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
+            for (what, token) in EXO_OFF_MACHINE_TOKENS {
+                assert!(
+                    !named_in_code(&source, token),
+                    "OMEGA-DELTA-0042: {} names {what} (`{token}`) outside a \
+                     comment. Exo's endpoint is unauthenticated and Omega must \
+                     never proxy it off-machine.",
+                    path.display()
+                );
+            }
+        }
+
+        // The flags that would redirect Exo, checked where they would have to
+        // appear to do any harm: the command lines Omega actually builds.
+        let command_path = repository_path(EXO_LANE_COMMAND_PATH);
+        let command = std::fs::read_to_string(&command_path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", command_path.display()));
+        let table = command
+            .split_once("pub const ADMITTED_LANE_ARGV")
+            .and_then(|(_, rest)| rest.split_once("\n];"))
+            .expect("the admitted argv table is present")
+            .0;
+        for flag in EXO_REDIRECTING_FLAGS {
+            assert!(
+                !table.contains(flag),
+                "OMEGA-DELTA-0042: an admitted Exo command line carries \
+                 `{flag}`, which points Exo away from the state root on disk \
+                 and at a server with no authentication."
+            );
+        }
+
+        // And the positive half: the lane refuses an off-loopback endpoint it
+        // inherited. Without this the check above is satisfied by a lane that
+        // simply never looked.
+        let connection_path = repository_path(EXO_CONNECTION_PATH);
+        let connection = std::fs::read_to_string(&connection_path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", connection_path.display()));
+        let body = function_body(&connection, "check_endpoint").unwrap_or_else(|| {
+            panic!(
+                "OMEGA-DELTA-0042: {} no longer checks where Exo is. \
+                 `EXO_EXOHARNESS_URL` in the inherited environment redirects \
+                 the lane off-machine with no Omega command line changing.",
+                connection_path.display()
+            )
+        });
+        assert!(
+            body.contains("EXO_EXOHARNESS_URL") && body.contains("LoopbackEndpoint::parse"),
+            "OMEGA-DELTA-0042: `check_endpoint` no longer parses the inherited \
+             endpoint through the type that refuses a non-loopback one."
+        );
+        let turn = function_body(&connection, "drive_turn").expect("the turn path exists");
+        assert!(
+            turn.contains("self.check_endpoint()"),
+            "OMEGA-DELTA-0042: the turn path no longer checks where Exo is."
+        );
+    }
+
+    /// OMEGA-DELTA-0042, and owner gate 8 behind it.
+    ///
+    /// Adding an executor lane must not open a fourth model-initiated path into
+    /// Full Auto authority. The lane reaches nothing that starts a run: it names
+    /// no launch origin, constructs no pin gesture, and never writes a run
+    /// reference — a record that carried one would be claiming engine-lane
+    /// authority Exo does not have.
+    #[test]
+    fn the_exo_lane_opens_no_path_into_full_auto_authority() {
+        for relative in [EXO_CONNECTION_PATH, EXO_LANE_LAW_PATH] {
+            let path = repository_path(relative);
+            let source = std::fs::read_to_string(&path)
+                .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
+            for token in EXO_FULL_AUTO_TOKENS {
+                let named = named_in_code(&source, token);
+                assert!(
+                    !named,
+                    "OMEGA-DELTA-0042: {} names `{token}` in code. An Exo agent \
+                     has an unrestricted networked shell; it is exactly the \
+                     caller owner gate 8 exists for.",
+                    path.display()
+                );
+            }
+        }
+    }
+
+    /// OMEGA-DELTA-0042. Every turn is gated before it is sent.
+    ///
+    /// Three refusals, in order, and the order matters: an agent read after the
+    /// send would report a capability the turn already used. Checked on the
+    /// function body, because the calls existing somewhere in a file is not the
+    /// same claim as the turn path running them.
+    #[test]
+    fn an_exo_turn_checks_the_pin_and_the_agent_before_it_sends() {
+        let path = repository_path(EXO_CONNECTION_PATH);
+        let source = std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
+        let body = function_body(&source, "drive_turn").unwrap_or_else(|| {
+            panic!(
+                "OMEGA-DELTA-0042: {} has no `drive_turn`, so nothing in this \
+                 file is the turn path any more.",
+                path.display()
+            )
+        });
+        let pin = body
+            .find("self.check_pin()")
+            .expect("OMEGA-DELTA-0042: a turn no longer checks which Exo it is driving");
+        let agent = body.find("self.check_agent()").expect(
+            "OMEGA-DELTA-0042: a turn no longer reads the Exo agent, so it \
+             cannot refuse self-modification capability",
+        );
+        let send = body
+            .find("ExoCommand::SendTurn")
+            .expect("OMEGA-DELTA-0042: a turn no longer sends");
+        assert!(
+            pin < agent && agent < send,
+            "OMEGA-DELTA-0042: the turn path runs its refusals out of order \
+             (pin {pin}, agent {agent}, send {send}). A capability read after \
+             the send describes a turn that already happened."
+        );
+    }
+
+    /// OMEGA-DELTA-0042. The lane is wired, not merely built.
+    ///
+    /// omega#78 shipped a router nobody constructed, and `OMEGA-DELTA-0035`
+    /// exists because of it. The same failure is available here: a lane with a
+    /// law, a connection, and tests, reachable by nobody.
+    #[test]
+    fn the_exo_lane_is_reachable_from_omega_agent() {
+        let router_path = repository_path(ROUTER_DISPATCH_PATH);
+        let router = std::fs::read_to_string(&router_path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", router_path.display()));
+        assert!(
+            router.contains("omega_exo_connection::connect_configured_lane")
+                && router.contains("with_external_acp(exo)"),
+            "OMEGA-DELTA-0042: {} no longer registers the Exo lane as the \
+             router's external executor, so a pin to it can never be honoured.",
+            router_path.display()
+        );
+
+        let factory_path = repository_path(AGENT_SERVER_FACTORY_PATH);
+        let factory = std::fs::read_to_string(&factory_path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", factory_path.display()));
+        assert!(
+            factory.contains("omega_exo_connection::ExoLaneConfig::data_dir_path()"),
+            "OMEGA-DELTA-0042: {} no longer hands the router the Exo lane's \
+             configuration path, so the lane is never found.",
+            factory_path.display()
+        );
+
+        let disclosure_path = repository_path(EXECUTOR_DISCLOSURE_BINDING_PATH);
+        let disclosure = std::fs::read_to_string(&disclosure_path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", disclosure_path.display()));
+        assert!(
+            disclosure.contains("downcast::<crate::omega_exo_connection::ExoHarnessConnection>()"),
+            "OMEGA-DELTA-0042: {} no longer recognises the Exo connection by \
+             its concrete type. `agent_id()` on that connection is derived from \
+             what Exo said about itself, so classifying by it would let an Exo \
+             install choose its own executor class.",
+            disclosure_path.display()
         );
     }
     // ---------------------------------------------------------------------

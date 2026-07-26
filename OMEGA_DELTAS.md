@@ -2070,3 +2070,108 @@ than it sounds, because the harness omega#81's acceptance sentence names —
   answered by disclosing where it would route, and dispatching a served turn to
   a real executor is a later decision with its own authority question, not an
   omission. The v1 fleet-backed server (openagents #9179) stays deferred.
+### OMEGA-DELTA-0042 — Omega drives Exo as a lane, and supplies the authority gate Exo lacks
+
+- **Upstream Zed:** external agents are attached over ACP or configured as
+  custom agent servers. There is no notion of an executor whose own agent can
+  rewrite itself, and nothing in the fork's ancestry has ever had to bound one.
+- **Which Exo, first.** This is `exoharness/exo`, the recursive-self-improvement
+  agent harness, pinned at `baa07f6785547080d99bd2a7d3eab6d76b984e35` with tree
+  `0aff9139a166414fa51a09b66ba4785bae05b46b`. It is **not** exo labs'
+  `exo-explore/exo` cluster-inference appliance, which shares a name and nothing
+  else; omega#86 was closed for integrating the wrong one. The pin therefore
+  carries the repository as a field a test reads, alongside the commit and the
+  tree — both, for the same reason `omega-effectd` is pinned by release tag *and*
+  asset digest, because a commit id alone is satisfied by a rewritten history in
+  a clone nobody re-fetched. Exo declares itself unstable with the written house
+  rule "do not write fallback code or handle backwards compatibility."
+- **What Omega is integrating, stated plainly.** An unauthenticated local
+  harness whose agent has an unrestricted networked shell and can rebuild
+  itself. Exo has no approval prompt anywhere by design — its security model is
+  sandbox isolation, and its threat model assumes you *want* the agent to modify
+  itself. Omega adds the gate Exo does not have, and the gate is four refusals
+  the turn path runs **before** it sends, each from a live observation rather
+  than from configuration Omega wrote down earlier:
+  - **where Exo is** — `EXO_EXOHARNESS_URL` is inherited from the environment,
+    and setting it redirects the lane from the state root on disk to an HTTP
+    server that has no authentication and full access to Exo's secrets. It is
+    parsed through `LoopbackEndpoint`, whose only constructor refuses anything
+    that is not this machine, and whose refusal separates `0.0.0.0` and `::`
+    from loopback because those are the *plausible* mistakes;
+  - **which Exo** — `git` in the checkout answers with a remote, a commit, and a
+    tree, and the pin admits or refuses it;
+  - **which bytes** — the binary is measured and compared against the owner's
+    `omega_harness` pin ledger entry for `exo`, when the owner froze one;
+  - **which agent** — `exo agent show` is read, and a turn is refused when the
+    agent carries self-modification capability: runtime tool authoring, a tool
+    module (which is how `guardian_action` is installed), or a read-write mount
+    (which is how Exo's source tree is edited from inside the sandbox). Tier C
+    is out of scope, and this is its enforcement rather than a promise about it.
+    Networking is *reported and not refused*, because refusing it would refuse
+    every useful agent and say nothing about self-modification.
+- **User text is never argument syntax.** Exo accepts its global options *after*
+  the subcommand, so an unterminated prompt is not a string Exo receives — it is
+  Exo's command line. Driven against the pinned binary, a prompt of `--help` on
+  an otherwise correct `conversation send` **exits 0, prints Exo's usage text,
+  and runs no turn**; a lane without the terminator would have rendered that
+  usage text as the model's reply, silently and on a success exit code. Every
+  command line the lane can produce is a variant of a closed enum whose exact
+  argv shape is written down, and every value reachable from a person or a model
+  is emitted after `--`.
+- **Omega never configures Exo.** The admitted verbs are one send and four
+  reads. `create`, `update`, `delete`, `mount`, `set`, `register`, `configure`,
+  `serve`, and `repl` are unreachable — not filtered, unexpressible. The only
+  mutation the lane causes is Exo's own record of the turn it just ran.
+- **The executor class, decided rather than defaulted.** `ExecutorClass` is
+  closed at three by `OMEGA-AGENT-AC-04`, and it answers *who ran the work*. An
+  Exo thread reports `ExternalAcp`. Not `NativeLoop`, which is the first-party
+  claim and would present an unrestricted shell's output as Omega's own. Not
+  `EngineLane`, which *is* Full Auto authority — a record on it must carry a
+  `run_ref`, and owner gate 8 admits only an explicit human action into it. Exo
+  has no engine run and no receipt, so a lane reporting `EngineLane` would be a
+  fourth model-reachable door into Full Auto authority opened by adding an
+  executor, three of which were removed from OpenAgents Desktop the same day.
+  `ExternalAcp` fits because the class is about the executor and not the wire: a
+  separate process Omega does not own, carrying no run reference. Tier B swaps
+  the CLI for ACP and the class does not change, which is the check that the
+  class was about the right thing. A fourth variant was considered and **not
+  taken**; the argument is written in `crates/omega_exo_lane` so a later reader
+  can disagree with something concrete.
+- **The disclosure names Exo, its executor, and its model** —
+  `external_acp · exo/basic · provider not disclosed/gpt-5-mini`, from a real
+  turn. No field was added to `ExecutorDisclosure`: the record's field list is
+  closed on purpose. `provider` is genuinely absent because Exo's LLM binding
+  has no provider field at all, only an optional base URL, and saying "not
+  disclosed" is better than deriving `openai` from an absence.
+- **Coarse on purpose.** One shot per turn, no live text deltas, tool activity
+  after the fact. That is Exo's limit at this pin — its turn streaming is an
+  in-process enum consumed by its own REPL and serialised to no transport. Tier
+  B lifts it by contributing a transport upstream, and is **not** started here.
+- **Enforced by:** `the_exo_lane_drives_the_harness_exo_and_not_the_cluster_one`,
+  `the_exo_lane_puts_no_user_text_before_the_argument_terminator`,
+  `the_exo_lane_exposes_no_endpoint_off_this_machine`,
+  `the_exo_lane_opens_no_path_into_full_auto_authority`,
+  `an_exo_turn_checks_the_pin_and_the_agent_before_it_sends`, and
+  `the_exo_lane_is_reachable_from_omega_agent` in `crates/omega_deltas/`, the 35
+  unit checks in `crates/omega_exo_lane/`, and `drives_a_real_exo` in
+  `crates/agent_ui/`, which is `#[ignore]`d because it needs a real Exo.
+- **Falsified against a running Exo,** every edit probed before its run. Pointing
+  the checkout's remote at `exo-explore/exo` refused the turn by name. Enabling
+  `tool_creation` on the live agent refused it. Mounting Exo's own source tree
+  `rw` refused it. `EXO_EXOHARNESS_URL=http://100.64.7.9:4766` refused it before
+  any Exo process started. Dropping the argument terminator, making the turn
+  reader accept any stdout, reporting `EngineLane`, unwiring the lane from the
+  router, and moving the capability read after the send each failed their tests.
+  **One falsification found a real hole:** removing the disclosure's Exo arm
+  left the live test green, because it asserted only the agent id — which the
+  fallback also produces. The live test now asserts the model, which only that
+  arm supplies, and the same edit fails it. A second falsification silently
+  no-opped through a shell quoting error and was caught by its probe rather than
+  by its result.
+- **What this does not cover.** Cancellation: an Exo turn is one blocking
+  process with no interruption point that leaves its durable log consistent, so
+  the lane says so in a log line rather than pretending. Steer and queue
+  negotiate against a turn boundary the lane cannot see mid-turn, which is
+  Tier B's to fix. The lane reads Exo's durable event log after a turn and
+  currently only logs a failure to do so, because the turn has already run and
+  refusing it afterwards would describe a world that did not happen.

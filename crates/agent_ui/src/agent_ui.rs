@@ -24,6 +24,7 @@ mod mode_selector;
 mod model_selector;
 mod model_selector_popover;
 pub mod omega_executor_disclosure;
+pub mod omega_exo_connection;
 pub mod omega_host_bridge;
 pub mod omega_router;
 pub mod omega_send_queue;
@@ -510,6 +511,18 @@ impl Agent {
                         .join(format!("omega-route-journal-{}.json", std::process::id()))
                 } else {
                     crate::omega_router::RouteJournal::data_dir_path()
+                },
+                // OMEGA-DELTA-0042, omega#87. The Exo harness lane's
+                // configuration. A stateless run gets a path inside the
+                // temporary directory, which does not exist, so a rendering
+                // harness never spawns somebody's Exo — the same reasoning as
+                // the journal above, and the same reason the choice is made
+                // here rather than inside the router.
+                if std::env::var("ZED_STATELESS").is_ok() {
+                    std::env::temp_dir()
+                        .join(format!("omega-exo-lane-{}.json", std::process::id()))
+                } else {
+                    crate::omega_exo_connection::ExoLaneConfig::data_dir_path()
                 },
             )),
             Self::Custom { id: name } => {
