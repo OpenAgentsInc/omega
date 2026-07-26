@@ -1647,7 +1647,7 @@ async fn open_zero_base_project(app_state: &Arc<AppState>, cx: &mut AsyncApp) ->
     );
     let opening = cx.update(|cx| {
         workspace::open_paths(
-            &[root.clone()],
+            std::slice::from_ref(&root),
             app_state.clone(),
             workspace::OpenOptions::default(),
             cx,
