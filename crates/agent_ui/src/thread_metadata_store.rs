@@ -2434,7 +2434,10 @@ mod tests {
     ) {
         init_test(cx);
 
-        let folder_paths = PathList::new(&[Path::new("/remote-project")]);
+        // A path no other test uses. The migration keys on `PathList`, and a
+        // *local* workspace sharing this one makes the remote row be skipped.
+        let folder_paths =
+            PathList::new(&[Path::new("/remote-project-backfills-from-workspace-db")]);
         let updated_at = Utc::now();
         let metadata = make_metadata(
             "remote-session",
@@ -2479,6 +2482,54 @@ mod tests {
             })
             .await
             .unwrap();
+
+        // The precondition is asserted, because when it does not hold this test
+        // fails far away from the cause.
+        //
+        // The migration skips a remote row whose `PathList` also appears as a
+        // *local* workspace. This test writes the workspace, then updates it to
+        // carry a remote connection. If the migration reads before that update
+        // is visible, it sees a local row, adds the path to `local_path_lists`,
+        // skips its own remote row, and the failure surfaces later as
+        // `expected migrated metadata row` — which reads as "the migration is
+        // broken" rather than "the fixture was not ready".
+        //
+        // That is what made this intermittent and hard to place: it failed
+        // roughly one run in six, and merely adding unrelated tests whose names
+        // sort nearby was enough to reproduce it, because `WorkspaceDb` is
+        // shared across the whole test binary.
+        //
+        // Reading the row back here is both the assertion and a barrier. If it
+        // ever fails, it says the fixture is not ready and names what was read,
+        // instead of blaming the code under test.
+        let location = cx
+            .update(|cx| {
+                let db = WorkspaceDb::global(cx);
+                let fs = <dyn Fs>::global(cx);
+                cx.background_spawn(async move {
+                    db.recent_project_workspaces_ungrouped(fs.as_ref()).await
+                })
+            })
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|workspace| workspace.paths == folder_paths)
+            .map(|workspace| workspace.location)
+            .collect::<Vec<_>>();
+        assert!(
+            location
+                .iter()
+                .any(|found| matches!(found, SerializedWorkspaceLocation::Remote(_))),
+            "fixture not ready: no remote workspace at {folder_paths:?}, found {location:?}"
+        );
+        assert!(
+            !location
+                .iter()
+                .any(|found| matches!(found, SerializedWorkspaceLocation::Local)),
+            "a local workspace shares {folder_paths:?}, so the migration will add \
+             the path to `local_path_lists` and skip the remote row. Found \
+             {location:?}"
+        );
 
         clear_thread_metadata_remote_connection_backfill(cx);
         cx.update(|cx| {
