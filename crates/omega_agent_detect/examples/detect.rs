@@ -7,6 +7,11 @@
 //!
 //! `cargo run -p omega_agent_detect --example detect`
 //!
+//! `OMEGA-DELTA-0092` added the Exo half. Exo is not on `PATH` and cannot be —
+//! it has no release artifact — so it is reported separately, as either the
+//! five fields a lane needs or the one field that is missing and where it was
+//! looked for.
+//!
 //! Exits non-zero when Codex is absent, so an unattended run that is about to
 //! assert "the first message routed to Codex" can check its own precondition
 //! first. A run that asserts routing on a machine without Codex is testing
@@ -26,6 +31,21 @@ fn main() -> std::process::ExitCode {
             agent.name,
             agent.binary.display()
         );
+    }
+
+    match omega_agent_detect::exo::derive_lane_from_env() {
+        Ok(lane) => {
+            println!("\nexo lane:");
+            println!("  binary       {}", lane.binary.display());
+            println!("  checkout     {}", lane.checkout.display());
+            println!("  root         {}", lane.root.display());
+            println!("  agent        {}", lane.agent);
+            println!("  conversation {}", lane.conversation);
+        }
+        // Not an error here. A machine with no Exo is the ordinary case, and
+        // the point of printing this is that the sentence names the field that
+        // is missing rather than saying "not found".
+        Err(underivable) => println!("\nexo lane: none — {underivable}"),
     }
 
     match omega_agent_detect::preferred(&detected) {
