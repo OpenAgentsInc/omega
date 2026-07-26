@@ -6735,7 +6735,7 @@ mod tests {
         owner_public_key_hex: &str,
         conversation_ref: &str,
         text: &str,
-    ) -> nostr::Event {
+    ) -> (nostr::Event, String) {
         let tags = conversation_tags(
             conversation_ref,
             owner_public_key_hex,
@@ -6746,13 +6746,18 @@ mod tests {
             .tags(tags)
             .build(sarah_keys.public_key());
         rumor.ensure_id();
-        smol::block_on(EventBuilder::gift_wrap(
+        // The wrap id is not the record id. The host stores the rumor under its
+        // own id and projects that id to the device, so a harness that reports
+        // the wrap id is naming an identifier nothing downstream ever uses.
+        let rumor_id = rumor.id.expect("the rumor carries its id").to_hex();
+        let wrap = smol::block_on(EventBuilder::gift_wrap(
             sarah_keys,
             owner_public_key,
             rumor,
             [],
         ))
-        .expect("gift wrap Sarah's message to the host")
+        .expect("gift wrap Sarah's message to the host");
+        (wrap, rumor_id)
     }
 
     /// Publish, and survive a relay that closed an idle socket.
@@ -6949,10 +6954,20 @@ mod tests {
             std::env::var("OMEGA_DEVICE_PROOF_AUTH_URL").unwrap_or_else(|_| relay_url.clone());
         let host_keys = device_proof_keys("OMEGA_DEVICE_PROOF_HOST_SECRET");
         let sarah_keys = device_proof_keys("OMEGA_DEVICE_PROOF_SARAH_SECRET");
-        let device_public_key_hex = std::env::var("OMEGA_DEVICE_PROOF_DEVICE_PUBKEY")
-            .expect("OMEGA_DEVICE_PROOF_DEVICE_PUBKEY must be the simulator's 64-hex device key")
-            .trim()
-            .to_string();
+        // Comma-separated, so one host can admit an iOS surface and an Android
+        // surface at the same time. omega#49 asks for a result on both, and a
+        // host that can only ever hold one grant proves the fan-out by
+        // assertion rather than by running it.
+        let device_public_key_hexes: Vec<String> = std::env::var("OMEGA_DEVICE_PROOF_DEVICE_PUBKEY")
+            .expect("OMEGA_DEVICE_PROOF_DEVICE_PUBKEY must be the surfaces' 64-hex device keys")
+            .split(',')
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .collect();
+        assert!(
+            !device_public_key_hexes.is_empty(),
+            "OMEGA_DEVICE_PROOF_DEVICE_PUBKEY must name at least one device key"
+        );
         let state_path = std::path::PathBuf::from(
             std::env::var("OMEGA_DEVICE_PROOF_STATE")
                 .expect("OMEGA_DEVICE_PROOF_STATE must be a durable state file path"),
@@ -6976,7 +6991,7 @@ mod tests {
         config.identity.sarah_public_key_hex = sarah_public_key_hex.clone();
         config.conversation_digest = owner_public_key_hex[..24].to_string();
         config.relay_url = Some(relay_url.clone());
-        config.admitted_device_public_key_hexes = vec![device_public_key_hex.clone()];
+        config.admitted_device_public_key_hexes = device_public_key_hexes.clone();
         config.approved_device_scopes = vec![
             crate::Issue31PairingScope::ObserveIssue31,
             crate::Issue31PairingScope::SendMessage,
@@ -6997,11 +7012,15 @@ mod tests {
             sarah_relay.connect().expect("sarah connect");
             Some(sarah_relay)
         };
+        // The exact sources this run seeded, so the loop can say whether each
+        // one reached each device rather than leaving "the host admits it and
+        // never projects it" to be inferred from a device screenshot.
+        let mut seeded_sources: Vec<(&'static str, String)> = Vec::new();
 
         if seed {
             let sarah_relay = sarah_publisher.as_mut().expect("sarah adapter");
             let now = unix_now();
-            let greeting = sarah_conversation_wrap(
+            let (greeting, greeting_rumor_id) = sarah_conversation_wrap(
                 &sarah_keys,
                 &owner_public_key,
                 &owner_public_key_hex,
@@ -7010,7 +7029,8 @@ mod tests {
             );
             device_proof_publish(sarah_relay, &auth_url, &sarah_keys, &greeting)
                 .expect("publish the Sarah greeting");
-            eprintln!("device-proof: seeded Sarah message {}", greeting.id.to_hex());
+            eprintln!("device-proof: seeded Sarah message {greeting_rumor_id}");
+            seeded_sources.push(("greeting", greeting_rumor_id));
 
             // One encrypted engram, so "inspect memory" has a real source.
             // An engram body is a JSON object with a `mem/…` slug and a value,
@@ -7043,6 +7063,7 @@ mod tests {
             device_proof_publish(sarah_relay, &auth_url, &sarah_keys, &engram)
                 .expect("publish the engram");
             eprintln!("device-proof: seeded engram {}", engram.id.to_hex());
+            seeded_sources.push(("engram", engram.id.to_hex()));
 
             if quarantine {
                 // Inside every record-level bound and outside the projection body
@@ -7113,7 +7134,9 @@ mod tests {
 
         eprintln!("device-proof: host  npub/hex {owner_public_key_hex}");
         eprintln!("device-proof: sarah hex      {sarah_public_key_hex}");
-        eprintln!("device-proof: device hex     {device_public_key_hex}");
+        for device_public_key_hex in &device_public_key_hexes {
+            eprintln!("device-proof: device hex     {device_public_key_hex}");
+        }
         eprintln!("device-proof: conversation   {conversation_ref}");
         eprintln!("device-proof: relay          {relay_url}");
 
@@ -7153,7 +7176,7 @@ mod tests {
                     // which the host never subscribes to, so every reply it
                     // reported sending was discarded in transit and the reply
                     // arm of this proof had never once run.
-                    let reply = sarah_conversation_wrap(
+                    let (reply, _reply_rumor_id) = sarah_conversation_wrap(
                         &sarah_keys,
                         &owner_public_key,
                         &owner_public_key_hex,
@@ -7201,6 +7224,31 @@ mod tests {
                     if announced_grants.get(&projection.grant_ref) != Some(&line) {
                         eprintln!("device-proof: grant {} · {line}", projection.grant_ref);
                         announced_grants.insert(projection.grant_ref.clone(), line);
+                    }
+                    // Whether each seeded source actually reached this grant.
+                    // "The host admits the engram and never projects it" was
+                    // read off a device surface; the host can state it directly.
+                    for (name, source_event_id) in &seeded_sources {
+                        let projected = host.source_was_projected(
+                            &projection.grant_ref,
+                            projection.generation,
+                            source_event_id,
+                        );
+                        if !projected {
+                            continue;
+                        }
+                        let key = format!("projected:{}:{name}", projection.grant_ref);
+                        if announced_grants
+                            .insert(key, source_event_id.clone())
+                            .as_ref()
+                            != Some(source_event_id)
+                        {
+                            eprintln!(
+                                "device-proof: PROJECTED {name} {} · {}",
+                                &source_event_id[..16],
+                                projection.grant_ref
+                            );
+                        }
                     }
                 }
             }
