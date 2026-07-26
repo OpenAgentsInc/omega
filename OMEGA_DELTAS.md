@@ -2970,3 +2970,47 @@ than it sounds, because the harness omega#81's acceptance sentence names —
   `a_truncated_transcript_says_that_it_was_truncated`, and
   `the_transcript_tool_reaches_the_model` in `crates/omega_deltas`; plus the
   suite in `crates/agent/src/tools/read_subagent_transcript_tool.rs`.
+
+### OMEGA-DELTA-0070 — A public Nostr chat skill is in every install
+
+- **Upstream Zed:** one skill is compiled into the binary, `create-skill`.
+  Every other skill is a file the user puts in `~/.agents/skills/` or in
+  `{project}/.agents/skills/`. An agent that must speak on a public NIP-29
+  relay therefore starts with no procedure, and each user writes their own.
+- **Omega now:** `public-nostr-chat` is compiled in. Omega Agent has it with no
+  skill directory, no project, and no network. The file is
+  `crates/agent_skills/builtin/public-nostr-chat/SKILL.md`, and it is an exact
+  copy of the skill the owner wrote in the OpenAgents repository on
+  2026-07-25. The text is unchanged, including its frontmatter.
+- **The copy is deliberate, and a shared path is not permitted.** Omega must
+  build and run from its own tree. A path into a sibling repository is a build
+  dependency on a checkout that a user does not have and an installed
+  application cannot read.
+- **The precedence is unchanged, and this is the point.** `SkillSource::BuiltIn`
+  stays at precedence `0`, so a global or project-local skill with the same name
+  continues to shadow it. A default that a person cannot replace is a removal of
+  their control, not an addition of a capability.
+- **The registration table is now the only list.** `builtin_skills` read the
+  name `create-skill` directly while `BUILTIN_SKILL_ENTRIES` was a second list
+  used only to serve bodies. With one skill the two lists could not disagree, so
+  nothing showed that the loader did not read the table. The loader now reads
+  the table. A skill added to the table alone used to get a body that no catalog
+  entry pointed at.
+- **A built-in that does not parse is recorded.** The loader dropped a parse
+  failure silently. The content is compiled in, so a failure is a defect in the
+  shipped binary, and a skill that is silently absent is the hardest form of it
+  to find. The failure is logged with the name of the skill.
+- **The skill keeps host names out of protocol code.** Relay URL, group
+  identifier, accepted kinds, and limits are configuration that an operator or a
+  public manifest supplies. Omega does not put an OpenAgents host name or group
+  identifier into the client, and the same procedure operates a different
+  NIP-29 relay and group.
+- **Enforced by:** `a_public_nostr_chat_skill_ships_in_the_binary` in
+  `crates/omega_deltas/`, and `public_nostr_chat_is_built_in` plus
+  `every_builtin_entry_loads_through_the_loader` in `crates/agent_skills/`. The
+  first reads the shipped file and the registration. The other two run the real
+  loader and assert that the skill is in the catalog with source `BuiltIn`.
+- **What this does not cover.** It adds a procedure, not a transport. Omega does
+  not sign, connect, or publish anything because this skill is present. The
+  signer, the relay, and the group stay operator-selected, and the skill refuses
+  a shared key and an implicit machine key.

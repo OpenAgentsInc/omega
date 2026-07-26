@@ -84,6 +84,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0054",
     "OMEGA-DELTA-0055",
     "OMEGA-DELTA-0060",
+    "OMEGA-DELTA-0070",
 ];
 
 /// OMEGA-DELTA-0060. The tool that reads a subagent's transcript.
@@ -2065,6 +2066,28 @@ pub const FULL_AUTO_PANEL_PATH: &str = "crates/full_auto_ui/src/panel.rs";
 
 /// OMEGA-DELTA-0050. Gate 8's two closed lists.
 pub const GATE_EIGHT_PATH: &str = "crates/omega_front_door/src/omega_front_door.rs";
+
+/// OMEGA-DELTA-0070. Where every compiled-in skill is registered and loaded.
+pub const BUILTIN_SKILLS_PATH: &str = "crates/agent_skills/agent_skills.rs";
+
+/// OMEGA-DELTA-0070. The shipped public NIP-29 chat skill.
+pub const PUBLIC_NOSTR_CHAT_SKILL_PATH: &str =
+    "crates/agent_skills/builtin/public-nostr-chat/SKILL.md";
+
+/// OMEGA-DELTA-0070. The name the skill is registered and invoked under. The
+/// entry name in the registration table and the `name` in the file's own
+/// frontmatter must both be this, because the loader keys the embedded body by
+/// a synthetic path built from the table name while the catalog entry takes its
+/// name from the frontmatter. A disagreement produces a skill whose body cannot
+/// be fetched.
+pub const PUBLIC_NOSTR_CHAT_SKILL_NAME: &str = "public-nostr-chat";
+
+/// OMEGA-DELTA-0070. The description limit the skill loader enforces, mirrored
+/// from `agent_skills::MAX_SKILL_DESCRIPTION_LEN`. Mirrored rather than
+/// imported: `agent_skills` pulls in gpui, and the delta checks are meant to
+/// run on their own without building the UI framework. The check below asserts
+/// the mirrored value against the source that owns it, so drift fails here.
+pub const MAX_SKILL_DESCRIPTION_LEN: usize = 1024;
 
 /// OMEGA-DELTA-0048. The namespaces zero base hides that the three default
 /// keymaps must still bind.
@@ -8106,6 +8129,185 @@ mod tests {
             "OMEGA-DELTA-0055: {} now knows about pins. Automatic routing is a \
              property of the routing law, not of a mode.",
             mode_path.display()
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // OMEGA-DELTA-0070 — A public Nostr chat skill is in every install
+    // ---------------------------------------------------------------------
+
+    /// OMEGA-DELTA-0070. The public NIP-29 chat skill is compiled in, is
+    /// registered in the one table the loader reads, and keeps the precedence
+    /// that lets a person override it.
+    ///
+    /// The runtime proof is `public_nostr_chat_is_built_in` in
+    /// `crates/agent_skills/`: it runs the real loader and asserts the skill is
+    /// in the catalog with source `BuiltIn`. That test cannot live here,
+    /// because `agent_skills` depends on gpui and these checks are meant to run
+    /// without building the UI framework. This check covers what a text scan
+    /// covers better anyway — that the shipped file, the registration, and the
+    /// runtime proof all still exist, and that the frontmatter the loader
+    /// validates has not drifted out of the limits it validates against.
+    #[test]
+    fn a_public_nostr_chat_skill_ships_in_the_binary() {
+        let skill_path = repository_path(PUBLIC_NOSTR_CHAT_SKILL_PATH);
+        let skill = std::fs::read_to_string(&skill_path).unwrap_or_else(|error| {
+            panic!(
+                "OMEGA-DELTA-0070: cannot read {}: {error}. The skill is \
+                 `include_str!`d, so Omega does not build without it — but a \
+                 later change could point the include somewhere else and leave \
+                 this file behind.",
+                skill_path.display()
+            )
+        });
+
+        let (frontmatter, body) = skill
+            .strip_prefix("---\n")
+            .and_then(|rest| rest.split_once("\n---"))
+            .unwrap_or_else(|| {
+                panic!(
+                    "OMEGA-DELTA-0070: {} has no YAML frontmatter block, so \
+                     the loader cannot parse it and the skill would be \
+                     silently absent from every install.",
+                    skill_path.display()
+                )
+            });
+
+        let field = |key: &str| -> String {
+            frontmatter
+                .lines()
+                .find_map(|line| line.strip_prefix(key))
+                .unwrap_or_else(|| {
+                    panic!(
+                        "OMEGA-DELTA-0070: {} declares no `{key}` in its \
+                         frontmatter. The loader rejects a skill without one.",
+                        skill_path.display()
+                    )
+                })
+                .trim()
+                .to_owned()
+        };
+
+        assert_eq!(
+            field("name:"),
+            PUBLIC_NOSTR_CHAT_SKILL_NAME,
+            "OMEGA-DELTA-0070: {} names itself something other than the name \
+             it is registered under. The catalog entry takes its name from the \
+             frontmatter and the embedded body is keyed by the table name, so \
+             the two disagreeing gives a skill whose body cannot be fetched.",
+            skill_path.display()
+        );
+
+        let description = field("description:");
+        assert!(
+            !description.is_empty() && description.len() <= MAX_SKILL_DESCRIPTION_LEN,
+            "OMEGA-DELTA-0070: the description in {} is {} bytes. \
+             `validate_description` refuses an empty one and refuses more than \
+             {MAX_SKILL_DESCRIPTION_LEN}, and a built-in that fails validation \
+             never reaches the catalog.",
+            skill_path.display(),
+            description.len()
+        );
+
+        for term in ["NIP-29", "relayUrl", "groupId"] {
+            assert!(
+                body.contains(term),
+                "OMEGA-DELTA-0070: {} no longer mentions {term:?}, so it is \
+                 not the public NIP-29 chat procedure this delta ships.",
+                skill_path.display()
+            );
+        }
+
+        let loader_path = repository_path(BUILTIN_SKILLS_PATH);
+        let loader = std::fs::read_to_string(&loader_path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", loader_path.display()));
+
+        assert!(
+            loader.contains(&format!(
+                "pub const MAX_SKILL_DESCRIPTION_LEN: usize = {MAX_SKILL_DESCRIPTION_LEN};"
+            )),
+            "OMEGA-DELTA-0070: {} no longer declares \
+             MAX_SKILL_DESCRIPTION_LEN as {MAX_SKILL_DESCRIPTION_LEN}, so the \
+             limit checked above is not the limit the loader enforces.",
+            loader_path.display()
+        );
+
+        assert!(
+            loader.contains("include_str!(\"builtin/public-nostr-chat/SKILL.md\")"),
+            "OMEGA-DELTA-0070: {} no longer embeds the skill at compile time. \
+             Reading it from a directory would make the skill a file an \
+             install may not have.",
+            loader_path.display()
+        );
+
+        let table = loader
+            .split_once("const BUILTIN_SKILL_ENTRIES")
+            .and_then(|(_, rest)| rest.split_once("];"))
+            .map(|(entries, _)| entries)
+            .unwrap_or_else(|| {
+                panic!(
+                    "OMEGA-DELTA-0070: cannot find the registration table in {}",
+                    loader_path.display()
+                )
+            });
+        assert!(
+            table.contains(&format!("(\"{PUBLIC_NOSTR_CHAT_SKILL_NAME}\"")),
+            "OMEGA-DELTA-0070: {PUBLIC_NOSTR_CHAT_SKILL_NAME} is not in \
+             BUILTIN_SKILL_ENTRIES in {}, so it is compiled into the binary \
+             and reachable by nothing.",
+            loader_path.display()
+        );
+
+        let catalog = function_body(&loader, "builtin_skills").unwrap_or_else(|| {
+            panic!(
+                "OMEGA-DELTA-0070: cannot find builtin_skills in {}",
+                loader_path.display()
+            )
+        });
+        assert!(
+            catalog.contains("BUILTIN_SKILL_ENTRIES"),
+            "OMEGA-DELTA-0070: builtin_skills in {} no longer reads the \
+             registration table. It used to name `create-skill` directly while \
+             the table was a second list used only to serve bodies; with one \
+             entry the two could not disagree, so nothing showed that adding a \
+             skill to the table added nothing to the catalog.",
+            loader_path.display()
+        );
+        assert!(
+            !catalog.contains("\"create-skill\"") && !catalog.contains("_CONTENT"),
+            "OMEGA-DELTA-0070: builtin_skills in {} names an individual skill \
+             again. A per-skill line beside the table is the second list this \
+             delta removed.",
+            loader_path.display()
+        );
+
+        let precedence = function_body(&loader, "precedence").unwrap_or_else(|| {
+            panic!(
+                "OMEGA-DELTA-0070: cannot find SkillSource::precedence in {}",
+                loader_path.display()
+            )
+        });
+        assert!(
+            precedence.contains("Self::BuiltIn => 0,"),
+            "OMEGA-DELTA-0070: a built-in skill no longer has the lowest \
+             precedence in {}. Shipping a default that a global or \
+             project-local skill of the same name cannot shadow takes a \
+             person's override away instead of giving them a capability.",
+            loader_path.display()
+        );
+
+        assert!(
+            loader.contains("fn public_nostr_chat_is_built_in()"),
+            "OMEGA-DELTA-0070: the runtime proof is gone from {}. Everything \
+             above reads text; only that test runs the loader and asserts the \
+             skill reaches the catalog as BuiltIn.",
+            loader_path.display()
+        );
+        assert!(
+            loader.contains("fn every_builtin_entry_loads_through_the_loader()"),
+            "OMEGA-DELTA-0070: the table-to-catalog proof is gone from {}, so \
+             a registered skill that never loads would be caught by nothing.",
+            loader_path.display()
         );
     }
 

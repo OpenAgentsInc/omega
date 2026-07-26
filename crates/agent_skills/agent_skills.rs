@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
 use url::Url;
+use util::ResultExt as _;
 use util::paths::component_matches_ignore_ascii_case;
 
 /// First segment of the skills directory path: `.agents`.
@@ -697,13 +698,30 @@ pub fn read_skill_body_from_content(
 /// Content of the built-in `create-skill` SKILL.md, embedded at compile time.
 const CREATE_SKILL_CONTENT: &str = include_str!("builtin/create-skill/SKILL.md");
 
+/// OMEGA-DELTA-0070. Content of the built-in `public-nostr-chat` SKILL.md,
+/// embedded at compile time.
+const PUBLIC_NOSTR_CHAT_CONTENT: &str = include_str!("builtin/public-nostr-chat/SKILL.md");
+
 /// Returns the set of skills that are compiled into the Zed binary.
+///
+/// Reads [`BUILTIN_SKILL_ENTRIES`], which is also what `builtin_skill_content`
+/// serves bodies from. An earlier version named `create-skill` here directly,
+/// so the table and the loader were two lists that happened to agree while
+/// there was only one entry; a second built-in added to the table alone would
+/// have been served a body it never had a catalog entry for.
+///
+/// A built-in whose frontmatter does not parse is logged rather than
+/// swallowed: it is a compile-time-embedded file, so a failure is a defect in
+/// the shipped binary and the alternative is a skill that is silently absent.
 pub fn builtin_skills() -> Vec<Skill> {
-    let mut skills = Vec::new();
-    if let Ok(skill) = parse_builtin_skill("create-skill", CREATE_SKILL_CONTENT) {
-        skills.push(skill);
-    }
-    skills
+    BUILTIN_SKILL_ENTRIES
+        .iter()
+        .filter_map(|&(name, content)| {
+            parse_builtin_skill(name, content)
+                .with_context(|| format!("built-in skill `{name}` failed to parse"))
+                .log_err()
+        })
+        .collect()
 }
 
 /// Parse a built-in skill from its embedded SKILL.md content. The skill
@@ -728,9 +746,18 @@ fn parse_builtin_skill(name: &str, content: &'static str) -> Result<Skill> {
     })
 }
 
-/// All built-in skills as `(name, raw_content)` pairs. Used by
-/// `builtin_skill_content` to serve the full SKILL.md without disk I/O.
-const BUILTIN_SKILL_ENTRIES: &[(&str, &str)] = &[("create-skill", CREATE_SKILL_CONTENT)];
+/// All built-in skills as `(name, raw_content)` pairs. This is the single
+/// registration point: [`builtin_skills`] builds the catalog from it and
+/// `builtin_skill_content` serves the full SKILL.md from it without disk I/O.
+///
+/// OMEGA-DELTA-0070 added `public-nostr-chat`. The entry name must equal the
+/// `name` in that file's frontmatter, because the synthetic
+/// `<built-in>/{name}/SKILL.md` path built from this column is the key
+/// `builtin_skill_content` looks the body up by.
+const BUILTIN_SKILL_ENTRIES: &[(&str, &str)] = &[
+    ("create-skill", CREATE_SKILL_CONTENT),
+    ("public-nostr-chat", PUBLIC_NOSTR_CHAT_CONTENT),
+];
 
 /// Look up the full embedded content of a built-in skill by its
 /// synthetic file path. Returns `None` if the path doesn't match any
@@ -2175,6 +2202,62 @@ description: A skill with no body content
         // base64url (no-pad) output must not require percent-encoding.
         assert!(!data.contains('+') && !data.contains('/') && !data.contains('='));
         assert_eq!(decode_skill_share_link(&link).unwrap(), content);
+    }
+
+    /// Every entry in `BUILTIN_SKILL_ENTRIES` reaches the catalog. Written
+    /// after `builtin_skills` was found naming `create-skill` directly while
+    /// the table it shared with `builtin_skill_content` was a separate list:
+    /// with one entry the two could not disagree, so nothing observed that the
+    /// loader was not reading the table at all.
+    #[test]
+    fn every_builtin_entry_loads_through_the_loader() {
+        let loaded = builtin_skills();
+        assert_eq!(
+            loaded.len(),
+            BUILTIN_SKILL_ENTRIES.len(),
+            "loaded {:?} but the table registers {:?}",
+            loaded.iter().map(|s| &s.name).collect::<Vec<_>>(),
+            BUILTIN_SKILL_ENTRIES
+                .iter()
+                .map(|(name, _)| name)
+                .collect::<Vec<_>>()
+        );
+        for (name, content) in BUILTIN_SKILL_ENTRIES {
+            let skill = loaded
+                .iter()
+                .find(|skill| skill.name == *name)
+                .unwrap_or_else(|| panic!("built-in skill {name:?} is not in the catalog"));
+            assert_eq!(skill.source, SkillSource::BuiltIn);
+            assert!(!skill.description.trim().is_empty());
+            // The synthetic path is the key `builtin_skill_content` serves
+            // bodies by, so a table name that disagrees with the frontmatter
+            // name would produce a skill whose body cannot be fetched.
+            assert_eq!(
+                builtin_skill_content(&skill.skill_file_path),
+                Some(*content),
+                "no embedded content is reachable at {}",
+                skill.skill_file_path.display()
+            );
+            let body = skill.embedded_body.expect("built-in bodies are embedded");
+            assert!(!body.trim().is_empty());
+        }
+    }
+
+    /// OMEGA-DELTA-0070. The public Nostr chat skill ships in the binary.
+    #[test]
+    fn public_nostr_chat_is_built_in() {
+        let skill = builtin_skills()
+            .into_iter()
+            .find(|skill| skill.name == "public-nostr-chat")
+            .expect("public-nostr-chat is compiled in");
+        assert_eq!(skill.source, SkillSource::BuiltIn);
+        assert!(validate_description(&skill.description).is_ok());
+        assert!(!skill.disable_model_invocation);
+        let body = skill.embedded_body.expect("body is embedded");
+        assert!(
+            body.contains("NIP-29") && body.contains("relayUrl"),
+            "the embedded body is not the public Nostr chat skill"
+        );
     }
 
     #[test]
