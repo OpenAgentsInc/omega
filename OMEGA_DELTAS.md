@@ -2057,10 +2057,18 @@ than it sounds, because the harness omega#81's acceptance sentence names —
   `refusal` stop reason and it is the wrong one: it means *the prompt and
   everything after it will not be included in the next prompt*, and stock Zed
   1.12.0 implements that literally — it dropped the turn and showed a refusal
-  banner with **no disclosure at all**. That was watched happening before this
-  shape was chosen. The turn genuinely ends, so it says `end_turn`, and what did
-  not happen is in the message the operator reads and in the typed record beside
-  it.
+  banner with **no disclosure at all**. The turn genuinely ends, so it says
+  `end_turn`, and what did not happen is in the message the operator reads and
+  in the typed record beside it. **Both shapes are photographed rendering**, in
+  stock Zed 1.12.0 attached to this crate's socket, same build and same prompt,
+  one value apart:
+  `crates/omega_acp_server/evidence/2026-07-26-zed-1.12.0-served-turn-end_turn.png`
+  keeps the turn and shows the executor and origin disclosure;
+  `…-served-turn-refusal.png` shows what the rejected shape cost — the turn
+  gone from the thread and a bare "Request Refused" banner guessing at a
+  *content policy* violation that never happened. A test asserting
+  `stopReason == "refusal"` was green across that entire difference, which is
+  why this bullet is answered with pixels and not with a passing assertion.
 - **What this does not cover.** The listener runs in the Omega process under the
   supervisor's control, **not** inside the packaged `@openagentsinc/omega-effectd`
   daemon; that daemon lives in the openagents repository and this packet is
