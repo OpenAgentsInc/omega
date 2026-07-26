@@ -874,13 +874,21 @@ import subprocess
 from pathlib import Path
 
 
-def worktree_is_dirty() -> bool:
-    """Ask git whether the tree this candidate was built from was recorded.
+def worktree_state() -> tuple[bool, list[str]]:
+    """Read whether the tree this candidate was built from was recorded.
 
-    `require_clean_checkout` refuses to start a build from a dirty tree, so
-    this normally answers false — but it has to be *read*, not asserted. It was
-    a Python literal, which made a provenance field that cannot disagree with
-    the build no matter what the tree held.
+    `require_clean_checkout` refuses to *start* from a dirty tree, so anything
+    seen here appeared during the build. This runs after packaging, and the
+    build generates `assets/licenses.md` through `script/generate-licenses`,
+    which is untracked — so every candidate recorded `dirty: true` on the
+    strength of its own output.
+
+    That reads as "the commit does not determine these bytes", which is the
+    opposite of true, and an independent reviewer correctly treated it as
+    weakening the source binding. A bare boolean cannot tell a reviewer which
+    reading applies, so the entries are recorded beside it: a tracked
+    modification really does break the commit-to-bytes binding, an untracked
+    build output does not.
     """
     status = subprocess.run(
         ["git", "status", "--porcelain"],
@@ -888,9 +896,12 @@ def worktree_is_dirty() -> bool:
         text=True,
         check=True,
     )
-    return bool(status.stdout.strip())
+    entries = [line for line in status.stdout.splitlines() if line.strip()]
+    tracked = [line for line in entries if not line.startswith("??")]
+    return bool(tracked), entries
 
 
+source_is_dirty, worktree_entries = worktree_state()
 icons = json.loads(os.environ["OMEGA_RC_ICON_JSON"])
 packaged_bindings = json.loads(os.environ["OMEGA_RC_PACKAGED_BINDINGS_JSON"])
 upstream = os.environ.get("OMEGA_RC_UPSTREAM_COMMIT") or None
@@ -932,7 +943,11 @@ record = {
     "source": {
         "commit": os.environ["OMEGA_RC_COMMIT"],
         "upstream_commit": upstream,
-        "dirty": worktree_is_dirty(),
+        # True only for a *tracked* modification, which is what actually
+        # breaks the commit-to-bytes binding. The entries are recorded beside
+        # it so a reader never has to guess which kind they are looking at.
+        "dirty": source_is_dirty,
+        "worktree_entries": worktree_entries,
         "repository": "https://github.com/OpenAgentsInc/omega",
     },
     "toolchains": {
