@@ -6326,9 +6326,17 @@ mod tests {
     ) -> Result<(), SarahConversationError> {
         match relay.publish(record) {
             Err(SarahConversationError::IdentityRequired) => {
-                let challenge = relay
-                    .auth_challenge()
-                    .expect("relay must expose a challenge after refusing the publish");
+                // Every step here returns rather than panics. A relay that
+                // closed an idle socket fails *inside* this branch — `publish`
+                // reports `IdentityRequired`, control comes here, and the AUTH
+                // write hits the reset — so an `expect` on this path takes the
+                // whole harness down before any retry wrapper can see it, and
+                // reports a dead socket as Sarah failing to answer.
+                let challenge = relay.auth_challenge().ok_or_else(|| {
+                    SarahConversationError::Relay(
+                        "relay refused the publish without exposing a challenge".into(),
+                    )
+                })?;
                 let auth_event = EventBuilder::new(Kind::Custom(22242), "")
                     .tag(Tag::parse(["relay", auth_url]).expect("relay tag"))
                     .tag(
@@ -6337,9 +6345,7 @@ mod tests {
                     )
                     .sign_with_keys(keys)
                     .expect("signed auth event");
-                relay
-                    .authenticate(&auth_event)
-                    .expect("NIP-42 authenticate");
+                relay.authenticate(&auth_event)?;
                 relay.publish(record)
             }
             other => other,
