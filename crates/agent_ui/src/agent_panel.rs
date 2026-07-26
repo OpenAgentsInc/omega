@@ -3686,6 +3686,72 @@ impl AgentPanel {
         })
     }
 
+    /// Open a thread and submit one message on it, with nobody at the keyboard.
+    ///
+    /// `OMEGA-DELTA-0093`, omega#100. Synthetic keystrokes are unusable on a
+    /// busy desktop — twice, an attempt to prove something about a turn failed
+    /// because the keys landed in another application — so every visual claim
+    /// about a turn depends on being able to send one without the window
+    /// having focus.
+    ///
+    /// **This is not a second way to send.** It hands
+    /// [`AgentInitialContent::ContentBlock`] with `auto_submit` to
+    /// [`Self::external_thread`], which is the same call the Git panel's
+    /// "review this branch diff" action already makes. The content lands in the
+    /// composer through `MessageEditor::set_message`, and the submit is
+    /// `ThreadView::send` — the identical function the Enter key reaches. A
+    /// control surface that bypassed the production path would prove nothing
+    /// about the production path, which is the whole reason this is a thin
+    /// wrapper rather than a driver of its own.
+    ///
+    /// Returns whether a thread was opened. `false` means the panel had no
+    /// project, which `external_thread` refuses on: a thread whose file tools
+    /// have no worktree is the `OMEGA-DELTA-0054` failure, and a driver that
+    /// reported success there would be reporting that a turn had started when
+    /// none had.
+    pub fn omega_send_first_message(
+        &mut self,
+        text: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !self.has_open_project(cx) {
+            return false;
+        }
+        self.external_thread(
+            None,
+            None,
+            None,
+            None,
+            Some(AgentInitialContent::ContentBlock {
+                blocks: vec![acp::ContentBlock::Text(acp::TextContent::new(text))],
+                auto_submit: true,
+            }),
+            true,
+            AgentThreadSource::AgentPanel,
+            window,
+            cx,
+        );
+        true
+    }
+
+    /// The thread the panel is showing, once it has one.
+    ///
+    /// `OMEGA-DELTA-0093`. Connecting an agent and completing ACP
+    /// initialization are real I/O, so the thread is not there the instant
+    /// [`Self::omega_send_first_message`] returns. An unattended driver polls
+    /// this rather than sleeping for a duration somebody guessed.
+    pub fn omega_active_acp_thread(&self, cx: &App) -> Option<Entity<AcpThread>> {
+        Some(
+            self.active_conversation_view()?
+                .read(cx)
+                .active_thread()?
+                .read(cx)
+                .thread
+                .clone(),
+        )
+    }
+
     fn external_thread(
         &mut self,
         agent_choice: Option<crate::Agent>,

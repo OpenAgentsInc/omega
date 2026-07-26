@@ -2827,6 +2827,13 @@ than it sounds, because the harness omega#81's acceptance sentence names —
   cost something twice.
 - **Enforced by:** `zero_base_opens_the_directory_it_was_started_in` in
   `crates/omega_deltas/`, and the seven unit tests in `crates/omega_workdir/`.
+- **The check's spelling changed with `OMEGA-DELTA-0093`, and its property did
+  not.** It used to require the literal text
+  `if open_zero_base_project(&app_state, cx).await {`. The driven send has to
+  run after *either* branch of the startup path rather than only after the
+  fallback, which meant negating that condition, so the check now asserts the
+  order directly: the project attempt comes first and the empty workspace is
+  what happens when it fails. Recorded here rather than silently adjusted.
 - **What this does not cover.** It does not decide which executor the turn runs
   on, which is `OMEGA-DELTA-0049`'s and the routing delta's business. It does
   not persist the choice — a folder chosen with the control lasts as long as the
@@ -3480,3 +3487,66 @@ than it sounds, because the harness omega#81's acceptance sentence names —
   router is built in a launched process, which is the path `cargo check`,
   `cargo test` and clippy were all green across when it was broken before.
 
+### OMEGA-DELTA-0093 — A turn can be driven without a keyboard, over the send a typed message uses
+
+- **Upstream Zed:** an agent turn starts because somebody typed into the
+  composer and pressed Enter. There is no way to start one from the command
+  line.
+- **Omega, before this:** none either, and it cost real time. Proving that the
+  transcript grows upward failed twice because the synthetic keystrokes landed
+  in another application — a busy desktop steals focus, and a key sent to a
+  window that no longer has it is a key sent somewhere else. Every visual claim
+  about a turn depends on being able to send one *without* the window having
+  focus, so every visual claim was blocked on a person sitting there.
+- **Omega now:** `omega --omega-send "…"` opens the thread this process would
+  have opened anyway and submits that text on it. `--omega-send-transcript`
+  writes the thread's Markdown once the turn settles, `--omega-quit-after-send`
+  ends the process with status `0` for a completed turn and non-zero otherwise,
+  and `--omega-send-timeout-secs` bounds the wait. Launch, detect, send, render
+  and check become one command a script can branch on.
+- **It is not a second way to send, and that is the point.**
+  `AgentPanel::omega_send_first_message` hands
+  `AgentInitialContent::ContentBlock` with `auto_submit` to `external_thread` —
+  the same call the Git panel's "review this branch diff" action already makes.
+  The text lands in the composer through `MessageEditor::set_message` and the
+  submit is `ThreadView::send`, the identical function the Enter key reaches, so
+  mention resolution, the message queue and the send disposition all still
+  happen. `AcpThread::send` is public and reachable from `crates/zed`, so the
+  shortest way to make this flag "work" would have been to build a prompt and
+  push it at the connection; the check refuses that by name, because a control
+  surface that bypasses the production path proves nothing about the production
+  path.
+- **The wait is "generating, then idle", never just "idle".** A thread is idle
+  for the moment between being built and the turn starting. A driver that
+  waited only for idle would report a completed turn before the first token —
+  a green unattended run that means nothing, which is the failure this whole
+  deliverable exists to stop being possible. Both waits are checked.
+- **Nothing sleeps for a guessed duration.** Connecting an agent and completing
+  ACP initialization are real I/O whose length is a property of the machine.
+  Every wait polls against one deadline and names what it was waiting for when
+  it runs out, because "the driven turn timed out" and "timed out waiting for
+  the agent panel" send a reader to different places.
+- **A thread with no project is a refusal, not a success.**
+  `external_thread` already returns early when the panel has no project, and
+  silently doing nothing would have reported that a turn had started when none
+  had. `omega_send_first_message` checks first and says so. That case is
+  `OMEGA-DELTA-0054`'s: a thread whose `grep`, `read_file` and `terminal` have
+  no worktree is the one that told the owner his code was an empty workspace.
+- **The flag is read from the command line and from nowhere else.** The same
+  shape as `OMEGA-DELTA-0047`'s zero base, and for the same reason:
+  `restore_or_create_workspace` is four call sites deep and takes no `Args`, so
+  a process global set once at startup keeps a command-line concern out of four
+  signatures that have nothing to do with it. Nothing is written anywhere, so
+  ending the process leaves nothing to repair.
+- **The driver runs after every branch of the startup path.** The zero-base
+  branch used to return early once it had opened a project, which would have
+  made `--omega-send` work on an empty workspace and silently do nothing on the
+  one case that matters.
+- **Enforced by:** `a_turn_can_be_driven_over_the_send_a_typed_message_uses` in
+  `crates/omega_deltas/`.
+- **What this does not cover.** It does not capture a window — that is the
+  visual runner's job, and it is a separate binary. It does not decide which
+  executor the turn runs on; `OMEGA-DELTA-0055` and `OMEGA-DELTA-0092` do. And
+  like every mode entered by a command-line flag, it cannot be reached by
+  `cargo check`, `cargo test` or clippy: the check above reads the source, and
+  only launching the binary with the flag proves the sequence runs.

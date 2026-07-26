@@ -303,6 +303,11 @@ fn main() {
         omega_zero_base::enter_from_command_line();
     }
 
+    // OMEGA-DELTA-0093. Read beside zero base, and for the same reason: both
+    // are command-line facts that a surface deep in startup has to consult
+    // later, and neither is written anywhere.
+    read_omega_send_from_command_line(&args);
+
     // Set custom data directory.
     if let Some(dir) = &args.user_data_dir {
         paths::set_custom_data_dir(dir);
@@ -1587,30 +1592,38 @@ pub(crate) async fn restore_or_create_workspace(
         // searches, every one returned no matches, and the agent reported that
         // the workspace appeared to be empty. Routing the first message to a
         // coding agent is worth nothing if the agent opens on nothing.
-        if open_zero_base_project(&app_state, cx).await {
-            return Ok(());
-        }
-
-        cx.update(|cx| {
-            workspace::open_new(
-                Default::default(),
-                app_state,
-                cx,
-                |_workspace, window, cx| {
-                    let restore_on_startup = WorkspaceSettings::get_global(cx).restore_on_startup;
-                    match restore_on_startup {
-                        // OMEGA-DELTA-0019. See above: the launchpad choice
-                        // stands, and the empty buffer becomes the front door.
-                        workspace::RestoreOnStartupBehavior::Launchpad => {}
-                        _ => {
-                            agent_ui::AgentPanel::open_front_door(window, cx);
+        if !open_zero_base_project(&app_state, cx).await {
+            cx.update(|cx| {
+                workspace::open_new(
+                    Default::default(),
+                    app_state,
+                    cx,
+                    |_workspace, window, cx| {
+                        let restore_on_startup =
+                            WorkspaceSettings::get_global(cx).restore_on_startup;
+                        match restore_on_startup {
+                            // OMEGA-DELTA-0019. See above: the launchpad choice
+                            // stands, and the empty buffer becomes the front door.
+                            workspace::RestoreOnStartupBehavior::Launchpad => {}
+                            _ => {
+                                agent_ui::AgentPanel::open_front_door(window, cx);
+                            }
                         }
-                    }
-                },
-            )
-        })
-        .await?;
+                    },
+                )
+            })
+            .await?;
+        }
     }
+
+    // OMEGA-DELTA-0093. After every branch above, so the driven send reaches
+    // the window a person would have been looking at. The zero-base branch used
+    // to return early here, which would have made `--omega-send` work on an
+    // empty workspace and silently do nothing on the one case that matters —
+    // and `OMEGA-DELTA-0040`'s identity wait stays where it is, at the top of
+    // this same function, because the ordering it binds is not this delta's to
+    // move.
+    drive_omega_send(cx).await;
 
     Ok(())
 }
@@ -1663,6 +1676,168 @@ async fn open_zero_base_project(app_state: &Arc<AppState>, cx: &mut AsyncApp) ->
             );
             false
         }
+    }
+}
+
+/// What `--omega-send` asked for, read from this process's command line.
+///
+/// `OMEGA-DELTA-0093`, omega#100. A process global set once at startup, for the
+/// reason `OMEGA-DELTA-0047` gives about zero base: `restore_or_create_workspace`
+/// is four call sites deep and takes no `Args`, and threading the flag through
+/// them would put a command-line concern into four signatures that have nothing
+/// to do with it. Like zero base, it is read from the command line and from
+/// nowhere else — no setting, no environment variable, nothing persisted — so
+/// ending the process leaves nothing to repair.
+#[derive(Debug)]
+pub(crate) struct OmegaSend {
+    text: String,
+    transcript: Option<PathBuf>,
+    quit: bool,
+    timeout: std::time::Duration,
+}
+
+static OMEGA_SEND: OnceLock<Option<OmegaSend>> = OnceLock::new();
+
+/// Record `--omega-send` and its companions, once.
+fn read_omega_send_from_command_line(args: &Args) {
+    let _ = OMEGA_SEND.set(args.omega_send.clone().map(|text| OmegaSend {
+        text,
+        transcript: args.omega_send_transcript.clone(),
+        quit: args.omega_quit_after_send,
+        timeout: std::time::Duration::from_secs(args.omega_send_timeout_secs),
+    }));
+}
+
+/// The send this process was started to make, if it was started to make one.
+fn omega_send_from_command_line() -> Option<&'static OmegaSend> {
+    OMEGA_SEND.get()?.as_ref()
+}
+
+/// Send one message on the thread this process opened, and wait for the turn.
+///
+/// `OMEGA-DELTA-0093`, omega#100. The whole sequence a person would do by hand
+/// — wait for the window, wait for the thread, type, press Enter, watch the
+/// turn finish, read the transcript — with nobody present for any of it.
+///
+/// Everything here waits by polling with a deadline rather than by sleeping for
+/// a duration somebody guessed. Connecting an external agent and completing ACP
+/// initialization are real I/O whose length is a property of the machine, and a
+/// fixed sleep is how an unattended run becomes either slow or flaky depending
+/// on the day.
+///
+/// The send itself is [`AgentPanel::omega_send_first_message`], which is a thin
+/// wrapper over the call the Git panel's "review this branch diff" action
+/// already makes. Nothing in this function talks to a connection, builds a
+/// prompt, or touches an `AcpThread` except to read its status: a control
+/// surface that bypassed the production path would prove nothing about the
+/// production path.
+async fn drive_omega_send(cx: &mut AsyncApp) {
+    let Some(send) = omega_send_from_command_line() else {
+        return;
+    };
+    let deadline = Instant::now() + send.timeout;
+    let outcome = run_omega_send(send, deadline, cx).await;
+    match &outcome {
+        Ok(()) => log::info!("OMEGA-DELTA-0093: the driven turn completed"),
+        Err(error) => log::error!("OMEGA-DELTA-0093: the driven turn did not complete: {error:#}"),
+    }
+    if send.quit {
+        // Exit status, not a log line: an unattended run has to be a command a
+        // script can branch on. A window that stayed alive is not a turn that
+        // happened, and that mistake has been made here before.
+        let code = i32::from(outcome.is_err());
+        log::info!("OMEGA-DELTA-0093: quitting after the driven turn, status {code}");
+        cx.update(|cx| cx.quit());
+        process::exit(code);
+    }
+}
+
+async fn run_omega_send(
+    send: &OmegaSend,
+    deadline: Instant,
+    cx: &mut AsyncApp,
+) -> Result<()> {
+    let window = omega_send_wait_for(deadline, cx, "a workspace window", |cx| {
+        cx.windows()
+            .into_iter()
+            .find_map(|handle| handle.downcast::<workspace::Workspace>())
+    })
+    .await?;
+
+    let panel = omega_send_wait_for(deadline, cx, "the agent panel", |cx| {
+        window
+            .read_with(cx, |workspace, cx| workspace.panel::<AgentPanel>(cx))
+            .ok()
+            .flatten()
+    })
+    .await?;
+
+    // `omega_send_first_message` refuses when the panel has no project, and the
+    // refusal is reported rather than retried: a thread whose file tools have
+    // no worktree is `OMEGA-DELTA-0054`'s failure, and waiting for it to stop
+    // being true would just spend the whole budget.
+    let opened = cx.update_window(window.into(), |_, window, cx| {
+        panel.update(cx, |panel, cx| {
+            panel.omega_send_first_message(send.text.clone(), window, cx)
+        })
+    })?;
+    anyhow::ensure!(
+        opened,
+        "no thread was opened: the panel has no project, so the thread's file \
+         tools would have had nothing to operate on"
+    );
+
+    let thread = omega_send_wait_for(deadline, cx, "the thread to connect", |cx| {
+        panel.read(cx).omega_active_acp_thread(cx)
+    })
+    .await?;
+
+    // Idle *after* generating, never the idle before it. A thread is idle for
+    // the moment between being built and the turn starting, so a plain "wait
+    // for idle" reports a completed turn before the first token — which is a
+    // green unattended run that proves nothing, the exact failure this whole
+    // deliverable exists to stop being possible.
+    omega_send_wait_for(deadline, cx, "the turn to start", |cx| {
+        (thread.read(cx).status() != acp_thread::ThreadStatus::Idle).then_some(())
+    })
+    .await?;
+    omega_send_wait_for(deadline, cx, "the turn to finish", |cx| {
+        (thread.read(cx).status() == acp_thread::ThreadStatus::Idle).then_some(())
+    })
+    .await?;
+
+    if let Some(path) = &send.transcript {
+        let transcript = cx.update(|cx| thread.read(cx).to_markdown(cx));
+        std::fs::write(path, transcript)
+            .with_context(|| format!("writing the transcript to {}", path.display()))?;
+        log::info!("OMEGA-DELTA-0093: transcript written to {}", path.display());
+    }
+    Ok(())
+}
+
+/// Poll `look` until it answers or the deadline passes.
+///
+/// `what` is what the caller was waiting for, and it is in the error rather
+/// than in a log line, because "the driven turn timed out" and "the driven turn
+/// timed out waiting for the agent panel" send a reader to different places.
+async fn omega_send_wait_for<T>(
+    deadline: Instant,
+    cx: &mut AsyncApp,
+    what: &str,
+    mut look: impl FnMut(&mut App) -> Option<T>,
+) -> Result<T> {
+    loop {
+        if let Some(found) = cx.update(&mut look) {
+            return Ok(found);
+        }
+        anyhow::ensure!(
+            Instant::now() < deadline,
+            "timed out waiting for {what}; raise --omega-send-timeout-secs if \
+             this machine is simply slow"
+        );
+        cx.background_executor()
+            .timer(std::time::Duration::from_millis(50))
+            .await;
     }
 }
 
@@ -1814,6 +1989,42 @@ struct Args {
     /// something to edit, so each implies the editor without this flag.
     #[arg(long)]
     full_editor: bool,
+
+    /// Sends one message on the thread Omega opens, with nobody at the keyboard.
+    ///
+    /// OMEGA-DELTA-0093. The text is put in the composer and submitted through
+    /// the same call the Enter key reaches, so what this drives is the shipped
+    /// send and not a second one beside it. Synthetic keystrokes are unusable
+    /// on a busy desktop — twice, keys meant for Omega landed in another
+    /// application — and every visual claim about a turn depends on being able
+    /// to send one without the window having focus.
+    #[arg(long, value_name = "TEXT")]
+    omega_send: Option<String>,
+
+    /// Writes the thread's transcript here once the turn settles.
+    ///
+    /// OMEGA-DELTA-0093. What a script checks. A window that stayed alive is
+    /// not a turn that happened, and a transcript is the smallest artefact that
+    /// tells the two apart without a screen capture.
+    #[arg(long, value_name = "PATH", requires = "omega_send")]
+    omega_send_transcript: Option<PathBuf>,
+
+    /// Quits when the turn started by --omega-send settles.
+    ///
+    /// OMEGA-DELTA-0093. Exit status 0 when the turn completed, non-zero when
+    /// it did not — so an unattended run is a command a script can branch on
+    /// rather than a process somebody has to go and look at.
+    #[arg(long, requires = "omega_send")]
+    omega_quit_after_send: bool,
+
+    /// How long to wait for that turn before giving up, in seconds.
+    #[arg(
+        long,
+        value_name = "SECONDS",
+        default_value = "300",
+        requires = "omega_send"
+    )]
+    omega_send_timeout_secs: u64,
 
     /// Pairs of file paths to diff. Can be specified multiple times.
     /// When directories are provided, recurses into them and shows all changed files in a single multi-diff view.

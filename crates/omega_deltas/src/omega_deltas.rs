@@ -90,6 +90,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0090",
     "OMEGA-DELTA-0091",
     "OMEGA-DELTA-0092",
+    "OMEGA-DELTA-0093",
 ];
 
 /// OMEGA-DELTA-0080. Where the agent panel declares its result-body ceiling and
@@ -5561,6 +5562,21 @@ mod tests {
         None
     }
 
+    /// A source file with its line comments removed.
+    ///
+    /// `contains` cannot tell a call from a call somebody commented out, and a
+    /// commented-out call is exactly how a wiring check stays green across the
+    /// change that unwires it. Line comments only: a block comment spanning a
+    /// call is not a spelling anybody reaches for, and removing them properly
+    /// means tracking string literals.
+    fn uncommented(source: &str) -> String {
+        source
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
     /// OMEGA-DELTA-0042. A source file with its test module removed.
     ///
     /// Every scan below asks "does the shipped lane name this?", and the tests
@@ -8187,11 +8203,36 @@ mod tests {
         let startup_path = repository_path(STARTUP_OPEN_PATH);
         let startup = std::fs::read_to_string(&startup_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", startup_path.display()));
+        // Order, not spelling. This used to require the exact text
+        // `if open_zero_base_project(&app_state, cx).await {`, and
+        // `OMEGA-DELTA-0093` had to negate that condition so the driven send
+        // could run after either branch rather than only after the fallback.
+        // The property the check is for is unchanged and is now asserted
+        // directly: the project attempt comes first, and the empty workspace is
+        // what happens when it fails.
+        let attempt = startup
+            .find("open_zero_base_project(&app_state, cx).await")
+            .unwrap_or_else(|| {
+                panic!(
+                    "OMEGA-DELTA-0054: {} no longer tries to open a project, so \
+                     zero base opens with no worktrees and every file tool the \
+                     thread holds reads nothing.",
+                    startup_path.display()
+                )
+            });
+        let fallback = startup[attempt..]
+            .find("workspace::open_new(")
+            .unwrap_or_else(|| {
+                panic!(
+                    "OMEGA-DELTA-0054: {} no longer falls back to an empty \
+                     workspace after the project attempt.",
+                    startup_path.display()
+                )
+            });
         assert!(
-            startup.contains("if open_zero_base_project(&app_state, cx).await {"),
-            "OMEGA-DELTA-0054: {} no longer tries to open a project before \
-             falling back to an empty workspace, so zero base opens with no \
-             worktrees and every file tool the thread holds reads nothing.",
+            fallback > 0,
+            "OMEGA-DELTA-0054: {} opens an empty workspace before it tries to \
+             open the working directory as a project.",
             startup_path.display()
         );
         assert!(
@@ -8521,6 +8562,121 @@ mod tests {
             "OMEGA-DELTA-0092: {} connects the lane without going through the \
              resolution, so the derivation exists and nothing reaches it.",
             lane_path.display()
+        );
+    }
+
+    /// OMEGA-DELTA-0093. A turn can be driven without a keyboard, over the
+    /// send a typed message already uses.
+    ///
+    /// The flag has to exist, the startup path has to reach the driver, and the
+    /// driver has to go through the panel rather than around it. The last is
+    /// the one worth a mechanical check: `AcpThread::send` is public and
+    /// reachable from `crates/zed`, so the shortest way to make this flag
+    /// "work" is to build a prompt and push it at the connection — which would
+    /// skip the composer, the mention resolution, the queue and the send
+    /// disposition, and would prove nothing about the path a person uses. A
+    /// control surface that bypasses the production path proves nothing about
+    /// the production path.
+    ///
+    /// The wait is checked too. A thread is idle for the moment between being
+    /// built and the turn starting, so a driver that waited only for idle would
+    /// report a completed turn before the first token: a green unattended run
+    /// that means nothing, which is exactly what this deliverable exists to
+    /// stop being possible.
+    #[test]
+    fn a_turn_can_be_driven_over_the_send_a_typed_message_uses() {
+        let startup_path = repository_path(STARTUP_OPEN_PATH);
+        let startup = std::fs::read_to_string(&startup_path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", startup_path.display()));
+        assert!(
+            startup.contains("omega_send: Option<String>"),
+            "OMEGA-DELTA-0093: {} no longer declares --omega-send. Synthetic \
+             keystrokes are unusable on a busy desktop, and every visual claim \
+             about a turn depends on sending one without the window having \
+             focus.",
+            startup_path.display()
+        );
+        // Commented out is not called. The first spelling of this check was
+        // `startup.contains("drive_omega_send(cx).await;")`, and prefixing the
+        // line with `//` left it green — observed directly while falsifying
+        // this test.
+        assert!(
+            uncommented(&startup).contains("drive_omega_send(cx).await;"),
+            "OMEGA-DELTA-0093: {} parses the flag and never acts on it.",
+            startup_path.display()
+        );
+
+        // Both halves of the driver, because they are one path split for
+        // readability: the outer function owns the deadline and the exit
+        // status, the inner one owns the sequence. Reading only the inner one
+        // left a bypass planted in the outer one unnoticed — also observed
+        // while falsifying this test.
+        let driver = ["drive_omega_send", "run_omega_send"]
+            .into_iter()
+            .map(|name| {
+                function_body(&startup, name).unwrap_or_else(|| {
+                    panic!(
+                        "OMEGA-DELTA-0093: cannot find `{name}` in {}",
+                        startup_path.display()
+                    )
+                })
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            driver.len() > 400,
+            "OMEGA-DELTA-0093: the body read for the driven send is too short \
+             to be the real one, so the checks below would pass without reading \
+             it"
+        );
+        assert!(
+            driver.contains("panel.omega_send_first_message("),
+            "OMEGA-DELTA-0093: {} no longer sends through the panel.",
+            startup_path.display()
+        );
+        for bypass in ["thread.send(", "send_raw(", "AgentConnection", "PromptRequest"] {
+            assert!(
+                !driver.contains(bypass),
+                "OMEGA-DELTA-0093: the driven send in {} reaches `{bypass}` \
+                 itself. That is a second way to send, beside the one a typed \
+                 message uses, and a control surface that bypasses the \
+                 production path proves nothing about the production path.",
+                startup_path.display()
+            );
+        }
+        assert!(
+            driver.contains("!= acp_thread::ThreadStatus::Idle")
+                && driver.contains("== acp_thread::ThreadStatus::Idle"),
+            "OMEGA-DELTA-0093: the driven send in {} no longer waits for the \
+             turn to start before waiting for it to finish. A thread is idle \
+             between being built and the turn starting, so waiting only for \
+             idle reports a completed turn before the first token.",
+            startup_path.display()
+        );
+
+        let panel_path = repository_path(AGENT_PANEL_PATH);
+        let panel = std::fs::read_to_string(&panel_path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", panel_path.display()));
+        let entry = function_body(&panel, "omega_send_first_message").unwrap_or_else(|| {
+            panic!(
+                "OMEGA-DELTA-0093: cannot find the keyboardless send in {}",
+                panel_path.display()
+            )
+        });
+        assert!(
+            entry.contains("self.external_thread(") && entry.contains("auto_submit: true"),
+            "OMEGA-DELTA-0093: {} no longer submits through `external_thread`, \
+             which is the same call the Git panel's review action makes and the \
+             path that puts the text in the composer and presses send.",
+            panel_path.display()
+        );
+        assert!(
+            entry.contains("has_open_project"),
+            "OMEGA-DELTA-0093: {} no longer refuses to open a thread with no \
+             project. A thread whose file tools have no worktree is \
+             OMEGA-DELTA-0054's failure, and reporting success there reports a \
+             turn that did not start.",
+            panel_path.display()
         );
     }
 
