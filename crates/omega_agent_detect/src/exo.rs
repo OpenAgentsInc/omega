@@ -80,6 +80,23 @@ pub const CHECKOUT_ENV_VAR: &str = "OMEGA_EXO_CHECKOUT";
 /// Names Exo's state root when it is not `<checkout>/.exo`.
 pub const ROOT_ENV_VAR: &str = "OMEGA_EXO_ROOT";
 
+/// Names a lane file whose `root` is worth trying.
+///
+/// The spelling `crates/agent_ui`'s own live-Exo test already documents. A
+/// machine that has been pointed at an Exo once has written this down
+/// somewhere, and the root in it is a better guess than any directory this
+/// module could invent.
+pub const LANE_FILE_ENV_VAR: &str = "OMEGA_EXO_LANE_FILE";
+
+/// The schema a lane file must carry before its `root` is believed.
+///
+/// Duplicated from `ExoLaneConfig`, deliberately and narrowly: this module
+/// reads two fields out of that file and leaves the other four to the type that
+/// owns the format. `OMEGA-DELTA-0092`'s check asserts the two spellings agree,
+/// because a schema guard that silently stopped matching would make this read
+/// accept a file the product refuses.
+pub const LANE_FILE_SCHEMA: &str = "openagents.omega.exo_lane.v1";
+
 /// Names the agent slug when the state root holds more than one.
 pub const AGENT_ENV_VAR: &str = "OMEGA_EXO_AGENT";
 
@@ -168,10 +185,17 @@ pub enum ExoLaneUnderivable {
         /// The binary paths that were looked at.
         searched: Vec<PathBuf>,
     },
-    /// No Exo state root. Exo has never run here, or ran somewhere else.
+    /// No Exo state root at any candidate.
+    ///
+    /// The plural is the correction. This carried one `expected` path, the
+    /// checkout's own `.exo`, and the summary drawn from it was "Exo has never
+    /// been run on this machine" — while two roots with live agents sat
+    /// elsewhere on the same disk. A refusal that names one place must not be
+    /// read as a statement about every place, so it now names every place it
+    /// looked.
     NoStateRoot {
-        /// The path that would have been the root.
-        expected: PathBuf,
+        /// Every candidate, in the order they were tried.
+        searched: Vec<PathBuf>,
     },
     /// The state root holds no agent.
     NoAgent {
@@ -229,10 +253,10 @@ impl std::fmt::Display for ExoLaneUnderivable {
                 checkout.display(),
                 display_paths(searched)
             ),
-            Self::NoStateRoot { expected } => write!(
+            Self::NoStateRoot { searched } => write!(
                 formatter,
-                "no Exo state root at {}; set {ROOT_ENV_VAR} to name one",
-                expected.display()
+                "no Exo state root: looked at {}; set {ROOT_ENV_VAR} to name one",
+                display_paths(searched)
             ),
             Self::NoAgent { root } => write!(
                 formatter,
@@ -277,8 +301,18 @@ impl std::error::Error for ExoLaneUnderivable {}
 pub struct ExoLaneOverrides {
     /// The checkout, instead of searching [`CHECKOUT_DIRECTORIES`].
     pub checkout: Option<PathBuf>,
-    /// The state root, instead of `<checkout>/.exo`.
+    /// The state root, instead of looking for one. Always wins.
     pub root: Option<PathBuf>,
+    /// Where the process was started, which may hold an `.exo`.
+    ///
+    /// A parameter and not a `current_dir()` call, for this module's usual
+    /// reason, and for a sharper one: the working directory is the single fact
+    /// that distinguishes the machine this derivation was first written against
+    /// — where it found nothing — from the same machine a directory later,
+    /// where it finds a working lane.
+    pub working_directory: Option<PathBuf>,
+    /// A lane file whose `root` is worth trying. See [`LANE_FILE_ENV_VAR`].
+    pub lane_file: Option<PathBuf>,
     /// The agent slug, instead of the only one there is.
     pub agent: Option<String>,
     /// The conversation slug, instead of the only one there is.
@@ -395,29 +429,124 @@ pub fn built_binary(checkout: &Path) -> Result<PathBuf, ExoLaneUnderivable> {
         })
 }
 
-/// Exo's state root, given what the caller named and which checkout was found.
+/// Exo's state root, given what the caller knows and which checkout was found.
+///
+/// # Where a root can be, and why it is not one place
+///
+/// Exo's root is wherever `--root` said. Its default is the relative path
+/// `.exo`, resolved against the working directory the CLI was started in — so
+/// the root lives beside *whatever directory somebody ran `exo` from*, which on
+/// a real machine is very often not the checkout. The first version of this
+/// function looked only beside the checkout, found nothing, and the absence was
+/// reported as "Exo has never been run here" while two roots with live agents
+/// sat elsewhere on the same disk.
+///
+/// That is the same mistake as reading `<root>/agents` instead of
+/// `<root>/exoharness/agents`, one level further out: a reader that looks in
+/// one place produces a confident false absence on a machine that has the
+/// thing. Both are fixed the same way — look everywhere it could be, and name
+/// everywhere you looked.
+///
+/// The order is [`ROOT_CANDIDATE_ORDER`]'s.
+///
+/// # Why a root with an agent wins
+///
+/// Among the candidates that exist, one holding at least one agent is preferred
+/// over one that merely exists. An empty root is the same dead end as no root —
+/// [`agent_slug`] refuses on it — so choosing it over a working one would
+/// reintroduce the failure the search exists to remove. An explicitly named
+/// root is exempt: the caller said which one, and quietly using a different
+/// one because theirs looked emptier would be Omega disagreeing with an
+/// instruction.
 ///
 /// # Errors
 ///
-/// [`ExoLaneUnderivable::NoStateRoot`] naming the path it expected, so the
-/// message points at something a person can go and look at.
-pub fn state_root(named: Option<&Path>, checkout: &Path) -> Result<PathBuf, ExoLaneUnderivable> {
-    let expected = named.map_or_else(
-        || checkout.join(STATE_ROOT_DIRECTORY),
-        Path::to_path_buf,
-    );
-    // The harness directory rather than the root, and rather than the agents
-    // directory inside it. Exo's object store creates `<root>/exoharness`
-    // eagerly when it opens, before any agent exists, and creates `agents/`
-    // only when something is written into it. Testing for `agents/` would
-    // therefore report "Exo has never run here" about a root where Exo has run
-    // and simply holds no agent — which is a different sentence with a
-    // different thing to do about it, and `agent_slug` says it.
-    if expected.join(HARNESS_DIRECTORY).is_dir() {
-        Ok(expected)
-    } else {
-        Err(ExoLaneUnderivable::NoStateRoot { expected })
+/// [`ExoLaneUnderivable::NoStateRoot`], naming every candidate it tried.
+pub fn state_root(
+    overrides: &ExoLaneOverrides,
+    checkout: &Path,
+) -> Result<PathBuf, ExoLaneUnderivable> {
+    if let Some(named) = overrides.root.as_deref() {
+        return if is_state_root(named) {
+            Ok(named.to_path_buf())
+        } else {
+            Err(ExoLaneUnderivable::NoStateRoot {
+                searched: vec![named.to_path_buf()],
+            })
+        };
     }
+
+    let searched: Vec<PathBuf> = [
+        overrides
+            .working_directory
+            .as_ref()
+            .map(|cwd| cwd.join(STATE_ROOT_DIRECTORY)),
+        Some(checkout.join(STATE_ROOT_DIRECTORY)),
+        overrides
+            .lane_file
+            .as_deref()
+            .and_then(root_named_by_lane_file),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+
+    let present: Vec<&PathBuf> = searched
+        .iter()
+        .filter(|candidate| is_state_root(candidate))
+        .collect();
+    present
+        .iter()
+        .find(|candidate| !record_slugs(&agents_directory(candidate)).is_empty())
+        .or(present.first())
+        .map(|candidate| (*candidate).clone())
+        .ok_or(ExoLaneUnderivable::NoStateRoot { searched })
+}
+
+/// The candidate order, as prose a reader can check the code against.
+///
+/// Named as a constant rather than left implicit in [`state_root`] because the
+/// order *is* the policy: an explicit instruction, then the directory the
+/// person is standing in, then the checkout, then a root somebody already wrote
+/// down.
+pub const ROOT_CANDIDATE_ORDER: &[&str] = &[
+    "OMEGA_EXO_ROOT, which always wins",
+    "<working directory>/.exo, which is Exo's own --root default",
+    "<checkout>/.exo",
+    "the root named by the lane file at OMEGA_EXO_LANE_FILE",
+];
+
+/// Whether a directory is an Exo state root.
+///
+/// The harness directory rather than the root, and rather than the agents
+/// directory inside it. Exo's object store creates `<root>/exoharness` eagerly
+/// when it opens, before any agent exists, and creates `agents/` only when
+/// something is written into it. Testing for `agents/` would report "Exo has
+/// never run here" about a root where Exo has run and simply holds no agent —
+/// a different sentence with a different thing to do about it, and
+/// [`agent_slug`] says it.
+fn is_state_root(candidate: &Path) -> bool {
+    candidate.join(HARNESS_DIRECTORY).is_dir()
+}
+
+/// The `root` a lane file names, if it carries the schema Omega understands.
+///
+/// Two fields, deliberately. The other four belong to `ExoLaneConfig`, which
+/// owns the format; this is a search hint, and treating it as a whole lane
+/// would mean a second parser for a file that already has one. The schema is
+/// still checked, because a `root` read out of a file whose shape Omega does
+/// not recognise is a path with no provenance.
+fn root_named_by_lane_file(lane_file: &Path) -> Option<PathBuf> {
+    let value: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(lane_file).ok()?).ok()?;
+    if value.get("schema").and_then(serde_json::Value::as_str) != Some(LANE_FILE_SCHEMA) {
+        return None;
+    }
+    value
+        .get("root")
+        .and_then(serde_json::Value::as_str)
+        .filter(|root| !root.trim().is_empty())
+        .map(PathBuf::from)
 }
 
 /// `<root>/exoharness/agents`, where Exo keeps one directory per agent.
@@ -478,18 +607,74 @@ pub fn conversation_slug(
             agent: agent.to_owned(),
         });
     };
-    let mut slugs = record_slugs(&directory.join("conversations"));
-    match slugs.len() {
-        0 => Err(ExoLaneUnderivable::NoConversation {
+    let mut records = conversation_records(&directory.join("conversations"));
+    if records.is_empty() {
+        return Err(ExoLaneUnderivable::NoConversation {
             root: root.to_path_buf(),
             agent: agent.to_owned(),
-        }),
-        1 => Ok(slugs.remove(0)),
-        _ => Err(ExoLaneUnderivable::SeveralConversations {
-            agent: agent.to_owned(),
-            slugs,
-        }),
+        });
     }
+    if records.len() == 1 {
+        return Ok(records.remove(0).slug);
+    }
+    // Several. Ordered by evidence rather than refused, and the difference from
+    // `agent_slug` is the point.
+    //
+    // Two agents are two different capabilities: different tool modules,
+    // different mounts, a different model binding. Choosing between them is the
+    // "pointed at the wrong one" failure `OMEGA-DELTA-0042` exists for, so it
+    // stays a refusal. Two conversations are two threads of the *same* agent,
+    // with the same capability and the same mounts; the worst case is that a
+    // message lands in a thread the person was not looking at, which is visible
+    // the moment it happens.
+    //
+    // So the tie is broken by what the agent was last used for.
+    // `latest_event_id` is a UUIDv7, which is time-ordered by construction, so
+    // "most recent" is a string comparison over a value Exo already wrote — not
+    // a file mtime, which a copy or a backup rewrites.
+    //
+    // A tie with no evidence is still a refusal: conversations that have never
+    // been used give nothing to order them by, and picking one would be the
+    // guess this module does not make.
+    let latest = records
+        .iter()
+        .filter_map(|record| {
+            record
+                .latest_event_id
+                .as_ref()
+                .map(|event| (event.clone(), record.slug.clone()))
+        })
+        .max();
+    match latest {
+        Some((_, slug)) => Ok(slug),
+        None => {
+            let mut slugs: Vec<String> = records.into_iter().map(|record| record.slug).collect();
+            slugs.sort();
+            Err(ExoLaneUnderivable::SeveralConversations {
+                agent: agent.to_owned(),
+                slugs,
+            })
+        }
+    }
+}
+
+/// One conversation, as much of it as the choice above needs.
+struct ConversationRecord {
+    slug: String,
+    /// Exo's own marker of the last thing that happened in it, when anything
+    /// has. A UUIDv7, so it sorts by time.
+    latest_event_id: Option<String>,
+}
+
+/// Every conversation directly under `directory`.
+fn conversation_records(directory: &Path) -> Vec<ConversationRecord> {
+    record_directories(directory)
+        .into_iter()
+        .map(|(path, slug)| ConversationRecord {
+            slug,
+            latest_event_id: record_field(&path.join("record.json"), "latest_event_id"),
+        })
+        .collect()
 }
 
 /// The directory holding the agent whose record carries `slug`.
@@ -535,20 +720,20 @@ fn record_directories(directory: &Path) -> Vec<(PathBuf, String)> {
         .map(|entry| entry.path())
         .filter(|path| path.is_dir())
         .filter_map(|path| {
-            let slug = record_slug(&path.join("record.json"))?;
+            let slug = record_field(&path.join("record.json"), "slug")?;
             Some((path, slug))
         })
         .collect()
 }
 
-/// The `slug` field of a record file.
-fn record_slug(record: &Path) -> Option<String> {
+/// One string field of a record file, when it is there and is not blank.
+fn record_field(record: &Path, field: &str) -> Option<String> {
     let file = std::fs::read_to_string(record).ok()?;
     let value: serde_json::Value = serde_json::from_str(&file).ok()?;
     value
-        .get("slug")
+        .get(field)
         .and_then(serde_json::Value::as_str)
-        .filter(|slug| !slug.trim().is_empty())
+        .filter(|value| !value.trim().is_empty())
         .map(str::to_owned)
 }
 
@@ -576,7 +761,7 @@ pub fn derive_lane(
 ) -> Result<DerivedExoLane, ExoLaneUnderivable> {
     let checkout = find_checkout(overrides.checkout.as_deref(), home)?;
     let binary = built_binary(&checkout)?;
-    let root = state_root(overrides.root.as_deref(), &checkout)?;
+    let root = state_root(overrides, &checkout)?;
     let agent = agent_slug(overrides.agent.as_deref(), &root)?;
     let conversation = conversation_slug(overrides.conversation.as_deref(), &root, &agent)?;
     Ok(DerivedExoLane {
@@ -609,6 +794,12 @@ pub fn derive_lane_from_env() -> Result<DerivedExoLane, ExoLaneUnderivable> {
     let overrides = ExoLaneOverrides {
         checkout: path(CHECKOUT_ENV_VAR),
         root: path(ROOT_ENV_VAR),
+        // A working directory that cannot be read is treated as no working
+        // directory, exactly as `omega_workdir` treats it: the other candidates
+        // still stand, and guessing one here would put a lane somewhere nobody
+        // named.
+        working_directory: std::env::current_dir().ok(),
+        lane_file: path(LANE_FILE_ENV_VAR),
         agent: text(AGENT_ENV_VAR),
         conversation: text(CONVERSATION_ENV_VAR),
     };
@@ -655,10 +846,21 @@ mod tests {
     }
 
     fn write_record(directory: &Path, slug: &str) {
+        write_used_record(directory, slug, None);
+    }
+
+    /// A record with Exo's own marker of when it was last used.
+    fn write_used_record(directory: &Path, slug: &str, latest_event_id: Option<&str>) {
         fs::create_dir_all(directory).expect("the fixture record directory is created");
         fs::write(
             directory.join("record.json"),
-            serde_json::json!({ "id": "0", "slug": slug, "name": slug }).to_string(),
+            serde_json::json!({
+                "id": "0",
+                "slug": slug,
+                "name": slug,
+                "latest_event_id": latest_event_id,
+            })
+            .to_string(),
         )
         .expect("the fixture record is written");
     }
@@ -844,7 +1046,7 @@ mod tests {
         assert_eq!(
             refusal,
             ExoLaneUnderivable::NoStateRoot {
-                expected: checkout.join(".exo")
+                searched: vec![checkout.join(".exo")]
             }
         );
     }
@@ -914,8 +1116,10 @@ mod tests {
         );
     }
 
+    /// Several conversations that have never been used give nothing to choose
+    /// between, so the choice is refused rather than invented.
     #[test]
-    fn several_conversations_are_listed_rather_than_chosen_between() {
+    fn several_unused_conversations_are_listed_rather_than_chosen_between() {
         let home = tempfile::tempdir().expect("a temporary home");
         let checkout = write_machine(home.path());
         write_record(
@@ -927,12 +1131,244 @@ mod tests {
         );
 
         let refusal = derive_lane(&ExoLaneOverrides::default(), home.path())
-            .expect_err("two conversations is not one conversation");
+            .expect_err("two conversations, neither of them ever used");
 
         assert!(
             matches!(&refusal, ExoLaneUnderivable::SeveralConversations { slugs, .. }
                 if slugs == &["another".to_owned(), "basic".to_owned()]),
             "{refusal:?}"
+        );
+    }
+
+    /// The real `exo-lane` root holds three conversations on one agent, and
+    /// refusing there would be a dead end on the machine this is meant to work
+    /// on. Two threads of the same agent share its capability and its mounts,
+    /// so the tie is broken by what Exo was last used for.
+    #[test]
+    fn the_conversation_last_used_is_the_one_the_lane_resumes() {
+        let home = tempfile::tempdir().expect("a temporary home");
+        let checkout = write_machine(home.path());
+        let conversations = agents(&checkout.join(STATE_ROOT_DIRECTORY))
+            .join("agent-id")
+            .join("conversations");
+        // UUIDv7s, so the later one sorts second by construction.
+        write_used_record(
+            &conversations.join("conversation-id"),
+            "basic",
+            Some("019f9ec3-9e64-7230-86b8-abc9054c82a2"),
+        );
+        write_used_record(
+            &conversations.join("second-id"),
+            "recent",
+            Some("019f9f6f-92de-7630-b8f8-309366dcd7e2"),
+        );
+
+        let lane = derive_lane(&ExoLaneOverrides::default(), home.path())
+            .expect("an agent that has been used names the thread it was used in");
+
+        assert_eq!(lane.conversation, "recent");
+    }
+
+    /// The correction this search exists for.
+    ///
+    /// A root beside the working directory, with a checkout whose own `.exo`
+    /// does not exist. The first version of this module found nothing here and
+    /// reported that Exo had never been run on the machine.
+    #[test]
+    fn a_root_beside_the_working_directory_is_found() {
+        let home = tempfile::tempdir().expect("a temporary home");
+        let checkout = write_checkout(home.path(), "work/exo", EXO_PIN.upstream);
+        write_binary(&checkout, "target/release/exo");
+        let elsewhere = home.path().join("somewhere-else");
+        let agents = agents(&elsewhere.join(STATE_ROOT_DIRECTORY));
+        write_record(&agents.join("id"), "zerobase");
+        write_record(&agents.join("id").join("conversations").join("c"), "zb-proof");
+
+        let lane = derive_lane(
+            &ExoLaneOverrides {
+                working_directory: Some(elsewhere.clone()),
+                ..ExoLaneOverrides::default()
+            },
+            home.path(),
+        )
+        .expect("Exo's root is wherever --root said, not only beside the checkout");
+
+        assert_eq!(lane.root, elsewhere.join(STATE_ROOT_DIRECTORY));
+        assert_eq!(lane.agent, "zerobase");
+        assert_eq!(lane.checkout, checkout, "the checkout is still the checkout");
+    }
+
+    /// A root that merely exists is the same dead end as no root.
+    #[test]
+    fn a_root_with_an_agent_beats_an_empty_one_that_comes_first() {
+        let home = tempfile::tempdir().expect("a temporary home");
+        // The checkout's own root has agents; the working directory's is empty.
+        let checkout = write_machine(home.path());
+        let empty = home.path().join("empty");
+        fs::create_dir_all(empty.join(STATE_ROOT_DIRECTORY).join(HARNESS_DIRECTORY))
+            .expect("the fixture empty root is created");
+
+        let lane = derive_lane(
+            &ExoLaneOverrides {
+                working_directory: Some(empty),
+                ..ExoLaneOverrides::default()
+            },
+            home.path(),
+        )
+        .expect("the root with an agent answers");
+
+        assert_eq!(
+            lane.root,
+            checkout.join(STATE_ROOT_DIRECTORY),
+            "an earlier candidate that holds no agent must not win over a later \
+             one that does, or the search reintroduces the dead end it exists \
+             to remove"
+        );
+    }
+
+    /// An explicit root is an instruction, not a candidate.
+    #[test]
+    fn a_named_empty_root_is_not_swapped_for_a_fuller_one() {
+        let home = tempfile::tempdir().expect("a temporary home");
+        write_machine(home.path());
+        let empty = home.path().join("empty");
+        fs::create_dir_all(empty.join(HARNESS_DIRECTORY)).expect("the fixture root is created");
+
+        let refusal = derive_lane(
+            &ExoLaneOverrides {
+                root: Some(empty.clone()),
+                ..ExoLaneOverrides::default()
+            },
+            home.path(),
+        )
+        .expect_err("the named root holds no agent");
+
+        assert!(
+            matches!(&refusal, ExoLaneUnderivable::NoAgent { root } if root == &empty),
+            "Omega must not quietly use a different root than the one it was \
+             told to use: {refusal:?}"
+        );
+    }
+
+    /// A named root that is not there names itself in the refusal.
+    ///
+    /// Separate from the search case: that one lists candidates Omega chose,
+    /// this one has to echo back the path the caller gave, or the message reads
+    /// as though Omega looked nowhere.
+    #[test]
+    fn a_named_root_that_is_absent_is_the_one_the_refusal_names() {
+        let home = tempfile::tempdir().expect("a temporary home");
+        write_machine(home.path());
+        let nowhere = home.path().join("not-a-root");
+
+        let refusal = derive_lane(
+            &ExoLaneOverrides {
+                root: Some(nowhere.clone()),
+                ..ExoLaneOverrides::default()
+            },
+            home.path(),
+        )
+        .expect_err("the named root does not exist");
+
+        assert_eq!(
+            refusal,
+            ExoLaneUnderivable::NoStateRoot {
+                searched: vec![nowhere.clone()]
+            }
+        );
+        assert!(
+            refusal.to_string().contains(&nowhere.display().to_string()),
+            "{refusal}"
+        );
+    }
+
+    #[test]
+    fn a_lane_file_elsewhere_names_a_root_worth_trying() {
+        let home = tempfile::tempdir().expect("a temporary home");
+        let checkout = write_checkout(home.path(), "work/exo", EXO_PIN.upstream);
+        write_binary(&checkout, "target/release/exo");
+        let elsewhere = home.path().join("named-by-a-lane-file");
+        let agents = agents(&elsewhere.join(STATE_ROOT_DIRECTORY));
+        write_record(&agents.join("id"), "omega-lane");
+        write_record(&agents.join("id").join("conversations").join("c"), "tier-a");
+        let lane_file = home.path().join("omega-exo-lane.json");
+        fs::write(
+            &lane_file,
+            serde_json::json!({
+                "schema": LANE_FILE_SCHEMA,
+                "binary": "/somewhere/exo",
+                "checkout": "/somewhere",
+                "root": elsewhere.join(STATE_ROOT_DIRECTORY).to_string_lossy(),
+                "agent": "omega-lane",
+                "conversation": "tier-a",
+            })
+            .to_string(),
+        )
+        .expect("the fixture lane file is written");
+
+        let lane = derive_lane(
+            &ExoLaneOverrides {
+                lane_file: Some(lane_file),
+                ..ExoLaneOverrides::default()
+            },
+            home.path(),
+        )
+        .expect("a root somebody already wrote down is a candidate");
+
+        assert_eq!(lane.root, elsewhere.join(STATE_ROOT_DIRECTORY));
+        assert_eq!(
+            lane.binary,
+            checkout.join("target/release/exo"),
+            "only the root is taken from the lane file; the binary still comes \
+             from the checkout that built it"
+        );
+    }
+
+    #[test]
+    fn a_lane_file_with_an_unknown_schema_names_no_root() {
+        let home = tempfile::tempdir().expect("a temporary home");
+        let lane_file = home.path().join("omega-exo-lane.json");
+        fs::write(
+            &lane_file,
+            serde_json::json!({ "schema": "something.else.v9", "root": "/tmp" }).to_string(),
+        )
+        .expect("the fixture lane file is written");
+
+        assert_eq!(
+            root_named_by_lane_file(&lane_file),
+            None,
+            "a root read out of a file whose shape Omega does not recognise is \
+             a path with no provenance"
+        );
+    }
+
+    /// The refusal that started the correction. It named one path, and the
+    /// summary drawn from it generalised to the whole machine.
+    #[test]
+    fn the_absent_root_refusal_names_every_place_it_looked() {
+        let home = tempfile::tempdir().expect("a temporary home");
+        let checkout = write_checkout(home.path(), "work/exo", EXO_PIN.upstream);
+        write_binary(&checkout, "target/release/exo");
+        let cwd = home.path().join("cwd");
+        fs::create_dir_all(&cwd).expect("the fixture working directory is created");
+
+        let refusal = derive_lane(
+            &ExoLaneOverrides {
+                working_directory: Some(cwd.clone()),
+                ..ExoLaneOverrides::default()
+            },
+            home.path(),
+        )
+        .expect_err("neither candidate exists");
+
+        let ExoLaneUnderivable::NoStateRoot { searched } = &refusal else {
+            panic!("{refusal:?}");
+        };
+        assert_eq!(
+            searched,
+            &[cwd.join(".exo"), checkout.join(".exo")],
+            "a refusal that names one place gets read as a statement about \
+             every place"
         );
     }
 

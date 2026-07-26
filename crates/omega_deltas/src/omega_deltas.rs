@@ -2132,6 +2132,20 @@ pub const FULL_AUTO_PANEL_PATH: &str = "crates/full_auto_ui/src/panel.rs";
 /// OMEGA-DELTA-0050. Gate 8's two closed lists.
 pub const GATE_EIGHT_PATH: &str = "crates/omega_front_door/src/omega_front_door.rs";
 
+/// OMEGA-DELTA-0092. How many places a state root is looked for.
+///
+/// An explicit `OMEGA_EXO_ROOT`, the working directory, the checkout, and a
+/// root named by an existing lane file. Written here as well as in the search
+/// so that adding or removing one is a change to this crate, and therefore to
+/// the registry entry, rather than a quiet edit to a list.
+pub const ROOT_CANDIDATE_ORDER_LENGTH: usize = 4;
+
+/// OMEGA-DELTA-0092. The variable that names a root outright.
+pub const ROOT_ENV_VAR_SPELLING: &str = "OMEGA_EXO_ROOT";
+
+/// OMEGA-DELTA-0092. The variable that names a lane file to mine a root from.
+pub const LANE_FILE_ENV_VAR_SPELLING: &str = "OMEGA_EXO_LANE_FILE";
+
 /// OMEGA-DELTA-0092. Where an Exo install is found and a lane derived from it.
 pub const EXO_DETECT_PATH: &str = "crates/omega_agent_detect/src/exo.rs";
 
@@ -5586,6 +5600,18 @@ mod tests {
         None
     }
 
+    /// Read one `const` or `struct` body out of a Rust source file.
+    ///
+    /// Cruder than `function_body` and enough for the two declarations that
+    /// need it: it starts after the opening text and stops at the first line
+    /// that closes at column zero or with a `];`.
+    fn declaration_body<'a>(source: &'a str, opening: &str) -> Option<&'a str> {
+        let start = source.find(opening)? + opening.len();
+        let rest = &source[start..];
+        let end = rest.find("\n];").or_else(|| rest.find("\n}"))?;
+        Some(&rest[..end])
+    }
+
     /// A source file with its line comments removed.
     ///
     /// `contains` cannot tell a call from a call somebody commented out, and a
@@ -8532,6 +8558,75 @@ mod tests {
              reports that Exo has never run.",
             detect_path.display()
         );
+        // The correction. A searcher that looks in one place produces a
+        // confident false absence on a machine that has the thing — the same
+        // shape as reading one level too high, one level further out, and it
+        // happened here: `<checkout>/.exo` was the only candidate, it did not
+        // exist, and the absence was reported as "Exo has never been run on
+        // this machine" while two roots with live agents sat on the same disk.
+        let root = function_body(&detect, "state_root").unwrap_or_else(|| {
+            panic!(
+                "OMEGA-DELTA-0092: cannot find the state root search in {}",
+                detect_path.display()
+            )
+        });
+        for candidate in [
+            "overrides.root.as_deref()",
+            "working_directory",
+            "checkout.join(STATE_ROOT_DIRECTORY)",
+            "lane_file",
+        ] {
+            assert!(
+                root.contains(candidate),
+                "OMEGA-DELTA-0092: the state root search in {} no longer tries \
+                 `{candidate}`. Exo's root is wherever `--root` said, and on \
+                 the machine this was written against it has never been beside \
+                 the checkout.",
+                detect_path.display()
+            );
+        }
+        assert!(
+            root.contains("record_slugs(&agents_directory(candidate)).is_empty()"),
+            "OMEGA-DELTA-0092: the state root search in {} no longer prefers a \
+             root that holds an agent. An empty root is the same dead end as no \
+             root, so taking one over a working one reintroduces the failure \
+             the search exists to remove.",
+            detect_path.display()
+        );
+        assert!(
+            detect.contains("searched: Vec<PathBuf>,")
+                && !detect.contains("expected: PathBuf,"),
+            "OMEGA-DELTA-0092: {} reports an absent root as one expected path \
+             again. A refusal that names one place gets read as a statement \
+             about every place, which is exactly how this went wrong.",
+            detect_path.display()
+        );
+        // The order is the policy, so it is written down as prose beside the
+        // code and checked against it. A candidate added or removed is a policy
+        // change and belongs in the registry entry, not in a list edit.
+        let documented = declaration_body(&detect, "pub const ROOT_CANDIDATE_ORDER: &[&str] = &[")
+            .unwrap_or_else(|| {
+                panic!(
+                    "OMEGA-DELTA-0092: {} no longer documents the candidate \
+                     order.",
+                    detect_path.display()
+                )
+            });
+        assert_eq!(
+            documented.matches('"').count() / 2,
+            ROOT_CANDIDATE_ORDER_LENGTH,
+            "OMEGA-DELTA-0092: {} documents a different number of root \
+             candidates than the registry entry describes.",
+            detect_path.display()
+        );
+        for named in [ROOT_ENV_VAR_SPELLING, LANE_FILE_ENV_VAR_SPELLING] {
+            assert!(
+                documented.contains(named),
+                "OMEGA-DELTA-0092: the documented candidate order in {} no \
+                 longer mentions {named}.",
+                detect_path.display()
+            );
+        }
         assert!(
             detect.contains("admits_upstream"),
             "OMEGA-DELTA-0092: {} no longer asks the pin whether a checkout is \
@@ -8580,6 +8675,23 @@ mod tests {
              never spawns somebody's Exo, and deriving whenever a file is \
              absent undoes that.",
             lane_path.display()
+        );
+        // The search reads two fields out of a lane file to find a root, so it
+        // carries its own copy of the schema string. A guard that silently
+        // stopped matching would make it accept a file the product refuses.
+        let quoted = |source: &str, name: &str| -> String {
+            source
+                .split_once(&format!("{name}: &str = \""))
+                .and_then(|(_, rest)| rest.split_once('"'))
+                .map(|(value, _)| value.to_owned())
+                .unwrap_or_else(|| panic!("OMEGA-DELTA-0092: no `{name}` to read"))
+        };
+        assert_eq!(
+            quoted(&lane, "EXO_LANE_SCHEMA"),
+            quoted(&detect, "LANE_FILE_SCHEMA"),
+            "OMEGA-DELTA-0092: {} and {} disagree about the lane file schema.",
+            lane_path.display(),
+            detect_path.display()
         );
         assert!(
             lane.contains("ExoLaneConfig::resolve(lane_path)"),

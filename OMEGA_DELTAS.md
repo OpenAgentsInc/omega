@@ -3473,9 +3473,48 @@ than it sounds, because the harness omega#81's acceptance sentence names —
   tomorrow is excluded by default. A fresh `--user-data-dir` still derives,
   because `paths::data_dir()` follows it — which is the state a new person is
   in and the case the acceptance names.
+- **The root is searched for, because Exo's root is wherever `--root` said.**
+  This first looked only at `<checkout>/.exo`, found nothing, and the absence
+  was reported as *"Exo has never been run on this machine"* — while two state
+  roots with live agents sat elsewhere on the same disk, one of them the root
+  the visual baselines run against. **That is the same error as the harness
+  directory, one level further out:** a reader that looks in one place produces
+  a confident false absence on a machine that has the thing. Exo's `--root`
+  default is `.exo` relative to *the directory `exo` was run from*, which on a
+  real machine is very often not the checkout. The candidates, in order, are
+  `OMEGA_EXO_ROOT`, `<working directory>/.exo`, `<checkout>/.exo`, and the root
+  named by the lane file at `OMEGA_EXO_LANE_FILE`. The refusal now names every
+  one it tried, because a refusal that names a single path gets read as a
+  statement about every path — which is precisely how the wrong summary was
+  drawn from a message that was itself true.
+- **A root holding an agent beats one that merely exists.** An empty root is the
+  same dead end as no root, so preferring an earlier empty candidate over a
+  later working one would reintroduce the failure the search exists to remove.
+  An explicitly named root is exempt: the caller said which one, and using a
+  different one because theirs looked emptier would be Omega disagreeing with an
+  instruction rather than answering it.
+- **Only the root is taken from a lane file, and only with the schema.** Two
+  fields; the other four belong to `ExoLaneConfig`, which owns the format. The
+  binary still comes from the checkout that built it. A check asserts the two
+  files spell the schema the same way, because a guard that silently stopped
+  matching would make the search accept a file the product refuses.
+- **Several conversations are ordered, not refused, and several agents still
+  are.** Two agents are two capabilities — different tool modules, different
+  mounts, a different model binding — so choosing between them is the "pointed
+  at the wrong one" failure `OMEGA-DELTA-0042` exists for. Two conversations are
+  two threads of the *same* agent, sharing its capability and its mounts; the
+  worst case is a message landing in a thread the person was not looking at,
+  which is visible the moment it happens. So the tie is broken by what the agent
+  was last used for: `latest_event_id` is a UUIDv7 and therefore time-ordered by
+  construction, so "most recent" is a comparison over a value Exo itself wrote,
+  not a file mtime that a copy rewrites. Conversations that have never been used
+  offer no evidence to order by, and are still refused. This is not a softening
+  of "refuse rather than guess": the real `exo-lane` root holds three
+  conversations on one agent, so refusing there was a dead end on the one
+  machine this has to work on.
 - **Enforced by:**
   `the_exo_lane_is_derived_from_the_install_and_only_for_the_product` in
-  `crates/omega_deltas/`, the 15 unit checks in `crates/omega_agent_detect/`,
+  `crates/omega_deltas/`, the 30 unit checks in `crates/omega_agent_detect/`,
   and `a_lane_file_that_will_not_parse_is_not_replaced_by_a_derived_lane` plus
   `an_absent_lane_file_outside_the_data_directory_derives_nothing` in
   `crates/agent_ui/`.
@@ -3483,9 +3522,21 @@ than it sounds, because the harness omega#81's acceptance sentence names —
   `OMEGA-DELTA-0042` makes `create`, `update` and `delete` unreachable and that
   is unchanged, so a state root with no agent is a refusal and not a lane Omega
   builds for itself. It does not check the commit, the tree or the bytes — see
-  above. And it cannot be checked by a compiler: the resolution runs when the
-  router is built in a launched process, which is the path `cargo check`,
-  `cargo test` and clippy were all green across when it was broken before.
+  above. It does not search the disk for roots: the four candidates are places a
+  root is named or is by convention, and a machine whose root is somewhere else
+  entirely names it with `OMEGA_EXO_ROOT`. And it cannot be checked by a
+  compiler: the resolution runs when the router is built in a launched process,
+  which is the path `cargo check`, `cargo test` and clippy were all green across
+  when it was broken before.
+- **What it derives on this machine.** Run from `scratchpad/exo-lane`, the
+  working-directory candidate answers and the whole lane resolves — binary
+  `~/work/exo/target/release/exo`, checkout `~/work/exo`, root
+  `scratchpad/exo-lane/.exo`, agent `zerobase`, conversation `zb-proof` — which
+  is field for field the lane file that was written there by hand, including
+  the same choice of conversation among the agent's three. Run from a directory
+  with no `.exo`, and with no variable set, it still derives nothing and names
+  both places it looked; that is the honest answer under this policy rather
+  than a residual defect.
 
 ### OMEGA-DELTA-0093 — A turn can be driven without a keyboard, over the send a typed message uses
 
