@@ -3384,3 +3384,99 @@ than it sounds, because the harness omega#81's acceptance sentence names —
   `only_detected_agents_are_offered`, and
   `every_subagent_result_names_its_executor` in `crates/omega_deltas`; plus the
   suite in `crates/agent/src/tools/subagent_executor.rs`.
+### OMEGA-DELTA-0092 — The Exo lane is derived from the install, not written by hand
+
+- **Upstream Zed:** an external agent is a `agent_servers` entry someone
+  configured. There is no notion of finding one on the machine and attaching to
+  it without being asked to.
+- **Omega, before this:** `OMEGA-DELTA-0055` removed the executor pin control
+  and routed an unpinned thread to the external ACP agent that is attached. The
+  routing worked. Nothing attached one. Reaching Exo still meant writing five
+  fields — `binary`, `checkout`, `root`, `agent`, `conversation` — into
+  `omega-exo-lane.json` by hand, so the automatic route had nothing to be
+  automatic about, and 0055's own entry said so: *"deriving that lane from what
+  detection found is omega#100's remaining deliverable and is not in this
+  delta."* That is this delta.
+- **Omega now:** `crates/omega_agent_detect/src/exo.rs` derives the five fields
+  from what is on the machine, and `ExoLaneConfig::resolve` uses the derivation
+  when there is no lane file. A person with Exo built gets a thread that reaches
+  it without writing anything.
+- **Exo is not found the way the other agents are, and that is not a
+  workaround.** The rest of `omega_agent_detect` looks for executables on
+  `PATH`, which is what `codex`, `claude`, `copilot` and `cursor-agent` are.
+  Exo has no release artifact at all — its install path is `curl setup.sh |
+  bash`, which clones and *builds from source* — so on this machine `exo` is not
+  on `PATH` and never will be. It is a checkout with a binary under its own
+  `target/`. `PATH` is therefore deliberately **not** searched for `exo`: the
+  lane needs the checkout as well as the binary, and its own field
+  documentation says why — the checkout is "the checkout the binary was built
+  from, for the pin check". A binary found on `PATH` carries no evidence of
+  which checkout built it, so pairing it with a checkout found elsewhere would
+  fabricate exactly the correspondence the pin check assumes.
+- **The layout trap, which this nearly shipped wrong.** Exo's `--root` is not
+  where its records are. `crates/cli/src/main.rs` builds the harness with
+  `root: cli.root.join("exoharness")` and opens the object store there, so an
+  agent record is at `<root>/exoharness/agents/<id>/record.json`. A reader that
+  looked at `<root>/agents` would find nothing on a machine that has agents and
+  would report that Exo had never run here. `<root>` itself holds `adapters/`,
+  `adapters.lock` and `exo-profile.md`, which belong to the CLI and not the
+  harness — which is what the extra level is for. The check asserts the level.
+- **What is refused rather than guessed.** Every step produces its field or
+  produces `ExoLaneUnderivable`, which names the field and the exact path it
+  looked at. No checkout, the *other* Exo, a checkout with nothing built, no
+  state root, no agent, no conversation, and — separately — more than one agent
+  or more than one conversation, listed rather than chosen between. Sending
+  somebody's first message to whichever agent a directory listing happened to
+  yield first is `OMEGA-DELTA-0042`'s "pointed at the wrong one" with a smaller
+  radius, not a different failure. `OMEGA_EXO_CHECKOUT`, `OMEGA_EXO_ROOT`,
+  `OMEGA_EXO_AGENT` and `OMEGA_EXO_CONVERSATION` each answer one of those
+  refusals with one variable, which is what makes "fail naming what is missing"
+  actionable rather than merely honest.
+- **A directory that is the other Exo is reported, not searched past.** A person
+  with exo labs' `exo-explore/exo` cloned at `~/work/exo` is in the omega#86
+  situation, and telling them Omega looked in six places and found nothing would
+  send them to install what they already have. A candidate that is simply absent
+  is not remembered, because absence is not evidence of anything.
+- **Only the upstream is checked here, and the split is deliberate.**
+  `ExoPin::admits_upstream` is new, factored out of `admits` rather than
+  duplicated, because a second spelling of "is this the same repository" is how
+  the two answers eventually disagree on the question that already cost a day.
+  The commit, the tree and the bytes stay where `OMEGA-DELTA-0042` put them:
+  read immediately before every turn. Derivation answers *which install*; the
+  pin answers *may it run*. A derivation that also enforced the commit would
+  turn an actionable refusal on the disclosure line into a silent "no lane
+  found" for anyone whose checkout had moved.
+- **This reads files rather than asking Exo.** Asking means starting
+  `exo agent list` before the window draws, and it needs `EXO_SECRET_BACKEND`
+  set alongside `EXO_MASTER_KEY_PATH` or Exo dies with a decryption error that
+  reads like a corrupt state root and is not. The cost of reading is a coupling
+  to Exo's on-disk layout, and the pin is what makes that safe: `EXO_PIN` names
+  an exact commit and tree, so the layout is pinned with everything else.
+- **A lane file that exists wins, and it wins on existing rather than on
+  parsing.** `ExoLaneConfig::load` returns `None` for a file that is
+  half-written or carries the wrong schema. Falling through to derivation there
+  would replace somebody's explicit, damaged configuration with a guess about a
+  different `.exo` — `OMEGA-DELTA-0042` approached from the other side.
+- **Derivation is admitted for the product's own lane and nowhere else.** The
+  gate is that the path *is* `ExoLaneConfig::data_dir_path()`. `agent_ui`
+  deliberately hands a stateless run a path inside the temporary directory that
+  does not exist, so that a rendering harness never spawns somebody's Exo, and
+  deriving whenever a file was absent would have undone that quietly. The gate
+  is positive rather than a list of paths to exclude, so a harness invented
+  tomorrow is excluded by default. A fresh `--user-data-dir` still derives,
+  because `paths::data_dir()` follows it — which is the state a new person is
+  in and the case the acceptance names.
+- **Enforced by:**
+  `the_exo_lane_is_derived_from_the_install_and_only_for_the_product` in
+  `crates/omega_deltas/`, the 15 unit checks in `crates/omega_agent_detect/`,
+  and `a_lane_file_that_will_not_parse_is_not_replaced_by_a_derived_lane` plus
+  `an_absent_lane_file_outside_the_data_directory_derives_nothing` in
+  `crates/agent_ui/`.
+- **What this does not cover.** It does not create anything in Exo.
+  `OMEGA-DELTA-0042` makes `create`, `update` and `delete` unreachable and that
+  is unchanged, so a state root with no agent is a refusal and not a lane Omega
+  builds for itself. It does not check the commit, the tree or the bytes — see
+  above. And it cannot be checked by a compiler: the resolution runs when the
+  router is built in a launched process, which is the path `cargo check`,
+  `cargo test` and clippy were all green across when it was broken before.
+

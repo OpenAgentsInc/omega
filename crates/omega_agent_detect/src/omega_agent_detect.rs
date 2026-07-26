@@ -28,6 +28,8 @@
 //! passed `cargo check`, `cargo test` and clippy together, because none of them
 //! launches the binary.
 
+pub mod exo;
+
 use std::path::{Path, PathBuf};
 
 /// An agent Omega knows how to drive, and the executables it might be called.
@@ -148,7 +150,7 @@ fn lookup(binary: &str, path_var: &str) -> Option<PathBuf> {
 }
 
 #[cfg(unix)]
-fn is_executable_file(path: &Path) -> bool {
+pub(crate) fn is_executable_file(path: &Path) -> bool {
     use std::os::unix::fs::PermissionsExt as _;
     std::fs::metadata(path)
         .map(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
@@ -156,7 +158,7 @@ fn is_executable_file(path: &Path) -> bool {
 }
 
 #[cfg(not(unix))]
-fn is_executable_file(path: &Path) -> bool {
+pub(crate) fn is_executable_file(path: &Path) -> bool {
     path.is_file()
 }
 

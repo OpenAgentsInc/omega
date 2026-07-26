@@ -142,6 +142,65 @@ impl ExoLaneConfig {
             conversation: field("conversation")?,
         })
     }
+
+    /// The lane this path stands for: the file if there is one, otherwise the
+    /// install on this machine.
+    ///
+    /// `OMEGA-DELTA-0092`, omega#100. `OMEGA-DELTA-0055` routes an unpinned
+    /// thread to the external ACP agent that is attached, and then nothing
+    /// attached one, because attaching meant writing five fields into
+    /// `omega-exo-lane.json` by hand. [`omega_agent_detect::exo`] derives those
+    /// five fields from a checkout, and this is where the derivation is allowed
+    /// to stand in for the file.
+    ///
+    /// Two rules, and each of them is load-bearing.
+    ///
+    /// **A lane file that exists is the answer, even when it is broken.** Not
+    /// "parses" — *exists*. [`Self::load`] returns `None` for a file that is
+    /// half-written or carries the wrong schema, and falling through to
+    /// derivation there would replace somebody's explicit, damaged
+    /// configuration with a guess about a different `.exo`. That is exactly the
+    /// failure `OMEGA-DELTA-0042` names, arrived at from the other side.
+    ///
+    /// **Derivation happens for the product's own lane and nowhere else.** The
+    /// gate is that `path` *is* [`Self::data_dir_path`]. A harness passes an
+    /// isolated lane file, and `agent_ui` deliberately hands a stateless run a
+    /// path inside the temporary directory that does not exist — so that a
+    /// rendering harness never spawns somebody's Exo. Deriving whenever a file
+    /// was absent would have quietly undone that, and the check is positive
+    /// rather than a list of paths to exclude so that a harness invented
+    /// tomorrow is excluded by default.
+    #[must_use]
+    pub fn resolve(path: &std::path::Path) -> Option<Self> {
+        if path.exists() {
+            return Self::load(path);
+        }
+        if path != Self::data_dir_path() {
+            return None;
+        }
+        match omega_agent_detect::exo::derive_lane_from_env() {
+            Ok(derived) => {
+                log::info!(
+                    "OMEGA-DELTA-0092: no Exo lane file, so the lane was derived \
+                     from the install at {}",
+                    derived.checkout.display()
+                );
+                Some(Self {
+                    binary: derived.binary,
+                    checkout: derived.checkout,
+                    root: ExoRoot::at(derived.root.to_string_lossy().into_owned()),
+                    agent: derived.agent,
+                    conversation: derived.conversation,
+                })
+            }
+            Err(underivable) => {
+                // Logged at info rather than warn. A machine with no Exo is the
+                // ordinary case, not a fault, and this runs on every start.
+                log::info!("OMEGA-DELTA-0092: no Exo lane: {underivable}");
+                None
+            }
+        }
+    }
 }
 
 /// Everything a turn needs, separated from the connection that owns it.
@@ -674,19 +733,23 @@ impl ExoDriver {
     }
 }
 
-/// The Exo lane the owner configured, if they configured one.
+/// The Exo lane this machine has: configured, or derived from the install.
 ///
-/// Called once, when the router is built. A machine with no lane file gets
-/// `None` and the router registers no external executor — which is the ordinary
-/// case, and is why the return type is an `Option` rather than a `Result` that
-/// every caller would have to decide to ignore.
+/// Called once, when the router is built. A machine with no Exo gets `None` and
+/// the router registers no external executor — which is the ordinary case, and
+/// is why the return type is an `Option` rather than a `Result` that every
+/// caller would have to decide to ignore.
+///
+/// `OMEGA-DELTA-0092`, omega#100. "No lane file" stopped meaning "no lane":
+/// see [`ExoLaneConfig::resolve`] for which of the two this path is and why the
+/// distinction is drawn where it is.
 pub async fn connect_configured_lane(
     lane_path: &std::path::Path,
     project: Entity<Project>,
     agent_server_store: WeakEntity<AgentServerStore>,
     cx: &mut AsyncApp,
 ) -> Result<Option<Rc<dyn AgentConnection>>> {
-    let Some(config) = ExoLaneConfig::load(lane_path) else {
+    let Some(config) = ExoLaneConfig::resolve(lane_path) else {
         return Ok(None);
     };
     let frozen = frozen_exo_digest();
@@ -1124,6 +1187,43 @@ mod tests {
         assert_eq!(config.agent, "omega-lane");
         assert_eq!(config.conversation, "tier-a");
         assert_eq!(config.root.as_str(), "/opt/exo/.exo");
+    }
+
+    /// `OMEGA-DELTA-0092`. A lane file that exists is the answer, and a broken
+    /// one is still an answer. The alternative — falling through to derivation
+    /// when the file will not parse — replaces somebody's explicit
+    /// configuration with a guess about a different `.exo`, which is the
+    /// `OMEGA-DELTA-0042` failure approached from the other side.
+    #[test]
+    fn a_lane_file_that_will_not_parse_is_not_replaced_by_a_derived_lane() {
+        let (_dir, path) = write("{ not json");
+
+        assert_eq!(
+            ExoLaneConfig::resolve(&path),
+            None,
+            "a damaged lane file must produce no lane, not a different one"
+        );
+    }
+
+    /// The gate that keeps a harness from spawning the owner's Exo.
+    ///
+    /// `agent_ui` hands a stateless run a lane path inside the temporary
+    /// directory that does not exist, precisely so that a rendering harness
+    /// never starts somebody's `exo acp`. Derivation is admitted for exactly
+    /// one path — the product's own — so that guarantee survives.
+    #[test]
+    fn an_absent_lane_file_outside_the_data_directory_derives_nothing() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let absent = dir.path().join("omega-exo-lane-1234.json");
+        assert!(!absent.exists());
+
+        assert_eq!(
+            ExoLaneConfig::resolve(&absent),
+            None,
+            "only the product's own lane path may be derived, whatever this \
+             machine happens to have installed"
+        );
+        assert_ne!(absent, ExoLaneConfig::data_dir_path());
     }
 
     #[test]

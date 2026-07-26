@@ -130,9 +130,7 @@ impl ExoPin {
     /// checkout of the wrong repository is reported as the wrong repository
     /// even though its commit also differs.
     pub fn admits(&self, observed: &ObservedExoCheckout) -> Result<(), ExoPinMismatch> {
-        if !same_repository(self.upstream, &observed.upstream) {
-            return Err(ExoPinMismatch::Upstream);
-        }
+        self.admits_upstream(&observed.upstream)?;
         if !self
             .source_commit
             .eq_ignore_ascii_case(observed.commit.trim())
@@ -143,6 +141,35 @@ impl ExoPin {
             return Err(ExoPinMismatch::Tree);
         }
         Ok(())
+    }
+
+    /// Whether a remote names the repository this lane drives, ignoring which
+    /// commit it is at.
+    ///
+    /// `OMEGA-DELTA-0092`, omega#100. Split out of [`admits`] rather than
+    /// duplicated in `omega_agent_detect`, which asks this question while
+    /// *finding* an Exo checkout on the machine and has no commit or tree to
+    /// offer yet. Duplicating the comparison would mean duplicating
+    /// [`normalize_remote`], and a second spelling of "is this the same
+    /// repository" is how the two answers eventually disagree — on the one
+    /// question that already cost a day in omega#86.
+    ///
+    /// This is deliberately weaker than [`admits`] and is not a substitute for
+    /// it. It answers "which install", not "may it run": the commit, the tree
+    /// and the bytes are still checked immediately before every turn.
+    ///
+    /// [`admits`]: Self::admits
+    ///
+    /// # Errors
+    ///
+    /// [`ExoPinMismatch::Upstream`] when the remote names a different
+    /// repository — exo labs' `exo-explore/exo` being the one that matters.
+    pub fn admits_upstream(&self, upstream: &str) -> Result<(), ExoPinMismatch> {
+        if same_repository(self.upstream, upstream) {
+            Ok(())
+        } else {
+            Err(ExoPinMismatch::Upstream)
+        }
     }
 }
 

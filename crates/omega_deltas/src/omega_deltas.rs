@@ -89,6 +89,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0080",
     "OMEGA-DELTA-0090",
     "OMEGA-DELTA-0091",
+    "OMEGA-DELTA-0092",
 ];
 
 /// OMEGA-DELTA-0080. Where the agent panel declares its result-body ceiling and
@@ -2105,6 +2106,16 @@ pub const FULL_AUTO_PANEL_PATH: &str = "crates/full_auto_ui/src/panel.rs";
 
 /// OMEGA-DELTA-0050. Gate 8's two closed lists.
 pub const GATE_EIGHT_PATH: &str = "crates/omega_front_door/src/omega_front_door.rs";
+
+/// OMEGA-DELTA-0092. Where an Exo install is found and a lane derived from it.
+pub const EXO_DETECT_PATH: &str = "crates/omega_agent_detect/src/exo.rs";
+
+/// OMEGA-DELTA-0092. Where derivation is allowed to stand in for a lane file.
+///
+/// The same file as [`EXO_CONNECTION_PATH`], named separately because the two
+/// deltas assert different things about it and a shared constant would make a
+/// rename look like it belonged to whichever check happened to fail first.
+pub const EXO_LANE_RESOLUTION_PATH: &str = "crates/agent_ui/src/omega_exo_connection.rs";
 
 /// OMEGA-DELTA-0070. Where every compiled-in skill is registered and loaded.
 pub const BUILTIN_SKILLS_PATH: &str = "crates/agent_skills/agent_skills.rs";
@@ -8373,6 +8384,143 @@ mod tests {
             "OMEGA-DELTA-0055: {} now knows about pins. Automatic routing is a \
              property of the routing law, not of a mode.",
             mode_path.display()
+        );
+    }
+
+    /// OMEGA-DELTA-0092. The lane is derived from the install, and the
+    /// derivation is admitted for exactly one path.
+    ///
+    /// Three things, and each is a way the change silently comes undone.
+    ///
+    /// The **derivation exists** and is reached from the lane's own resolution,
+    /// because `OMEGA-DELTA-0055` routes an unpinned thread to whatever
+    /// external agent is attached and nothing attached one: the lane needed a
+    /// hand-written file. Losing the call puts the hand back.
+    ///
+    /// The **file still wins**, and it wins on existing rather than on parsing.
+    /// A damaged lane file that fell through to derivation would replace an
+    /// explicit configuration with a guess about a different `.exo`, which is
+    /// the `OMEGA-DELTA-0042` failure arrived at from the other side.
+    ///
+    /// The **gate is positive**. Derivation is admitted when the path *is* the
+    /// data directory's, not when it is absent from a list of harness paths, so
+    /// a harness invented tomorrow is excluded by default. `agent_ui` hands a
+    /// stateless run a temporary path that does not exist precisely so a
+    /// rendering harness never spawns somebody's Exo, and deriving on absence
+    /// would have undone that quietly.
+    #[test]
+    fn the_exo_lane_is_derived_from_the_install_and_only_for_the_product() {
+        let detect_path = repository_path(EXO_DETECT_PATH);
+        let detect = std::fs::read_to_string(&detect_path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", detect_path.display()));
+        assert!(
+            detect.len() > 2000,
+            "OMEGA-DELTA-0092: {} is too short to be the derivation, so the \
+             checks below would pass without reading it",
+            detect_path.display()
+        );
+        // Scoped to the derived lane's own declaration, and the scoping is
+        // load-bearing. `pub conversation:` also appears on `ExoLaneOverrides`,
+        // so a check against the whole file stayed green with the field deleted
+        // from the lane — observed directly while falsifying this test.
+        let derived = detect
+            .split_once("pub struct DerivedExoLane {")
+            .and_then(|(_, rest)| rest.split_once("\n}"))
+            .map(|(body, _)| body)
+            .unwrap_or_else(|| {
+                panic!(
+                    "OMEGA-DELTA-0092: cannot find the derived lane in {}",
+                    detect_path.display()
+                )
+            });
+        assert!(
+            derived.len() < detect.len() / 2,
+            "OMEGA-DELTA-0092: the body read for the derived lane is not a \
+             plausible struct, so the field checks would be reading the whole \
+             file — which is how a deleted field went unnoticed once already"
+        );
+        for field in ["binary", "checkout", "root", "agent", "conversation"] {
+            assert!(
+                derived.contains(&format!("pub {field}:")),
+                "OMEGA-DELTA-0092: {} no longer derives `{field}`. A lane is \
+                 all five fields or it is not a lane.",
+                detect_path.display()
+            );
+        }
+        assert!(
+            detect.contains("pub const HARNESS_DIRECTORY: &str = \"exoharness\";"),
+            "OMEGA-DELTA-0092: {} no longer names Exo's harness directory.",
+            detect_path.display()
+        );
+        // Scoped for the same reason, with the test module removed rather than
+        // by function: the fixture helper beside this code builds the identical
+        // path, so a whole-file check stayed green with the *production* reader
+        // moved one level up — also observed while falsifying this test, and
+        // the more dangerous of the two, because that is the level the layout
+        // trap is at.
+        assert!(
+            production_source(&detect).contains("root.join(HARNESS_DIRECTORY).join(\"agents\")"),
+            "OMEGA-DELTA-0092: {} no longer reads agents from inside Exo's \
+             harness directory. Exo's `--root` is not where the records are — \
+             the CLI opens the store at `<root>/exoharness` — so a reader one \
+             level too high finds nothing on a machine that has agents and \
+             reports that Exo has never run.",
+            detect_path.display()
+        );
+        assert!(
+            detect.contains("admits_upstream"),
+            "OMEGA-DELTA-0092: {} no longer asks the pin whether a checkout is \
+             the Exo this lane drives. omega#86 was a day spent on exo labs' \
+             `exo-explore/exo`, which shares nothing with ours but a name.",
+            detect_path.display()
+        );
+
+        let lane_path = repository_path(EXO_LANE_RESOLUTION_PATH);
+        let lane = std::fs::read_to_string(&lane_path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", lane_path.display()));
+        let resolve = function_body(&lane, "resolve").unwrap_or_else(|| {
+            panic!(
+                "OMEGA-DELTA-0092: cannot find the lane resolution in {}. \
+                 Without it a thread reaches Exo only through a file somebody \
+                 wrote by hand.",
+                lane_path.display()
+            )
+        });
+        assert!(
+            resolve.len() > 200,
+            "OMEGA-DELTA-0092: the body read for the lane resolution is too \
+             short to be the real one, so the checks below would pass without \
+             reading it"
+        );
+        assert!(
+            resolve.contains("omega_agent_detect::exo::derive_lane_from_env()"),
+            "OMEGA-DELTA-0092: {} no longer derives a lane from the install. \
+             `OMEGA-DELTA-0055` routes an unpinned thread to the external agent \
+             that is attached; without this, nothing attaches one.",
+            lane_path.display()
+        );
+        assert!(
+            resolve.contains("if path.exists() {") && resolve.contains("return Self::load(path);"),
+            "OMEGA-DELTA-0092: {} no longer lets an existing lane file settle \
+             the question. It must be existence and not parsing: a damaged file \
+             that fell through to derivation would replace somebody's explicit \
+             configuration with a guess about a different `.exo`.",
+            lane_path.display()
+        );
+        assert!(
+            resolve.contains("if path != Self::data_dir_path() {"),
+            "OMEGA-DELTA-0092: {} no longer restricts derivation to the \
+             product's own lane path. `agent_ui` hands a stateless run a \
+             temporary path that does not exist so that a rendering harness \
+             never spawns somebody's Exo, and deriving whenever a file is \
+             absent undoes that.",
+            lane_path.display()
+        );
+        assert!(
+            lane.contains("ExoLaneConfig::resolve(lane_path)"),
+            "OMEGA-DELTA-0092: {} connects the lane without going through the \
+             resolution, so the derivation exists and nothing reaches it.",
+            lane_path.display()
         );
     }
 
