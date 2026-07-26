@@ -144,7 +144,7 @@ impl WebSocketRelayAdapter {
     }
 
     #[cfg(test)]
-    fn new_for_keys_with_policy(
+    pub(crate) fn new_for_keys_with_policy(
         relay_urls: Vec<String>,
         owner_keys: Keys,
         sarah_public_key_hex: String,
@@ -842,7 +842,12 @@ impl WebSocketRelayAdapter {
                 &tags,
             )?;
             if record_kind == "message" {
-                require_single_private_recipient(&tags, &recipient_public_key_hex)?;
+                require_conversation_recipients(
+                    &tags,
+                    &sender_public_key_hex,
+                    &self.owner_public_key_hex,
+                    &self.sarah_public_key_hex,
+                )?;
                 if (sender_public_key_hex != self.owner_public_key_hex
                     && sender_public_key_hex != self.sarah_public_key_hex)
                     || tag_value(&tags, "conversation").as_deref() != Some(conversation_ref)
@@ -1439,6 +1444,54 @@ fn require_single_private_recipient(
     if recipients != [recipient_public_key_hex] {
         return Err(SarahConversationError::InvalidRequest(
             "Issue 31 private rumor must have exactly one local p tag".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// A Sarah conversation message is a two-party record, unlike every Issue 31
+/// control record around it, and its author is never in its own `p` set.
+///
+/// `conversation_tags` writes a `p` tag for the owner *and* one for Sarah, but
+/// `EventBuilder::build` defaults `allow_self_tagging` to false and strips the
+/// `p` tag matching the event author. So an owner-authored rumor ships as
+/// `p: [sarah]` and a Sarah-authored one as `p: [owner]`. That is correct
+/// NIP-17 — a rumor's `p` tags are its receivers — and it is exactly what the
+/// old 1:1 `require_single_private_recipient` rule could not express.
+///
+/// Holding conversation rumors to that rule refused every message the host
+/// itself authored. The owner's own send was unreadable back off the relay,
+/// `load_issue31_source_event` could never confirm it, and the command came
+/// back `reason.omega.projection_failed` with no owner projection ever
+/// published — a phone on omega#49 saw the send publish, the host admit the
+/// command, and no reply arrive, three times. Nothing in the repository caught
+/// it because every admission test hand-wrote a single-`p` rumor instead of
+/// building one through the production path.
+///
+/// The bound the single-recipient rule was buying is kept. The author plus the
+/// `p` set must be exactly the conversation's own two participants, so a rumor
+/// naming any third recipient, or addressed to another pair entirely, is still
+/// refused. Being the addressed reader is already proven by NIP-59: this custody
+/// key decrypted the seal.
+fn require_conversation_recipients(
+    tags: &[Vec<String>],
+    sender_public_key_hex: &str,
+    owner_public_key_hex: &str,
+    sarah_public_key_hex: &str,
+) -> Result<(), SarahConversationError> {
+    let mut named: Vec<&str> = tags
+        .iter()
+        .filter(|tag| tag.first().map(String::as_str) == Some("p"))
+        .filter_map(|tag| tag.get(1).map(String::as_str))
+        .collect();
+    named.push(sender_public_key_hex);
+    named.sort_unstable();
+    named.dedup();
+    let mut participants = [owner_public_key_hex, sarah_public_key_hex];
+    participants.sort_unstable();
+    if named != participants {
+        return Err(SarahConversationError::InvalidRequest(
+            "Issue 31 conversation rumor must name exactly the owner and Sarah".into(),
         ));
     }
     Ok(())
@@ -2697,6 +2750,147 @@ mod tests {
         );
         assert_eq!(query_gap_after_eose(12, false), GapState::None);
         assert_eq!(query_gap_after_eose(256, false), GapState::Possible);
+    }
+
+    /// The owner's own send has to be readable back off the relay, because
+    /// `load_issue31_source_event` will not confirm a source it cannot see and
+    /// the command result degrades to `reason.omega.projection_failed` with no
+    /// owner projection ever published — which is exactly what a phone saw on
+    /// omega#49: the send published, the host admitted the command, and no
+    /// reply ever arrived.
+    ///
+    /// The rumor is built through the production tag builder and the production
+    /// event builder rather than hand-written. That is the whole point: every
+    /// prior admission test wrote its own single-`p` rumor and so never saw
+    /// that `EventBuilder::build` strips the author's own `p` tag, leaving the
+    /// owner's message addressed only to Sarah and unreadable by its own author.
+    #[test]
+    fn owner_authored_conversation_message_survives_its_own_round_trip() {
+        let owner = Keys::generate();
+        let sarah = Keys::generate();
+        let conversation_ref = "sarah.0123456789abcdef01234567";
+        let tags = crate::sarah_conversation::conversation_tags(
+            conversation_ref,
+            &owner.public_key().to_hex(),
+            &sarah.public_key().to_hex(),
+        )
+        .expect("production conversation tags");
+        let mut rumor = EventBuilder::new(Kind::PrivateDirectMessage, "durable hello")
+            .tags(tags)
+            .build(owner.public_key());
+        rumor.ensure_id();
+        let rumor_event_id = rumor.id.expect("rumor id").to_hex();
+
+        let relay = WebSocketRelayAdapter::new_for_keys_with_policy(
+            vec!["wss://relay.example.com".to_string()],
+            owner.clone(),
+            sarah.public_key().to_hex(),
+            Vec::new(),
+            Vec::new(),
+        )
+        .expect("relay");
+
+        // The host's own copy: sender and recipient are both the owner key,
+        // which is the copy `load_issue31_source_event` has to find.
+        let own_copy = smol::block_on(EventBuilder::gift_wrap(
+            &owner,
+            &owner.public_key(),
+            rumor.clone(),
+            [],
+        ))
+        .expect("gift wrap to the owner");
+        let stored = relay
+            .admit_event(&own_copy, conversation_ref)
+            .expect("the owner's own message must be admissible")
+            .expect("the owner's own message must be stored");
+        assert_eq!(stored.record_kind, "message");
+        assert_eq!(stored.event_id, rumor_event_id);
+        assert_eq!(stored.pubkey, owner.public_key().to_hex());
+        assert_eq!(stored.kind, crate::ISSUE31_PRIVATE_RUMOR_KIND);
+        // The wire shape this is defending: the author is not in its own `p`
+        // set, so a reader that demands to see itself there can never read its
+        // own send back.
+        assert_eq!(
+            stored
+                .tags
+                .iter()
+                .filter(|tag| tag.first().map(String::as_str) == Some("p"))
+                .filter_map(|tag| tag.get(1).cloned())
+                .collect::<Vec<_>>(),
+            vec![sarah.public_key().to_hex()]
+        );
+
+        // The other direction has to keep working: Sarah authors, the owner
+        // reads, and now it is the owner's `p` tag that survives.
+        let sarah_tags = crate::sarah_conversation::conversation_tags(
+            conversation_ref,
+            &owner.public_key().to_hex(),
+            &sarah.public_key().to_hex(),
+        )
+        .expect("production conversation tags");
+        let mut sarah_rumor = EventBuilder::new(Kind::PrivateDirectMessage, "Sarah here")
+            .tags(sarah_tags)
+            .build(sarah.public_key());
+        sarah_rumor.ensure_id();
+        let sarah_wrap = smol::block_on(EventBuilder::gift_wrap(
+            &sarah,
+            &owner.public_key(),
+            sarah_rumor,
+            [],
+        ))
+        .expect("gift wrap to the owner");
+        let stored_reply = relay
+            .admit_event(&sarah_wrap, conversation_ref)
+            .expect("Sarah's message must be admissible")
+            .expect("Sarah's message must be stored");
+        assert_eq!(stored_reply.record_kind, "message");
+        assert_eq!(stored_reply.pubkey, sarah.public_key().to_hex());
+
+        // The leak guard the single-recipient rule was buying is unchanged: a
+        // third recipient on the rumor is still refused outright.
+        let mut leaky_tags = crate::sarah_conversation::conversation_tags(
+            conversation_ref,
+            &owner.public_key().to_hex(),
+            &sarah.public_key().to_hex(),
+        )
+        .expect("production conversation tags");
+        let stranger = Keys::generate();
+        leaky_tags
+            .push(nostr::Tag::parse(["p", stranger.public_key().to_hex().as_str()]).expect("p tag"));
+        let mut leaky = EventBuilder::new(Kind::PrivateDirectMessage, "leaky")
+            .tags(leaky_tags)
+            .build(owner.public_key());
+        leaky.ensure_id();
+        let leaky_wrap =
+            smol::block_on(EventBuilder::gift_wrap(&owner, &owner.public_key(), leaky, []))
+                .expect("gift wrap");
+        assert!(
+            relay.admit_event(&leaky_wrap, conversation_ref).is_err(),
+            "a conversation rumor naming a third recipient must still be refused"
+        );
+
+        // And a rumor addressed away from this reader entirely is still refused.
+        let elsewhere_tags = crate::sarah_conversation::conversation_tags(
+            conversation_ref,
+            &stranger.public_key().to_hex(),
+            &sarah.public_key().to_hex(),
+        )
+        .expect("production conversation tags");
+        let mut elsewhere = EventBuilder::new(Kind::PrivateDirectMessage, "elsewhere")
+            .tags(elsewhere_tags)
+            .build(owner.public_key());
+        elsewhere.ensure_id();
+        let elsewhere_wrap = smol::block_on(EventBuilder::gift_wrap(
+            &owner,
+            &owner.public_key(),
+            elsewhere,
+            [],
+        ))
+        .expect("gift wrap");
+        assert!(
+            relay.admit_event(&elsewhere_wrap, conversation_ref).is_err(),
+            "a conversation rumor addressed to another pair must still be refused"
+        );
     }
 
     #[test]

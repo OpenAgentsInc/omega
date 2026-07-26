@@ -3935,7 +3935,7 @@ fn private_outbox_ref(prefix: &str, content: &str, tags: &[Tag], recipients: &[S
     format!("{prefix}.{:x}", Sha256::digest(binding))
 }
 
-fn conversation_tags(
+pub(crate) fn conversation_tags(
     conversation_ref: &str,
     owner_pubkey: &str,
     sarah_pubkey: &str,
@@ -5776,6 +5776,102 @@ mod tests {
     /// OMEGA_DEVICE_PROOF_STATE=/path/to/state.json \
     ///   cargo test -p omega_effectd --lib live_device_proof_host -- --ignored --nocapture
     /// ```
+    /// omega#49 / omega#46 exit 1: a device sends to Sarah and the host must
+    /// publish the owner record the device is waiting on.
+    ///
+    /// The phone showed the correct pending state and no reply ever arrived.
+    /// The command was admitted and never quarantined, so the failure was
+    /// downstream of admission, inside `execute_issue31_action_v2`:
+    /// `send_message` publishes the owner rumor, `enqueue_issue31_source_projection`
+    /// then has to read it back off the relay to confirm it, and the read-back
+    /// refused the host's own message — see `require_conversation_recipients`.
+    /// The result degraded to `reason.omega.projection_failed` and no owner
+    /// projection was ever enqueued for the device.
+    ///
+    /// This drives the real action path against a real relay, so the assertion
+    /// is on the same bytes a phone waits for rather than on a substitute.
+    #[test]
+    #[ignore = "requires a live relay; set OMEGA_LIVE_RELAY_URL"]
+    fn owner_send_confirms_and_projects_to_the_device_on_a_live_relay() {
+        let Ok(relay_url) = std::env::var("OMEGA_LIVE_RELAY_URL") else {
+            eprintln!("OMEGA_LIVE_RELAY_URL unset; skipping");
+            return;
+        };
+        let temporary = tempfile::tempdir().expect("tempdir");
+        let host_keys = Keys::generate();
+        let sarah_keys = Keys::generate();
+        let device_public_key_hex = Keys::generate().public_key().to_hex();
+        let signer = SigningIdentity::from_keys(host_keys.clone());
+        let owner_public_key_hex = signer.public_key_hex.clone();
+        let mut config = SarahConversationConfig::mock_fixture();
+        config.identity.owner_public_key_hex = owner_public_key_hex.clone();
+        config.identity.sarah_public_key_hex = sarah_keys.public_key().to_hex();
+        config.conversation_digest = owner_public_key_hex[..24].to_string();
+        config.relay_url = Some(relay_url.clone());
+        let conversation_ref = config.conversation_ref();
+
+        let relay = crate::nostr_websocket_relay::WebSocketRelayAdapter::new_for_keys_with_policy(
+            vec![relay_url.clone()],
+            host_keys,
+            sarah_keys.public_key().to_hex(),
+            Vec::new(),
+            Vec::new(),
+        )
+        .expect("host adapter");
+        let controller = Issue31HostController::new(Issue31HostConfiguration {
+            host_ref: "omega.host.local".into(),
+            host_public_key_hex: owner_public_key_hex.clone(),
+            sarah_public_key_hex: sarah_keys.public_key().to_hex(),
+            conversation: conversation_ref.clone(),
+            display_name: "Local Omega".into(),
+            relay_urls: vec![relay_url],
+            generation: ISSUE31_NOSTR_HOST_GENERATION,
+        })
+        .expect("host controller");
+        let mut client = SarahConversationClient::with_relay(config, Box::new(relay), signer);
+        client.issue31_state_path = Some(temporary.path().join("issue31-state.json"));
+        // The production caller binds the controller around the executor; the
+        // durable commit inside `send_message` requires it.
+        client.issue31_host = Some(controller);
+
+        let execution = client.execute_issue31_action_v2(
+            &Issue31CommandArguments::SendMessage {
+                action_ref: crate::ISSUE31_ACTION_SEND_MESSAGE.into(),
+                conversation: conversation_ref,
+                text: "Does a send from a paired device confirm?".into(),
+            },
+            "idempotency.issue31.send_message:liveconfirm",
+            "grant.omega.liveconfirm",
+            &device_public_key_hex,
+            1,
+        );
+        assert_eq!(
+            execution.status,
+            Issue31CommandHandlingStatus::Accepted,
+            "the host must accept its own send; reason {:?}",
+            execution.reason_ref
+        );
+        let source_event_id = execution
+            .source_event_id
+            .expect("an accepted send must name the owner record it produced");
+
+        // The owner record is not merely published — it is readable back off
+        // the relay, which is the step that was failing.
+        let source = client
+            .load_issue31_source_event(&source_event_id)
+            .expect("the owner's own message must be readable back off the relay");
+        assert_eq!(source.pubkey, owner_public_key_hex);
+        assert_eq!(source.record_kind, "message");
+        assert_eq!(source.kind, crate::ISSUE31_PRIVATE_RUMOR_KIND);
+
+        // And the device has an owner projection waiting for it, addressed to
+        // the device key rather than to either conversation participant.
+        assert!(
+            !client.issue31_private_outbox.is_empty(),
+            "an accepted send must enqueue the owner projection the device renders"
+        );
+    }
+
     #[test]
     #[ignore = "device proof host; set OMEGA_DEVICE_PROOF_RELAY"]
     fn live_device_proof_host() {
@@ -5823,13 +5919,20 @@ mod tests {
 
         // Seed the owner-private sources before the host starts, so the very
         // first projection pass has something to fan out.
-        if seed {
+        // Sarah publishes for the whole run, not only during the seed, so a
+        // send from the device can be answered while the harness is live.
+        let mut sarah_publisher = {
             let mut sarah_relay = crate::nostr_websocket_relay::WebSocketRelayAdapter::new_for_keys(
                 vec![relay_url.clone()],
                 sarah_keys.clone(),
             )
             .expect("sarah adapter");
             sarah_relay.connect().expect("sarah connect");
+            Some(sarah_relay)
+        };
+
+        if seed {
+            let sarah_relay = sarah_publisher.as_mut().expect("sarah adapter");
             let now = unix_now();
             let greeting = EventBuilder::new(
                 Kind::Custom(crate::ISSUE31_PRIVATE_RUMOR_KIND),
@@ -5839,7 +5942,7 @@ mod tests {
             .custom_created_at(nostr::Timestamp::from(now))
             .sign_with_keys(&sarah_keys)
             .expect("signed Sarah message");
-            device_proof_publish(&mut sarah_relay, &auth_url, &sarah_keys, &greeting)
+            device_proof_publish(sarah_relay, &auth_url, &sarah_keys, &greeting)
                 .expect("publish the Sarah greeting");
             eprintln!("device-proof: seeded Sarah message {}", greeting.id.to_hex());
 
@@ -5865,7 +5968,7 @@ mod tests {
             .custom_created_at(nostr::Timestamp::from(now))
             .sign_with_keys(&sarah_keys)
             .expect("signed engram");
-            device_proof_publish(&mut sarah_relay, &auth_url, &sarah_keys, &engram)
+            device_proof_publish(sarah_relay, &auth_url, &sarah_keys, &engram)
                 .expect("publish the engram");
             eprintln!("device-proof: seeded engram {}", engram.id.to_hex());
 
@@ -5883,7 +5986,7 @@ mod tests {
                 .custom_created_at(nostr::Timestamp::from(now + 1))
                 .sign_with_keys(&sarah_keys)
                 .expect("signed unreadable source");
-                device_proof_publish(&mut sarah_relay, &auth_url, &sarah_keys, &unreadable)
+                device_proof_publish(sarah_relay, &auth_url, &sarah_keys, &unreadable)
                     .expect("publish the unreadable source");
                 eprintln!(
                     "device-proof: seeded quarantine source {}",
@@ -5892,9 +5995,17 @@ mod tests {
             }
         }
 
-        let relay = crate::nostr_websocket_relay::WebSocketRelayAdapter::new_for_keys(
+        // The host reads with the owner key in custody and Sarah as the *other*
+        // participant. `new_for_keys` collapses both roles onto one key, which
+        // silently narrows the read: the `authors` filter becomes
+        // `[host, host]`, so nothing Sarah signs is ever requested, and the
+        // conversation participant set stops matching the records on the wire.
+        let relay = crate::nostr_websocket_relay::WebSocketRelayAdapter::new_for_keys_with_policy(
             vec![relay_url.clone()],
             host_keys,
+            sarah_public_key_hex.clone(),
+            Vec::new(),
+            Vec::new(),
         )
         .expect("host adapter");
         let host_configuration = Issue31HostConfiguration {
@@ -5935,10 +6046,54 @@ mod tests {
         let started = std::time::Instant::now();
         let mut revoked = false;
         let mut announced_grants: BTreeMap<String, String> = BTreeMap::new();
+        // The previous run of this harness could see that a command had been
+        // admitted and not quarantined, and could not see what the host then
+        // did with it. That is the whole distance between "the send failed" and
+        // "the send failed inside `send_message` with `projection_failed`", so
+        // the accepted-send counter and Sarah's answer are both surfaced here.
+        let mut announced_message_seq = client.message_seq;
         while started.elapsed().as_secs() < seconds {
             match client.sync_issue31_host() {
                 Ok(()) => {}
                 Err(error) => eprintln!("device-proof: sync error {error}"),
+            }
+            if client.message_seq != announced_message_seq {
+                announced_message_seq = client.message_seq;
+                let turn_ref = client
+                    .active_turn_ref
+                    .clone()
+                    .unwrap_or_else(|| format!("turn.{announced_message_seq}"));
+                eprintln!(
+                    "device-proof: OWNER SEND ACCEPTED · message_seq {announced_message_seq} · {turn_ref} · run_state {}",
+                    client.run_state
+                );
+                if let Some(sarah_relay) = sarah_publisher.as_mut() {
+                    // Sarah's half. This is the harness's own keypair, not the
+                    // admitted OpenAgents turn service: it produces a real
+                    // signed Sarah record on a real relay, and is not evidence
+                    // that the turn service produced it.
+                    let reply = EventBuilder::new(
+                        Kind::Custom(crate::ISSUE31_PRIVATE_RUMOR_KIND),
+                        format!(
+                            "Received. Answering {turn_ref} from a real Omega host over a real relay."
+                        ),
+                    )
+                    .tag(
+                        Tag::parse(["conversation", conversation_ref.as_str()])
+                            .expect("conversation tag"),
+                    )
+                    .tag(Tag::parse(["turn", turn_ref.as_str()]).expect("turn tag"))
+                    .custom_created_at(nostr::Timestamp::from(unix_now()))
+                    .sign_with_keys(&sarah_keys)
+                    .expect("signed Sarah reply");
+                    match device_proof_publish(sarah_relay, &auth_url, &sarah_keys, &reply) {
+                        Ok(()) => eprintln!(
+                            "device-proof: SARAH REPLIED {} · {turn_ref}",
+                            &reply.id.to_hex()[..16]
+                        ),
+                        Err(error) => eprintln!("device-proof: Sarah reply failed {error}"),
+                    }
+                }
             }
             let now = unix_now();
             for (event_id, reason) in &client.issue31_quarantined_events {
