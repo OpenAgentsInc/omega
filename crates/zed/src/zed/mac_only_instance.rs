@@ -52,6 +52,31 @@ fn address() -> SocketAddr {
         user_port += wrapped_uid;
     }
 
+    // A custom data directory is a different instance, so it gets its own lock.
+    //
+    // The lock exists to stop two processes sharing one profile. Two processes
+    // pointed at different `--user-data-dir` roots share nothing, yet the port
+    // above keys only on release channel and uid, so the second was refused
+    // with "omega is already running". `ZED_RELEASE_CHANNEL` is
+    // `debug_assertions`-only, so a release build had no way to move the port
+    // either, and every clean-profile proof had to begin by quitting the
+    // owner's live session.
+    //
+    // The offset is derived from the directory path, so the same profile keeps
+    // the same port across launches — a custom instance still refuses a second
+    // copy of *itself*, which is the property worth keeping.
+    if let Some(custom_dir) = paths::custom_data_dir() {
+        let mut hash: u32 = 2_166_136_261;
+        for byte in custom_dir.as_os_str().as_encoded_bytes() {
+            hash ^= u32::from(*byte);
+            hash = hash.wrapping_mul(16_777_619);
+        }
+        // Land well clear of the four release-channel blocks above.
+        const CUSTOM_BASE: u16 = 45_737;
+        const CUSTOM_SPAN: u32 = 4_000;
+        user_port = CUSTOM_BASE + (hash % CUSTOM_SPAN) as u16;
+    }
+
     SocketAddr::V4(SocketAddrV4::new(LOCALHOST, user_port))
 }
 

@@ -23,6 +23,18 @@ pub fn app_storage_slug() -> &'static str {
     app_identity::CHANNEL.storage_slug()
 }
 
+/// The custom data directory, if one was set.
+///
+/// Two Omega instances pointed at different data directories share no state,
+/// so they are not the same instance. The macOS single-instance lock keys its
+/// port on release channel and uid only, which meant a second instance with
+/// its own `--user-data-dir` was refused by the first — and `ZED_RELEASE_CHANNEL`
+/// is `debug_assertions`-only, so a release build had no way out. Proving
+/// anything on a clean profile therefore required quitting the running Omega.
+pub fn custom_data_dir() -> Option<&'static PathBuf> {
+    CUSTOM_DATA_DIR.get()
+}
+
 /// A custom data directory override, set only by `set_custom_data_dir`.
 /// This is used to override the default data directory location.
 /// The directory will be created if it doesn't exist when set.
