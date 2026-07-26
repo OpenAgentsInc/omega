@@ -17,6 +17,15 @@ door as narrow as the thing that is genuinely unobservable: a 360-pixel
 viewport and a larger UI font are ordinary rendering conditions and are
 performed here, not waived.
 
+Two checks depend on a system flag only the owner can set: increased contrast
+and reduced motion live in a domain `defaults write` is refused on. The flag is
+their precondition and never their observation. With increased contrast on, the
+window is read for legible text and the focus indicator is moved and watched;
+with reduced motion on, a journey is completed by keyboard and undone by menu,
+and every state it passes through is read from a still frame. Recording either
+as a pass because a preference is set would state a fact about the host and
+call it a fact about the product.
+
 The screen-reader check reads the macOS accessibility tree through
 `AXUIElement`, which is the exact surface a screen reader consumes. That is a
 real observation of what assistive technology would receive. It is not a claim
@@ -108,6 +117,41 @@ FOCUS_MOVE_MINIMUM_PIXELS = 2000
 #: A reverse move has to leave the window at least this many times closer to
 #: the earlier image than a forward move moved it away.
 FOCUS_RETURN_RATIO = 10
+
+#: How many lines of text have to be recognised off the rendered window before
+#: the increased-contrast render counts as legible, and the confidence below
+#: which a recognised line is not counted. Legibility is read from the product
+#: a person sees, not from a layout tree, so a render that is present but
+#: unreadable fails here.
+CONTRAST_LEGIBLE_LINES = 12
+CONTRAST_LEGIBLE_CONFIDENCE = 0.5
+
+#: How long the reduced-motion journey waits after each input before calling a
+#: state settled, and by how much the frame taken as soon as the harness could
+#: take one may differ from the settled frame. Stated openly: a state that is
+#: still moving when the person arrives differs between the two captures by a
+#: sizeable fraction of the change the step made, and fails.
+MOTION_SETTLED_SECONDS = 2.0
+MOTION_SETTLE_RATIO = 10
+
+#: The command the reduced-motion journey completes, the text that has to be
+#: legible on screen before it is completed, and the View-menu item that undoes
+#: it. The command is chosen because the candidate offers the same action by two
+#: independent routes, which is what lets the journey be completed by keyboard
+#: and checked by menu.
+MOTION_JOURNEY_COMMAND = "toggle right dock"
+MOTION_JOURNEY_MATCH = "workspace: toggle right dock"
+MOTION_JOURNEY_MENU_ITEM = "Toggle Right Dock"
+
+#: What a run says when an owner-only accessibility flag is off. `defaults
+#: write` cannot set these: macOS answers `Could not write domain`, so the
+#: window in which they can be observed exists only while a person has turned
+#: them on.
+OWNER_FLAG_OFF = (
+    "{check}: system flag {key} is off on this host. macOS privacy policy "
+    "protects that domain, so only the owner can turn it on, in System "
+    "Settings > Accessibility > Display."
+)
 
 #: Anything matching these in an accessibility value would be a secret reaching
 #: assistive technology, which is the failure the screen-reader check exists to
@@ -866,6 +910,315 @@ def main() -> int:
         )
         waived.append(check)
 
+    # The two checks below depend on a system flag only the owner can set, and
+    # they are performed first for that reason. `defaults write` is refused on
+    # that domain, so the window in which they can be observed at all is open
+    # only while a person is holding it open, and it is not this run's to spend.
+    # Every other check can be performed at any hour on any day.
+
+    # ---- high contrast ------------------------------------------------------
+    # The system flag is this check's *precondition*, not its observation. Only
+    # the owner can set it, so a run cannot happen without them; but a pass
+    # recorded off the flag alone would be a fact about the host's preferences,
+    # and the two facts this check carries are facts about the product. Both are
+    # performed here, with increased contrast on, and both are pixel reads.
+    if not system_flag("com.apple.universalaccess", "increaseContrast"):
+        blocked.append(OWNER_FLAG_OFF.format(check="high-contrast", key="increaseContrast"))
+    elif not activate():
+        blocked.append("high-contrast: the candidate could not be brought to the front")
+    else:
+        contrast_refs: list[dict[str, str]] = []
+
+        # Legibility is read the way a person reads it: characters recognised
+        # off the rendered window. Text present in the layout but rendered
+        # unreadably under increased contrast fails this; nothing here is taken
+        # from a layout tree or a settings value.
+        legible_ref = attach_screenshot(root, "high-contrast", window_frame())
+        readable: list[dict[str, Any]] = []
+        if legible_ref is not None:
+            contrast_refs.append(legible_ref)
+            readable = [
+                line
+                for line in (ocr_lines(root / legible_ref["path"]) or [])
+                if isinstance(line.get("text"), str)
+                and line["text"].strip()
+                and float(line.get("confidence", 0.0)) >= CONTRAST_LEGIBLE_CONFIDENCE
+            ]
+        content_legible = len(readable) >= CONTRAST_LEGIBLE_LINES
+
+        # The focus indicator is observed by moving the selection and comparing
+        # the window with itself. A caret blink cannot clear the forward
+        # threshold, and a move that leaves the window unchanged is not an
+        # indicator no matter what any tree says.
+        keystroke('keystroke "p" using {command down, shift down}')
+        contrast_paths: dict[str, Path] = {}
+        for name, fragment in (
+            ("start", None),
+            ("forward", "key code 125"),
+            ("back", "key code 126"),
+        ):
+            if fragment is not None and not keystroke(fragment):
+                continue
+            label = f"high-contrast-focus-{name}"
+            _, reference = window_digest(root, label)
+            if reference is not None:
+                contrast_refs.append(reference)
+                contrast_paths[name] = root / f"screenshot-{label}.png"
+        keystroke("key code 53")  # escape
+
+        def contrast_pixels(first: str, second: str) -> int | None:
+            if first not in contrast_paths or second not in contrast_paths:
+                return None
+            return differing_pixels(contrast_paths[first], contrast_paths[second])
+
+        contrast_forward = contrast_pixels("start", "forward")
+        contrast_return = contrast_pixels("start", "back")
+        focus_indicator_visible = (
+            contrast_forward is not None
+            and contrast_forward >= FOCUS_MOVE_MINIMUM_PIXELS
+            and contrast_return is not None
+            and contrast_return * FOCUS_RETURN_RATIO <= contrast_forward
+        )
+
+        if content_legible and focus_indicator_visible:
+            record_performed(
+                "accessibility",
+                "high-contrast",
+                {
+                    "system_increase_contrast": True,
+                    "content_legible": True,
+                    "focus_indicator_visible": True,
+                },
+                [
+                    write_evidence(
+                        root,
+                        "high-contrast",
+                        {
+                            "system_flag": "com.apple.universalaccess increaseContrast",
+                            "legible_line_count": len(readable),
+                            "legible_line_minimum": CONTRAST_LEGIBLE_LINES,
+                            "legible_confidence_minimum": CONTRAST_LEGIBLE_CONFIDENCE,
+                            "legible_lines": [
+                                line["text"] for line in readable
+                            ][:40],
+                            "focus_indicator_pixels": {
+                                "forward_move": contrast_forward,
+                                "return_move": contrast_return,
+                                "minimum_forward": FOCUS_MOVE_MINIMUM_PIXELS,
+                                "return_ratio": FOCUS_RETURN_RATIO,
+                            },
+                            "content_legible_basis": (
+                                "Optical character recognition over a capture of the "
+                                "candidate's own window taken while the host had "
+                                "increased contrast on. Lines below the stated "
+                                "confidence are not counted."
+                            ),
+                            "focus_indicator_basis": (
+                                "Moving the selection repainted the window well beyond "
+                                "the stated minimum and moving back returned it to "
+                                "very near the earlier image, so a visible indicator "
+                                "moved with the focus rather than the window merely "
+                                "changing."
+                            ),
+                            "method": (
+                                "Performed with the owner-set system flag on. The flag "
+                                "is the precondition of this observation, not the "
+                                "observation."
+                            ),
+                        },
+                    ),
+                    *contrast_refs,
+                ],
+            )
+        else:
+            blocked.append(
+                f"high-contrast: legible_lines={len(readable)} "
+                f"(minimum {CONTRAST_LEGIBLE_LINES}) forward={contrast_forward} "
+                f"return={contrast_return}"
+            )
+
+    # ---- reduced motion -----------------------------------------------------
+    # `motion_required_for_completion: false` is the substantive claim in this
+    # whole set, and the system flag says nothing about it. It is a claim about
+    # the product: that a person who has turned motion off can still finish. So
+    # a journey is completed here, with the flag on, by keyboard alone, and each
+    # of its end states is read from a still frame.
+    #
+    # The completion is checked by an independent route rather than by trusting
+    # the keystroke: the command is completed from the palette by keyboard, then
+    # undone through the candidate's own View menu, and the window has to come
+    # back to the image it started from. A journey that did something else does
+    # not round-trip.
+    if not system_flag("com.apple.universalaccess", "reduceMotion"):
+        blocked.append(OWNER_FLAG_OFF.format(check="reduced-motion", key="reduceMotion"))
+    elif not activate():
+        blocked.append("reduced-motion: the candidate could not be brought to the front")
+    else:
+        motion_refs: list[dict[str, str]] = []
+        motion_paths: dict[str, Path] = {}
+
+        def motion_capture(label: str) -> bool:
+            """Capture the window under its own label, region-free.
+
+            No window frame is read first: with `--window-id` the frame is not
+            used, and the read would put an osascript round trip between the
+            input and the frame this check calls the first one.
+            """
+            reference = attach_screenshot(root, f"reduced-motion-{label}", None)
+            if reference is None:
+                return False
+            motion_refs.append(reference)
+            motion_paths[label] = root / f"screenshot-reduced-motion-{label}.png"
+            return True
+
+        def motion_pixels(first: str, second: str) -> int | None:
+            if first not in motion_paths or second not in motion_paths:
+                return None
+            return differing_pixels(motion_paths[first], motion_paths[second])
+
+        motion_capture("baseline-first")
+        time.sleep(MOTION_SETTLED_SECONDS)
+        motion_capture("baseline")
+
+        delivered_open = keystroke('keystroke "p" using {command down, shift down}')
+        motion_capture("open-first")
+        time.sleep(MOTION_SETTLED_SECONDS)
+        motion_capture("open")
+
+        delivered_query = keystroke(f'keystroke "{MOTION_JOURNEY_COMMAND}"')
+        time.sleep(MOTION_SETTLED_SECONDS)
+        motion_capture("filter")
+        filtered = (
+            ocr_lines(motion_paths["filter"]) if "filter" in motion_paths else None
+        )
+        command_offered = (
+            filtered is not None
+            and first_position(filtered, MOTION_JOURNEY_MATCH) is not None
+        )
+
+        delivered_complete = keystroke("key code 36")  # return
+        motion_capture("complete-first")
+        time.sleep(MOTION_SETTLED_SECONDS)
+        motion_capture("complete")
+
+        undone = view_menu(MOTION_JOURNEY_MENU_ITEM)
+        time.sleep(MOTION_SETTLED_SECONDS)
+        motion_capture("restored")
+
+        opened_change = motion_pixels("baseline", "open")
+        completed_change = motion_pixels("baseline", "complete")
+        restored_change = motion_pixels("baseline", "restored")
+        settle = {
+            "baseline": motion_pixels("baseline-first", "baseline"),
+            "open": motion_pixels("open-first", "open"),
+            "complete": motion_pixels("complete-first", "complete"),
+        }
+
+        reached = opened_change is not None and opened_change >= FOCUS_MOVE_MINIMUM_PIXELS
+        completed = (
+            completed_change is not None and completed_change >= FOCUS_MOVE_MINIMUM_PIXELS
+        )
+        round_tripped = (
+            completed
+            and restored_change is not None
+            and restored_change * FOCUS_RETURN_RATIO <= completed_change
+        )
+        # Every state the journey passes through has to be still when it is
+        # looked at. A surface that is still moving when the person arrives is
+        # a surface whose completion depends on motion.
+        still = all(
+            value is not None
+            and reference is not None
+            and value * MOTION_SETTLE_RATIO <= reference
+            for value, reference in (
+                (settle["baseline"], completed_change),
+                (settle["open"], opened_change),
+                (settle["complete"], completed_change),
+            )
+        )
+
+        if (
+            delivered_open
+            and delivered_query
+            and delivered_complete
+            and undone
+            and reached
+            and command_offered
+            and completed
+            and round_tripped
+            and still
+        ):
+            record_performed(
+                "accessibility",
+                "reduced-motion",
+                {"system_reduce_motion": True, "motion_required_for_completion": False},
+                [
+                    write_evidence(
+                        root,
+                        "reduced-motion",
+                        {
+                            "system_flag": "com.apple.universalaccess reduceMotion",
+                            "journey": [
+                                "open the command palette by keyboard",
+                                f"type {MOTION_JOURNEY_COMMAND!r}",
+                                "read the offered command off the rendered window",
+                                "complete it with the return key",
+                                f"undo it from the View menu item "
+                                f"{MOTION_JOURNEY_MENU_ITEM!r}",
+                            ],
+                            "journey_pixels": {
+                                "opened_change": opened_change,
+                                "completed_change": completed_change,
+                                "restored_change": restored_change,
+                                "minimum_change": FOCUS_MOVE_MINIMUM_PIXELS,
+                                "return_ratio": FOCUS_RETURN_RATIO,
+                            },
+                            "settled_pixels": settle,
+                            "settle_seconds": MOTION_SETTLED_SECONDS,
+                            "settle_ratio": MOTION_SETTLE_RATIO,
+                            "command_offered": MOTION_JOURNEY_MATCH,
+                            "completion_basis": (
+                                "The journey was completed by keyboard with reduced "
+                                "motion on, and undoing it through the candidate's own "
+                                "View menu returned the window to the image it started "
+                                "from, so what the keyboard completed was this command "
+                                "and the journey really did finish."
+                            ),
+                            "no_motion_basis": (
+                                "Every state the journey passes through was read from a "
+                                "still frame: the capture taken as soon as the harness "
+                                "could take one after each input differs from the "
+                                "capture taken "
+                                f"{MOTION_SETTLED_SECONDS} seconds later by at most a "
+                                f"{MOTION_SETTLE_RATIO}th of the change that step made. "
+                                "Nothing here was read from an animation, and no step "
+                                "needed one to become reachable or readable."
+                            ),
+                            "not_observed": (
+                                "This is not a claim that the candidate renders "
+                                "differently with reduced motion on. It is a claim that "
+                                "the journey completes while it is on."
+                            ),
+                            "method": (
+                                "Keyboard and the candidate's own menu, delivered "
+                                "through System Events to the process under test, with "
+                                "every state read as pixels or as text recognised from "
+                                "pixels."
+                            ),
+                        },
+                    ),
+                    *motion_refs,
+                ],
+            )
+        else:
+            blocked.append(
+                "reduced-motion: delivered="
+                f"{delivered_open}/{delivered_query}/{delivered_complete} "
+                f"undone={undone} opened={opened_change} offered={command_offered} "
+                f"completed={completed_change} restored={restored_change} "
+                f"settled={settle}"
+            )
+
     # ---- manual journey -----------------------------------------------------
 
     # Zed isolation: purely mechanical, and meaningful only because this host
@@ -1458,33 +1811,6 @@ def main() -> int:
                     ),
                     captured[name],
                 ],
-            )
-
-    for check, domain, key, facts in [
-        (
-            "high-contrast",
-            "com.apple.universalaccess",
-            "increaseContrast",
-            lambda: {
-                "system_increase_contrast": True,
-                "content_legible": True,
-                "focus_indicator_visible": True,
-            },
-        ),
-        (
-            "reduced-motion",
-            "com.apple.universalaccess",
-            "reduceMotion",
-            lambda: {"system_reduce_motion": True, "motion_required_for_completion": False},
-        ),
-    ]:
-        if system_flag(domain, key):
-            record("accessibility", check, facts(), {"system_flag": f"{domain} {key}"})
-        else:
-            blocked.append(
-                f"{check}: system flag {key} is off on this host. macOS privacy policy "
-                "protects that domain, so only the owner can turn it on, in System "
-                "Settings > Accessibility > Display."
             )
 
     if blocked:
