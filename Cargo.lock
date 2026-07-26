@@ -550,6 +550,7 @@ dependencies = [
  "omega_front_door",
  "omega_harness",
  "omega_identity",
+ "omega_zero_base",
  "ordered-float 2.10.1",
  "parking_lot",
  "paths",
@@ -6612,6 +6613,7 @@ dependencies = [
  "nostr",
  "omega_effectd",
  "omega_front_door",
+ "omega_zero_base",
  "project",
  "serde",
  "serde_json",
@@ -12032,6 +12034,10 @@ dependencies = [
  "windows-sys 0.61.2",
  "zeroize",
 ]
+
+[[package]]
+name = "omega_zero_base"
+version = "0.1.0"
 
 [[package]]
 name = "onboarding"
@@ -22348,6 +22354,7 @@ dependencies = [
  "codestral",
  "collections",
  "command_palette",
+ "command_palette_hooks",
  "component",
  "component_preview",
  "copilot",
@@ -22415,6 +22422,7 @@ dependencies = [
  "notifications",
  "omega_effectd",
  "omega_front_door",
+ "omega_zero_base",
  "onboarding",
  "outline",
  "outline_panel",

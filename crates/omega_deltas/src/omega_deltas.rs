@@ -74,6 +74,9 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0044",
     "OMEGA-DELTA-0045",
     "OMEGA-DELTA-0046",
+    "OMEGA-DELTA-0047",
+    "OMEGA-DELTA-0048",
+    "OMEGA-DELTA-0050",
 ];
 
 /// OMEGA-DELTA-0036. The uninstall script embedded in the shipped `cli`.
@@ -1976,6 +1979,50 @@ pub const EXO_LANE_COMMAND_PATH: &str = "crates/omega_exo_lane/src/command.rs";
 
 /// OMEGA-DELTA-0042. The half that spawns a process and builds a thread.
 pub const EXO_CONNECTION_PATH: &str = "crates/agent_ui/src/omega_exo_connection.rs";
+
+/// OMEGA-DELTA-0047, 0048. The mode itself: what reads the command line, what
+/// the admitted set is, and what a refusal says.
+pub const ZERO_BASE_MODE_PATH: &str = "crates/omega_zero_base/src/omega_zero_base.rs";
+
+/// OMEGA-DELTA-0048, 0050. The surface: the palette restriction, the action
+/// gate, and the visible way out.
+pub const ZERO_BASE_UI_PATH: &str = "crates/zed/src/omega_zero_base_ui.rs";
+
+/// OMEGA-DELTA-0048. Where panels are added, and where zero base skips them.
+pub const WORKSPACE_INITIALIZATION_PATH: &str = "crates/zed/src/zed.rs";
+
+/// OMEGA-DELTA-0048. The palette filter the restriction extends.
+pub const COMMAND_PALETTE_FILTER_PATH: &str =
+    "crates/command_palette_hooks/src/command_palette_hooks.rs";
+
+/// OMEGA-DELTA-0048. The dispatch point the action gate is consulted from.
+pub const ACTION_DISPATCH_PATH: &str = "crates/gpui/src/window.rs";
+
+/// OMEGA-DELTA-0050. The Full Auto launch surface and its start control.
+pub const FULL_AUTO_PANEL_PATH: &str = "crates/full_auto_ui/src/panel.rs";
+
+/// OMEGA-DELTA-0050. Gate 8's two closed lists.
+pub const GATE_EIGHT_PATH: &str = "crates/omega_front_door/src/omega_front_door.rs";
+
+/// OMEGA-DELTA-0048. The namespaces zero base hides that the three default
+/// keymaps must still bind.
+///
+/// Each one is a surface the mode takes off the screen. If a later change
+/// deletes one of these actions to make zero base simpler, the keymap that
+/// still names it panics Omega at startup — which is the failure this list
+/// exists to make loud, and the reason it is checked against the shipped keymap
+/// files rather than against a memory of them.
+pub const ZERO_BASE_HIDDEN_KEYMAP_NAMESPACES: &[&str] = &[
+    "debugger::",
+    "git::",
+    "git_panel::",
+    "outline_panel::",
+    "pane::",
+    "project_panel::",
+    "search::",
+    "terminal::",
+    "workspace::",
+];
 
 /// OMEGA-DELTA-0042. The two Exos, which share only a name.
 ///
@@ -6774,6 +6821,301 @@ mod tests {
             assert!(
                 visual.contains(token),
                 "OMEGA-DELTA-0046: the real Exo visual proof lost `{token}`"
+            );
+        }
+    }
+
+    // ------ OMEGA-DELTA-0047 … 0050 — zero base
+
+    /// OMEGA-DELTA-0047. The mode reader names the command line, and the
+    /// shipped defaults contain no zero-base key.
+    ///
+    /// The cheap failure is a settings value. A settings value is writable by a
+    /// project settings file and by anything else that can write settings, so a
+    /// mode that hides authority-bearing surfaces would be settable by
+    /// something that is not the person at the keyboard. `OMEGA-DELTA-0020`
+    /// records the same objection against a composer mode flag, and this check
+    /// is the mechanised version of it: the mode's own source must not read a
+    /// settings store, an environment variable, or a file, and no key that
+    /// could turn it on may appear in the shipped defaults.
+    #[test]
+    fn zero_base_is_entered_only_from_the_command_line() {
+        let mode_path = repository_path(ZERO_BASE_MODE_PATH);
+        let mode = std::fs::read_to_string(&mode_path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", mode_path.display()));
+
+        assert!(
+            mode.contains("pub fn enter_from_command_line()"),
+            "OMEGA-DELTA-0047: {} must offer exactly one way in, and it must \
+             say in its own name where the mode comes from.",
+            mode_path.display()
+        );
+
+        for other_source in [
+            "SettingsStore",
+            "Settings::get",
+            "settings::",
+            "std::env::var",
+            "std::fs::read",
+            "paths::",
+        ] {
+            assert!(
+                !mode.contains(other_source),
+                "OMEGA-DELTA-0047: {} reads {other_source}. The mode is read \
+                 from the process command line, once, and from nowhere else — \
+                 a second reader is a second way to turn the mode on that the \
+                 person at the keyboard did not use.",
+                mode_path.display()
+            );
+        }
+
+        let startup_path = repository_path(STARTUP_PATH);
+        let startup = std::fs::read_to_string(&startup_path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", startup_path.display()));
+        assert!(
+            startup.contains("zero_base: bool"),
+            "OMEGA-DELTA-0047: {} no longer declares the zero-base flag on the \
+             argument parser, so the shipped binary has no way into the mode.",
+            startup_path.display()
+        );
+        assert!(
+            startup.contains("omega_zero_base::enter_from_command_line()"),
+            "OMEGA-DELTA-0047: {} no longer enters the mode from the parsed \
+             command line.",
+            startup_path.display()
+        );
+
+        // The whole shipped default settings text, not a parsed subtree: a
+        // zero-base key anywhere in it is the failure, wherever someone nested
+        // it.
+        let defaults_path = repository_path(DEFAULT_SETTINGS_PATH);
+        let defaults = std::fs::read_to_string(&defaults_path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", defaults_path.display()));
+        for key in ["zero_base", "zero-base", "zeroBase"] {
+            assert!(
+                !defaults.contains(key),
+                "OMEGA-DELTA-0047: {} contains {key:?}. Zero base is not a \
+                 setting, and a settings key for it would be a second way in \
+                 that a project settings file could write.",
+                defaults_path.display()
+            );
+        }
+    }
+
+    /// OMEGA-DELTA-0048. Zero base hides by filter and by refusal, and deletes
+    /// nothing.
+    ///
+    /// Two halves, and both are load-bearing. The palette restriction is what a
+    /// person sees; the action gate is what makes "not rendered" safe, because
+    /// a surface that is only visually absent is still one key press away. And
+    /// the deletion that would make either of them unnecessary is the one thing
+    /// that cannot be done here: the built-in keymap is loaded and unwrapped at
+    /// startup, so a binding naming a missing action kills the process while
+    /// `cargo check --workspace` stays green. `0.2.0-rc6` died that way.
+    #[test]
+    fn zero_base_hides_by_filter_and_refusal_and_deletes_nothing() {
+        let ui_path = repository_path(ZERO_BASE_UI_PATH);
+        let ui = std::fs::read_to_string(&ui_path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", ui_path.display()));
+        for token in [
+            "filter.restrict_to(ADMITTED_NAMESPACES, ADMITTED_ACTIONS)",
+            "cx.set_action_gate(",
+            "omega_zero_base::refusal(action_name)",
+            "workspace.show_toast(",
+        ] {
+            assert!(
+                ui.contains(token),
+                "OMEGA-DELTA-0048: the zero-base surface lost `{token}`. \
+                 Without it a hidden action is a silent no-op rather than a \
+                 sentence a person can read."
+            );
+        }
+
+        let filter_path = repository_path(COMMAND_PALETTE_FILTER_PATH);
+        let filter = std::fs::read_to_string(&filter_path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", filter_path.display()));
+        assert!(
+            filter.contains("pub fn restrict_to(") && filter.contains("pub fn clear_restriction("),
+            "OMEGA-DELTA-0048: {} no longer offers an admitted set, so zero \
+             base could only hide by listing every namespace it knows about — \
+             and would keep admitting the ones a later crate adds.",
+            filter_path.display()
+        );
+
+        let dispatch_path = repository_path(ACTION_DISPATCH_PATH);
+        let dispatch = std::fs::read_to_string(&dispatch_path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", dispatch_path.display()));
+        assert!(
+            dispatch.contains("if !cx.action_is_admitted(action)"),
+            "OMEGA-DELTA-0048: {} no longer consults the action gate before \
+             dispatching, so a refused action would still reach its listener \
+             through a key binding.",
+            dispatch_path.display()
+        );
+
+        let panels_path = repository_path(WORKSPACE_INITIALIZATION_PATH);
+        let panels = std::fs::read_to_string(&panels_path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", panels_path.display()));
+        for token in [
+            "if omega_zero_base::is_active()",
+            "add_panel_when_ready(project_panel",
+            "add_panel_when_ready(sarah_workroom_panel",
+        ] {
+            assert!(
+                panels.contains(token),
+                "OMEGA-DELTA-0048: {} lost `{token}`. The panels are skipped in \
+                 zero base and kept everywhere else; deleting their load calls \
+                 would make the mode irreversible inside the window.",
+                panels_path.display()
+            );
+        }
+
+        // Nothing was deleted: every namespace zero base hides is still bound
+        // in all three shipped keymaps. `keymaps_name_no_deleted_action` covers
+        // the crates Omega removed outright; this covers the ones it only hides.
+        let mut missing: Vec<String> = Vec::new();
+        for keymap in [
+            "assets/keymaps/default-macos.json",
+            "assets/keymaps/default-linux.json",
+            "assets/keymaps/default-windows.json",
+        ] {
+            let path = repository_path(keymap);
+            let source = std::fs::read_to_string(&path)
+                .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
+            for namespace in ZERO_BASE_HIDDEN_KEYMAP_NAMESPACES {
+                if !source.contains(namespace) {
+                    missing.push(format!("{namespace:?} is no longer bound in {keymap}"));
+                }
+            }
+        }
+        assert!(
+            missing.is_empty(),
+            "OMEGA-DELTA-0048: zero base hides these surfaces and must delete \
+             none of them:\n{}",
+            missing.join("\n")
+        );
+    }
+
+    /// OMEGA-DELTA-0050. Zero base opens no authority path.
+    ///
+    /// Owner gate 8 closes the launch origins at four and the pin gestures at
+    /// two. A mode that pre-pinned its thread to the Exo lane would need a
+    /// third pin gesture, which is an edit to a closed list. This packet makes
+    /// no such edit, and this check is what says so in a place a later change
+    /// has to argue with.
+    #[test]
+    fn zero_base_opens_no_authority_path() {
+        let gate_path = repository_path(GATE_EIGHT_PATH);
+        let gate = std::fs::read_to_string(&gate_path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", gate_path.display()));
+        let compact = without_whitespace(&gate);
+        assert!(
+            compact.contains(&without_whitespace(
+                "&[
+                    Self::NewThreadMenuItem,
+                    Self::OpenLauncherAction,
+                    Self::RunMonitorNewRun,
+                    Self::RunSurfaceNewRun,
+                ]"
+            )),
+            "OMEGA-DELTA-0050: LaunchOrigin::all() changed. Zero base adds no \
+             launch origin, so a change here means something else took gate \
+             8's list — say which, in its own delta."
+        );
+        assert!(
+            compact.contains(&without_whitespace(
+                "&[Self::ExecutorPinMenuItem, Self::ExecutorPinCleared]"
+            )),
+            "OMEGA-DELTA-0050: PinGesture::all() changed. Zero base pins \
+             nothing — the viewer sets the pin with one visible click on the \
+             disclosure line — so a third gesture is a separate decision that \
+             needs its own reason in this test."
+        );
+        assert!(
+            !gate.contains("omega_zero_base"),
+            "OMEGA-DELTA-0050: {} now knows about zero base. Gate 8's lists are \
+             about human gestures, and a mode is not one.",
+            gate_path.display()
+        );
+
+        // Not rendered *and* disabled, in both places, because a surface that
+        // is only visually absent is still one dispatch away.
+        let mode_path = repository_path(ZERO_BASE_MODE_PATH);
+        let mode = std::fs::read_to_string(&mode_path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", mode_path.display()));
+        assert!(
+            !mode.contains("\"full_auto_panel\"") && !mode.contains("\"agent_computer\""),
+            "OMEGA-DELTA-0050: {} admits a namespace that reaches Full Auto or \
+             the Agent Computer. Neither belongs in the admitted set.",
+            mode_path.display()
+        );
+
+        let panel_path = repository_path(AGENT_PANEL_PATH);
+        let panel = std::fs::read_to_string(&panel_path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", panel_path.display()));
+        assert!(
+            panel.contains(".when(!omega_zero_base::is_active(), |menu|"),
+            "OMEGA-DELTA-0050: {} renders the Full Auto entry in zero base.",
+            panel_path.display()
+        );
+        assert!(
+            panel.contains("self.refuse_in_zero_base(\"full_auto_panel::OpenLauncher\", cx)")
+                && panel.contains("self.refuse_in_zero_base(\"full_auto_panel::ToggleFocus\", cx)"),
+            "OMEGA-DELTA-0050: {} no longer refuses the Full Auto surface in \
+             zero base. Not rendering it is only half the rule.",
+            panel_path.display()
+        );
+
+        let full_auto_path = repository_path(FULL_AUTO_PANEL_PATH);
+        let full_auto = std::fs::read_to_string(&full_auto_path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", full_auto_path.display()));
+        assert!(
+            full_auto.contains(".when(!omega_zero_base::is_active(), |this|"),
+            "OMEGA-DELTA-0050: {} renders the Full Auto start control in zero \
+             base.",
+            full_auto_path.display()
+        );
+        assert!(
+            full_auto.contains("omega_zero_base::refusal(\"full_auto_panel::StartRun\")"),
+            "OMEGA-DELTA-0050: {} no longer refuses `start_run` in zero base. \
+             Starting Full Auto is the one act gate 8 says no code path may \
+             reach without an explicit human gesture.",
+            full_auto_path.display()
+        );
+
+        // `OMEGA-DELTA-0040` keeps its order. The zero-base branch waits on the
+        // identity gate before it opens and zooms its panel. Without the wait
+        // the mode still *works* on a first-ever launch — it simply covers
+        // onboarding with a zoomed panel, which is a bypass of an identity gate
+        // wearing a layout's clothes. That is the failure this line catches.
+        let panels = std::fs::read_to_string(repository_path(WORKSPACE_INITIALIZATION_PATH))
+            .expect("the workspace initialization is readable");
+        assert!(
+            panels.contains("await_identity_ready(app_state, cx).await.log_err();"),
+            "OMEGA-DELTA-0050: the zero-base panel branch no longer waits for \
+             identity onboarding, so a first-ever launch in zero base would \
+             never see the identity gate `OMEGA-DELTA-0040` puts in front of it."
+        );
+
+        // No change to the Exo lane: zero base writes no configuration, opens
+        // no listener, and proxies no `exo serve`.
+        let ui_path = repository_path(ZERO_BASE_UI_PATH);
+        let ui = std::fs::read_to_string(&ui_path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", ui_path.display()));
+        for reaching_the_lane in [
+            "ExoLaneConfig",
+            "exo serve",
+            "write_exo",
+            "FullAutoDispatch",
+            "LaunchOrigin",
+            "PinGesture",
+        ] {
+            assert!(
+                !ui.contains(reaching_the_lane),
+                "OMEGA-DELTA-0050: {} reaches {reaching_the_lane}. Zero base is \
+                 a subtraction of the editor, not a second code path through \
+                 the Exo lane or the launch gate.",
+                ui_path.display()
             );
         }
     }

@@ -2420,3 +2420,94 @@ than it sounds, because the harness omega#81's acceptance sentence names —
   Metal visual runner. The visual path starts the shipped ACP transport, sends
   one real turn, requires the reply and all three durable references, and then
   records both layouts.
+
+### OMEGA-DELTA-0047 — Zero base is off unless the process was started with the flag
+
+- **Before this change:** Omega had one surface. Every mode-like behaviour it
+  had was a setting, and a setting is writable by a project settings file and by
+  anything else that can write settings.
+- **Omega now:** `omega --zero-base` opens one window that shows one Exo thread
+  and the controls that operate it. Without the flag Omega is unchanged.
+- **The mode is read from the process command line, once, and from nowhere
+  else.** `crates/omega_zero_base/` reads no settings store, no environment
+  variable and no file. The only writer of its entry is the argument parser in
+  `crates/zed/src/main.rs`. A rejected alternative is recorded for each: a
+  setting, because a project settings file must not be able to hide
+  authority-bearing surfaces (`OMEGA-DELTA-0020` records the same objection
+  against a composer mode flag); a release channel, because that is a second
+  product with its own update path and proof matrix; and a second binary,
+  because `OMEGA-DELTA-0038` requires the packaged gate to open every executable
+  that ships.
+- **Nothing persists.** The mode is never written to disk, so ending the process
+  is a complete repair, and a visible control on the status bar leaves it inside
+  the window a person is already looking at.
+- **Enforced by:** `zero_base_is_entered_only_from_the_command_line` in
+  `crates/omega_deltas/`, and the mode's own tests in
+  `crates/omega_zero_base/`.
+
+### OMEGA-DELTA-0048 — Zero base hides by filter and by refusal, and deletes nothing
+
+- **Before this change:** Omega's two ways to make a surface go away were
+  deletion (`OMEGA-DELTA-0009`, `OMEGA-DELTA-0012`) and a settings default.
+  Deletion is not available here: the built-in keymap is loaded and unwrapped at
+  startup, so a binding naming a missing action kills the process before any
+  window opens while `cargo check --workspace` stays green. `0.2.0-rc6` died
+  that way.
+- **Omega now:** Zero base hides by two mechanisms and removes nothing. The
+  panels, the editor's status-bar indicators, the editor pane and the tab bar
+  are **not rendered** — their `add_panel_when_ready` calls in
+  `initialize_panels` are skipped and the Exo panel is zoomed. Everything
+  outside the admitted set is **disabled** — the command palette is restricted
+  to `omega_zero_base::ADMITTED_NAMESPACES` and `ADMITTED_ACTIONS`, and an
+  action outside that set is refused at dispatch.
+- **A refusal is a sentence, never a silent no-op.** The refusal names the
+  action, names the mode, and names the two ways out: the visible control in the
+  window, and starting Omega without the flag.
+- **The gate is the reason "not rendered" is safe.** A surface that is only
+  visually absent is still one key press away, so the mode installs an action
+  gate consulted before any listener runs, and the two halves are applied
+  together to the Full Auto entry and the Full Auto start control.
+- **No action and no key binding is deleted.** `assets/keymaps/default-macos.json`
+  and its Linux and Windows siblings are untouched, and every namespace zero
+  base hides is still bound in all three.
+- **Enforced by:** `zero_base_hides_by_filter_and_refusal_and_deletes_nothing`
+  in `crates/omega_deltas/`, which also requires the three keymap files to still
+  bind the hidden namespaces, and `keymaps_name_no_deleted_action`, which stays
+  green.
+
+### OMEGA-DELTA-0050 — Zero base opens no authority path
+
+- **Before this change:** Owner gate 8 closes the admitted launch origins at four
+  in `origins_are_all_human_gestures` and the admitted pin gestures at two in
+  `pin_gestures_are_all_human_gestures`. A mode that pre-pinned its thread to the
+  Exo lane would need a third pin gesture, which is an edit to a closed list.
+- **Omega now:** Zero base makes no such edit. It pins nothing. The viewer sets
+  the pin with one visible click on the disclosure line, which also demonstrates
+  the line doing its work.
+- **No zero-base path reaches Full Auto.** The Full Auto entry in the agent
+  panel's new-thread menu is not rendered, `open_full_auto` and
+  `toggle_full_auto` refuse, the `full_auto_panel` namespace is outside the
+  admitted set so its actions are refused at dispatch, and the "Start Full Auto"
+  control is neither rendered nor able to start a run.
+- **No change to the Exo lane.** Zero base writes no Exo configuration, opens no
+  listener, proxies no `exo serve`, does not bypass the one-use Tier C grant, and
+  changes none of the four preflight refusals in `OMEGA-DELTA-0042`.
+- **`OMEGA-DELTA-0040` keeps its order.** A first-ever launch still lands on
+  identity onboarding; the flag adds no bypass. Zero base's panel branch awaits
+  the identity gate before it opens and zooms its panel, because a mode that
+  merely covered onboarding with a zoomed panel would be a bypass of an identity
+  gate wearing a layout's clothes.
+- **Enforced by:** `zero_base_opens_no_authority_path` in
+  `crates/omega_deltas/`, alongside the unchanged
+  `origins_are_all_human_gestures` and `pin_gestures_are_all_human_gestures` in
+  `crates/omega_front_door/`.
+
+<!-- The fourth entry omega#99 counts — "a zero-base turn still names its
+     executor", carrying the two visual baselines — is deliberately not
+     allocated here. Its scene cannot land without its PNG, and
+     `run_omega_exo_visual_tests` cannot presently record one: the suite leaks
+     its `exo acp` child between captures, a second `exo acp` on the same
+     conversation blocks on Exo's per-conversation lock, and the suite therefore
+     hangs before its second scene. That is a defect in the shipped suite, not
+     in zero base, and it blocks re-recording `omega_exo_workspace_narrow` just
+     as much. See omega#99. -->

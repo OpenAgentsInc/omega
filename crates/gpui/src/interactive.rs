@@ -875,4 +875,69 @@ mod test {
             })
             .unwrap();
     }
+
+    /// omega#99, `OMEGA-DELTA-0048`. The action gate refuses a key binding
+    /// before its listener runs, and says which action it refused.
+    ///
+    /// This is the property that makes "not rendered" a safe mechanism. A
+    /// surface Omega merely stops drawing is still one key press away, and the
+    /// key press arrives here. The test therefore presses the key rather than
+    /// calling `dispatch_action`: a gate that only covered the programmatic
+    /// entry point would leave every existing binding live.
+    #[gpui::test]
+    fn test_action_gate_refuses_a_key_binding_before_its_listener(cx: &mut TestAppContext) {
+        use std::{cell::RefCell, rc::Rc};
+
+        let window = cx.update(|cx| {
+            cx.open_window(Default::default(), |_, cx| {
+                cx.new(|cx| TestView {
+                    saw_key_down: false,
+                    saw_action: false,
+                    focus_handle: cx.focus_handle(),
+                })
+            })
+            .unwrap()
+        });
+
+        let refused: Rc<RefCell<Vec<String>>> = Rc::default();
+        cx.update(|cx| {
+            cx.bind_keys(vec![KeyBinding::new("ctrl-g", TestAction, Some("parent"))]);
+            let refused = refused.clone();
+            cx.set_action_gate(move |action, _| {
+                refused.borrow_mut().push(action.name().to_owned());
+                false
+            });
+        });
+
+        window
+            .update(cx, |test_view, window, cx| {
+                window.focus(&test_view.focus_handle, cx)
+            })
+            .unwrap();
+
+        cx.dispatch_keystroke(*window, Keystroke::parse("ctrl-g").unwrap());
+
+        window
+            .update(cx, |test_view, _, _| {
+                assert!(
+                    !test_view.saw_action,
+                    "a refused action must reach no listener at all"
+                );
+            })
+            .unwrap();
+        assert_eq!(
+            refused.borrow().as_slice(),
+            ["test_only::TestAction"],
+            "the gate must be told which action it is refusing, so the refusal \
+             can name it in a sentence a person reads"
+        );
+
+        // Clearing the gate restores the ordinary behaviour, which is what
+        // leaving the mode inside the window depends on.
+        cx.update(|cx| cx.clear_action_gate());
+        cx.dispatch_keystroke(*window, Keystroke::parse("ctrl-g").unwrap());
+        window
+            .update(cx, |test_view, _, _| assert!(test_view.saw_action))
+            .unwrap();
+    }
 }

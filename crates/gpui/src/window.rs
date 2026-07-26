@@ -5324,6 +5324,14 @@ impl Window {
         action: &dyn Action,
         cx: &mut App,
     ) {
+        // The gate refuses before any listener runs, so a refused action
+        // reaches neither a global listener nor an element in the focus chain.
+        // See `App::set_action_gate`.
+        if !cx.action_is_admitted(action) {
+            cx.propagate_event = false;
+            return;
+        }
+
         let dispatch_path = self.rendered_frame.dispatch_tree.dispatch_path(node_id);
 
         // Capture phase for global actions.

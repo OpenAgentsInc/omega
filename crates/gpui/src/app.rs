@@ -326,6 +326,8 @@ pub(crate) type KeystrokeObserver =
 type QuitHandler = Box<dyn FnOnce(&mut App) -> LocalBoxFuture<'static, ()> + 'static>;
 type WindowClosedHandler = Box<dyn FnMut(&mut App, WindowId)>;
 type ReleaseListener = Box<dyn FnOnce(&mut dyn Any, &mut App) + 'static>;
+/// See [`App::set_action_gate`]. `true` admits the action, `false` refuses it.
+pub(crate) type ActionGate = Rc<dyn Fn(&dyn Action, &mut App) -> bool + 'static>;
 type NewEntityListener = Box<dyn FnMut(AnyEntity, &mut Option<&mut Window>, &mut App) + 'static>;
 
 /// Defines when the application should automatically quit.
@@ -695,6 +697,7 @@ pub struct App {
     pub(crate) keyboard_mapper: Rc<dyn PlatformKeyboardMapper>,
     pub(crate) global_action_listeners:
         TypeIdHashMap<Vec<Rc<dyn Fn(&dyn Any, DispatchPhase, &mut Self)>>>,
+    pub(crate) action_gate: Option<ActionGate>,
     pending_effects: VecDeque<Effect>,
 
     pub(crate) observers: SubscriberSet<EntityId, Handler>,
@@ -814,6 +817,7 @@ impl App {
                 keyboard_layout,
                 keyboard_mapper,
                 global_action_listeners: Default::default(),
+                action_gate: None,
                 pending_effects: VecDeque::new(),
                 pending_notifications: FxHashSet::default(),
                 pending_global_notifications: Default::default(),
@@ -2143,6 +2147,39 @@ impl App {
         self.keymap.clone()
     }
 
+    /// Install a gate consulted before *every* dispatched action, whatever
+    /// dispatched it: a key binding, a menu item, the command palette, or
+    /// another element's handler.
+    ///
+    /// The gate returns `true` to admit the action and `false` to refuse it. A
+    /// refused action reaches no listener at all, so this is the only hook that
+    /// can turn a surface off without deleting the action behind it — which
+    /// matters because an unresolvable key binding is a startup panic, not a
+    /// preference.
+    ///
+    /// The gate runs inside a window update, so it must not re-enter the
+    /// window. Use [`App::defer`] to show anything a person is meant to read.
+    ///
+    /// One gate at a time; installing a second replaces the first.
+    pub fn set_action_gate(&mut self, gate: impl Fn(&dyn Action, &mut Self) -> bool + 'static) {
+        self.action_gate = Some(Rc::new(gate));
+    }
+
+    /// Remove the gate installed by [`App::set_action_gate`], if any.
+    pub fn clear_action_gate(&mut self) {
+        self.action_gate = None;
+    }
+
+    /// Ask the installed gate whether this action may be dispatched.
+    ///
+    /// `true` when no gate is installed, which is every ordinary Omega process.
+    pub(crate) fn action_is_admitted(&mut self, action: &dyn Action) -> bool {
+        let Some(gate) = self.action_gate.clone() else {
+            return true;
+        };
+        gate(action, self)
+    }
+
     /// Register a global handler for actions invoked via the keyboard. These handlers are run at
     /// the end of the bubble phase for actions, and so will only be invoked if there are no other
     /// handlers or if they called `cx.propagate()`.
@@ -2365,6 +2402,12 @@ impl App {
     }
 
     fn dispatch_global_action(&mut self, action: &dyn Action) {
+        // The gate refuses before any listener runs. See `set_action_gate`.
+        if !self.action_is_admitted(action) {
+            self.propagate_event = false;
+            return;
+        }
+
         self.propagate_event = true;
 
         if let Some(mut global_listeners) = self

@@ -459,6 +459,18 @@ impl FullAutoPanel {
     /// them, and evidence is minted by the host at the completion-admission
     /// gate.
     fn start_run(&mut self, cx: &mut Context<Self>) {
+        // omega#99. Zero base does not render this control, and it refuses it
+        // too. Both, because a start control that is only visually absent is
+        // still one dispatch away, and starting Full Auto is the one thing owner
+        // gate 8 says no code path may reach without an explicit human act.
+        // The sentence lands in the draft error, where this surface already
+        // puts every other refusal a person needs to read.
+        if omega_zero_base::is_active() {
+            self.draft.submitting = false;
+            self.draft.error = Some(omega_zero_base::refusal("full_auto_panel::StartRun"));
+            cx.notify();
+            return;
+        }
         self.sync_draft_from_editors(cx);
         let validation = validate_launcher_draft(&self.draft);
         let (project_ref, worktree_ref) = self
@@ -970,12 +982,14 @@ impl Render for FullAutoPanel {
                             .child(
                                 h_flex()
                                     .gap_2()
-                                    .child(
+                                    // omega#99. Not rendered in zero base, and
+                                    // `start_run` refuses as well.
+                                    .when(!omega_zero_base::is_active(), |this| this.child(
                                         Button::new("full-auto-start", "Start Full Auto")
                                             .style(ButtonStyle::Filled)
                                             .disabled(!can_start)
                                             .on_click(cx.listener(|this, _, _, cx| this.start_run(cx))),
-                                    )
+                                    ))
                                     .child(
                                         Button::new("full-auto-cancel", "Cancel")
                                             .style(ButtonStyle::Subtle)

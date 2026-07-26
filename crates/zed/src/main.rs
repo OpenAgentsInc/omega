@@ -1,6 +1,7 @@
 // Disable command line from opening on release mode
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod omega_zero_base_ui;
 mod reliability;
 mod zed;
 
@@ -268,6 +269,16 @@ fn main() {
         unsafe {
             std::env::set_var(workroom_ui::PUBLIC_DEMO_ENV, "1");
         }
+    }
+
+    // omega#99. Zero base is entered here and nowhere else: from the parsed
+    // process command line, once, before anything reads a settings file. It is
+    // deliberately not a setting, because a settings value is writable by a
+    // project settings file and by anything else that can write settings, and a
+    // mode that hides authority-bearing surfaces must not be settable by
+    // something that is not the person at the keyboard.
+    if args.zero_base {
+        omega_zero_base::enter_from_command_line();
     }
 
     // Set custom data directory.
@@ -873,6 +884,13 @@ fn main() {
         }
 
         initialize_workspace(app_state.clone(), cx);
+
+        // omega#99. After every other `init` has registered its actions and
+        // filled the palette, so the restriction and the gate see the whole
+        // registry. Without the flag this is not called and nothing changes.
+        if omega_zero_base::entered_from_command_line() {
+            omega_zero_base_ui::init(cx);
+        }
 
         cx.activate(true);
 
@@ -1688,6 +1706,16 @@ struct Args {
     /// modify the normal Omega profile.
     #[arg(long, requires = "user_data_dir")]
     demo_workroom: bool,
+
+    /// Opens zero base: one Exo thread and the controls that operate it.
+    ///
+    /// The editor around the thread is not rendered and the actions outside the
+    /// admitted set are refused with a sentence, but nothing is deleted — the
+    /// same binary is a full editor without this flag. The mode is read here,
+    /// once, and never written anywhere, so ending the process leaves nothing
+    /// to repair. A visible control leaves it inside the window.
+    #[arg(long)]
+    zero_base: bool,
 
     /// Pairs of file paths to diff. Can be specified multiple times.
     /// When directories are provided, recurses into them and shows all changed files in a single multi-diff view.

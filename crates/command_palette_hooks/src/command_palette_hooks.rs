@@ -22,6 +22,23 @@ pub struct CommandPaletteFilter {
     /// Actions that have explicitly been shown. These should be shown even if
     /// they are in a hidden namespace.
     shown_action_types: TypeIdHashSet,
+    /// The admitted set, when the palette is restricted to one.
+    ///
+    /// `hide_namespace` is a denylist, and a denylist cannot express "only
+    /// these": Omega registers actions in more than sixty namespaces, and a
+    /// mode that hid every namespace it knew about would keep admitting the
+    /// ones a later crate adds. `Some` here inverts the question — anything
+    /// outside the two lists is hidden. Both lists are `&'static`, so the
+    /// admitted set is a constant some other code points at rather than a list
+    /// assembled at runtime.
+    restriction: Option<Restriction>,
+}
+
+/// The admitted set of a restricted command palette.
+#[derive(Clone, Copy)]
+struct Restriction {
+    namespaces: &'static [&'static str],
+    actions: &'static [&'static str],
 }
 
 #[derive(Deref, DerefMut, Default)]
@@ -61,8 +78,41 @@ impl CommandPaletteFilter {
             return false;
         }
 
+        if let Some(restriction) = self.restriction
+            && !restriction.namespaces.contains(&namespace)
+            && !restriction.actions.contains(&name)
+        {
+            return true;
+        }
+
         self.hidden_namespaces.contains(namespace)
             || self.hidden_action_types.contains(&action.type_id())
+    }
+
+    /// Hides every action outside the given namespaces and action names.
+    ///
+    /// The inverse of [`Self::hide_namespace`], for a mode that admits a short
+    /// list rather than denying a long one. The palette still opens, and it
+    /// lists what the restriction admits.
+    pub fn restrict_to(
+        &mut self,
+        namespaces: &'static [&'static str],
+        actions: &'static [&'static str],
+    ) {
+        self.restriction = Some(Restriction {
+            namespaces,
+            actions,
+        });
+    }
+
+    /// Removes the restriction set by [`Self::restrict_to`], if any.
+    pub fn clear_restriction(&mut self) {
+        self.restriction = None;
+    }
+
+    /// Is the palette currently restricted to an admitted set?
+    pub fn is_restricted(&self) -> bool {
+        self.restriction.is_some()
     }
 
     /// Hides all actions in the given namespace.
@@ -89,6 +139,67 @@ impl CommandPaletteFilter {
             self.shown_action_types.insert(*action_type);
             self.hidden_action_types.remove(action_type);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::actions;
+
+    actions!(
+        command_palette_hooks_test,
+        [
+            /// Stands in for an action zero base admits.
+            Admitted,
+            /// Stands in for an action zero base hides.
+            Hidden
+        ]
+    );
+
+    /// omega#99, `OMEGA-DELTA-0048`. A restricted palette still opens, and it
+    /// lists what the restriction admits and nothing else.
+    ///
+    /// The denylist could not express this. Omega registers actions in more
+    /// than sixty namespaces, so a mode that hid every namespace it knew about
+    /// would keep admitting the ones a later crate adds — the surface would
+    /// grow back one release at a time and nothing would fail.
+    #[test]
+    fn a_restriction_admits_only_what_it_names() {
+        const NAMESPACES: &[&str] = &["command_palette_hooks_test"];
+        const NONE: &[&str] = &[];
+
+        let mut filter = CommandPaletteFilter::default();
+        assert!(!filter.is_restricted());
+        assert!(!filter.is_hidden(&Admitted));
+        assert!(!filter.is_hidden(&Hidden));
+
+        // A restriction naming no namespace at all hides both.
+        filter.restrict_to(NONE, NONE);
+        assert!(filter.is_restricted());
+        assert!(filter.is_hidden(&Admitted));
+        assert!(filter.is_hidden(&Hidden));
+
+        // Naming the namespace admits both; naming one action admits one.
+        filter.restrict_to(NAMESPACES, NONE);
+        assert!(!filter.is_hidden(&Admitted));
+        assert!(!filter.is_hidden(&Hidden));
+
+        filter.restrict_to(NONE, &["command_palette_hooks_test::Admitted"]);
+        assert!(!filter.is_hidden(&Admitted));
+        assert!(filter.is_hidden(&Hidden));
+
+        // The denylist keeps working underneath, so a settings change that
+        // hides a namespace still hides it inside the mode.
+        filter.restrict_to(NAMESPACES, NONE);
+        filter.hide_namespace("command_palette_hooks_test");
+        assert!(filter.is_hidden(&Admitted));
+
+        filter.show_namespace("command_palette_hooks_test");
+        filter.clear_restriction();
+        assert!(!filter.is_restricted());
+        assert!(!filter.is_hidden(&Admitted));
+        assert!(!filter.is_hidden(&Hidden));
     }
 }
 

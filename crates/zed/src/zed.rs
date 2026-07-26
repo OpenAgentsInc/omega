@@ -594,6 +594,31 @@ pub fn initialize_workspace(app_state: Arc<AppState>, cx: &mut App) {
             }
         }
 
+        // omega#99. Zero base draws one control on the status bar — the visible
+        // way out — and none of the editor's own indicators. They are not
+        // rendered rather than removed: without the flag the block below runs
+        // exactly as it always has.
+        if omega_zero_base::is_active() {
+            crate::omega_zero_base_ui::install_on_workspace(
+                workspace,
+                window,
+                cx,
+                |workspace, window, cx| {
+                    let panels_task = initialize_panels(window, cx);
+                    workspace.set_panels_task(panels_task);
+                },
+            );
+
+            let panels_task = initialize_panels(window, cx);
+            workspace.set_panels_task(panels_task);
+            register_actions(app_state.clone(), workspace, window, cx);
+
+            if !workspace.has_active_modal(window, cx) {
+                workspace.focus_handle(cx).focus(window, cx);
+            }
+            return;
+        }
+
         let edit_prediction_menu_handle = PopoverMenuHandle::default();
         let edit_prediction_ui = cx.new(|cx| {
             edit_prediction_ui::EditPredictionButton::new(
@@ -786,7 +811,49 @@ fn show_software_emulation_warning_if_needed(
     }
 }
 
-fn initialize_panels(window: &mut Window, cx: &mut Context<Workspace>) -> Task<anyhow::Result<()>> {
+pub(crate) fn initialize_panels(
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) -> Task<anyhow::Result<()>> {
+    // omega#99. Zero base loads the agent panel and nothing else, opens it, and
+    // zooms it. The project, outline, terminal, git, debug, Agent Computer and
+    // Sarah workroom panels are *not rendered*: their `add_panel_when_ready`
+    // calls are skipped rather than their code removed, so a person who leaves
+    // the mode gets them back in the same window. Zooming is what takes the
+    // editor pane and the tab bar off the screen; no project is opened, so
+    // there is no buffer for them to show.
+    if omega_zero_base::is_active() {
+        let workspace_entity = cx.entity();
+        let app_state = workspace_entity.read(cx).app_state().clone();
+        return cx.spawn_in(window, async move |workspace_handle, cx| {
+            // `OMEGA-DELTA-0040` keeps its order. A first-ever launch lands on
+            // identity onboarding, and zero base waits for it rather than
+            // covering it with a zoomed panel — a mode that hid the identity
+            // gate would be a bypass of it, which is a larger change than a
+            // demonstration needs.
+            await_identity_ready(app_state, cx).await.log_err();
+
+            initialize_agent_panel(workspace_handle.clone(), cx.clone())
+                .await
+                .log_err();
+
+            workspace_handle
+                .update_in(cx, |workspace, window, cx| {
+                    workspace.open_panel::<agent_ui::AgentPanel>(window, cx);
+                    if let Some(panel) = workspace.panel::<agent_ui::AgentPanel>(cx) {
+                        panel.update(cx, |panel, cx| {
+                            use workspace::dock::Panel as _;
+                            panel.set_zoomed(true, window, cx);
+                        });
+                    }
+                    workspace.focus_panel::<agent_ui::AgentPanel>(window, cx);
+                })
+                .log_err();
+
+            anyhow::Ok(())
+        });
+    }
+
     cx.spawn_in(window, async move |workspace_handle, cx| {
         let project_panel = ProjectPanel::load(workspace_handle.clone(), cx.clone());
         let outline_panel = OutlinePanel::load(workspace_handle.clone(), cx.clone());

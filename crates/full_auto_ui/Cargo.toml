@@ -21,6 +21,7 @@ gpui.workspace = true
 log.workspace = true
 omega_effectd.workspace = true
 omega_front_door.workspace = true
+omega_zero_base.workspace = true
 project.workspace = true
 serde.workspace = true
 serde_json.workspace = true

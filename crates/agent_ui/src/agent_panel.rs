@@ -3070,6 +3070,31 @@ impl AgentPanel {
         .detach();
     }
 
+    /// Say no in one sentence a person can read. omega#99.
+    ///
+    /// The mode's action gate already refuses the `full_auto_panel` namespace
+    /// before any listener runs. This is the second half of the same rule, for
+    /// the callers that are not action dispatches: a surface that is only
+    /// visually absent is still reachable, and a reachable surface that returns
+    /// silently is indistinguishable from a broken one.
+    fn refuse_in_zero_base(&self, action_name: &str, cx: &mut Context<Self>) {
+        let sentence = omega_zero_base::refusal(action_name);
+        log::info!("{sentence}");
+        if let Some(workspace) = self.workspace.upgrade() {
+            workspace.update(cx, |workspace, cx| {
+                struct ZeroBaseRefusalToast;
+                workspace.show_toast(
+                    workspace::Toast::new(
+                        workspace::notifications::NotificationId::unique::<ZeroBaseRefusalToast>(),
+                        sentence,
+                    )
+                    .autohide(),
+                    cx,
+                );
+            });
+        }
+    }
+
     /// Show the Full Auto launch surface inside this panel.
     ///
     /// `OMEGA-DELTA-0020`. The owner asked for Full Auto to be folded into the
@@ -3081,6 +3106,14 @@ impl AgentPanel {
     /// gate 8 — only an explicit human action may start Full Auto authority —
     /// is why the fold adds an entry and not a composer mode flag.
     pub fn open_full_auto(&mut self, focus: bool, window: &mut Window, cx: &mut Context<Self>) {
+        // omega#99. Zero base refuses this surface as well as not rendering its
+        // entry. The refusal is a sentence, not a silent return: a person who
+        // reached this through a keymap of their own is told which mode is on
+        // and how to leave it.
+        if omega_zero_base::is_active() {
+            self.refuse_in_zero_base("full_auto_panel::OpenLauncher", cx);
+            return;
+        }
         if self.full_auto.is_none() {
             let workspace = self.workspace.clone();
             self.full_auto = Some(cx.new(|cx| FullAutoPanel::new(workspace, window, cx)));
@@ -3099,6 +3132,10 @@ impl AgentPanel {
     /// deliberate: a user keymap may already name it, and the fold is meant to
     /// move where Full Auto lives, not to take a binding away.
     pub fn toggle_full_auto(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if omega_zero_base::is_active() {
+            self.refuse_in_zero_base("full_auto_panel::ToggleFocus", cx);
+            return;
+        }
         if self.showing_full_auto {
             self.showing_full_auto = false;
             self.focus_handle(cx).focus(window, cx);
@@ -6061,38 +6098,52 @@ impl AgentPanel {
                                     }
                                 }),
                         )
-                        .item(
-                            ContextMenuEntry::new("Full Auto")
-                                .icon(IconName::OmegaAgent)
-                                .icon_color(Color::Accent)
-                                .handler({
-                                    move |window, cx| {
-                                        window.dispatch_action(Box::new(OpenLauncher), cx);
-                                    }
-                                }),
-                        )
-                        .item(
-                            ContextMenuEntry::new("Agent Computer")
-                                .icon(IconName::OmegaAgent)
-                                .icon_color(Color::Accent)
-                                .handler({
-                                    move |window, cx| {
-                                        window
-                                            .dispatch_action(Box::new(OpenAgentComputerPanel), cx);
-                                    }
-                                }),
-                        )
-                        .item(
-                            ContextMenuEntry::new("Sarah")
-                                .icon(IconName::OmegaAgent)
-                                .icon_color(Color::Accent)
-                                .handler({
-                                    move |window, cx| {
-                                        window
-                                            .dispatch_action(Box::new(OpenSarahWorkroomPanel), cx);
-                                    }
-                                }),
-                        )
+                        // omega#99. Zero base does not render the Full Auto
+                        // entry, and the Agent Computer and Sarah entries go
+                        // with it because their panels are not loaded either.
+                        // Not rendering is only half of it: `open_full_auto`
+                        // below refuses too, and the mode's action gate refuses
+                        // the `full_auto_panel` namespace, because a surface
+                        // that is only visually absent is still one key press
+                        // away.
+                        .when(!omega_zero_base::is_active(), |menu| {
+                            menu.item(
+                                ContextMenuEntry::new("Full Auto")
+                                    .icon(IconName::OmegaAgent)
+                                    .icon_color(Color::Accent)
+                                    .handler({
+                                        move |window, cx| {
+                                            window.dispatch_action(Box::new(OpenLauncher), cx);
+                                        }
+                                    }),
+                            )
+                            .item(
+                                ContextMenuEntry::new("Agent Computer")
+                                    .icon(IconName::OmegaAgent)
+                                    .icon_color(Color::Accent)
+                                    .handler({
+                                        move |window, cx| {
+                                            window.dispatch_action(
+                                                Box::new(OpenAgentComputerPanel),
+                                                cx,
+                                            );
+                                        }
+                                    }),
+                            )
+                            .item(
+                                ContextMenuEntry::new("Sarah")
+                                    .icon(IconName::OmegaAgent)
+                                    .icon_color(Color::Accent)
+                                    .handler({
+                                        move |window, cx| {
+                                            window.dispatch_action(
+                                                Box::new(OpenSarahWorkroomPanel),
+                                                cx,
+                                            );
+                                        }
+                                    }),
+                            )
+                        })
                         .when(supports_terminal, |menu| {
                             menu.item(
                                 ContextMenuEntry::new("Terminal")
