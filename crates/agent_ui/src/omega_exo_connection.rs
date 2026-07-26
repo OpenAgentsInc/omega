@@ -317,6 +317,18 @@ impl ExoHarnessConnection {
         &self.driver.config
     }
 
+    /// End the `exo acp` process this lane started, now.
+    ///
+    /// omega#99. Dropping the connection already kills the child, but a drop
+    /// happens only once every owner has let go, and the owners include GPUI
+    /// entities whose teardown is deferred. A caller that is finished with the
+    /// lane — the visual proof runner, between one photographed turn and the
+    /// next — says so here instead of hoping a reference graph unwinds before
+    /// the next `exo acp` starts.
+    pub fn end_exo_process(&self) {
+        self.acp.end_agent_server_process();
+    }
+
     #[must_use]
     pub fn tier_c_receipt(&self) -> Option<ExoTierCReceipt> {
         self.tier_c_receipt.borrow().clone()

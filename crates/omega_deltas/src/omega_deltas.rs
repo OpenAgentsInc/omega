@@ -76,6 +76,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0046",
     "OMEGA-DELTA-0047",
     "OMEGA-DELTA-0048",
+    "OMEGA-DELTA-0049",
     "OMEGA-DELTA-0050",
     "OMEGA-DELTA-0051",
 ];
@@ -7053,6 +7054,173 @@ mod tests {
             "OMEGA-DELTA-0048: zero base hides these surfaces and must delete \
              none of them:\n{}",
             missing.join("\n")
+        );
+    }
+
+    /// OMEGA-DELTA-0049. A zero-base turn still names its executor.
+    ///
+    /// The disclosure line is `OMEGA-DELTA-0021`, and in the Exo lane it is
+    /// also the door: a thread routes to Exo exactly when a person pins
+    /// `ExternalAcp` on it. A mode whose entire purpose is subtraction is the
+    /// likeliest place for that line to be subtracted by accident, and the
+    /// likeliest *shape* for the accident is a zero-base branch inside the
+    /// surface that draws it — a second code path that renders something
+    /// cheaper. So the check is that no such branch exists, and that the two
+    /// zero-base baselines are recorded by the same capture that photographs a
+    /// real Exo turn rather than by a second, mocked one.
+    #[test]
+    fn a_zero_base_turn_still_names_its_executor() {
+        // The two functions that draw the line do not know zero base exists.
+        //
+        // This was first written as "the whole file must not name the mode",
+        // on the reasoning that a branch anywhere could reach the line. That
+        // was too strong, and it forbade the layout the owner actually asked
+        // for: an empty transcript has to claim the vertical space in zero base
+        // so the composer sits at the bottom instead of floating at the top,
+        // and that is a mode-aware branch in this file by necessity. A rule
+        // that forbids the fix it was meant to protect is the wrong rule.
+        //
+        // So the scope is the disclosure and its pin, which is what the delta
+        // is about: no cheaper second rendering of who ran the turn. Layout
+        // elsewhere in the file is free to know the mode.
+        let thread_path = repository_path(THREAD_VIEW_PATH);
+        let thread = std::fs::read_to_string(&thread_path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", thread_path.display()));
+        for drawing in ["render_executor_disclosure", "render_executor_pin"] {
+            let body = function_body(&thread, drawing).unwrap_or_else(|| {
+                panic!(
+                    "OMEGA-DELTA-0049: cannot find `{drawing}` in {}",
+                    thread_path.display()
+                )
+            });
+            assert!(
+                body.len() > 40,
+                "OMEGA-DELTA-0049: the body read for `{drawing}` is too short to \
+                 be the real one, so this check would pass without reading it",
+            );
+            assert!(
+                !body.contains("omega_zero_base"),
+                "OMEGA-DELTA-0049: `{drawing}` in {} now branches on zero base. \
+                 The disclosure line and its pin are the same code on both \
+                 surfaces; a mode-aware branch here is a second way to draw the \
+                 line, and the cheaper one always wins eventually.",
+                thread_path.display()
+            );
+        }
+        for drawn in [
+            "fn render_executor_disclosure",
+            "self.render_executor_disclosure(cx)",
+            "self.render_executor_pin(cx)",
+        ] {
+            assert!(
+                thread.contains(drawn),
+                "OMEGA-DELTA-0049: {} no longer draws `{drawn}`. Removing the \
+                 executor line removes the door into the Exo lane as well as \
+                 the statement of who ran the turn.",
+                thread_path.display()
+            );
+        }
+
+        // The binding that builds the typed record is untouched by the mode.
+        let binding_path = repository_path(EXECUTOR_DISCLOSURE_BINDING_PATH);
+        let binding = std::fs::read_to_string(&binding_path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", binding_path.display()));
+        assert!(
+            !binding.contains("omega_zero_base"),
+            "OMEGA-DELTA-0049: {} now knows about zero base. The record is \
+             derived from the connection's concrete type, and a mode is not one \
+             of its inputs.",
+            binding_path.display()
+        );
+
+        // The two scenes exist, and they are recorded by the same capture that
+        // runs the real Exo turn. A separate zero-base capture would be free to
+        // drift into a mock, which is the failure this pairing prevents.
+        let visual_path = repository_path(VISUAL_TEST_RUNNER_PATH);
+        let visual = std::fs::read_to_string(&visual_path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", visual_path.display()));
+        for token in [
+            "\"omega_zero_base_wide\"",
+            "\"omega_zero_base_narrow\"",
+            "ExoSceneSurface::ZeroBase",
+            "omega_zero_base_ui::install_on_workspace(",
+            "omega_zero_base::enter_from_command_line();",
+        ] {
+            assert!(
+                visual.contains(token),
+                "OMEGA-DELTA-0049: the zero-base visual proof lost `{token}`"
+            );
+        }
+        assert_eq!(
+            visual.matches("fn run_omega_exo_visual_capture").count(),
+            1,
+            "OMEGA-DELTA-0049: there is more than one Exo capture in {}. The \
+             zero-base scenes photograph a real streamed Exo turn because they \
+             go through the same capture as the full-editor scenes; a second \
+             capture is where a mocked turn would enter.",
+            visual_path.display()
+        );
+
+        for scene in ["omega_zero_base_wide", "omega_zero_base_narrow"] {
+            let baseline = repository_path(&format!(
+                "crates/zed/test_fixtures/visual_tests/{scene}.png"
+            ));
+            let recorded = std::fs::metadata(&baseline).unwrap_or_else(|error| {
+                panic!(
+                    "OMEGA-DELTA-0049: {} is missing ({error}). A scene cannot \
+                     land without its picture.",
+                    baseline.display()
+                )
+            });
+            assert!(
+                recorded.len() > 0,
+                "OMEGA-DELTA-0049: {} is empty.",
+                baseline.display()
+            );
+        }
+
+        // The suite has to be able to record them again, and this is the defect
+        // that held this entry back. The capture waited with `run_until_parked`,
+        // which returns only when the scheduler has nothing left to run — and an
+        // attached ACP transport reading a live child's stdout is runnable again
+        // as soon as it is polled, so it never returned. The capture hung before
+        // its turn with the runner spinning on one core. A hang is worse than a
+        // failure because it reports nothing, so every wait in this capture
+        // spends a budget and then says what it was waiting for.
+        assert!(
+            visual.contains("fn step_scheduler(")
+                && visual.contains("SCHEDULER_STEP_BUDGET"),
+            "OMEGA-DELTA-0049: {} lost its bounded wait. `run_until_parked` \
+             does not return while a real `exo acp` child is attached.",
+            visual_path.display()
+        );
+        assert!(
+            visual.matches("step_scheduler(cx, SCHEDULER_STEP_BUDGET)").count() >= 2,
+            "OMEGA-DELTA-0049: {} waits on the Exo turn without a budget \
+             somewhere. Both the wait for the connected thread and the wait \
+             after the turn are unbounded without it.",
+            visual_path.display()
+        );
+
+        // And the suite ends the process it started rather than waiting for the
+        // last `Rc` to go away. Sampled at 100ms across a run without this, a
+        // capture's child was still alive as the next capture's child started.
+        assert!(
+            visual.contains("exo.end_exo_process();"),
+            "OMEGA-DELTA-0049: {} no longer ends the `exo acp` process each \
+             capture started, and a scene would again depend on a reference \
+             graph unwinding in time.",
+            visual_path.display()
+        );
+        let connection_path = repository_path(EXO_CONNECTION_PATH);
+        let connection = std::fs::read_to_string(&connection_path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", connection_path.display()));
+        assert!(
+            connection.contains("pub fn end_exo_process(&self)")
+                && connection.contains("self.acp.end_agent_server_process();"),
+            "OMEGA-DELTA-0049: {} no longer offers a way to end the lane's \
+             process by name.",
+            connection_path.display()
         );
     }
 

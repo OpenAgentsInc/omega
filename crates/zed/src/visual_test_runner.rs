@@ -151,6 +151,20 @@ use {
     zed_actions::OpenSettingsAt,
 };
 
+// omega#99. The zero-base surface, compiled into this binary from the same file
+// the shipped `omega` binary compiles. The baseline has to photograph the code
+// that ships; a stand-in status-bar control here would photograph a claim about
+// zero base rather than zero base.
+//
+// `dead_code` because this binary uses only `install_on_workspace`: the palette
+// restriction and the action gate are proven by `command_palette_hooks`'
+// restriction test and by gpui's action-gate keystroke test, neither of which a
+// screenshot could show.
+#[cfg(all(target_os = "macos", feature = "visual-tests"))]
+#[allow(dead_code)]
+#[path = "omega_zero_base_ui.rs"]
+mod omega_zero_base_ui;
+
 // All macOS-specific constants grouped together
 #[cfg(target_os = "macos")]
 mod constants {
@@ -165,6 +179,11 @@ mod constants {
     /// Threshold for image comparison (0.0 to 1.0)
     /// Images must match at least this percentage to pass
     pub const MATCH_THRESHOLD: f64 = 0.99;
+
+    /// omega#99. How many scheduler steps one bounded wait in the Exo capture
+    /// is allowed. Large enough that a real turn's work always fits, small
+    /// enough that a permanently-runnable transport cannot hold the wait open.
+    pub const SCHEDULER_STEP_BUDGET: usize = 20_000;
 
     /// Tooltip show delay - must match TOOLTIP_SHOW_DELAY in gpui/src/elements/div.rs
     pub const TOOLTIP_SHOW_DELAY: Duration = Duration::from_millis(500);
@@ -3066,23 +3085,87 @@ fn run_omega_exo_visual_tests(
         lane_path.clone(),
         "omega_exo_workspace_wide",
         size(px(1320.), px(860.)),
+        ExoSceneSurface::FullEditor,
         update_baseline,
     )?;
     let narrow = run_omega_exo_visual_capture(
-        app_state,
+        app_state.clone(),
         cx,
-        lane_path,
+        lane_path.clone(),
         "omega_exo_workspace_narrow",
         size(px(720.), px(900.)),
+        ExoSceneSurface::FullEditor,
         update_baseline,
     )?;
 
-    for result in [&wide, &narrow] {
+    // omega#99. The zero-base scenes come last, and the mode is never left.
+    // `omega_zero_base` is a process-global entered once from the command line;
+    // `leave` turns it off permanently within the process, so a scene recorded
+    // after a leave would not be zero base at all. Entering here rather than in
+    // `main` also keeps the two scenes above photographing the ordinary
+    // surface, which is what makes the pair of pairs worth having.
+    omega_zero_base::enter_from_command_line();
+    anyhow::ensure!(
+        omega_zero_base::is_active(),
+        "the zero-base scenes must be photographed with the mode actually on"
+    );
+    let zero_base_wide = run_omega_exo_visual_capture(
+        app_state.clone(),
+        cx,
+        lane_path.clone(),
+        "omega_zero_base_wide",
+        size(px(1320.), px(860.)),
+        ExoSceneSurface::ZeroBase,
+        update_baseline,
+    )?;
+    let zero_base_narrow = run_omega_exo_visual_capture(
+        app_state,
+        cx,
+        lane_path,
+        "omega_zero_base_narrow",
+        size(px(720.), px(900.)),
+        ExoSceneSurface::ZeroBase,
+        update_baseline,
+    )?;
+
+    for result in [&wide, &narrow, &zero_base_wide, &zero_base_narrow] {
         if let TestResult::BaselineUpdated(path) = result {
             return Ok(TestResult::BaselineUpdated(path.clone()));
         }
     }
     Ok(TestResult::Passed)
+}
+
+/// Run the scheduler until it runs out of work, or until a step budget is
+/// spent, whichever comes first.
+///
+/// omega#99. `run_until_parked` has no budget: it returns only when the
+/// scheduler has nothing left to run. That is the right primitive for a suite
+/// whose tasks are all simulated, and the wrong one while a real `exo acp`
+/// child is attached — the ACP transport's read of the child's stdout is
+/// runnable again as soon as it is polled, so the call never returns and the
+/// capture spins on one core forever. Every wait in the Exo capture is
+/// therefore bounded, and a wait that runs out of budget reports what it was
+/// waiting for instead of hanging.
+#[cfg(all(target_os = "macos", feature = "visual-tests"))]
+fn step_scheduler(cx: &mut VisualTestAppContext, budget: usize) {
+    for _ in 0..budget {
+        if !cx.background_executor.tick() {
+            return;
+        }
+    }
+}
+
+/// Which Omega surface a scene photographs the Exo turn on.
+///
+/// omega#99. Named rather than a `bool` because the call sites read at a
+/// glance, and because the difference is the whole point of the second pair:
+/// the same real Exo turn, on the ordinary surface and on the subtracted one.
+#[cfg(all(target_os = "macos", feature = "visual-tests"))]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ExoSceneSurface {
+    FullEditor,
+    ZeroBase,
 }
 
 #[cfg(all(target_os = "macos", feature = "visual-tests"))]
@@ -3092,6 +3175,7 @@ fn run_omega_exo_visual_capture(
     lane_path: PathBuf,
     test_name: &'static str,
     window_size: gpui::Size<gpui::Pixels>,
+    surface: ExoSceneSurface,
     update_baseline: bool,
 ) -> Result<TestResult> {
     use agent_ui::AgentPanel;
@@ -3145,6 +3229,25 @@ fn run_omega_exo_visual_capture(
         .context("failed to open the Exo workspace window")?;
     cx.run_until_parked();
 
+    // omega#99. Zero base's status bar carries one control — the visible way
+    // out — and none of the editor's own indicators. This is the same call
+    // `initialize_workspace` makes in the shipped binary. The `restore_panels`
+    // argument is a no-op here because this runner adds by hand the one panel
+    // it photographs, which is exactly the difference the argument exists for.
+    if surface == ExoSceneSurface::ZeroBase {
+        workspace_window
+            .update(cx, |workspace, window, cx| {
+                omega_zero_base_ui::install_on_workspace(
+                    workspace,
+                    window,
+                    cx,
+                    |_workspace, _window, _cx| {},
+                );
+            })
+            .context("failed to install the zero-base surface")?;
+        cx.run_until_parked();
+    }
+
     let (weak_workspace, async_window_cx) = workspace_window
         .update(cx, |workspace, window, cx| {
             (workspace.weak_handle(), window.to_async(cx))
@@ -3169,10 +3272,19 @@ fn run_omega_exo_visual_capture(
         .context("failed to open the Exo Agent panel")?;
     cx.run_until_parked();
 
+    // The lane's `exo acp` child, kept out here so the teardown below can end
+    // it whether or not the capture succeeded. omega#99: a scene that failed
+    // its assertions still started a process, and leaving it running is what
+    // made the second capture unrunnable.
+    let mut exo_connection: Option<Rc<agent_ui::omega_exo_connection::ExoHarnessConnection>> = None;
+
     // Keep capture failures inside this closure so the real ACP connection is
     // always removed below. Otherwise an early assertion or screenshot error
     // masks its own cause with GPUI's leaked ElicitationStore check.
-    let capture = (|| -> Result<TestResult> {
+    let capture = (|exo_connection: &mut Option<
+        Rc<agent_ui::omega_exo_connection::ExoHarnessConnection>,
+    >|
+     -> Result<TestResult> {
         let server: Rc<dyn AgentServer> = Rc::new(ExoVisualAgentServer { lane_path });
         cx.update_window(workspace_window.into(), |_, window, cx| {
             panel.update(cx, |panel, cx| {
@@ -3183,10 +3295,20 @@ fn run_omega_exo_visual_capture(
         // Connecting the child process and completing ACP initialization
         // require real I/O. Poll the visible state for at most five seconds;
         // one `run_until_parked` can return before stdio initialization wakes
-        // the foreground executor.
-        cx.background_executor.allow_parking();
+        // the foreground executor, so the loop steps the scheduler and then
+        // gives the reactor real wall time to deliver the next line.
+        //
+        // omega#99. Parking stays *forbidden* for the duration of this loop.
+        // `run_until_parked` returns when the scheduler has nothing left to
+        // run; with parking allowed it instead waits for the executor to go
+        // quiet, and an attached ACP transport whose child is sitting on its
+        // own stdin never does. The loop then never reached its second
+        // iteration and the capture hung here — before the turn, before any
+        // screenshot, with the runner spinning on the child's stdout at 100%
+        // of a core. Parking is what the blocking wait on the turn below needs,
+        // and it is switched on there and only there.
         for _ in 0..100 {
-            cx.run_until_parked();
+            step_scheduler(cx, SCHEDULER_STEP_BUDGET);
             if cx.read(|cx| {
                 panel
                     .read(cx)
@@ -3197,7 +3319,6 @@ fn run_omega_exo_visual_capture(
             }
             std::thread::sleep(Duration::from_millis(50));
         }
-        cx.background_executor.forbid_parking();
 
         let thread_view = cx
             .read(|cx| panel.read(cx).active_thread_view_for_tests().cloned())
@@ -3211,6 +3332,18 @@ fn run_omega_exo_visual_capture(
             })
             .ok_or_else(|| anyhow::anyhow!("the Exo workspace thread is not available"))?;
 
+        // Hand the lane's connection to the teardown before the turn runs, not
+        // after. A turn that fails its assertions has still started an
+        // `exo acp`, and that is exactly the run whose leftover child would
+        // make the *next* scene unrunnable.
+        *exo_connection = cx.read(|cx| {
+            thread
+                .read(cx)
+                .connection()
+                .clone()
+                .downcast::<agent_ui::omega_exo_connection::ExoHarnessConnection>()
+        });
+
         let marker = "OMEGA-EXO-PANE-READY";
         let prompt =
             format!("Run one tool that prints OMEGA-EXO-TOOL, then reply with exactly {marker}.");
@@ -3219,7 +3352,7 @@ fn run_omega_exo_visual_capture(
         let send_result = cx.foreground_executor.block_test(send);
         cx.background_executor.forbid_parking();
         send_result.context("the real Exo visual turn failed")?;
-        cx.run_until_parked();
+        step_scheduler(cx, SCHEDULER_STEP_BUDGET);
 
         let (transcript, turn) = cx.read(|cx| {
             let thread = thread.read(cx);
@@ -3262,7 +3395,33 @@ fn run_omega_exo_visual_capture(
         );
 
         run_visual_test(test_name, workspace_window.into(), cx, update_baseline)
-    })();
+    })(&mut exo_connection);
+
+    // End the `exo acp` process this capture started, by name, before anything
+    // else is torn down.
+    //
+    // omega#99. `AcpConnection` kills its child on `Drop`, but `Drop` runs only
+    // once every owner of the connection has let go, and the owners include
+    // GPUI entities whose teardown this runner can ask for and cannot observe.
+    // Measured on 2026-07-26 by sampling `pgrep` every 100ms across a full run
+    // with this call removed: a capture's child was still alive while the next
+    // capture's child was starting — two at once — and went away only when the
+    // reference graph happened to unwind. That overlap is not what a scene
+    // should depend on, so the runner ends the process it started rather than
+    // waiting to find out.
+    //
+    // The alternatives were considered and rejected. Giving each capture its
+    // own Exo conversation would make Omega's own test tooling write Exo state,
+    // which omega#87 closed the door on: Omega does not configure Exo. Reusing
+    // one connection across scenes would make every photograph after the first
+    // depend on the transcript the previous one left behind, which is the
+    // opposite of what independent baselines are for. Ending the process the
+    // runner itself started is the one option that leaves both boundaries where
+    // they were.
+    if let Some(exo) = exo_connection.as_ref() {
+        exo.end_exo_process();
+    }
+    drop(exo_connection);
 
     // Drop every owner of the real ACP connection before the runner's leaked
     // entity check. The panel's connection store retains a successful custom

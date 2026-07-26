@@ -405,7 +405,16 @@ pub struct AcpConnection {
     agent_capabilities: acp::AgentCapabilities,
     request_elicitations: Entity<ElicitationStore>,
     defaults: AcpConnectionDefaults,
-    child: Option<Child>,
+    /// The agent server process, behind a `RefCell` so it can be ended by name
+    /// rather than only by the last `Rc` going away.
+    ///
+    /// omega#99. `Drop` still kills it, but `Drop` only runs when every owner
+    /// of this connection has been released, and those owners include GPUI
+    /// entities whose teardown is deferred. A caller that knows it is finished
+    /// with an agent server — the visual proof runner between two captures, for
+    /// instance — needs to be able to say so and have the process actually
+    /// gone, rather than hope a reference graph unwinds in time.
+    child: RefCell<Option<Child>>,
     session_list: Option<Rc<AcpSessionList>>,
     debug_log: AcpDebugLog,
     _settings_subscription: Subscription,
@@ -1098,12 +1107,25 @@ impl AcpConnection {
             _dispatch_task: dispatch_task,
             _wait_task: wait_task,
             _stderr_task: stderr_task,
-            child: Some(child),
+            child: RefCell::new(Some(child)),
         })
     }
 
     pub fn prompt_capabilities(&self) -> &acp::PromptCapabilities {
         &self.agent_capabilities.prompt_capabilities
+    }
+
+    /// End the agent server process this connection started, now.
+    ///
+    /// omega#99. Idempotent: the child is taken out of its cell, so a second
+    /// call — including the one `Drop` makes — finds nothing left to do.
+    ///
+    /// `Child::kill` signals the whole process group, which is why this reaches
+    /// a shell wrapper's grandchildren as well as the direct child.
+    pub fn end_agent_server_process(&self) {
+        if let Some(mut child) = self.child.borrow_mut().take() {
+            child.kill().log_err();
+        }
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -1133,7 +1155,7 @@ impl AcpConnection {
             agent_capabilities,
             request_elicitations,
             defaults,
-            child: None,
+            child: RefCell::new(None),
             session_list: None,
             debug_log: AcpDebugLog::default(),
             _settings_subscription: settings_subscription,
@@ -1516,9 +1538,7 @@ fn emit_load_error_to_all_sessions(
 
 impl Drop for AcpConnection {
     fn drop(&mut self) {
-        if let Some(ref mut child) = self.child {
-            child.kill().log_err();
-        }
+        self.end_agent_server_process();
     }
 }
 

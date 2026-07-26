@@ -2490,6 +2490,60 @@ than it sounds, because the harness omega#81's acceptance sentence names —
   bind the hidden namespaces, and `keymaps_name_no_deleted_action`, which stays
   green.
 
+### OMEGA-DELTA-0049 — A zero-base turn still names its executor
+
+- **Before this change:** the executor disclosure line, `OMEGA-DELTA-0021`, is
+  the control that reaches the Exo lane — a thread routes to Exo exactly when a
+  person pins `ExternalAcp` on it — and it is also the line that stops Omega
+  presenting somebody else's output as its own. A mode whose whole purpose is
+  subtraction is the most likely place for it to be subtracted by accident.
+- **Omega now:** zero base draws the same executor disclosure line, built by the
+  same `omega_executor_disclosure` binding from the same typed record, with the
+  same pin control beside it. `conversation_view/thread_view.rs` does not know
+  that zero base exists; there is no zero-base branch in the surface that draws
+  the line, which is why there is no second code path for it to drift down.
+- **Photographed, not asserted.** `omega_zero_base_wide` and
+  `omega_zero_base_narrow` are recorded by `run_omega_exo_visual_tests` through
+  the same capture that records `omega_exo_workspace_wide` and
+  `omega_exo_workspace_narrow`, so the turn in the picture is a real streamed
+  Exo turn over `exo acp` — text deltas, a `shell` tool call, its result, and
+  the durable Exo session, turn and event references — and not a mock. Compared
+  in-process through Metal at `MATCH_THRESHOLD` 0.99.
+- **Every wait in the capture is bounded.** This is what had made these
+  baselines unrecordable, and it is worth naming precisely because the first
+  diagnosis was wrong. The capture waited with `run_until_parked`, which returns
+  only when the scheduler has nothing left to run. That is right for a suite
+  whose tasks are all simulated and wrong while a real `exo acp` child is
+  attached: the ACP transport's read of the child's stdout becomes runnable
+  again as soon as it is polled, so the call never returned. The runner spun on
+  one core and hung — before the turn, before any screenshot — and a suite that
+  hangs is worse than one that fails, because it says nothing. Each wait now
+  spends a step budget and moves on.
+- **The suite ends the process it started.** `run_omega_exo_visual_capture`
+  ends the `exo acp` process by name rather than waiting for `AcpConnection`'s
+  `Drop`, which runs only once every owner has let go — and the owners include
+  GPUI entities whose teardown the runner can ask for and cannot observe.
+  Sampled every 100ms across a full run with that call removed, a capture's
+  child was still alive while the next capture's child was starting. It was not
+  what hung the suite, and it is still not something a scene should depend on.
+- **Enforced by:** `a_zero_base_turn_still_names_its_executor` in
+  `crates/omega_deltas/`, and the two committed baselines under
+  `crates/zed/test_fixtures/visual_tests/`.
+- **Scope, and why it was narrowed.** The check reads the bodies of
+  `render_executor_disclosure` and `render_executor_pin`, not the whole of
+  `thread_view.rs`. It was first written against the whole file, on the
+  reasoning that a branch anywhere could reach the line. That was too strong.
+  Zero base has to know the mode elsewhere in the same file: an empty
+  transcript must claim the vertical space so the composer sits at the bottom
+  rather than floating at the top, which is the layout the owner asked for
+  directly. A rule that forbids the fix it exists to protect is the wrong rule,
+  so the scope is now the two functions that draw the line. Layout elsewhere in
+  the file may name the mode; the disclosure and its pin may not.
+- **What this does not cover.** A cheaper rendering of the line placed in some
+  other file is not caught here. The pairing with the baselines is what makes
+  that visible: both scenes are photographed by the same capture that runs a
+  real Exo turn, so a second mocked path would have to forge a turn to hide.
+
 ### OMEGA-DELTA-0050 — Zero base opens no authority path
 
 - **Before this change:** Owner gate 8 closes the admitted launch origins at four
@@ -2516,16 +2570,6 @@ than it sounds, because the harness omega#81's acceptance sentence names —
   `crates/omega_deltas/`, alongside the unchanged
   `origins_are_all_human_gestures` and `pin_gestures_are_all_human_gestures` in
   `crates/omega_front_door/`.
-
-<!-- The fourth entry omega#99 counts — "a zero-base turn still names its
-     executor", carrying the two visual baselines — is deliberately not
-     allocated here. Its scene cannot land without its PNG, and
-     `run_omega_exo_visual_tests` cannot presently record one: the suite leaks
-     its `exo acp` child between captures, a second `exo acp` on the same
-     conversation blocks on Exo's per-conversation lock, and the suite therefore
-     hangs before its second scene. That is a defect in the shipped suite, not
-     in zero base, and it blocks re-recording `omega_exo_workspace_narrow` just
-     as much. See omega#99. -->
 
 ### OMEGA-DELTA-0051 — Zero base derives its setup, and can finish the one step it still asks for
 
