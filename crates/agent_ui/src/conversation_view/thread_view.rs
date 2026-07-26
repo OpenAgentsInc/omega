@@ -12964,6 +12964,22 @@ impl ThreadView {
                 h_flex()
                     .min_w_0()
                     .gap_1()
+                    // `OMEGA-DELTA-0094`, omega#107. Who can read this, first.
+                    //
+                    // Ahead of the executor line rather than beside the model
+                    // selector, because the order in this row is the order a
+                    // person needs the answers in. Which runtime spent the
+                    // budget matters after the turn; whether the sentence being
+                    // typed is private matters before it.
+                    //
+                    // Read from `self.root_thread_id`, which is the thread's
+                    // own identity, and never from the selection. A subagent
+                    // takes its root's audience because it is the same
+                    // conversation.
+                    .child(crate::omega_audience_control::render_audience_control(
+                        self.root_thread_id,
+                        cx,
+                    ))
                     .child(
                         Icon::new(match exo {
                             Some(_) => IconName::BoltOutlined,

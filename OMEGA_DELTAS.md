@@ -3550,3 +3550,87 @@ than it sounds, because the harness omega#81's acceptance sentence names —
   like every mode entered by a command-line flag, it cannot be reached by
   `cargo check`, `cargo test` or clippy: the check above reads the source, and
   only launching the binary with the flag proves the sequence runs.
+### OMEGA-DELTA-0094 — A thread's audience is recorded on the thread, and Local needs nothing
+
+- **Upstream behaviour.** Zed has no notion of who can read a thread. Every
+  agent thread is local to the machine and to the person at it, so there is
+  nothing to disclose and nothing to choose. The nearest upstream concept is
+  `crates/channel`, which is collaboration over Zed's own collab server, and it
+  is a different thing: a channel is a place with members, not a property of a
+  thread.
+- **Why Omega diverges.** omega#107 asks for more than one, and omega#108 puts a
+  public Forge-backed one behind it. The moment there are two, "which one is
+  this thread in" becomes a question a person has to be able to answer before
+  they type, and the obvious implementation answers it wrongly. Reading the
+  current selection at draw time is indistinguishable from reading a record
+  while there is one audience, and is a disclosure defect as soon as there are
+  two: selecting a community audience repaints every thread on screen as
+  belonging to it, so a conversation held in private last week renders as one
+  held in public. Nothing is published, and the person has no way to learn that
+  — the only thing they can ask has told them the opposite.
+- **The vocabulary, deliberately not "workspace".** The issue asks for
+  "workspace identity", and the word is already spent three times: *project* is
+  a directory (`OMEGA-DELTA-0054` gives zero base one), Zed's `Workspace` is a
+  window, and `crates/workroom_receipts` calls a place a machine works a *room*.
+  A fourth meaning is how a person reads the composer and thinks about their
+  folder. The concept here is *who can read this*, so it is an **audience**:
+  the one word that carries both halves the issue names — an audience and its
+  history — and the only one nothing in this repository had taken.
+- **The law.**
+  - **Local is a constructor, not a configuration.** `Audience::local` takes no
+    argument that renames it and none that gives it a reach. Its reach is
+    `Reach::ThisComputer`, and `crates/omega_audience` depends on `serde` and
+    nothing else, so "no account, no relay, no network" is a property of the
+    dependency graph before it is a property of any code.
+  - **Local is always present and always first.** `AudienceRoster::entries`
+    yields it before anything else, `AudienceRoster::new` drops anything
+    claiming its identity, `AudienceId::joined` refuses its key, and
+    `AudienceRoster::is_empty` is `const false`. A profile that has joined
+    nothing sees Local and one honest sentence, not an empty menu.
+  - **The record is on the thread.** `AudienceBook::audience_of` takes a thread
+    and no selection; there is no parameter it could read one from. A thread
+    with no record is Local — never the selection — because the threads with no
+    record are exactly the ones written before this existed, which are the ones
+    somebody held in private.
+  - **A thread keeps the audience it was started in.** `AudienceBook::bind`
+    returns `RebindRefused` rather than overwriting, and
+    `record_thread_opening` returns early on an existing record. Choosing an
+    audience changes the next thread; the menu says so in as many words.
+  - **The recording happens where a thread starts.** `ConversationView::new` is
+    the only place that knows the difference between a new thread and a resumed
+    one, because `resume_session_id` and `thread_id` are both `Option` there.
+    The draw-time substitute — `AcpThread::is_draft_thread`, which is
+    `entries().is_empty()` — is also true of a resumed thread whose entries have
+    not loaded, so binding on it would hand a community audience to an old
+    private conversation on a slow disk.
+  - **It is visible without opening anything, and it is not a settings page.**
+    The control is a button in zero base's composer row, ahead of the executor
+    line, with the current audience on its face. The owner has rejected a modal
+    setup screen repeatedly; this is beside the model and the executor, where he
+    asked for controls to live.
+  - **The refusal omega#108 needs is stated here, once.** `may_publish` takes a
+    thread's recorded audience and returns `PublishRefused::ThreadIsLocal` for a
+    local thread and `AudienceUnresolved` for one this profile cannot see. It
+    takes no selection and no roster-plus-choice, so omega#108's "authorization
+    before the effect" cannot be satisfied by asking a different question.
+  - **An audience this build cannot resolve reads as unknown, not as local.**
+    `ThreadAudience::Unresolved` renders "Unknown audience" with a warning icon
+    and reports `is_private_to_this_computer() == false`. An unanswerable
+    question is not a yes.
+- **What this does not cover.** No check reads a rendered pixel: the position of
+  the control in the row, the icons, the menu's wording and the tooltip text are
+  unverified here, and omega#107's acceptance is four rendered windows. Nothing
+  here publishes, joins, or transports anything — `Reach::Shared` is a value
+  with no code behind it until omega#108. There is no membership, no identity
+  binding, and no relay. The `OMEGA_AUDIENCE_PREVIEW` environment variable adds
+  one fixture entry to the roster so the selector and the does-not-move rule can
+  be looked at before omega#108 exists; it publishes nothing, its identity is
+  `preview:` prefixed so it cannot be mistaken for a Forge coordinate, and it
+  cannot become the default — a selection the roster cannot resolve falls back
+  to Local at load.
+- **Enforced by:** `local_needs_no_network_no_relay_and_no_account`,
+  `the_composer_reads_the_audience_from_the_thread`,
+  `the_composer_shows_the_audience_without_opening_a_menu`,
+  `a_thread_keeps_the_audience_it_was_started_in`, and
+  `the_audience_is_recorded_where_a_thread_starts` in `crates/omega_deltas`;
+  plus the 17 unit tests in `crates/omega_audience/src/omega_audience.rs`.

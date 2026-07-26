@@ -91,7 +91,31 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0091",
     "OMEGA-DELTA-0092",
     "OMEGA-DELTA-0093",
+    "OMEGA-DELTA-0094",
 ];
+
+/// OMEGA-DELTA-0094. The audience rules, which know nothing about a window.
+pub const AUDIENCE_PATH: &str = "crates/omega_audience/src/omega_audience.rs";
+
+/// OMEGA-DELTA-0094. The manifest that keeps Local reachable with nothing.
+pub const AUDIENCE_MANIFEST_PATH: &str = "crates/omega_audience/Cargo.toml";
+
+/// OMEGA-DELTA-0094. The composer control and the durable record.
+pub const AUDIENCE_CONTROL_PATH: &str = "crates/agent_ui/src/omega_audience_control.rs";
+
+/// OMEGA-DELTA-0094. Where a thread starts, and so where its audience is
+/// recorded.
+pub const CONVERSATION_VIEW_PATH: &str = "crates/agent_ui/src/conversation_view.rs";
+
+/// OMEGA-DELTA-0094. Every crate `omega_audience` is allowed to depend on.
+///
+/// A closed list rather than a denylist of network crates, for the reason
+/// `MEASURED_DIGEST_CONSTRUCTORS` gives: a denylist is a list of the ways
+/// somebody already thought of, and "Local must never depend on a network, a
+/// relay, or an account" has to survive a dependency nobody has heard of yet.
+/// Serialisation is admitted because a record that does not survive a restart
+/// is inferred after one.
+pub const AUDIENCE_ALLOWED_DEPENDENCIES: &[&str] = &["serde"];
 
 /// OMEGA-DELTA-0080. Where the agent panel declares its result-body ceiling and
 /// applies it to every terminal it creates.
@@ -8634,7 +8658,12 @@ mod tests {
             "OMEGA-DELTA-0093: {} no longer sends through the panel.",
             startup_path.display()
         );
-        for bypass in ["thread.send(", "send_raw(", "AgentConnection", "PromptRequest"] {
+        for bypass in [
+            "thread.send(",
+            "send_raw(",
+            "AgentConnection",
+            "PromptRequest",
+        ] {
             assert!(
                 !driver.contains(bypass),
                 "OMEGA-DELTA-0093: the driven send in {} reaches `{bypass}` \
@@ -10468,5 +10497,306 @@ mod tests {
              same thing.",
             handle_path.display()
         );
+    }
+    // ------------------------------------------------------ OMEGA-DELTA-0094
+
+    /// OMEGA-DELTA-0094. Local is reachable with no account, no relay and no
+    /// network.
+    ///
+    /// The property omega#107 puts above everything else, and the one omega#108
+    /// is forbidden from weakening. It is checked on the dependency graph
+    /// rather than on the code, because that is where it is decidable: a crate
+    /// that cannot reach a socket cannot be made to reach one by a later edit
+    /// that reads as a small convenience.
+    ///
+    /// A closed list, not a denylist. See `AUDIENCE_ALLOWED_DEPENDENCIES`.
+    #[test]
+    fn local_needs_no_network_no_relay_and_no_account() {
+        let path = repository_path(AUDIENCE_MANIFEST_PATH);
+        let manifest = std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
+
+        let dependencies = manifest
+            .split_once("\n[dependencies]")
+            .map(|(_, rest)| rest.split("\n[").next().unwrap_or_default())
+            .unwrap_or_else(|| {
+                panic!(
+                    "OMEGA-DELTA-0094: {} declares no `[dependencies]` section, so \
+                     this check cannot see what Local depends on.",
+                    path.display()
+                )
+            });
+
+        let declared: Vec<String> = dependencies
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty() && !line.starts_with('#'))
+            .map(|line| {
+                line.split(['=', '.'])
+                    .next()
+                    .unwrap_or_default()
+                    .trim()
+                    .to_string()
+            })
+            .collect();
+
+        for dependency in &declared {
+            assert!(
+                AUDIENCE_ALLOWED_DEPENDENCIES.contains(&dependency.as_str()),
+                "OMEGA-DELTA-0094: `omega_audience` now depends on `{dependency}`. \
+                 Local is the audience that works when everything else is down, \
+                 and it is that only for as long as the crate holding its rules \
+                 cannot reach an account, a relay, or a socket. Admitted: \
+                 {AUDIENCE_ALLOWED_DEPENDENCIES:?}."
+            );
+        }
+
+        // A local thread costs no durable write either. `record_thread_opening`
+        // returns before it reaches the store, because an absent record already
+        // means Local. Without this the path that has to keep working when
+        // everything else is down would carry a write per thread, and adding
+        // one is what broke `test_select_agent_action_updates_visible_draft`.
+        let control = read_repository_file(AUDIENCE_CONTROL_PATH);
+        let record = body_of(&control, "record_thread_opening");
+        assert!(
+            record.contains("if audience.is_local() {"),
+            "OMEGA-DELTA-0094: {} now writes a durable record for a local \
+             thread. An absent record already means Local, so the row changes \
+             no answer and costs the one path that must never need anything.",
+            repository_path(AUDIENCE_CONTROL_PATH).display()
+        );
+
+        let source = read_repository_file(AUDIENCE_PATH);
+        assert!(
+            source.contains("pub fn local() -> Self"),
+            "OMEGA-DELTA-0094: {} must construct the local audience. A local \
+             audience that is configured rather than constructed can be \
+             configured into a shared one.",
+            repository_path(AUDIENCE_PATH).display()
+        );
+        assert!(
+            source.contains("reach: Reach::ThisComputer,"),
+            "OMEGA-DELTA-0094: the local audience no longer declares \
+             `Reach::ThisComputer` in {}.",
+            repository_path(AUDIENCE_PATH).display()
+        );
+        assert!(
+            source.contains("pub const fn is_empty(&self) -> bool {")
+                && source.contains("        false"),
+            "OMEGA-DELTA-0094: `AudienceRoster::is_empty` in {} is no longer \
+             constantly false. omega#107 acceptance 4 is that a profile which \
+             has joined nothing still sees Local and does not read as broken, \
+             and a roster that can report itself empty invites a caller to draw \
+             nothing.",
+            repository_path(AUDIENCE_PATH).display()
+        );
+    }
+
+    /// OMEGA-DELTA-0094. The composer reads the thread, never the selection.
+    ///
+    /// omega#107's first falsifier, mechanically: "remove the workspace from
+    /// the thread record and infer it from the current selection". The label a
+    /// person reads is produced by one function, and that function is held to
+    /// taking a thread and consulting no selection. `AudienceBook::audience_of`
+    /// has no selection parameter at all, so the only way to reintroduce the
+    /// defect is to call the selection here — which is what this reads for.
+    #[test]
+    fn the_composer_reads_the_audience_from_the_thread() {
+        let path = repository_path(AUDIENCE_CONTROL_PATH);
+        let source = read_repository_file(AUDIENCE_CONTROL_PATH);
+
+        assert!(
+            source.contains("pub fn thread_audience_label(thread_id: ThreadId, cx: &mut App)"),
+            "OMEGA-DELTA-0094: {} must produce the composer's label from a \
+             thread identity. A label function that takes a selection can only \
+             be correct by accident.",
+            path.display()
+        );
+
+        let body = body_of(&source, "thread_audience_label");
+        assert!(
+            body.contains("thread_audience(thread_id, cx)"),
+            "OMEGA-DELTA-0094: the composer's label in {} is no longer read \
+             from the thread's own audience.",
+            path.display()
+        );
+        assert!(
+            !body.contains("selected"),
+            "OMEGA-DELTA-0094: the composer's label in {} consults the \
+             selection. This is omega#107's falsifier: switching audience then \
+             repaints every thread already on screen, so a private \
+             conversation from last week renders as a public one, nothing is \
+             published, and the person has no way to find out.",
+            path.display()
+        );
+
+        let rules = read_repository_file(AUDIENCE_PATH);
+        let audience_of = body_of(&rules, "audience_of");
+        assert!(
+            audience_of.contains("unwrap_or_else(AudienceId::local)"),
+            "OMEGA-DELTA-0094: a thread with no recorded audience no longer \
+             resolves to Local in {}. The threads with no record are the ones \
+             written before this existed, which are the ones somebody held in \
+             private.",
+            repository_path(AUDIENCE_PATH).display()
+        );
+    }
+
+    /// OMEGA-DELTA-0094. The current audience is on the face of the control.
+    ///
+    /// omega#107's third falsifier is "drop the visible indicator: it must
+    /// become impossible to tell a private thread from a public one without
+    /// opening a menu". So the control is required in the composer row a person
+    /// is already looking at, and it is required to be the composer row rather
+    /// than a settings page — the owner has rejected a modal setup screen
+    /// repeatedly.
+    #[test]
+    fn the_composer_shows_the_audience_without_opening_a_menu() {
+        let path = repository_path(THREAD_VIEW_PATH);
+        let source = read_repository_file(THREAD_VIEW_PATH);
+
+        let bar = body_of(&source, "render_zero_base_executor_bar");
+        assert!(
+            bar.contains("omega_audience_control::render_audience_control("),
+            "OMEGA-DELTA-0094: zero base's composer bar in {} no longer draws \
+             the audience control. It is the row a person reads before typing, \
+             and without it there is no way to tell a private thread from a \
+             public one without opening something.",
+            path.display()
+        );
+        assert!(
+            bar.contains("self.root_thread_id"),
+            "OMEGA-DELTA-0094: the composer bar in {} no longer passes the \
+             thread's own identity to the audience control.",
+            path.display()
+        );
+
+        let control = read_repository_file(AUDIENCE_CONTROL_PATH);
+        let render = body_of(&control, "render_audience_control");
+        assert!(
+            render.contains("thread_audience_label(thread_id, cx)"),
+            "OMEGA-DELTA-0094: the control in {} no longer puts the audience on \
+             its own face. A control that only names the audience once its menu \
+             is open is the indicator omega#107 forbids dropping.",
+            repository_path(AUDIENCE_CONTROL_PATH).display()
+        );
+        assert!(
+            render.contains("Button::new(\"omega-audience-selector\", label)"),
+            "OMEGA-DELTA-0094: the control in {} no longer labels its trigger \
+             with the audience.",
+            repository_path(AUDIENCE_CONTROL_PATH).display()
+        );
+    }
+
+    /// OMEGA-DELTA-0094. Switching does not move a thread that already exists.
+    ///
+    /// Two halves, because either alone is enough to lose the property. The
+    /// rule refuses a rebinding, and the only caller returns before it would
+    /// attempt one — a caller that called `bind` and discarded the `Result`
+    /// would satisfy the first half while doing exactly what it forbids.
+    #[test]
+    fn a_thread_keeps_the_audience_it_was_started_in() {
+        let rules = read_repository_file(AUDIENCE_PATH);
+        let bind = body_of(&rules, "bind");
+        assert!(
+            bind.contains("Err(RebindRefused {"),
+            "OMEGA-DELTA-0094: `AudienceBook::bind` in {} no longer refuses to \
+             move a bound thread. omega#107 deliverable 5 is that a thread keeps \
+             the audience it was started in.",
+            repository_path(AUDIENCE_PATH).display()
+        );
+
+        let control = read_repository_file(AUDIENCE_CONTROL_PATH);
+        let record = body_of(&control, "record_thread_opening");
+        assert!(
+            record.contains("if loaded.book.recorded(&key).is_some() {")
+                && record.contains("return;"),
+            "OMEGA-DELTA-0094: `record_thread_opening` in {} no longer returns \
+             early on a thread that already has an audience. Calling `bind` and \
+             discarding the refusal would leave the rule green while the caller \
+             tried to move threads on every open.",
+            repository_path(AUDIENCE_CONTROL_PATH).display()
+        );
+
+        let select = body_of(&control, "select_audience");
+        assert!(
+            !select.contains("thread_id") && !select.contains("book"),
+            "OMEGA-DELTA-0094: `select_audience` in {} now touches a thread. \
+             Choosing an audience is for the next thread; a chooser that can \
+             reach the record is one edit away from rewriting an old thread's \
+             audience.",
+            repository_path(AUDIENCE_CONTROL_PATH).display()
+        );
+    }
+
+    /// OMEGA-DELTA-0094. The audience is recorded where a thread starts.
+    ///
+    /// The distinction between a thread that did not exist a moment ago and one
+    /// being opened again is only available at construction, where
+    /// `resume_session_id` and `thread_id` are both `Option`. The draw-time
+    /// substitute is `AcpThread::is_draft_thread`, which is
+    /// `entries().is_empty()` and therefore also true of a resumed thread whose
+    /// entries have not loaded — so a slow disk would hand a community audience
+    /// to somebody's old private conversation. This pins the call to the
+    /// constructor and pins the two signals it reads.
+    #[test]
+    fn the_audience_is_recorded_where_a_thread_starts() {
+        let path = repository_path(CONVERSATION_VIEW_PATH);
+        let source = read_repository_file(CONVERSATION_VIEW_PATH);
+
+        assert!(
+            source.contains("omega_audience_control::record_thread_opening("),
+            "OMEGA-DELTA-0094: {} no longer records a thread's audience when \
+             the thread is created. Without it every thread is unrecorded, \
+             every thread reads as Local, and selecting an audience does \
+             nothing at all.",
+            path.display()
+        );
+        assert!(
+            source.contains("omega_audience::ThreadOpening::Resumed")
+                && source.contains("omega_audience::ThreadOpening::Started"),
+            "OMEGA-DELTA-0094: {} no longer distinguishes a started thread from \
+             a resumed one. Treating a resumed thread as started makes opening \
+             last month's private conversation adopt today's selection.",
+            path.display()
+        );
+        assert!(
+            source.contains("reattached_to_a_persisted_record || resume_session_id.is_some()"),
+            "OMEGA-DELTA-0094: {} no longer reads both signals for a resumed \
+             thread. A thread reattached to a persisted record and a thread \
+             resuming a session are both threads that already existed.",
+            path.display()
+        );
+
+        let control = read_repository_file(AUDIENCE_CONTROL_PATH);
+        assert!(
+            !control.contains(".is_draft_thread()"),
+            "OMEGA-DELTA-0094: {} decides an audience from `is_draft_thread`, \
+             which is `entries().is_empty()`. That is also true of a resumed \
+             thread whose entries have not loaded yet.",
+            repository_path(AUDIENCE_CONTROL_PATH).display()
+        );
+    }
+
+    /// [`function_body`], but a miss is a failure rather than an empty string.
+    ///
+    /// OMEGA-DELTA-0090's rule, applied to the checks themselves: a check that
+    /// cannot find its subject must fail. Returning `unwrap_or_default` on a
+    /// renamed function turns every assertion about its body into an assertion
+    /// about nothing, and it turns green.
+    fn body_of<'a>(source: &'a str, name: &str) -> &'a str {
+        function_body(source, name).unwrap_or_else(|| {
+            panic!(
+                "OMEGA-DELTA-0094: `fn {name}` is gone. A check that cannot find \
+                 what it is about must fail rather than pass."
+            )
+        })
+    }
+
+    /// Read a repository source file, or say which one could not be read.
+    fn read_repository_file(relative: &str) -> String {
+        let path = repository_path(relative);
+        std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()))
     }
 }

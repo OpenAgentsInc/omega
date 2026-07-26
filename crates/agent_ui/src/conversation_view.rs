@@ -845,7 +845,33 @@ impl ConversationView {
         })
         .detach();
 
+        // `OMEGA-DELTA-0094`, omega#107. The audience is recorded where a
+        // thread starts, and read where a thread is drawn.
+        //
+        // This is the only place that can tell the difference between a thread
+        // that did not exist a moment ago and one being opened again, and the
+        // difference decides whether the current selection applies. Both
+        // signals are already here: `thread_id` is `Some` when reattaching to a
+        // persisted record, and `resume_session_id` is `Some` when resuming a
+        // session. At draw time neither is available and the substitute —
+        // `AcpThread::is_draft_thread`, which is `entries().is_empty()` — is
+        // also true of a resumed thread whose entries have not loaded, so
+        // binding there would hand a community audience to somebody's old
+        // private conversation on a slow disk.
+        //
+        // `record_thread_opening` binds once. A thread that already has an
+        // audience keeps it.
+        let reattached_to_a_persisted_record = thread_id.is_some();
         let thread_id = thread_id.unwrap_or_else(ThreadId::new);
+        crate::omega_audience_control::record_thread_opening(
+            thread_id,
+            if reattached_to_a_persisted_record || resume_session_id.is_some() {
+                omega_audience::ThreadOpening::Resumed
+            } else {
+                omega_audience::ThreadOpening::Started
+            },
+            cx,
+        );
 
         Self {
             agent: agent.clone(),

@@ -1,0 +1,26 @@
+[package]
+name = "omega_audience"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license = "GPL-3.0-or-later"
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/omega_audience.rs"
+doctest = false
+
+# OMEGA-DELTA-0094. This list is checked, not just reviewed.
+#
+# "Local must never depend on a network, a relay, or an account" is a property
+# of a dependency graph before it is a property of any code. A crate that can
+# reach a socket can be made to reach one by a later edit that reads as a small
+# convenience. `local_needs_no_network_no_relay_and_no_account` in
+# `omega_deltas` holds this list to serialisation only.
+[dependencies]
+serde.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

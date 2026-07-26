@@ -23,6 +23,7 @@ mod message_editor;
 mod mode_selector;
 mod model_selector;
 mod model_selector_popover;
+pub mod omega_audience_control;
 pub mod omega_executor_disclosure;
 pub mod omega_exo_connection;
 pub mod omega_host_bridge;

@@ -548,6 +548,7 @@ dependencies = [
  "node_runtime",
  "notifications",
  "omega_agent_detect",
+ "omega_audience",
  "omega_effectd",
  "omega_exo_lane",
  "omega_front_door",
@@ -11961,6 +11962,14 @@ dependencies = [
  "omega_exo_lane",
  "serde_json",
  "tempfile",
+]
+
+[[package]]
+name = "omega_audience"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
