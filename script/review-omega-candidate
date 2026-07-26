@@ -7,7 +7,8 @@ producer *claim*, then reproduces every check itself and compares.
 
 The distinction matters: reading the producer's JSON and confirming it parses
 is not review, it is proofreading. Everything below is recomputed from the
-artifact and the installed application.
+artifact itself. The application it checks is the one inside the candidate
+disk image, not whatever is installed.
 
 Independence is structural, not declared:
 
@@ -23,7 +24,7 @@ Independence is structural, not declared:
 Usage:
     OMEGA_REVIEWER_KEY_FILE=~/work/.secrets/omega-independent-reviewer.env \\
     review-omega-candidate \\
-        --candidate-dmg <dmg> --app /Applications/Omega.app \\
+        --candidate-dmg <dmg> \\
         --producer-claim <claim.json> --output <receipt.json>
 """
 
@@ -35,6 +36,8 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -103,6 +106,38 @@ def load_reviewer_key() -> tuple[str, str]:
     return secret, public
 
 
+def signing_package_root() -> Path:
+    """Locate the package whose `node_modules` carry the signing curves.
+
+    This was derived from the script's own location, three parents up plus
+    `openagents/packages/sarah`. That holds only when the reviewer runs from
+    the canonical omega checkout beside a canonical openagents checkout — and
+    an independent reviewer is supposed to run from an isolated worktree,
+    where it raises `FileNotFoundError` from inside `subprocess`. A reviewer
+    that cannot sign from an isolated tree pushes reviews back into the
+    producer's directory layout, which is the opposite of the point.
+
+    Candidates are tried in order and the first that exists wins, so an
+    unusual layout can be handled by setting the environment variable rather
+    than by moving the checkout.
+    """
+    override = os.environ.get("OMEGA_REVIEW_SIGNING_PACKAGE")
+    candidates = [Path(override).expanduser()] if override else []
+    here = Path(__file__).resolve()
+    candidates += [
+        here.parent.parent.parent / "openagents" / "packages" / "sarah",
+        Path.home() / "work" / "openagents" / "packages" / "sarah",
+    ]
+    for candidate in candidates:
+        if (candidate / "node_modules").is_dir():
+            return candidate
+    raise ReviewError(
+        "cannot find a package providing the signing curves; set "
+        "OMEGA_REVIEW_SIGNING_PACKAGE to a directory whose node_modules has "
+        "@noble/curves"
+    )
+
+
 def sign(message_hex: str, secret_hex: str) -> str:
     """Schnorr-sign the evidence digest with the reviewer key."""
     result = subprocess.run(
@@ -121,7 +156,7 @@ def sign(message_hex: str, secret_hex: str) -> str:
         ],
         capture_output=True,
         text=True,
-        cwd=str(Path(__file__).resolve().parent.parent.parent / "openagents" / "packages" / "sarah"),
+        cwd=str(signing_package_root()),
     )
     if result.returncode != 0 or len(result.stdout.strip()) != 128:
         raise ReviewError(f"reviewer signature failed: {result.stderr.strip()[:200]}")
@@ -137,10 +172,45 @@ def observe(command: list[str]) -> tuple[bool, str]:
     return True, (result.stdout + result.stderr)
 
 
+@contextmanager
+def mounted_candidate(dmg: Path):
+    """Yield the `Omega.app` inside `dmg`, mounted read-only.
+
+    Every check must bind to one artifact. This existed as `--app`, defaulting
+    to `/Applications/Omega.app`, and two of the four checks read it while the
+    other two read the disk image. An independent review run exactly as
+    documented then returned `accepted` with zero disagreements while
+    `notarization` and `forbidden_strings` were reading a *different candidate*
+    that happened to be installed — the reviewer caught it only by comparing
+    `CFBundleVersion`, the host binary digest and the CDHash by hand.
+
+    A review that can pass against an artifact nobody named is worse than no
+    review, so the app is no longer an input. It comes out of the disk image
+    the claim is about.
+    """
+    mount_point = Path(tempfile.mkdtemp(prefix="omega-review-"))
+    attach = subprocess.run(
+        ["hdiutil", "attach", "-nobrowse", "-readonly", "-quiet",
+         "-mountpoint", str(mount_point), str(dmg)],
+        capture_output=True, text=True,
+    )
+    if attach.returncode != 0:
+        raise ReviewError(f"cannot mount the candidate: {attach.stderr.strip()[:200]}")
+    try:
+        apps = sorted(mount_point.glob("*.app"))
+        if len(apps) != 1:
+            raise ReviewError(
+                f"expected exactly one application in the candidate, found {len(apps)}"
+            )
+        yield apps[0]
+    finally:
+        subprocess.run(["hdiutil", "detach", str(mount_point), "-quiet"],
+                       capture_output=True)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--candidate-dmg", type=Path, required=True)
-    parser.add_argument("--app", type=Path, default=Path("/Applications/Omega.app"))
     parser.add_argument("--producer-claim", type=Path, required=True)
     parser.add_argument("--obligation", default="omega#16")
     parser.add_argument("--output", type=Path, required=True)
@@ -186,47 +256,51 @@ def main() -> int:
         claim.get("artifactSha256", ""),
     )
 
-    # 2. Gatekeeper's own verdict on the installed application.
-    ran, output = observe(["spctl", "-a", "-vvv", "-t", "exec", str(args.app)])
-    if not ran:
-        inconclusive = True
-    else:
-        notarized = "source=Notarized Developer ID" in output
-        record(
-            "notarization",
-            f"spctl -a -vvv -t exec {args.app}",
-            "notarized" if notarized else "not_notarized",
-            claim.get("notarization", ""),
-        )
+    # Checks 2 to 4 bind to the application inside the candidate, never to
+    # whatever happens to be installed. See mounted_candidate().
+    with mounted_candidate(args.candidate_dmg) as app:
+        binary = app / "Contents" / "MacOS" / "omega"
 
-    # 3. The stapled ticket, checked against the artifact rather than the app,
-    #    because the bundler staples the disk image.
-    ran, output = observe(["xcrun", "stapler", "validate", str(args.candidate_dmg)])
-    if not ran:
-        inconclusive = True
-    else:
-        stapled = "The validate action worked" in output
-        record(
-            "stapled_ticket",
-            f"xcrun stapler validate {args.candidate_dmg.name}",
-            "stapled" if stapled else "not_stapled",
-            claim.get("stapled", ""),
-        )
+        # 2. Gatekeeper's own verdict on the candidate's application.
+        ran, output = observe(["spctl", "-a", "-vvv", "-t", "exec", str(app)])
+        if not ran:
+            inconclusive = True
+        else:
+            notarized = "source=Notarized Developer ID" in output
+            record(
+                "notarization",
+                f"spctl -a -vvv -t exec <candidate>/{app.name}",
+                "notarized" if notarized else "not_notarized",
+                claim.get("notarization", ""),
+            )
 
-    # 4. Forbidden strings, scanned from the shipped binary. This is the check
-    #    that caught two Zed surfaces a source review had passed.
-    binary = args.app / "Contents" / "MacOS" / "omega"
-    ran, output = observe(["strings", str(binary)])
-    if not ran:
-        inconclusive = True
-    else:
-        found = sorted({needle for needle in FORBIDDEN_STRINGS if needle in output})
-        record(
-            "forbidden_strings",
-            f"strings {binary} | grep -F <forbidden>",
-            ",".join(found) if found else "none",
-            claim.get("forbiddenStrings", ""),
-        )
+        # 3. The stapled ticket on the disk image, because the bundler staples
+        #    the image. The application inside it is stapled separately.
+        ran, output = observe(["xcrun", "stapler", "validate", str(args.candidate_dmg)])
+        if not ran:
+            inconclusive = True
+        else:
+            stapled = "The validate action worked" in output
+            record(
+                "stapled_ticket",
+                f"xcrun stapler validate {args.candidate_dmg.name}",
+                "stapled" if stapled else "not_stapled",
+                claim.get("stapled", ""),
+            )
+
+        # 4. Forbidden strings, scanned from the shipped binary. This is the
+        #    check that caught two Zed surfaces a source review had passed.
+        ran, output = observe(["strings", str(binary)])
+        if not ran:
+            inconclusive = True
+        else:
+            found = sorted({needle for needle in FORBIDDEN_STRINGS if needle in output})
+            record(
+                "forbidden_strings",
+                f"strings <candidate>/{app.name}/Contents/MacOS/omega | grep -F <forbidden>",
+                ",".join(found) if found else "none",
+                claim.get("forbiddenStrings", ""),
+            )
 
     if inconclusive:
         outcome = "inconclusive"
