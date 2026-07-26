@@ -8,6 +8,7 @@ mod draft;
 mod evidence_chain;
 mod issue31_adjunct;
 mod issue31_delivery;
+mod issue31_observation;
 mod panel;
 mod provider_roster;
 mod thread_run_link;
@@ -27,6 +28,9 @@ pub use issue31_delivery::{
     issue31_host_projection_documents, issue31_host_projection_source,
     issue31_provider_roster_source,
     latest_issue31_live_reading, set_issue31_live_reading, Issue31FullAutoReading,
+};
+pub use issue31_observation::{
+    observe_issue31_full_auto, Issue31ObservationError, MAX_ISSUE31_PROJECTED_RUNS,
 };
 pub use panel::FullAutoPanel;
 pub use provider_roster::{parse_provider_accounts, ProviderAccountRow};

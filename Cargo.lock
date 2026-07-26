@@ -6608,6 +6608,7 @@ dependencies = [
  "editor",
  "futures 0.3.32",
  "gpui",
+ "log",
  "nostr",
  "omega_effectd",
  "omega_front_door",

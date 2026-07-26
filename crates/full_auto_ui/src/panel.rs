@@ -23,17 +23,8 @@ use omega_effectd::{
     openagents_session, shared_supervisor,
 };
 
-use crate::issue31_delivery::{Issue31FullAutoReading, set_issue31_live_reading};
-
-/// The omega#47 contract carries at most this many runs in one projection.
-const MAX_ISSUE31_PROJECTED_RUNS: usize = 16;
-
-fn unix_millis() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|elapsed| u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX))
-        .unwrap_or_default()
-}
+use crate::issue31_delivery::set_issue31_live_reading;
+use crate::issue31_observation::observe_issue31_full_auto;
 use omega_front_door::LaunchOrigin;
 use serde_json::Value;
 use settings::{NotifyWhenAgentWaiting, Settings as _};
@@ -335,46 +326,26 @@ impl FullAutoPanel {
             // omega#49: the same poll feeds the phone. The Sarah host pump
             // publishes whatever reading is recorded here, so a Full Auto view
             // the desktop can see is one the owner's paired device can see too.
-            // The reading is stored only when the daemon actually answered:
+            //
+            // omega#97: the polling itself moved to `issue31_observation`, so
+            // this view and a headless host take one reading path rather than
+            // two. It refuses an incomplete reading rather than shortening it —
             // recording a partial one would publish a shorter run list than the
-            // host has, which reads on the phone as runs that ended.
-            if let (Ok(runs), Some(capacity)) = (&listed, &capacity) {
-                let generation = {
-                    let guard = supervisor.lock().await;
-                    guard.generation()
-                };
-                let mut run_details = Vec::new();
-                let mut evidence = Vec::new();
-                let mut complete = true;
-                for run in runs.iter().take(MAX_ISSUE31_PROJECTED_RUNS) {
-                    let mut guard = supervisor.lock().await;
-                    match guard.get_run(&run.run_ref).await {
-                        Ok(detail) => run_details.push(detail),
-                        Err(_) => {
-                            complete = false;
-                            break;
-                        }
-                    }
-                    if let (Ok(report), Ok(receipt)) = (
-                        guard.get_report(&run.run_ref).await,
-                        guard.get_receipt(&run.run_ref).await,
-                    ) {
-                        evidence.push((report, receipt));
-                    }
-                }
-                if complete {
-                    set_issue31_live_reading(Issue31FullAutoReading {
-                        generated_at_ms: unix_millis(),
-                        host_generation: generation,
-                        run_details,
-                        capacity: capacity.clone(),
-                        // Provider connection handoffs are not part of this
-                        // reading. They are durable host records owned by the
-                        // Sarah pump's ledger (omega#91) and survive a restart
-                        // that this poll does not; carrying them here as well
-                        // would give one fact two sources.
-                        evidence,
-                    });
+            // host has, which reads on the phone as runs that ended — and the
+            // stamp is the observer's own clock reading, which no caller here
+            // can supply.
+            //
+            // Provider connection handoffs are deliberately not part of this
+            // reading. They are durable host records owned by the Sarah pump's
+            // ledger (omega#91) and survive a restart that this poll does not;
+            // carrying them here as well would give one fact two sources.
+            match observe_issue31_full_auto(&supervisor).await {
+                Ok(reading) => set_issue31_live_reading(reading),
+                Err(error) => {
+                    // Silence, not an empty view. The pump keeps publishing the
+                    // last reading the host actually took, and a host that has
+                    // never taken one publishes nothing at all.
+                    log::debug!("omega#97: Full Auto observation skipped ({})", error.token());
                 }
             }
             this.update(cx, |this, cx| {

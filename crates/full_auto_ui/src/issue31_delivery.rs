@@ -35,18 +35,37 @@ use crate::issue31_adjunct::{
 };
 use crate::provider_roster::parse_provider_accounts;
 
+/// This host's clock, in epoch milliseconds. The single reading every
+/// observation is stamped from.
+fn unix_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX))
+        .unwrap_or_default()
+}
+
 /// One complete reading of the live Full Auto surface, owned rather than
 /// borrowed so it can be cached between the panel that reads it and the pump
 /// that publishes it.
 ///
 /// `host_ref` is absent on purpose: the host reference belongs to the device's
 /// grant, not to the run registry, so it is supplied per delivery.
-#[derive(Clone, Debug, Default)]
+///
+/// `Default` is deliberately not derived. A default reading is one nobody
+/// measured, and it would carry `generated_at_ms: 0` — a stamp that decodes,
+/// projects, and reads on the phone as a host observation taken in 1970. The
+/// only readings that exist are ones a daemon answered.
+#[derive(Clone, Debug)]
 pub struct Issue31FullAutoReading {
-    /// When the daemon was actually read, in epoch milliseconds. Never "now":
-    /// a snapshot stamped with the publish time would claim a freshness the
-    /// host does not have.
-    pub generated_at_ms: u64,
+    /// When the daemon was actually read, in epoch milliseconds.
+    ///
+    /// Private, and there is no production path that sets it (omega#97). The
+    /// host's own clock stamps it once inside `observed`, so a caller cannot
+    /// supply one: a reading whose stamp its author chose is exactly how a
+    /// recorded fixture becomes host authority, and omega#49's exit forbids
+    /// that in as many words. Making it unwritable is stronger than forbidding
+    /// it in a comment, because a comment does not survive a rebase.
+    generated_at_ms: u64,
     pub host_generation: u64,
     /// One `get_run` record per run the daemon listed.
     pub run_details: Vec<Value>,
@@ -57,6 +76,62 @@ pub struct Issue31FullAutoReading {
 }
 
 impl Issue31FullAutoReading {
+    /// The only constructor a production path can reach.
+    ///
+    /// `generated_at_ms` is one reading of this host's clock, taken here and
+    /// stamped once. There is no parameter for it, so a client-supplied,
+    /// fixture-supplied, or replayed value cannot enter — it is discarded by
+    /// being inexpressible rather than by being checked.
+    ///
+    /// Taken *after* the daemon answered, on purpose. Stamping before the reads
+    /// would put the stamp behind a run that began during them, and the
+    /// contract refuses a run whose start is newer than the snapshot; stamping
+    /// after can only over-state freshness by the length of one poll, which
+    /// under-states no run's unattended duration.
+    pub fn observed(
+        host_generation: u64,
+        run_details: Vec<Value>,
+        capacity: Value,
+        evidence: Vec<(Value, Value)>,
+    ) -> Self {
+        Self {
+            generated_at_ms: unix_millis(),
+            host_generation,
+            run_details,
+            capacity,
+            evidence,
+        }
+    }
+
+    /// When this host read its daemon.
+    pub fn generated_at_ms(&self) -> u64 {
+        self.generated_at_ms
+    }
+
+    /// A reading stamped at a recorded instant, for tests over captured daemon
+    /// bytes only.
+    ///
+    /// `#[cfg(test)]` is the whole point: the projection has to be testable
+    /// against real recorded `get_run` output at a known instant, and no
+    /// shipped build may contain a way to state a stamp the host did not
+    /// measure. This function does not exist in a release binary.
+    #[cfg(test)]
+    fn at_recorded_instant(
+        generated_at_ms: u64,
+        host_generation: u64,
+        run_details: Vec<Value>,
+        capacity: Value,
+        evidence: Vec<(Value, Value)>,
+    ) -> Self {
+        Self {
+            generated_at_ms,
+            host_generation,
+            run_details,
+            capacity,
+            evidence,
+        }
+    }
+
     /// A stable identifier for exactly this reading.
     ///
     /// The mobile contract binds the detail projection to the snapshot that
@@ -101,12 +176,12 @@ pub fn issue31_host_projection_documents(
     // against the pump's own clock. A handoff opened after this reading was
     // taken belongs to the next snapshot, and the contract says so: a row whose
     // request time is newer than `generatedAtMs` is refused (omega#91).
-    let handoffs = request.handoffs.projected(reading.generated_at_ms).rows;
+    let handoffs = request.handoffs.projected(reading.generated_at_ms()).rows;
     let snapshot_ref = reading.snapshot_ref(&handoffs);
     let sources = Issue31FullAutoLiveSources {
         host_ref: request.host_ref,
         snapshot_ref: &snapshot_ref,
-        generated_at_ms: reading.generated_at_ms,
+        generated_at_ms: reading.generated_at_ms(),
         host_generation: reading.host_generation,
         run_details: &reading.run_details,
         capacity: &reading.capacity,
@@ -118,7 +193,7 @@ pub fn issue31_host_projection_documents(
     // contract's way of saying "this host cannot presently vouch for you".
     let identity = Issue31HostIdentitySource {
         source_ref: "source.omega.issue31-pairing",
-        observed_at_ms: reading.generated_at_ms,
+        observed_at_ms: reading.generated_at_ms(),
         owner_grant_ref: Some(request.grant_ref),
         record_refs: &["record.omega.host-announcement", "record.omega.owner-grant"],
         permitted_action_refs: &[
@@ -258,13 +333,13 @@ mod tests {
     }
 
     fn reading() -> Issue31FullAutoReading {
-        Issue31FullAutoReading {
-            generated_at_ms: LIVE_GENERATED_AT_MS,
-            host_generation: 19,
-            run_details: vec![live("get_run", LIVE_RUN)],
-            capacity: live("get_capacity", LIVE_CAPACITY),
-            evidence: Vec::new(),
-        }
+        Issue31FullAutoReading::at_recorded_instant(
+            LIVE_GENERATED_AT_MS,
+            19,
+            vec![live("get_run", LIVE_RUN)],
+            live("get_capacity", LIVE_CAPACITY),
+            Vec::new(),
+        )
     }
 
     #[test]
@@ -532,13 +607,13 @@ mod tests {
             omega_effectd::SarahConversationClient::with_relay(config, Box::new(relay), signer);
         client.attach_issue31_host_controller(controller);
         // The host's real, currently-empty reading of its own Full Auto state.
-        set_issue31_live_reading(Issue31FullAutoReading {
-            generated_at_ms: unix_seconds().saturating_mul(1_000),
-            host_generation: 1,
-            run_details: Vec::new(),
-            capacity: json!({ "accounts": [] }),
-            evidence: Vec::new(),
-        });
+        set_issue31_live_reading(Issue31FullAutoReading::at_recorded_instant(
+            unix_seconds().saturating_mul(1_000),
+            1,
+            Vec::new(),
+            json!({ "accounts": [] }),
+            Vec::new(),
+        ));
         client.set_issue31_host_projection_source(issue31_host_projection_source());
 
         client
@@ -653,13 +728,13 @@ mod tests {
         // the snapshot's `generatedAtMs` is when the host last looked, and a
         // handoff stamped after that reading belongs to the next snapshot.
         let observe = || {
-            set_issue31_live_reading(Issue31FullAutoReading {
-                generated_at_ms: unix_seconds().saturating_mul(1_000) + 1_000,
-                host_generation: 1,
-                run_details: Vec::new(),
-                capacity: capacity_with_accounts(),
-                evidence: Vec::new(),
-            });
+            set_issue31_live_reading(Issue31FullAutoReading::at_recorded_instant(
+                unix_seconds().saturating_mul(1_000) + 1_000,
+                1,
+                Vec::new(),
+                capacity_with_accounts(),
+                Vec::new(),
+            ));
         };
         observe();
         client.set_issue31_host_projection_source(issue31_host_projection_source());
@@ -929,11 +1004,11 @@ mod tests {
         // is what makes the terminal outcome a refusal rather than a
         // connection.
         let observe = || {
-            set_issue31_live_reading(Issue31FullAutoReading {
-                generated_at_ms: unix_seconds().saturating_mul(1_000) + 1_000,
-                host_generation: 1,
-                run_details: Vec::new(),
-                capacity: json!({
+            set_issue31_live_reading(Issue31FullAutoReading::at_recorded_instant(
+                unix_seconds().saturating_mul(1_000) + 1_000,
+                1,
+                Vec::new(),
+                json!({
                     "lanes": [{"lane": "claude-local", "state": "available", "activeRuns": 0}],
                     "accounts": [{
                         "accountRef": "account.claude.1",
@@ -944,8 +1019,8 @@ mod tests {
                         "lane": "lane.claude-local",
                     }],
                 }),
-                evidence: Vec::new(),
-            });
+                Vec::new(),
+            ));
         };
         observe();
         client.set_issue31_host_projection_source(issue31_host_projection_source());
@@ -1241,13 +1316,13 @@ mod tests {
 
     #[test]
     fn a_host_running_nothing_publishes_an_empty_view_rather_than_silence() {
-        let empty = Issue31FullAutoReading {
-            generated_at_ms: LIVE_GENERATED_AT_MS,
-            host_generation: 19,
-            run_details: Vec::new(),
-            capacity: json!({ "accounts": [] }),
-            evidence: Vec::new(),
-        };
+        let empty = Issue31FullAutoReading::at_recorded_instant(
+            LIVE_GENERATED_AT_MS,
+            19,
+            Vec::new(),
+            json!({ "accounts": [] }),
+            Vec::new(),
+        );
         let documents = issue31_host_projection_documents(
             &empty,
             &request("omega.host.local", "grant.omega.device_1", &no_handoffs()),
@@ -1261,5 +1336,269 @@ mod tests {
             documents.host.get("hostRef").and_then(Value::as_str),
             Some("omega.host.local"),
         );
+    }
+
+    /// The omega#97 exit, against a REAL running daemon and the DEPLOYED relay.
+    ///
+    /// omega#49 and omega#91 both closed carrying the same named substitution:
+    ///
+    /// > the Full Auto reading. No `omega-effectd` daemon is attached to this
+    /// > process, so the host's roster reading is supplied here rather than
+    /// > polled.
+    ///
+    /// This test is that substitution being removed. It spawns the packaged
+    /// `omega-effectd` under a data root of its own, reads it through the same
+    /// `observe_issue31_full_auto` the desktop panel calls, hands the reading to
+    /// the shipped projection source, and lets the shipped `sync_issue31_host`
+    /// pump publish it to a paired device over a real relay.
+    ///
+    /// Nothing recorded is on the wire. `fixtures/live-omega-effectd.get_run.json`
+    /// is not read here — replaying it would make a recorded fixture the host
+    /// authority for a device proof, which omega#49's exit forbids in as many
+    /// words, and which the private stamp on `Issue31FullAutoReading` now makes
+    /// unexpressible from a production path rather than merely discouraged.
+    ///
+    /// ## What this run does NOT start
+    ///
+    /// It never calls `start`, `pause`, `resume`, `retry`, or `stop`. Full Auto
+    /// authority does not begin on a path a model can reach, so a freshly
+    /// spawned daemon holds no runs and this asserts a host that looked and
+    /// found none — which is a real observation, and on the wire is a different
+    /// document from a host that never looked. What a real *run* projects is
+    /// covered from captured daemon bytes by
+    /// `a_live_host_run_projects_its_exact_unattended_duration`; what this adds
+    /// is that the bytes reaching the phone came from a daemon that answered.
+    ///
+    /// ## Named substitutions
+    ///
+    /// - identity custody. The owner key is a keypair rather than
+    ///   `omega_identity::IdentityService`, because custody needs the GPUI app
+    ///   and this harness runs headless. A run proves the host protocol and the
+    ///   relay, not owner key custody.
+    /// - `lane_readiness`. The shipped answer lives in `agent_ui` and needs a
+    ///   GPUI workspace. This process genuinely holds no workspace and no
+    ///   admitted agent authority, so it answers `unavailable` for every lane —
+    ///   a true statement about this host, and one that can only under-claim
+    ///   its capacity.
+    ///
+    /// ```sh
+    /// OMEGA_LIVE_RELAY_URL=wss://relay.openagents.com \
+    /// OMEGA_EFFECTD_BIN=/Applications/Omega.app/Contents/Resources/omega-effectd/bin/omega-effectd \
+    ///   cargo test -p full_auto_ui --lib \
+    ///   a_running_daemon_supplies_the_reading_a_paired_device_reads_on_a_live_relay \
+    ///   -- --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore = "requires a live relay and a packaged omega-effectd; set OMEGA_LIVE_RELAY_URL and OMEGA_EFFECTD_BIN"]
+    fn a_running_daemon_supplies_the_reading_a_paired_device_reads_on_a_live_relay() {
+        let Ok(relay_url) = std::env::var("OMEGA_LIVE_RELAY_URL") else {
+            eprintln!("OMEGA_LIVE_RELAY_URL unset; skipping");
+            return;
+        };
+        let Ok(effectd_bin) = std::env::var("OMEGA_EFFECTD_BIN") else {
+            eprintln!("OMEGA_EFFECTD_BIN unset; skipping");
+            return;
+        };
+        let daemon = std::path::PathBuf::from(&effectd_bin);
+        assert!(
+            daemon.is_file(),
+            "OMEGA_EFFECTD_BIN must name the packaged omega-effectd executable: {effectd_bin}",
+        );
+
+        // Its own data root. The owner's running Omega keeps its runs under
+        // `paths::data_dir()`, and a second writer there would be a second
+        // durable run authority over the same registry.
+        let temporary = tempfile::tempdir().expect("tempdir");
+        let data_root = temporary.path().join("effectd");
+        let supervisor = std::rc::Rc::new(smol::lock::Mutex::new(
+            omega_effectd::OmegaEffectdSupervisor::new(omega_effectd::default_options(
+                data_root.clone(),
+                omega_effectd::OmegaEffectdCommand {
+                    program: daemon,
+                    args: Vec::new(),
+                },
+            )),
+        ));
+        {
+            // See the named substitution above: no workspace, no admitted agent
+            // authority, so every lane is honestly unavailable.
+            let mut guard = smol::block_on(supervisor.lock());
+            guard.set_host_handler(std::rc::Rc::new(|request: omega_effectd::HostRequestFrame| {
+                Box::pin(async move {
+                    match request.method {
+                        omega_effectd::HostMethod::LaneReadiness => Ok(json!({
+                            "known": false,
+                            "admitted": false,
+                            "fullAuto": false,
+                            "state": "unavailable",
+                        })),
+                        _ => Err(omega_effectd::HostResponseError::unavailable(
+                            "This headless host answers only lane_readiness.",
+                        )),
+                    }
+                }) as omega_effectd::OmegaEffectdHostFuture
+            }));
+        }
+
+        let initialized = smol::block_on(async {
+            let mut guard = supervisor.lock().await;
+            guard.start().await
+        })
+        .expect("the packaged omega-effectd must start");
+        eprintln!(
+            "omega#97: omega-effectd {} answered initialize at generation {} under {}",
+            initialized.service_version,
+            initialized.generation,
+            data_root.display(),
+        );
+
+        // The reading. Measured, through the exact function `panel.rs` calls.
+        let before_ms = unix_seconds().saturating_mul(1_000);
+        let reading = smol::block_on(crate::issue31_observation::observe_issue31_full_auto(
+            &supervisor,
+        ))
+        .expect("a running daemon must let this host state a reading");
+        let after_ms = unix_seconds().saturating_mul(1_000) + 1_000;
+
+        // Provenance: the stamp is this host's clock at the moment it read the
+        // daemon, not a value anything handed it. A replayed fixture cannot
+        // land in this window, and there is no parameter through which one
+        // could try.
+        assert!(
+            reading.generated_at_ms() >= before_ms && reading.generated_at_ms() <= after_ms,
+            "the reading must be stamped by the host that took it: \
+             {before_ms} <= {} <= {after_ms}",
+            reading.generated_at_ms(),
+        );
+        // The daemon's own capacity record, not a constructed one. Its lane
+        // list is the thing `parse_provider_accounts` reads the account-to-lane
+        // mapping out of, so this is where the roster comes from.
+        let lanes = reading
+            .capacity
+            .get("lanes")
+            .and_then(Value::as_array)
+            .expect("a live get_capacity carries the host's lanes");
+        assert!(
+            !lanes.is_empty(),
+            "the daemon answered get_capacity with no lanes at all: {}",
+            reading.capacity,
+        );
+        eprintln!(
+            "omega#97: measured reading · generation {} · {} run(s) · {} lane(s) · {} account(s) · stamped {}",
+            reading.host_generation,
+            reading.run_details.len(),
+            lanes.len(),
+            parse_provider_accounts(&reading.capacity).len(),
+            reading.generated_at_ms(),
+        );
+
+        // Publish it, through the shipped pump, to a real paired device.
+        let host_keys = nostr::Keys::generate();
+        let sarah_keys = nostr::Keys::generate();
+        let device_public_key_hex = nostr::Keys::generate().public_key().to_hex();
+        let signer = omega_effectd::SigningIdentity::from_keys(host_keys.clone());
+        let owner_public_key_hex = signer.public_key_hex.clone();
+
+        let mut config = omega_effectd::SarahConversationConfig::mock_fixture();
+        config.identity.owner_public_key_hex = owner_public_key_hex.clone();
+        config.identity.sarah_public_key_hex = sarah_keys.public_key().to_hex();
+        config.conversation_digest = owner_public_key_hex[..24].to_string();
+        config.relay_url = Some(relay_url.clone());
+        let conversation_ref = config.conversation_ref();
+
+        let relay = omega_effectd::WebSocketRelayAdapter::new_for_keys_with_policy(
+            vec![relay_url.clone()],
+            host_keys,
+            sarah_keys.public_key().to_hex(),
+            Vec::new(),
+            Vec::new(),
+        )
+        .expect("host relay adapter");
+        let controller = live_paired_controller(
+            &owner_public_key_hex,
+            &sarah_keys.public_key().to_hex(),
+            &conversation_ref,
+            &relay_url,
+            &device_public_key_hex,
+        );
+        let grant = controller
+            .active_grants(unix_seconds())
+            .expect("grants")
+            .first()
+            .cloned()
+            .expect("the paired device holds an active grant");
+
+        let mut client =
+            omega_effectd::SarahConversationClient::with_relay(config, Box::new(relay), signer);
+        client.attach_issue31_host_controller(controller);
+        set_issue31_live_reading(reading.clone());
+        client.set_issue31_host_projection_source(issue31_host_projection_source());
+        client.set_issue31_provider_roster_source(issue31_provider_roster_source());
+
+        client
+            .sync_issue31_host()
+            .expect("the shipped host pump runs against the live relay");
+
+        assert!(
+            client
+                .issue31_published_host_adjunct_grants()
+                .contains(&format!("{}:{}", grant.grant_ref, grant.generation)),
+            "the pump must record the omega#47 publication it made for this grant",
+        );
+        // The outbox drains only when every configured relay acknowledged every
+        // gift wrap, so an empty backlog is the live relay's own receipt.
+        assert!(
+            client.issue31_pending_private_publish_refs().is_empty(),
+            "the live relay must acknowledge every owner-private record: {:?}",
+            client.issue31_pending_private_publish_refs(),
+        );
+
+        // And the document the phone decodes carries the daemon's stamp — the
+        // proof that what crossed the relay is what the daemon said, rather
+        // than anything this test could have authored.
+        let documents = issue31_host_projection_documents(
+            &reading,
+            &Issue31HostProjectionRequest {
+                host_ref: "omega.host.local",
+                host_public_key_hex: &owner_public_key_hex,
+                device_public_key_hex: &device_public_key_hex,
+                grant_ref: &grant.grant_ref,
+                expected_generation: grant.generation,
+                observed_at_ms: reading.generated_at_ms(),
+                handoffs: &no_handoffs(),
+            },
+        )
+        .expect("a measured reading projects");
+        assert_eq!(
+            documents
+                .detail
+                .get("generatedAtMs")
+                .and_then(Value::as_u64),
+            Some(reading.generated_at_ms()),
+            "the detail the phone reads must carry the instant the daemon was read",
+        );
+        let decoded = workroom_receipts::decode_issue31_full_auto_adjunct(
+            &serde_json::to_string(&documents.detail).expect("serialize detail"),
+        )
+        .expect("the emitter must not produce a detail the phone would refuse");
+        assert_eq!(
+            decoded.runs.len(),
+            reading.run_details.len(),
+            "the phone must read exactly the runs the daemon reported",
+        );
+
+        eprintln!(
+            "omega#97 live relay OK: {relay_url} stored the omega#47 snapshot and detail for \
+             grant {} addressed to device {device_public_key_hex}, built from a reading this \
+             host measured from a running omega-effectd ({} run(s), {} lane(s))",
+            grant.grant_ref,
+            reading.run_details.len(),
+            lanes.len(),
+        );
+
+        smol::block_on(async {
+            let mut guard = supervisor.lock().await;
+            let _ = guard.stop().await;
+        });
     }
 }
