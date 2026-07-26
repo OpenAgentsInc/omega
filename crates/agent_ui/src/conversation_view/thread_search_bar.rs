@@ -948,6 +948,10 @@ fn collect_markdowns(
         }
         AgentThreadEntry::Elicitation(_) => {}
         AgentThreadEntry::ContextCompaction(_) => {}
+        // OMEGA-DELTA-0045. A system note carries no `Entity<Markdown>`; its
+        // text is a plain `SharedString` the host wrote, so there is nothing
+        // here for the Markdown-backed search index to collect.
+        AgentThreadEntry::SystemNote(_) => {}
     }
     out
 }

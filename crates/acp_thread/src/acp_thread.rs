@@ -393,6 +393,35 @@ pub enum AgentThreadEntry {
     Elicitation(ElicitationEntryId),
     CompletedPlan(Vec<PlanEntry>),
     ContextCompaction(ContextCompaction),
+    /// OMEGA-DELTA-0045. A note the supervising host wrote into the thread so
+    /// the owner reading it can see something that happened *to* the run
+    /// rather than inside a model turn.
+    SystemNote(SystemNote),
+}
+
+/// OMEGA-DELTA-0045. Identity of a host-authored system note.
+///
+/// The engine supplies it, so a retried `append_system_note` — after a host
+/// restart, or after a response the engine never saw — lands on the note that
+/// is already there instead of writing a second copy of the same disclosure.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SystemNoteId(pub Arc<str>);
+
+/// OMEGA-DELTA-0045. A host-authored line in the thread.
+///
+/// This exists because of the rc11 defect: a cross-provider handoff changed
+/// which model was spending the owner's budget and left nothing in the thread
+/// the owner reads. `AgentThreadEntry` had no variant an owner-visible,
+/// non-model disclosure could be, so the host had nowhere to put one and
+/// refused instead. The refusal was honest; the missing seam was the defect.
+///
+/// The text is plain, not Markdown, and not model output: it is written by the
+/// host and rendered as-is, so nothing a provider emits can style, hide, or
+/// impersonate it.
+#[derive(Debug, Clone)]
+pub struct SystemNote {
+    pub id: SystemNoteId,
+    pub text: SharedString,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -785,6 +814,7 @@ impl AgentThreadEntry {
             Self::Elicitation(_) => false,
             Self::CompletedPlan(_) => false,
             Self::ContextCompaction(_) => false,
+            Self::SystemNote(_) => false,
         }
     }
 
@@ -803,6 +833,7 @@ impl AgentThreadEntry {
                 md
             }
             Self::ContextCompaction(_) => "--- Context Compacted ---\n\n".to_string(),
+            Self::SystemNote(note) => format!("--- {} ---\n\n", note.text),
         }
     }
 
@@ -2485,7 +2516,8 @@ impl AcpThread {
                 | AgentThreadEntry::Elicitation(_)
                 | AgentThreadEntry::AssistantMessage(_)
                 | AgentThreadEntry::CompletedPlan(_)
-                | AgentThreadEntry::ContextCompaction(_) => {}
+                | AgentThreadEntry::ContextCompaction(_)
+                | AgentThreadEntry::SystemNote(_) => {}
             }
         }
         false
@@ -2515,7 +2547,8 @@ impl AcpThread {
                 | AgentThreadEntry::Elicitation(_)
                 | AgentThreadEntry::AssistantMessage(_)
                 | AgentThreadEntry::CompletedPlan(_)
-                | AgentThreadEntry::ContextCompaction(_) => {}
+                | AgentThreadEntry::ContextCompaction(_)
+                | AgentThreadEntry::SystemNote(_) => {}
             }
         }
 
@@ -2536,7 +2569,8 @@ impl AcpThread {
                 | AgentThreadEntry::Elicitation(_)
                 | AgentThreadEntry::AssistantMessage(_)
                 | AgentThreadEntry::CompletedPlan(_)
-                | AgentThreadEntry::ContextCompaction(_) => {}
+                | AgentThreadEntry::ContextCompaction(_)
+                | AgentThreadEntry::SystemNote(_) => {}
             }
         }
 
@@ -2550,6 +2584,7 @@ impl AcpThread {
                 AgentThreadEntry::AssistantMessage(..)
                 | AgentThreadEntry::CompletedPlan(..)
                 | AgentThreadEntry::ContextCompaction(_)
+                | AgentThreadEntry::SystemNote(_)
                 | AgentThreadEntry::Elicitation(_) => continue,
                 AgentThreadEntry::ToolCall(..) => return true,
             }
@@ -3013,6 +3048,24 @@ impl AcpThread {
         Self::flush_streaming_text(&mut self.streaming_text_buffer, cx);
         self.entries.push(entry);
         cx.emit(AcpThreadEvent::NewEntry);
+    }
+
+    /// OMEGA-DELTA-0045. Append a host-authored note to the thread the owner
+    /// reads. Returns `false` when a note with this id is already present.
+    ///
+    /// Idempotent on the id rather than last-write-wins: the note is a record
+    /// that something happened, so a retry must not be able to rewrite what
+    /// the owner was already shown, and must not double it either.
+    pub fn push_system_note(&mut self, note: SystemNote, cx: &mut Context<Self>) -> bool {
+        if self
+            .entries
+            .iter()
+            .any(|entry| matches!(entry, AgentThreadEntry::SystemNote(existing) if existing.id == note.id))
+        {
+            return false;
+        }
+        self.push_entry(AgentThreadEntry::SystemNote(note), cx);
+        true
     }
 
     pub fn push_context_compaction(
@@ -10074,5 +10127,82 @@ mod tests {
             ThreadStatus::Idle,
             "running_turn must be cleared even when tx was dropped without send"
         );
+    }
+
+    /// OMEGA-DELTA-0045. A host-authored note lands in the transcript, once.
+    ///
+    /// The source check in `crates/omega_deltas` reads the shape; this runs it.
+    /// Both halves matter: the shape check would pass an implementation that
+    /// keyed on the id and appended anyway, and a behavioural test alone would
+    /// pass an implementation nothing renders.
+    #[gpui::test]
+    async fn test_system_note_is_appended_once_per_note_id(cx: &mut TestAppContext) {
+        init_test(cx);
+
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+        let connection = Rc::new(FakeAgentConnection::new());
+        let thread = cx
+            .update(|cx| {
+                connection.new_session(project, PathList::new(&[Path::new(path!("/test"))]), cx)
+            })
+            .await
+            .unwrap();
+
+        let note = |id: &str, text: &str| SystemNote {
+            id: SystemNoteId(id.into()),
+            text: text.into(),
+        };
+
+        thread.update(cx, |thread, cx| {
+            assert!(
+                thread.push_system_note(
+                    note("handoff.provider.1", "Provider handoff: codex-local to claude-local"),
+                    cx,
+                ),
+                "the first append of a note id must land"
+            );
+            assert!(
+                !thread.push_system_note(
+                    note("handoff.provider.1", "Provider handoff: rewritten"),
+                    cx,
+                ),
+                "a retry of the same note id must not append again, and must \
+                 not rewrite what the owner has already read"
+            );
+            assert!(
+                thread.push_system_note(
+                    note("handoff.provider.2", "Provider handoff: claude-local to codex-local"),
+                    cx,
+                ),
+                "a different note id is a different disclosure"
+            );
+        });
+
+        thread.read_with(cx, |thread, cx| {
+            let notes: Vec<&SystemNote> = thread
+                .entries()
+                .iter()
+                .filter_map(|entry| match entry {
+                    AgentThreadEntry::SystemNote(note) => Some(note),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(notes.len(), 2, "one entry per distinct note id");
+            assert_eq!(
+                notes[0].text.as_ref(),
+                "Provider handoff: codex-local to claude-local",
+                "the retry must not have rewritten the first disclosure"
+            );
+
+            // The transcript the owner copies out carries it too. A note that
+            // is on screen and absent from the export would let the silence
+            // rc11 shipped come back the moment anyone quotes a thread.
+            let markdown = thread.to_markdown(cx);
+            assert!(
+                markdown.contains("Provider handoff: codex-local to claude-local"),
+                "the exported transcript must carry the disclosure: {markdown}"
+            );
+        });
     }
 }

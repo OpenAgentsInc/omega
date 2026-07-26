@@ -515,7 +515,7 @@ async fn handle_request(
             refresh_evidence(request.params, request.generation, &state, &cx)
         }
         HostMethod::InterruptTurn => interrupt_turn(request.params, &state, &mut cx).await,
-        HostMethod::AppendSystemNote => append_system_note(request.params),
+        HostMethod::AppendSystemNote => append_system_note(request.params, &state, &mut cx).await,
         HostMethod::SarahSessionStatus
         | HostMethod::SarahBootstrap
         | HostMethod::SarahRoomSnapshot
@@ -1163,16 +1163,61 @@ async fn interrupt_turn(
     Ok(json!({ "interrupted": true }))
 }
 
-fn append_system_note(params: Value) -> Result<Value, HostResponseError> {
+/// OMEGA-DELTA-0045. Write a host-authored note into the thread the owner
+/// reads.
+///
+/// This used to refuse — `unavailable("Agent threads do not expose an
+/// owner-visible system-note authority.")` — because `AgentThreadEntry` had no
+/// variant a non-model disclosure could be. The refusal was typed and honest,
+/// and it was still the rc11 silence: the engine emits a provider-handoff note
+/// naming both lanes, the host dropped it, and a run that changed which model
+/// was spending the owner's budget left nothing in the transcript. FA-07 gate
+/// 5 exists to forbid exactly that.
+///
+/// The note goes to the thread named in `threadRef` and nowhere else, so a
+/// handoff addressed to the *target* thread cannot be filed against the source
+/// one. `noteRef` makes the append idempotent: the engine may retry after a
+/// response it never saw, and the owner must not be shown the same disclosure
+/// twice — nor a rewritten one, which is why the id wins over the newer text.
+///
+/// The idempotence is scoped to the live thread, not to the correlation
+/// journal. That is the scope that matters: the note is an entry in the
+/// thread, so a thread that is gone has no owner reading it and nothing to
+/// double.
+async fn append_system_note(
+    params: Value,
+    state: &Rc<RefCell<HostBridgeState>>,
+    cx: &mut AsyncApp,
+) -> Result<Value, HostResponseError> {
     let params: AppendSystemNoteParams = decode_params(params)?;
     validate_ref(&params.thread_ref, "threadRef")?;
     validate_ref(&params.note_ref, "noteRef")?;
     if params.text.is_empty() {
         return Err(invalid("text must not be empty."));
     }
-    Err(unavailable(
-        "Agent threads do not expose an owner-visible system-note authority.",
-    ))
+    let conversation = {
+        let bridge = state.borrow();
+        bridge
+            .threads
+            .iter()
+            .find(|thread| thread.thread_id.to_key_string() == params.thread_ref)
+            .ok_or_else(|| unavailable("The requested Agent thread is not bound."))?
+            .conversation
+            .as_ref()
+            .and_then(WeakEntity::upgrade)
+            .ok_or_else(|| unavailable("The requested Agent thread was closed."))?
+    };
+    let thread = wait_for_root_thread(&conversation, cx).await?;
+    let appended = thread.update(cx, |thread, cx| {
+        thread.push_system_note(
+            acp_thread::SystemNote {
+                id: acp_thread::SystemNoteId(params.note_ref.as_str().into()),
+                text: params.text.into(),
+            },
+            cx,
+        )
+    });
+    Ok(json!({ "appended": appended }))
 }
 
 async fn wait_for_root_thread(
