@@ -133,18 +133,19 @@ every file tool silently returned nothing.
 **Workspace (Zed's)** — the window-level type, `workspace::Workspace`. Panels,
 docks, the status bar. Inherited from upstream and not worth renaming.
 
-**Workspace (the audience)** — proposed in omega#107: *which people share this
-history*. Local by default; a community one when you join it. This meaning has
-no code yet, and its name is deliberately unsettled — three meanings for one
-word is a defect, and choosing here is cheaper than choosing after omega#108
-ships.
+**Audience** — *which people share this history*. Local by default; a
+Forge-backed community audience after its invitation is joined. The audience
+is recorded on the thread when it opens and does not follow later selector
+changes. Community messages are NIP-22 records bound to the Forge repository's
+NIP-34 coordinate, signed by the sender's Omega identity, persisted before
+network I/O, and sent through a bounded NIP-42-authenticated relay outbox.
 
 **Workroom** — a room with channels, membership, and signed records, in the
 Buzz-parity sense. Nostr-primary and native, not a Buzz deployment.
 
-Guidance until omega#107 decides: say **project** for a directory, **window**
-for the Zed type, and name the audience concept explicitly rather than calling
-it a workspace.
+Say **project** for a directory, **window** for the Zed type, and **audience**
+for the sharing boundary. “Community workspace” is acceptable product copy for
+a Forge-backed audience, but it is not a directory or a Zed workspace.
 
 ### Skill
 

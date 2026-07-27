@@ -1580,18 +1580,15 @@ impl ThreadView {
 
         let text = message_editor.read(cx).text(cx);
         let text = text.trim();
-        // omega#108. `/community` is answered here, beside `/login`, and never
-        // reaches the model.
-        //
-        // `run` returns `None` for anything that is not a community command, so
-        // an ordinary message that merely begins with a slash is untouched. The
-        // answer is a toast rather than a transcript entry because writing into
-        // the transcript needs `acp_thread`; that is the better home and it is
-        // recorded on the issue. A toast makes the command usable now without
-        // pretending the answer came from the agent, which would be worse.
+        // `/community` is a local control surface. Keep the exchange visible in
+        // the transcript, but never forward it to the selected model.
         if let Some(answer) = crate::omega_community_control::run(self.root_thread_id, text, cx) {
+            let command = text.to_owned();
             message_editor.update(cx, |editor, cx| editor.clear(window, cx));
-            self.show_local_command_toast(answer, cx);
+            thread.update(cx, |thread, cx| {
+                thread.push_user_content_block(None, command.into(), cx);
+                thread.push_assistant_content_block(answer.into(), false, cx);
+            });
             cx.emit(AcpThreadViewEvent::Interacted);
             return;
         }

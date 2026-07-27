@@ -23,29 +23,24 @@
 //! and the grammar it accepts is `omega_community::parse_command`, which lives
 //! in the crate that can be tested without a window.
 //!
-//! # What is honestly not here yet
-//!
-//! Nothing in this tree connects to a relay, and nothing here signs. So
-//! `\/community post` runs the full authorization — the audience rule, the room
-//! match, and the Forge's roles — composes the exact bytes, and then says that
-//! there is nothing wired to sign and send them. That is the state of the tree,
-//! and the alternative shapes are both worse: a message that reports "sent" and
-//! went nowhere, or a verb the surface refuses to admit exists.
-//!
-//! The refusals, though, are real today, and they are omega#108's own
-//! falsifiers: posting from a local thread is refused, posting into a room this
-//! thread does not belong to is refused, and a `forge:viewer` is refused by the
-//! Forge's own role.
-
-use std::rc::Rc;
+use std::{
+    collections::{BTreeMap, HashSet},
+    rc::Rc,
+    time::Duration,
+};
 
 use db::kvp::KeyValueStore;
 use gpui::{App, AppContext as _, Global, TaskExt as _};
-use nostr::PublicKey;
+use nostr::{Event, JsonUtil as _, PublicKey};
 use omega_audience::Audience;
 use omega_community::{
-    AuthorizedMessage, COMMAND_HELP, Command, Invitation, JoinOutcome, JoinedRooms, RoomPresence,
+    AuthorizedMessage, COMMAND_HELP, Command, ForgeRepository, Invitation, JoinOutcome,
+    JoinedRooms, Outbox, QueueOutcome, RelayOutcome, RoomPresence, SignedRecord, binding_of,
     parse_command,
+};
+use omega_identity::{
+    AdmittedSigningRequest, IdentityService, PublicIdentity, ReceiptRef, SigningPurpose,
+    UnsignedEventTemplate,
 };
 use util::ResultExt as _;
 
@@ -57,6 +52,11 @@ const NAMESPACE: &str = "omega_community";
 
 /// The key holding every room this profile has joined.
 const ROOMS_KEY: &str = "joined_rooms";
+const OUTBOX_KEY: &str = "outbox";
+const RECORDS_KEY: &str = "verified_records";
+const MAX_RECORDS_PER_ROOM: usize = 128;
+const MAX_RECORD_CONTENT_BYTES: usize = 64 * 1024;
+const REFRESH_INTERVAL_SECONDS: u64 = 30;
 
 /// The rooms this profile is in, hydrated from the key-value store once.
 #[derive(Default)]
@@ -64,12 +64,12 @@ struct OmegaCommunity {
     /// `None` until the first read, so a launch that never opens a thread pays
     /// nothing for a feature nobody on this machine has joined.
     rooms: Option<Rc<JoinedRooms>>,
-    /// This profile's own key, and whether it has been looked for.
-    ///
-    /// Read through `omega_identity`, which touches the disk. Cached because
-    /// the composer asks on every draw and a person's key does not change
-    /// between two frames.
-    author: Option<Option<PublicKey>>,
+    outbox: Option<Rc<Outbox>>,
+    records: Option<Rc<BTreeMap<String, Vec<Event>>>>,
+    deliveries: HashSet<String>,
+    refreshes: HashSet<String>,
+    refreshed_at: BTreeMap<String, u64>,
+    identity: Option<Option<PublicIdentity>>,
 }
 
 impl Global for OmegaCommunity {}
@@ -92,43 +92,71 @@ fn rooms(cx: &mut App) -> Rc<JoinedRooms> {
     stored
 }
 
-fn persist(rooms: &JoinedRooms, cx: &App) {
+fn persist_value<T: serde::Serialize>(key: &'static str, value: &T, cx: &App) {
     let store = KeyValueStore::global(cx);
-    let Some(payload) = serde_json::to_string(rooms).log_err() else {
+    let Some(payload) = serde_json::to_string(value).log_err() else {
         return;
     };
     cx.background_spawn(async move {
         store
             .scoped(NAMESPACE)
-            .write(ROOMS_KEY.to_string(), payload)
+            .write(key.to_string(), payload)
             .await
     })
     .detach_and_log_err(cx);
 }
 
-/// This profile's own Nostr key, if custody has one.
-///
-/// The one place in this feature that reads a key, and it reads the *public*
-/// half only. omega#108 deliverable 4 is that a person's identity is theirs;
-/// `omega_community` names no key type outside its tests precisely so that the
-/// reading happens here, where a check can see it.
-///
-/// `None` on a machine whose identity is not ready, which is a state to name
-/// rather than an error: nothing about the room works without knowing who is
-/// asking, and saying so is more useful than an empty list.
-fn author(cx: &mut App) -> Option<PublicKey> {
-    if let Some(author) = cx.default_global::<OmegaCommunity>().author {
-        return author;
+fn outbox(cx: &mut App) -> Rc<Outbox> {
+    if let Some(outbox) = cx.default_global::<OmegaCommunity>().outbox.clone() {
+        return outbox;
     }
 
-    let author = omega_identity::IdentityService::system(*app_identity::CHANNEL)
+    let stored: Outbox = KeyValueStore::global(cx)
+        .scoped(NAMESPACE)
+        .read(OUTBOX_KEY)
+        .log_err()
+        .flatten()
+        .and_then(|raw| serde_json::from_str(&raw).log_err())
+        .unwrap_or_default();
+    let stored = Rc::new(stored);
+    cx.default_global::<OmegaCommunity>().outbox = Some(stored.clone());
+    stored
+}
+
+fn records(cx: &mut App) -> Rc<BTreeMap<String, Vec<Event>>> {
+    if let Some(records) = cx.default_global::<OmegaCommunity>().records.clone() {
+        return records;
+    }
+
+    let stored: BTreeMap<String, Vec<Event>> = KeyValueStore::global(cx)
+        .scoped(NAMESPACE)
+        .read(RECORDS_KEY)
+        .log_err()
+        .flatten()
+        .and_then(|raw| serde_json::from_str(&raw).log_err())
+        .unwrap_or_default();
+    let stored = Rc::new(stored);
+    cx.default_global::<OmegaCommunity>().records = Some(stored.clone());
+    stored
+}
+
+fn identity(cx: &mut App) -> Option<PublicIdentity> {
+    if let Some(identity) = cx.default_global::<OmegaCommunity>().identity.clone() {
+        return identity;
+    }
+
+    let identity = IdentityService::system(*app_identity::CHANNEL)
         .inspect()
         .log_err()
-        .and_then(|custody| custody.identity)
-        .and_then(|identity| PublicKey::from_hex(identity.public_key_hex().as_str()).log_err());
+        .and_then(|custody| custody.identity);
 
-    cx.default_global::<OmegaCommunity>().author = Some(author);
-    author
+    cx.default_global::<OmegaCommunity>().identity = Some(identity.clone());
+    identity
+}
+
+fn author(cx: &mut App) -> Option<PublicKey> {
+    identity(cx)
+        .and_then(|identity| PublicKey::from_hex(identity.public_key_hex().as_str()).log_err())
 }
 
 /// Every community audience this profile has joined.
@@ -137,7 +165,12 @@ fn author(cx: &mut App) -> Option<PublicKey> {
 /// not in here — `AudienceRoster` puts it first by construction, and a second
 /// source of it would be a second thing to keep right.
 pub fn joined_audiences(cx: &mut App) -> Vec<Audience> {
-    rooms(cx)
+    let rooms = rooms(cx);
+    pump_pending(cx);
+    for room in rooms.rooms() {
+        refresh_room(room.repository.clone(), cx);
+    }
+    rooms
         .rooms()
         .filter_map(|room| room.repository.audience().log_err())
         .collect()
@@ -183,8 +216,10 @@ fn status(cx: &mut App) -> String {
         );
     }
 
+    pump_pending(cx);
     let mut lines = Vec::new();
     for room in rooms.rooms() {
+        refresh_room(room.repository.clone(), cx);
         let roles: Vec<String> = room
             .membership
             .role_refs
@@ -203,7 +238,38 @@ fn status(cx: &mut App) -> String {
             room.membership_as_of()
         ));
     }
-    lines.push(NOTHING_IS_WIRED_TO_SEND.to_string());
+    let outbox = outbox(cx);
+    if !outbox.is_empty() {
+        lines.push("\nMessages:".to_string());
+        lines.extend(outbox.sorted().map(|entry| {
+            format!(
+                "{} — {}",
+                short_event_id(&entry.event.id.to_hex()),
+                entry.delivery.label()
+            )
+        }));
+    }
+    let records = records(cx);
+    let visible = records.values().map(Vec::len).sum::<usize>();
+    lines.push(format!(
+        "\n{visible} verified room message{} cached. Relay refresh is running in the background.",
+        if visible == 1 { "" } else { "s" }
+    ));
+    for room in rooms.rooms() {
+        let Some(messages) = records.get(&room.repository.coordinate().to_string()) else {
+            continue;
+        };
+        if !messages.is_empty() {
+            lines.push(format!("\nRecent messages in {}:", room.name()));
+        }
+        lines.extend(messages.iter().rev().take(5).rev().map(|event| {
+            format!(
+                "{}: {}",
+                short_event_id(&event.pubkey.to_hex()),
+                event.content.trim()
+            )
+        }));
+    }
     lines.join("\n")
 }
 
@@ -231,11 +297,14 @@ fn join(invitation: Invitation, cx: &mut App) -> String {
         }
         outcome => {
             cx.default_global::<OmegaCommunity>().rooms = Some(rooms.clone());
-            persist(&rooms, cx);
+            persist_value(ROOMS_KEY, &*rooms, cx);
             // The roster is rebuilt from the rooms, so the composer's cached
             // copy has to be dropped or the room a person just joined does not
             // appear until the next launch.
             forget_roster(cx);
+            for room in rooms.rooms() {
+                refresh_room(room.repository.clone(), cx);
+            }
 
             let opening = match outcome {
                 JoinOutcome::Refreshed => {
@@ -246,7 +315,8 @@ fn join(invitation: Invitation, cx: &mut App) -> String {
             format!(
                 "{opening} {what_you_may_do}\n\nIt is in the composer's audience selector. \
                  Choosing it there changes the audience of the next thread you start, not this \
-                 one.\n{NOTHING_IS_WIRED_TO_SEND}"
+                 one. Relay messages are signed with your Omega identity and synchronized in the \
+                 background."
             )
         }
     }
@@ -263,7 +333,7 @@ fn leave(thread_id: ThreadId, cx: &mut App) -> String {
     }
 
     cx.default_global::<OmegaCommunity>().rooms = Some(rooms.clone());
-    persist(&rooms, cx);
+    persist_value(ROOMS_KEY, &*rooms, cx);
     forget_roster(cx);
 
     format!(
@@ -287,15 +357,26 @@ fn who(thread_id: ThreadId, cx: &mut App) -> String {
         return WHO_NEEDS_A_ROOM.to_string();
     };
 
-    // No records, because nothing reads from a relay yet. The answer is
-    // therefore this profile alone, and `RoomPresence::describe` says on what
-    // basis — which is the sentence that stops it being read as a member list.
-    RoomPresence::observed(&joined.repository, &joined.membership, author, []).describe()
+    refresh_room(joined.repository.clone(), cx);
+    let records = records(cx);
+    let observed: Vec<SignedRecord> = records
+        .get(&joined.repository.coordinate().to_string())
+        .into_iter()
+        .flatten()
+        .filter_map(|event| SignedRecord::verify_received(&joined.repository, event.clone()).ok())
+        .collect();
+    let description =
+        RoomPresence::observed(&joined.repository, &joined.membership, author, &observed)
+            .describe();
+    format!("{description}\n\nOmega is refreshing this room from the relay in the background.")
 }
 
 fn post(thread_id: ThreadId, text: &str, cx: &mut App) -> String {
     let audience = thread_audience(thread_id, cx);
-    let Some(author) = author(cx) else {
+    let Some(identity) = identity(cx) else {
+        return NO_KEY_YET.to_string();
+    };
+    let Some(author) = PublicKey::from_hex(identity.public_key_hex().as_str()).log_err() else {
         return NO_KEY_YET.to_string();
     };
 
@@ -316,7 +397,6 @@ fn post(thread_id: ThreadId, text: &str, cx: &mut App) -> String {
         );
     };
 
-    let _early = joined.repository.coordinate();
     let message = match AuthorizedMessage::prepare(
         &joined.repository,
         &joined.membership,
@@ -329,11 +409,289 @@ fn post(thread_id: ThreadId, text: &str, cx: &mut App) -> String {
     };
 
     let mut unsigned = message.into_unsigned(now());
-    format!(
-        "Authorized, and composed as {} — the audience allowed it, the room matched, and the \
-         Forge's roles admit you.\n\n{NOTHING_IS_WIRED_TO_SEND}",
-        unsigned.id().to_hex()
-    )
+    let event_id = unsigned.id();
+    let event = unsigned.event();
+    let request_ref = match ReceiptRef::new(format!("omega.community.{}", &event_id.to_hex()[..32]))
+    {
+        Ok(request_ref) => request_ref,
+        Err(error) => return format!("Not sent. The signing request was invalid: {error}"),
+    };
+    let signed =
+        match IdentityService::system(*app_identity::CHANNEL).sign(&AdmittedSigningRequest {
+            request_ref,
+            identity_ref: identity.identity_ref().clone(),
+            purpose: SigningPurpose::NostrEvent,
+            event: UnsignedEventTemplate {
+                created_at: event.created_at.as_secs(),
+                kind: event.kind.as_u16(),
+                tags: event
+                    .tags
+                    .iter()
+                    .map(|tag| tag.as_slice().to_vec())
+                    .collect(),
+                content: event.content.clone(),
+            },
+        }) {
+            Ok(signed) => signed,
+            Err(error) => return format!("Not sent. Omega could not sign the message: {error}"),
+        };
+    let signed = match Event::from_json(signed.signed_event_json)
+        .map_err(|error| error.to_string())
+        .and_then(|event| {
+            unsigned
+                .accept_signature(event)
+                .map_err(|error| error.to_string())
+        }) {
+        Ok(signed) => signed,
+        Err(error) => return format!("Not sent. The signed message was refused: {error}"),
+    };
+
+    let mut outbox = outbox(cx);
+    let outcome = Rc::make_mut(&mut outbox).queue(&signed, now());
+    cx.default_global::<OmegaCommunity>().outbox = Some(outbox.clone());
+    cache_verified_record(&joined.repository, signed.event().clone(), cx);
+    start_delivery(
+        signed.id(),
+        signed.event().clone(),
+        joined.repository.relays().to_vec(),
+        cx,
+    );
+
+    match outcome {
+        QueueOutcome::Queued => format!(
+            "Queued {} for {}. It is signed by your Omega identity and will remain visible here \
+             until the relay acknowledges it or bounded retries stop.",
+            short_event_id(&signed.id().to_hex()),
+            joined.name()
+        ),
+        QueueOutcome::AlreadyQueued => format!(
+            "{} was already queued. Omega will send the same signed bytes rather than create a \
+             duplicate.",
+            short_event_id(&signed.id().to_hex())
+        ),
+    }
+}
+
+fn short_event_id(id: &str) -> &str {
+    id.get(..12).unwrap_or(id)
+}
+
+fn cache_verified_record(repository: &ForgeRepository, event: Event, cx: &mut App) {
+    cache_verified_records(repository, [event], cx);
+}
+
+fn cache_verified_records(
+    repository: &ForgeRepository,
+    events: impl IntoIterator<Item = Event>,
+    cx: &mut App,
+) {
+    let coordinate = repository.coordinate().to_string();
+    let mut records = records(cx);
+    let room_records = Rc::make_mut(&mut records).entry(coordinate).or_default();
+    let mut changed = false;
+    for event in events {
+        if event.content.len() > MAX_RECORD_CONTENT_BYTES
+            || SignedRecord::verify_received(repository, event.clone()).is_err()
+            || room_records.iter().any(|known| known.id == event.id)
+        {
+            continue;
+        }
+        room_records.push(event);
+        changed = true;
+    }
+    if !changed {
+        return;
+    }
+    room_records.sort_by_key(|event| (event.created_at, event.id));
+    if room_records.len() > MAX_RECORDS_PER_ROOM {
+        room_records.drain(..room_records.len() - MAX_RECORDS_PER_ROOM);
+    }
+    cx.default_global::<OmegaCommunity>().records = Some(records.clone());
+    persist_value(RECORDS_KEY, &*records, cx);
+}
+
+fn refresh_room(repository: ForgeRepository, cx: &mut App) {
+    let coordinate = repository.coordinate().to_string();
+    let state = cx.default_global::<OmegaCommunity>();
+    if state.refreshes.contains(&coordinate)
+        || state
+            .refreshed_at
+            .get(&coordinate)
+            .is_some_and(|last| now().saturating_sub(*last) < REFRESH_INTERVAL_SECONDS)
+    {
+        return;
+    }
+    state.refreshes.insert(coordinate.clone());
+    state.refreshed_at.insert(coordinate.clone(), now());
+    let relay_urls = repository.relays().to_vec();
+    let query_coordinate = coordinate.clone();
+    let query = cx.background_spawn(async move {
+        omega_effectd::query_community_events(relay_urls, &query_coordinate)
+    });
+    cx.spawn(async move |cx| -> anyhow::Result<()> {
+        let result = query.await;
+        cx.update(|cx| {
+            cx.default_global::<OmegaCommunity>()
+                .refreshes
+                .remove(&coordinate);
+            match result {
+                Ok(events) => {
+                    cache_verified_records(&repository, events, cx);
+                    cx.refresh_windows();
+                }
+                Err(error) => {
+                    log::warn!(
+                        "OMEGA-WS-02: community relay refresh for {coordinate} failed: {error}"
+                    );
+                }
+            }
+        });
+        Ok(())
+    })
+    .detach_and_log_err(cx);
+}
+
+fn start_delivery(event_id: nostr::EventId, event: Event, relay_urls: Vec<String>, cx: &mut App) {
+    let event_id_hex = event_id.to_hex();
+    if !cx
+        .default_global::<OmegaCommunity>()
+        .deliveries
+        .insert(event_id_hex.clone())
+    {
+        return;
+    }
+    let initial_payload = match serde_json::to_string(&*outbox(cx)) {
+        Ok(payload) => payload,
+        Err(error) => {
+            cx.default_global::<OmegaCommunity>()
+                .deliveries
+                .remove(&event_id_hex);
+            log::error!("OMEGA-WS-02: could not persist queued event {event_id_hex}: {error}");
+            return;
+        }
+    };
+    let store = KeyValueStore::global(cx);
+
+    cx.spawn(async move |cx| -> anyhow::Result<()> {
+        let initial_store = store.clone();
+        if let Err(error) = cx
+            .background_spawn(async move {
+                initial_store
+                    .scoped(NAMESPACE)
+                    .write(OUTBOX_KEY.to_string(), initial_payload)
+                    .await
+            })
+            .await
+        {
+            cx.update(|cx| {
+                cx.default_global::<OmegaCommunity>()
+                    .deliveries
+                    .remove(&event_id_hex);
+            });
+            return Err(error);
+        }
+        let mut backoff = Duration::from_secs(1);
+        loop {
+            let attempt_event = event.clone();
+            let attempt_relays = relay_urls.clone();
+            let result = cx
+                .background_spawn(async move {
+                    omega_effectd::publish_community_event(attempt_relays, &attempt_event)
+                })
+                .await;
+            let outcome = match result {
+                Ok(()) => RelayOutcome::Accepted,
+                Err(error) => RelayOutcome::Unreachable {
+                    message: error.to_string(),
+                },
+            };
+            let (should_retry, payload) = cx.update(|cx| {
+                let mut outbox = outbox(cx);
+                let outbox_mut = Rc::make_mut(&mut outbox);
+                let should_retry = match outbox_mut.record_attempt(event_id, &outcome, now()) {
+                    Ok(entry) => entry.delivery.is_pending(),
+                    Err(error) => {
+                        log::error!(
+                            "OMEGA-WS-02: delivery result for {event_id_hex} had no outbox entry: \
+                             {error}"
+                        );
+                        false
+                    }
+                };
+                cx.default_global::<OmegaCommunity>().outbox = Some(outbox.clone());
+                cx.refresh_windows();
+                (should_retry, serde_json::to_string(&*outbox))
+            });
+            let payload = match payload {
+                Ok(payload) => payload,
+                Err(error) => {
+                    cx.update(|cx| {
+                        cx.default_global::<OmegaCommunity>()
+                            .deliveries
+                            .remove(&event_id_hex);
+                    });
+                    return Err(error.into());
+                }
+            };
+            let attempt_store = store.clone();
+            if let Err(error) = cx
+                .background_spawn(async move {
+                    attempt_store
+                        .scoped(NAMESPACE)
+                        .write(OUTBOX_KEY.to_string(), payload)
+                        .await
+                })
+                .await
+            {
+                cx.update(|cx| {
+                    cx.default_global::<OmegaCommunity>()
+                        .deliveries
+                        .remove(&event_id_hex);
+                });
+                return Err(error);
+            }
+            if !should_retry {
+                break;
+            }
+            cx.background_executor().timer(backoff).await;
+            backoff = backoff.saturating_mul(2).min(Duration::from_secs(8));
+        }
+        cx.update(|cx| {
+            cx.default_global::<OmegaCommunity>()
+                .deliveries
+                .remove(&event_id_hex);
+        });
+        Ok(())
+    })
+    .detach_and_log_err(cx);
+}
+
+fn pump_pending(cx: &mut App) {
+    let pending: Vec<Event> = outbox(cx)
+        .pending()
+        .map(|entry| entry.event.clone())
+        .collect();
+    let rooms = rooms(cx);
+    for event in pending {
+        let Ok(coordinate) = binding_of(&event) else {
+            log::error!(
+                "OMEGA-WS-02: an outbox event has no valid repository binding; refusing to send it"
+            );
+            continue;
+        };
+        let relay_urls = rooms
+            .rooms()
+            .find(|room| room.repository.coordinate() == &coordinate)
+            .map(|room| room.repository.relays().to_vec());
+        let Some(relay_urls) = relay_urls else {
+            log::warn!(
+                "OMEGA-WS-02: queued event {} belongs to a room this profile has left",
+                event.id
+            );
+            continue;
+        };
+        start_delivery(event.id, event, relay_urls, cx);
+    }
 }
 
 /// The room a thread belongs to, if this profile is in it.
@@ -354,12 +712,6 @@ fn current_room(thread_id: ThreadId, cx: &mut App) -> Option<CurrentRoom> {
     }
 }
 
-/// Said once, because it is the one thing every answer here has to be honest
-/// about and a second wording would eventually be a softer one.
-const NOTHING_IS_WIRED_TO_SEND: &str = "Nothing in this build signs or reaches a relay yet, so a message is authorized and composed \
-     and then goes no further. It is not queued and it is not lost — there is nowhere for it to \
-     go, and Omega will not report a send that did not happen.";
-
 const WHO_NEEDS_A_ROOM: &str = "This thread is not in a community workspace, so there is nobody to list. Open a thread in \
      one and ask again.";
 
@@ -373,27 +725,19 @@ const NO_KEY_YET: &str = "Omega does not have your key yet, so it cannot say who
 mod tests {
     use super::*;
 
-    /// Every sentence this module can produce, so a wording change is a diff a
-    /// reader can see rather than something noticed in a window.
     #[test]
-    fn the_sentences_say_what_is_true_of_this_build() {
-        assert!(
-            NOTHING_IS_WIRED_TO_SEND.contains("goes no further"),
-            "the one thing every answer has to be honest about is that nothing \
-             is sent"
-        );
-        assert!(
-            NOTHING_IS_WIRED_TO_SEND.contains("not queued")
-                && NOTHING_IS_WIRED_TO_SEND.contains("not lost"),
-            "a message that was never signed is not in the outbox, so it is \
-             neither pending nor lost, and both halves have to be said or the \
-             other one is assumed"
-        );
+    fn refusals_are_complete_sentences() {
         for sentence in [WHO_NEEDS_A_ROOM, LEAVE_NEEDS_A_ROOM, NO_KEY_YET] {
             assert!(
                 !sentence.is_empty() && sentence.ends_with('.'),
                 "a refusal a person reads is a sentence"
             );
         }
+    }
+
+    #[test]
+    fn event_ids_are_shortened_without_panicking() {
+        assert_eq!(short_event_id("0123456789abcdef"), "0123456789ab");
+        assert_eq!(short_event_id("short"), "short");
     }
 }

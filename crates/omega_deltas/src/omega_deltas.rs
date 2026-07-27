@@ -254,8 +254,11 @@ pub const COMMUNITY_PRESENCE_PATH: &str = "crates/omega_community/src/presence.r
 /// OMEGA-DELTA-0113. The grammar of an instruction typed into the conversation.
 pub const COMMUNITY_COMMAND_PATH: &str = "crates/omega_community/src/command.rs";
 
-/// OMEGA-DELTA-0113. The edge that stores the rooms, reads a key, and answers.
+/// OMEGA-DELTA-0113. The edge that stores rooms, signs, queues, and answers.
 pub const COMMUNITY_CONTROL_PATH: &str = "crates/agent_ui/src/omega_community_control.rs";
+
+/// OMEGA-DELTA-0113. The NIP-42 websocket edge used by community messages.
+pub const COMMUNITY_RELAY_PATH: &str = "crates/omega_effectd/src/nostr_websocket_relay.rs";
 
 /// OMEGA-DELTA-0106, widened by OMEGA-DELTA-0113. Every source file in the room
 /// crate.
@@ -14197,14 +14200,16 @@ mod tests {
         );
     }
 
-    /// OMEGA-DELTA-0113. Posting authorizes before it composes, and the
-    /// authorization is the room's, not a second copy of it.
+    /// OMEGA-DELTA-0113. Posting authorizes before it composes, signs the exact
+    /// authorized bytes, and persists them before the relay effect.
     ///
     /// omega#108: "Authorization and audience checks happen **before** an
     /// effect, not after." `AuthorizedMessage::prepare` is the only constructor
     /// that performs them, so the way this is lost is not by deleting the call
     /// — it is by the edge composing an `UnsignedRecord` some other way, or by
     /// re-deciding on the audience here with a `match` that looks equivalent.
+    /// Once authorized, the only admitted order is compose, sign, verify, queue,
+    /// persist, and then publish through the authenticated relay edge.
     #[test]
     fn posting_is_authorized_before_a_single_byte_is_composed() {
         let control_path = repository_path(COMMUNITY_CONTROL_PATH);
@@ -14244,12 +14249,79 @@ mod tests {
              where it is furthest from the rule it duplicates.",
             control_path.display()
         );
+        let sign = post
+            .find(".sign(&AdmittedSigningRequest")
+            .unwrap_or_else(|| {
+                panic!(
+                    "OMEGA-DELTA-0113: `post` in {} no longer signs the authorized \
+                 event through Omega identity custody.",
+                    control_path.display()
+                )
+            });
+        let verify = post.find("accept_signature").unwrap_or_else(|| {
+            panic!(
+                "OMEGA-DELTA-0113: `post` in {} no longer verifies that custody \
+                 signed the exact authorized bytes.",
+                control_path.display()
+            )
+        });
+        let queue = post.find(".queue(&signed").unwrap_or_else(|| {
+            panic!(
+                "OMEGA-DELTA-0113: `post` in {} no longer puts the signed event \
+                 in the durable outbox before delivery.",
+                control_path.display()
+            )
+        });
+        let delivery = post.find("start_delivery(").unwrap_or_else(|| {
+            panic!(
+                "OMEGA-DELTA-0113: `post` in {} no longer hands the queued event \
+                 to the bounded relay delivery path.",
+                control_path.display()
+            )
+        });
         assert!(
-            control.contains("NOTHING_IS_WIRED_TO_SEND"),
-            "OMEGA-DELTA-0113: {} no longer says that nothing signs or reaches \
-             a relay. A verb that reports a send into a room nothing reaches is \
-             the one failure this surface must not have.",
+            compose < sign && sign < verify && verify < queue && queue < delivery,
+            "OMEGA-DELTA-0113: `post` in {} no longer follows compose, sign, \
+             verify, queue, then delivery.",
             control_path.display()
+        );
+
+        let delivery_body = body_of(&indented, "start_delivery");
+        let persist = delivery_body
+            .find(".write(OUTBOX_KEY.to_string(), initial_payload)")
+            .unwrap_or_else(|| {
+                panic!(
+                    "OMEGA-DELTA-0113: `start_delivery` in {} no longer persists \
+                     the initial outbox state.",
+                    control_path.display()
+                )
+            });
+        let publish = delivery_body
+            .find("publish_community_event")
+            .unwrap_or_else(|| {
+                panic!(
+                    "OMEGA-DELTA-0113: `start_delivery` in {} no longer uses the \
+                     community relay effect.",
+                    control_path.display()
+                )
+            });
+        assert!(
+            persist < publish,
+            "OMEGA-DELTA-0113: `start_delivery` in {} reaches the relay before \
+             the signed event is durably visible.",
+            control_path.display()
+        );
+
+        let relay_path = repository_path(COMMUNITY_RELAY_PATH);
+        let relay = uncommented(&read_repository_file(COMMUNITY_RELAY_PATH));
+        let relay = with_free_functions_indented(&relay);
+        let publish = body_of(&relay, "publish_community_event");
+        assert!(
+            publish.contains("sign_active_auth_event")
+                && publish.contains("authenticate(&auth_event)"),
+            "OMEGA-DELTA-0113: `publish_community_event` in {} no longer answers \
+             relay NIP-42 challenges with the Omega identity.",
+            relay_path.display()
         );
     }
 

@@ -33,7 +33,9 @@ pub use openagents_binding::{
 
 pub use issue31_nostr::*;
 pub use issue31_provider_handoff::*;
-pub use nostr_websocket_relay::WebSocketRelayAdapter;
+pub use nostr_websocket_relay::{
+    WebSocketRelayAdapter, publish_community_event, query_community_events,
+};
 pub use omega_device_bridge::PROTOCOL as DEVICE_BRIDGE_PROTOCOL;
 pub use omega_device_bridge::{
     BindRefusal as DeviceBridgeBindRefusal, BridgeBindHost, BridgeError as DeviceBridgeError,

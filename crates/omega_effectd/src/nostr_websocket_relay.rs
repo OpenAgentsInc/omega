@@ -505,6 +505,78 @@ impl WebSocketRelayAdapter {
         }
     }
 
+    fn query_community_once(
+        &mut self,
+        coordinate: &str,
+    ) -> Result<Vec<Event>, SarahConversationError> {
+        self.subscription_sequence = self.subscription_sequence.saturating_add(1);
+        let subscription_id = format!("omega-community-{}", self.subscription_sequence);
+        self.send_json(json!([
+            "REQ",
+            subscription_id,
+            {
+                "kinds": [1111],
+                "#A": [coordinate],
+                "limit": 128
+            }
+        ]))?;
+        let deadline = Instant::now() + QUERY_TIMEOUT;
+        let mut events = BTreeMap::new();
+        loop {
+            match self.next_message_until(deadline)? {
+                IncomingMessage::TimedOut => {
+                    return Err(SarahConversationError::Relay(
+                        "community relay query timed out".into(),
+                    ));
+                }
+                IncomingMessage::Json(value) => {
+                    if self.record_auth_challenge(&value) {
+                        return Err(SarahConversationError::IdentityRequired);
+                    }
+                    let Some(frame) = value.as_array() else {
+                        continue;
+                    };
+                    match frame.first().and_then(Value::as_str) {
+                        Some("EVENT")
+                            if frame.get(1).and_then(Value::as_str)
+                                == Some(subscription_id.as_str()) =>
+                        {
+                            let Some(event) = frame.get(2) else {
+                                continue;
+                            };
+                            let event = Event::from_json(event.to_string()).map_err(|error| {
+                                SarahConversationError::Relay(format!(
+                                    "community relay returned an invalid event: {error}"
+                                ))
+                            })?;
+                            if event.verify().is_ok() {
+                                events.entry(event.id.to_hex()).or_insert(event);
+                            }
+                        }
+                        Some("EOSE")
+                            if frame.get(1).and_then(Value::as_str)
+                                == Some(subscription_id.as_str()) =>
+                        {
+                            self.send_json(json!(["CLOSE", subscription_id]))?;
+                            return Ok(events.into_values().collect());
+                        }
+                        Some("CLOSED")
+                            if frame.get(1).and_then(Value::as_str)
+                                == Some(subscription_id.as_str()) =>
+                        {
+                            let reason = frame
+                                .get(2)
+                                .and_then(Value::as_str)
+                                .unwrap_or("relay closed the community subscription");
+                            return Err(SarahConversationError::Relay(reason.to_string()));
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+
     /// The order in which `publish` walks the configured relays.
     ///
     /// Normally left to right. But `publish` is the one operation that hands
@@ -1316,6 +1388,81 @@ impl RelayTransport for WebSocketRelayAdapter {
     }
 }
 
+/// Publish one already-signed event through Omega's authenticated relay
+/// transport.
+///
+/// The event is never re-signed. A NIP-42 challenge signs only the relay's
+/// authentication event, then the exact caller-supplied bytes are retried.
+pub fn publish_community_event(
+    relay_urls: Vec<String>,
+    event: &Event,
+) -> Result<(), SarahConversationError> {
+    let identity_service = Arc::new(IdentityService::system(*app_identity::CHANNEL));
+    let owner_public_key_hex = identity_service
+        .inspect()
+        .map_err(|error| SarahConversationError::Identity(error.to_string()))?
+        .identity
+        .map(|identity| identity.public_key_hex().as_str().to_string())
+        .ok_or(SarahConversationError::IdentityRequired)?;
+    let mut relay = WebSocketRelayAdapter::new(
+        relay_urls.clone(),
+        identity_service,
+        owner_public_key_hex,
+        Vec::new(),
+        Vec::new(),
+    )?;
+    relay.connect()?;
+    for _ in 0..=relay_urls.len() {
+        match relay.publish(event) {
+            Err(SarahConversationError::IdentityRequired) => {
+                let auth_event = relay.sign_active_auth_event()?;
+                relay.authenticate(&auth_event)?;
+            }
+            result => return result,
+        }
+    }
+    Err(SarahConversationError::Relay(
+        "relay authentication did not settle".into(),
+    ))
+}
+
+/// Read signed NIP-22 messages bound to one Forge repository.
+///
+/// This transport proves relay identity with NIP-42 when challenged. The
+/// caller still has to enforce repository binding before displaying a record.
+pub fn query_community_events(
+    relay_urls: Vec<String>,
+    coordinate: &str,
+) -> Result<Vec<Event>, SarahConversationError> {
+    let identity_service = Arc::new(IdentityService::system(*app_identity::CHANNEL));
+    let owner_public_key_hex = identity_service
+        .inspect()
+        .map_err(|error| SarahConversationError::Identity(error.to_string()))?
+        .identity
+        .map(|identity| identity.public_key_hex().as_str().to_string())
+        .ok_or(SarahConversationError::IdentityRequired)?;
+    let mut relay = WebSocketRelayAdapter::new(
+        relay_urls.clone(),
+        identity_service,
+        owner_public_key_hex,
+        Vec::new(),
+        Vec::new(),
+    )?;
+    relay.connect()?;
+    for _ in 0..=relay_urls.len() {
+        match relay.query_community_once(coordinate) {
+            Err(SarahConversationError::IdentityRequired) => {
+                let auth_event = relay.sign_active_auth_event()?;
+                relay.authenticate(&auth_event)?;
+            }
+            result => return result,
+        }
+    }
+    Err(SarahConversationError::Relay(
+        "relay authentication did not settle".into(),
+    ))
+}
+
 /// Order the relays a publish should attempt, given an open authenticated
 /// session on `resume_at` if there is one.
 ///
@@ -1825,6 +1972,43 @@ mod tests {
         assert_eq!(relay.connected_relays(), vec![url.clone()]);
         eprintln!(
             "live relay OK: published {} and read it back from {}",
+            &record.id.to_hex()[..16],
+            url
+        );
+    }
+
+    /// Live proof for the Forge community seam added for omega#108.
+    #[test]
+    #[ignore = "requires a live relay; set OMEGA_LIVE_RELAY_URL"]
+    fn live_community_round_trip() {
+        let Ok(url) = std::env::var("OMEGA_LIVE_RELAY_URL") else {
+            eprintln!("OMEGA_LIVE_RELAY_URL unset; skipping");
+            return;
+        };
+        let auth_url = std::env::var("OMEGA_LIVE_RELAY_AUTH_URL").unwrap_or_else(|_| url.clone());
+        let keys = Keys::generate();
+        let coordinate = format!(
+            "30617:{}:omega-live-{}",
+            keys.public_key().to_hex(),
+            unix_now()
+        );
+        let record = EventBuilder::new(Kind::Custom(1111), "omega community live round trip")
+            .tag(nostr::Tag::parse(["A", coordinate.as_str()]).expect("repository root tag"))
+            .sign_with_keys(&keys)
+            .expect("signed community record");
+        let mut relay = live_authenticated_adapter(vec![url.clone()], &keys);
+
+        live_publish(&mut relay, &auth_url, &keys, &record)
+            .expect("publish community record through NIP-42");
+        let events = relay
+            .query_community_once(&coordinate)
+            .expect("query community records by repository binding");
+        assert!(
+            events.iter().any(|event| event.id == record.id),
+            "the exact signed community event must read back"
+        );
+        eprintln!(
+            "live community relay OK: published {} and read it back from {}",
             &record.id.to_hex()[..16],
             url
         );
