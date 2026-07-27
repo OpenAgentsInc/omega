@@ -612,6 +612,11 @@ pub struct ConversationView {
     /// `OMEGA-DELTA-0122`. Handed to the real composer the moment one exists —
     /// see [`ConversationView::hand_loading_draft_over`] — and dropped there.
     loading_composer: Option<Entity<Editor>>,
+    /// The rebuild waiting for the person to stop cycling executors.
+    ///
+    /// omega#117. Holding the task is what makes this a debounce: assigning a
+    /// new one drops the old, and dropping a GPUI task cancels it.
+    pending_executor_rebuild: Option<Task<()>>,
     /// Whether Send has been asked for while it was disabled, so the status
     /// line can say the message was not sent rather than nothing at all.
     loading_send_refused: bool,
@@ -923,6 +928,7 @@ impl ConversationView {
             auth_task: None,
             loading_status: None,
             loading_composer: None,
+            pending_executor_rebuild: None,
             loading_send_refused: false,
             last_theme_id: Some(cx.theme().id.clone()),
             draft_prompt_persist_task: None,
@@ -1141,7 +1147,77 @@ impl ConversationView {
     /// new one. Everything else about the rebuild is the same, and the rebuild
     /// is the point: the connection is where the choice is read, so nothing
     /// short of building a new one can attach a different executor.
+    /// Rebuild onto a different executor, on the next turn of the loop.
+    ///
+    /// omega#116. The whole body is deferred, and that is the fix rather than
+    /// a detail. Every step of it reads the `ThreadView` — for the work dirs,
+    /// for the composer's focus handle — so calling it while a `ThreadView` is
+    /// mutably borrowed takes a second lease and GPUI panics with
+    /// `cannot read ThreadView while it is already being updated`.
+    ///
+    /// Its two callers do exactly that. The Shift-Tab handler runs inside
+    /// `cx.listener` on the `ThreadView`; so does the menu path once a
+    /// selection is made. The owner pressed Shift-Tab and the application
+    /// vanished.
+    ///
+    /// Deferring means no caller has to know. Fixing the one read I noticed
+    /// first was the wrong shape: it left the same trap for the next read
+    /// anyone adds, and the second crash proved it — the app died at launch
+    /// for the same reason, in a path I had not looked at.
     pub fn reset_onto_new_executor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // omega#117. Cycle now, connect once you stop.
+        //
+        // Shift-Tab used to rebuild on every press, so walking four executors
+        // paid four full adapter starts — each one an `npm exec` and an ACP
+        // handshake — and the owner could not cycle at anything like the speed
+        // a keystroke implies. The selection is a *choice*; the connection is
+        // what the choice eventually costs, and the two do not have to happen
+        // in the same instant.
+        //
+        // The label, the placeholder and the disclosure all read the selection,
+        // so they change on the keystroke and cycling stays instant. Only the
+        // connect waits, and only until the presses stop.
+        //
+        // Holding the task is the debounce: assigning here drops the previous
+        // one, and a dropped GPUI task is cancelled. `rebuild_onto_new_executor`
+        // is still deferred internally, so the borrow rule that crashed this
+        // twice is unchanged.
+        const SETTLE: Duration = Duration::from_millis(450);
+
+        let this = cx.entity();
+        self.pending_executor_rebuild = Some(cx.spawn_in(window, async move |_, cx| {
+            cx.background_executor().timer(SETTLE).await;
+            this.update_in(cx, |this, window, cx| {
+                this.pending_executor_rebuild = None;
+                this.rebuild_onto_new_executor(window, cx);
+            })
+            .ok();
+        }));
+    }
+
+    fn rebuild_onto_new_executor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // omega#117. Landing back where you started costs nothing.
+        //
+        // Cycling four executors and stopping on the one already attached is
+        // the ordinary way to look at the list, and it used to tear down a
+        // working connection and build the same one again. The comparison is
+        // against the thread's *disclosure* — what is actually attached — not
+        // against the last thing selected, because those disagree exactly when
+        // a previous rebuild failed, and that is the case where a rebuild is
+        // most wanted rather than least.
+        if let Some(selected) = crate::omega_executor_selector::selected()
+            && let Some(view) = self.root_thread_view()
+        {
+            let disclosure = view.read(cx).executor_disclosure(cx);
+            let attached = crate::omega_executor_selector::SelectableExecutor::of(
+                disclosure.class,
+                disclosure.agent_id.as_ref(),
+            );
+            if attached == Some(selected) {
+                return;
+            }
+        }
+
         self.clear_resolved_request_elicitations(cx);
         self.loading_status = None;
 
