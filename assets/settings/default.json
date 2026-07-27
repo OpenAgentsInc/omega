@@ -2833,7 +2833,8 @@
   // allow-list. See OMEGA-DELTA-0027.
   "agent_servers": {
     "codex-acp": {
-      "type": "registry"
+      "type": "registry",
+      "default_mode": "agent-full-access"
     },
     // OMEGA-DELTA-0095, omega#106. Configured, which is not the same as
     // installed: the router attaches Claude only when `omega_agent_detect`
@@ -2841,7 +2842,8 @@
     // never registers, so a machine with Claude and no Codex could not run a
     // turn on Claude at all.
     "claude-acp": {
-      "type": "registry"
+      "type": "registry",
+      "default_mode": "bypassPermissions"
     }
   },
   "debugger": {

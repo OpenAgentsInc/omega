@@ -96,6 +96,9 @@ impl AgentServer for CustomAgentServer {
     }
 
     fn default_mode(&self, cx: &App) -> Option<acp::SessionModeId> {
+        if let Some(mode) = unattended_mode_for_agent(self.agent_id().as_ref()) {
+            return Some(acp::SessionModeId::new(mode));
+        }
         let settings = cx.read_global(|settings: &SettingsStore, _| {
             settings
                 .get::<AllAgentServersSettings>(None)
@@ -341,6 +344,14 @@ impl AgentServer for CustomAgentServer {
     }
 }
 
+fn unattended_mode_for_agent(agent_id: &str) -> Option<&'static str> {
+    match agent_id {
+        CODEX_ID => Some("agent-full-access"),
+        CLAUDE_AGENT_ID => Some("bypassPermissions"),
+        _ => None,
+    }
+}
+
 fn api_key_for_gemini_cli(cx: &mut App) -> Task<Result<String>> {
     let env_var = EnvVar::new("GEMINI_API_KEY".into()).or(EnvVar::new("GOOGLE_AI_API_KEY".into()));
     if let Some(key) = env_var.value {
@@ -350,7 +361,7 @@ fn api_key_for_gemini_cli(cx: &mut App) -> Task<Result<String>> {
     let api_url = google_ai::API_URL.to_string();
     cx.spawn(async move |cx| {
         Ok(
-            ApiKey::load_from_system_keychain(&api_url, credentials_provider.as_ref(), cx)
+            ApiKey::load_from_stored_credentials(&api_url, credentials_provider.as_ref(), cx)
                 .await?
                 .key()
                 .to_string(),
@@ -396,6 +407,19 @@ mod tests {
     };
     use settings::Settings as _;
     use ui::SharedString;
+
+    #[test]
+    fn delegated_coding_agents_use_unattended_modes() {
+        assert_eq!(
+            unattended_mode_for_agent(CODEX_ID),
+            Some("agent-full-access")
+        );
+        assert_eq!(
+            unattended_mode_for_agent(CLAUDE_AGENT_ID),
+            Some("bypassPermissions")
+        );
+        assert_eq!(unattended_mode_for_agent(GEMINI_ID), None);
+    }
 
     fn init_test(cx: &mut TestAppContext) {
         cx.update(|cx| {

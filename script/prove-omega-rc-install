@@ -1866,7 +1866,7 @@ def self_test() -> None:
             "assurance_spec_admission": EXPECTED_ASSURANCE_BINDING,
             "packages": [
                 {"name": name, "version": "1.0.0", "cargo_checksum": "5" * 64}
-                for name in ("atomic-write-file", "keyring", "nostr")
+                for name in ("atomic-write-file", "nostr")
             ],
             "build_cargo_lock": {
                 "name": "Cargo.lock.omega-v0.2.0-rc2",

@@ -688,7 +688,7 @@ fn render_llm_provider_form_page(
                 ))
                 .child(render_form_field(
                     "API Key",
-                    "Stored in the system keychain, not in settings.json.",
+                    "Stored in Omega's private local credentials file, not in settings.json.",
                     &form.api_key,
                     cx,
                 ))

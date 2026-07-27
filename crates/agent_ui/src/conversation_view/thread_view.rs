@@ -10844,14 +10844,6 @@ impl ThreadView {
             .map(|log| log.read(cx).changed_buffers(cx).collect::<Vec<_>>())
             .unwrap_or_default();
 
-        let is_pending_tool_call = thread_view
-            .as_ref()
-            .and_then(|tv| {
-                let sid = tv.read(cx).thread.read(cx).session_id();
-                self.conversation.read(cx).pending_tool_call(sid, cx)
-            })
-            .is_some();
-
         // omega#109. A subagent spawned with an `executor` was run by somebody
         // else — Codex, Claude Code — with its own login, its own tools and its
         // own loop. Unattributed, its work appears inside an Omega window and
@@ -11055,7 +11047,7 @@ impl ThreadView {
                                         )
                                     }),
                             )
-                            .when(!has_no_title_or_canceled && !is_pending_tool_call, |this| {
+                            .when(!has_no_title_or_canceled, |this| {
                                 this.tooltip(move |_, cx| {
                                     Tooltip::with_meta(
                                         title.to_string(),
@@ -11065,7 +11057,7 @@ impl ThreadView {
                                     )
                                 })
                             })
-                            .when(has_expandable_content && !is_pending_tool_call, |this| {
+                            .when(has_expandable_content, |this| {
                                 this.cursor_pointer()
                                     .hover(|s| s.bg(cx.theme().colors().element_hover))
                                     .child(

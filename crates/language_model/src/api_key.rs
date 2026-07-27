@@ -12,9 +12,9 @@ use std::{
 use crate::AuthenticateError;
 
 /// Manages a single API key for a language model provider. API keys either come from environment
-/// variables or the system keychain.
+/// variables or Omega's local credentials provider.
 ///
-/// Keys from the system keychain are associated with a provider URL, and this ensures that they are
+/// Stored keys are associated with a provider URL, and this ensures that they are
 /// only used with that URL.
 pub struct ApiKeyState {
     pub url: SharedString,
@@ -95,7 +95,7 @@ impl ApiKeyState {
         }
     }
 
-    /// Set or delete the API key in the system keychain.
+    /// Set or delete the API key in local credential storage.
     pub fn store<Ent: 'static>(
         &mut self,
         url: SharedString,
@@ -106,7 +106,7 @@ impl ApiKeyState {
     ) -> Task<Result<()>> {
         if self.is_from_env_var() {
             return Task::ready(Err(anyhow!(
-                "bug: attempted to store API key in system keychain when API key is from env var",
+                "bug: attempted to store API key when API key is from env var",
             )));
         }
         cx.spawn(async move |ent, cx| {
@@ -123,7 +123,7 @@ impl ApiKeyState {
                 this.url = url;
                 this.load_status = match &key {
                     Some(key) => LoadStatus::Loaded(ApiKey {
-                        source: ApiKeySource::SystemKeychain,
+                        source: ApiKeySource::StoredCredentials,
                         key: key.as_str().into(),
                     }),
                     None => LoadStatus::NotPresent,
@@ -152,7 +152,7 @@ impl ApiKeyState {
         }
     }
 
-    /// If needed, loads the API key associated with the given URL from the system keychain. When a
+    /// If needed, loads the API key associated with the given URL from local credential storage. When a
     /// non-empty environment variable is provided, it will be used instead. If called when an API
     /// key was already loaded for a different URL, that key will be cleared before loading.
     ///
@@ -211,7 +211,7 @@ impl ApiKeyState {
         cx.spawn({
             async move |ent, cx| {
                 let load_status =
-                    ApiKey::load_from_system_keychain_impl(&url, provider.as_ref(), cx).await;
+                    ApiKey::load_from_stored_credentials_impl(&url, provider.as_ref(), cx).await;
                 ent.update(cx, |ent, cx| {
                     let this = get_this(ent);
                     this.url = url;
@@ -237,17 +237,17 @@ impl ApiKey {
         }
     }
 
-    pub async fn load_from_system_keychain(
+    pub async fn load_from_stored_credentials(
         url: &str,
         credentials_provider: &dyn CredentialsProvider,
         cx: &AsyncApp,
     ) -> Result<Self, AuthenticateError> {
-        Self::load_from_system_keychain_impl(url, credentials_provider, cx)
+        Self::load_from_stored_credentials_impl(url, credentials_provider, cx)
             .await
             .into_authenticate_result()
     }
 
-    async fn load_from_system_keychain_impl(
+    async fn load_from_stored_credentials_impl(
         url: &str,
         credentials_provider: &dyn CredentialsProvider,
         cx: &AsyncApp,
@@ -266,7 +266,7 @@ impl ApiKey {
             Err(_) => return LoadStatus::Error(format!("API key for URL {url} is not utf8")),
         };
         LoadStatus::Loaded(Self {
-            source: ApiKeySource::SystemKeychain,
+            source: ApiKeySource::StoredCredentials,
             key: key.into(),
         })
     }
@@ -285,14 +285,14 @@ impl LoadStatus {
 #[derive(Debug, Clone)]
 enum ApiKeySource {
     EnvVar(SharedString),
-    SystemKeychain,
+    StoredCredentials,
 }
 
 impl Display for ApiKeySource {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
             ApiKeySource::EnvVar(var) => write!(f, "environment variable {}", var),
-            ApiKeySource::SystemKeychain => write!(f, "system keychain"),
+            ApiKeySource::StoredCredentials => write!(f, "local credential storage"),
         }
     }
 }

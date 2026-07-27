@@ -9,7 +9,7 @@
 //!
 //! Client id is `openagents-omega` (never `openagents-desktop`). Public binding
 //! facts live under the Omega data root. Token material stays in Omega isolated
-//! keychain custody and never enters a log, crash record, or UI projection.
+//! private local credential custody and never enters a log, crash record, or UI projection.
 
 use std::{
     fmt, fs,
@@ -30,7 +30,7 @@ use smol::io::AsyncReadExt as _;
 pub const OPENAGENTS_OMEGA_CLIENT_ID: &str = "openagents-omega";
 pub const OPENAGENTS_AUTH_SESSION_URL: &str = "https://openagents.com/api/mobile/auth/session";
 pub const OPENAGENTS_SARAH_OWNER_URL: &str = "https://openagents.com/api/mobile/sarah";
-/// Keychain url for binding credentials. Omega-namespaced by the provider.
+/// Storage key for binding credentials. Omega-namespaced by the provider.
 pub const OPENAGENTS_BINDING_CREDENTIAL_KEY: &str = "omega://openagents/account-binding/v1";
 /// On-disk public relation schema (no secrets).
 pub const BINDING_RECORD_SCHEMA: &str = "openagents.omega.account-binding.v1";
@@ -253,7 +253,7 @@ pub fn init_openagents_binding(cx: &mut App) {
     }
     let binding = OpenAgentsBinding::new(
         default_binding_data_root(),
-        zed_credentials_provider::system_keychain(cx),
+        zed_credentials_provider::local_credentials(cx),
         cx.http_client(),
     );
     // Load any existing public record so the visible state is honest at boot.

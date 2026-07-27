@@ -290,7 +290,7 @@ fn context_server_http_input(
     let oauth = oauth.map_or_else(
         || {
             r#"
-    /// Uncomment to use a pre-registered OAuth client. You can include the client secret here as well, otherwise it will be prompted interactively and saved in the system keychain.
+    /// Uncomment to use a pre-registered OAuth client. You can include the client secret here as well, otherwise it will be prompted interactively and saved in Omega's private local credentials file.
     // "oauth": {
     //   "client_id": "your-client-id",
     // },"#

@@ -175,7 +175,7 @@ For a Bedrock API key, choose API key authentication:
 }
 ```
 
-The API key itself is stored in the system keychain, not in `settings.json`.
+The API key itself is stored in Omega's owner-only local credentials file, not in `settings.json`.
 
 ### Bedrock Cross-Region Inference {#bedrock-cross-region-inference}
 

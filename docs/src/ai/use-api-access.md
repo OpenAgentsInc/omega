@@ -41,9 +41,9 @@ agent paths and model access paths.
 
 ## API Keys and Environment Variables {#api-keys}
 
-Most API-access providers can be configured on the **Settings → AI → LLM Providers** page with {#action agent::OpenSettings}. Keys saved through Zed are stored in the system keychain, not in `settings.json`.
+Most API-access providers can be configured on the **Settings → AI → LLM Providers** page with {#action agent::OpenSettings}. Keys saved through Omega are stored in an owner-only local credentials file, not in `settings.json`.
 
-Zed also reads provider-specific environment variables. Non-empty environment variables take precedence over keychain values. If a key comes from an environment variable, unset the variable and restart Zed to stop using it.
+Omega also reads provider-specific environment variables. Non-empty environment variables take precedence over stored values. If a key comes from an environment variable, unset the variable and restart Omega to stop using it.
 
 | Provider          | Environment variable                                  |
 | ----------------- | ----------------------------------------------------- |
@@ -86,7 +86,7 @@ Headers managed by Zed for each provider, such as `Authorization`, `Content-Type
 
 ## Remote Projects {#remote-projects}
 
-Zed LLM providers for Zed AI features are initialized in the local Zed app. In SSH, dev container, and other remote projects, API keys saved in Zed are read from the local system keychain, and provider environment variables are read from the local Zed process environment.
+Omega LLM providers are initialized in the local app. In SSH, dev container, and other remote projects, saved API keys are read from the local app data directory, and provider environment variables are read from the local Omega process environment.
 
 External Agents and Terminal Threads may run their own processes and use their own remote or local environment. See [External Agents](./external-agents.md) and [Terminal Threads](./terminal-threads.md).
 

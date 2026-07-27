@@ -38,9 +38,7 @@ use crate::{
         SelectedRecovery, reconcile_prepared,
     },
     recovery_artifact::{self, RecoveryArtifactError},
-    secret::{
-        DevelopmentFileSecretStore, SecretKeyMaterial, SecretStore, StoreError, SystemKeyringStore,
-    },
+    secret::{FileSecretStore, SecretKeyMaterial, SecretStore, StoreError},
 };
 
 const IDENTITY_TRANSACTION_SCHEMA: &str = "openagents.omega.identity-transaction.v1";
@@ -59,23 +57,11 @@ pub struct IdentityService {
 
 impl IdentityService {
     pub fn system(channel: AppChannel) -> Self {
-        let development_use_keychain =
-            std::env::var("ZED_DEVELOPMENT_USE_KEYCHAIN").is_ok_and(|value| !value.is_empty());
-        let store: Arc<dyn SecretStore> = if use_development_file_secret_store(
-            channel,
-            cfg!(debug_assertions),
-            development_use_keychain,
-        ) {
-            Arc::new(DevelopmentFileSecretStore::new(
-                paths::config_dir().join("development_identity_secret"),
-            ))
-        } else {
-            Arc::new(SystemKeyringStore)
-        };
+        let identity_root = paths::data_dir().join("identity");
         Self::new(
             channel,
-            CustodyPaths::for_data_root(paths::data_dir().join("identity")),
-            store,
+            CustodyPaths::for_data_root(identity_root.clone()),
+            Arc::new(FileSecretStore::new(identity_root.join("identity.secret"))),
             Arc::new(SystemSecretGenerator),
         )
     }
@@ -91,10 +77,11 @@ impl IdentityService {
 
     /// Build custody against an explicit channel data root (parent of `identity/`).
     pub fn for_channel_data_root(channel: AppChannel, data_root: PathBuf) -> Self {
+        let identity_root = data_root.join("identity");
         Self::new(
             channel,
-            CustodyPaths::for_data_root(data_root.join("identity")),
-            Arc::new(SystemKeyringStore),
+            CustodyPaths::for_data_root(identity_root.clone()),
+            Arc::new(FileSecretStore::new(identity_root.join("identity.secret"))),
             Arc::new(SystemSecretGenerator),
         )
     }
@@ -103,14 +90,15 @@ impl IdentityService {
         proof_root: PathBuf,
         crash_boundary: Option<ProofCrashBoundary>,
     ) -> Self {
+        let identity_root = proof_root.join("identity");
         Self {
             channel: AppChannel::Rc,
             locator: KeyringLocator::proof(
                 IDENTITY_PROOF_KEYRING_SERVICE,
                 IDENTITY_PROOF_KEYRING_ACCOUNT,
             ),
-            paths: CustodyPaths::for_data_root(proof_root.join("identity")),
-            store: Arc::new(SystemKeyringStore),
+            paths: CustodyPaths::for_data_root(identity_root.clone()),
+            store: Arc::new(FileSecretStore::new(identity_root.join("identity.secret"))),
             generator: Arc::new(SystemSecretGenerator),
             proof_crash_boundary: crash_boundary,
         }
@@ -1274,14 +1262,7 @@ impl IdentityService {
                     self.best_effort_manifest_identity(),
                 );
             }
-            Err(StoreError::Conflict) => {
-                return ResolvedCustody::conflict(
-                    CustodyConflictReason::AmbiguousSecureStore,
-                    self.best_effort_manifest_identity(),
-                    None,
-                );
-            }
-            Err(StoreError::Corrupt | StoreError::Configuration) => {
+            Err(StoreError::Corrupt) => {
                 return ResolvedCustody::without_secret(
                     CustodyState::Incomplete,
                     self.best_effort_manifest_identity(),
@@ -1343,10 +1324,8 @@ impl IdentityService {
                         // A transaction is what makes this state damage. With
                         // one on disk, custody was interrupted part-way and
                         // `Incomplete` is the honest answer. Without one,
-                        // nothing was ever started here: the per-channel
-                        // keychain simply holds an identity this data root has
-                        // no files for, which is where every fresh
-                        // `--user-data-dir` on this machine starts (omega#110).
+                        // nothing was ever started here: the injected store
+                        // holds an identity this data root has no files for.
                         let state = if transaction.is_some() {
                             CustodyState::Incomplete
                         } else {
@@ -1430,14 +1409,6 @@ impl IdentityService {
             .flatten()
             .map(|manifest| manifest.identity().clone())
     }
-}
-
-fn use_development_file_secret_store(
-    channel: AppChannel,
-    debug_assertions: bool,
-    development_use_keychain: bool,
-) -> bool {
-    channel == AppChannel::Dev && debug_assertions && !development_use_keychain
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1744,8 +1715,7 @@ fn custody_error_from_store(error: StoreError) -> CustodyError {
         StoreError::Locked | StoreError::Unavailable => {
             CustodyError::CustodyDenied(CustodyState::Locked)
         }
-        StoreError::Conflict => CustodyError::CustodyDenied(CustodyState::Conflict),
-        StoreError::Corrupt | StoreError::Configuration => CustodyError::SecureStoreUnavailable,
+        StoreError::Corrupt => CustodyError::SecureStoreUnavailable,
     }
 }
 
@@ -1779,7 +1749,6 @@ mod tests {
         Missing,
         Locked,
         Unavailable,
-        Conflict,
         Substitute([u8; 32]),
     }
 
@@ -1833,7 +1802,6 @@ mod tests {
                 FakeReadMode::Missing => Ok(None),
                 FakeReadMode::Locked => Err(StoreError::Locked),
                 FakeReadMode::Unavailable => Err(StoreError::Unavailable),
-                FakeReadMode::Conflict => Err(StoreError::Conflict),
                 FakeReadMode::Substitute(bytes) => {
                     SecretKeyMaterial::from_bytes(Zeroizing::new(bytes))
                         .map(Some)
@@ -1897,24 +1865,6 @@ mod tests {
             store,
             Arc::new(FixedGenerator([1; 32])),
         )
-    }
-
-    #[test]
-    fn only_an_unforced_debug_dev_runtime_uses_the_file_store() {
-        for channel in AppChannel::ALL {
-            for debug_assertions in [false, true] {
-                for development_use_keychain in [false, true] {
-                    assert_eq!(
-                        use_development_file_secret_store(
-                            channel,
-                            debug_assertions,
-                            development_use_keychain,
-                        ),
-                        channel == AppChannel::Dev && debug_assertions && !development_use_keychain
-                    );
-                }
-            }
-        }
     }
 
     fn counting_service(
@@ -2699,25 +2649,12 @@ mod tests {
     }
 
     #[test]
-    fn inspection_distinguishes_keychain_ambiguity_from_identity_mismatch() {
+    fn inspection_reports_identity_mismatch() {
         let temporary_directory = tempfile::tempdir().expect("create temporary directory");
         let store = FakeStore::empty();
         let service = service(store.clone(), temporary_directory.path().to_path_buf());
         let created = service.create(receipt()).expect("create identity");
         let manifest_identity = created.identity.expect("created public identity");
-
-        store.set_read_mode(FakeReadMode::Conflict);
-        let ambiguous = service
-            .inspect_details()
-            .expect("inspect ambiguous secure store");
-        assert_eq!(ambiguous.custody.state, CustodyState::Conflict);
-        assert_eq!(
-            ambiguous.conflict,
-            Some(CustodyConflict {
-                reason: CustodyConflictReason::AmbiguousSecureStore,
-                identities: vec![manifest_identity.clone()],
-            })
-        );
 
         store.set_read_mode(FakeReadMode::Substitute([2; 32]));
         let mismatch = service
@@ -3236,11 +3173,10 @@ mod tests {
         );
     }
 
-    /// omega#110. The keychain is scoped per channel and per user, not per
-    /// profile, so a brand-new `--user-data-dir` on this machine starts beside
-    /// an identity it has no files for. That is not damage, and the state it
-    /// resolves to has to say so: `Incomplete` offers a repair with nothing to
-    /// repair, and every action it admits is refused.
+    /// omega#110. A data root can be paired with an injected store that already
+    /// contains an identity but has no matching profile files. That is not
+    /// damage, and the state it resolves to has to say so: `Incomplete` offers
+    /// a repair with nothing to repair, and every action it admits is refused.
     #[test]
     fn a_fresh_profile_beside_a_custodied_identity_is_adoptable_not_damaged() {
         let first_root = tempfile::tempdir().expect("create first profile root");
@@ -3333,7 +3269,7 @@ mod tests {
         ));
     }
 
-    /// omega#110. Adoption adopts. If the keychain entry disappears between the
+    /// omega#110. Adoption adopts. If the stored secret disappears between the
     /// screen naming an npub and the owner clicking the control under it,
     /// generating a different identity behind that sentence would be the silent
     /// pick the screen promised not to make.

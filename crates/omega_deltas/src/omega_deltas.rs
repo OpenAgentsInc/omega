@@ -17590,10 +17590,9 @@ mod tests {
 
     /// OMEGA-DELTA-0126. A derived lane finds the file backend by the file.
     ///
-    /// The file backend's one trace outside the root is the master key at Exo's
-    /// own default path. Absence of that trace must derive *no* store rather
-    /// than `AppleKeychain`, so that a lane never names a backend Exo did not
-    /// pick.
+    /// Omega always names the file backend and Exo's default master-key path,
+    /// including before the file exists, so Exo can never fall through to a
+    /// platform credential store.
     #[test]
     fn a_derived_lane_finds_the_file_backend_by_the_key_exo_writes() {
         let derivation = read_repository_file(EXO_DERIVATION_PATH);
@@ -17613,16 +17612,15 @@ mod tests {
              have must not be overruled by a search."
         );
         assert!(
-            store.contains("default_master_key_path(") && store.contains("is_file()"),
-            "OMEGA-DELTA-0126: the derivation no longer looks for the master \
-             key file Exo itself writes, which is the only trace a file-backed \
-             root leaves outside the root."
+            store.contains("default_master_key_path(")
+                && store.contains("Some(ExoSecretStore::File"),
+            "OMEGA-DELTA-0126: the derivation no longer forces Exo's file \
+             backend at its default master-key path."
         );
         assert!(
             !store.contains("ExoSecretStore::AppleKeychain"),
             "OMEGA-DELTA-0126: the derivation falls back to naming the \
-             keychain. Naming no store and naming Exo's current default are \
-             the same behaviour only until that default moves."
+             platform credential store."
         );
         let default_path = function_body(&derivation, "default_master_key_path")
             .expect("OMEGA-DELTA-0126: Exo's default master-key path is gone");
@@ -18825,49 +18823,27 @@ mod tests {
         );
     }
 
-    /// OMEGA-DELTA-0141. An unsigned debug executable must not repeatedly ask
-    /// macOS for access to the development identity's Keychain item.
+    /// OMEGA-DELTA-0141. Identity custody must remain file-backed in every
+    /// channel so launching Omega never invokes an operating-system credential
+    /// prompt.
     #[test]
-    fn debug_identity_custody_avoids_the_system_keychain() {
+    fn identity_custody_is_always_private_local_storage() {
         let custody_path = repository_path(IDENTITY_CUSTODY_PATH);
         let custody = without_comments(&read_repository_file(IDENTITY_CUSTODY_PATH));
-        let system = method_body(
-            &custody,
+        for constructor in [
             "pub fn system(",
-            &custody_path,
-            "The runtime constructor owns the narrow debug-only store choice.",
-        );
-        for required in [
-            "use_development_file_secret_store(",
-            "cfg!(debug_assertions)",
-            "ZED_DEVELOPMENT_USE_KEYCHAIN",
-            "DevelopmentFileSecretStore::new(",
-            "development_identity_secret",
+            "pub fn for_channel_data_root(",
+            "pub(crate) fn for_disposable_proof(",
         ] {
-            assert!(
-                system.contains(required),
-                "OMEGA-DELTA-0141: the debug identity store selection in {} \
-                 lost `{required}`.",
-                custody_path.display()
+            let body = method_body(
+                &custody,
+                constructor,
+                &custody_path,
+                "Every runtime identity constructor owns an explicit local secret file.",
             );
-        }
-
-        let selector =
-            function_body(&custody, "use_development_file_secret_store").unwrap_or_else(|| {
-                panic!(
-                    "OMEGA-DELTA-0141: {} lost the debug identity store selector.",
-                    custody_path.display()
-                )
-            });
-        for required in [
-            "channel == AppChannel::Dev",
-            "debug_assertions",
-            "!development_use_keychain",
-        ] {
             assert!(
-                selector.contains(required),
-                "OMEGA-DELTA-0141: the debug identity store selector in {} \
-                 lost `{required}`.",
+                body.contains("FileSecretStore::new(") && body.contains("identity.secret"),
+                "OMEGA-DELTA-0141: `{constructor}` in {} is no longer explicitly file-backed.",
                 custody_path.display()
             );
         }
@@ -18875,18 +18851,90 @@ mod tests {
         let secret_path = repository_path("crates/omega_identity/src/secret.rs");
         let secret = without_comments(&read_repository_file("crates/omega_identity/src/secret.rs"));
         for required in [
-            "impl SecretStore for DevelopmentFileSecretStore",
+            "impl SecretStore for FileSecretStore",
             "AtomicWriteFile::open",
             "SecretKeyMaterial::from_bytes",
             "Permissions::from_mode(0o600)",
+            "Permissions::from_mode(0o700)",
         ] {
             assert!(
                 secret.contains(required),
-                "OMEGA-DELTA-0141: the development identity store in {} lost \
+                "OMEGA-DELTA-0141: the identity store in {} lost \
                  `{required}`.",
                 secret_path.display()
             );
         }
+        assert!(
+            !secret.contains("keyring::") && !secret.contains("SystemKeyringStore"),
+            "OMEGA-DELTA-0141: {} regained an operating-system credential-store path.",
+            secret_path.display()
+        );
+    }
+
+    #[test]
+    fn macos_runtime_has_no_keychain_credential_calls() {
+        let provider =
+            read_repository_file("crates/zed_credentials_provider/src/zed_credentials_provider.rs");
+        for required in [
+            "LocalCredentialsProvider",
+            "AtomicWriteFile::open",
+            "Permissions::from_mode(0o600)",
+            "Permissions::from_mode(0o700)",
+        ] {
+            assert!(
+                provider.contains(required),
+                "Omega's local credential provider lost `{required}`."
+            );
+        }
+        for forbidden in [
+            "KeychainCredentialsProvider",
+            "read_credentials(url)",
+            "write_credentials(url",
+            "ZED_DEVELOPMENT_USE_KEYCHAIN",
+        ] {
+            assert!(
+                !provider.contains(forbidden),
+                "Omega's credential provider regained Keychain path `{forbidden}`."
+            );
+        }
+
+        let platform = read_repository_file("crates/gpui_macos/src/platform.rs");
+        for forbidden in [
+            "SecItemAdd",
+            "SecItemUpdate",
+            "SecItemDelete",
+            "SecItemCopyMatching",
+            "kSecClass",
+        ] {
+            assert!(
+                !platform.contains(forbidden),
+                "The macOS platform regained Security.framework credential call `{forbidden}`."
+            );
+        }
+    }
+
+    #[test]
+    fn routed_subagents_are_unattended_without_locking_other_cards() {
+        let servers = read_repository_file("crates/agent_servers/src/custom.rs");
+        assert!(
+            servers.contains("CODEX_ID => Some(\"agent-full-access\")")
+                && servers.contains("CLAUDE_AGENT_ID => Some(\"bypassPermissions\")"),
+            "Omega no longer forces unattended permission modes for routed coding agents."
+        );
+
+        let thread_view =
+            read_repository_file("crates/agent_ui/src/conversation_view/thread_view.rs");
+        let card = method_body(
+            &thread_view,
+            "fn render_subagent_card(",
+            &repository_path("crates/agent_ui/src/conversation_view/thread_view.rs"),
+            "Subagent disclosure controls remain independent from permission prompts.",
+        );
+        assert!(
+            card.contains(".when(has_expandable_content,")
+                && !card.contains("has_expandable_content && !is_pending_tool_call"),
+            "A pending permission request still disables subagent card expansion."
+        );
     }
 
     /// OMEGA-DELTA-0142. Provider credential failures must stop retrying and

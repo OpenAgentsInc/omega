@@ -1133,8 +1133,8 @@ impl IdentitySection {
                 actions: vec![IdentityAction::RetryReset, IdentityAction::Relaunch],
             },
             CustodyState::Locked => IdentityPresentation {
-                title: "System keychain locked",
-                description: "Unlock the system keychain before Omega checks or uses your identity.",
+                title: "Identity file unavailable",
+                description: "Check the private identity file's ownership and permissions, then try again.",
                 icon: IconName::Lock,
                 color: Color::Warning,
                 actions: vec![IdentityAction::Retry],
@@ -1157,7 +1157,7 @@ impl IdentitySection {
                         "Identity choice required"
                     },
                     description: if ambiguous {
-                        "The system keychain returned more than one matching credential. Omega will not guess which one to use."
+                        "Secure identity metadata is ambiguous. Omega will not guess which identity to use."
                     } else {
                         "Public identity facts disagree. Recover the identity you own or explicitly reset after verifying a backup."
                     },
@@ -1200,7 +1200,7 @@ impl IdentitySection {
             }
             CustodyState::Unadopted => IdentityPresentation {
                 title: "Use your Omega identity here",
-                description: "This profile has no identity files yet, and your keychain already holds the identity above. Omega adopts that identity for this profile; it does not create a second one.",
+                description: "This profile has no public identity files yet, and the private local identity file already holds the identity above. Omega adopts that identity for this profile; it does not create a second one.",
                 icon: IconName::Person,
                 color: Color::Accent,
                 actions: vec![IdentityAction::Adopt, IdentityAction::Recover],
@@ -1812,7 +1812,7 @@ mod tests {
             (CustodyState::Absent, "Create your Omega identity"),
             (CustodyState::Unadopted, "Use your Omega identity here"),
             (CustodyState::Ready, "Identity ready"),
-            (CustodyState::Locked, "System keychain locked"),
+            (CustodyState::Locked, "Identity file unavailable"),
             (CustodyState::Incomplete, "Identity setup needs repair"),
             (CustodyState::Lost, "Recovery needed"),
             (CustodyState::Conflict, "Identity choice required"),

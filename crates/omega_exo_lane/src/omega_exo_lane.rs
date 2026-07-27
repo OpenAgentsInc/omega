@@ -101,8 +101,7 @@ pub use endpoint::{EXO_SERVE_DEFAULT_BIND, LoopbackEndpoint, OffLoopback};
 pub use pin::{EXO_HARNESS_ID, EXO_PIN, ExoPin, ExoPinMismatch, ObservedExoCheckout, admits_bytes};
 pub use protocol::{EXO_REQUEST_KIND_COUNT, ExoRequestKind};
 pub use secret_store::{
-    APPLE_KEYCHAIN_BACKEND, ExoSecretStore, FILE_BACKEND, MASTER_KEY_PATH_ENV_VAR,
-    SECRET_BACKEND_ENV_VAR,
+    ExoSecretStore, FILE_BACKEND, MASTER_KEY_PATH_ENV_VAR, SECRET_BACKEND_ENV_VAR,
 };
 pub use turn::{ExoToolActivity, ExoTurn, NotATurn};
 

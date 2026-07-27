@@ -345,7 +345,10 @@ impl FullAutoPanel {
                     // Silence, not an empty view. The pump keeps publishing the
                     // last reading the host actually took, and a host that has
                     // never taken one publishes nothing at all.
-                    log::debug!("omega#97: Full Auto observation skipped ({})", error.token());
+                    log::debug!(
+                        "omega#97: Full Auto observation skipped ({})",
+                        error.token()
+                    );
                 }
             }
             this.update(cx, |this, cx| {
@@ -643,7 +646,7 @@ impl FullAutoPanel {
                     OpenAgentsSessionPhase::SignedOut => {
                         "OpenAgents Sync account disconnected.".into()
                     }
-                    _ => "OpenAgents could not prove both credentials were revoked. The local keychain record was retained.".into(),
+                    _ => "OpenAgents could not prove both credentials were revoked. The private local credential record was retained.".into(),
                 };
                 cx.notify();
             })

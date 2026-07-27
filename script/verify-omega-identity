@@ -24,10 +24,6 @@ LOCKED_PACKAGES = {
         "0.3.0",
         "84790c55b5704b0d35130bf16a4ce22a8e70eb0ea773522557524d9a4852663d",
     ),
-    "keyring": (
-        "3.6.3",
-        "eebcc3aff044e5944a8fbaf69eb277d11986064cba30c468730e8b9909fb551c",
-    ),
     "nostr": (
         "0.44.4",
         "98cf5d15d70d1f8f4059e5f79923ac15891eb691d2843d01191e0585fb064d70",
@@ -116,14 +112,11 @@ for package_name in ("atomic-write-file", "nostr"):
             f"{package_name!r} must inherit the locked workspace dependency"
         )
 
-keyring_lines = re.findall(r"(?m)^keyring\s*=\s*(.+)$", identity_manifest)
-if not keyring_lines or any(
-    re.search(r"\bworkspace\s*=\s*true\b", specification) is None
-    for specification in keyring_lines
+if re.search(r"(?m)^keyring\s*=", workspace_dependencies) or re.search(
+    r"(?m)^keyring\s*=", identity_manifest
 ):
     fail(
-        "crates/omega_identity/Cargo.toml: every target-specific keyring dependency "
-        "must inherit the locked workspace dependency"
+        "Omega identity manifests must not declare the operating-system keyring dependency"
     )
 
 lockfile = read_text("Cargo.lock")
@@ -409,7 +402,7 @@ if failures:
     raise SystemExit(1)
 
 print(
-    "Omega identity verification passed: dependency locks, Buzz provenance, "
-    "public vector, and secret-boundary tripwires are intact."
+    "Omega identity verification passed: file-storage dependency locks, Buzz "
+    "provenance, public vector, and secret-boundary tripwires are intact."
 )
 PY

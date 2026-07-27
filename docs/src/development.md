@@ -11,35 +11,16 @@ See the platform-specific instructions for building Zed from source:
 - [Linux](./development/linux.md)
 - [Windows](./development/windows.md)
 
-## Keychain access
+## Local credential storage
 
-Zed stores secrets in the system keychain.
+Omega never stores runtime credentials in the macOS Keychain. Provider keys,
+OAuth sessions, native-session tokens, and the Nostr identity secret use
+owner-only local files in the channel's application data directory. Credential
+writes are atomic; the credentials directory is mode `0700` and its files are
+mode `0600` on Unix.
 
-However, when running a development build of Zed on macOS (and perhaps other
-platforms) trying to access the keychain results in a lot of keychain prompts
-that require entering your password over and over.
-
-On macOS this is caused by the development build not having a stable identity.
-Even if you choose the "Always Allow" option, the OS will still prompt you for
-your password again the next time something changes in the binary.
-
-This quickly becomes annoying and impedes development speed.
-
-That is why, by default, a debug build of Omega uses development files for both
-ordinary credentials and its development-only identity key. The identity file
-is created with owner-only permissions. These files are intentionally limited
-to the unsigned `dev` channel; packaged builds continue to use secure system
-custody.
-
-> **Note:** This is **only** the case for development builds. For all non-development
-> release channels the system keychain is always used.
-
-If you need to test something using the real system keychain in a development
-build, run Omega with the following environment variable set:
-
-```
-ZED_DEVELOPMENT_USE_KEYCHAIN=1
-```
+The files are not encrypted at rest. Protect the operating-system account and
+application data directory as you would other local developer credentials.
 
 ## Performance Measurements
 

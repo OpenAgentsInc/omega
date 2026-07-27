@@ -34,17 +34,10 @@ smol.workspace = true
 thiserror.workspace = true
 zeroize.workspace = true
 
-[target.'cfg(target_os = "macos")'.dependencies]
-keyring = { workspace = true, features = ["apple-native", "vendored"] }
-
-[target.'cfg(target_os = "linux")'.dependencies]
-keyring = { workspace = true, features = ["sync-secret-service", "vendored"] }
-
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
 
 [target.'cfg(target_os = "windows")'.dependencies]
-keyring = { workspace = true, features = ["windows-native", "vendored"] }
 windows-sys = { workspace = true, features = [
     "Win32_Foundation",
     "Win32_Security",

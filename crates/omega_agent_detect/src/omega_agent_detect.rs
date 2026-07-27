@@ -17,7 +17,7 @@
 //!
 //! This module answers the other question, and only that one. It looks for
 //! executables on `PATH`. It does not read settings, it does not read the
-//! keychain, and it starts no processes — asking an agent to identify itself
+//! credential storage, and it starts no processes — asking an agent to identify itself
 //! costs a process launch on the startup path, and a file that is present and
 //! executable is enough to offer it.
 //!

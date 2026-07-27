@@ -167,9 +167,9 @@ pub struct DerivedExoLane {
     pub conversation: String,
     /// Which key opens the root's secrets. `OMEGA-DELTA-0126`.
     ///
-    /// `None` means the lane names none and Exo uses its own default, which on
-    /// macOS is the keychain and needs no environment at all. See
-    /// [`secret_store`] for why this cannot be read off the root.
+    /// `None` means the lane names none. Omega always supplies its private local
+    /// file store for derived lanes. See [`secret_store`] for why this cannot be
+    /// read off the root.
     pub secret_store: Option<ExoSecretStore>,
 }
 
@@ -854,16 +854,8 @@ pub fn chosen_working_directory(
 ///    and the search must not overrule them.
 /// 2. `EXO_MASTER_KEY_PATH` alone, which is a file-backed root by
 ///    [`ExoSecretStore::parse`]'s rule.
-/// 3. Exo's default master-key path, when a file is actually there.
-/// 4. `None` — no store named, and Exo uses its own default. That is the right
-///    answer for a keychain-backed root, and it is the answer on the great
-///    majority of machines, because the keychain is what Exo picks on macOS
-///    unless somebody chose otherwise.
-///
-/// Returning `None` rather than guessing [`ExoSecretStore::AppleKeychain`] is
-/// deliberate: the two are the same behaviour today and they stop being the
-/// same the moment Exo's default moves, and a lane that names a backend Exo did
-/// not pick is a lane that broke on an Exo upgrade for a reason nobody can see.
+/// 3. Exo's default master-key path. Omega always names the file backend so an
+///    Exo launch can never fall through to the platform credential store.
 ///
 /// Inputs are parameters, for this module's usual reason.
 #[must_use]
@@ -875,7 +867,7 @@ pub fn secret_store(overrides: &ExoLaneOverrides, home: &Path) -> Option<ExoSecr
         return Some(store);
     }
     let default_master_key = default_master_key_path(overrides.config_home.as_deref(), home);
-    default_master_key.is_file().then(|| ExoSecretStore::File {
+    Some(ExoSecretStore::File {
         master_key: Some(default_master_key),
     })
 }

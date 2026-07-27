@@ -48,7 +48,7 @@ The Omega Agent and other model-backed Zed AI features use models configured thr
 | Use OpenRouter, Vercel AI Gateway, Amazon Bedrock, or another gateway         | [Use a Gateway](./use-a-gateway.md)                               |
 | Use Ollama, LM Studio, local OpenAI-compatible servers, or self-hosted models | [Use a Local Model](./use-a-local-model.md)                       |
 
-Provider keys saved through Zed are stored in the system keychain, not in `settings.json`.
+Provider keys saved through Omega are stored in an owner-only local credentials file, not in `settings.json`.
 
 ## Change AI Settings {#ai-settings}
 

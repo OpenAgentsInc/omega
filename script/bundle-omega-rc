@@ -2,7 +2,7 @@
 # Owned Omega RC macOS package entry point (OMEGA-BRAND-05).
 #
 # Produces (or dry-runs the contract for):
-#   Omega-v0.2.0-rc3-macos-arm64.dmg
+#   Omega-v0.2.0-rc20-macos-arm64.dmg
 #
 # Does not claim notarization success. Notarization runs only when owner
 # notarization secrets are present; otherwise the release record records that

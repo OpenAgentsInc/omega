@@ -101,8 +101,6 @@ pub(crate) enum StoreError {
     Locked,
     Unavailable,
     Corrupt,
-    Conflict,
-    Configuration,
 }
 
 pub(crate) trait SecretStore: Send + Sync {
@@ -112,48 +110,11 @@ pub(crate) trait SecretStore: Send + Sync {
     fn delete(&self, locator: &KeyringLocator) -> Result<(), StoreError>;
 }
 
-pub(crate) struct SystemKeyringStore;
-
-impl SecretStore for SystemKeyringStore {
-    fn read(&self, locator: &KeyringLocator) -> Result<Option<SecretKeyMaterial>, StoreError> {
-        let entry = keyring_entry(locator)?;
-        let bytes = match entry.get_secret() {
-            Ok(bytes) => Zeroizing::new(bytes),
-            Err(keyring::Error::NoEntry) => return Ok(None),
-            Err(error) => return Err(classify_keyring_error(error)),
-        };
-        let secret_bytes: [u8; 32] = bytes
-            .as_slice()
-            .try_into()
-            .map_err(|_| StoreError::Corrupt)?;
-        SecretKeyMaterial::from_bytes(Zeroizing::new(secret_bytes))
-            .map(Some)
-            .map_err(|_| StoreError::Corrupt)
-    }
-
-    fn write(
-        &self,
-        locator: &KeyringLocator,
-        secret: &SecretKeyMaterial,
-    ) -> Result<(), StoreError> {
-        keyring_entry(locator)?
-            .set_secret(secret.0.as_ref())
-            .map_err(classify_keyring_error)
-    }
-
-    fn delete(&self, locator: &KeyringLocator) -> Result<(), StoreError> {
-        match keyring_entry(locator)?.delete_credential() {
-            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
-            Err(error) => Err(classify_keyring_error(error)),
-        }
-    }
-}
-
-pub(crate) struct DevelopmentFileSecretStore {
+pub(crate) struct FileSecretStore {
     path: PathBuf,
 }
 
-impl DevelopmentFileSecretStore {
+impl FileSecretStore {
     pub(crate) fn new(path: PathBuf) -> Self {
         Self { path }
     }
@@ -167,7 +128,7 @@ impl DevelopmentFileSecretStore {
     }
 }
 
-impl SecretStore for DevelopmentFileSecretStore {
+impl SecretStore for FileSecretStore {
     fn read(&self, _locator: &KeyringLocator) -> Result<Option<SecretKeyMaterial>, StoreError> {
         let bytes = match fs::read(&self.path) {
             Ok(bytes) => Zeroizing::new(bytes),
@@ -190,6 +151,13 @@ impl SecretStore for DevelopmentFileSecretStore {
     ) -> Result<(), StoreError> {
         if let Some(parent) = self.path.parent() {
             fs::create_dir_all(parent).map_err(Self::classify_io_error)?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt as _;
+
+                fs::set_permissions(parent, fs::Permissions::from_mode(0o700))
+                    .map_err(Self::classify_io_error)?;
+            }
         }
         let mut file = AtomicWriteFile::open(&self.path).map_err(Self::classify_io_error)?;
         #[cfg(unix)]
@@ -211,22 +179,6 @@ impl SecretStore for DevelopmentFileSecretStore {
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
             Err(error) => Err(Self::classify_io_error(error)),
         }
-    }
-}
-
-fn keyring_entry(locator: &KeyringLocator) -> Result<keyring::Entry, StoreError> {
-    keyring::Entry::new(locator.service(), locator.account()).map_err(classify_keyring_error)
-}
-
-fn classify_keyring_error(error: keyring::Error) -> StoreError {
-    match error {
-        keyring::Error::NoStorageAccess(_) => StoreError::Locked,
-        keyring::Error::PlatformFailure(_) => StoreError::Unavailable,
-        keyring::Error::NoEntry => StoreError::Unavailable,
-        keyring::Error::BadEncoding(_) => StoreError::Corrupt,
-        keyring::Error::Ambiguous(_) => StoreError::Conflict,
-        keyring::Error::TooLong(_, _) | keyring::Error::Invalid(_, _) => StoreError::Configuration,
-        _ => StoreError::Unavailable,
     }
 }
 
@@ -254,10 +206,10 @@ mod tests {
     }
 
     #[test]
-    fn development_file_store_round_trips_and_deletes_a_secret() {
+    fn file_store_round_trips_and_deletes_a_secret() {
         let temporary_directory = TempDir::new().expect("create temporary directory");
         let path = temporary_directory.path().join("identity");
-        let store = DevelopmentFileSecretStore::new(path.clone());
+        let store = FileSecretStore::new(path.clone());
         let locator = KeyringLocator::for_channel(app_identity::AppChannel::Dev);
         let secret =
             SecretKeyMaterial::from_bytes(Zeroizing::new([42; 32])).expect("valid test secret");

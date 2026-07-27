@@ -106,7 +106,7 @@ pub fn init_openagents_session(cx: &mut App) {
         return;
     }
     cx.set_global(OpenAgentsSessionGlobal(OpenAgentsSession {
-        credentials: zed_credentials_provider::system_keychain(cx),
+        credentials: zed_credentials_provider::local_credentials(cx),
         http_client: cx.http_client(),
         phase: Arc::new(Mutex::new(OpenAgentsSessionPhase::SignedOut)),
     }));
@@ -282,8 +282,8 @@ impl OpenAgentsSession {
         else {
             return Ok(None);
         };
-        let credential: StoredCredential = serde_json::from_slice(&secret)
-            .context("OpenAgents keychain credential was invalid")?;
+        let credential: StoredCredential =
+            serde_json::from_slice(&secret).context("OpenAgents stored credential was invalid")?;
         if credential.schema_version != 1
             || credential.owner_user_id != username
             || credential.owner_user_id.trim().is_empty()
@@ -294,7 +294,7 @@ impl OpenAgentsSession {
                 .is_some_and(|token| token.trim().is_empty())
             || credential.access_token.len() > MAX_ACCESS_TOKEN_BYTES
         {
-            return Err(anyhow!("OpenAgents keychain credential was invalid"));
+            return Err(anyhow!("OpenAgents stored credential was invalid"));
         }
         Ok(Some(credential))
     }
@@ -377,7 +377,7 @@ mod tests {
     }
 
     #[test]
-    fn keychain_namespace_and_public_phase_never_contain_tokens() {
+    fn credential_namespace_and_public_phase_never_contain_tokens() {
         assert_eq!(
             OPENAGENTS_SESSION_KEY,
             "omega://openagents/native-session/v1"

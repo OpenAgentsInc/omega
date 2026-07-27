@@ -478,10 +478,10 @@ pub enum CustodyState {
     /// has never adopted, and no transaction is in flight.
     ///
     /// Separate from [`Self::Incomplete`] because the two need opposite
-    /// sentences. The keychain is scoped per channel and per user, not per
-    /// profile, so a brand-new `--user-data-dir` on a machine that already has
-    /// an Omega identity lands here — nothing is damaged and nothing was
-    /// interrupted; this profile simply has no identity files yet.
+    /// sentences. A custom secure store may be scoped more broadly than the
+    /// profile, so a brand-new `--user-data-dir` beside an existing identity can
+    /// land here — nothing is damaged and nothing was interrupted; this profile
+    /// simply has no identity files yet.
     /// `Incomplete` says a transaction was interrupted and offers repair, which
     /// on a fresh profile is a repair with nothing to repair and no way to
     /// finish (omega#110).

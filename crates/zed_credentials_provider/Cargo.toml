@@ -13,6 +13,7 @@ path = "src/zed_credentials_provider.rs"
 
 [dependencies]
 anyhow.workspace = true
+atomic-write-file.workspace = true
 credentials_provider.workspace = true
 futures.workspace = true
 gpui.workspace = true
@@ -20,3 +21,6 @@ paths.workspace = true
 release_channel.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

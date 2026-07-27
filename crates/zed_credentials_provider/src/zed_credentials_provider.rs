@@ -1,27 +1,19 @@
-use std::collections::HashMap;
-use std::future::Future;
-use std::path::PathBuf;
-use std::pin::Pin;
-use std::sync::{Arc, LazyLock};
+use std::{
+    collections::HashMap,
+    fs,
+    future::Future,
+    io::{self, Write as _},
+    path::PathBuf,
+    pin::Pin,
+    sync::{Arc, Mutex},
+};
 
-use anyhow::Result;
+use anyhow::{Context as _, Result};
+use atomic_write_file::AtomicWriteFile;
 use credentials_provider::CredentialsProvider;
 use futures::FutureExt as _;
 use gpui::{App, AsyncApp, Global};
 use release_channel::ReleaseChannel;
-
-/// An environment variable whose presence indicates that the system keychain
-/// should be used in development.
-///
-/// By default, running Zed in development uses the development credentials
-/// provider. Setting this environment variable allows you to interact with the
-/// system keychain (for instance, if you need to test something).
-///
-/// Only works in development. Setting this environment variable in other
-/// release channels is a no-op.
-static ZED_DEVELOPMENT_USE_KEYCHAIN: LazyLock<bool> = LazyLock::new(|| {
-    std::env::var("ZED_DEVELOPMENT_USE_KEYCHAIN").is_ok_and(|value| !value.is_empty())
-});
 
 pub struct ZedCredentialsProvider(pub Arc<dyn CredentialsProvider>);
 
@@ -42,64 +34,20 @@ pub fn global(cx: &App) -> Arc<dyn CredentialsProvider> {
         .unwrap_or_else(|| new(cx))
 }
 
-/// Returns a channel-namespaced system keychain provider.
-///
-/// This entry point never selects the plaintext development provider. It is
-/// not the sovereign identity custody API: the generic provider copies secret
-/// bytes into ordinary vectors. Identity custody must use the typed, direct
-/// keyring boundary introduced with the signer.
-pub fn system_keychain(cx: &App) -> Arc<dyn CredentialsProvider> {
-    new_with_sensitivity(cx, CredentialSensitivity::Sovereign)
+/// Returns a channel-namespaced private local credentials provider.
+pub fn local_credentials(cx: &App) -> Arc<dyn CredentialsProvider> {
+    new(cx)
 }
 
 fn new(cx: &App) -> Arc<dyn CredentialsProvider> {
-    new_with_sensitivity(cx, CredentialSensitivity::Normal)
-}
-
-fn new_with_sensitivity(
-    cx: &App,
-    sensitivity: CredentialSensitivity,
-) -> Arc<dyn CredentialsProvider> {
     let release_channel =
         ReleaseChannel::try_global(cx).unwrap_or(*release_channel::RELEASE_CHANNEL);
-    let backend = backend_for(release_channel, sensitivity, *ZED_DEVELOPMENT_USE_KEYCHAIN);
-
-    let inner: Arc<dyn CredentialsProvider> = match backend {
-        CredentialBackend::DevelopmentFile => Arc::new(DevelopmentCredentialsProvider::new()),
-        CredentialBackend::SystemKeychain => Arc::new(KeychainCredentialsProvider),
-    };
+    let inner: Arc<dyn CredentialsProvider> = Arc::new(LocalCredentialsProvider::new());
 
     Arc::new(NamespacedCredentialsProvider {
         namespace: release_channel.credential_namespace(),
         inner,
     })
-}
-
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
-enum CredentialSensitivity {
-    Normal,
-    Sovereign,
-}
-
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
-enum CredentialBackend {
-    DevelopmentFile,
-    SystemKeychain,
-}
-
-fn backend_for(
-    release_channel: ReleaseChannel,
-    sensitivity: CredentialSensitivity,
-    development_use_keychain: bool,
-) -> CredentialBackend {
-    if release_channel == ReleaseChannel::Dev
-        && sensitivity == CredentialSensitivity::Normal
-        && !development_use_keychain
-    {
-        CredentialBackend::DevelopmentFile
-    } else {
-        CredentialBackend::SystemKeychain
-    }
 }
 
 fn namespaced_credential_key(namespace: &str, url: &str) -> String {
@@ -153,86 +101,82 @@ impl CredentialsProvider for NamespacedCredentialsProvider {
     }
 }
 
-/// A credentials provider that stores credentials in the system keychain.
-struct KeychainCredentialsProvider;
-
-impl CredentialsProvider for KeychainCredentialsProvider {
-    fn read_credentials<'a>(
-        &'a self,
-        url: &'a str,
-        cx: &'a AsyncApp,
-    ) -> Pin<Box<dyn Future<Output = Result<Option<(String, Vec<u8>)>>> + 'a>> {
-        async move { cx.update(|cx| cx.read_credentials(url)).await }.boxed_local()
-    }
-
-    fn write_credentials<'a>(
-        &'a self,
-        url: &'a str,
-        username: &'a str,
-        password: &'a [u8],
-        cx: &'a AsyncApp,
-    ) -> Pin<Box<dyn Future<Output = Result<()>> + 'a>> {
-        async move {
-            cx.update(move |cx| cx.write_credentials(url, username, password))
-                .await
-        }
-        .boxed_local()
-    }
-
-    fn delete_credentials<'a>(
-        &'a self,
-        url: &'a str,
-        cx: &'a AsyncApp,
-    ) -> Pin<Box<dyn Future<Output = Result<()>> + 'a>> {
-        async move { cx.update(move |cx| cx.delete_credentials(url)).await }.boxed_local()
-    }
-}
-
-/// A credentials provider that stores credentials in a local file.
-///
-/// This MUST only be used in development, as this is not a secure way of storing
-/// credentials on user machines.
-///
-/// Its existence is purely to work around the annoyance of having to constantly
-/// re-allow access to the system keychain when developing Zed.
-struct DevelopmentCredentialsProvider {
+struct LocalCredentialsProvider {
     path: PathBuf,
+    access: Mutex<()>,
 }
 
-impl DevelopmentCredentialsProvider {
+impl LocalCredentialsProvider {
     fn new() -> Self {
-        let path = paths::config_dir().join("development_credentials");
+        Self::new_at(
+            paths::data_dir()
+                .join("credentials")
+                .join("credentials.json"),
+        )
+    }
 
-        Self { path }
+    fn new_at(path: PathBuf) -> Self {
+        Self {
+            path,
+            access: Mutex::new(()),
+        }
     }
 
     fn load_credentials(&self) -> Result<HashMap<String, (String, Vec<u8>)>> {
-        let json = std::fs::read(&self.path)?;
+        let json = match fs::read(&self.path) {
+            Ok(json) => json,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(HashMap::new()),
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("failed to read {}", self.path.display()));
+            }
+        };
         let credentials: HashMap<String, (String, Vec<u8>)> = serde_json::from_slice(&json)?;
 
         Ok(credentials)
     }
 
     fn save_credentials(&self, credentials: &HashMap<String, (String, Vec<u8>)>) -> Result<()> {
-        let json = serde_json::to_string(credentials)?;
-        std::fs::write(&self.path, json)?;
+        let parent = self
+            .path
+            .parent()
+            .context("local credentials path has no parent directory")?;
+        fs::create_dir_all(parent)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+
+            fs::set_permissions(parent, fs::Permissions::from_mode(0o700))?;
+        }
+
+        let json = serde_json::to_vec(credentials)?;
+        let mut file = AtomicWriteFile::open(&self.path)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+
+            file.as_file()
+                .set_permissions(fs::Permissions::from_mode(0o600))?;
+        }
+        file.write_all(&json)?;
+        file.commit()?;
 
         Ok(())
     }
 }
 
-impl CredentialsProvider for DevelopmentCredentialsProvider {
+impl CredentialsProvider for LocalCredentialsProvider {
     fn read_credentials<'a>(
         &'a self,
         url: &'a str,
         _cx: &'a AsyncApp,
     ) -> Pin<Box<dyn Future<Output = Result<Option<(String, Vec<u8>)>>> + 'a>> {
         async move {
-            Ok(self
-                .load_credentials()
-                .unwrap_or_default()
-                .get(url)
-                .cloned())
+            let _access = self
+                .access
+                .lock()
+                .map_err(|_| anyhow::anyhow!("local credentials lock is poisoned"))?;
+            Ok(self.load_credentials()?.get(url).cloned())
         }
         .boxed_local()
     }
@@ -245,7 +189,11 @@ impl CredentialsProvider for DevelopmentCredentialsProvider {
         _cx: &'a AsyncApp,
     ) -> Pin<Box<dyn Future<Output = Result<()>> + 'a>> {
         async move {
-            let mut credentials = self.load_credentials().unwrap_or_default();
+            let _access = self
+                .access
+                .lock()
+                .map_err(|_| anyhow::anyhow!("local credentials lock is poisoned"))?;
+            let mut credentials = self.load_credentials()?;
             credentials.insert(url.to_string(), (username.to_string(), password.to_vec()));
 
             self.save_credentials(&credentials)
@@ -259,6 +207,10 @@ impl CredentialsProvider for DevelopmentCredentialsProvider {
         _cx: &'a AsyncApp,
     ) -> Pin<Box<dyn Future<Output = Result<()>> + 'a>> {
         async move {
+            let _access = self
+                .access
+                .lock()
+                .map_err(|_| anyhow::anyhow!("local credentials lock is poisoned"))?;
             let mut credentials = self.load_credentials()?;
             credentials.remove(url);
 
@@ -273,34 +225,7 @@ mod tests {
     use std::collections::HashSet;
 
     use super::*;
-
-    #[test]
-    fn sovereign_credentials_always_use_the_system_keychain() {
-        for release_channel in ReleaseChannel::ALL {
-            for development_use_keychain in [false, true] {
-                assert_eq!(
-                    backend_for(
-                        release_channel,
-                        CredentialSensitivity::Sovereign,
-                        development_use_keychain,
-                    ),
-                    CredentialBackend::SystemKeychain
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn normal_development_credentials_retain_the_development_provider() {
-        assert_eq!(
-            backend_for(ReleaseChannel::Dev, CredentialSensitivity::Normal, false),
-            CredentialBackend::DevelopmentFile
-        );
-        assert_eq!(
-            backend_for(ReleaseChannel::Dev, CredentialSensitivity::Normal, true),
-            CredentialBackend::SystemKeychain
-        );
-    }
+    use tempfile::TempDir;
 
     #[test]
     fn credential_keys_are_isolated_by_release_channel() {
@@ -316,5 +241,56 @@ mod tests {
             keys.iter()
                 .all(|key| key.starts_with("com.openagents.omega"))
         );
+    }
+
+    #[test]
+    fn local_credentials_are_private_and_round_trip() {
+        let temporary_directory = TempDir::new().expect("create temporary directory");
+        let path = temporary_directory
+            .path()
+            .join("credentials")
+            .join("credentials.json");
+        let provider = LocalCredentialsProvider::new_at(path.clone());
+        let mut credentials = HashMap::new();
+        credentials.insert(
+            "com.openagents.omega.dev:https://example.com".to_owned(),
+            ("account".to_owned(), b"secret".to_vec()),
+        );
+
+        provider
+            .save_credentials(&credentials)
+            .expect("save local credentials");
+        assert_eq!(
+            provider.load_credentials().expect("load local credentials"),
+            credentials
+        );
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+
+            let directory_mode = fs::metadata(path.parent().expect("credentials parent"))
+                .expect("read credentials directory metadata")
+                .permissions()
+                .mode()
+                & 0o777;
+            let file_mode = fs::metadata(path)
+                .expect("read credentials file metadata")
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(directory_mode, 0o700);
+            assert_eq!(file_mode, 0o600);
+        }
+    }
+
+    #[test]
+    fn corrupt_local_credentials_are_not_treated_as_empty() {
+        let temporary_directory = TempDir::new().expect("create temporary directory");
+        let path = temporary_directory.path().join("credentials.json");
+        fs::write(&path, b"not json").expect("write corrupt credentials");
+        let provider = LocalCredentialsProvider::new_at(path);
+
+        assert!(provider.load_credentials().is_err());
     }
 }

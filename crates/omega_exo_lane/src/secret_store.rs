@@ -1,10 +1,7 @@
 //! Which key opens the lane's root. `OMEGA-DELTA-0126`, omega#112.
 //!
 //! Exo encrypts the provider credentials in its state root, and the key that
-//! opens them does not live in the root: it lives in the macOS keychain, or in
-//! a file whose path Exo learns from its environment. Nothing in the root says
-//! which — the ciphertext envelope on disk is byte-identical either way — so a
-//! reader cannot infer it and a lane that does not carry it is guessing.
+//! opens them is a file whose path Exo learns from its environment.
 //!
 //! Before this existed, `connect_configured_lane` built its child command with
 //! `env: None` and the `exo acp` child inherited whatever Omega itself was
@@ -17,7 +14,7 @@
 //! # What this type is, and is not
 //!
 //! It is a *name for a key*, in the same sense that [`ExoRoot`] is a name for a
-//! directory. It has no method that reads a key, opens a keychain, or touches
+//! directory. It has no method that reads a key or touches
 //! the file it names. What it produces is [`ExoSecretStore::env`] — the two
 //! variables Exo's own CLI documents (`EXO_SECRET_BACKEND`,
 //! `EXO_MASTER_KEY_PATH`) — and handing an environment to a child process is
@@ -41,19 +38,9 @@ pub const MASTER_KEY_PATH_ENV_VAR: &str = "EXO_MASTER_KEY_PATH";
 /// The value `EXO_SECRET_BACKEND` takes for a file-backed root.
 pub const FILE_BACKEND: &str = "file";
 
-/// The value `EXO_SECRET_BACKEND` takes for a keychain-backed root.
-pub const APPLE_KEYCHAIN_BACKEND: &str = "apple-keychain";
-
 /// Where the key that opens a root's secrets is kept.
-///
-/// Closed, and closed on Exo's own two backends rather than on a string,
-/// because an unrecognised backend name reaching Exo's command line is a turn
-/// that fails at the model call — the latest possible moment — and a person
-/// who mistyped one is owed the refusal at the lane file instead.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ExoSecretStore {
-    /// The macOS keychain. Exo's default on this platform.
-    AppleKeychain,
     /// A master key file.
     ///
     /// `master_key` is `None` when the lane leaves the path to Exo's own
@@ -68,23 +55,16 @@ impl ExoSecretStore {
     /// The backend name Exo's CLI accepts, for `EXO_SECRET_BACKEND`.
     #[must_use]
     pub const fn backend_name(&self) -> &'static str {
-        match self {
-            Self::AppleKeychain => APPLE_KEYCHAIN_BACKEND,
-            Self::File { .. } => FILE_BACKEND,
-        }
+        FILE_BACKEND
     }
 
     /// The store this backend name and key path stand for.
     ///
     /// `None` for a backend name Exo does not have. A key path without a
-    /// backend name is a file-backed store — naming a master key file and
-    /// leaving the backend to default to the keychain is not a configuration
-    /// anybody means, and Exo's own error for it is the decryption failure this
-    /// whole type exists to stop.
+    /// backend name is a file-backed store.
     #[must_use]
     pub fn parse(backend: Option<&str>, master_key: Option<&Path>) -> Option<Self> {
         match backend.map(str::trim) {
-            Some(APPLE_KEYCHAIN_BACKEND) => Some(Self::AppleKeychain),
             Some(FILE_BACKEND) => Some(Self::File {
                 master_key: master_key.map(Path::to_path_buf),
             }),
@@ -98,10 +78,8 @@ impl ExoSecretStore {
     /// The variables the `exo` child is launched with.
     ///
     /// Additive: these are set on top of the environment the child would have
-    /// inherited, so a lane that names a store overrides an ambient one and a
-    /// lane that names none changes nothing. Never a value read out of a
-    /// keychain or a key file — only the two paths Exo uses to find them
-    /// itself.
+    /// inherited, so a lane that names a store overrides an ambient one. Never
+    /// a value read out of a key file — only the path Exo uses to find it.
     #[must_use]
     pub fn env(&self) -> Vec<(String, String)> {
         let mut env = vec![(
@@ -157,18 +135,9 @@ mod tests {
     }
 
     #[test]
-    fn a_keychain_store_names_the_backend_and_no_path() {
-        let store = ExoSecretStore::AppleKeychain;
-
-        assert_eq!(
-            store.env(),
-            vec![("EXO_SECRET_BACKEND".to_owned(), "apple-keychain".to_owned())]
-        );
-    }
-
-    #[test]
     fn a_backend_exo_does_not_have_is_refused_rather_than_forwarded() {
         assert_eq!(ExoSecretStore::parse(Some("vault"), None), None);
+        assert_eq!(ExoSecretStore::parse(Some("apple-keychain"), None), None);
         assert_eq!(ExoSecretStore::parse(Some(""), None), None);
     }
 
@@ -201,7 +170,6 @@ mod tests {
             "File::",
             "read_to_string",
             "OpenOptions",
-            "keyring",
             "Entry::new",
         ] {
             assert!(
