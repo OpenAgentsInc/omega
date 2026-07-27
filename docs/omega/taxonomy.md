@@ -227,7 +227,9 @@ header value is always clickable: it chooses a folder when none is attached and
 changes the directory after one has been chosen. Only `--full-editor` opens the
 editor. `--diff`, `--dev-container`, and `--demo-workroom` describe editor-only
 work and are refused unless `--full-editor` is also present — see
-`OMEGA-DELTA-0116`.
+`OMEGA-DELTA-0116`. Local development preserves the same default:
+`script/zed-local` opens zero base unless its caller explicitly passes
+`--full-editor`.
 
 ### Words for evidence
 

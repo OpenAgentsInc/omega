@@ -15,6 +15,9 @@ SUMMARY
 
   $ script/zed-local -2 ssh://your-ssh-uri-here
 
+  Omega starts in zero base unless --full-editor is passed explicitly after
+  the launcher options.
+
 OPTIONS
   --help            Print this help message
   --release         Build Zed in release mode
@@ -198,14 +201,10 @@ setTimeout(() => {
     } else if (i != 0 && othersOnPreview) {
       binaryPath = "/Applications/Zed Preview.app/Contents/MacOS/zed";
     }
-    // OMEGA-DELTA-0052. `omega` with no arguments opens zero base, which is
-    // one Exo thread and no editor. Every instance after the first is spawned
-    // with no arguments, and this harness exists to put several editors on one
-    // screen, so each Omega instance asks for the editor explicitly. Only
-    // Omega: upstream Zed does not know the flag and would refuse to start.
-    const isOmega = binaryPath === zedBinary;
-    const editorFlag = isOmega ? ["--full-editor"] : [];
-    const instanceArgs = i == 0 ? [...editorFlag, ...args] : editorFlag;
+    // OMEGA-DELTA-0116. The development launcher preserves Omega's default
+    // mode. Arguments belong to the first instance exactly as the help text
+    // says; a full editor is opened only when the caller passes its flag.
+    const instanceArgs = i == 0 ? args : [];
     spawn(binaryPath, instanceArgs, {
       stdio: "inherit",
       env: Object.assign({}, process.env, {

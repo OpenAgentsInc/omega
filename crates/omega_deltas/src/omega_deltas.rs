@@ -822,6 +822,7 @@ pub const SUBAGENT_TRANSCRIPT_ACCESS_VARIANTS: &[&str] = &[
 
 /// OMEGA-DELTA-0036. The uninstall script embedded in the shipped `cli`.
 pub const UNINSTALL_SCRIPT_PATH: &str = "script/uninstall.sh";
+pub const LOCAL_LAUNCHER_PATH: &str = "script/zed-local";
 
 /// OMEGA-DELTA-0036. Where the removal plan is derived from `paths::`.
 pub const UNINSTALL_PLAN_PATH: &str = "crates/cli/src/uninstall.rs";
@@ -9847,15 +9848,16 @@ mod tests {
     /// The three facts, and why each is separately load-bearing:
     ///
     /// **The composer does not absorb an empty thread.** Upstream gives the
-    /// composer the whole panel when there are no messages. In a dock-sized
-    /// panel that reads as a roomy new-thread surface; zoomed to the window,
-    /// which is what zero base does, it put the text field at the top of the
-    /// screen with a field of dead black under it.
+    /// composer the whole panel when there are no messages. Zoomed to the
+    /// window in zero base, it put the text field at the top with a field of
+    /// dead black under it. In a wide full-editor split, it turned the input
+    /// into a full-height left column and separated the field from its controls
+    /// by the same dead space.
     ///
     /// **The empty transcript takes that space instead.** The inverse of the
-    /// same rule, in the other branch. Both are needed: with only the first,
-    /// nothing claims the space and the composer floats; with only the second,
-    /// two elements both expand.
+    /// same rule, in the other branch and in both modes. Both are needed: with
+    /// only the first, nothing claims the space and the composer floats; with
+    /// only the second, two elements both expand.
     ///
     /// **The conversation is drawn before the composer.** The order in the
     /// column is the "grows upward" claim itself, and it is the one fact a
@@ -9868,13 +9870,12 @@ mod tests {
         let source = uncommented(&source);
 
         assert!(
-            source.contains(
-                "let composer_fills_panel = !has_messages && !omega_zero_base::is_active();"
-            ),
-            "OMEGA-DELTA-0100: {} lets the composer absorb an empty thread in \
-             zero base again. Upstream's rule reads as a roomy new-thread \
-             surface in a dock-sized panel; zoomed to the whole window it puts \
-             the input at the top of the screen with dead black beneath it.",
+            source.contains("let fills_container = editor_expanded;")
+                && !source.contains("composer_fills_panel"),
+            "OMEGA-DELTA-0100: {} lets the composer absorb an empty thread \
+             again. The input must hug its field and controls in both zero base \
+             and a full-editor split; only an explicit expand action may give \
+             the composer the available height.",
             path.display()
         );
 
@@ -9883,13 +9884,14 @@ mod tests {
         // would stay green with the empty-transcript branch deleted — which is
         // the branch that does the pushing.
         let empty = source
-            .split_once("} else if omega_zero_base::is_active() {")
+            .split_once("if has_messages {")
+            .and_then(|(_, rest)| rest.split_once("} else {"))
             .map(|(_, rest)| rest)
             .unwrap_or_else(|| {
                 panic!(
-                    "OMEGA-DELTA-0100: {} no longer has a zero-base branch for \
-                     an empty transcript, so nothing claims the space and the \
-                     composer floats back up.",
+                    "OMEGA-DELTA-0100: {} no longer has an empty-transcript \
+                     branch, so nothing claims the space and the composer \
+                     floats back up.",
                     path.display()
                 )
             });
@@ -9897,9 +9899,9 @@ mod tests {
         assert!(
             empty.contains("this.flex_1().size_full().into_any()"),
             "OMEGA-DELTA-0100: {}'s empty transcript no longer takes the space \
-             above the composer in zero base. The composer gave that space up \
-             in the check above; if nothing else claims it the input floats to \
-             the top, which is the layout the owner asked to be rid of.",
+             above the composer. The composer gave that space up in the check \
+             above; if nothing else claims it the input floats to the top, \
+             which is the layout the owner asked to be rid of.",
             path.display()
         );
 
@@ -15556,6 +15558,21 @@ mod tests {
              editor-only option must be refused unless that flag is also \
              present; no other argument may name the mode.",
             startup_path.display()
+        );
+
+        let launcher_path = repository_path(LOCAL_LAUNCHER_PATH);
+        let launcher = std::fs::read_to_string(&launcher_path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", launcher_path.display()));
+        let launcher = uncommented(&launcher);
+        assert!(
+            launcher.contains("const instanceArgs = i == 0 ? args : [];")
+                && !launcher.contains("const editorFlag")
+                && !launcher.contains("isOmega ? [\"--full-editor\"]"),
+            "OMEGA-DELTA-0116: {} changes Omega's mode without the caller \
+             asking. Development is still Omega: a local launcher must preserve \
+             zero base by default and pass `--full-editor` only when the caller \
+             supplied it.",
+            launcher_path.display()
         );
         // The half of `OMEGA-DELTA-0052` this must not have quietly bought its
         // repair with: the default still points at zero base, and the flag is

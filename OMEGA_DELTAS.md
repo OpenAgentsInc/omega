@@ -3938,20 +3938,22 @@ than merely stated.
 
 - **Upstream Zed:** an empty thread gives the composer the whole panel. The
   message list collapses to nothing, the composer takes `flex_1().size_full()`,
-  and the column between them is `justify_between()`. In a dock-sized panel that
-  reads as a roomy new-thread surface, which is what it is for.
+  and the column between them is `justify_between()`.
 - **Omega, before this:** the rule was already inverted in zero base, by omega#99
   and omega#100, and nothing asserted it. Zero base zooms the panel to the whole
   window, and at that size upstream's rule put the text field at the top of the
   screen, the model and pin dropdowns at the very bottom, and a field of dead
   black between them. The owner asked for the input to sit at the bottom, the
   way a chat surface puts it.
-- **Omega now:** in zero base the composer hugs its content and the transcript
-  above it takes the remaining space, so a thread grows upward from a composer
-  that stays where it is. Outside zero base the upstream rule is untouched.
+- **Omega now:** the composer hugs its content in both modes unless the reader
+  explicitly expands it. The empty transcript above it takes the remaining
+  space, so a thread grows upward from a composer that stays at the bottom. In
+  a full-editor split the field stays attached to its controls instead of
+  becoming a full-height left column.
 - **Three facts produce it, and each is separately load-bearing.**
-  `composer_fills_panel` is `!has_messages && !omega_zero_base::is_active()`, so
-  the composer gives the space up. The empty-transcript branch takes it, with
+  `fills_container` is exactly `editor_expanded`, so an empty thread cannot
+  absorb the panel in either mode. The empty-transcript branch takes the space
+  in both modes, with
   `flex_1().size_full()` on a thread with no messages — without that, nothing
   claims the space and the composer floats back up; without the first, two
   elements both expand. And the conversation is drawn *before* the composer in
@@ -3982,8 +3984,7 @@ than merely stated.
 - **What this does not cover.** It is a source check and it proves no pixel. The
   acceptance still asks for a capture somebody opened, and the capture still has
   to come from the visual runner, which builds its workspace in-process and
-  never takes the launch path. It says nothing about the composer *outside* zero
-  base, where the upstream rule stands.
+  never takes the launch path.
 
 ### OMEGA-DELTA-0102 — Exo's protocol is enumerated once, and decided about twice
 
@@ -4920,6 +4921,11 @@ than merely stated.
   draw, so each declares `--full-editor` as a clap prerequisite. Omitting it is
   a visible command-line error. Intentional use of an editor-only option does
   not turn that option into the editor's own mode flag.
+- **Development uses the same default.** `script/zed-local` used to append
+  `--full-editor` to every local Omega process, so "open in dev mode" meant
+  "silently opt out of zero base." It now passes the caller's arguments to the
+  first instance unchanged and passes no arguments to the others. A developer
+  gets the editor only by typing the same explicit flag as everyone else.
 - **A path that no longer changes the mode has to do something.** Otherwise the
   repair turns `omega <path>` from "opens the wrong product" into "does nothing
   visible", which is not obviously better. `resolve_zero_base_project_arguments`

@@ -4457,26 +4457,21 @@ impl ThreadView {
         };
 
         let max_content_width = AgentSettings::get_global(cx).max_content_width;
-        let has_messages = self.list_state.item_count() > 0;
-
-        // omega#99. The composer sits at the bottom in zero base, always.
+        // omega#99. The composer sits at the bottom, always.
         //
         // Upstream's empty thread gives the composer the whole panel —
         // `flex_1().size_full()` here, `h_full()` on the column below, and
-        // `justify_between()` between them. In a dock-sized panel that reads as
-        // a roomy new-thread surface. In zero base the panel is zoomed to the
-        // whole window, so the same rule put the text field at the top of the
-        // screen, the model and pin dropdowns at the very bottom, and a field
-        // of dead black between them. The owner asked for the input to sit at
-        // the bottom, the way a chat surface puts it, rather than at the top.
+        // `justify_between()` between them. Zero base first exposed the defect
+        // because its panel fills the window. The same rule is still wrong in
+        // the full editor: an empty thread in a wide split turns the input into
+        // a full-height column, separating the field from its controls with a
+        // field of dead black.
         //
-        // So in zero base the composer hugs its content and the transcript
-        // above it takes the remaining space — see the `conversation` branch in
-        // `Render`, which expands on an empty thread for the same reason. The
-        // editor and its footer row stay together, and the empty space is
-        // above them where it belongs.
-        let composer_fills_panel = !has_messages && !omega_zero_base::is_active();
-        let fills_container = composer_fills_panel || editor_expanded;
+        // The composer therefore always hugs its content unless the reader
+        // explicitly expands it. The empty transcript takes the remaining
+        // space in both modes, keeping the field and footer controls together
+        // at the bottom.
+        let fills_container = editor_expanded;
 
         // omega#100. The composer's surface is the width of the conversation,
         // not the width of the window.
@@ -4512,14 +4507,8 @@ impl ThreadView {
             .px_2()
             .justify_center()
             .on_action(cx.listener(Self::handle_message_editor_move_up))
-            .map(|this| {
-                if !composer_fills_panel {
-                    this.on_action(cx.listener(Self::expand_message_editor))
-                        .when(editor_expanded, |this| this.h(vh(0.8, window)))
-                } else {
-                    this.flex_1().size_full()
-                }
-            })
+            .on_action(cx.listener(Self::expand_message_editor))
+            .when(editor_expanded, |this| this.h(vh(0.8, window)))
             .child(
                 v_flex()
                     .when_some(max_content_width, |this, max_w| this.flex_basis(max_w))
@@ -13582,15 +13571,13 @@ impl Render for ThreadView {
                         .child(self.render_entries(cx))
                         .vertical_scrollbar_for(&list_state, window, cx)
                         .into_any()
-                } else if omega_zero_base::is_active() {
-                    // omega#99. An empty transcript still takes the space in
-                    // zero base, so the composer below it is pushed to the
-                    // bottom of the window rather than floating at the top.
-                    // Upstream lets the composer absorb this space instead;
-                    // see `render_message_editor` for why that inverts here.
-                    this.flex_1().size_full().into_any()
                 } else {
-                    this.into_any()
+                    // omega#99. An empty transcript still takes the available
+                    // space, so the compact composer below it stays at the
+                    // bottom rather than floating at the top. Upstream lets the
+                    // composer absorb this space instead; see
+                    // `render_message_editor` for why that inverts here.
+                    this.flex_1().size_full().into_any()
                 }
             });
         let conversation = match (exo, self.exo_inspector_expanded) {
