@@ -13023,7 +13023,6 @@ impl ThreadView {
     /// `pin_session`, and an engine lane — the only Full Auto authority among
     /// the three — is still reachable by a pin and by nothing else.
     fn render_zero_base_executor_bar(&self, cx: &mut Context<Self>) -> AnyElement {
-        let disclosure = self.executor_disclosure(cx);
         let exo = self.exo_connection(cx);
         let inspector_open = self.exo_inspector_expanded;
         let turn_phase = exo.as_ref().map(|exo| exo.turn().phase);
@@ -13039,37 +13038,6 @@ impl ThreadView {
                 h_flex()
                     .min_w_0()
                     .gap_1()
-                    // `OMEGA-DELTA-0094`, omega#107. Who can read this, first.
-                    //
-                    // Ahead of the executor line rather than beside the model
-                    // selector, because the order in this row is the order a
-                    // person needs the answers in. Which runtime spent the
-                    // budget matters after the turn; whether the sentence being
-                    // typed is private matters before it.
-                    //
-                    // Read from `self.root_thread_id`, which is the thread's
-                    // own identity, and never from the selection. A subagent
-                    // takes its root's audience because it is the same
-                    // conversation.
-                    .child(crate::omega_audience_control::render_audience_control(
-                        self.root_thread_id,
-                        cx,
-                    ))
-                    .child(
-                        Icon::new(match exo {
-                            Some(_) => IconName::BoltOutlined,
-                            None => self.agent_icon,
-                        })
-                        .size(IconSize::XSmall)
-                        .color(Color::Muted),
-                    )
-                    // OMEGA-DELTA-0021. From the record, on every draw.
-                    .child(
-                        Label::new(disclosure.label())
-                            .size(LabelSize::XSmall)
-                            .color(Color::Muted)
-                            .truncate(),
-                    )
                     // omega#99. The turn's own state, only while there is a
                     // turn. Permanent chrome that says "idle" at a person all
                     // day is a knob; a dot that appears when the executor
@@ -13125,7 +13093,6 @@ impl ThreadView {
             )
             .into_any_element()
     }
-
     /// The one line zero base says when something is genuinely missing.
     ///
     /// omega#99. `None` whenever there is nothing to say, which is the point:
