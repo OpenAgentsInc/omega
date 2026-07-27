@@ -26,7 +26,8 @@ use crate::completion_provider::{AvailableSkill, PromptLocalCommand, pluralize};
 // `OMEGA-DELTA-0080`. The ceiling on a tool call's result body, and the label
 // of the control that lifts it.
 use crate::entry_view_state::{
-    COLLAPSED_TOOL_OUTPUT_LINES, tool_output_ceiling_is_toggleable, tool_output_ceiling_label,
+    COLLAPSED_TOOL_OUTPUT_LINES, UNTITLED_THOUGHT_HEADING, tool_output_ceiling_is_toggleable,
+    tool_output_ceiling_label,
 };
 use crate::message_editor::SharedSessionCapabilities;
 use crate::ui::{
@@ -7630,7 +7631,37 @@ impl ThreadView {
         window: &Window,
         cx: &Context<Self>,
     ) -> AnyElement {
-        let header_id = SharedString::from(format!("thinking-block-header-{}", entry_ix));
+        // `OMEGA-DELTA-0124`. The header says the thought, not the word
+        // "Thinking".
+        //
+        // Every block was headed with the same word, and the thought's own
+        // title sat under it in bold, so a run of five thoughts read as five
+        // identical labels with the real content indented beneath each. The
+        // owner, looking at three in a row: *"rather than showing 'Thinking'
+        // each time, where it says Thinking I want it showing the actual
+        // thought, not on a separate line"*.
+        //
+        // The title is not read off `chunk` here, and that is the whole design.
+        // Reading it here is what shipped the defect: the header showed the
+        // title and the body rendered the same `Entity<Markdown>` it was read
+        // from, so every thought rendered its title twice. `ThoughtView` is
+        // built once per arriving chunk in `EntryViewState`, where there is a
+        // `&mut App` to build a second markdown with and somewhere to keep it —
+        // and its body has the title lines removed, so there is nothing left
+        // down there to draw them from. See `OMEGA_DELTAS.md`.
+        //
+        // A block can hold more than one thought, and the owner saw that too:
+        // two titles under a single lightbulb, the second reading as a
+        // subheading of the first. His call — *"if theres 2 thoughts in a single
+        // 'thinking block' ... u can just show that same lightbulb line twice"*
+        // — so this draws one row per title.
+        //
+        // The ids carry `chunk_ix`. They did not, and two thoughts in one
+        // message are siblings, so their headers shared an element id and
+        // therefore their hover and click state.
+        let header_id = SharedString::from(format!("thinking-block-header-{entry_ix}-{chunk_ix}"));
+        let disclosure_id =
+            SharedString::from(format!("thinking-block-expand-{entry_ix}-{chunk_ix}"));
         let card_header_id = SharedString::from("inner-card-header");
 
         let key = (entry_ix, chunk_ix);
@@ -7638,9 +7669,19 @@ impl ThreadView {
         let entry_view_state = self.entry_view_state.read(cx);
         let (is_open, is_constrained) = entry_view_state.thinking_block_state(key, cx);
         let should_auto_scroll = entry_view_state.is_auto_expanded_thinking_block(key);
-        let scroll_handle = entry_view_state
-            .entry(entry_ix)
-            .and_then(|entry| entry.scroll_handle_for_assistant_message_chunk(chunk_ix));
+        let entry = entry_view_state.entry(entry_ix);
+        let scroll_handle =
+            entry.and_then(|entry| entry.scroll_handle_for_assistant_message_chunk(chunk_ix));
+        let thought = entry.and_then(|entry| entry.thought_for_assistant_message_chunk(chunk_ix));
+
+        // Nothing has been synced for this chunk yet. Falling back to the whole
+        // chunk under the old word is the behaviour that shipped for a year:
+        // the header is not the thought, but no title is drawn twice.
+        let headings = thought.map_or_else(
+            || vec![SharedString::new_static(UNTITLED_THOUGHT_HEADING)],
+            |thought| thought.headings().to_vec(),
+        );
+        let body = thought.map_or(Some(chunk), |thought| thought.body().cloned());
 
         if should_auto_scroll {
             if let Some(ref handle) = scroll_handle {
@@ -7650,47 +7691,87 @@ impl ThreadView {
 
         let panel_bg = cx.theme().colors().panel_background;
 
+        // One muted line, in the size and colour the word "Thinking" had.
+        // `min_w_0` and `truncate` together are what keeps a long title from
+        // wrapping to a second row or pushing the disclosure off the end.
+        let heading_row = |title: SharedString| {
+            h_flex()
+                .h(window.line_height() - px(2.))
+                .min_w_0()
+                .gap_1p5()
+                .overflow_hidden()
+                .child(
+                    Icon::new(IconName::ToolThink)
+                        .size(IconSize::Small)
+                        .color(Color::Muted),
+                )
+                .child(
+                    div()
+                        .min_w_0()
+                        .text_size(self.tool_name_font_size())
+                        .text_color(cx.theme().colors().text_muted)
+                        .truncate()
+                        .child(title),
+                )
+        };
+
+        let mut headings = headings.into_iter();
+        let first_heading = headings
+            .next()
+            .unwrap_or_else(|| SharedString::new_static(UNTITLED_THOUGHT_HEADING));
+        let extra_headings = headings.enumerate().collect::<Vec<_>>();
+
         v_flex()
             .gap_1()
             .child(
-                h_flex()
-                    .id(header_id)
+                v_flex()
+                    // The group moved out to cover every row, so hovering the
+                    // second thought's line reveals the same disclosure the
+                    // first one's does.
                     .group(&card_header_id)
-                    .relative()
                     .w_full()
-                    .pr_1()
-                    .justify_between()
                     .child(
                         h_flex()
-                            .h(window.line_height() - px(2.))
-                            .gap_1p5()
-                            .overflow_hidden()
+                            .id(header_id)
+                            .relative()
+                            .w_full()
+                            .pr_1()
+                            .gap_1()
+                            .justify_between()
+                            .child(heading_row(first_heading))
                             .child(
-                                Icon::new(IconName::ToolThink)
-                                    .size(IconSize::Small)
-                                    .color(Color::Muted),
+                                Disclosure::new(disclosure_id, is_open)
+                                    .opened_icon(IconName::ChevronUp)
+                                    .closed_icon(IconName::ChevronDown)
+                                    .visible_on_hover(&card_header_id)
+                                    .on_click(cx.listener(
+                                        move |this, _event: &ClickEvent, window, cx| {
+                                            this.toggle_thinking_block_expansion(key, window, cx);
+                                        },
+                                    )),
                             )
-                            .child(
-                                div()
-                                    .text_size(self.tool_name_font_size())
-                                    .text_color(cx.theme().colors().text_muted)
-                                    .child("Thinking"),
-                            ),
-                    )
-                    .child(
-                        Disclosure::new(("expand", entry_ix), is_open)
-                            .opened_icon(IconName::ChevronUp)
-                            .closed_icon(IconName::ChevronDown)
-                            .visible_on_hover(&card_header_id)
                             .on_click(cx.listener(move |this, _event: &ClickEvent, window, cx| {
                                 this.toggle_thinking_block_expansion(key, window, cx);
                             })),
                     )
-                    .on_click(cx.listener(move |this, _event: &ClickEvent, window, cx| {
-                        this.toggle_thinking_block_expansion(key, window, cx);
+                    .children(extra_headings.into_iter().map(|(heading_ix, title)| {
+                        h_flex()
+                            .id(SharedString::from(format!(
+                                "thinking-block-heading-{entry_ix}-{chunk_ix}-{heading_ix}"
+                            )))
+                            .w_full()
+                            .pr_1()
+                            .child(heading_row(title))
+                            .on_click(cx.listener(move |this, _event: &ClickEvent, window, cx| {
+                                this.toggle_thinking_block_expansion(key, window, cx);
+                            }))
                     })),
             )
-            .when(is_open, |this| {
+            // A body of titles alone renders nothing, which is what a thought
+            // is for the moment between its title arriving and its first
+            // sentence. The header still has its row.
+            .when(is_open && body.is_some(), |this| {
+                let body = body.expect("guarded by `body.is_some()`");
                 this.child(
                     div()
                         .when(is_constrained, |this| this.relative())
@@ -7707,7 +7788,7 @@ impl ThreadView {
                                 })
                                 .overflow_hidden()
                                 .child(self.render_markdown(
-                                    chunk,
+                                    body,
                                     MarkdownStyle::themed(MarkdownFont::Agent, window, cx),
                                     cx,
                                 )),

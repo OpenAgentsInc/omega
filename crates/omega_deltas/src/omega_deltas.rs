@@ -112,11 +112,21 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0121",
     "OMEGA-DELTA-0122",
     "OMEGA-DELTA-0123",
+    "OMEGA-DELTA-0124",
 ];
 
 /// OMEGA-DELTA-0119. The read-only sheet a transcript file link opens in a
 /// mode that draws no editor.
 pub const FILE_PEEK_PATH: &str = "crates/agent_ui/src/omega_file_peek.rs";
+
+/// OMEGA-DELTA-0124. Where a thinking block is split into the muted lines its
+/// header shows and the body those lines have been taken out of.
+pub const THINKING_BLOCK_SPLIT_PATH: &str = "crates/agent_ui/src/entry_view_state.rs";
+
+/// OMEGA-DELTA-0124. Where the thread search collects the markdown it
+/// highlights.
+pub const THREAD_SEARCH_BAR_PATH: &str =
+    "crates/agent_ui/src/conversation_view/thread_search_bar.rs";
 
 /// OMEGA-DELTA-0106. The community audience: a Forge repository, its members,
 /// and the signed records they send.
@@ -16450,6 +16460,154 @@ mod tests {
              mode's safety argument is that hiding a surface is safe because \
              something refuses it out loud; this is the out-loud half.",
             ui_path.display()
+        );
+    }
+    // ------ OMEGA-DELTA-0124 — the header says the thought, and says it once
+
+    /// OMEGA-DELTA-0124. A thinking block's header carries the thought's own
+    /// title, and the body under it does not carry it a second time.
+    ///
+    /// The owner, on a live build, looking at three identical "Thinking" labels
+    /// with the real content indented under each: *"rather than showing
+    /// 'Thinking' each time, where it says Thinking I want it showing the
+    /// actual thought, not on a separate line"*.
+    ///
+    /// **The obvious implementation is the defect, and it shipped.** Reading
+    /// the title in `render_thinking_block` and putting it in the header is one
+    /// line; the body then renders the *same* `Entity<Markdown>` the title was
+    /// read from, so every thought drew its title twice — muted above, bold
+    /// below. It was reverted in `2b6e004d1c`, and this test is what stops the
+    /// same one line from being written a third time.
+    ///
+    /// So the checks below are about *where the words come from*, not about how
+    /// the row looks. The header must draw the split view's headings, the body
+    /// must draw the split view's body, and the split must remove what it
+    /// hoists.
+    #[test]
+    fn a_thoughts_title_reaches_the_header_and_is_not_left_in_the_body() {
+        let split_path = repository_path(THINKING_BLOCK_SPLIT_PATH);
+        let split_source = std::fs::read_to_string(&split_path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", split_path.display()));
+        let split = production_source(&split_source);
+
+        // 1. The split exists, and it is a split: the body it returns is what
+        //    is left after the titles are taken out. A version that returned
+        //    the titles and the untouched source would satisfy a check that
+        //    only looked for the function name.
+        assert!(
+            split.contains("pub(crate) fn split_thought(source: &str) -> SplitThought"),
+            "OMEGA-DELTA-0124: {} no longer splits a thinking block into its \
+             titles and a body. Without it the header and the body are the same \
+             text, and the title renders twice.",
+            split_path.display()
+        );
+        assert!(
+            split.contains("pub(crate) fn thought_title(line: &str) -> Option<&str>"),
+            "OMEGA-DELTA-0124: {} no longer decides what a title line is. \
+             Emphasis marks a title, not position — the second thought in a \
+             block is the second *emphasised* line — so this question is asked \
+             of every line and must stay askable on its own.",
+            split_path.display()
+        );
+
+        // 2. The split is cached, and rebuilt only when the text moves. A
+        //    thought streams token by token and `render_thinking_block` runs
+        //    every frame with `&self`; deriving there would build a `Markdown`
+        //    per frame per visible thought.
+        assert!(
+            split.contains("struct ThoughtView"),
+            "OMEGA-DELTA-0124: {} no longer keeps the split. The renderer holds \
+             `&self` and cannot memoise, so the only other place to do this \
+             work is per frame.",
+            split_path.display()
+        );
+        assert!(
+            without_whitespace(split).contains(&without_whitespace(
+                ".is_some_and(|thought| thought.source == source)"
+            )),
+            "OMEGA-DELTA-0124: the sync in {} no longer compares the source it \
+             derived from before re-deriving. Every finished thought in a turn \
+             is then re-split and re-parsed on every update for the rest of the \
+             turn.",
+            split_path.display()
+        );
+
+        // 3. The renderer draws the split, not the chunk. This is the check
+        //    that fails on the defect that shipped.
+        let view_path = repository_path(THREAD_VIEW_PATH);
+        let view_source = std::fs::read_to_string(&view_path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", view_path.display()));
+        // Read whole, not through `production_source`: `thread_view.rs` carries
+        // a `#[cfg(test)]` item near the top, so trimming at the first one
+        // would leave 483 lines and the check would pass by finding nothing.
+        let view = view_source.as_str();
+        let block = view
+            .split_once("fn render_thinking_block(")
+            .map(|(_, rest)| rest)
+            .unwrap_or_else(|| {
+                panic!(
+                    "OMEGA-DELTA-0124: {} no longer has `render_thinking_block`.",
+                    view_path.display()
+                )
+            });
+        let block = block
+            .split_once("\n    fn ")
+            .map_or(block, |(body, _)| body);
+
+        assert!(
+            block.contains("thought_for_assistant_message_chunk(chunk_ix)"),
+            "OMEGA-DELTA-0124: {} no longer reads the split for the chunk it is \
+             drawing. Whatever it heads the block with, it is not the thought.",
+            view_path.display()
+        );
+        assert!(
+            block.contains("thought.headings().to_vec()"),
+            "OMEGA-DELTA-0124: the header in {} no longer draws the split's \
+             heading lines. One row per thought is the owner's own call for a \
+             block holding two: \"u can just show that same lightbulb line \
+             twice\".",
+            view_path.display()
+        );
+        assert!(
+            block.contains("thought.body().cloned()"),
+            "OMEGA-DELTA-0124: the body in {} no longer renders the split's \
+             body. If it renders the chunk instead, the chunk still holds the \
+             title the header is showing, and the thought draws its title \
+             twice — muted above and bold below. That is exactly what was \
+             shipped and reverted in `2b6e004d1c`.",
+            view_path.display()
+        );
+        assert!(
+            !block.contains("chunk.read(cx)"),
+            "OMEGA-DELTA-0124: {} reads the chunk's own source inside \
+             `render_thinking_block`. That is the one line the defect was: the \
+             header takes its words from the entity the body renders, and \
+             nothing removes them from it.",
+            view_path.display()
+        );
+        assert!(
+            !block.contains(".child(\"Thinking\")"),
+            "OMEGA-DELTA-0124: the header in {} says the word \"Thinking\" \
+             literally again. The owner asked for the thought there; the word \
+             survives only as the fallback in `UNTITLED_THOUGHT_HEADING`, for a \
+             block that has arrived as markers and no words yet.",
+            view_path.display()
+        );
+
+        // 4. Search follows what is drawn. Highlights are source offsets, and
+        //    the body has lines removed from above them, so highlighting the
+        //    chunk while rendering the body lands on the wrong words.
+        let search_path = repository_path(THREAD_SEARCH_BAR_PATH);
+        let search_source = std::fs::read_to_string(&search_path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", search_path.display()));
+        let search = production_source(&search_source);
+        assert!(
+            search.contains("thought_for_assistant_message_chunk(chunk_ix)"),
+            "OMEGA-DELTA-0124: {} collects a thinking block's own markdown for \
+             search rather than the body that is rendered. A highlight is an \
+             offset into the source, and every title above it has been removed \
+             from what is on screen, so the highlight lands on the wrong words.",
+            search_path.display()
         );
     }
 }

@@ -5514,3 +5514,112 @@ than merely stated.
   focus, deliberately, because stealing focus from the composer to browse
   history is the trade the owner has not asked for. And it does not make the
   sidebar's open state persist: closing the process closes the sidebar.
+
+### OMEGA-DELTA-0124 — A thought's own title heads its block, and is not left underneath
+
+- **Upstream behaviour.** Upstream Zed heads every thinking block with the
+  literal word *"Thinking"*, an icon, and a disclosure. The model's own title
+  line renders inside the block, in bold, as the first thing under the header.
+
+- **What the owner saw.** Testing a live build, with three thoughts in a row on
+  screen: *"rather than showing 'Thinking' each time, where it says Thinking I
+  want it showing the actual thought, not on a separate line, and using the same
+  font color/size that 'Thinking' is now"*. A run of five thoughts reads as five
+  identical labels with the real content indented beneath each — the header
+  costs a row per thought and carries no information, and the one line that
+  would have told you what the thought was is the line below it.
+
+- **The obvious implementation is the defect, and it shipped.** Reading the
+  title in `render_thinking_block` and putting it in the header is a one-line
+  move, and it was made. Every thought then rendered its title **twice**: muted
+  in the header, and still bold in the body underneath. The cause is that the
+  header and the body draw from the *same* `Entity<Markdown>` — the one
+  `ContentBlock::markdown()` hands out, which is shared with the search bar, the
+  selection, the context menu and the copy path. There is nowhere in the
+  renderer to hide the title from the body. It was reverted in `2b6e004d1c`.
+
+- **Two ways out, and why this is the one taken.** The alternative was to teach
+  `MarkdownElement` to skip the root blocks that are titles, keeping one entity.
+  That is attractive — no second parse, no cache, and source offsets stay
+  identical, so search highlights and selection need no thought at all. It was
+  rejected on a case it cannot express: a title and its prose in **one
+  paragraph** (`**Title**\nprose`, no blank line between) is one root block, and
+  a renderer that skips blocks can only take all of it or none. Taking all of it
+  deletes the prose; taking none renders the title twice, which is the defect.
+  Removing the title *line* has no such case, because a line is the unit the
+  model actually writes titles in.
+
+- **So the body is a second markdown, derived.** `split_thought` takes a block's
+  source and returns the titles it found and the source with those lines
+  removed. `ThoughtView` holds the result and the source it was derived from,
+  and lives in `EntryViewState` — **not** in the renderer, which holds `&self`
+  on every frame and can neither build an entity nor memoise one. Deriving there
+  would construct a `Markdown` per frame per visible thought, and a thought
+  streams token by token. `EntryViewState::sync_entry` already runs once per
+  arriving update, compares the source, and does nothing when it has not moved.
+
+- **Emphasis marks a title, not position.** A block can hold more than one
+  thought, and the owner saw it: two titles under one lightbulb, the second
+  reading as a subheading of the first. His call — *"youll need to handle if
+  theres 2 thoughts in a single 'thinking block' in which case u can just show
+  that same lightbulb line twice its ok"* — so the header draws one muted row
+  per title. The second thought is the second *emphasised* line, not the second
+  line, so every line is asked rather than the first one.
+
+- **What is deliberately not hoisted.**
+  - A **streaming title has no closing marker** — `**Search` arrives with
+    nothing after it and stays that way until the next token. It counts, because
+    waiting for the close would leave the header blank for the whole time a
+    thought is being written, which is the only time anybody is watching it.
+  - A **closed `**` run must own its whole line.** `**Note** that the file is
+    gone` is a bold lead-in inside prose; hoisting it would put half a sentence
+    in the header and delete it from the paragraph it belongs to.
+  - A **`#` inside fenced or indented code is a comment.** Fences are tracked,
+    and a line four spaces in is an indented code block.
+  - `#Title` and `#######` are not headings, by the same rule that stops a line
+    of prose being taken out of the body.
+
+- **A thought with no title keeps every word.** The header falls back to the
+  first non-empty line, and — unlike a title — that line **stays in the body**.
+  A title is a label for the paragraph under it and says nothing that paragraph
+  does not; a first sentence *is* the thought, and lifting it out to avoid an
+  echo would delete content. `titles` and `preview` are separate fields for
+  exactly this reason: only the first kind is removed, and the check can tell
+  them apart. When even that is empty — a block that has arrived as `**` and no
+  words — the row falls back to `UNTITLED_THOUGHT_HEADING`, the word the header
+  used to always say, so a row is never blank mid-stream.
+
+- **Search follows what is drawn.** A highlight is an offset into a source, and
+  the rendered body has lines removed from above it, so highlighting the block's
+  own markdown while rendering the derived body would land on the wrong words.
+  `collect_markdowns` takes the rendered body. The cost is that a title is no
+  longer found by thread search; it is on screen in the header, which is not a
+  markdown entity and cannot be highlighted.
+
+- **Long titles truncate.** `min_w_0` on the row and `truncate` on the label,
+  rather than wrapping to a second row or pushing the disclosure off the end.
+
+- **Enforced by:** `a_thoughts_title_reaches_the_header_and_is_not_left_in_the_body`
+  in `crates/omega_deltas`; and
+  `a_title_never_appears_in_both_the_header_and_the_body`,
+  `a_thought_always_has_a_heading`,
+  `a_thinking_block_splits_into_its_titles_and_the_rest` and
+  `a_hash_inside_code_is_a_comment_and_stays_where_it_is` in
+  `crates/agent_ui/src/entry_view_state.rs`
+  (`cargo test -p agent_ui --lib entry_view_state`).
+
+  The first of those is the one that matters: it states the property as an
+  *idempotence* — split a body that has already been split and there is no title
+  left to find — so anything that puts a title in the header while leaving it in
+  the body fails, whatever route it took. Its first version asked each body line
+  on its own and went red on a `# comment` inside a fenced shell snippet, which
+  is not a title and is in no header; running the whole splitter is what tells
+  those apart, and a check that could not would have been satisfied by hoisting
+  the comment out of the code.
+
+- **What this does not cover.** **Nobody has seen it drawn.** The split is
+  proved as text, and the renderer is proved to read the split rather than the
+  chunk — which is the defect that shipped, and removing either line fails on
+  exactly that. What has not been proved is the drawing: two lightbulb rows
+  under one disclosure, a title truncating at the window's edge, and the row
+  that shows while a title is still arriving have not been rendered in a window.

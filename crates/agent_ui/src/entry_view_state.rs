@@ -13,7 +13,8 @@ use gpui::{
     AnyEntity, App, AppContext as _, Entity, EntityId, EventEmitter, FocusHandle, Focusable,
     ScrollHandle, TextStyleRefinement, WeakEntity, Window,
 };
-use language::language_settings::SoftWrap;
+use language::{LanguageRegistry, language_settings::SoftWrap};
+use markdown::{Markdown, MarkdownOptions};
 use project::{AgentId, Project, project_settings::DiagnosticSeverity};
 use rope::Point;
 use settings::{Settings as _, ThinkingBlockDisplay};
@@ -122,6 +123,196 @@ pub(crate) fn tool_output_ceiling_is_toggleable(
         total_lines > displayed_lines
     } else {
         total_lines > COLLAPSED_TOOL_OUTPUT_LINES
+    }
+}
+
+/// `OMEGA-DELTA-0124`. What heads a thinking block that wrote no title of its
+/// own, and could not be given one.
+pub(crate) const UNTITLED_THOUGHT_HEADING: &str = "Thinking";
+
+/// `OMEGA-DELTA-0124`. A thinking block, split into the lines its header
+/// presents and the source that renders underneath them.
+///
+/// The header used to say the word "Thinking" and nothing else, so a run of
+/// five thoughts read as five identical labels with the real content indented
+/// beneath each. The owner, looking at three in a row while testing a build:
+/// *"rather than showing 'Thinking' each time, where it says Thinking I want it
+/// showing the actual thought, not on a separate line"*.
+///
+/// The trap in that is the second half. Moving the title *up* is one line of
+/// view code; it was written that way once and shipped, and every thought then
+/// rendered its title **twice** — muted in the header, and still bold in the
+/// body underneath, because the header reads the same `Entity<Markdown>` the
+/// body renders. Hence this split: `titles` are removed from `body`, so there
+/// is no source left for the body to draw them from.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub(crate) struct SplitThought {
+    /// The titles the model itself wrote, in the order it wrote them. Every one
+    /// of these has been taken out of `body`.
+    ///
+    /// A block can hold more than one thought, and the owner saw it: two titles
+    /// under a single lightbulb, the second reading as a subheading of the
+    /// first. His call — *"if theres 2 thoughts in a single 'thinking block' ...
+    /// u can just show that same lightbulb line twice"* — so this is a list,
+    /// and the header draws one row per entry.
+    pub titles: Vec<SharedString>,
+    /// What to head a thought that wrote no title with.
+    ///
+    /// This is a *preview* of prose, not a title, and it is deliberately still
+    /// in `body`. A title is a label for the paragraph under it and says
+    /// nothing that paragraph does not; a first sentence is the thought itself,
+    /// and lifting it out of the body would delete content to avoid an echo.
+    /// So the echo is accepted here and nowhere else, and it is why
+    /// `titles` and `preview` are separate fields rather than one list: only
+    /// the first kind is removed, and a check can tell them apart.
+    pub preview: Option<SharedString>,
+    /// The source that renders under the header. Contains no title line — see
+    /// `a_title_never_appears_in_both_the_header_and_the_body`.
+    pub body: String,
+}
+
+impl SplitThought {
+    /// The muted lines the header draws, top to bottom. Never empty: a thought
+    /// mid-stream has a row before it has words.
+    pub(crate) fn headings(&self) -> Vec<SharedString> {
+        if !self.titles.is_empty() {
+            return self.titles.clone();
+        }
+        vec![
+            self.preview
+                .clone()
+                .unwrap_or_else(|| SharedString::new_static(UNTITLED_THOUGHT_HEADING)),
+        ]
+    }
+}
+
+/// `OMEGA-DELTA-0124`. The title a line carries, if it is a title line.
+///
+/// **Emphasis marks a title, not position.** The second thought in a block is
+/// the second *emphasised* line, not the second line, so this is asked of every
+/// line rather than of the first one.
+///
+/// A streaming title has no closing marker — `**Search` arrives with nothing
+/// after it and stays that way until the next token — so an unterminated `**`
+/// run counts. Waiting for the close would leave the header blank for the whole
+/// time a thought is being written, which is the only time anybody is watching
+/// it.
+///
+/// A *closed* `**` run must own the whole line. `**Note** that the file is
+/// gone` is a bold lead-in inside prose, and hoisting it would put half a
+/// sentence in the header and delete it from the paragraph it belongs to.
+pub(crate) fn thought_title(line: &str) -> Option<&str> {
+    // Four spaces is an indented code block, where a `#` is a comment.
+    if line.len() - line.trim_start().len() >= 4 {
+        return None;
+    }
+    let line = line.trim();
+
+    if line.starts_with('#') {
+        let level = line
+            .chars()
+            .take_while(|&character| character == '#')
+            .count();
+        // `#######` is not a heading, and `#Title` is not one either — treating
+        // it as one would take a line of prose out of the body.
+        if level > 6 || !line[level..].starts_with(' ') {
+            return None;
+        }
+        let title = line[level..].trim_matches(['#', ' '].as_slice());
+        return (!title.is_empty()).then_some(title);
+    }
+
+    let rest = line.strip_prefix("**")?;
+    match rest.find("**") {
+        Some(end) => {
+            if !rest[end + 2..].trim().is_empty() {
+                return None;
+            }
+            let title = rest[..end].trim();
+            (!title.is_empty()).then_some(title)
+        }
+        None => {
+            let title = rest.trim();
+            (!title.is_empty()).then_some(title)
+        }
+    }
+}
+
+/// The opening or closing marker of a fenced code block, if the line is one.
+fn code_fence(line: &str) -> Option<&'static str> {
+    ["```", "~~~"]
+        .into_iter()
+        .find(|marker| line.starts_with(marker))
+}
+
+/// `OMEGA-DELTA-0124`. Split a thinking block into its header lines and the
+/// body that renders beneath them.
+///
+/// Every title found is *removed* from the body. That removal is the whole
+/// point: the header and the body are drawn from the same block of text, so the
+/// only way the title cannot appear twice is for the body's copy not to exist.
+pub(crate) fn split_thought(source: &str) -> SplitThought {
+    let mut titles = Vec::new();
+    let mut body = String::with_capacity(source.len());
+    let mut fence: Option<&str> = None;
+    // A blank line is only worth writing if something follows it. Removing a
+    // title from `prose\n\n**Title**\n\nprose` otherwise leaves two blank lines
+    // where the model wrote one, and a leading one where it wrote none.
+    let mut blank_is_owed = false;
+
+    for line in source.split('\n') {
+        let trimmed = line.trim();
+
+        if let Some(marker) = fence {
+            if trimmed.starts_with(marker) {
+                fence = None;
+            }
+            // Verbatim: a `# comment` in a shell snippet is not a heading, and
+            // a line taken out of a fence changes what the code says.
+            body.push_str(line);
+            body.push('\n');
+            continue;
+        }
+
+        if trimmed.is_empty() {
+            blank_is_owed = !body.is_empty();
+            continue;
+        }
+
+        if let Some(title) = thought_title(line) {
+            titles.push(SharedString::from(title.to_owned()));
+            continue;
+        }
+
+        // A fence opens *after* the title question, not before it: no line can
+        // be both, and asking in this order keeps the two rules independent.
+        fence = code_fence(trimmed);
+
+        if blank_is_owed {
+            body.push('\n');
+            blank_is_owed = false;
+        }
+        body.push_str(line);
+        body.push('\n');
+    }
+
+    // Only when the model wrote no title at all: the first line it did write,
+    // stripped of the markers of the formatting it is no longer getting, so a
+    // half-arrived `**` does not render as a row of asterisks.
+    let preview = titles.is_empty().then(|| {
+        source
+            .lines()
+            .map(str::trim)
+            .find(|line| !line.is_empty())
+            .map(|line| line.trim_matches(['#', '*', '_', '`', ' '].as_slice()))
+            .filter(|line| !line.is_empty())
+            .map(|line| SharedString::from(line.to_owned()))
+    });
+
+    SplitThought {
+        titles,
+        preview: preview.flatten(),
+        body: body.trim_end().to_owned(),
     }
 }
 
@@ -480,6 +671,14 @@ impl EntryViewState {
                 }
             }
             AgentThreadEntry::AssistantMessage(message) => {
+                // `OMEGA-DELTA-0124`. Read before the entry is borrowed
+                // mutably: the body a thought's header is split from is parsed
+                // with the same language registry its own markdown was.
+                let language_registry = self
+                    .project
+                    .upgrade()
+                    .map(|project| project.read(cx).languages().clone());
+                let message = MessageThoughts::new(message);
                 let entry = if let Some(Entry::AssistantMessage(entry)) =
                     self.entries.get_mut(index)
                 {
@@ -489,6 +688,7 @@ impl EntryViewState {
                         index,
                         Entry::AssistantMessage(AssistantMessageEntry {
                             scroll_handles_by_chunk_index: HashMap::default(),
+                            thoughts_by_chunk_index: HashMap::default(),
                             focus_handle: cx.focus_handle(),
                         }),
                     );
@@ -497,7 +697,7 @@ impl EntryViewState {
                     };
                     entry
                 };
-                entry.sync(message);
+                entry.sync(message, language_registry, cx);
             }
             AgentThreadEntry::CompletedPlan(_) => {
                 if !matches!(self.entries.get(index), Some(Entry::CompletedPlan)) {
@@ -601,9 +801,78 @@ pub enum ViewEvent {
     },
 }
 
+/// `OMEGA-DELTA-0124`. The thinking blocks of one assistant message, lifted out
+/// of the thread so the entry can be synced without holding a borrow of it.
+///
+/// Syncing needs `&mut App` — a split thought's body is a second `Markdown`
+/// entity — and the message is read through the very `App` it would borrow.
+/// `AssistantMessageChunk` is not `Clone`, so this carries the two facts the
+/// sync actually uses.
+pub struct MessageThoughts {
+    chunk_count: usize,
+    last_chunk_is_thought: bool,
+    /// Each thinking block's own markdown, by chunk index.
+    thoughts: Vec<(usize, Entity<Markdown>)>,
+}
+
+impl MessageThoughts {
+    fn new(message: &acp_thread::AssistantMessage) -> Self {
+        Self {
+            chunk_count: message.chunks.len(),
+            last_chunk_is_thought: matches!(
+                message.chunks.last(),
+                Some(AssistantMessageChunk::Thought { .. })
+            ),
+            thoughts: message
+                .chunks
+                .iter()
+                .enumerate()
+                .filter_map(|(ix, chunk)| match chunk {
+                    AssistantMessageChunk::Thought { block, .. } => {
+                        Some((ix, block.markdown()?.clone()))
+                    }
+                    AssistantMessageChunk::Message { .. } => None,
+                })
+                .collect(),
+        }
+    }
+}
+
+/// `OMEGA-DELTA-0124`. One thinking block as the view draws it: the muted lines
+/// its header shows, and a body with those lines taken out.
+///
+/// **This is a cache, and it is why the split is done here and not in the
+/// renderer.** A thought streams in token by token, and its markdown is
+/// re-derived on every arriving chunk — but only on an arriving chunk.
+/// `render_thinking_block` runs on every frame and holds `&self`, so it can
+/// neither build an entity nor memoise one; doing the work there would
+/// construct a `Markdown` per frame per visible thought. `source` is the text
+/// this was derived from, and a sync that finds it unchanged does nothing.
+#[derive(Debug)]
+pub struct ThoughtView {
+    source: SharedString,
+    headings: Vec<SharedString>,
+    body: Option<Entity<Markdown>>,
+}
+
+impl ThoughtView {
+    /// The muted lines the header draws, one per thought. Never empty.
+    pub fn headings(&self) -> &[SharedString] {
+        &self.headings
+    }
+
+    /// The source under the header, or `None` when the block is titles alone —
+    /// which is what a thought looks like for the moment between its title
+    /// arriving and its first sentence.
+    pub fn body(&self) -> Option<&Entity<Markdown>> {
+        self.body.as_ref()
+    }
+}
+
 #[derive(Debug)]
 pub struct AssistantMessageEntry {
     scroll_handles_by_chunk_index: HashMap<usize, ScrollHandle>,
+    thoughts_by_chunk_index: HashMap<usize, ThoughtView>,
     focus_handle: FocusHandle,
 }
 
@@ -612,11 +881,79 @@ impl AssistantMessageEntry {
         self.scroll_handles_by_chunk_index.get(&ix).cloned()
     }
 
-    pub fn sync(&mut self, message: &acp_thread::AssistantMessage) {
-        if let Some(acp_thread::AssistantMessageChunk::Thought { .. }) = message.chunks.last() {
-            let ix = message.chunks.len() - 1;
+    pub fn thought_for_chunk(&self, ix: usize) -> Option<&ThoughtView> {
+        self.thoughts_by_chunk_index.get(&ix)
+    }
+
+    pub fn sync(
+        &mut self,
+        message: MessageThoughts,
+        language_registry: Option<Arc<LanguageRegistry>>,
+        cx: &mut App,
+    ) {
+        if message.last_chunk_is_thought {
+            let ix = message.chunk_count - 1;
             let handle = self.scroll_handles_by_chunk_index.entry(ix).or_default();
             handle.scroll_to_bottom();
+        }
+
+        // `OMEGA-DELTA-0124`. Re-split each thought whose text moved, and only
+        // those. A turn holds every thought it has already finished, and their
+        // sources stop changing the moment the next one starts.
+        self.thoughts_by_chunk_index.retain(|ix, _| {
+            message
+                .thoughts
+                .iter()
+                .any(|(thought_ix, _)| thought_ix == ix)
+        });
+        for (ix, block) in message.thoughts {
+            let source = block.read(cx).source().clone();
+            if self
+                .thoughts_by_chunk_index
+                .get(&ix)
+                .is_some_and(|thought| thought.source == source)
+            {
+                continue;
+            }
+
+            let split = split_thought(&source);
+            let headings = split.headings();
+            let body = if split.body.is_empty() {
+                None
+            } else if let Some(body) = self
+                .thoughts_by_chunk_index
+                .get(&ix)
+                .and_then(|thought| thought.body.clone())
+            {
+                body.update(cx, |body, cx| body.replace(split.body, cx));
+                Some(body)
+            } else {
+                // The same options the thought's own markdown was built with in
+                // `acp_thread`, so the body renders as it did when it was one
+                // entity rather than two.
+                Some(cx.new(|cx| {
+                    Markdown::new_with_options(
+                        split.body.into(),
+                        language_registry.clone(),
+                        None,
+                        MarkdownOptions {
+                            render_mermaid_diagrams: true,
+                            render_metadata_blocks: true,
+                            ..Default::default()
+                        },
+                        cx,
+                    )
+                }))
+            };
+
+            self.thoughts_by_chunk_index.insert(
+                ix,
+                ThoughtView {
+                    source,
+                    headings,
+                    body,
+                },
+            );
         }
     }
 }
@@ -687,6 +1024,20 @@ impl Entry {
     ) -> Option<ScrollHandle> {
         match self {
             Self::AssistantMessage(message) => message.scroll_handle_for_chunk(chunk_ix),
+            Self::UserMessage(_)
+            | Self::ToolCall(_)
+            | Self::Elicitation { .. }
+            | Self::CompletedPlan
+            | Self::ContextCompaction
+            | Self::SystemNote => None,
+        }
+    }
+
+    /// `OMEGA-DELTA-0124`. The split of a thinking block: its header lines, and
+    /// the body those lines have been taken out of.
+    pub fn thought_for_assistant_message_chunk(&self, chunk_ix: usize) -> Option<&ThoughtView> {
+        match self {
+            Self::AssistantMessage(message) => message.thought_for_chunk(chunk_ix),
             Self::UserMessage(_)
             | Self::ToolCall(_)
             | Self::Elicitation { .. }
@@ -831,8 +1182,219 @@ mod tests {
     use project::Project;
     use serde_json::json;
     use settings::SettingsStore;
+    use ui::SharedString;
     use util::path;
     use workspace::{MultiWorkspace, PathList};
+
+    /// `OMEGA-DELTA-0124`. Every thinking block this splitter has ever been
+    /// shown, as text.
+    ///
+    /// One table, used by every check below, because the property that matters
+    /// is a property of *all* of them: no title in a header is still in the
+    /// body under it. Checking each case's shape separately is how the one case
+    /// that duplicates gets added without anybody noticing.
+    const THOUGHTS: &[&str] = &[
+        // The ordinary one: a bold title, then prose.
+        "**Planning plugin uninstall strategy**\n\nThe user wants the plugin gone.",
+        // Two thoughts in one block. The owner saw this and asked for the
+        // lightbulb line twice.
+        "**Planning plugin uninstall strategy**\n\nThe user wants it gone.\n\n\
+         **Searching for the config**\n\nIt is under `~/.config`.",
+        // A heading rather than emphasis.
+        "# Planning\n\nThe user wants the plugin gone.",
+        "### Planning\n\nThe user wants the plugin gone.",
+        // Mid-stream: the title has arrived, its closing marker has not.
+        "**Search",
+        "**Searching for the con",
+        // Mid-stream, earlier still: the markers before any word.
+        "**",
+        "*",
+        "",
+        // Title and no prose yet.
+        "**Planning plugin uninstall strategy**",
+        // Prose with no title at all.
+        "The user wants the plugin gone. I should look at the manifest first.",
+        // A bold lead-in inside prose. Not a title: hoisting it would put half
+        // a sentence in the header and delete it from the paragraph.
+        "**Note** that the manifest is gone, so the uninstall cannot proceed.",
+        // A `#` inside fenced code is a comment, not a heading.
+        "**Checking the config**\n\n```bash\n# the config lives here\ncat ~/.config/x\n```",
+        // A title after a fence closes is still a title.
+        "```bash\n# not a heading\n```\n\n**Reading the manifest**\n\nIt is empty.",
+        // Four spaces is an indented code block.
+        "Consider:\n\n    # not a heading\n    cat x\n",
+        // Not headings: seven hashes, and a hash with no space after it.
+        "####### seven\n\n#nospace",
+    ];
+
+    /// `OMEGA-DELTA-0124`. **A title never appears in both the header and the
+    /// body.**
+    ///
+    /// This is the check for the defect that shipped. The header was given the
+    /// thought's title and the body kept rendering the same markdown, so every
+    /// thought drew its title twice — muted above, bold below. The owner saw it
+    /// on the first build.
+    ///
+    /// Stated as an idempotence: split a body that has already been split and
+    /// there is no title left to find. Anything that puts a title in the header
+    /// while leaving it in the body fails here, whatever route it took.
+    ///
+    /// It is the *splitter* that is re-run, not the line predicate. Asking each
+    /// body line on its own was the first version of this check, and it failed
+    /// on a `# comment` inside a fenced shell snippet — which is not a title,
+    /// is not in any header, and must stay exactly where the model put it. A
+    /// check that cannot tell those apart would have been satisfied by hoisting
+    /// the comment out of the code.
+    #[test]
+    fn a_title_never_appears_in_both_the_header_and_the_body() {
+        use super::split_thought;
+
+        for source in THOUGHTS {
+            let split = split_thought(source);
+
+            let titles_left_in_body = split_thought(&split.body).titles;
+            assert!(
+                titles_left_in_body.is_empty(),
+                "OMEGA-DELTA-0124: the body of {source:?} still holds title \
+                 line(s) {titles_left_in_body:?}. The header draws the same \
+                 words, so the thought renders its title twice — muted above \
+                 and bold below. That is the defect this delta exists for.",
+            );
+
+            for title in &split.titles {
+                assert!(
+                    !split.body.contains(title.as_ref()),
+                    "OMEGA-DELTA-0124: {title:?} is a header line of {source:?} \
+                     and is still somewhere in the body under it.",
+                );
+            }
+
+            // The preview is the *other* kind of header line, and the two must
+            // stay distinguishable: a preview is prose that stays in the body,
+            // so a title recorded as one would silently escape the check above.
+            assert!(
+                split.preview.is_none() || split.titles.is_empty(),
+                "OMEGA-DELTA-0124: {source:?} produced both a title and a \
+                 prose preview. A block is headed by one or the other.",
+            );
+        }
+    }
+
+    /// `OMEGA-DELTA-0124`. A row is never blank, whatever has arrived so far.
+    #[test]
+    fn a_thought_always_has_a_heading() {
+        use super::{UNTITLED_THOUGHT_HEADING, split_thought};
+
+        for source in THOUGHTS {
+            let headings = split_thought(source).headings();
+            assert!(
+                !headings.is_empty() && headings.iter().all(|heading| !heading.trim().is_empty()),
+                "OMEGA-DELTA-0124: {source:?} headed a thinking block with \
+                 nothing. Mid-stream is exactly when somebody is looking at it.",
+            );
+        }
+
+        // A thought that has arrived as markers alone has no words to show, and
+        // falls all the way back to the word the header used to always say.
+        assert_eq!(
+            split_thought("**").headings(),
+            vec![SharedString::new_static(UNTITLED_THOUGHT_HEADING)],
+        );
+        assert_eq!(
+            split_thought("").headings(),
+            vec![SharedString::new_static(UNTITLED_THOUGHT_HEADING)],
+        );
+    }
+
+    /// `OMEGA-DELTA-0124`. What each shape of block actually splits into.
+    #[test]
+    fn a_thinking_block_splits_into_its_titles_and_the_rest() {
+        use super::split_thought;
+
+        let one =
+            split_thought("**Planning plugin uninstall strategy**\n\nThe user wants it gone.");
+        assert_eq!(one.titles, vec!["Planning plugin uninstall strategy"]);
+        assert_eq!(one.body, "The user wants it gone.");
+        assert_eq!(one.preview, None);
+
+        // Two thoughts, two rows, one body with neither title in it.
+        let two = split_thought(
+            "**Planning the uninstall**\n\nThe user wants it gone.\n\n\
+             **Searching for the config**\n\nIt is under `~/.config`.",
+        );
+        assert_eq!(
+            two.titles,
+            vec!["Planning the uninstall", "Searching for the config"],
+        );
+        assert_eq!(
+            two.body,
+            "The user wants it gone.\n\nIt is under `~/.config`.",
+        );
+
+        // Emphasis marks a title, not position: the second thought is the
+        // second *emphasised* line, not the second line.
+        let interleaved = split_thought("Some prose first.\n\n**A title after it**\n\nMore prose.");
+        assert_eq!(interleaved.titles, vec!["A title after it"]);
+        assert_eq!(interleaved.body, "Some prose first.\n\nMore prose.");
+
+        // A title still arriving has no closing marker, and renders anyway.
+        assert_eq!(split_thought("**Search").titles, vec!["Search"]);
+        assert_eq!(split_thought("**Search").body, "");
+
+        // Headings count too.
+        assert_eq!(
+            split_thought("# Planning\n\nProse.").titles,
+            vec!["Planning"]
+        );
+        assert_eq!(
+            split_thought("### Planning ###\n\nProse.").titles,
+            vec!["Planning"],
+        );
+
+        // A block with no title keeps every word it has, and previews the first
+        // line rather than eating it.
+        let untitled =
+            split_thought("The user wants the plugin gone.\nI will look at the manifest.");
+        assert!(untitled.titles.is_empty());
+        assert_eq!(
+            untitled.preview.as_deref(),
+            Some("The user wants the plugin gone."),
+        );
+        assert_eq!(
+            untitled.body,
+            "The user wants the plugin gone.\nI will look at the manifest.",
+        );
+
+        // A bold lead-in is prose. It keeps its whole sentence.
+        let lead_in = split_thought("**Note** that the manifest is gone.");
+        assert!(lead_in.titles.is_empty());
+        assert_eq!(lead_in.body, "**Note** that the manifest is gone.");
+    }
+
+    /// `OMEGA-DELTA-0124`. Fenced and indented code is not prose, and nothing
+    /// is lifted out of it.
+    #[test]
+    fn a_hash_inside_code_is_a_comment_and_stays_where_it_is() {
+        use super::split_thought;
+
+        let fenced = split_thought(
+            "**Checking the config**\n\n```bash\n# the config lives here\ncat x\n```",
+        );
+        assert_eq!(fenced.titles, vec!["Checking the config"]);
+        assert_eq!(
+            fenced.body, "```bash\n# the config lives here\ncat x\n```",
+            "a shell comment was taken for a heading and hoisted out of the code",
+        );
+
+        let indented = split_thought("Consider:\n\n    # not a heading\n    cat x");
+        assert!(indented.titles.is_empty());
+        assert_eq!(indented.body, "Consider:\n\n    # not a heading\n    cat x");
+
+        // A blank line inside a fence is part of the code and survives the
+        // collapsing that removing a title leaves behind.
+        let blank_in_fence = split_thought("**T**\n\n```\na\n\n\nb\n```");
+        assert_eq!(blank_in_fence.body, "```\na\n\n\nb\n```");
+    }
 
     /// `OMEGA-DELTA-0080`. The control appears only when it has something to
     /// offer, and it says how much.

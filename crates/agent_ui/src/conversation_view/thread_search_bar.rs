@@ -896,13 +896,22 @@ fn collect_markdowns(
                             out.push(md.clone());
                         }
                     }
+                    // `OMEGA-DELTA-0124`. The *rendered* body, not the block.
+                    // A thinking block's header lines are cut out of the body
+                    // it renders, so highlights placed on the block's own
+                    // markdown would be offset by every title above them and
+                    // land on the wrong words. Search follows what is drawn.
                     AssistantMessageChunk::Thought { block, .. }
                         if entry_view_state
                             .thinking_block_state((entry_ix, chunk_ix), cx)
                             .0 =>
                     {
-                        if let Some(md) = block.markdown() {
-                            out.push(md.clone());
+                        match entry_view_state
+                            .entry(entry_ix)
+                            .and_then(|entry| entry.thought_for_assistant_message_chunk(chunk_ix))
+                        {
+                            Some(thought) => out.extend(thought.body().cloned()),
+                            None => out.extend(block.markdown().cloned()),
                         }
                     }
                     AssistantMessageChunk::Thought { .. } => {}
