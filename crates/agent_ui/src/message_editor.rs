@@ -2039,32 +2039,37 @@ impl Render for MessageEditor {
             .on_action(cx.listener(Self::paste_raw))
             .capture_action(cx.listener(Self::paste))
             .flex_1()
-            .child({
-                let settings = ThemeSettings::get_global(cx);
+            .child(EditorElement::new(&self.editor, composer_editor_style(cx)))
+    }
+}
 
-                let text_style = TextStyle {
-                    color: cx.theme().colors().text,
-                    font_family: settings.buffer_font.family.clone(),
-                    font_fallbacks: settings.buffer_font.fallbacks.clone(),
-                    font_features: settings.buffer_font.features.clone(),
-                    font_size: settings.agent_buffer_font_size(cx).into(),
-                    font_weight: settings.buffer_font.weight,
-                    line_height: relative(settings.buffer_line_height.value()),
-                    ..Default::default()
-                };
+/// How the agent composer draws its text.
+///
+/// `OMEGA-DELTA-0122`. Lifted out of `Render` because there is now a second
+/// field wearing this face: the composer `ConversationView` draws while the
+/// executor is still connecting, which a person types into before this one
+/// exists. What they typed is moved across the moment the connection lands, and
+/// two copies of this style would let the two fields drift until that handover
+/// reflowed a half-written sentence under the caret.
+pub(crate) fn composer_editor_style(cx: &App) -> EditorStyle {
+    let settings = ThemeSettings::get_global(cx);
 
-                EditorElement::new(
-                    &self.editor,
-                    EditorStyle {
-                        background: cx.theme().colors().editor_background,
-                        local_player: cx.theme().players().local(),
-                        text: text_style,
-                        syntax: cx.theme().syntax().clone(),
-                        inlay_hints_style: editor::make_inlay_hints_style(cx),
-                        ..Default::default()
-                    },
-                )
-            })
+    EditorStyle {
+        background: cx.theme().colors().editor_background,
+        local_player: cx.theme().players().local(),
+        text: TextStyle {
+            color: cx.theme().colors().text,
+            font_family: settings.buffer_font.family.clone(),
+            font_fallbacks: settings.buffer_font.fallbacks.clone(),
+            font_features: settings.buffer_font.features.clone(),
+            font_size: settings.agent_buffer_font_size(cx).into(),
+            font_weight: settings.buffer_font.weight,
+            line_height: relative(settings.buffer_line_height.value()),
+            ..Default::default()
+        },
+        syntax: cx.theme().syntax().clone(),
+        inlay_hints_style: editor::make_inlay_hints_style(cx),
+        ..Default::default()
     }
 }
 

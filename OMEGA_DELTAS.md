@@ -5068,3 +5068,81 @@ than merely stated.
   the named line. Those stay open. The reader is also not offered in a full
   editor, so a regression there would show up as the editor opening — which is
   the correct behaviour, and therefore not a check.
+
+### OMEGA-DELTA-0122 — A wait a person can type through
+
+- **Upstream Zed:** the composer belongs to the thread view, and the thread view
+  is built from a session. Until an agent connects there is nothing to type
+  into, and a centred *"Loading…"* fills the pane. Connecting happens once, at
+  startup, so the gap is a second nobody is looking at.
+- **Omega, before this:** `OMEGA-DELTA-0115` put an executor selector in the
+  composer and omega#112 made choosing one call `reset_onto_new_executor`, which
+  tears the connection down and builds a new one. The gap stopped being a
+  startup detail and became a place a person goes on purpose, several times an
+  hour, immediately after deciding who they are about to talk to. The owner, on
+  a live build: *"that loading thing is ok but you still dont show the input bar
+  while its fucking loading. i want to be able to type while shit is loading.
+  and move the loading indicator to inside the input bar like bottom left"*.
+- **Omega now:** `ConversationView` draws its own composer for the whole of
+  `Loading` — same box, same place, same type, focused, typable. The loading
+  indicator is its status line, bottom-left. Send is disabled. What is typed is
+  moved into the real composer, caret included, the moment one exists.
+- **The handover is the point, not the field.** A field whose contents are
+  discarded when the thing it was waiting for arrives is *worse* than no field:
+  a wait is a wait, but a lost sentence is a lost sentence, and the sentence
+  lost here is the first one — the one that states the task, the longest one a
+  person writes. `hand_loading_draft_over` runs where the thread view is built,
+  restores the caret offset, and never clears the destination: if the real
+  composer already carries a restored draft, the typed text goes after it rather
+  than over it. Untidy, and correct — both texts are somebody's.
+- **Send is disabled, and refusing is visible.** The owner, earlier the same
+  session: *"if something needs initalization, just disable the submit button in
+  the input box until its ready"*. There is no session, no thread and no queue,
+  so a live button would lie about what a press does. A `Chat` that arrives here
+  is refused and the status line changes to say the message was not sent and to
+  press Enter again once it clears — because a key press that appears to do
+  nothing is the exact silence a disabled button exists to replace.
+- **It does not auto-send on connect.** Queue-and-fire was the other defensible
+  answer and it is not defensible *here*, for a reason particular to how a
+  person reaches this state: they reached it by **switching executor**. A
+  message composed while Codex was tearing down and fired the instant Claude
+  attaches goes to a runtime nobody watched it go to, with the window that would
+  have shown them already gone. So it waits for a second, explicit press. Both
+  behaviours are stated on screen rather than left to be discovered.
+- **A bare `Editor`, wearing the real composer's face.** Almost everything that
+  makes `MessageEditor` the real composer — `@` mentions, `/` commands, skills,
+  the queue — is a question asked of a session that does not exist yet. A
+  mention resolved in the loading field would be a crease the field can hold and
+  the handover cannot, so it would vanish silently at the one moment a person is
+  not looking. The field takes plain text and its placeholder says so. It draws
+  with `composer_editor_style`, now declared once and worn by both, so the two
+  cannot drift into a reflow under the caret at handover.
+- **The bottom-left is still empty once loaded.** `be27475c11` emptied it at the
+  owner's request and `OMEGA-DELTA-0116` keeps it empty; the indicator is there
+  *only* while connecting, and the executor selector and provider controls stay
+  on the right where `render_zero_base_executor_bar` puts them. The row carries
+  `flex_wrap` for the same reason the real one does: unwrapped, a narrow window
+  pushes Send off the edge, and a disabled control nobody can see is
+  indistinguishable from one that was never built.
+- **Neither gate is weakened.** `OMEGA-DELTA-0052` is untouched — this adds no
+  dock, no status bar and no way out of zero base. `OMEGA-DELTA-0040` is
+  untouched — the identity gate runs before any window opens, so a composer
+  inside a window that does not exist yet is not reachable any earlier than it
+  was. This delta is about the wait *after* the window, not the wait before it.
+- **Enforced by:** `the_wait_for_an_executor_is_one_a_person_can_type_through`
+  in `crates/omega_deltas`. Every assertion was watched failing against the
+  source before the repair and against the repair reverted one piece at a time:
+  a deleted `render_loading_composer`, a composer built and never drawn, a label
+  where the editor should be, a deleted handover, a handover that is never
+  called, a handover that restores text but not the caret, a handover that
+  clears the destination first, a Send button left live, a refusal that records
+  nothing, a handover that sends, the indicator moved to the right of Send, an
+  unwrapped row, and the shared style un-shared.
+- **What this does not cover.** **No window has been opened.** Nothing here
+  proves what a person sees: that the loading composer is the same size and in
+  the same place as the real one, that focus lands in it without a click, that
+  the caret is visibly where it was left after the handover, or that the status
+  sentence fits beside Send in a narrow panel. Those are omega#112's acceptance
+  and they stay open. The loading field is also not persisted: text typed into
+  it and then abandoned by closing the window before the connection lands is
+  gone, because `draft_prompt` belongs to a thread and there is no thread.

@@ -21,7 +21,8 @@ use client::zed_urls;
 use collections::{HashMap, HashSet, IndexMap};
 use editor::scroll::Autoscroll;
 use editor::{
-    Editor, EditorEvent, EditorMode, MultiBuffer, PathKey, SelectionEffects, SizingBehavior,
+    Editor, EditorElement, EditorEvent, EditorMode, MultiBuffer, MultiBufferOffset, PathKey,
+    SelectionEffects, SizingBehavior,
 };
 use file_icons::FileIcons;
 use fs::Fs;
@@ -106,6 +107,15 @@ const STOPWATCH_THRESHOLD: Duration = Duration::from_secs(30);
 const TOKEN_THRESHOLD: u64 = 250;
 
 pub(crate) const DRAFT_PROMPT_PERSIST_DEBOUNCE: Duration = Duration::from_millis(250);
+
+/// `OMEGA-DELTA-0122`. What the composer says while the executor connects.
+///
+/// Not the real composer's placeholder, which offers `@` and `/`. Neither works
+/// yet — both ask a session that does not exist — so promising them here would
+/// be a lie a person discovers by typing one. It says the one thing somebody
+/// deciding whether to start typing needs to know instead.
+pub(crate) const LOADING_COMPOSER_PLACEHOLDER: &str =
+    "Type while the executor connects — what you write is kept";
 
 pub(crate) mod elicitation;
 mod message_queue;
@@ -593,6 +603,14 @@ pub struct ConversationView {
     notification_subscriptions: HashMap<WindowHandle<AgentNotification>, Vec<Subscription>>,
     auth_task: Option<Task<()>>,
     loading_status: Option<SharedString>,
+    /// What a person types while the executor is still connecting.
+    ///
+    /// `OMEGA-DELTA-0122`. Handed to the real composer the moment one exists —
+    /// see [`ConversationView::hand_loading_draft_over`] — and dropped there.
+    loading_composer: Option<Entity<Editor>>,
+    /// Whether Send has been asked for while it was disabled, so the status
+    /// line can say the message was not sent rather than nothing at all.
+    loading_send_refused: bool,
     /// When settings change, use this to see if the theme has changed (which
     /// causes mermaid diagrams to re-render).
     last_theme_id: Option<String>,
@@ -900,6 +918,8 @@ impl ConversationView {
             notification_subscriptions: HashMap::default(),
             auth_task: None,
             loading_status: None,
+            loading_composer: None,
+            loading_send_refused: false,
             last_theme_id: Some(cx.theme().id.clone()),
             draft_prompt_persist_task: None,
             code_span_resolver,
@@ -982,6 +1002,107 @@ impl ConversationView {
             .request_elicitations()
     }
 
+    /// The field a person types into while the executor is still connecting.
+    ///
+    /// `OMEGA-DELTA-0122`. The composer belongs to [`ThreadView`], and there is
+    /// no thread view until a session exists, so for the whole of `Loading`
+    /// there was no way to type. That was a defensible gap while connecting
+    /// happened once at startup. `reset_onto_new_executor` made it a place a
+    /// person goes on purpose: choosing an executor rebuilds the connection
+    /// from nothing, and the owner, having just chosen one, is left looking at
+    /// a window with no input in it.
+    ///
+    ///     "that loading thing is ok but you still dont show the input bar
+    ///      while its fucking loading. i want to be able to type while shit is
+    ///      loading."
+    ///
+    /// So this exists, and what is typed into it is moved into the real
+    /// composer by [`Self::hand_loading_draft_over`] the moment one is built.
+    ///
+    /// # Why a bare `Editor` and not a `MessageEditor`
+    ///
+    /// `MessageEditor` is the real composer, and almost all of what makes it
+    /// that — `@` mentions, `/` commands, skills, the queue — is a question
+    /// asked of a session that does not exist yet. Its completions would have
+    /// nothing to complete against, and a mention resolved here would be a
+    /// crease this field can carry and the handover cannot: moving text across
+    /// preserves what a person typed, not what an editor made of it. A plain
+    /// field that loses nothing is better than a rich one that loses creases
+    /// silently at the exact moment the connection lands.
+    ///
+    /// It wears `composer_editor_style` so the two fields are one field to look
+    /// at, and the handover does not reflow a half-written sentence.
+    fn loading_composer(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Entity<Editor> {
+        if let Some(editor) = self.loading_composer.clone() {
+            return editor;
+        }
+
+        let settings = AgentSettings::get_global(cx);
+        let min_lines = settings.message_editor_min_lines;
+        let max_lines = settings.set_message_editor_max_lines();
+        let editor = cx.new(|cx| {
+            let mut editor = Editor::auto_height(min_lines, max_lines, window, cx);
+            editor.set_placeholder_text(LOADING_COMPOSER_PLACEHOLDER, window, cx);
+            editor.set_show_indent_guides(false, cx);
+            editor.set_soft_wrap();
+            editor.disable_mouse_wheel_zoom();
+            editor.set_use_modal_editing(true);
+            editor
+        });
+        self.loading_composer = Some(editor.clone());
+        editor
+    }
+
+    /// Move what was typed during `Loading` into the composer that now exists.
+    ///
+    /// `OMEGA-DELTA-0122`. This is the half of the loading composer that
+    /// matters. Letting someone type into a field whose contents are thrown
+    /// away when the thing they were waiting for arrives is worse than not
+    /// letting them type at all: the second is a wait, the first is a lost
+    /// sentence, and the sentence is the one that states the task.
+    ///
+    /// The caret goes back where it was, because a person who was mid-word when
+    /// the connection landed is still mid-word.
+    ///
+    /// If the real composer already carries something — a restored draft, or
+    /// content the panel was opened with — nothing is overwritten. The typed
+    /// text goes on the end, after a blank line, and the caret follows it.
+    /// Which is not tidy, and is the right trade: both texts are somebody's.
+    fn hand_loading_draft_over(
+        &mut self,
+        thread_view: &Entity<ThreadView>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.loading_send_refused = false;
+        let Some(loading_composer) = self.loading_composer.take() else {
+            return;
+        };
+
+        let (text, cursor_offset) = loading_composer.update(cx, |editor, cx| {
+            let snapshot = editor.display_snapshot(cx);
+            let cursor = editor
+                .selections
+                .newest::<MultiBufferOffset>(&snapshot)
+                .head();
+            (editor.text(cx), cursor.0)
+        });
+        if text.is_empty() {
+            return;
+        }
+
+        let message_editor = thread_view.read(cx).message_editor.clone();
+        message_editor.update(cx, |message_editor, cx| {
+            if message_editor.is_empty(cx) {
+                message_editor.insert_text(&text, window, cx);
+                message_editor.set_cursor_offset(cursor_offset, window, cx);
+            } else {
+                message_editor.set_cursor_offset(usize::MAX, window, cx);
+                message_editor.insert_text(&format!("\n\n{text}"), window, cx);
+            }
+        });
+    }
+
     /// Rebuild the connection for a *different* executor.
     ///
     /// omega#112. `reset` is the wrong move for this and the difference is one
@@ -1054,6 +1175,15 @@ impl ConversationView {
                     .focus_handle(cx)
                     .focus(window, cx);
             });
+        } else {
+            // `OMEGA-DELTA-0122`. Which is the ordinary case here, not the
+            // fallback: the rebuild has just put this view back into `Loading`,
+            // so there is no thread view yet and the composer on screen is the
+            // loading one. It gets the caret for the reason above — a person
+            // who has just chosen an executor should be able to type, and
+            // typing is now something they can do before it arrives.
+            let loading_composer = self.loading_composer(window, cx);
+            loading_composer.focus_handle(cx).focus(window, cx);
         }
         cx.notify();
     }
@@ -1275,7 +1405,10 @@ impl ConversationView {
                             cx,
                         );
 
-                        if this.focus_handle.contains_focused(window, cx) {
+                        let was_focused = this.focus_handle.contains_focused(window, cx);
+                        this.hand_loading_draft_over(&current, window, cx);
+
+                        if was_focused {
                             current
                                 .read(cx)
                                 .message_editor
@@ -2809,6 +2942,133 @@ impl ConversationView {
         );
     }
 
+    /// The composer, while the executor is connecting.
+    ///
+    /// `OMEGA-DELTA-0122`. Same box, same place, same type — see
+    /// [`Self::loading_composer`] for why it exists and
+    /// [`Self::hand_loading_draft_over`] for what becomes of what is typed
+    /// into it.
+    ///
+    /// # Send is off, and says so
+    ///
+    /// The owner, on initialization generally: "if something needs
+    /// initalization, just disable the submit button in the input box until its
+    /// ready". There is nothing to send to — no session, no thread, no queue —
+    /// so the button is disabled rather than fake.
+    ///
+    /// It does not auto-send. A `Chat` that arrives here is refused, and the
+    /// status line says the message was not sent, because the alternative is a
+    /// key press that appears to do nothing. Firing on connect was the other
+    /// defensible answer and this is not it, for a reason particular to how a
+    /// person gets here: they got here by *switching executor*. A message
+    /// queued against the old one and fired at the new one would be sent to
+    /// somebody they did not choose to send it to, with the window that would
+    /// have shown them so already gone.
+    ///
+    /// # The indicator is in the bar, bottom left
+    ///
+    /// The owner: "move the loading indicator to inside the input bar like
+    /// bottom left". Which is also where it stops: bottom-left is empty once
+    /// loaded and stays empty — `render_zero_base_executor_bar` puts the
+    /// executor selector and the provider's controls on the right, and the left
+    /// carries only the turn's own state while there is a turn.
+    fn render_loading_composer(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let editor = self.loading_composer(window, cx);
+        let status = if self.loading_send_refused {
+            SharedString::from("Not sent — still connecting. Press Enter again when this clears.")
+        } else {
+            self.loading_status
+                .clone()
+                .unwrap_or_else(|| "Connecting…".into())
+        };
+        let max_content_width = AgentSettings::get_global(cx).max_content_width;
+
+        v_flex()
+            .key_context("AcpThread")
+            .flex_1()
+            .size_full()
+            .justify_end()
+            .on_action(cx.listener(|this, _: &Chat, _window, cx| {
+                this.loading_send_refused = true;
+                cx.notify();
+            }))
+            .child(
+                h_flex().pb_2().px_2().justify_center().child(
+                    v_flex()
+                        .when_some(max_content_width, |this, max_w| this.flex_basis(max_w))
+                        .when(max_content_width.is_none(), |this| this.w_full())
+                        .min_w_0()
+                        .bg(cx.theme().colors().editor_background)
+                        .border_1()
+                        .border_color(cx.theme().colors().border)
+                        .rounded_lg()
+                        .px_2()
+                        .flex_shrink_1()
+                        .flex_grow_0()
+                        .justify_between()
+                        .gap_2()
+                        .child(
+                            v_flex()
+                                .w_full()
+                                .min_h_0()
+                                .min_h(rems_from_px(96.))
+                                .pt_1p5()
+                                .pb_0p5()
+                                .pr_2p5()
+                                .child(EditorElement::new(
+                                    &editor,
+                                    crate::message_editor::composer_editor_style(cx),
+                                )),
+                        )
+                        .child(
+                            // `flex_wrap` for the same reason the real bar
+                            // has it: in a narrow window an unwrapped row
+                            // pushes Send off the edge, and a disabled
+                            // control a person cannot see is
+                            // indistinguishable from one that is missing.
+                            h_flex()
+                                .w_full()
+                                .min_w_0()
+                                .flex_none()
+                                .flex_wrap()
+                                .gap_1()
+                                .justify_between()
+                                .child(
+                                    h_flex().min_w_0().child(
+                                        Label::new(status)
+                                            .size(LabelSize::Small)
+                                            .color(Color::Muted)
+                                            .with_animation(
+                                                "loading-agent-label",
+                                                Animation::new(Duration::from_secs(2))
+                                                    .repeat()
+                                                    .with_easing(pulsating_between(0.3, 0.7)),
+                                                |label, delta| label.alpha(delta),
+                                            ),
+                                    ),
+                                )
+                                .child(
+                                    h_flex().min_w_0().child(
+                                        IconButton::new("send-message", IconName::Send)
+                                            .style(ButtonStyle::Filled)
+                                            .disabled(true)
+                                            .icon_color(Color::Muted)
+                                            .tooltip(Tooltip::text(
+                                                "Send is available once the executor is \
+                                                     connected — what you type is kept",
+                                            )),
+                                    ),
+                                ),
+                        ),
+                ),
+            )
+            .into_any()
+    }
+
     fn render_load_error(
         &self,
         e: &LoadError,
@@ -3510,6 +3770,16 @@ fn placeholder_text(agent_name: &str, has_commands: bool) -> String {
 
 impl Focusable for ConversationView {
     fn focus_handle(&self, cx: &App) -> FocusHandle {
+        // `OMEGA-DELTA-0122`. While connecting, focus belongs to the composer
+        // that is on screen. Without this, focusing the panel during `Loading`
+        // lands on the container, and the field a person can see and type in is
+        // one they have to click first — which is the complaint one step over,
+        // not answered.
+        if let Some(loading_composer) = self.loading_composer.as_ref()
+            && matches!(self.server_state, ServerState::Loading { .. })
+        {
+            return loading_composer.focus_handle(cx);
+        }
         match self.active_thread() {
             Some(thread) => thread.read(cx).focus_handle(cx),
             None => self.focus_handle.clone(),
@@ -3550,42 +3820,30 @@ impl Render for ConversationView {
         let request_elicitation_connection = self.request_elicitation_connection();
         let active_thread_renders_request_elicitations =
             self.active_thread_renders_request_elicitations();
+        // omega#112, then `OMEGA-DELTA-0122`. Bottom left, not the middle of an
+        // empty window — and in a composer, not on its own.
+        //
+        // The owner, switching executors: "it shows me a fullscreen loading
+        // window with nothing on it except for the center message. that is
+        // unacceptable." A centred label in an otherwise blank pane reads as
+        // the application having gone somewhere, for something that is usually
+        // a second of process startup.
+        //
+        // Moving it down was accepted and was not enough: "you still dont show
+        // the input bar while its fucking loading". So the label is now the
+        // status line of a real, typable composer, which is the window still
+        // looking like the window you were just in — and the bottom-left corner
+        // it sits in is the one `render_zero_base_executor_bar` leaves empty.
+        //
+        // Built before the match rather than inside it: drawing it needs
+        // `&mut self`, and the match holds `&self.server_state` across every
+        // arm.
+        let loading_composer = matches!(self.server_state, ServerState::Loading { .. })
+            .then(|| self.render_loading_composer(window, cx));
+
         let content = match &self.server_state {
             ServerState::Loading { .. } => {
-                let label_text = self
-                    .loading_status
-                    .clone()
-                    .unwrap_or_else(|| "Loading…".into());
-                // omega#112. Bottom left, not the middle of an empty window.
-                //
-                // The owner, switching executors: "it shows me a fullscreen
-                // loading window with nothing on it except for the center
-                // message. that is unacceptable."
-                //
-                // A centred label in an otherwise blank pane reads as the
-                // application having gone somewhere, for something that is
-                // usually a second of process startup. Down here it reads as
-                // what it is — a status line — and the window still looks like
-                // the window you were just in.
-                v_flex()
-                    .flex_1()
-                    .size_full()
-                    .items_start()
-                    .justify_end()
-                    .p_3()
-                    .child(
-                        Label::new(label_text)
-                            .size(LabelSize::Small)
-                            .color(Color::Muted)
-                            .with_animation(
-                                "loading-agent-label",
-                                Animation::new(Duration::from_secs(2))
-                                    .repeat()
-                                    .with_easing(pulsating_between(0.3, 0.7)),
-                                |label, delta| label.alpha(delta),
-                            ),
-                    )
-                    .into_any()
+                loading_composer.unwrap_or_else(|| div().into_any_element())
             }
             ServerState::LoadError { error: e, .. } => v_flex()
                 .flex_1()

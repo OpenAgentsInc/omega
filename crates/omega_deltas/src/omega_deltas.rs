@@ -108,6 +108,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0116",
     "OMEGA-DELTA-0119",
     "OMEGA-DELTA-0121",
+    "OMEGA-DELTA-0122",
 ];
 
 /// OMEGA-DELTA-0119. The read-only sheet a transcript file link opens in a
@@ -255,7 +256,14 @@ pub const AUDIENCE_CONTROL_PATH: &str = "crates/agent_ui/src/omega_audience_cont
 
 /// OMEGA-DELTA-0094. Where a thread starts, and so where its audience is
 /// recorded.
+///
+/// OMEGA-DELTA-0122. Also where the composer lives during the whole of
+/// `Loading`, because there is no thread view yet to hold one.
 pub const CONVERSATION_VIEW_PATH: &str = "crates/agent_ui/src/conversation_view.rs";
+
+/// OMEGA-DELTA-0122. The real composer, and the one face both it and the
+/// loading composer draw with.
+pub const MESSAGE_EDITOR_PATH: &str = "crates/agent_ui/src/message_editor.rs";
 
 /// OMEGA-DELTA-0105. The three sentences the audience menu says.
 ///
@@ -15356,6 +15364,231 @@ mod tests {
              this window's worktrees — which is not necessarily where the agent \
              is running.",
             thread_path.display()
+        );
+    }
+
+    // ------ OMEGA-DELTA-0122 — a wait a person can type through
+
+    /// The method body that follows `signature`, up to the next method.
+    ///
+    /// OMEGA-DELTA-0122. Every check below is about one of two methods, and
+    /// scanning the whole file for them would pass on a match anywhere — most
+    /// dangerously on the *real* composer, which legitimately contains
+    /// everything the loading one must not.
+    fn method_body<'source>(
+        source: &'source str,
+        signature: &str,
+        path: &std::path::Path,
+        note: &str,
+    ) -> &'source str {
+        let after = source
+            .split_once(signature)
+            .map(|(_, rest)| rest)
+            .unwrap_or_else(|| {
+                panic!(
+                    "OMEGA-DELTA-0122: {} no longer has `{signature}`. {note}",
+                    path.display()
+                )
+            });
+        // The method's own closing brace, at the indent an `impl` member ends
+        // on. Stopping at the next `fn` instead misses the ones spelled `pub
+        // fn`, and a body that runs on into its neighbour makes every negative
+        // check below assert something about the wrong method.
+        after
+            .split_once("\n    }\n")
+            .map_or(after, |(body, _)| body)
+    }
+
+    /// OMEGA-DELTA-0122. While the executor connects there is a composer, it
+    /// takes text, that text survives the connection, and Send is off and says
+    /// so.
+    ///
+    /// The composer belongs to `ThreadView`, and there is no thread view until
+    /// a session exists — so for the whole of `Loading` the window had no input
+    /// in it at all. `omega#112` made that a place a person goes on purpose:
+    /// choosing an executor calls `reset_onto_new_executor`, which rebuilds the
+    /// connection from nothing. The owner, on a live build:
+    ///
+    ///     "that loading thing is ok but you still dont show the input bar
+    ///      while its fucking loading. i want to be able to type while shit is
+    ///      loading. and move the loading indicator to inside the input bar
+    ///      like bottom left"
+    ///
+    /// Four things have to hold together for that to be worth having, and each
+    /// one of them fails silently on its own:
+    ///
+    /// 1. **A composer exists during `Loading`.** A pulsing label is not one.
+    /// 2. **What is typed is carried over.** A field whose contents vanish when
+    ///    the wait ends is worse than no field: the sentence lost is the one
+    ///    that states the task, and nothing on screen said it was at risk.
+    /// 3. **Send is disabled, and refusing is visible.** The owner, earlier the
+    ///    same session: "if something needs initalization, just disable the
+    ///    submit button in the input box until its ready". A key press that
+    ///    appears to do nothing is the failure mode a disabled button exists to
+    ///    prevent, so `Chat` here changes what the status line says.
+    /// 4. **It does not auto-send on connect.** Both answers were defensible in
+    ///    the abstract; this one is not abstract. A person reaches this state by
+    ///    *switching executor*, so a message queued while connecting and fired
+    ///    on arrival goes to a runtime they did not watch it go to.
+    #[test]
+    fn the_wait_for_an_executor_is_one_a_person_can_type_through() {
+        let view_path = repository_path(CONVERSATION_VIEW_PATH);
+        let view_source = std::fs::read_to_string(&view_path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", view_path.display()));
+        // Not `production_source`: it cuts at the first `#[cfg(test)]`, and in
+        // this file that is a test-only `use` on line 12, which would leave
+        // every scan below looking at the imports.
+        let view = uncommented(
+            view_source
+                .split_once("\n#[cfg(test)]\npub(crate) mod tests {")
+                .map_or(view_source.as_str(), |(before, _)| before),
+        );
+
+        // 1. There is a composer, and `Loading` draws it.
+        let composer = method_body(
+            &view,
+            "fn render_loading_composer(",
+            &view_path,
+            "The whole of `Loading` then has no input in it, which is the \
+             state the owner was looking at when they asked for one.",
+        );
+        assert!(
+            view.contains("self.render_loading_composer(window, cx)"),
+            "OMEGA-DELTA-0122: {} builds the loading composer and never draws \
+             it. An element nothing renders is the same as no element.",
+            view_path.display()
+        );
+        assert!(
+            composer.contains("EditorElement::new(")
+                && composer.contains("composer_editor_style(cx)"),
+            "OMEGA-DELTA-0122: the loading composer in {} is no longer a real \
+             editor wearing the real composer's face. A label shaped like a \
+             field cannot be typed into, and a field with its own style reflows \
+             what is in it at the exact moment the handover happens.",
+            view_path.display()
+        );
+
+        // 2. What was typed is moved across, caret and all, and nothing on the
+        //    receiving side is thrown away to make room for it.
+        let handover = method_body(
+            &view,
+            "fn hand_loading_draft_over(",
+            &view_path,
+            "Then the loading composer is a field whose contents are discarded \
+             when the thing it was waiting for arrives.",
+        );
+        assert!(
+            view.contains("this.hand_loading_draft_over(&current, window, cx);"),
+            "OMEGA-DELTA-0122: {} no longer hands the loading draft over where \
+             the thread view is built. The handover existing and never being \
+             called loses the text exactly as completely as not having one.",
+            view_path.display()
+        );
+        assert!(
+            handover.contains("message_editor.insert_text(&text, window, cx);")
+                && handover
+                    .contains("message_editor.set_cursor_offset(cursor_offset, window, cx);"),
+            "OMEGA-DELTA-0122: the handover in {} no longer restores both the \
+             text and the caret. A person mid-word when the connection landed \
+             is still mid-word.",
+            view_path.display()
+        );
+        assert!(
+            !handover.contains(".clear("),
+            "OMEGA-DELTA-0122: the handover in {} clears the destination. \
+             Whatever is already in the real composer — a restored draft, \
+             content the panel was opened with — is somebody's too, and this \
+             method exists precisely because losing typed text is the failure \
+             worth a delta.",
+            view_path.display()
+        );
+
+        // 3. Send is off, and 4. it stays off — the handover moves text, and
+        //    that is all it does.
+        assert!(
+            composer.contains(".disabled(true)"),
+            "OMEGA-DELTA-0122: the Send control in {} is no longer disabled \
+             while connecting. There is no session to send to, so a live \
+             button is a button that lies about what a press will do.",
+            view_path.display()
+        );
+        assert!(
+            composer.contains("this.loading_send_refused = true;"),
+            "OMEGA-DELTA-0122: {} no longer records a Send asked for while \
+             connecting. Enter then does nothing and says nothing, which is the \
+             silence the disabled button was supposed to replace.",
+            view_path.display()
+        );
+        assert!(
+            view.contains("Not sent — still connecting."),
+            "OMEGA-DELTA-0122: {} no longer says the message was not sent. \
+             The refusal has to be a sentence a person reads, not a state a \
+             field holds.",
+            view_path.display()
+        );
+        assert!(
+            !handover.contains(".send(")
+                && !handover.contains("send_impl(")
+                && !handover.contains("queue_message(")
+                && !handover.contains("Chat"),
+            "OMEGA-DELTA-0122: the handover in {} sends. A person reaches this \
+             state by switching executor, so a message queued against the old \
+             one and fired at the new one is sent to a runtime they never \
+             watched it go to — and the window that would have shown them is \
+             already gone.",
+            view_path.display()
+        );
+
+        // The indicator is in the bar and on the left, which is the half of the
+        // owner's sentence that is about where to look.
+        let (status_at, send_at) = (
+            composer.find("Label::new(status)"),
+            composer.find(r#"IconButton::new("send-message""#),
+        );
+        assert!(
+            matches!((status_at, send_at), (Some(status), Some(send)) if status < send),
+            "OMEGA-DELTA-0122: the loading status in {} is no longer the \
+             left-hand end of the composer's own bottom row. The owner: \"move \
+             the loading indicator to inside the input bar like bottom left\". \
+             Outside the box it reads as the application having gone somewhere.",
+            view_path.display()
+        );
+        assert!(
+            composer.contains(".flex_wrap()"),
+            "OMEGA-DELTA-0122: the loading composer's bottom row in {} no \
+             longer wraps. Unwrapped, a narrow window pushes Send off the edge, \
+             and a disabled control a person cannot see is indistinguishable \
+             from one that was never built.",
+            view_path.display()
+        );
+
+        // The placeholder does not offer what this field cannot do.
+        assert!(
+            !view.contains("Type while the executor connects — @ to include"),
+            "OMEGA-DELTA-0122: the loading composer's placeholder in {} offers \
+             `@` mentions. Both `@` and `/` ask a session that does not exist \
+             yet, so promising them is a lie a person finds by typing one.",
+            view_path.display()
+        );
+
+        // The one face, declared once.
+        let editor_path = repository_path(MESSAGE_EDITOR_PATH);
+        let editor_source = std::fs::read_to_string(&editor_path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", editor_path.display()));
+        let editor = uncommented(production_source(&editor_source));
+        assert!(
+            editor.contains("pub(crate) fn composer_editor_style(cx: &App) -> EditorStyle"),
+            "OMEGA-DELTA-0122: {} no longer declares the composer's style as \
+             something a second field can wear. Two copies drift, and the drift \
+             shows up as a reflow under the caret at handover.",
+            editor_path.display()
+        );
+        assert!(
+            editor.contains("EditorElement::new(&self.editor, composer_editor_style(cx))"),
+            "OMEGA-DELTA-0122: the real composer in {} no longer draws with the \
+             shared style, so the shared style is now only the loading one's — \
+             which is the drift this was meant to make impossible.",
+            editor_path.display()
         );
     }
 }
