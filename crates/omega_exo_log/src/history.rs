@@ -436,7 +436,8 @@ impl ExoHistoryUnavailable {
         "this is not an empty history; Omega did not read one";
 
     /// Every variant, so a check can drive all of them.
-    pub const ALL: &'static [Self] = &[Self::NotConfigured, Self::NoAgentId, Self::NoConversationId];
+    pub const ALL: &'static [Self] =
+        &[Self::NotConfigured, Self::NoAgentId, Self::NoConversationId];
 }
 
 impl std::fmt::Display for ExoHistoryUnavailable {
@@ -775,7 +776,9 @@ mod tests {
             })),
         ];
 
-        let both: ExoArtifactSet = [write(1, "first"), write(2, "second")].into_iter().collect();
+        let both: ExoArtifactSet = [write(1, "first"), write(2, "second")]
+            .into_iter()
+            .collect();
         let history = ExoHistory::read(&events, &both);
         let bodies: Vec<&ExoBody> = history
             .rows

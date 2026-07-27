@@ -563,7 +563,8 @@ mod tests {
     /// lifetime and nothing outlives it.
     fn one_shot(reply: String) -> (ExoReadClient, std::thread::JoinHandle<String>) {
         let (client, server) = serving(vec![reply]);
-        let handle = std::thread::spawn(move || server.join().expect("the server thread").remove(0));
+        let handle =
+            std::thread::spawn(move || server.join().expect("the server thread").remove(0));
         (client, handle)
     }
 
