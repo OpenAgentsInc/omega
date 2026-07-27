@@ -18890,6 +18890,27 @@ mod tests {
             );
         }
 
+        let render_thread_error = method_body(
+            &thread,
+            "pub(crate) fn render_thread_error(",
+            &thread_path,
+            "Thread errors belong inside the same readable column as messages.",
+        );
+        for required in [
+            "AgentSettings::get_global(cx).max_content_width",
+            ".justify_center()",
+            ".when_some(max_content_width, |this, max_w| this.max_w(max_w))",
+            "CalloutBorderPosition::Contained",
+        ] {
+            assert!(
+                render_thread_error.contains(required),
+                "OMEGA-DELTA-0142: the thread error surface in {} lost \
+                 `{required}`, so errors can become a full-width status bar \
+                 instead of an inline conversation card.",
+                thread_path.display()
+            );
+        }
+
         for settings_action in [
             "omega::OpenSettings",
             "omega::OpenSettingsAt",

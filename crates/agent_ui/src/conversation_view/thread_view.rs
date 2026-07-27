@@ -11455,7 +11455,17 @@ impl ThreadView {
             ),
         };
 
-        Some(div().child(callout.border_position(self.callout_border_position())))
+        let max_content_width = AgentSettings::get_global(cx).max_content_width;
+
+        Some(
+            h_flex().w_full().justify_center().px_2().pb_2().child(
+                div()
+                    .w_full()
+                    .min_w_0()
+                    .when_some(max_content_width, |this, max_w| this.max_w(max_w))
+                    .child(callout.border_position(CalloutBorderPosition::Contained)),
+            ),
+        )
     }
 
     fn render_refusal_error(&self, cx: &mut Context<'_, Self>) -> Callout {

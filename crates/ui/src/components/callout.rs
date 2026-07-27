@@ -6,6 +6,7 @@ use crate::prelude::*;
 pub enum CalloutBorderPosition {
     Top,
     Bottom,
+    Contained,
 }
 
 /// A callout component for displaying important information that requires user attention.
@@ -149,6 +150,7 @@ impl RenderOnce for Callout {
             .map(|this| match self.border_position {
                 CalloutBorderPosition::Top => this.border_t_1(),
                 CalloutBorderPosition::Bottom => this.border_b_1(),
+                CalloutBorderPosition::Contained => this.border_1().rounded_md(),
             })
             .border_color(cx.theme().colors().border)
             .bg(bg_color)

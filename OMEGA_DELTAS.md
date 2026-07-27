@@ -6601,6 +6601,11 @@ credential can be entered or replaced. The action sits in the error callout
 that reported the problem rather than requiring the user to discover the
 settings hierarchy independently.
 
+Thread errors render as contained cards in the same centered, maximum-width
+column as conversation messages and the composer. They use the message
+surface's full border and corner treatment rather than drawing an edge-to-edge
+status strip across the window.
+
 Google AI reports a missing key through the typed, non-retryable
 `NoApiKey` completion error. Missing and invalid credentials from every native
 provider use the same actionable error surface.
