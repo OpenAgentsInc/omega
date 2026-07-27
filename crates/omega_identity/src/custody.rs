@@ -38,7 +38,9 @@ use crate::{
         SelectedRecovery, reconcile_prepared,
     },
     recovery_artifact::{self, RecoveryArtifactError},
-    secret::{SecretKeyMaterial, SecretStore, StoreError, SystemKeyringStore},
+    secret::{
+        DevelopmentFileSecretStore, SecretKeyMaterial, SecretStore, StoreError, SystemKeyringStore,
+    },
 };
 
 const IDENTITY_TRANSACTION_SCHEMA: &str = "openagents.omega.identity-transaction.v1";
@@ -57,10 +59,23 @@ pub struct IdentityService {
 
 impl IdentityService {
     pub fn system(channel: AppChannel) -> Self {
+        let development_use_keychain =
+            std::env::var("ZED_DEVELOPMENT_USE_KEYCHAIN").is_ok_and(|value| !value.is_empty());
+        let store: Arc<dyn SecretStore> = if use_development_file_secret_store(
+            channel,
+            cfg!(debug_assertions),
+            development_use_keychain,
+        ) {
+            Arc::new(DevelopmentFileSecretStore::new(
+                paths::config_dir().join("development_identity_secret"),
+            ))
+        } else {
+            Arc::new(SystemKeyringStore)
+        };
         Self::new(
             channel,
             CustodyPaths::for_data_root(paths::data_dir().join("identity")),
-            Arc::new(SystemKeyringStore),
+            store,
             Arc::new(SystemSecretGenerator),
         )
     }
@@ -1408,6 +1423,14 @@ impl IdentityService {
     }
 }
 
+fn use_development_file_secret_store(
+    channel: AppChannel,
+    debug_assertions: bool,
+    development_use_keychain: bool,
+) -> bool {
+    channel == AppChannel::Dev && debug_assertions && !development_use_keychain
+}
+
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 enum TransactionOperation {
@@ -1865,6 +1888,24 @@ mod tests {
             store,
             Arc::new(FixedGenerator([1; 32])),
         )
+    }
+
+    #[test]
+    fn only_an_unforced_debug_dev_runtime_uses_the_file_store() {
+        for channel in AppChannel::ALL {
+            for debug_assertions in [false, true] {
+                for development_use_keychain in [false, true] {
+                    assert_eq!(
+                        use_development_file_secret_store(
+                            channel,
+                            debug_assertions,
+                            development_use_keychain,
+                        ),
+                        channel == AppChannel::Dev && debug_assertions && !development_use_keychain
+                    );
+                }
+            }
+        }
     }
 
     fn counting_service(

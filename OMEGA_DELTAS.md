@@ -4481,11 +4481,15 @@ than merely stated.
 - **Upstream Zed:** first-run onboarding asks for nothing that outlives the
   profile directory. `--user-data-dir` is a complete reset of who you are to
   the app, because there is nothing about you outside it.
-- **Omega:** the signing key lives in the system keychain under
+- **Omega:** in packaged builds the signing key lives in the system keychain under
   `com.openagents.omega.credentials.<channel>`, scoped **per release channel
   and per user — not per profile**. That scope is deliberate and kept: an
   identity belongs to a person, not to a directory, and a per-profile identity
   would mean a second window on the same Mac signed as somebody else.
+- **Amended by `OMEGA-DELTA-0141`:** unsigned debug builds use an
+  owner-readable development file because their executable identity changes on
+  every rebuild and macOS otherwise repeats a password dialog. Packaged builds
+  and explicit Keychain tests keep the scope and custody described here.
 - **What omega#110 reported is the conclusion, not the scope.** A brand-new
   `--user-data-dir` has no identity files and a keychain that already holds an
   identity. Custody called that `Incomplete` — the state written for a
@@ -6561,3 +6565,22 @@ available to correct or change the directory.
 
 - **Enforced by:** `the_thread_folder_is_a_persistent_picker_control` in
   `crates/omega_deltas`.
+
+### OMEGA-DELTA-0141 — Unsigned debug identity custody does not summon Keychain
+
+An unsigned `dev` debug build stores its development-only Nostr identity secret
+in an atomic, owner-readable file beside its other development credentials.
+This avoids macOS asking for the login Keychain password again whenever a
+rebuild changes the executable identity.
+
+The exception is deliberately narrow. Nightly, RC, stable, non-debug builds,
+the operator identity CLI, and a development run with
+`ZED_DEVELOPMENT_USE_KEYCHAIN=1` continue to use the system keychain. The
+development file validates the same 32-byte secret material, is written with
+mode `0600` on Unix, and is removed through the same custody reset path.
+
+- **Enforced by:** `debug_identity_custody_avoids_the_system_keychain` in
+  `crates/omega_deltas`, plus
+  `only_an_unforced_debug_dev_runtime_uses_the_file_store` and
+  `development_file_store_round_trips_and_deletes_a_secret` in
+  `crates/omega_identity`.

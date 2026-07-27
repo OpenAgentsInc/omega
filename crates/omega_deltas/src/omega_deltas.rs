@@ -129,6 +129,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0138",
     "OMEGA-DELTA-0139",
     "OMEGA-DELTA-0140",
+    "OMEGA-DELTA-0141",
 ];
 
 /// OMEGA-DELTA-0125. Every entry the thread header's `…` menu offers, the
@@ -18801,5 +18802,69 @@ mod tests {
             "OMEGA-DELTA-0140: the initial no-folder warning no longer offers \
              the same in-window folder picker as the persistent header."
         );
+    }
+
+    /// OMEGA-DELTA-0141. An unsigned debug executable must not repeatedly ask
+    /// macOS for access to the development identity's Keychain item.
+    #[test]
+    fn debug_identity_custody_avoids_the_system_keychain() {
+        let custody_path = repository_path(IDENTITY_CUSTODY_PATH);
+        let custody = without_comments(&read_repository_file(IDENTITY_CUSTODY_PATH));
+        let system = method_body(
+            &custody,
+            "pub fn system(",
+            &custody_path,
+            "The runtime constructor owns the narrow debug-only store choice.",
+        );
+        for required in [
+            "use_development_file_secret_store(",
+            "cfg!(debug_assertions)",
+            "ZED_DEVELOPMENT_USE_KEYCHAIN",
+            "DevelopmentFileSecretStore::new(",
+            "development_identity_secret",
+        ] {
+            assert!(
+                system.contains(required),
+                "OMEGA-DELTA-0141: the debug identity store selection in {} \
+                 lost `{required}`.",
+                custody_path.display()
+            );
+        }
+
+        let selector =
+            function_body(&custody, "use_development_file_secret_store").unwrap_or_else(|| {
+                panic!(
+                    "OMEGA-DELTA-0141: {} lost the debug identity store selector.",
+                    custody_path.display()
+                )
+            });
+        for required in [
+            "channel == AppChannel::Dev",
+            "debug_assertions",
+            "!development_use_keychain",
+        ] {
+            assert!(
+                selector.contains(required),
+                "OMEGA-DELTA-0141: the debug identity store selector in {} \
+                 lost `{required}`.",
+                custody_path.display()
+            );
+        }
+
+        let secret_path = repository_path("crates/omega_identity/src/secret.rs");
+        let secret = without_comments(&read_repository_file("crates/omega_identity/src/secret.rs"));
+        for required in [
+            "impl SecretStore for DevelopmentFileSecretStore",
+            "AtomicWriteFile::open",
+            "SecretKeyMaterial::from_bytes",
+            "Permissions::from_mode(0o600)",
+        ] {
+            assert!(
+                secret.contains(required),
+                "OMEGA-DELTA-0141: the development identity store in {} lost \
+                 `{required}`.",
+                secret_path.display()
+            );
+        }
     }
 }

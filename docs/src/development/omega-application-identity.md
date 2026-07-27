@@ -27,10 +27,12 @@ The resulting application executable is named `omega`. Internal crate names,
 legacy `zed://` parsing remain compatibility surfaces. Omega does not register
 itself as the handler for `zed://`.
 
-Normal development credentials can still use the channel-local development
-credentials file. Identity custody code must use the secure-only provider seam,
-which always selects the system keychain and applies the channel credential
-namespace.
+Unsigned debug builds use channel-local development files for ordinary
+credentials and the development identity key, avoiding repeated operating
+system prompts whenever the executable changes. The identity file has
+owner-only permissions. Set `ZED_DEVELOPMENT_USE_KEYCHAIN=1` when explicitly
+testing Keychain behavior. Non-debug and non-development builds always use the
+system keychain with the channel credential namespace.
 
 ## Review identity onboarding fixtures
 
@@ -54,7 +56,9 @@ masked import preview contains no private key material.
 importing, opening, signing with, inspecting, and resetting an Omega identity.
 It stores one 32-byte Nostr secret in the operating system credential provider
 under the current release channel's `KeyringLocator`. There is no environment,
-plaintext-file, app-data, or auto-generation fallback.
+plaintext-file, app-data, or auto-generation fallback in packaged builds. The
+unsigned debug `dev` channel uses the documented owner-only development
+identity file instead.
 
 Creation and import are explicit transactions. Omega serializes each mutation
 with a process-global mutex and a channel-scoped cross-process operating-system

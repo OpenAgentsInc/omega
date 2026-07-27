@@ -25,14 +25,17 @@ your password again the next time something changes in the binary.
 
 This quickly becomes annoying and impedes development speed.
 
-That is why, by default, when running a development build of Zed an alternative
-credential provider is used to bypass the system keychain.
+That is why, by default, a debug build of Omega uses development files for both
+ordinary credentials and its development-only identity key. The identity file
+is created with owner-only permissions. These files are intentionally limited
+to the unsigned `dev` channel; packaged builds continue to use secure system
+custody.
 
 > **Note:** This is **only** the case for development builds. For all non-development
 > release channels the system keychain is always used.
 
-If you need to test something out using the real system keychain in a
-development build, run Zed with the following environment variable set:
+If you need to test something using the real system keychain in a development
+build, run Omega with the following environment variable set:
 
 ```
 ZED_DEVELOPMENT_USE_KEYCHAIN=1
