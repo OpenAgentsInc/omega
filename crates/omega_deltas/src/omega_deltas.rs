@@ -12521,6 +12521,40 @@ mod tests {
         );
     }
 
+    /// OMEGA-DELTA-0101. The collapsed subagent card names the external ACP
+    /// model when the live adapter advertises one.
+    #[test]
+    fn a_subagent_card_names_the_external_acp_model_when_the_adapter_discloses_it() {
+        let binding_path = repository_path(EXECUTOR_DISCLOSURE_BINDING_PATH);
+        let binding = read_repository_file(EXECUTOR_DISCLOSURE_BINDING_PATH);
+        let compact_binding = without_whitespace(&binding);
+        assert!(
+            compact_binding.contains(&without_whitespace(
+                "session_config_options(session_id, cx)"
+            )) && compact_binding.contains("selected_acp_model"),
+            "OMEGA-DELTA-0101: {} no longer derives an external ACP model from \
+             the live session config. The card must show what the adapter \
+             selected, never a hard-coded Claude model.",
+            binding_path.display()
+        );
+
+        let view_path = repository_path(THREAD_VIEW_PATH);
+        let view = read_repository_file(THREAD_VIEW_PATH);
+        let compact_view = without_whitespace(&view);
+        for required in [
+            "Some(model) => format!(\"{} · {model}\", disclosure.agent_id)",
+            "None => format!(\"{} · model not disclosed\", disclosure.agent_id)",
+        ] {
+            assert!(
+                compact_view.contains(&without_whitespace(required)),
+                "OMEGA-DELTA-0101: {} no longer renders `{required}` in the \
+                 subagent card header. The model belongs beside the ACP agent \
+                 id on the collapsed line.",
+                view_path.display()
+            );
+        }
+    }
+
     /// OMEGA-DELTA-0101. A session Omega holds no transcript for says so
     /// without guessing which kind it was.
     ///

@@ -10869,8 +10869,12 @@ impl ThreadView {
             use crate::omega_executor_disclosure::ThreadExecutorDisclosure as _;
             let disclosure = thread.read(cx).omega_executor_disclosure(cx);
             (disclosure.class != omega_front_door::ExecutorClass::NativeLoop).then(|| {
+                let header = match disclosure.model.as_deref() {
+                    Some(model) => format!("{} · {model}", disclosure.agent_id),
+                    None => format!("{} · model not disclosed", disclosure.agent_id),
+                };
                 (
-                    SharedString::from(disclosure.agent_id.clone()),
+                    SharedString::from(header),
                     SharedString::from(disclosure.label()),
                 )
             })
@@ -11012,13 +11016,13 @@ impl ThreadView {
                                             .size(LabelSize::Custom(self.tool_name_font_size()))
                                             .truncate(),
                                     )
-                                    .when_some(external_executor, |this, (agent_id, label)| {
+                                    .when_some(external_executor, |this, (header, label)| {
                                         this.child(
                                             div()
                                                 .id(("subagent-executor", entry_ix))
                                                 .flex_none()
                                                 .child(
-                                                    Label::new(agent_id)
+                                                    Label::new(header)
                                                         .size(LabelSize::Custom(
                                                             self.tool_name_font_size(),
                                                         ))

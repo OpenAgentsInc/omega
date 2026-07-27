@@ -207,14 +207,15 @@ pub struct SidebarState {
 impl SidebarState {
     /// The state a machine that has never stored one gets.
     ///
-    /// Open, with every section expanded. "default open on the zerobase chat
-    /// page" was the instruction, and a first launch is the case it is about:
-    /// a sidebar that starts collapsed is a feature nobody finds.
+    /// Open, with recent threads expanded and public chat collapsed. The
+    /// thread list is the sidebar's primary navigation and should be visible
+    /// immediately; public chat remains one click away without competing for
+    /// the initial vertical space.
     #[must_use]
     pub fn default_open() -> Self {
         Self {
             open: true,
-            collapsed: Vec::new(),
+            collapsed: vec![SectionId::NostrActivity.key().to_string()],
         }
     }
 
@@ -413,12 +414,11 @@ mod tests {
     }
 
     #[test]
-    fn a_machine_that_has_never_stored_a_state_gets_an_open_one() {
+    fn a_machine_that_has_never_stored_a_state_opens_threads_and_collapses_public_chat() {
         let state = SidebarState::from_stored(None);
         assert!(state.open, "the owner asked for default open on zero base");
-        for section in SectionId::ALL {
-            assert!(!state.is_collapsed(*section));
-        }
+        assert!(!state.is_collapsed(SectionId::RecentThreads));
+        assert!(state.is_collapsed(SectionId::NostrActivity));
     }
 
     #[test]
@@ -432,18 +432,22 @@ mod tests {
     }
 
     #[test]
-    fn a_collapsed_section_survives_a_round_trip() {
+    fn section_choices_survive_a_round_trip() {
         let mut state = SidebarState::default_open();
+        state.toggle_section(SectionId::RecentThreads);
         state.toggle_section(SectionId::NostrActivity);
         let json = serde_json::to_string(&state).expect("serialises");
         let restored = SidebarState::from_stored(Some(&json));
 
         assert!(
-            restored.is_collapsed(SectionId::NostrActivity),
+            restored.is_collapsed(SectionId::RecentThreads),
             "'persistent' covers the vertical menus too — a section collapsed \
              before a restart must come back collapsed."
         );
-        assert!(!restored.is_collapsed(SectionId::RecentThreads));
+        assert!(
+            !restored.is_collapsed(SectionId::NostrActivity),
+            "an explicitly expanded section must not be reset to its default"
+        );
         assert!(restored.open);
     }
 
@@ -451,14 +455,10 @@ mod tests {
     fn toggling_a_section_twice_leaves_it_as_it_was() {
         let mut state = SidebarState::default_open();
         state.toggle_section(SectionId::NostrActivity);
-        assert!(state.is_collapsed(SectionId::NostrActivity));
-        state.toggle_section(SectionId::NostrActivity);
         assert!(!state.is_collapsed(SectionId::NostrActivity));
-        assert!(
-            state.collapsed.is_empty(),
-            "an un-collapsed section must leave no entry behind, or the stored \
-             state grows without bound across a session of toggling"
-        );
+        state.toggle_section(SectionId::NostrActivity);
+        assert!(state.is_collapsed(SectionId::NostrActivity));
+        assert_eq!(state, SidebarState::default_open());
     }
 
     #[test]

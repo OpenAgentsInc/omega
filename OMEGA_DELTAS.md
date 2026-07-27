@@ -3405,10 +3405,9 @@ than it sounds, because the harness omega#81's acceptance sentence names —
   what a person reads.
 - **What a subagent discloses.**
   - An external ACP subagent: class `external_acp`, the agent id it connected
-    with, and **no model**. `AcpConnection` does not implement
-    `AgentConnection::model_selector`, so Codex genuinely does not tell Omega
-    which model served the turn. `None` is *not disclosed*; an invented model
-    would read as a disclosure while being a guess.
+    with, and **no model in the parent tool report**. That report is created
+    before the UI owns the live ACP session, so an invented model there would
+    read as a disclosure while being a guess.
   - An inherited subagent: class `native_loop`, Omega's own agent id, and the
     **subagent's** provider and model — not the parent's. `subagent_model`
     overrides the inherited model for every subagent, so those are two facts and
@@ -3425,15 +3424,17 @@ than it sounds, because the harness omega#81's acceptance sentence names —
   build holds a string there; it reads as *not disclosed* rather than being
   parsed into an invented class, and it must not fail to load — the output is an
   untagged enum, so a field that fails takes the whole tool call with it.
-- **What this does not cover.** The disclosure reaches the **parent**, which is
-  the reader the acceptance is about — a model, reading a tool result. It does
-  not reach the agent panel's subagent card: that looks the session up in the
-  native connection's thread map, an external subagent is not in it, and
-  `crates/agent_ui` is where that would be fixed. So nobody has *seen* an
-  external subagent disclose itself in a window, and the record being right is
-  not the same fact as the line being drawn.
+- **What reaches the subagent card.** The card owns the external ACP thread, so
+  it can read the live session's `model` config option when the adapter
+  advertises one. The collapsed header renders `agent-id · model`, using the
+  adapter's human-readable model name; an unrecognised selected value remains
+  visible as its raw id. When an adapter does not disclose a model, the line
+  says `model not disclosed` rather than guessing. This live UI projection does
+  not retroactively invent a model for the parent tool report.
 - **Enforced by:** `a_subagents_executor_is_disclosed_as_a_record` and
-  `a_session_with_no_transcript_names_both_reasons` in `crates/omega_deltas`;
+  `a_subagent_card_names_the_external_acp_model_when_the_adapter_discloses_it`,
+  and `a_session_with_no_transcript_names_both_reasons` in
+  `crates/omega_deltas`;
   plus `an_external_subagent_discloses_its_own_executor`,
   `an_external_subagent_never_discloses_as_the_native_loop`,
   `a_mixed_fan_out_is_attributable_record_by_record` and
@@ -6139,6 +6140,11 @@ question rather than leaving it to whoever next reads the menu.
     that manifest names, and draws the five most recent kind-9 messages —
     the same relay, group and kind the `/agentchat` page reads. Signatures are
     verified against the pubkey drawn beside them.
+
+- **The initial disclosure follows the task hierarchy.** On a profile with no
+  stored sidebar state, *Recent threads* starts expanded and *Public chat*
+  starts collapsed. Once a person changes either section, the stored choice
+  remains authoritative across launches.
 
 - **The read is a read.** `auth.directRead` is `public` and the relay serves the
   group's history unauthenticated, so there is no signer here, no key, no NIP-42

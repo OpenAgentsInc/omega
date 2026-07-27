@@ -32,7 +32,8 @@
 //! | Part | Durable home |
 //! | --- | --- |
 //! | class, agent id | the connection, rebuilt from `sidebar_threads.agent_id` |
-//! | provider, model | `DbThread.model`, restored by `Thread::from_db` |
+//! | native provider, model | `DbThread.model`, restored by `Thread::from_db` |
+//! | external ACP model | the live session's model config option, when advertised |
 //! | run ref | `full-auto-host-correlation.json`, reloaded at startup |
 //!
 //! A projection cannot disagree with the thread it describes. A cached copy
@@ -119,6 +120,20 @@ fn classify_connection(
         };
     }
 
+    if let Some(acp_connection) = connection.clone().downcast::<AcpConnection>() {
+        let model = acp_connection
+            .session_config_options(session_id, cx)
+            .and_then(|options| selected_acp_model(&options.config_options()));
+        return ExecutorDisclosure {
+            class: ExecutorClass::ExternalAcp,
+            agent_id,
+            provider: None,
+            model,
+            run_ref: None,
+            route: crate::omega_router::recorded_route(session_id),
+        };
+    }
+
     // `OMEGA-DELTA-0042`, omega#87. The Exo harness lane. Recognised by its
     // concrete type for the same reason the native loop is: `agent_id()` on
     // this connection is *derived from what Exo said about itself*, so
@@ -150,14 +165,10 @@ fn classify_connection(
         };
     }
 
-    // `AcpConnection` shares the fallback, but is recognised explicitly so an
-    // unrecognised connection type leaves a trace instead of passing silently.
-    if connection.downcast::<AcpConnection>().is_none() {
-        log::debug!(
-            "OMEGA-DELTA-0021: disclosing {agent_id} as an external ACP agent; \
-             its connection type is not one this build recognises"
-        );
-    }
+    log::debug!(
+        "OMEGA-DELTA-0021: disclosing {agent_id} as an external ACP agent; \
+         its connection type is not one this build recognises"
+    );
 
     ExecutorDisclosure {
         class: ExecutorClass::ExternalAcp,
@@ -169,9 +180,77 @@ fn classify_connection(
     }
 }
 
+fn selected_acp_model(options: &[acp::SessionConfigOption]) -> Option<String> {
+    let option = options.iter().find(|option| {
+        matches!(
+            option.category.as_ref(),
+            Some(acp::SessionConfigOptionCategory::Model)
+        ) || option.id.0.as_ref() == "model"
+    })?;
+    let acp::SessionConfigKind::Select(select) = &option.kind else {
+        return None;
+    };
+
+    let selected_name = match &select.options {
+        acp::SessionConfigSelectOptions::Ungrouped(options) => options
+            .iter()
+            .find(|option| option.value == select.current_value)
+            .map(|option| option.name.clone()),
+        acp::SessionConfigSelectOptions::Grouped(groups) => groups
+            .iter()
+            .flat_map(|group| &group.options)
+            .find(|option| option.value == select.current_value)
+            .map(|option| option.name.clone()),
+        _ => None,
+    };
+
+    selected_name
+        .filter(|name| !name.trim().is_empty())
+        .or_else(|| {
+            let current_value = select.current_value.0.to_string();
+            (!current_value.trim().is_empty()).then_some(current_value)
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn external_acp_model_uses_the_adapters_human_readable_selection() {
+        let options = vec![
+            acp::SessionConfigOption::select(
+                "model",
+                "Model",
+                "claude-opus-4-6",
+                vec![
+                    acp::SessionConfigSelectOption::new("claude-sonnet-4-6", "Sonnet 4.6"),
+                    acp::SessionConfigSelectOption::new("claude-opus-4-6", "Opus 4.6"),
+                ],
+            )
+            .category(acp::SessionConfigOptionCategory::Model),
+        ];
+
+        assert_eq!(selected_acp_model(&options).as_deref(), Some("Opus 4.6"));
+    }
+
+    #[test]
+    fn external_acp_model_keeps_an_out_of_picker_model_id_visible() {
+        let options = vec![
+            acp::SessionConfigOption::select(
+                "model",
+                "Model",
+                "claude-opus-5",
+                Vec::<acp::SessionConfigSelectOption>::new(),
+            )
+            .category(acp::SessionConfigOptionCategory::Model),
+        ];
+
+        assert_eq!(
+            selected_acp_model(&options).as_deref(),
+            Some("claude-opus-5")
+        );
+    }
 
     /// OMEGA-DELTA-0021. Delegating to a run keeps the agent that actually ran
     /// the work, and produces a coherent record.
