@@ -121,6 +121,8 @@ pub enum LanguageModelCompletionError {
         provider: LanguageModelProviderName,
         retry_after: Option<Duration>,
     },
+    #[error("{message}")]
+    HostedUsageLimitExceeded { message: String },
     #[error("{provider}'s API servers are overloaded right now")]
     ServerOverloaded {
         provider: LanguageModelProviderName,

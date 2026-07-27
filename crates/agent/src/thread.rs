@@ -4861,6 +4861,7 @@ impl Thread {
             | NoApiKey { .. }
             | ApiEndpointNotFound { .. }
             | PromptTooLarge { .. } => None,
+            HostedUsageLimitExceeded { .. } => None,
             // These errors might be transient, so retry them
             SerializeRequest { .. } | BuildRequestBody { .. } | StreamEndedUnexpectedly { .. } => {
                 Some(RetryStrategy::Fixed {

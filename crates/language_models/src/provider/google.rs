@@ -364,6 +364,31 @@ struct HostedGrantResponse {
     grant: HostedGrant,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct HostedGrantErrorResponse {
+    resets_at: Option<String>,
+}
+
+fn hosted_grant_error(status: StatusCode, body: &str) -> LanguageModelCompletionError {
+    if status == StatusCode::TOO_MANY_REQUESTS {
+        let resets_at = serde_json::from_str::<HostedGrantErrorResponse>(body)
+            .ok()
+            .and_then(|response| response.resets_at);
+        let message = match resets_at {
+            Some(resets_at) => {
+                format!("Hosted Omega's daily usage limit was reached. It resets at {resets_at}.")
+            }
+            None => "Hosted Omega's daily usage limit was reached.".to_string(),
+        };
+        return LanguageModelCompletionError::HostedUsageLimitExceeded { message };
+    }
+
+    LanguageModelCompletionError::Other(anyhow::anyhow!(
+        "Hosted Omega is unavailable (HTTP {status})."
+    ))
+}
+
 async fn request_hosted_grant(
     http_client: &dyn HttpClient,
     base_url: &str,
@@ -405,16 +430,8 @@ async fn request_hosted_grant(
         .context("failed to read hosted-compute grant response")
         .map_err(LanguageModelCompletionError::Other)?;
 
-    if status == StatusCode::TOO_MANY_REQUESTS {
-        return Err(LanguageModelCompletionError::RateLimitExceeded {
-            provider: PROVIDER_NAME,
-            retry_after: None,
-        });
-    }
     if !status.is_success() {
-        return Err(LanguageModelCompletionError::Other(anyhow::anyhow!(
-            "Hosted Omega is unavailable (HTTP {status})."
-        )));
+        return Err(hosted_grant_error(status, &body));
     }
 
     let response: HostedGrantResponse = serde_json::from_str(&body)
@@ -428,6 +445,28 @@ async fn request_hosted_grant(
     let grant_ref = response.grant.grant_ref.clone();
     *cached_grant = Some(response.grant);
     Ok(grant_ref)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hosted_allowance_error_is_not_a_google_rate_limit() {
+        let error = hosted_grant_error(
+            StatusCode::TOO_MANY_REQUESTS,
+            r#"{"error":"builtin_agent_quota_exhausted","resetsAt":"2026-07-28T00:00:00.000Z"}"#,
+        );
+
+        assert!(matches!(
+            &error,
+            LanguageModelCompletionError::HostedUsageLimitExceeded { .. }
+        ));
+        assert_eq!(
+            error.to_string(),
+            "Hosted Omega's daily usage limit was reached. It resets at 2026-07-28T00:00:00.000Z."
+        );
+    }
 }
 
 impl LanguageModel for GoogleLanguageModel {
