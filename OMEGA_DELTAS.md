@@ -4101,6 +4101,14 @@ than merely stated.
   identity stays theirs and Omega has no key to lose. A signature over anything
   other than the exact authorized bytes is refused, which is the one place a
   signer could substitute something.
+- **Omega ships the ability to join a Forge repository, not the address of
+  one.** A `CommunityDescriptor` is what an invitation carries — tenant,
+  repository, coordinate, relays, and the name a person reads. The crate names
+  no host, which `COMMUNITY_FORBIDDEN_IN_PRODUCTION` holds for the reason
+  `OMEGA-DELTA-0070` gives about the public-chat skill: a host name in the code
+  makes the code work for exactly one deployment. Relays are a list from the
+  first contract, because widening that later would be a stored-record
+  migration for every profile that had joined anything.
 - **The binding has no default.** An outbound event with its room tag removed
   fails rather than falling back to whichever room is selected. There is nothing
   to fall back to.
@@ -4126,7 +4134,7 @@ than merely stated.
   `the_room_carries_the_audience_rule_rather_than_restating_it`,
   `the_contribution_skills_ship_in_the_binary`, and
   `the_contribution_skills_describe_the_path_this_repository_uses` in
-  `crates/omega_deltas/`, plus the crate's own thirty-two checks in
+  `crates/omega_deltas/`, plus the crate's own checks in
   `crates/omega_community/`. The last of the four is the one that matters most:
   it asserts the skills against the tree — the files they cite must exist, the
   delta ID shape they teach must be the one `ENFORCED_DELTAS` uses — rather than

@@ -124,14 +124,20 @@ pub const COMMUNITY_ALLOWED_DEPENDENCIES: &[&str] = &["nostr", "omega_audience",
 
 /// OMEGA-DELTA-0106. Names that must not appear outside this crate's tests.
 ///
-/// The crate composes bytes for somebody else to sign. A key type in the
-/// shipped half would mean Omega had a key to lose.
+/// Two rules in one list. The crate composes bytes for somebody else to sign,
+/// so a key type in the shipped half would mean Omega had a key to lose. And
+/// the crate ships the ability to join a Forge repository rather than the
+/// address of one — the reason `OMEGA-DELTA-0070` gives for keeping a relay
+/// host out of the public-chat skill: a host name in the code makes the code
+/// work for exactly one deployment, and the descriptor is configuration.
 pub const COMMUNITY_FORBIDDEN_IN_PRODUCTION: &[&str] = &[
     "SecretKey",
     "sign_schnorr",
     "Keys::new",
     "reqwest",
     "TcpStream",
+    "openagents.com",
+    "wss://",
 ];
 
 /// OMEGA-DELTA-0106. The contribution skills, as `(name, path)`.
@@ -12183,13 +12189,24 @@ mod tests {
                 .next()
                 .expect("splitting always yields a first part");
             for forbidden in COMMUNITY_FORBIDDEN_IN_PRODUCTION {
+                let why = match *forbidden {
+                    "openagents.com" | "wss://" => {
+                        "The crate ships the ability to join a Forge \
+                         repository, not the address of one. A host here makes \
+                         the code work for exactly one deployment, and the \
+                         descriptor an invitation carries is where it belongs."
+                    }
+                    _ => {
+                        "Omega composes the bytes and accepts a signature over \
+                         exactly those bytes; a person's key stays theirs, and \
+                         a crate that can produce one is a crate that has to \
+                         hold one."
+                    }
+                };
                 assert!(
                     !production.contains(forbidden),
                     "OMEGA-DELTA-0106: {} names `{forbidden}` outside its \
-                     tests. Omega composes the bytes and accepts a signature \
-                     over exactly those bytes; a person's key stays theirs, \
-                     and a crate that can produce one is a crate that has to \
-                     hold one.",
+                     tests. {why}",
                     repository_path(relative).display()
                 );
             }

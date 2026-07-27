@@ -72,6 +72,13 @@ pub enum RepositoryError {
     SeparatorInReference(String),
     /// The NIP-34 coordinate was not `30617:<64 hex>:<identifier>`.
     MalformedCoordinate(String),
+    /// No relay was given.
+    ///
+    /// Refused at construction rather than at publication. A shared audience
+    /// with nowhere to publish would appear in the selector, accept a thread,
+    /// accept a message, and then fail at the last step with nothing useful to
+    /// say about why.
+    NoRelay,
     /// The coordinate named a different repository from the one it was given
     /// for.
     ///
@@ -95,6 +102,10 @@ impl fmt::Display for RepositoryError {
             Self::SeparatorInReference(value) => write!(
                 formatter,
                 "`{value}` cannot contain `/`, which separates the tenant from the repository"
+            ),
+            Self::NoRelay => formatter.write_str(
+                "a shared audience needs at least one relay, or there is nowhere for a \
+                 message in it to go",
             ),
             Self::MalformedCoordinate(value) => write!(
                 formatter,
@@ -200,13 +211,56 @@ impl From<RepositoryCoordinate> for String {
     }
 }
 
+/// What an invitation hands somebody.
+///
+/// A described repository rather than a compiled-in one. `OMEGA-DELTA-0070`
+/// made the same call for the public chat skill and gave the reason: a relay
+/// host name, a group identifier, and an operator's choice of infrastructure
+/// are configuration, and putting them in the code makes the code work for
+/// exactly one deployment. Omega ships the ability to join a Forge repository;
+/// it does not ship the address of one.
+///
+/// The field names are the Forge's own, so this decodes what the Forge already
+/// serves rather than a shape somebody transcribed.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CommunityDescriptor {
+    /// The Forge tenant.
+    pub tenant_ref: String,
+    /// The repository within it.
+    pub repository_ref: String,
+    /// The NIP-34 announcement coordinate.
+    pub coordinate: RepositoryCoordinate,
+    /// The relays this repository's records live on, most preferred first.
+    pub relays: Vec<String>,
+    /// What a person reads in the audience selector.
+    pub name: String,
+}
+
+impl CommunityDescriptor {
+    /// Reads a descriptor into a repository.
+    ///
+    /// # Errors
+    ///
+    /// [`RepositoryError`], as [`ForgeRepository::new`].
+    pub fn into_repository(self) -> Result<ForgeRepository, RepositoryError> {
+        ForgeRepository::new(
+            self.tenant_ref,
+            self.repository_ref,
+            self.coordinate,
+            self.relays,
+            self.name,
+        )
+    }
+}
+
 /// A repository on the OpenAgents Forge, and the audience behind it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ForgeRepository {
     tenant_ref: String,
     repository_ref: String,
     coordinate: RepositoryCoordinate,
-    relay: String,
+    relays: Vec<String>,
     name: String,
 }
 
@@ -218,15 +272,23 @@ impl ForgeRepository {
     /// are separate because the label is allowed to change and the identity is
     /// not.
     ///
+    /// `relays` is a list rather than a single address from the first contract.
+    /// Buzz assumes one workspace relay; the accepted parity direction is that
+    /// relay choice and replacement are first-class, and widening this later
+    /// would be a stored-record migration for every profile that had joined
+    /// anything. The first entry is the one a record's relay hint names.
+    ///
     /// # Errors
     ///
     /// [`RepositoryError`], including the case where the coordinate announces a
-    /// different repository from `repository_ref`.
+    /// different repository from `repository_ref`, and the case where no relay
+    /// is given — a shared audience with nowhere to publish is a room that
+    /// cannot say why it is failing.
     pub fn new(
         tenant_ref: impl Into<String>,
         repository_ref: impl Into<String>,
         coordinate: RepositoryCoordinate,
-        relay: impl Into<String>,
+        relays: impl IntoIterator<Item = impl Into<String>>,
         name: impl Into<String>,
     ) -> Result<Self, RepositoryError> {
         let tenant_ref = tenant_ref.into().trim().to_string();
@@ -247,11 +309,20 @@ impl ForgeRepository {
             });
         }
 
+        let relays: Vec<String> = relays
+            .into_iter()
+            .map(|relay| relay.into().trim().to_string())
+            .filter(|relay| !relay.is_empty())
+            .collect();
+        if relays.is_empty() {
+            return Err(RepositoryError::NoRelay);
+        }
+
         Ok(Self {
             tenant_ref,
             repository_ref,
             coordinate,
-            relay: relay.into(),
+            relays,
             name: name.into(),
         })
     }
@@ -274,10 +345,16 @@ impl ForgeRepository {
         &self.coordinate
     }
 
-    /// The relay this repository's records are published to.
+    /// The relay a record's hint names, which is the first admitted one.
     #[must_use]
     pub fn relay(&self) -> &str {
-        &self.relay
+        self.relays.first().map_or("", String::as_str)
+    }
+
+    /// Every relay admitted for this repository, most preferred first.
+    #[must_use]
+    pub fn relays(&self) -> &[String] {
+        &self.relays
     }
 
     /// The stored key of this repository's audience.
@@ -532,14 +609,24 @@ mod tests {
         "30617:7649603503856e5148d571eac2766b288a8ff1e9e35d380337a1d2b0015b4f92:omega";
 
     pub(crate) fn omega_repository() -> ForgeRepository {
-        ForgeRepository::new(
-            "tenant.openagents",
-            "omega",
-            RepositoryCoordinate::parse(OMEGA_COORDINATE).expect("the receipted coordinate"),
-            "wss://relay.openagents.com",
-            "Omega development",
-        )
-        .expect("the receipted repository")
+        omega_descriptor()
+            .into_repository()
+            .expect("the receipted repository")
+    }
+
+    /// The descriptor an invitation to omega's own community audience carries.
+    /// Written out here, in a test, rather than compiled into the crate: the
+    /// crate ships the ability to join a Forge repository, not the address of
+    /// one.
+    fn omega_descriptor() -> CommunityDescriptor {
+        CommunityDescriptor {
+            tenant_ref: "tenant.openagents".to_string(),
+            repository_ref: "omega".to_string(),
+            coordinate: RepositoryCoordinate::parse(OMEGA_COORDINATE)
+                .expect("the receipted coordinate"),
+            relays: vec!["wss://relay.openagents.com".to_string()],
+            name: "Omega development".to_string(),
+        }
     }
 
     pub(crate) fn membership(state: MembershipState, roles: &[RoleRef]) -> ForgeMembership {
@@ -568,6 +655,54 @@ mod tests {
         assert_eq!(audience.name(), "Omega development");
     }
 
+    /// A descriptor is what an invitation hands somebody, and it has to survive
+    /// the trip.
+    #[test]
+    fn a_descriptor_becomes_a_room_and_back_again() {
+        let descriptor = omega_descriptor();
+        let encoded = serde_json::to_string(&descriptor).expect("a descriptor encodes");
+        let decoded: CommunityDescriptor =
+            serde_json::from_str(&encoded).expect("a descriptor decodes");
+
+        assert_eq!(decoded, descriptor);
+        let repository = decoded.into_repository().expect("a described room");
+        assert_eq!(repository.audience_key(), "forge:tenant.openagents/omega");
+        assert_eq!(repository.relay(), "wss://relay.openagents.com");
+        assert_eq!(repository.relays().len(), 1);
+    }
+
+    #[test]
+    fn a_room_with_nowhere_to_publish_is_refused_at_construction() {
+        let no_relays: Vec<String> = Vec::new();
+
+        assert_eq!(
+            ForgeRepository::new(
+                "tenant.openagents",
+                "omega",
+                RepositoryCoordinate::parse(OMEGA_COORDINATE).expect("the coordinate"),
+                no_relays,
+                "Omega development",
+            ),
+            Err(RepositoryError::NoRelay),
+            "a room that appeared in the selector and then failed at the last \
+             step would have nothing useful to say about why"
+        );
+    }
+
+    #[test]
+    fn more_than_one_relay_is_admitted_from_the_first_contract() {
+        let mut descriptor = omega_descriptor();
+        descriptor.relays.push("wss://relay.example".to_string());
+        let repository = descriptor.into_repository().expect("a described room");
+
+        assert_eq!(repository.relays().len(), 2);
+        assert_eq!(
+            repository.relay(),
+            "wss://relay.openagents.com",
+            "the hint on a record names the first admitted relay"
+        );
+    }
+
     #[test]
     fn a_coordinate_for_another_repository_is_refused() {
         let neighbour = RepositoryCoordinate::parse(
@@ -580,7 +715,7 @@ mod tests {
                 "tenant.openagents",
                 "omega",
                 neighbour,
-                "wss://relay.openagents.com",
+                ["wss://relay.openagents.com"],
                 "Omega development",
             ),
             Err(RepositoryError::CoordinateNamesAnotherRepository {
