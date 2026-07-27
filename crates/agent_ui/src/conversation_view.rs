@@ -2074,9 +2074,29 @@ impl ConversationView {
         let Some(connected) = self.as_connected() else {
             return;
         };
-        if connected.threads.contains_key(&subagent_id)
-            || !connected.connection.supports_load_session()
-        {
+        if connected.threads.contains_key(&subagent_id) {
+            return;
+        }
+
+        // omega#109. A subagent spawned with an `executor` is an external ACP
+        // agent — Codex, Claude Code — and its session belongs to that agent's
+        // own server, not to this connection. `NativeAgent::sessions` has never
+        // heard of it and `load_session` below cannot produce it, so the card
+        // had a session id and nothing to resolve it to. It is resolved from
+        // the registry the spawn writes instead.
+        //
+        // The reference taken here is what keeps the transcript afterwards. The
+        // subagent's own lifetime ends with the tool call that spawned it: the
+        // handle drops the connection, which drops the child process. Holding
+        // the thread from here means the card still shows what the subagent did
+        // once the agent server is gone, which is the state a reader is in for
+        // all but the seconds the turn was running.
+        if let Some(external_thread) = agent::external_subagent_thread(&subagent_id, cx) {
+            self.register_subagent_thread_view(external_thread, window, cx);
+            return;
+        }
+
+        if !connected.connection.supports_load_session() {
             return;
         }
         let Some(parent_thread) = connected.threads.get(&parent_session_id) else {
@@ -2101,25 +2121,41 @@ impl ConversationView {
         cx.spawn_in(window, async move |this, cx| {
             let subagent_thread = subagent_thread_task.await?;
             this.update_in(cx, |this, window, cx| {
-                let Some(conversation) = this
-                    .as_connected()
-                    .map(|connected| connected.conversation.clone())
-                else {
-                    return;
-                };
-                let subagent_session_id = subagent_thread.read(cx).session_id().clone();
-                conversation.update(cx, |conversation, cx| {
-                    conversation.register_thread(subagent_thread.clone(), cx);
-                });
-                let view =
-                    this.new_thread_view(subagent_thread, conversation, false, None, window, cx);
-                let Some(connected) = this.as_connected_mut() else {
-                    return;
-                };
-                connected.threads.insert(subagent_session_id, view);
+                this.register_subagent_thread_view(subagent_thread, window, cx);
             })
         })
         .detach();
+    }
+
+    /// Give a subagent's thread a view, and put it where the card looks.
+    ///
+    /// Shared by both ways a subagent thread arrives — loaded from this
+    /// connection, or resolved from the external-subagent registry — because
+    /// what has to happen after is the same either way, and the half that is
+    /// easy to forget is `register_thread`: without it the thread's entries
+    /// never reach the view's `EntryViewState`, and the card renders an empty
+    /// transcript while the subagent works.
+    fn register_subagent_thread_view(
+        &mut self,
+        subagent_thread: Entity<AcpThread>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(conversation) = self
+            .as_connected()
+            .map(|connected| connected.conversation.clone())
+        else {
+            return;
+        };
+        let subagent_session_id = subagent_thread.read(cx).session_id().clone();
+        conversation.update(cx, |conversation, cx| {
+            conversation.register_thread(subagent_thread.clone(), cx);
+        });
+        let view = self.new_thread_view(subagent_thread, conversation, false, None, window, cx);
+        let Some(connected) = self.as_connected_mut() else {
+            return;
+        };
+        connected.threads.insert(subagent_session_id, view);
     }
 
     fn spawn_external_agent_login(
@@ -3754,6 +3790,104 @@ pub(crate) mod tests {
         let weak_view = conversation_view.downgrade();
         drop(conversation_view);
         assert!(!weak_view.is_upgradable());
+    }
+
+    /// omega#109. The panel resolves an external subagent it cannot load.
+    ///
+    /// A subagent spawned with an `executor` runs as Codex or Claude Code, on
+    /// that agent's own server. Its session is not this connection's and never
+    /// will be: `NativeAgent::sessions` has no entry, `load_session` here
+    /// cannot produce it, and all the panel is handed is an id. So the card had
+    /// a name and nothing to resolve it to — the whole of omega#109's second
+    /// gap.
+    ///
+    /// The stub connection this view is running is deliberately one that does
+    /// not support loading sessions, which is the honest shape of the problem:
+    /// there is no route from this connection to that thread, and the only
+    /// reason the card can render one is the lookup added here. Point the
+    /// lookup back at this connection alone and the assertion below fails —
+    /// which is the check the falsifier asks for.
+    #[gpui::test]
+    async fn an_external_subagent_is_resolved_by_id_and_names_its_own_executor(
+        cx: &mut TestAppContext,
+    ) {
+        init_test(cx);
+
+        let (conversation_view, cx) =
+            setup_conversation_view(StubAgentServer::new(StubAgentConnection::new()), cx).await;
+
+        let (root_thread, project) = conversation_view.read_with(cx, |view, cx| {
+            (
+                view.root_thread_view()
+                    .expect("the conversation must have a root thread")
+                    .read(cx)
+                    .thread
+                    .clone(),
+                view.project.clone(),
+            )
+        });
+
+        // A session on somebody else's connection. That is what an external ACP
+        // subagent is, and why the panel could not find one.
+        let external_connection: Rc<dyn AgentConnection> =
+            Rc::new(StubAgentConnection::new().with_agent_id(
+                project::agent_server_store::AgentId::new("codex-acp".to_string()),
+            ));
+        let external_thread = cx
+            .update(|_window, cx| {
+                external_connection
+                    .clone()
+                    .new_session(project.clone(), PathList::default(), cx)
+            })
+            .await
+            .expect("the external agent must open a session");
+        let external_id = external_thread.read_with(cx, |thread, _cx| thread.session_id().clone());
+
+        assert!(
+            conversation_view
+                .read_with(cx, |view, _cx| view.thread_view(&external_id))
+                .is_none(),
+            "the external session must not already be in this connection's map; \
+             if it is, this test is not testing what it says it is"
+        );
+
+        // What `create_external_acp_subagent` records when it opens one.
+        cx.update(|_window, cx| {
+            agent::register_external_subagent_session(external_id.clone(), &external_thread, cx);
+        });
+
+        // And what the parent announces: an id, and nothing else.
+        root_thread.update(cx, |thread, cx| {
+            thread.subagent_spawned(external_id.clone(), cx);
+        });
+        cx.run_until_parked();
+
+        let resolved = conversation_view
+            .read_with(cx, |view, _cx| view.thread_view(&external_id))
+            .expect(
+                "the panel was handed an external subagent's session id and \
+                 could not resolve it, so its card has no thread: no \
+                 transcript, and no executor to name",
+            );
+
+        resolved.read_with(cx, |view, cx| {
+            assert_eq!(
+                view.thread.read(cx).session_id(),
+                &external_id,
+                "the card resolved to the wrong thread"
+            );
+
+            // And the card can name what ran it. Classified from the thread's
+            // own connection, so the card and the thread cannot disagree.
+            use crate::omega_executor_disclosure::ThreadExecutorDisclosure as _;
+            let disclosure = view.thread.read(cx).omega_executor_disclosure(cx);
+            assert_eq!(
+                disclosure.class,
+                omega_front_door::ExecutorClass::ExternalAcp,
+                "an external subagent must not read as Omega's own loop"
+            );
+            assert_eq!(disclosure.agent_id, "codex-acp");
+        });
     }
 
     #[gpui::test]

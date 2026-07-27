@@ -102,6 +102,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0107",
     "OMEGA-DELTA-0110",
     "OMEGA-DELTA-0111",
+    "OMEGA-DELTA-0112",
     "OMEGA-DELTA-0113",
     "OMEGA-DELTA-0114",
 ];
@@ -522,6 +523,33 @@ pub const SUBAGENT_DISCLOSURE_CONSTRUCTORS: &[(&str, &str)] = &[
 /// OMEGA-DELTA-0101. Where the sentence for a session Omega holds no
 /// transcript for is written.
 pub const SUBAGENT_MISSING_TRANSCRIPT_FN: &str = "pub fn no_transcript_available";
+
+/// OMEGA-DELTA-0112. The function that opens an external subagent's session.
+pub const EXTERNAL_SUBAGENT_OPEN_FN: &str = "fn create_external_acp_subagent";
+
+/// OMEGA-DELTA-0112. Where a session id can be turned back into the thread
+/// behind it.
+///
+/// The whole of what `crates/agent_ui` is allowed to know about an external
+/// subagent. `AcpThreadEvent::SubagentSpawned` carries an id and nothing else,
+/// and the id names a session in the *external* agent server — never in
+/// `NativeAgent::sessions` — so without this the panel is handed a name it
+/// cannot resolve.
+pub const EXTERNAL_SUBAGENT_REGISTRY_PATH: &str = "crates/agent/src/external_subagent_sessions.rs";
+
+/// OMEGA-DELTA-0112. The call that records an opened external session.
+pub const EXTERNAL_SUBAGENT_REGISTER_FN: &str = "register_external_subagent_session";
+
+/// OMEGA-DELTA-0112. The call that resolves one.
+pub const EXTERNAL_SUBAGENT_LOOKUP_FN: &str = "external_subagent_thread";
+
+/// OMEGA-DELTA-0112. Where the panel decides what a spawned subagent's card
+/// renders.
+pub const EXTERNAL_SUBAGENT_PANEL_PATH: &str = "crates/agent_ui/src/conversation_view.rs";
+
+/// OMEGA-DELTA-0112. Where the card is drawn.
+pub const EXTERNAL_SUBAGENT_CARD_PATH: &str =
+    "crates/agent_ui/src/conversation_view/thread_view.rs";
 
 /// OMEGA-DELTA-0060. The tool that reads a subagent's transcript.
 pub const SUBAGENT_TRANSCRIPT_TOOL_PATH: &str =
@@ -14155,6 +14183,165 @@ mod tests {
             "OMEGA-DELTA-0111: {} no longer namespaces a native tool's \
              artifact source apart from the terminal's.",
             registry_path.display()
+        );
+    }
+
+    // ------ OMEGA-DELTA-0112 — An external subagent is spawned by the tool,
+    //                            and the panel can find it
+
+    /// OMEGA-DELTA-0112. The tool really reaches the external agent, and the
+    /// session it opens can be found again.
+    ///
+    /// Three separate things had to be true for `spawn_agent` with an
+    /// `executor` to work at all, and none of them were checked by anything
+    /// that ran, because until omega#109 **the tool path had never executed**.
+    /// `OMEGA-DELTA-0061`'s live test opened its own session with its own three
+    /// calls, which proved the handle and could not fail when the caller of
+    /// those calls was wrong. It was wrong: the session was opened with an
+    /// empty working-directory list, and `session_directories_from_work_dirs`
+    /// refuses an empty one, so every external subagent died at `new_session`
+    /// on every machine.
+    ///
+    /// This check holds the three at the source, in the order they have to
+    /// hold: the route exists, the session is opened with somewhere to work,
+    /// and the id it produces is recorded where a reader with only an id can
+    /// resolve it.
+    #[test]
+    fn an_external_subagent_is_reachable_by_the_tool_and_findable_by_id() {
+        let agent_path = repository_path(SUBAGENT_EXTERNAL_HANDLE_PATH);
+        let agent = std::fs::read_to_string(&agent_path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", agent_path.display()));
+
+        let start = agent.find(EXTERNAL_SUBAGENT_OPEN_FN).unwrap_or_else(|| {
+            panic!(
+                "OMEGA-DELTA-0112: {} no longer has `{EXTERNAL_SUBAGENT_OPEN_FN}`. \
+                 An executor with nothing to open a session cannot produce an \
+                 external subagent.",
+                agent_path.display()
+            )
+        });
+        let end = agent[start..]
+            .find("\n    pub(crate) fn resume_subagent_thread")
+            .map_or(agent.len(), |offset| start + offset);
+        let open = &agent[start..end];
+
+        // 1. It is opened with the directories the parent works in. An empty
+        //    list is not a default: it is the failure this delta found, and it
+        //    fails *inside* `new_session`, so nothing above sees more than
+        //    "could not open a session".
+        assert!(
+            !without_whitespace(open).contains(&without_whitespace(
+                "new_session(project.clone(), PathList::default()"
+            )),
+            "OMEGA-DELTA-0112: {} opens the external subagent's session with an \
+             empty `PathList` again. `session_directories_from_work_dirs` takes \
+             the first path as the session's `cwd` and refuses an empty list, \
+             so this is not a permissive default — it is every external \
+             subagent failing before it starts.",
+            agent_path.display()
+        );
+        assert!(
+            without_whitespace(open).contains(&without_whitespace("let work_dirs")),
+            "OMEGA-DELTA-0112: {} no longer derives working directories for the \
+             external subagent. A subagent asked to work on this project must \
+             be looking at this project.",
+            agent_path.display()
+        );
+
+        // 2. It records what it opened, keyed by the id the panel is given.
+        assert!(
+            open.contains(EXTERNAL_SUBAGENT_REGISTER_FN),
+            "OMEGA-DELTA-0112: {} opens an external session and does not record \
+             it. `AcpThreadEvent::SubagentSpawned` carries an id and nothing \
+             else, so an unrecorded session is a name the panel cannot resolve.",
+            agent_path.display()
+        );
+
+        // 3. And the tool routes an executor there rather than to the parent's
+        //    own loop, which is the silent fallback the whole executor surface
+        //    exists to prevent.
+        assert!(
+            without_whitespace(&agent).contains(&without_whitespace(
+                "SubagentExecutor::ExternalAcp { id, name } => {
+                self.create_external_acp_subagent(id, name, cx)"
+            )),
+            "OMEGA-DELTA-0112: {} no longer routes `SubagentExecutor::ExternalAcp` \
+             into `create_external_acp_subagent`. Naming an executor would then \
+             produce a subagent on the parent's own model, reporting \
+             `native_loop` — a lie about who did the work, arriving by the one \
+             door `resolve_subagent_executor` does not guard.",
+            agent_path.display()
+        );
+
+        // The registry itself holds the sessions weakly. A strong map would
+        // keep every external subagent's thread, and the agent server behind
+        // it, alive for the life of the process.
+        let registry_path = repository_path(EXTERNAL_SUBAGENT_REGISTRY_PATH);
+        let registry = std::fs::read_to_string(&registry_path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", registry_path.display()));
+        assert!(
+            registry.contains("WeakEntity<AcpThread>"),
+            "OMEGA-DELTA-0112: {} no longer holds external subagent sessions \
+             weakly. The subagent's lifetime belongs to the tool call that \
+             spawned it; a map that never forgets would silently extend it.",
+            registry_path.display()
+        );
+    }
+
+    /// OMEGA-DELTA-0112. The panel resolves an external subagent, and says who
+    /// ran it.
+    ///
+    /// The subagent card looks its thread up in this connection's session map.
+    /// An external subagent is deliberately not in it, so the card had nowhere
+    /// to render from. Both halves of the repair are held here: the lookup that
+    /// finds the thread, and the line that names the agent whose work is being
+    /// shown inside an Omega window.
+    #[test]
+    fn the_panel_resolves_an_external_subagent_and_names_its_executor() {
+        let panel_path = repository_path(EXTERNAL_SUBAGENT_PANEL_PATH);
+        let panel = std::fs::read_to_string(&panel_path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", panel_path.display()));
+
+        assert!(
+            panel.contains(&format!("agent::{EXTERNAL_SUBAGENT_LOOKUP_FN}")),
+            "OMEGA-DELTA-0112: {} no longer resolves a spawned subagent against \
+             the external-subagent registry, so the lookup is pointed at this \
+             connection's map alone. An external subagent's session is not in \
+             it and cannot be loaded from it, so the card loses its thread \
+             entirely.",
+            panel_path.display()
+        );
+
+        let card_path = repository_path(EXTERNAL_SUBAGENT_CARD_PATH);
+        let card = std::fs::read_to_string(&card_path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", card_path.display()));
+
+        let start = card.find("fn render_subagent_card").unwrap_or_else(|| {
+            panic!(
+                "OMEGA-DELTA-0112: {} no longer has `render_subagent_card`.",
+                card_path.display()
+            )
+        });
+        let end = card[start..]
+            .find("\n    fn ")
+            .map_or(card.len(), |offset| start + offset);
+        let body = without_whitespace(&card[start..end]);
+
+        assert!(
+            body.contains(&without_whitespace("omega_executor_disclosure(cx)")),
+            "OMEGA-DELTA-0112: the subagent card in {} no longer asks the \
+             thread who ran it. `OMEGA-DELTA-0021` fixed disclosure as a record \
+             read from the executor; a card that named an agent any other way \
+             could disagree with the thread it is drawing.",
+            card_path.display()
+        );
+        assert!(
+            body.contains(&without_whitespace("ExecutorClass::NativeLoop")),
+            "OMEGA-DELTA-0112: the subagent card in {} no longer distinguishes \
+             Omega's own loop from somebody else's. Naming every subagent is \
+             noise; naming none of them is the silent false attribution \
+             OMEGA-DELTA-0021 exists to stop.",
+            card_path.display()
         );
     }
 }

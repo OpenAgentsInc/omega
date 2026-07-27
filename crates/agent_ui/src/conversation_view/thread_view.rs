@@ -10711,6 +10711,30 @@ impl ThreadView {
             })
             .is_some();
 
+        // omega#109. A subagent spawned with an `executor` was run by somebody
+        // else — Codex, Claude Code — with its own login, its own tools and its
+        // own loop. Unattributed, its work appears inside an Omega window and
+        // reads as Omega's own, which is the silent false-attribution claim
+        // `OMEGA-DELTA-0021` exists to stop; that law does not stop applying
+        // because the reader is looking at a card rather than a thread.
+        //
+        // Classified from the thread's own connection, through the same
+        // extension trait every other surface in this crate uses, so a card and
+        // a thread cannot disagree about what ran. Nothing is shown for a
+        // subagent on Omega's own loop: naming Omega inside Omega is noise, and
+        // absence of the line means the default, which is what it already meant
+        // before this existed.
+        let external_executor = thread.as_ref().and_then(|thread| {
+            use crate::omega_executor_disclosure::ThreadExecutorDisclosure as _;
+            let disclosure = thread.read(cx).omega_executor_disclosure(cx);
+            (disclosure.class != omega_front_door::ExecutorClass::NativeLoop).then(|| {
+                (
+                    SharedString::from(disclosure.agent_id.clone()),
+                    SharedString::from(disclosure.label()),
+                )
+            })
+        });
+
         let is_expanded = self
             .entry_view_state
             .read(cx)
@@ -10847,6 +10871,23 @@ impl ThreadView {
                                             .size(LabelSize::Custom(self.tool_name_font_size()))
                                             .truncate(),
                                     )
+                                    .when_some(external_executor, |this, (agent_id, label)| {
+                                        this.child(
+                                            div()
+                                                .id(("subagent-executor", entry_ix))
+                                                .flex_none()
+                                                .child(
+                                                    Label::new(agent_id)
+                                                        .size(LabelSize::Custom(
+                                                            self.tool_name_font_size(),
+                                                        ))
+                                                        .color(Color::Muted),
+                                                )
+                                                .tooltip(move |_, cx| {
+                                                    Tooltip::simple(label.clone(), cx)
+                                                }),
+                                        )
+                                    })
                                     .when(files_changed > 0, |this| {
                                         this.child(
                                             Label::new(format!(

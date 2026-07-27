@@ -1,4 +1,5 @@
 mod db;
+mod external_subagent_sessions;
 mod legacy_thread;
 mod native_agent_server;
 pub mod outline;
@@ -15,6 +16,7 @@ mod tools;
 
 use context_server::ContextServerId;
 pub use db::*;
+pub use external_subagent_sessions::*;
 use itertools::Itertools;
 pub use native_agent_server::NativeAgentServer;
 pub use pattern_extraction::*;
@@ -3116,6 +3118,29 @@ impl NativeThreadEnvironment {
         }
 
         let project = parent_thread.project().clone();
+
+        // The directories the subagent works in, which are the parent's.
+        //
+        // This was `PathList::default()`, and an empty one is not a default —
+        // `session_directories_from_work_dirs` takes the first path as the
+        // session's `cwd` and refuses an empty list with "Working directory
+        // cannot be empty". So every external subagent failed at `new_session`,
+        // on every machine, before any agent-specific behaviour was reached.
+        // omega#102 could not see it because its live test opened the session
+        // itself with a real path; omega#109 ran this function and it failed on
+        // the first attempt.
+        //
+        // The parent's own list is the right answer rather than merely a
+        // non-empty one: a subagent asked to work on this project must be
+        // looking at this project. The project's default list is the fallback
+        // for a thread that has not recorded one yet, which is what the panel
+        // already does when it opens a subagent session.
+        let work_dirs = self
+            .acp_thread
+            .upgrade()
+            .and_then(|acp_thread| acp_thread.read(cx).work_dirs().cloned())
+            .unwrap_or_else(|| project.read(cx).default_path_list(cx));
+
         let server: Rc<dyn agent_servers::AgentServer> =
             Rc::new(agent_servers::CustomAgentServer::new(
                 project::agent_server_store::AgentId::new(agent_id.clone()),
@@ -3141,7 +3166,7 @@ impl NativeThreadEnvironment {
                 .update(|cx| {
                     connection
                         .clone()
-                        .new_session(project.clone(), PathList::default(), cx)
+                        .new_session(project.clone(), work_dirs.clone(), cx)
                 })
                 .await
                 .with_context(|| {
@@ -3150,7 +3175,16 @@ impl NativeThreadEnvironment {
                     )
                 })?;
 
-            let session_id = cx.update(|cx| acp_thread.read(cx).session_id().clone());
+            // Recorded here, at the one place an external subagent's session is
+            // opened. `AcpThreadEvent::SubagentSpawned` carries only the id, so
+            // without this the panel receives a session id it has no way to
+            // resolve: the thread is not in `NativeAgent::sessions` and never
+            // will be. See `external_subagent_sessions`.
+            let session_id = cx.update(|cx| {
+                let session_id = acp_thread.read(cx).session_id().clone();
+                crate::register_external_subagent_session(session_id.clone(), &acp_thread, cx);
+                session_id
+            });
 
             Ok(Rc::new(ExternalAcpSubagentHandle::new(
                 session_id, acp_thread, agent_id, agent_name, connection,

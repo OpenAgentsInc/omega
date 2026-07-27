@@ -4709,3 +4709,68 @@ than merely stated.
   `test_large_native_tool_result_is_bounded_and_its_address_is_spendable`,
   `test_small_native_tool_result_is_untouched`, and
   `test_an_address_from_a_reopened_thread_says_why_it_no_longer_resolves`.
+### OMEGA-DELTA-0112 — An external subagent is spawned by the tool, and the panel can find it
+
+- **Upstream behaviour.** Upstream Zed has no per-spawn executor: a subagent is
+  the parent's own loop, so nothing spawns an agent server, nothing has a
+  session on somebody else's connection, and the subagent card always finds its
+  thread where it looks.
+- **Omega, before this.** `OMEGA-DELTA-0061` gave `spawn_agent` an `executor`
+  and `OMEGA-DELTA-0101` gave the result a real disclosure record. Both were
+  checked, and **the tool path had never executed**. omega#102's live test
+  opened its own session with its own three calls —
+  `CustomAgentServer` → `connect` → `new_session` — which proves
+  `ExternalAcpSubagentHandle` and cannot fail when the *caller* of those calls
+  is wrong. It was wrong.
+- **The defect a re-stated sequence could not see.**
+  `NativeThreadEnvironment::create_external_acp_subagent` opened the session
+  with `PathList::default()`. `session_directories_from_work_dirs` takes the
+  first path as the session's `cwd` and refuses an empty list with *"Working
+  directory cannot be empty"*, so **every external subagent failed at
+  `new_session`, on every machine**, before any agent-specific behaviour was
+  reached — and the failure surfaced as the generic *"Could not open a … session
+  for this subagent"*, which reads as the agent's fault. The parent's own
+  working directories are now used, falling back to the project's default list,
+  which is what the panel already does when it opens a subagent session. A
+  subagent asked to work on this project must be looking at this project.
+- **Why the panel had nowhere to render.** The subagent card resolves its thread
+  from the connection's session map. An external subagent is deliberately not in
+  it: the handle holds only an `AcpThread`, there is no native `Thread` behind
+  it, and `NativeAgent::sessions` never learns of it, because the session
+  belongs to the agent server that runs its own loop with its own login and its
+  own tools. `AcpThreadEvent::SubagentSpawned` carries an id and nothing else,
+  and `load_session` on the native connection cannot produce that thread, so the
+  card had a name it could not resolve.
+- **One fact, recorded once.** `external_subagent_sessions` maps a session id to
+  the `AcpThread` behind it, written where the session is opened and read by the
+  panel. It is not a second session map: it decides nothing, owns nothing, and
+  is consulted by nothing that runs a subagent. The entities are **weak** —
+  the subagent's lifetime belongs to the tool call that spawned it, which drops
+  the connection and therefore the child process when it ends, and a map that
+  never forgot would silently extend that for the life of the process. The panel
+  takes a strong reference through the `ThreadView` it builds, which is why the
+  card still shows what the subagent did after the agent server is gone.
+- **The card says who ran it.** A non-native executor is named on the card, read
+  through `omega_executor_disclosure` — the same classification every other
+  surface in `crates/agent_ui` uses, so a card and a thread cannot disagree
+  about what ran. Nothing is shown for a subagent on Omega's own loop: naming
+  Omega inside Omega is noise, and absence means the default, which is what it
+  already meant. `OMEGA-DELTA-0021`'s law does not stop applying because the
+  reader is looking at a card rather than at a thread.
+- **Enforced by:**
+  `an_external_subagent_is_reachable_by_the_tool_and_findable_by_id` and
+  `the_panel_resolves_an_external_subagent_and_names_its_executor` in
+  `crates/omega_deltas`; `an_external_subagent_is_resolved_by_id_and_names_its_own_executor`
+  in `crates/agent_ui/src/conversation_view.rs`; and, against the real
+  `codex-acp` and `claude-agent-acp` binaries,
+  `one_turn_spawns_two_codex_and_one_claude_through_the_tool`,
+  `an_external_subagent_is_findable_by_session_id_while_it_runs` and
+  `reading_an_external_subagent_transcript_refuses_with_its_own_reason` in
+  `crates/agent/src/tests/external_acp_subagent.rs`
+  (`cargo test -p agent --features e2e --lib external_acp_subagent`).
+- **What this does not cover.** **Nobody has seen the three cards.** The panel's
+  lookup is proved headlessly — the id resolves, the thread is the right one,
+  and it classifies as `external_acp` — and removing the lookup fails that check
+  on exactly that. What is not proved is the drawing: the card's layout with an
+  executor name in it, three of them in one turn, has not been rendered in a
+  window. omega#109's acceptance 3 stays open for that reason and no other.
