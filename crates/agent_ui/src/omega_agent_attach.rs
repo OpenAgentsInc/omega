@@ -60,6 +60,52 @@
 //! a new person, and it is the case omega#106 requires to keep working — the
 //! router registers no external executor, the native loop runs, and the
 //! composer shows the existing visible fallback reason.
+//!
+//! # Why the failure was kept, when degrading looked kinder
+//!
+//! omega#106's close-out reopened the rule above. The case against it: an
+//! unreachable *registry* is not an absent *agent*. The agent is installed and
+//! the download is not available, and refusing to open a thread over Omega's
+//! own supply chain reads as the app failing to open. That is a real
+//! distinction and it is drawable — but it is not decidable here, which is the
+//! only place it would have to be decided.
+//!
+//! Three things settled it.
+//!
+//! **The failure is the retry.** `ConversationView` subscribes to the
+//! agent-server store. The ACP registry finishing its load rebuilds that store
+//! and emits `AgentServersUpdated`, and a view sitting in `ServerState::
+//! LoadError` resets and connects again. So a registry that is a few seconds
+//! late costs a few seconds of a named error and then heals into Codex on its
+//! own. A degrade would connect *successfully* with the native loop, reach
+//! `Connected` with no thread error, and never be re-driven — stranding the
+//! session on the native loop after the agent became reachable. That is a
+//! thread running one executor while the reader believes another, reached from
+//! the opposite direction. `a_failed_attach_is_retried_when_the_adapter_
+//! registers` in `crates/omega_deltas` holds that seam, because the argument
+//! for failing lives in a file this one does not own.
+//!
+//! **Nothing here can tell late from gone.** At the moment the bound expires,
+//! a registry three seconds behind and a registry permanently unreachable are
+//! the same observation. A policy fixed at that instant is wrong in one
+//! direction or the other; an error defers the question to the only thing that
+//! can answer it, which is time, and the retry above closes the loop.
+//!
+//! **The offline case buys less than it looks.** With a warm registry cache
+//! the adapter registers and the attach succeeds. With a cold one — a first
+//! launch that has never had network — the native loop has no configured
+//! provider either, so a degrade would hand back a composer that fails one
+//! layer later with a worse sentence. What the reader needs there is to be
+//! told what is missing, not to be moved somewhere without being asked.
+//!
+//! What was wrong was the sentence, not the rule; see [`await_registration`].
+//!
+//! The cost is stated rather than argued away: `Agent::NativeAgent` *is* the
+//! router, so while a chosen agent stays unreachable there is no picker entry
+//! that reaches the native loop, and a persistently unreachable adapter leaves
+//! the panel with no first-party path. The fix for that is an explicit "run on
+//! Omega's own loop" action on the error — a choice the reader makes, not a
+//! substitution made for them — and it belongs to the panel, not here.
 
 use std::rc::Rc;
 use std::time::Duration;
@@ -89,6 +135,14 @@ pub const DRIVABLE_AGENT_IDS: &[&str] = &[agent_servers::CODEX_ID, agent_servers
 /// It is a bound, not a wait: a machine where the agent never registers spends
 /// this once and then gets the error that names it. A machine where nothing is
 /// detected never reaches here at all, so the no-agent case costs nothing.
+///
+/// Five seconds is deliberately far short of the registry's own 30-second
+/// fetch timeout, and that is not an oversight. Sitting here for the full
+/// fetch would show a spinner where an explanation belongs; expiring early
+/// shows the explanation, and `ConversationView` re-drives the connect when
+/// the registry does land. Erring short is therefore erring towards telling
+/// the reader something. Raising this to "cover" the fetch would trade a
+/// self-healing few seconds of prose for half a minute of nothing.
 pub const REGISTRATION_ATTEMPTS: usize = 50;
 
 /// The interval between the attempts [`REGISTRATION_ATTEMPTS`] bounds.
@@ -176,11 +230,11 @@ pub async fn connect_detected_executor(
 
     let store = agent_server_store.upgrade().with_context(|| {
         format!(
-            "{} is installed at {}, but Omega's agent-server store is gone, so \
-             `{}` cannot be attached",
+            "Omega's agent-server store is gone, so `{}` cannot be attached to \
+             run {} (found at {})",
+            agent.id,
             agent.name,
-            agent.binary.display(),
-            agent.id
+            agent.binary.display()
         )
     })?;
 
@@ -191,10 +245,13 @@ pub async fn connect_detected_executor(
     let connect = cx.update(|cx| server.connect(delegate, project, cx));
     let connection = connect.await.with_context(|| {
         format!(
-            "{} is installed at {}, but its ACP server `{}` did not start",
+            "`{}`, the ACP adapter Omega runs {} through, did not start. That \
+             adapter is resolved from the ACP registry and is not the {} at \
+             {} detection found",
+            agent.id,
             agent.name,
-            agent.binary.display(),
-            agent.id
+            agent.name,
+            agent.binary.display()
         )
     })?;
     Ok(Some(connection))
@@ -202,10 +259,29 @@ pub async fn connect_detected_executor(
 
 /// Wait, boundedly, for the chosen agent's ACP server to register.
 ///
+/// # The failure names Omega's supply chain, not the reader's installation
+///
+/// Detection proved that `{agent.binary}` exists. It is *not* what runs the
+/// turn: `codex-acp` and `claude-acp` are separate adapters, resolved from the
+/// ACP registry, and this wait is for one of those to appear in the store.
+/// When it does not, the reader's own Codex is working and Omega's fetch of
+/// its adapter is not.
+///
+/// So the sentence must not open with their binary and its path and then
+/// report a failure. That reads as "your Codex is broken" and sends them to
+/// debug the one part of this that is fine. It is the honest-attribution rule
+/// — say what happened, do not attribute it to something that did not do it —
+/// applied to a failure instead of to a turn.
+///
+/// It also says that Omega retries, because that is true and because it is
+/// what makes waiting the right thing for the reader to do. The retry is
+/// `ConversationView::handle_agent_servers_updated`; see the module docs for
+/// why this stays an error at all.
+///
 /// # Errors
 ///
-/// Returns an error naming the agent when it has not registered within
-/// [`REGISTRATION_ATTEMPTS`].
+/// Returns an error naming the adapter, and the agent it would have driven,
+/// when it has not registered within [`REGISTRATION_ATTEMPTS`].
 async fn await_registration(
     agent: &DetectedAgent,
     store: &Entity<AgentServerStore>,
@@ -219,12 +295,15 @@ async fn await_registration(
         cx.background_executor().timer(REGISTRATION_INTERVAL).await;
     }
     Err(anyhow!(
-        "{} is installed at {}, but Omega registered no ACP server under `{}`. \
-         The agent is present and Omega cannot drive it, so the turn is not \
-         quietly moved to the native loop.",
+        "Omega could not resolve `{}`, the ACP adapter it runs {} through, \
+         from the ACP registry. Your {} at {} is fine — the adapter is a \
+         separate download, and a first launch needs to reach the network \
+         once. Omega retries the moment the registry loads. Until then the \
+         turn is not quietly moved to the native loop.",
+        agent.id,
         agent.name,
-        agent.binary.display(),
-        agent.id
+        agent.name,
+        agent.binary.display()
     ))
 }
 
@@ -331,6 +410,37 @@ mod tests {
              rule lives in omega_agent_detect::CANDIDATES, and detect_on_path \
              is what guarantees the slice arrives in it"
         );
+    }
+
+    /// The drivable ids are adapters, not the binaries detection found.
+    ///
+    /// This is the fact every failure sentence in this module turns on, and it
+    /// is easy to lose because the two are named after the same product. If an
+    /// id ever became the detected binary's own name, the sentences would
+    /// start telling the truth by accident and stop when it changed back.
+    #[test]
+    fn the_drivable_ids_are_adapters_and_not_the_detected_binaries() {
+        for agent in [codex(), claude()] {
+            let binary = agent
+                .binary
+                .file_name()
+                .expect("the fixture binary has a name")
+                .to_string_lossy()
+                .into_owned();
+            assert_ne!(
+                agent.id, binary,
+                "`{}` is the adapter Omega resolves from the ACP registry and \
+                 `{binary}` is what detection found on PATH. They are separate \
+                 downloads, which is why a failure to reach one says nothing \
+                 about the other.",
+                agent.id
+            );
+            assert!(
+                agent.id.ends_with("-acp"),
+                "`{}` no longer reads as an ACP adapter id",
+                agent.id
+            );
+        }
     }
 
     /// Every id this module will attach is one `agent_servers` can host.

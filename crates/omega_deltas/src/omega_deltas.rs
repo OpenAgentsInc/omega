@@ -149,6 +149,27 @@ pub const DETECTED_EXECUTOR_DRIVABLE_TOKENS: &[&str] =
 pub const DETECTED_EXECUTOR_SETTINGS_KEYS: &[&str] =
     &["agent_servers.codex-acp", "agent_servers.claude-acp"];
 
+/// OMEGA-DELTA-0095, amended. What a registration failure must say it could not
+/// reach.
+///
+/// Detection proves a binary is on `PATH`. What Omega actually spawns is a
+/// *different* artifact — an ACP adapter resolved from the ACP registry
+/// (`codex-acp` and `claude-acp` are both npx distributions there, not the
+/// `codex` and `claude` binaries detection found). When the adapter cannot be
+/// resolved, the reader's own installation is fine and Omega's supply chain is
+/// not, so a message that leads with "`Codex` is installed at … but" and then
+/// reports a failure is a false statement about the reader's machine. That is
+/// the honest-attribution rule pointed the wrong way, and it is the rule this
+/// whole surface exists to keep.
+pub const DETECTED_EXECUTOR_REGISTRATION_FAILURE_PHRASES: &[&str] =
+    &["ACP registry", "Omega retries"];
+
+/// OMEGA-DELTA-0095, amended. Where a failed attach is re-driven.
+///
+/// The reason the attach is allowed to fail hard at all. See
+/// `a_failed_attach_is_retried_when_the_adapter_registers`.
+pub const CONNECTION_RETRY_PATH: &str = CONVERSATION_VIEW_PATH;
+
 /// OMEGA-DELTA-0080. Where the agent panel declares its result-body ceiling and
 /// applies it to every terminal it creates.
 pub const TOOL_OUTPUT_CEILING_PATH: &str = "crates/agent_ui/src/entry_view_state.rs";
@@ -11213,5 +11234,117 @@ mod tests {
                  which is the source the endpoint allow-list approved."
             );
         }
+    }
+
+    /// OMEGA-DELTA-0095, amended by omega#106's close-out. A failed attach is
+    /// re-driven when the adapter registers, and that is what makes failing
+    /// hard the honest choice rather than a dead end.
+    ///
+    /// The amendment argued that a chosen agent Omega cannot reach must stay an
+    /// error rather than degrade to the native loop, and the argument turns
+    /// entirely on this seam. `ConversationView` subscribes to the
+    /// agent-server store; the ACP registry finishing its load rebuilds that
+    /// store and emits `AgentServersUpdated`; and a view sitting in
+    /// `ServerState::LoadError` resets and connects again. So a slow registry
+    /// costs a few seconds of a named error and then heals itself, and the
+    /// attach never has to guess — at the one moment it must decide — whether
+    /// an absent adapter is three seconds late or permanently gone.
+    ///
+    /// Degrading would remove exactly this. A degraded router connects
+    /// successfully, so the view reaches `Connected` with no thread error,
+    /// `should_retry` is false for it, and nothing re-drives the attach when
+    /// the adapter finally arrives. The person would spend the rest of the
+    /// session on the native loop while their installed Codex sat there
+    /// working — a thread running one executor while the reader believes
+    /// another, arrived at from the opposite direction.
+    ///
+    /// Which is why this is checked rather than assumed. Delete the retry and
+    /// the attach's failure stops being recoverable, and the argument recorded
+    /// in `OMEGA-DELTA-0095` stops being true — silently, in a file the attach
+    /// does not own.
+    #[test]
+    fn a_failed_attach_is_retried_when_the_adapter_registers() {
+        let path = repository_path(CONNECTION_RETRY_PATH);
+        let source = read_repository_file(CONNECTION_RETRY_PATH);
+        let compact = without_whitespace(&code_of(&source));
+
+        assert!(
+            compact.contains(&without_whitespace(
+                "cx.subscribe_in(
+                    &agent_server_store,
+                    window,
+                    Self::handle_agent_servers_updated,
+                )"
+            )),
+            "OMEGA-DELTA-0095: {} no longer subscribes to the agent-server \
+             store. Nothing then tells a view that the ACP registry finished \
+             loading, so an attach that failed while the registry was still \
+             in flight stays failed for the life of the view.",
+            path.display()
+        );
+
+        let handler = body_of(&source, "handle_agent_servers_updated");
+        let handler = without_whitespace(&code_of(handler));
+        assert!(
+            handler.contains(&without_whitespace("ServerState::LoadError { .. } => true")),
+            "OMEGA-DELTA-0095: `handle_agent_servers_updated` in {} no longer \
+             re-drives a view that failed to load. `omega_agent_attach` fails \
+             hard on a chosen agent it cannot reach *because* this recovers: \
+             without it, a registry that was two seconds late becomes a \
+             permanently unusable agent panel, and the case for failing over \
+             degrading collapses.",
+            path.display()
+        );
+        assert!(
+            handler.contains(&without_whitespace("self.reset(window, cx)")),
+            "OMEGA-DELTA-0095: `handle_agent_servers_updated` in {} decides to \
+             retry and then does not connect again. A retry that reaches no \
+             `connect` is the same dead end with an extra branch.",
+            path.display()
+        );
+    }
+
+    /// OMEGA-DELTA-0095, amended by omega#106's close-out. An attach failure
+    /// names what Omega could not reach, not the reader's installation.
+    ///
+    /// `omega_agent_detect` proves the `codex` binary is on `PATH`. What the
+    /// attach spawns is `codex-acp`, a different artifact that Omega resolves
+    /// from the ACP registry. When that resolution fails the reader's Codex is
+    /// fine and Omega's own supply chain is not, so a sentence of the shape
+    /// "Codex is installed at /usr/local/bin/codex, but …" hands the reader a
+    /// false statement about their machine and sends them to debug the one
+    /// thing that is working.
+    ///
+    /// The rule is the disclosure rule, applied to a failure instead of a
+    /// turn: say what actually happened, and do not attribute it to something
+    /// that did not do it.
+    #[test]
+    fn an_attach_failure_names_what_omega_could_not_reach() {
+        let attach_path = repository_path(DETECTED_EXECUTOR_ATTACH_PATH);
+        let attach = read_repository_file(DETECTED_EXECUTOR_ATTACH_PATH);
+        let production = attach
+            .split("#[cfg(test)]")
+            .next()
+            .expect("splitting always yields a first part");
+
+        for phrase in DETECTED_EXECUTOR_REGISTRATION_FAILURE_PHRASES {
+            assert!(
+                production.contains(phrase),
+                "OMEGA-DELTA-0095: {} no longer says `{phrase}` when a chosen \
+                 agent's ACP adapter never registers. The reader is left to \
+                 conclude their own installation is broken, and to go and \
+                 debug the one part of this that is working.",
+                attach_path.display()
+            );
+        }
+
+        assert!(
+            !production.contains("but Omega registered no ACP server under"),
+            "OMEGA-DELTA-0095: {} is back to the sentence that opened with the \
+             reader's binary and its path and then reported a failure. What \
+             failed is the ACP registry resolution of a separate adapter; \
+             naming the binary there is a false claim about their machine.",
+            attach_path.display()
+        );
     }
 }

@@ -3791,6 +3791,68 @@ than it sounds, because the harness omega#81's acceptance sentence names —
   native loop. That is the stated rule, and it is the one behaviour here worth
   watching in a window first.
 
+#### Amendment, omega#106 close-out — the failure is kept, the sentence is not
+
+The paragraph above ends by flagging the one open behaviour: a chosen agent
+Omega cannot reach is a hard error, and the agent panel reports it instead of
+opening on the native loop. That was reopened and decided. **The rule stands.**
+What changed is what the failure says, and why the rule is now believed rather
+than merely stated.
+
+- **The case for degrading was real.** An unreachable *registry* is not an
+  absent *agent*. `codex` is on `PATH`, its login works, and the only thing
+  missing is Omega's own download. Refusing to open a thread over that reads as
+  the app failing to open, and "the app must open" is the older promise.
+- **The case against it is stronger, and it is not the principle.** It is
+  `ConversationView::handle_agent_servers_updated`. A view in
+  `ServerState::LoadError` re-drives its connect whenever the agent-server
+  store changes, and the ACP registry finishing its load is exactly such a
+  change. So a registry that is a few seconds late already costs a few seconds
+  of a named error and then heals into Codex by itself. A degrade would connect
+  *successfully* with the native loop, land in `Connected` with no thread
+  error, and never be re-driven — leaving the session on the native loop for
+  good after the agent became reachable. That is a thread running one executor
+  while the reader believes another, arrived at from the opposite direction:
+  the same defect the disclosure line exists to prevent.
+- **The distinction cannot be drawn where it would have to be drawn.** At the
+  instant the 5-second bound expires, a registry three seconds behind and a
+  registry permanently gone are the same observation. Any policy fixed there is
+  wrong in one direction or the other. An error defers the question to time,
+  which is the only thing that can answer it, and the retry closes the loop.
+- **The offline case buys less than it looks.** With a warm registry cache the
+  adapter registers and the attach succeeds. With a cold one — a first launch
+  that has never reached the network — the native loop has no configured
+  provider either, so a degrade hands back a composer that fails one layer
+  later with a worse sentence.
+- **What was actually wrong was the attribution.** Detection proves the `codex`
+  binary exists. What runs the turn is `codex-acp`, a *separate* npx adapter
+  resolved from the ACP registry. The failure sentences opened with the
+  reader's binary and its path — "Codex is installed at /usr/local/bin/codex,
+  but …" — and then reported a failure, which reads as "your Codex is broken"
+  and sends them to debug the one part that is working. That is the
+  honest-attribution rule pointed the wrong way. The sentences now name the
+  adapter, say the registry is what could not be reached, say the reader's
+  install is fine, and say Omega retries.
+- **The 5-second bound is short on purpose.** It is far under the registry's
+  own 30-second fetch timeout. Waiting out the fetch would show a spinner where
+  an explanation belongs; expiring early shows the explanation and lets the
+  retry do the waiting.
+- **The residual cost, stated rather than argued away.** `Agent::NativeAgent`
+  *is* the router, so while a chosen agent stays unreachable no picker entry
+  reaches the native loop, and a persistently unreachable adapter leaves the
+  panel with no first-party path. The fix is an explicit "run on Omega's own
+  loop" action on the error — a choice the reader makes, not a substitution
+  made for them — and it belongs to the panel, not to the attach.
+
+- **Enforced by:** `a_failed_attach_is_retried_when_the_adapter_registers` and
+  `an_attach_failure_names_what_omega_could_not_reach` in
+  `crates/omega_deltas/`. The first is the load-bearing one: the argument for
+  failing lives in `conversation_view.rs`, which `omega_agent_attach` does not
+  own, so deleting the retry would quietly falsify this amendment. Plus
+  `the_drivable_ids_are_adapters_and_not_the_detected_binaries` in
+  `crates/agent_ui/`, which pins the adapter/binary split the sentences depend
+  on.
+
 ### OMEGA-DELTA-0100 — The composer stays at the bottom and the transcript grows up to it
 
 - **Upstream Zed:** an empty thread gives the composer the whole panel. The
