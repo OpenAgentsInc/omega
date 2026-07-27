@@ -6411,3 +6411,28 @@ terminal output replaces the visible tool-call content.
 - **Enforced by:** `protected_git_commands_cannot_silently_discard_dirty_work`
   in `crates/omega_deltas`, plus parser and classifier unit tests in
   `shell_command_parser` and `agent`.
+
+### OMEGA-DELTA-0135 — The basic profile uses a measured slim prompt
+
+The `basic` profile renders `basic_system_prompt.hbs`; every other profile keeps
+the inherited broad system prompt. The slim template is ordered as identity,
+communication, five-tool use, work safety, task execution, delegation, system
+information, optional sandbox guidance, optional skills, and instruction
+files. It omits the wide surface's Mermaid essay, grep/find and LSP workflows,
+and editor-specific tool guidance.
+
+The empty-context prompt is rendered in tests with and without sandboxing and
+must remain at or below 8,192 bytes before skills and instruction-file bodies.
+Changing that ceiling is a policy change. The prompt also binds the work-loss
+law directly: the agent preserves user work, uses its own snapshots for undo,
+and never treats Git checkout, restore, or stash as an undo mechanism.
+Delegation remains optional; the prompt forbids calling it when no executor
+exists and tells the agent to complete the work itself.
+
+Project-context maintenance retains its equality gate, so refresh events that
+do not change model-visible context keep rendering byte-identical prompts and
+continue to hit the provider prompt cache.
+
+- **Enforced by:** `the_basic_prompt_is_separate_short_and_measured` in
+  `crates/omega_deltas` and the rendered-template tests in
+  `crates/agent/src/templates.rs`.

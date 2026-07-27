@@ -4570,8 +4570,12 @@ impl Thread {
             ),
             is_linux: cfg!(target_os = "linux"),
             is_windows: cfg!(target_os = "windows"),
+        };
+        let system_prompt = if self.profile_id.as_str() == builtin_profiles::BASIC {
+            system_prompt.render_basic(&self.templates)
+        } else {
+            system_prompt.render(&self.templates)
         }
-        .render(&self.templates)
         .context("failed to build system prompt")
         .expect("Invalid template");
         let mut messages = vec![LanguageModelRequestMessage {

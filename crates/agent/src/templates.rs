@@ -63,6 +63,12 @@ impl Template for SystemPromptTemplate<'_> {
     const TEMPLATE_NAME: &'static str = "system_prompt.hbs";
 }
 
+impl SystemPromptTemplate<'_> {
+    pub fn render_basic(&self, templates: &Templates) -> Result<String> {
+        Ok(templates.0.render("basic_system_prompt.hbs", self)?)
+    }
+}
+
 /// Handlebars helper for checking if an item is in a list
 fn contains(
     h: &handlebars::Helper,
@@ -111,6 +117,88 @@ mod tests {
         assert!(rendered.contains("Today's Date: 2026-01-01"));
         assert!(rendered.contains("## Fixing Diagnostics"));
         assert!(rendered.contains("test-model"));
+    }
+
+    #[test]
+    fn test_basic_system_prompt_is_measured() {
+        const BASIC_SYSTEM_PROMPT_BYTE_CEILING: usize = 8_192;
+
+        for sandboxing in [false, true] {
+            let project = prompt_store::ProjectContext::default();
+            let template = SystemPromptTemplate {
+                project: &project,
+                available_tools: vec![
+                    "read".into(),
+                    "write".into(),
+                    "edit".into(),
+                    "bash".into(),
+                    "delegate".into(),
+                ],
+                model_name: Some("google/gemini-3.6-flash".to_string()),
+                date: "2026-07-27".to_string(),
+                user_agents_md: None,
+                sandboxing,
+                is_linux: false,
+                is_windows: false,
+            };
+            let rendered = template.render_basic(&Templates::new()).unwrap();
+
+            assert!(
+                rendered.len() <= BASIC_SYSTEM_PROMPT_BYTE_CEILING,
+                "basic prompt rendered to {} bytes with sandboxing={sandboxing}, exceeding the {}-byte ceiling",
+                rendered.len(),
+                BASIC_SYSTEM_PROMPT_BYTE_CEILING,
+            );
+            assert!(!rendered.contains("mermaid"));
+            assert!(!rendered.contains("find_path"));
+            assert!(!rendered.contains("language server"));
+            assert!(!rendered.contains("## Skills"));
+            assert!(!rendered.contains("## Instruction Files"));
+        }
+    }
+
+    #[test]
+    fn test_basic_system_prompt_keeps_required_section_order() {
+        let project = prompt_store::ProjectContext::default();
+        let template = SystemPromptTemplate {
+            project: &project,
+            available_tools: vec![
+                "read".into(),
+                "write".into(),
+                "edit".into(),
+                "bash".into(),
+                "delegate".into(),
+            ],
+            model_name: None,
+            date: "2026-07-27".to_string(),
+            user_agents_md: Some("personal".into()),
+            sandboxing: true,
+            is_linux: false,
+            is_windows: false,
+        };
+        let rendered = template.render_basic(&Templates::new()).unwrap();
+        let headings = [
+            "## Communication",
+            "## Tool Use",
+            "## Work Safety",
+            "## Task Execution",
+            "## Delegation",
+            "## System Information",
+            "## Bash Sandbox",
+            "## Instruction Files",
+        ];
+        let mut prior = 0;
+        for heading in headings {
+            let position = rendered
+                .find(heading)
+                .expect("required heading should render");
+            assert!(position >= prior, "{heading} rendered out of order");
+            prior = position;
+        }
+        assert!(rendered.contains(
+            "never use `git checkout`, `git restore`, or `git stash` as an undo mechanism"
+        ));
+        assert!(rendered.contains("Never delegate when no executor exists"));
     }
 
     #[test]

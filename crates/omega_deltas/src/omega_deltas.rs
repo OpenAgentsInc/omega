@@ -123,6 +123,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0132",
     "OMEGA-DELTA-0133",
     "OMEGA-DELTA-0134",
+    "OMEGA-DELTA-0135",
 ];
 
 /// OMEGA-DELTA-0125. Every entry the thread header's `…` menu offers, the
@@ -18399,6 +18400,86 @@ mod tests {
             fresh_status.contains("backend.status"),
             "OMEGA-DELTA-0134: the guard can no longer bypass the cached UI \
              snapshot and query Git immediately before execution."
+        );
+    }
+
+    /// OMEGA-DELTA-0135. The basic profile selects its own measured prompt,
+    /// while the inherited broad prompt remains available to other profiles.
+    #[test]
+    fn the_basic_prompt_is_separate_short_and_measured() {
+        let templates = read_repository_file("crates/agent/src/templates.rs");
+        let measured_test = function_body(&templates, "test_basic_system_prompt_is_measured")
+            .expect("OMEGA-DELTA-0135: the rendered basic-prompt ceiling check is gone");
+        assert!(
+            measured_test.contains("render_basic")
+                && measured_test.contains("BASIC_SYSTEM_PROMPT_BYTE_CEILING: usize = 8_192"),
+            "OMEGA-DELTA-0135: the test no longer renders the basic template \
+             against the admitted 8,192-byte ceiling."
+        );
+
+        let thread = read_repository_file("crates/agent/src/thread.rs");
+        let request_builder = function_body(&thread, "build_request_messages_until")
+            .expect("OMEGA-DELTA-0135: the request builder is gone");
+        assert!(
+            request_builder.contains("builtin_profiles::BASIC")
+                && request_builder.contains("render_basic")
+                && request_builder.contains("system_prompt.render(&self.templates)"),
+            "OMEGA-DELTA-0135: the basic profile no longer selects the slim \
+             prompt beside the inherited broad prompt."
+        );
+
+        let prompt = read_repository_file("crates/agent/src/templates/basic_system_prompt.hbs");
+        let required_sections = [
+            "You are the Omega coding agent",
+            "## Communication",
+            "## Tool Use",
+            "## Work Safety",
+            "## Task Execution",
+            "## Delegation",
+            "## System Information",
+            "## Bash Sandbox",
+            "## Skills",
+            "## Instruction Files",
+        ];
+        let mut prior = 0;
+        for section in required_sections {
+            let position = prompt.find(section).unwrap_or_else(|| {
+                panic!("OMEGA-DELTA-0135: `{section}` is absent from the basic prompt")
+            });
+            assert!(
+                position >= prior,
+                "OMEGA-DELTA-0135: `{section}` moved out of the admitted order."
+            );
+            prior = position;
+        }
+        for dropped in [
+            "mermaid",
+            "find_path",
+            "language server",
+            "go_to_definition",
+        ] {
+            assert!(
+                !prompt.contains(dropped),
+                "OMEGA-DELTA-0135: wide-prompt guidance `{dropped}` returned \
+                 to the basic template."
+            );
+        }
+        assert!(
+            prompt.contains("Never delegate when no executor exists")
+                && prompt.contains(
+                    "never use `git checkout`, `git restore`, or `git stash` as an undo mechanism"
+                ),
+            "OMEGA-DELTA-0135: the no-executor or snapshot-based undo law is \
+             missing from the basic prompt."
+        );
+
+        let agent = read_repository_file("crates/agent/src/agent.rs");
+        let refresh = function_body(&agent, "maintain_project_context")
+            .expect("OMEGA-DELTA-0135: project-context maintenance is gone");
+        assert!(
+            refresh.contains("if *current_project_context != project_context"),
+            "OMEGA-DELTA-0135: unchanged project context now invalidates the \
+             prompt cache."
         );
     }
 }
