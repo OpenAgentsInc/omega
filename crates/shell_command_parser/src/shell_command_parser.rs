@@ -34,6 +34,41 @@ pub fn extract_commands(command: &str) -> Option<Vec<String>> {
     Some(commands)
 }
 
+pub fn extract_command_tokens(command: &str) -> Option<Vec<Vec<String>>> {
+    if validate_terminal_command(command) != TerminalCommandValidation::Safe {
+        return None;
+    }
+    extract_commands(command)?
+        .iter()
+        .map(|command| normalized_simple_command_tokens(command))
+        .collect()
+}
+
+fn normalized_simple_command_tokens(command: &str) -> Option<Vec<String>> {
+    let reader = BufReader::new(command.as_bytes());
+    let options = ParserOptions::default();
+    let source_info = SourceInfo::default();
+    let mut parser = Parser::new(reader, &options, &source_info);
+    let program = parser.parse_program().ok()?;
+    let simple_command = first_simple_command(&program)?;
+
+    let mut tokens = Vec::new();
+    let command_word = simple_command.word_or_name.as_ref()?;
+    tokens.push(normalize_word(command_word)?);
+
+    if let Some(suffix) = &simple_command.suffix {
+        for item in &suffix.0 {
+            match item {
+                ast::CommandPrefixOrSuffixItem::IoRedirect(_) => {}
+                ast::CommandPrefixOrSuffixItem::Word(word) => tokens.push(normalize_word(word)?),
+                _ => return None,
+            }
+        }
+    }
+
+    Some(tokens)
+}
+
 pub fn extract_terminal_command_prefix(command: &str) -> Option<TerminalCommandPrefix> {
     let reader = BufReader::new(command.as_bytes());
     let options = ParserOptions::default();
@@ -1119,6 +1154,31 @@ mod tests {
     fn test_command_with_args() {
         let commands = extract_commands("ls -la /tmp").expect("parse failed");
         assert_eq!(commands, vec!["ls -la /tmp"]);
+    }
+
+    #[test]
+    fn test_extract_command_tokens_normalizes_chained_commands() {
+        let commands =
+            extract_command_tokens("git checkout 'HEAD~1' -- 'src/file.rs' && git reset --hard")
+                .expect("parse failed");
+        assert_eq!(
+            commands,
+            vec![
+                vec!["git", "checkout", "HEAD~1", "--", "src/file.rs"],
+                vec!["git", "reset", "--hard"],
+            ]
+        );
+    }
+
+    #[test]
+    fn test_extract_command_tokens_rejects_substitutions() {
+        assert_eq!(extract_command_tokens("git restore $(pwd)/file.rs"), None);
+    }
+
+    #[test]
+    fn test_extract_command_tokens_ignores_redirections() {
+        let commands = extract_command_tokens("git clean -fd 2>/dev/null").expect("parse failed");
+        assert_eq!(commands, vec![vec!["git", "clean", "-fd"]]);
     }
 
     #[test]

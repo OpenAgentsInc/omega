@@ -2,11 +2,12 @@ use agent_client_protocol::schema::v1 as acp;
 use anyhow::Result;
 use futures::FutureExt as _;
 use gpui::{App, AsyncApp, Entity, SharedString, Task};
-use project::Project;
+use project::{Project, git_store::Repository};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use settings::Settings;
 use std::{
+    collections::BTreeSet,
     path::{Path, PathBuf},
     rc::Rc,
     sync::Arc,
@@ -19,9 +20,317 @@ use crate::sandboxing::{
     NetworkRequest, sandbox_git_dirs, sandbox_worktree_writable_paths,
     sandboxing_enabled_for_project,
 };
+use crate::tool_permissions::{GitDataLossCommand, GitDataLossGuard, classify_git_data_loss};
 use crate::{AgentTool, ThreadEnvironment, ToolCallEventStream, ToolInput};
 
 const COMMAND_OUTPUT_LIMIT: u64 = 16 * 1024;
+const GIT_DATA_LOSS_GUARD_META_KEY: &str = "omega.git_data_loss_guard";
+
+#[derive(Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum GitDataLossGuardDecision {
+    Allow,
+    Confirm,
+    Deny,
+}
+
+#[derive(Serialize)]
+struct GitDataLossGuardReceipt {
+    schema: &'static str,
+    decision: GitDataLossGuardDecision,
+    operations: Vec<&'static str>,
+    files: Vec<String>,
+    reason: Option<String>,
+}
+
+struct GitStatusCheck {
+    repository: Entity<Repository>,
+    repository_root: PathBuf,
+    path_prefixes: Vec<git::repository::RepoPath>,
+}
+
+fn git_data_loss_decision(
+    dirty_file_count: usize,
+    unknown_scope_count: usize,
+) -> GitDataLossGuardDecision {
+    if dirty_file_count == 0 && unknown_scope_count == 0 {
+        GitDataLossGuardDecision::Allow
+    } else {
+        GitDataLossGuardDecision::Confirm
+    }
+}
+
+async fn guard_git_data_loss(
+    command: &str,
+    working_directory: Option<&Path>,
+    project: &Entity<Project>,
+    event_stream: &ToolCallEventStream,
+    cx: &mut AsyncApp,
+) -> Result<(), String> {
+    let commands = match classify_git_data_loss(command) {
+        GitDataLossGuard::NotApplicable => return Ok(()),
+        GitDataLossGuard::DenyUnparseable => {
+            update_git_data_loss_receipt(
+                event_stream,
+                GitDataLossGuardReceipt {
+                    schema: "openagents.omega.git-data-loss-guard.v1",
+                    decision: GitDataLossGuardDecision::Deny,
+                    operations: Vec::new(),
+                    files: Vec::new(),
+                    reason: Some(
+                        "The command contains a protected Git operation but could not be safely decomposed."
+                            .to_string(),
+                    ),
+                },
+            );
+            return Err(
+                "Blocked because the dirty-tree guard could not safely decompose this protected Git command."
+                    .to_string(),
+            );
+        }
+        GitDataLossGuard::Inspect(commands) => commands,
+    };
+
+    let operations = commands
+        .iter()
+        .map(|command| command.operation)
+        .collect::<Vec<_>>();
+    let Some(working_directory) = working_directory else {
+        let reason =
+            "The protected Git command has no project working directory to inspect.".to_string();
+        update_git_data_loss_receipt(
+            event_stream,
+            GitDataLossGuardReceipt {
+                schema: "openagents.omega.git-data-loss-guard.v1",
+                decision: GitDataLossGuardDecision::Deny,
+                operations,
+                files: Vec::new(),
+                reason: Some(reason.clone()),
+            },
+        );
+        return Err(reason);
+    };
+    let checks = cx.update(|cx| {
+        commands
+            .iter()
+            .map(|command| git_status_check(command, working_directory, project, cx))
+            .collect::<Result<Vec<_>, _>>()
+    });
+    let checks = match checks {
+        Ok(checks) => checks,
+        Err(error) => {
+            update_git_data_loss_receipt(
+                event_stream,
+                GitDataLossGuardReceipt {
+                    schema: "openagents.omega.git-data-loss-guard.v1",
+                    decision: GitDataLossGuardDecision::Deny,
+                    operations,
+                    files: Vec::new(),
+                    reason: Some(error.clone()),
+                },
+            );
+            return Err(error);
+        }
+    };
+
+    let mut dirty_files = BTreeSet::new();
+    let mut unknown_scopes = BTreeSet::new();
+    for check in checks {
+        let status = cx.update(|cx| check.repository.read(cx).fresh_status(check.path_prefixes));
+        match status.await {
+            Ok(status) => {
+                for (path, _) in status.entries.iter() {
+                    dirty_files.insert(
+                        check
+                            .repository_root
+                            .join(path.as_unix_str())
+                            .display()
+                            .to_string(),
+                    );
+                }
+            }
+            Err(error) => {
+                unknown_scopes.insert(format!(
+                    "{} (status unavailable: {error})",
+                    check.repository_root.display()
+                ));
+            }
+        }
+    }
+
+    if git_data_loss_decision(dirty_files.len(), unknown_scopes.len())
+        == GitDataLossGuardDecision::Allow
+    {
+        update_git_data_loss_receipt(
+            event_stream,
+            GitDataLossGuardReceipt {
+                schema: "openagents.omega.git-data-loss-guard.v1",
+                decision: GitDataLossGuardDecision::Allow,
+                operations,
+                files: Vec::new(),
+                reason: Some("The affected Git scope is clean.".to_string()),
+            },
+        );
+        return Ok(());
+    }
+
+    let files = dirty_files.into_iter().collect::<Vec<_>>();
+    let unknown_scopes = unknown_scopes.into_iter().collect::<Vec<_>>();
+    let reason = if unknown_scopes.is_empty() {
+        "The protected Git operation can discard uncommitted changes.".to_string()
+    } else {
+        format!(
+            "The dirty-tree guard could not verify these scopes: {}.",
+            unknown_scopes.join(", ")
+        )
+    };
+    update_git_data_loss_receipt(
+        event_stream,
+        GitDataLossGuardReceipt {
+            schema: "openagents.omega.git-data-loss-guard.v1",
+            decision: GitDataLossGuardDecision::Confirm,
+            operations,
+            files: files.clone(),
+            reason: Some(reason.clone()),
+        },
+    );
+
+    let mut message = reason;
+    if !files.is_empty() {
+        message.push_str("\n\nAffected files:\n");
+        for file in &files {
+            message.push_str(&format!("- `{file}`\n"));
+        }
+    }
+    if !unknown_scopes.is_empty() {
+        message.push_str("\nAffected scopes:\n");
+        for scope in &unknown_scopes {
+            message.push_str(&format!("- `{scope}`\n"));
+        }
+    }
+
+    let decision = cx.update(|cx| {
+        event_stream.prompt_for_decision(
+            Some("Discard uncommitted Git changes?".to_string()),
+            Some(message),
+            vec![
+                acp::PermissionOption::new(
+                    acp::PermissionOptionId::new("discard_git_changes"),
+                    "Discard changes",
+                    acp::PermissionOptionKind::AllowOnce,
+                ),
+                acp::PermissionOption::new(
+                    acp::PermissionOptionId::new("cancel_git_changes"),
+                    "Cancel",
+                    acp::PermissionOptionKind::RejectOnce,
+                ),
+            ],
+            cx,
+        )
+    });
+    let decision = decision.await.map_err(|error| error.to_string())?;
+    if decision.0.as_ref() == "discard_git_changes" {
+        Ok(())
+    } else {
+        Err("Protected Git operation cancelled by the user.".to_string())
+    }
+}
+
+fn git_status_check(
+    command: &GitDataLossCommand,
+    working_directory: &Path,
+    project: &Entity<Project>,
+    cx: &App,
+) -> Result<GitStatusCheck, String> {
+    let git_directory = command.git_directory.as_ref().map_or_else(
+        || working_directory.to_path_buf(),
+        |directory| {
+            if directory.is_absolute() {
+                directory.clone()
+            } else {
+                working_directory.join(directory)
+            }
+        },
+    );
+    let git_directory =
+        util::paths::normalize_lexically(&git_directory).map_err(|error| error.to_string())?;
+
+    let repository = project
+        .read(cx)
+        .repositories(cx)
+        .values()
+        .filter(|repository| {
+            git_directory.starts_with(&repository.read(cx).work_directory_abs_path)
+        })
+        .max_by_key(|repository| {
+            repository
+                .read(cx)
+                .work_directory_abs_path
+                .components()
+                .count()
+        })
+        .cloned()
+        .ok_or_else(|| {
+            format!(
+                "The protected Git command targets `{}`, which is not a known project repository.",
+                git_directory.display()
+            )
+        })?;
+    let repository_root = repository.read(cx).work_directory_abs_path.to_path_buf();
+    let path_prefixes = command
+        .paths
+        .as_ref()
+        .map(|paths| {
+            if paths.iter().any(|path| {
+                let path = path.to_string_lossy();
+                path.starts_with(':') || path.contains(['*', '?', '[', ']'])
+            }) {
+                return Ok(Vec::new());
+            }
+            paths
+                .iter()
+                .map(|path| {
+                    let absolute = if path.is_absolute() {
+                        path.clone()
+                    } else {
+                        git_directory.join(path)
+                    };
+                    let absolute = util::paths::normalize_lexically(&absolute)
+                        .map_err(|error| error.to_string())?;
+                    repository
+                        .read(cx)
+                        .abs_path_to_repo_path(&absolute)
+                        .ok_or_else(|| {
+                            format!(
+                                "The protected Git path `{}` is outside the selected repository.",
+                                absolute.display()
+                            )
+                        })
+                })
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .transpose()?
+        .unwrap_or_default();
+
+    Ok(GitStatusCheck {
+        repository,
+        repository_root,
+        path_prefixes,
+    })
+}
+
+fn update_git_data_loss_receipt(
+    event_stream: &ToolCallEventStream,
+    receipt: GitDataLossGuardReceipt,
+) {
+    event_stream.update_fields_with_meta(
+        acp::ToolCallUpdateFields::new(),
+        Some(acp::Meta::from_iter([(
+            GIT_DATA_LOSS_GUARD_META_KEY.into(),
+            serde_json::json!(receipt),
+        )])),
+    );
+}
 
 /// Executes a shell one-liner and returns the combined output.
 ///
@@ -454,6 +763,14 @@ async fn run_terminal_tool(
         })?;
 
     authorize.await.map_err(|e| e.to_string())?;
+    guard_git_data_loss(
+        &input.command,
+        working_dir.as_deref(),
+        &project,
+        &event_stream,
+        cx,
+    )
+    .await?;
 
     let want_fs_write_all = sandboxing && sandbox_input.allow_fs_write_all == Some(true);
     let want_unsandboxed = sandboxing && sandbox_input.unsandboxed == Some(true);
@@ -1336,6 +1653,46 @@ fn working_dir(cd: &str, project: &Entity<Project>, cx: &mut App) -> Result<Opti
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn git_data_loss_guard_allows_a_clean_scope_without_prompting() {
+        assert_eq!(
+            git_data_loss_decision(0, 0),
+            GitDataLossGuardDecision::Allow
+        );
+    }
+
+    #[test]
+    fn git_data_loss_guard_confirms_dirty_or_unknown_scopes() {
+        assert_eq!(
+            git_data_loss_decision(1, 0),
+            GitDataLossGuardDecision::Confirm
+        );
+        assert_eq!(
+            git_data_loss_decision(0, 1),
+            GitDataLossGuardDecision::Confirm
+        );
+    }
+
+    #[test]
+    fn git_data_loss_guard_receipt_is_versioned_and_typed() {
+        let receipt = GitDataLossGuardReceipt {
+            schema: "openagents.omega.git-data-loss-guard.v1",
+            decision: GitDataLossGuardDecision::Deny,
+            operations: vec!["restore"],
+            files: vec!["/project/src/main.rs".to_string()],
+            reason: Some("test".to_string()),
+        };
+        let value = serde_json::to_value(receipt).expect("receipt should serialize");
+        assert_eq!(
+            value.get("schema").and_then(serde_json::Value::as_str),
+            Some("openagents.omega.git-data-loss-guard.v1")
+        );
+        assert_eq!(
+            value.get("decision").and_then(serde_json::Value::as_str),
+            Some("deny")
+        );
+    }
 
     #[test]
     fn test_initial_title_shows_full_multiline_command() {

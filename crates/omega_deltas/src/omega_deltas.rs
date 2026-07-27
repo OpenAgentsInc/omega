@@ -122,6 +122,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0131",
     "OMEGA-DELTA-0132",
     "OMEGA-DELTA-0133",
+    "OMEGA-DELTA-0134",
 ];
 
 /// OMEGA-DELTA-0125. Every entry the thread header's `…` menu offers, the
@@ -18327,6 +18328,77 @@ mod tests {
             enabled_tools.contains("basic_tool_name"),
             "OMEGA-DELTA-0133: the basic aliases are declared but no longer \
              used at the model boundary."
+        );
+    }
+
+    /// OMEGA-DELTA-0134. Protected Git commands inspect fresh repository
+    /// status after ordinary permission authorization and emit a typed guard
+    /// decision before they can execute.
+    #[test]
+    fn protected_git_commands_cannot_silently_discard_dirty_work() {
+        let permissions = read_repository_file("crates/agent/src/tool_permissions.rs");
+        let classifier = function_body(&permissions, "classify_git_command")
+            .expect("OMEGA-DELTA-0134: the Git data-loss classifier is gone");
+        for operation in [
+            "\"checkout\"",
+            "\"restore\"",
+            "\"stash_drop\"",
+            "\"stash_pop\"",
+            "\"stash_clear\"",
+            "\"reset_hard\"",
+            "\"clean\"",
+        ] {
+            assert!(
+                classifier.contains(operation),
+                "OMEGA-DELTA-0134: the protected Git operation {operation} is \
+                 no longer classified."
+            );
+        }
+
+        let terminal = read_repository_file("crates/agent/src/tools/terminal_tool.rs");
+        let runner = function_body(&terminal, "run_terminal_tool")
+            .expect("OMEGA-DELTA-0134: the terminal runner is gone");
+        let authorization = runner
+            .find("authorize.await")
+            .expect("OMEGA-DELTA-0134: ordinary terminal authorization is gone");
+        let guard = runner
+            .find("guard_git_data_loss")
+            .expect("OMEGA-DELTA-0134: the dirty-tree guard is not called");
+        assert!(
+            authorization < guard,
+            "OMEGA-DELTA-0134: the dirty-tree guard moved below the ordinary \
+             permission ladder, so hard denials or user rules may lose precedence."
+        );
+
+        let guard_body = function_body(&terminal, "guard_git_data_loss")
+            .expect("OMEGA-DELTA-0134: the dirty-tree guard implementation is gone");
+        for required in [
+            "fresh_status",
+            "GitDataLossGuardDecision::Allow",
+            "GitDataLossGuardDecision::Confirm",
+            "GitDataLossGuardDecision::Deny",
+            "Affected files:",
+            "prompt_for_decision",
+        ] {
+            assert!(
+                guard_body.contains(required),
+                "OMEGA-DELTA-0134: the guard no longer contains `{required}`."
+            );
+        }
+        assert!(
+            terminal.contains("openagents.omega.git-data-loss-guard.v1")
+                && terminal.contains("omega.git_data_loss_guard"),
+            "OMEGA-DELTA-0134: guard decisions are no longer versioned typed \
+             transcript metadata."
+        );
+
+        let repository = read_repository_file("crates/project/src/git_store.rs");
+        let fresh_status = function_body(&repository, "fresh_status")
+            .expect("OMEGA-DELTA-0134: the fresh repository-status query is gone");
+        assert!(
+            fresh_status.contains("backend.status"),
+            "OMEGA-DELTA-0134: the guard can no longer bypass the cached UI \
+             snapshot and query Git immediately before execution."
         );
     }
 }

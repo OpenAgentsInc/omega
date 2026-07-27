@@ -3,9 +3,9 @@ use crate::tools::TerminalTool;
 use agent_settings::{AgentSettings, CompiledRegex, ToolPermissions, ToolRules};
 use settings::ToolPermissionMode;
 use shell_command_parser::{
-    TerminalCommandValidation, extract_commands, validate_terminal_command,
+    TerminalCommandValidation, extract_command_tokens, extract_commands, validate_terminal_command,
 };
-use std::path::{Component, Path};
+use std::path::{Component, Path, PathBuf};
 use std::sync::LazyLock;
 use util::shell::ShellKind;
 
@@ -15,6 +15,185 @@ const INVALID_TERMINAL_COMMAND_MESSAGE: &str = "The terminal command could not b
      allow shell substitutions or interpolations in permission-protected commands. Forbidden examples include $VAR, \
      ${VAR}, $(...), backticks, $((...)), <(...), and >(...). Resolve those values before calling terminal, or ask \
      the user for the literal value to use.";
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum GitDataLossGuard {
+    NotApplicable,
+    Inspect(Vec<GitDataLossCommand>),
+    DenyUnparseable,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GitDataLossCommand {
+    pub operation: &'static str,
+    pub git_directory: Option<PathBuf>,
+    pub paths: Option<Vec<PathBuf>>,
+}
+
+pub fn classify_git_data_loss(command: &str) -> GitDataLossGuard {
+    let Some(commands) = extract_command_tokens(command) else {
+        return if mentions_git_data_loss_command(command) {
+            GitDataLossGuard::DenyUnparseable
+        } else {
+            GitDataLossGuard::NotApplicable
+        };
+    };
+
+    let saw_git_invocation = commands
+        .iter()
+        .any(|tokens| git_command_index(tokens).is_some());
+    let commands = commands
+        .iter()
+        .filter_map(|tokens| classify_git_command(tokens))
+        .collect::<Vec<_>>();
+    if commands.is_empty() {
+        if !saw_git_invocation && mentions_git_data_loss_command(command) {
+            GitDataLossGuard::DenyUnparseable
+        } else {
+            GitDataLossGuard::NotApplicable
+        }
+    } else {
+        GitDataLossGuard::Inspect(commands)
+    }
+}
+
+fn mentions_git_data_loss_command(command: &str) -> bool {
+    let command = command.to_ascii_lowercase();
+    command.contains("git")
+        && ["checkout", "restore", "stash", "reset", "clean"]
+            .iter()
+            .any(|operation| command.contains(operation))
+}
+
+fn classify_git_command(tokens: &[String]) -> Option<GitDataLossCommand> {
+    let git_index = git_command_index(tokens)?;
+    let mut index = git_index + 1;
+    let mut git_directory = None;
+
+    while let Some(token) = tokens.get(index) {
+        match token.as_str() {
+            "-C" => {
+                git_directory = Some(PathBuf::from(tokens.get(index + 1)?));
+                index += 2;
+            }
+            "-c" => index += 2,
+            "--no-pager" | "--no-optional-locks" => index += 1,
+            token if token.starts_with("-C") && token.len() > 2 => {
+                git_directory = Some(PathBuf::from(&token[2..]));
+                index += 1;
+            }
+            token if token.starts_with('-') => index += 1,
+            _ => break,
+        }
+    }
+
+    let operation = tokens.get(index)?.as_str();
+    let arguments = &tokens[index + 1..];
+    match operation {
+        "checkout" => {
+            let separator = arguments.iter().position(|argument| argument == "--")?;
+            let paths = arguments[separator + 1..]
+                .iter()
+                .map(PathBuf::from)
+                .collect::<Vec<_>>();
+            Some(GitDataLossCommand {
+                operation: "checkout",
+                git_directory,
+                paths: (!paths.is_empty()).then_some(paths),
+            })
+        }
+        "restore" => Some(GitDataLossCommand {
+            operation: "restore",
+            git_directory,
+            paths: restore_paths(arguments),
+        }),
+        "stash" => {
+            let operation = match arguments.first().map(String::as_str) {
+                Some("drop") => "stash_drop",
+                Some("pop") => "stash_pop",
+                Some("clear") => "stash_clear",
+                _ => return None,
+            };
+            Some(GitDataLossCommand {
+                operation,
+                git_directory,
+                paths: None,
+            })
+        }
+        "reset"
+            if arguments
+                .iter()
+                .any(|argument| argument == "--hard" || argument.starts_with("--hard=")) =>
+        {
+            Some(GitDataLossCommand {
+                operation: "reset_hard",
+                git_directory,
+                paths: None,
+            })
+        }
+        "clean"
+            if arguments.iter().any(|argument| {
+                argument == "--force"
+                    || (argument.starts_with('-')
+                        && !argument.starts_with("--")
+                        && argument
+                            .chars()
+                            .skip(1)
+                            .any(|flag| flag == 'f' || flag == 'd'))
+            }) =>
+        {
+            Some(GitDataLossCommand {
+                operation: "clean",
+                git_directory,
+                paths: None,
+            })
+        }
+        _ => None,
+    }
+}
+
+fn git_command_index(tokens: &[String]) -> Option<usize> {
+    let git_index = tokens.iter().position(|token| {
+        Path::new(token)
+            .file_name()
+            .is_some_and(|name| name == "git")
+    })?;
+    if git_index == 0
+        || matches!(
+            tokens.first().map(String::as_str),
+            Some("sudo" | "env" | "command")
+        )
+    {
+        Some(git_index)
+    } else {
+        None
+    }
+}
+
+fn restore_paths(arguments: &[String]) -> Option<Vec<PathBuf>> {
+    if let Some(separator) = arguments.iter().position(|argument| argument == "--") {
+        let paths = arguments[separator + 1..]
+            .iter()
+            .map(PathBuf::from)
+            .collect::<Vec<_>>();
+        return (!paths.is_empty()).then_some(paths);
+    }
+
+    let mut paths = Vec::new();
+    let mut index = 0;
+    while let Some(argument) = arguments.get(index) {
+        match argument.as_str() {
+            "--source" | "-s" => index += 2,
+            argument if argument.starts_with("--source=") => index += 1,
+            argument if argument.starts_with('-') => index += 1,
+            argument => {
+                paths.push(PathBuf::from(argument));
+                index += 1;
+            }
+        }
+    }
+    (!paths.is_empty()).then_some(paths)
+}
 
 /// Security rules that are always enforced and cannot be overridden by any setting.
 /// These protect against catastrophic operations like wiping filesystems.
@@ -565,6 +744,87 @@ mod tests {
     use gpui::px;
     use settings::{DockPosition, NotifyWhenAgentWaiting, PlaySoundWhenAgentDone};
     use std::sync::Arc;
+
+    #[test]
+    fn classifies_each_git_data_loss_command_family() {
+        let cases = [
+            ("git checkout -- src/main.rs", "checkout"),
+            ("git checkout HEAD~1 -- src/main.rs", "checkout"),
+            ("git restore src/main.rs", "restore"),
+            ("git stash drop", "stash_drop"),
+            ("git stash pop", "stash_pop"),
+            ("git stash clear", "stash_clear"),
+            ("git reset --hard HEAD~1", "reset_hard"),
+            ("git clean -f", "clean"),
+            ("git clean -d", "clean"),
+        ];
+
+        for (command, expected_operation) in cases {
+            let GitDataLossGuard::Inspect(commands) = classify_git_data_loss(command) else {
+                panic!("expected inspection for {command}");
+            };
+            assert_eq!(
+                commands.first().map(|command| command.operation),
+                Some(expected_operation)
+            );
+        }
+    }
+
+    #[test]
+    fn classifies_git_data_loss_commands_in_chains() {
+        let GitDataLossGuard::Inspect(commands) =
+            classify_git_data_loss("git restore src/main.rs && git clean -fd")
+        else {
+            panic!("expected inspection");
+        };
+        assert_eq!(
+            commands
+                .iter()
+                .map(|command| command.operation)
+                .collect::<Vec<_>>(),
+            vec!["restore", "clean"]
+        );
+    }
+
+    #[test]
+    fn preserves_git_directory_and_path_scope() {
+        assert_eq!(
+            classify_git_data_loss("git -C nested checkout HEAD -- src/main.rs"),
+            GitDataLossGuard::Inspect(vec![GitDataLossCommand {
+                operation: "checkout",
+                git_directory: Some(PathBuf::from("nested")),
+                paths: Some(vec![PathBuf::from("src/main.rs")]),
+            }])
+        );
+    }
+
+    #[test]
+    fn denies_unparseable_git_data_loss_commands() {
+        assert_eq!(
+            classify_git_data_loss("git restore $(pwd)/src/main.rs"),
+            GitDataLossGuard::DenyUnparseable
+        );
+        assert_eq!(
+            classify_git_data_loss("sh -c 'git restore src/main.rs'"),
+            GitDataLossGuard::DenyUnparseable
+        );
+    }
+
+    #[test]
+    fn ignores_non_data_loss_git_commands() {
+        for command in [
+            "git status",
+            "git checkout feature-branch",
+            "git stash list",
+            "git reset --soft HEAD~1",
+            "git clean -n",
+        ] {
+            assert_eq!(
+                classify_git_data_loss(command),
+                GitDataLossGuard::NotApplicable
+            );
+        }
+    }
 
     fn test_agent_settings(tool_permissions: ToolPermissions) -> AgentSettings {
         AgentSettings {

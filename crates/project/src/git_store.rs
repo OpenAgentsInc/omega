@@ -43,8 +43,8 @@ use git::{
     },
     stash::{GitStash, StashEntry},
     status::{
-        self, DiffStat, DiffTreeType, FileStatus, GitSummary, StatusCode, TrackedStatus, TreeDiff,
-        TreeDiffStatus, UnmergedStatus, UnmergedStatusCode,
+        self, DiffStat, DiffTreeType, FileStatus, GitStatus, GitSummary, StatusCode, TrackedStatus,
+        TreeDiff, TreeDiffStatus, UnmergedStatus, UnmergedStatusCode,
     },
 };
 use gpui::{
@@ -5490,6 +5490,24 @@ impl MergeDetails {
 }
 
 impl Repository {
+    pub fn fresh_status(
+        &self,
+        path_prefixes: Vec<RepoPath>,
+    ) -> BoxFuture<'static, Result<GitStatus>> {
+        let repository_state = self.repository_state.clone();
+        async move {
+            match repository_state.await.map_err(anyhow::Error::msg)? {
+                RepositoryState::Local(repository) => {
+                    repository.backend.status(&path_prefixes).await
+                }
+                RepositoryState::Remote(_) => {
+                    bail!("fresh repository status is unavailable for remote projects")
+                }
+            }
+        }
+        .boxed()
+    }
+
     pub fn is_trusted(&self) -> bool {
         match self.repository_state.peek() {
             Some(Ok(RepositoryState::Local(state))) => state.backend.is_trusted(),

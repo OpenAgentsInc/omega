@@ -6386,3 +6386,28 @@ five-tool profile instead of duplicating the model check.
 
 - **Enforced by:** `the_basic_profile_is_the_default_five_tool_surface` in
   `crates/omega_deltas`.
+
+### OMEGA-DELTA-0134 — Destructive Git commands inspect the dirty tree first
+
+The terminal permission ladder still decides whether a command is generally
+allowed, including built-in denials and user deny/confirm rules. After that
+authorization succeeds—but before a process exists—Omega separately guards Git
+commands that can discard local data: path checkout and restore, stash
+drop/pop/clear, hard reset, and forced or directory clean.
+
+The guard parses chained commands with the existing fail-closed shell parser
+and resolves each command's repository and path scope, including `git -C`.
+Unparseable protected commands and scopes outside the project are denied. For a
+known scope, the repository backend runs a fresh status query rather than
+trusting the asynchronously refreshed UI snapshot. A clean scope proceeds
+without friction. A dirty scope prompts with the affected file names; an
+unavailable status prompts with the affected repository scope instead.
+
+Every applicable outcome is retained on the tool call as versioned
+`openagents.omega.git-data-loss-guard.v1` metadata with an `allow`, `confirm`,
+or `deny` decision. This receipt makes the guard auditable even after later
+terminal output replaces the visible tool-call content.
+
+- **Enforced by:** `protected_git_commands_cannot_silently_discard_dirty_work`
+  in `crates/omega_deltas`, plus parser and classifier unit tests in
+  `shell_command_parser` and `agent`.
