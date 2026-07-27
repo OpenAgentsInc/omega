@@ -6584,3 +6584,35 @@ mode `0600` on Unix, and is removed through the same custody reset path.
   `only_an_unforced_debug_dev_runtime_uses_the_file_store` and
   `development_file_store_round_trips_and_deletes_a_secret` in
   `crates/omega_identity`.
+
+### OMEGA-DELTA-0142 — Provider credential errors lead to their solution
+
+A missing or rejected provider credential is not a transient request failure.
+Omega stops retrying it, presents the provider's credential guidance, and adds
+a provider-named action that opens **Settings → AI → LLM Providers**, where the
+credential can be entered or replaced. The action sits in the error callout
+that reported the problem rather than requiring the user to discover the
+settings hierarchy independently.
+
+Google AI reports a missing key through the typed, non-retryable
+`NoApiKey` completion error. Missing and invalid credentials from every native
+provider use the same actionable error surface.
+
+- **Enforced by:** `provider_credential_errors_open_llm_provider_settings` in
+  `crates/omega_deltas`.
+
+### OMEGA-DELTA-0143 — Lost identity reset returns to first-run setup
+
+When an identity's public manifest remains but its signing secret is absent,
+there is no secret for the normal marker-first, relaunch-required reset to
+protect. The explicit **Reset identity** action completes and acknowledges that
+cleanup immediately, removes the stale public identity records, and returns
+onboarding to the create-or-import state in the same process.
+
+Ready identities retain the restart-safe reset boundary. This exception applies
+only to the already-lost state and cannot delete an available signing key.
+
+- **Enforced by:** `a_lost_identity_can_reset_without_another_relaunch` in
+  `crates/omega_deltas`, plus
+  `resetting_a_lost_identity_returns_to_first_run_without_a_relaunch` in
+  `crates/omega_identity`.

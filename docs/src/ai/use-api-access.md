@@ -193,6 +193,11 @@ Use Google AI API access when you have a Gemini API key.
 
 Zed reads `GEMINI_API_KEY`, falling back to `GOOGLE_AI_API_KEY`, from the local Zed process environment.
 
+If an agent request is missing a provider key or the provider rejects the saved
+key, its error includes a **Configure _Provider_** action. That action opens
+**Settings → AI → LLM Providers** at the credential controls; credential errors
+are not retried because another attempt cannot succeed until the key changes.
+
 #### Custom Google AI Models {#google-ai-custom-models}
 
 Add custom Google AI models when you need a specific Gemini model version,

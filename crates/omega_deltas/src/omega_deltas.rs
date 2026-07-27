@@ -130,6 +130,8 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0139",
     "OMEGA-DELTA-0140",
     "OMEGA-DELTA-0141",
+    "OMEGA-DELTA-0142",
+    "OMEGA-DELTA-0143",
 ];
 
 /// OMEGA-DELTA-0125. Every entry the thread header's `…` menu offers, the
@@ -18866,5 +18868,75 @@ mod tests {
                 secret_path.display()
             );
         }
+    }
+
+    /// OMEGA-DELTA-0142. Provider credential failures must stop retrying and
+    /// offer a direct route to the settings surface that can resolve them.
+    #[test]
+    fn provider_credential_errors_open_llm_provider_settings() {
+        let google_path = "crates/language_models/src/provider/google.rs";
+        let google = without_comments(&read_repository_file(google_path));
+        assert!(
+            google.contains("LanguageModelCompletionError::NoApiKey")
+                && google.contains("provider: PROVIDER_NAME"),
+            "OMEGA-DELTA-0142: a missing Google key in {} is no longer \
+             classified as the non-retryable provider credential error.",
+            repository_path(google_path).display()
+        );
+
+        let thread_path = repository_path(THREAD_VIEW_PATH);
+        let thread = without_comments(&read_repository_file(THREAD_VIEW_PATH));
+        for required in [
+            "ThreadError::NoCredentials { provider }",
+            "ThreadError::AuthenticationFailed { provider }",
+            "render_provider_configuration_error(",
+            "open_llm_providers_settings_button(Some(provider), cx)",
+            "zed_actions::OpenSettingsAt",
+            "path: \"llm_providers\".to_string()",
+        ] {
+            assert!(
+                thread.contains(required),
+                "OMEGA-DELTA-0142: provider credential recovery in {} lost \
+                 `{required}`.",
+                thread_path.display()
+            );
+        }
+    }
+
+    /// OMEGA-DELTA-0143. Resetting an identity whose public record has outlived
+    /// its secret returns onboarding to first-run setup in the same process.
+    #[test]
+    fn a_lost_identity_can_reset_without_another_relaunch() {
+        let custody_path = repository_path(IDENTITY_CUSTODY_PATH);
+        let custody = without_comments(&read_repository_file(IDENTITY_CUSTODY_PATH));
+        let reset = method_body(
+            &custody,
+            "pub fn reset(",
+            &custody_path,
+            "Lost custody has no secret to protect with the normal marker-first \
+             relaunch boundary.",
+        );
+        for required in [
+            "identity_was_lost",
+            "self.complete_reset_locked(marker.clone())",
+            "self.acknowledge_relaunch_locked(ResetMarker",
+        ] {
+            assert!(
+                reset.contains(required),
+                "OMEGA-DELTA-0143: the lost-identity reset in {} lost \
+                 `{required}`.",
+                custody_path.display()
+            );
+        }
+
+        let identity_section_path = "crates/onboarding/src/identity_section.rs";
+        let identity_section = without_comments(&read_repository_file(identity_section_path));
+        assert!(
+            identity_section
+                .contains("IdentityAction::Reset => self.reset_lost_identity(window, cx)"),
+            "OMEGA-DELTA-0143: the Reset identity action in {} no longer starts \
+             the lost-custody reset directly.",
+            repository_path(identity_section_path).display()
+        );
     }
 }

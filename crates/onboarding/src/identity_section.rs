@@ -601,7 +601,7 @@ impl IdentitySection {
                 cx,
                 |backend| backend.resume_reset(),
             ),
-            IdentityAction::Reset => self.confirm_reset(window, cx),
+            IdentityAction::Reset => self.reset_lost_identity(window, cx),
             IdentityAction::Relaunch => cx.restart(),
             IdentityAction::Protect | IdentityAction::ReplaceRecovery => {
                 self.controller.cancel();
@@ -612,7 +612,7 @@ impl IdentitySection {
         }
     }
 
-    fn confirm_reset(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn reset_lost_identity(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(identity_ref) = self
             .controller
             .durable()
@@ -627,30 +627,14 @@ impl IdentitySection {
             cx.notify();
             return;
         };
-        self.operation_task = Some(cx.spawn_in(window, async move |this, cx| {
-            let response = cx.prompt(
-                gpui::PromptLevel::Critical,
-                "Reset this Omega identity?",
-                Some(
-                    "Reset removes the signing key from secure custody. Continue only if you have a verified encrypted recovery file.",
-                ),
-                &["Reset identity", "Cancel"],
-            );
-            if response.await != Ok(0) {
-                return;
-            }
-            this.update_in(cx, |this, window, cx| {
-                this.start_custody_operation(
-                    IdentityOperation::Reset {
-                        receipt_ref: receipt_ref.clone(),
-                    },
-                    window,
-                    cx,
-                    move |backend| backend.reset(&identity_ref, receipt_ref),
-                );
-            })
-            .log_err();
-        }));
+        self.start_custody_operation(
+            IdentityOperation::Reset {
+                receipt_ref: receipt_ref.clone(),
+            },
+            window,
+            cx,
+            move |backend| backend.reset(&identity_ref, receipt_ref),
+        );
     }
 
     fn choose_recovery_artifact(&mut self, window: &mut Window, cx: &mut Context<Self>) {

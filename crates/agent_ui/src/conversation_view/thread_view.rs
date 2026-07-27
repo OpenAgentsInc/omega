@@ -11387,7 +11387,12 @@ impl ThreadView {
                     .unwrap_or_else(|| {
                         format!("No credentials are configured for {provider}.").into()
                     });
-                self.render_error_callout("Credentials Missing", message, false, true, cx)
+                self.render_provider_configuration_error(
+                    "Credentials Missing",
+                    message,
+                    provider,
+                    cx,
+                )
             }
             ThreadError::StreamError { provider } => self.render_error_callout(
                 "Connection Interrupted",
@@ -11404,7 +11409,12 @@ impl ThreadView {
                 let message = Self::provider_by_name(provider, cx)
                     .map(|provider| provider.authentication_error_message())
                     .unwrap_or_else(|| format!("Could not authenticate with {provider}.").into());
-                self.render_error_callout("Authentication Failed", message, false, false, cx)
+                self.render_provider_configuration_error(
+                    "Authentication Failed",
+                    message,
+                    provider,
+                    cx,
+                )
             }
             ThreadError::PermissionDenied { provider, message } => {
                 let message: SharedString = message.clone().unwrap_or_else(|| {
@@ -11543,6 +11553,27 @@ impl ThreadView {
             .dismiss_action(self.dismiss_error_button(cx))
     }
 
+    fn render_provider_configuration_error(
+        &self,
+        title: &'static str,
+        message: SharedString,
+        provider: &SharedString,
+        cx: &mut Context<Self>,
+    ) -> Callout {
+        Callout::new()
+            .severity(Severity::Error)
+            .icon(IconName::XCircle)
+            .title(title)
+            .description(message.clone())
+            .actions_slot(
+                h_flex()
+                    .gap_0p5()
+                    .child(self.open_llm_providers_settings_button(Some(provider), cx))
+                    .child(self.create_copy_button(message)),
+            )
+            .dismiss_action(self.dismiss_error_button(cx))
+    }
+
     fn render_model_not_available_error(&self, cx: &mut Context<Self>) -> Option<Callout> {
         let thread = self.as_native_thread(cx)?;
 
@@ -11601,7 +11632,7 @@ impl ThreadView {
             .actions_slot(
                 h_flex()
                     .gap_1()
-                    .child(self.open_llm_providers_settings_button(cx))
+                    .child(self.open_llm_providers_settings_button(None, cx))
                     .when(has_authenticated_provider, |this| {
                         this.child(self.open_model_selector_button(cx))
                     }),
@@ -11611,8 +11642,15 @@ impl ThreadView {
         Some(callout)
     }
 
-    fn open_llm_providers_settings_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        Button::new("configure-llm-provider", "Configure Provider")
+    fn open_llm_providers_settings_button(
+        &self,
+        provider: Option<&SharedString>,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let label: SharedString = provider
+            .map(|provider| format!("Configure {provider}").into())
+            .unwrap_or_else(|| "Configure Provider".into());
+        Button::new("configure-llm-provider", label)
             .label_size(LabelSize::Small)
             .style(ButtonStyle::Filled)
             .on_click(cx.listener(|this, _, window, cx| {

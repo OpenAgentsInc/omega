@@ -766,6 +766,7 @@ impl IdentityService {
             return Ok(marker.result());
         }
         let resolved = self.resolve_locked();
+        let identity_was_lost = resolved.result.state == CustodyState::Lost;
         if let Some(identity) = &resolved.result.identity {
             if identity.identity_ref() != expected_identity {
                 return Err(CustodyError::CustodyDenied(CustodyState::Conflict));
@@ -777,6 +778,14 @@ impl IdentityService {
         let marker = ResetMarker::pending(expected_identity.clone(), authorization_ref);
         write_json_document(&self.paths.reset_path, &marker)?;
         self.trigger_proof_crash(ProofCrashBoundary::AfterResetMarker);
+        if identity_was_lost {
+            self.complete_reset_locked(marker.clone())
+                .map_err(|_| CustodyError::ResetFailed)?;
+            return self.acknowledge_relaunch_locked(ResetMarker {
+                status: ResetStatus::Complete,
+                ..marker
+            });
+        }
         Ok(marker.result())
     }
 
@@ -3380,6 +3389,38 @@ mod tests {
             CustodyState::Ready,
             "after a reset the profile must once again require onboarding"
         );
+    }
+
+    #[test]
+    fn resetting_a_lost_identity_returns_to_first_run_without_a_relaunch() {
+        let temporary_directory = tempfile::tempdir().expect("create temporary directory");
+        let store = FakeStore::empty();
+        let service = service(store.clone(), temporary_directory.path().to_path_buf());
+        let created = service.create(receipt()).expect("create identity");
+        let identity = created.identity.expect("created public identity");
+        store
+            .delete(&service.locator)
+            .expect("remove stored secret");
+        assert_eq!(
+            service.inspect().expect("inspect lost identity").state,
+            CustodyState::Lost
+        );
+
+        let reset = service
+            .reset(
+                identity.identity_ref(),
+                ReceiptRef::new("lost-identity-reset").expect("valid reset receipt"),
+            )
+            .expect("reset lost identity");
+
+        assert_eq!(reset.state, CustodyState::Absent);
+        assert_eq!(
+            service.inspect().expect("inspect reset identity").state,
+            CustodyState::Absent
+        );
+        assert!(!service.paths.manifest_path.exists());
+        assert!(!service.paths.completion_path.exists());
+        assert!(!service.paths.reset_path.exists());
     }
 
     #[test]

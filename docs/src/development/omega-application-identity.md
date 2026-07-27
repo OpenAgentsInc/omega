@@ -121,6 +121,14 @@ result remains `relaunch-required` or `reset-failed` and the marker is preserved
 for a later process to acknowledge. This process-level inspection must not be
 called from individual onboarding view constructors.
 
+A lost identity is the narrow exception to the relaunch boundary. In that state
+the public identity is known but the active store has already proven that no
+signing secret is available. The onboarding **Reset identity** action therefore
+completes and acknowledges cleanup in the current process, returning directly
+to first-run identity creation. This is especially relevant after an unsigned
+development build migrates from Keychain to its owner-only development file:
+the old public manifest can outlive the secret in the newly selected store.
+
 Ready-state onboarding UI exposes Protect, not Reset. Use the operator CLI for
 an authorized wipe of channel custody:
 
