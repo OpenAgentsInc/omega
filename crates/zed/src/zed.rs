@@ -841,11 +841,8 @@ pub(crate) fn initialize_panels(
                 return anyhow::Ok(());
             };
 
-            // `OMEGA-DELTA-0040` keeps its order. A first-ever launch lands on
-            // identity onboarding, and zero base waits for it rather than
-            // covering it with a zoomed panel — a mode that hid the identity
-            // gate would be a bypass of it, which is a larger change than a
-            // demonstration needs.
+            // Keep startup readiness ahead of the front door so the optional
+            // onboarding journey can be restored without racing this panel.
             await_identity_ready(app_state, cx).await.log_err();
 
             initialize_agent_panel(workspace_handle.clone(), cx.clone())
@@ -864,17 +861,9 @@ pub(crate) fn initialize_panels(
                     workspace.focus_panel::<agent_ui::AgentPanel>(window, cx);
                     // OMEGA-DELTA-0053. Seal the window here and nowhere else.
                     //
-                    // After the identity gate, and after the thread is open,
-                    // because sealing stops the workspace rendering a centre
-                    // pane and `OMEGA-DELTA-0040`'s identity onboarding is a
-                    // centre-pane item. Sealing earlier would leave a fresh
-                    // profile with no surface to answer the identity gate on,
-                    // which is a worse dead end than the one
-                    // `OMEGA-DELTA-0051` repaired.
-                    //
-                    // From here the editor is not rendered rather than covered
-                    // by the zoom above, so a control that survives the action
-                    // gate cannot put it back.
+                    // Seal only after the thread opens. From here the editor is
+                    // not rendered rather than covered by the zoom above, so a
+                    // control that survives the action gate cannot put it back.
                     omega_zero_base::seal();
                     cx.notify();
                 })

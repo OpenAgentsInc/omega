@@ -1955,50 +1955,26 @@ than it sounds, because the harness omega#81's acceptance sentence names —
   — each failed the self-test. Every falsification was probed against a pristine
   copy before its test ran.
 
-### OMEGA-DELTA-0040 — A first-ever launch lands on identity onboarding, and finishing it opens the front door
+### OMEGA-DELTA-0040 — Startup skips onboarding and opens the front door
 
 - **Upstream Zed:** first-run onboarding is a page you may open, skip, or close;
   nothing in the startup path waits for it, and the window opens regardless.
-- **Omega, before this:** the ordering existed and nothing named it. Identity
-  onboarding gates startup (`await_identity_ready`), `OMEGA-DELTA-0019` and
-  `OMEGA-DELTA-0034` open the front door on a window with nothing to restore,
-  and no test connected the two. A packaged first-ever launch therefore lands on
-  Onboarding rather than the agent, which reads as `OMEGA-DELTA-0034` failing
-  its own exit unless somebody decides on purpose that it does not.
-- **The owner's decision, recorded rather than assumed.** Omega is
-  identity-first by design: omega#9's packet exists to put identity before
-  editor setup, and an agent thread before an identity would invert it. "Fresh
-  launch lands on the surface" is satisfied by the front door being the surface
-  a *usable* session opens on. A genuinely first-ever launch legitimately lands
-  on onboarding first, and every launch after it lands on the agent. The owner
-  may veto this; it is written down so a veto has something to point at.
-- **The decision is only sound while the handoff is real,** so the handoff is
-  the thing that is tested. "Onboarding first" and "onboarding instead" are the
-  same picture on a first launch and completely different products on the
-  second. Three links, each of which fails silently on its own:
-  `restore_or_create_workspace` **waits** on `await_identity_ready` before it
-  opens anything; the first-run branch of `on_finish` **closes its own window
-  and releases** that wait; and `release_identity_waiters` **completes the
-  channel** the startup path is parked on. Remove the middle link and setup
-  completes into a launchpad that never becomes an agent — a failure no check on
-  the front door alone can see.
-- **Enforced by:** `first_run_onboarding_hands_the_startup_off_to_the_front_door`
+- **Omega:** startup goes directly to the new-thread surface. Identity
+  onboarding remains available through its explicit actions for later optional
+  use, but `await_identity_ready` returns before inspecting custody or opening
+  the onboarding page. This also prevents a startup inspection from prompting
+  for keychain access before the user asks to manage identity.
+- **Reversible seam:** startup and zero base still call
+  `await_identity_ready` before opening the front door. Reintroducing an
+  optional startup journey is therefore one explicit policy change, not a
+  reconstruction of the launch sequence. The dormant completion handoff
+  remains tested so it does not silently decay.
+- **Enforced by:** `startup_skips_onboarding_and_opens_the_front_door`
   in `crates/omega_deltas`, alongside `a_fresh_window_opens_on_the_agent`
   (`OMEGA-DELTA-0019`) and `the_front_door_does_not_require_an_open_project`
   (`OMEGA-DELTA-0034`).
-- **What this does not cover.** **Abandoning** onboarding is a dead end in that
-  launch. The first-run onboarding page is an ordinary closeable item; closing
-  it calls `Item::on_removed` → `onboarding_closed`, which clears the
-  "onboarding is open" flag and **does not** complete the startup channel. So a
-  user who closes the tab instead of finishing setup keeps the launchpad window
-  the onboarding page was hosted in, with the agent dock closed and no window
-  ever created behind it. Identity is still not ready, so relaunching shows
-  onboarding again and nothing is lost but the session — and refusing to
-  continue without an identity is the identity-first posture working, not
-  failing. Making the page unclosable, or making a close mean "quit", is an
-  onboarding-surface decision (omega#9) and not this delta's to take. This delta
-  also does not cover *what* onboarding asks for, or the editor-setup journey,
-  which reaches the welcome page rather than the front door and is unchanged.
+- **What this does not cover:** the contents of onboarding, or the later UX for
+  offering it as an optional journey.
 
 ### OMEGA-DELTA-0041 — Omega Agent is attachable over ACP, on a loopback socket that is off by default and read-only
 

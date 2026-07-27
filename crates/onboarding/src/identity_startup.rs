@@ -7,6 +7,8 @@ use workspace::AppState;
 
 use crate::show_onboarding_view;
 
+const OPEN_ONBOARDING_DURING_STARTUP: bool = false;
+
 type StartupInspection = Result<IdentityInspection, Arc<CustodyError>>;
 type StartupCompletion = Result<(), Arc<anyhow::Error>>;
 
@@ -119,6 +121,10 @@ pub async fn await_identity_ready(
     app_state: Arc<AppState>,
     cx: &mut AsyncApp,
 ) -> anyhow::Result<()> {
+    if !OPEN_ONBOARDING_DURING_STARTUP {
+        return Ok(());
+    }
+
     let (inspection, completion, terminal) = cx.update(|cx| {
         IdentityStartupCoordinator::install(cx);
         let coordinator = cx.global::<IdentityStartupCoordinator>();
@@ -244,9 +250,13 @@ mod tests {
         }
     }
 
-    /// omega#110 must not weaken `OMEGA-DELTA-0040`. The match is exhaustive on
-    /// purpose: a new custody state has to decide, here, whether a launch may
-    /// open a composer under it, rather than inheriting an answer from a `!=`.
+    #[test]
+    fn startup_does_not_open_onboarding() {
+        assert!(!OPEN_ONBOARDING_DURING_STARTUP);
+    }
+
+    /// Keep the dormant gate exhaustive so manually restoring the startup
+    /// journey cannot accidentally treat a new custody state as ready.
     #[test]
     fn every_custody_state_but_ready_holds_the_startup_wait() {
         fn expected(state: CustodyState) -> bool {

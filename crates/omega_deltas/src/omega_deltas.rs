@@ -6562,28 +6562,14 @@ mod tests {
         }
     }
 
-    /// OMEGA-DELTA-0040. A first-ever launch lands on identity onboarding, and
-    /// finishing it opens the front door.
+    /// OMEGA-DELTA-0040. Startup skips onboarding and opens the front door.
     ///
-    /// The owner decided the ordering: Omega is identity-first, so an agent
-    /// thread before an identity would invert the thing omega#9's packet exists
-    /// to establish. That decision is only sound while the handoff is real —
-    /// "onboarding first" and "onboarding instead" are the same picture on a
-    /// first launch and completely different products on the second.
-    ///
-    /// So the chain is checked link by link, because each link fails silently
-    /// on its own:
-    ///
-    /// - the startup path *waits* — without the await, the front door would
-    ///   open behind onboarding and Omega would be asking for an identity over
-    ///   the top of a composer;
-    /// - finishing *releases* the wait — without the release, completing setup
-    ///   would leave the user on the launchpad with nothing else ever opening,
-    ///   and no test that only looks at the front door would notice;
-    /// - releasing *completes the channel* the startup path is parked on —
-    ///   without that, `release_identity_waiters` is a call that returns.
+    /// The onboarding implementation remains available from its explicit
+    /// actions, but it must not intercept startup. The readiness call stays
+    /// ahead of the front door as a single reversible seam for restoring an
+    /// optional startup journey later.
     #[test]
-    fn first_run_onboarding_hands_the_startup_off_to_the_front_door() {
+    fn startup_skips_onboarding_and_opens_the_front_door() {
         let startup_path = repository_path(STARTUP_PATH);
         let startup = std::fs::read_to_string(&startup_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", startup_path.display()));
@@ -6597,10 +6583,8 @@ mod tests {
 
         let waits_at = restore.find("await_identity_ready(").unwrap_or_else(|| {
             panic!(
-                "OMEGA-DELTA-0040: `restore_or_create_workspace` in {} no longer \
-                 waits for identity. The front door would open behind first-run \
-                 onboarding, which is Omega asking for an identity on top of a \
-                 composer — the inversion the owner's ordering decision rejects.",
+                "OMEGA-DELTA-0040: `restore_or_create_workspace` in {} lost the \
+                 readiness seam that keeps optional onboarding reversible.",
                 startup_path.display()
             )
         });
@@ -6615,12 +6599,23 @@ mod tests {
             });
         assert!(
             waits_at < opens_at,
-            "OMEGA-DELTA-0040: {} opens the front door before it waits for \
-             identity. Onboarding is first *and* the agent is what follows it; \
-             reversing them makes the first-run window a race.",
+            "OMEGA-DELTA-0040: {} opens the front door before the optional \
+             readiness seam, which would make restoring onboarding a race.",
             startup_path.display()
         );
 
+        let coordinator_path = repository_path(IDENTITY_STARTUP_PATH);
+        let coordinator = std::fs::read_to_string(&coordinator_path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", coordinator_path.display()));
+        assert!(
+            coordinator.contains("const OPEN_ONBOARDING_DURING_STARTUP: bool = false;"),
+            "OMEGA-DELTA-0040: {} can open onboarding during startup again. \
+             Startup must go directly to the new-thread surface.",
+            coordinator_path.display()
+        );
+
+        // Keep the dormant handoff intact so reintroducing optional onboarding
+        // is one deliberate switch rather than a reconstruction.
         let onboarding_path = repository_path(ONBOARDING_PATH);
         let onboarding = std::fs::read_to_string(&onboarding_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", onboarding_path.display()));
@@ -6662,9 +6657,6 @@ mod tests {
             onboarding_path.display()
         );
 
-        let coordinator_path = repository_path(IDENTITY_STARTUP_PATH);
-        let coordinator = std::fs::read_to_string(&coordinator_path)
-            .unwrap_or_else(|error| panic!("cannot read {}: {error}", coordinator_path.display()));
         let release =
             function_body(&coordinator, "release_identity_waiters").unwrap_or_else(|| {
                 panic!(
