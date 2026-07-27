@@ -37,6 +37,7 @@ pub(crate) enum IdentitySectionPresentation {
 trait IdentityBackend: Send + Sync {
     fn inspect(&self) -> Result<IdentityInspection, CustodyError>;
     fn create(&self, receipt_ref: ReceiptRef) -> Result<IdentityInspection, CustodyError>;
+    fn adopt_custodied(&self, receipt_ref: ReceiptRef) -> Result<IdentityInspection, CustodyError>;
     fn resume_incomplete_create(&self) -> Result<IdentityInspection, CustodyError>;
     fn prepare_import(
         &self,
@@ -94,6 +95,11 @@ impl IdentityBackend for SystemIdentityBackend {
 
     fn create(&self, receipt_ref: ReceiptRef) -> Result<IdentityInspection, CustodyError> {
         self.service.create(receipt_ref)?;
+        self.service.inspect_details()
+    }
+
+    fn adopt_custodied(&self, receipt_ref: ReceiptRef) -> Result<IdentityInspection, CustodyError> {
+        self.service.adopt_custodied(receipt_ref)?;
         self.service.inspect_details()
     }
 
@@ -178,6 +184,7 @@ impl IdentityBackend for SystemIdentityBackend {
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 enum IdentityAction {
     Create,
+    Adopt,
     Recover,
     Retry,
     ResumeCreate,
@@ -192,6 +199,7 @@ impl IdentityAction {
     fn id(self) -> &'static str {
         match self {
             Self::Create => "create",
+            Self::Adopt => "adopt",
             Self::Recover => "recover",
             Self::Retry => "retry",
             Self::ResumeCreate => "resume-create",
@@ -206,6 +214,10 @@ impl IdentityAction {
     fn label(self) -> &'static str {
         match self {
             Self::Create => "Create identity",
+            // Not "Create identity". The identity already exists in the
+            // keychain and this control adopts it; a label that says "create"
+            // would describe an identity the owner does not get (omega#110).
+            Self::Adopt => "Use this identity",
             Self::Recover => "Recover identity",
             Self::Retry => "Try again",
             Self::ResumeCreate => "Resume setup",
@@ -225,6 +237,7 @@ impl IdentityAction {
         matches!(
             self,
             Self::Create
+                | Self::Adopt
                 | Self::Retry
                 | Self::ResumeCreate
                 | Self::RetryReset
@@ -551,6 +564,22 @@ impl IdentitySection {
                     window,
                     cx,
                     move |backend| backend.create(receipt_ref),
+                );
+            }
+            IdentityAction::Adopt => {
+                let Ok(receipt_ref) = Self::next_receipt("omega-onboarding-adopt") else {
+                    self.controller
+                        .report_error(IdentityUiError::OperationFailed);
+                    cx.notify();
+                    return;
+                };
+                self.start_inspection_operation(
+                    IdentityOperation::AdoptCustodied {
+                        receipt_ref: receipt_ref.clone(),
+                    },
+                    window,
+                    cx,
+                    move |backend| backend.adopt_custodied(receipt_ref),
                 );
             }
             IdentityAction::Recover => {
@@ -997,6 +1026,10 @@ impl IdentitySection {
                     "Creating your identity…",
                     "Omega is creating one Nostr identity, installing it in secure custody, and verifying read-back.",
                 ),
+                IdentityOperation::AdoptCustodied { .. } => (
+                    "Using your existing identity…",
+                    "Omega is adopting the identity already in secure custody for this profile. No new identity is created.",
+                ),
                 IdentityOperation::ResumeIncomplete => (
                     "Resuming identity setup…",
                     "Omega is finishing the durable transaction without rotating the known identity.",
@@ -1181,6 +1214,13 @@ impl IdentitySection {
                     },
                 }
             }
+            CustodyState::Unadopted => IdentityPresentation {
+                title: "Use your Omega identity here",
+                description: "This profile has no identity files yet, and your keychain already holds the identity above. Omega adopts that identity for this profile; it does not create a second one.",
+                icon: IconName::Person,
+                color: Color::Accent,
+                actions: vec![IdentityAction::Adopt, IdentityAction::Recover],
+            },
             CustodyState::Absent => IdentityPresentation {
                 title: "Create your Omega identity",
                 description: "Create a local Nostr identity for signed work, portable social context, and agent coordination.",
@@ -1786,6 +1826,7 @@ mod tests {
     fn every_durable_custody_fact_has_an_explicit_presentation() {
         let cases = [
             (CustodyState::Absent, "Create your Omega identity"),
+            (CustodyState::Unadopted, "Use your Omega identity here"),
             (CustodyState::Ready, "Identity ready"),
             (CustodyState::Locked, "System keychain locked"),
             (CustodyState::Incomplete, "Identity setup needs repair"),
@@ -1801,6 +1842,82 @@ mod tests {
             assert!(accessibility_label.starts_with(title));
             assert!(!accessibility_label.contains("nsec"));
         }
+    }
+
+    /// omega#110. The keychain is per channel and per user, not per profile, so
+    /// a brand-new `--user-data-dir` on this machine opens beside an identity
+    /// it has no files for. It was shown "Identity setup needs repair" with
+    /// **Recover identity** as the only control — a repair with nothing to
+    /// repair, reachable only by producing a recovery file, so the composer
+    /// behind `OMEGA-DELTA-0040`'s wait could not be reached at all.
+    ///
+    /// The screen now says what happens to that identity, and the control that
+    /// says it is the one that does it.
+    #[test]
+    fn a_fresh_profile_is_offered_the_custodied_identity_and_told_it_is_adopted() {
+        let unadopted = IdentitySection::durable_presentation(&inspection(CustodyState::Unadopted));
+
+        assert_eq!(unadopted.title, "Use your Omega identity here");
+        assert_eq!(
+            unadopted.actions,
+            vec![IdentityAction::Adopt, IdentityAction::Recover]
+        );
+        assert_eq!(IdentityAction::Adopt.label(), "Use this identity");
+
+        // Acceptance 2: the sentence has to state which of adopt or create
+        // happens. "adopts" is the claim; "does not create a second one" is the
+        // half a reader is most likely to have assumed wrongly.
+        assert!(unadopted.description.contains("adopts"));
+        assert!(
+            unadopted
+                .description
+                .contains("does not create a second one")
+        );
+        assert!(!unadopted.description.contains("repair"));
+
+        // A label that says "create" over a control that adopts is the same
+        // defect wearing the opposite sentence.
+        assert_ne!(
+            IdentityAction::Adopt.label(),
+            IdentityAction::Create.label()
+        );
+    }
+
+    /// omega#110 acceptance 4, and the failure mode a fix for it invites: a
+    /// profile that genuinely is damaged must still say so. Fixing the fresh
+    /// profile by never reporting damage would be worse than the bug.
+    #[test]
+    fn a_genuinely_interrupted_transaction_still_reports_repair() {
+        let mut interrupted = inspection(CustodyState::Incomplete);
+        interrupted.pending_transaction = Some(PendingIdentityTransaction {
+            operation: PendingIdentityOperation::Import,
+            receipt_ref: ReceiptRef::new("interrupted-import").expect("valid receipt"),
+            expected_identity: None,
+        });
+        let repair = IdentitySection::durable_presentation(&interrupted);
+        assert_eq!(repair.title, "Identity setup needs repair");
+        assert_eq!(repair.actions, vec![IdentityAction::Recover]);
+
+        let unadopted = IdentitySection::durable_presentation(&inspection(CustodyState::Unadopted));
+        assert_ne!(repair.title, unadopted.title);
+        assert_ne!(repair.description, unadopted.description);
+        assert_ne!(repair.actions, unadopted.actions);
+    }
+
+    /// omega#110 acceptance 3. A machine whose keychain has never held an Omega
+    /// identity is the case the issue names as unverified, and clearing the
+    /// owner's keychain to find out is not something to do. Fabricating the
+    /// state is: `Absent` is what a service resolves to when the store is empty
+    /// and no files exist, and this is the screen it produces.
+    #[test]
+    fn a_machine_with_no_omega_identity_is_still_offered_creation() {
+        let absent = IdentitySection::durable_presentation(&inspection(CustodyState::Absent));
+        assert_eq!(absent.title, "Create your Omega identity");
+        assert_eq!(
+            absent.actions,
+            vec![IdentityAction::Create, IdentityAction::Recover]
+        );
+        assert!(absent.actions.contains(&IdentityAction::Create));
     }
 
     #[test]

@@ -4385,3 +4385,81 @@ than merely stated.
   open on a machine with one. There is also **no call site in a view**: the
   method exists and is checked, and what draws it is a separate change in
   `thread_view.rs`.
+
+### OMEGA-DELTA-0110 — A profile with no identity files adopts the identity already in custody, and says so
+
+- **Upstream Zed:** first-run onboarding asks for nothing that outlives the
+  profile directory. `--user-data-dir` is a complete reset of who you are to
+  the app, because there is nothing about you outside it.
+- **Omega:** the signing key lives in the system keychain under
+  `com.openagents.omega.credentials.<channel>`, scoped **per release channel
+  and per user — not per profile**. That scope is deliberate and kept: an
+  identity belongs to a person, not to a directory, and a per-profile identity
+  would mean a second window on the same Mac signed as somebody else.
+- **What omega#110 reported is the conclusion, not the scope.** A brand-new
+  `--user-data-dir` has no identity files and a keychain that already holds an
+  identity. Custody called that `Incomplete` — the state written for a
+  transaction that was interrupted — so onboarding said *"Identity setup needs
+  repair: a prior recovery transaction needs the same owner-authorized identity
+  candidate"* and offered **Recover identity** as its only control. There was
+  no prior transaction. `create` was refused for the profile not being
+  `Absent`, `resume_incomplete_create` was refused for having nothing to
+  resume, and recovery needed an encrypted artifact the owner may not have to
+  hand. With `OMEGA-DELTA-0040` parking the front door behind identity
+  onboarding, **the composer was unreachable on a fresh profile** — which is
+  why every acceptance item phrased "a fresh `--user-data-dir` reaches a
+  composer" was unsatisfiable, and why every "fresh profile" run that day was
+  not fresh.
+- **The state is now separated, and a transaction is what separates them.**
+  `resolve_locked` resolves a data root with no manifest and a readable secret
+  to `CustodyState::Unadopted` when no transaction is on disk, and keeps
+  `Incomplete` when one is. Damage is still reported as damage: a planted
+  transaction beside the same keychain entry still resolves to `Incomplete`,
+  still says "Identity setup needs repair", and adoption over it is refused as
+  a conflict rather than overwriting it.
+- **The screen says which, because the owner ruled that it must.** Adopting
+  silently and adopting visibly are the same behaviour and different products.
+  The unadopted screen shows the npub and fingerprint it is about to adopt and
+  states *"Omega adopts that identity for this profile; it does not create a
+  second one"*, under a control labelled **Use this identity** — not "Create
+  identity", which would name an identity the owner does not get.
+- **Adoption adopts.** The control routes to `IdentityService::adopt_custodied`,
+  not `create`. `create` falls back to generating when the store turns out to
+  be empty; reached from a screen that has already named an npub, that fallback
+  would produce a different identity behind the sentence promising this one. An
+  empty store is a refusal here (`CustodyDenied(Absent)`) with nothing
+  generated, nothing written, and no transaction left on disk. `create` itself
+  stays refused on an unadopted profile: replacing a custodied identity with a
+  fresh one is a reset, and a reset is a separate owner-authorized decision.
+- **`OMEGA-DELTA-0040` is unchanged and is checked to be.** `Unadopted` is not
+  `Ready`, so the fresh profile still waits on onboarding; this fixes what
+  onboarding *concludes*, not whether the wait happens. The gate predicate is
+  now the named `onboarding_required`, and both this delta and a unit test hold
+  it: a state that counted as ready would open a composer having silently taken
+  an identity nobody was shown, which is omega#110 with the opposite sign.
+- **Enforced by:**
+  `a_profile_with_no_identity_files_adopts_the_custodied_identity_and_says_so`
+  in `crates/omega_deltas`; plus unit tests in `crates/omega_identity`
+  (`a_fresh_profile_beside_a_custodied_identity_is_adoptable_not_damaged`,
+  `an_interrupted_transaction_beside_a_custodied_identity_is_still_a_repair`,
+  `adoption_refuses_rather_than_generating_when_custody_turns_out_empty`) and
+  `crates/onboarding`
+  (`a_fresh_profile_is_offered_the_custodied_identity_and_told_it_is_adopted`,
+  `a_genuinely_interrupted_transaction_still_reports_repair`,
+  `a_machine_with_no_omega_identity_is_still_offered_creation`,
+  `every_custody_state_but_ready_holds_the_startup_wait`).
+- **What this does not cover.** **No window has been opened.** Every claim here
+  is proved against fabricated state — a temporary data root and a fake secret
+  store — because the live case needs the owner's keychain, and probing it
+  raises a password dialog on their screen. So "a fresh profile reaches a
+  composer" is proved as far as the gate: custody resolves to `Ready` after
+  adoption, and `Ready` is the predicate the startup wait releases on. The
+  pixels between that release and a composer are `OMEGA-DELTA-0019` and
+  `OMEGA-DELTA-0040`'s, already covered, and unverified in the same launch as
+  this change. The genuinely-new-user case — a machine whose keychain has never
+  held an Omega identity — is answered the same way: `Absent` still offers
+  **Create identity**, asserted against a fabricated empty store rather than by
+  clearing the owner's keychain. A profile choosing a *different* identity from
+  the custodied one still goes through recovery or reset; there is no one-click
+  "give this profile its own identity", and adding one would be a decision
+  about what a profile is, not a bug fix.

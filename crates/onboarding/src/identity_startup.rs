@@ -135,7 +135,7 @@ pub async fn await_identity_ready(
     };
 
     let needs_onboarding = match inspection.await {
-        Ok(inspection) => inspection.custody.state != CustodyState::Ready,
+        Ok(inspection) => onboarding_required(&inspection),
         Err(error) => {
             zlog::error!("identity startup inspection failed: {error}");
             true
@@ -168,6 +168,19 @@ pub async fn await_identity_ready(
     completion
         .await
         .map_err(|error| anyhow::anyhow!("{error:#}"))
+}
+
+/// The startup gate `OMEGA-DELTA-0040` parks on: onboarding is required until
+/// custody is `Ready`.
+///
+/// Named rather than inlined so the predicate has one place it can be weakened
+/// and one place a test can hold. omega#110 changed what onboarding *concludes*
+/// about an identity this profile did not create — it must not change whether
+/// the wait happens. `Unadopted` counting as ready would open a composer having
+/// silently adopted an identity nobody was shown, which is the same defect as
+/// omega#110 with the opposite sign.
+fn onboarding_required(inspection: &IdentityInspection) -> bool {
+    inspection.custody.state != CustodyState::Ready
 }
 
 pub(crate) fn onboarding_opened(cx: &mut App) {
@@ -212,6 +225,60 @@ mod tests {
                     record: None,
                 },
             })
+        }
+    }
+
+    fn inspection_with(state: CustodyState) -> IdentityInspection {
+        IdentityInspection {
+            custody: CustodyResult {
+                state,
+                identity: None,
+                receipt_ref: None,
+            },
+            pending_transaction: None,
+            conflict: None,
+            recovery_protection: RecoveryProtectionStatus {
+                state: RecoveryProtectionState::NotApplicable,
+                record: None,
+            },
+        }
+    }
+
+    /// omega#110 must not weaken `OMEGA-DELTA-0040`. The match is exhaustive on
+    /// purpose: a new custody state has to decide, here, whether a launch may
+    /// open a composer under it, rather than inheriting an answer from a `!=`.
+    #[test]
+    fn every_custody_state_but_ready_holds_the_startup_wait() {
+        fn expected(state: CustodyState) -> bool {
+            match state {
+                CustodyState::Ready => false,
+                CustodyState::Absent
+                | CustodyState::Unadopted
+                | CustodyState::Locked
+                | CustodyState::Incomplete
+                | CustodyState::Lost
+                | CustodyState::Conflict
+                | CustodyState::ResetFailed
+                | CustodyState::RelaunchRequired => true,
+            }
+        }
+
+        for state in [
+            CustodyState::Ready,
+            CustodyState::Absent,
+            CustodyState::Unadopted,
+            CustodyState::Locked,
+            CustodyState::Incomplete,
+            CustodyState::Lost,
+            CustodyState::Conflict,
+            CustodyState::ResetFailed,
+            CustodyState::RelaunchRequired,
+        ] {
+            assert_eq!(
+                onboarding_required(&inspection_with(state)),
+                expected(state),
+                "{state:?} changed sides of the OMEGA-DELTA-0040 startup wait"
+            );
         }
     }
 

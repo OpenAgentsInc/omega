@@ -100,6 +100,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0105",
     "OMEGA-DELTA-0106",
     "OMEGA-DELTA-0107",
+    "OMEGA-DELTA-0110",
 ];
 
 /// OMEGA-DELTA-0106. The community audience: a Forge repository, its members,
@@ -710,6 +711,14 @@ pub const ONBOARDING_PATH: &str = "crates/onboarding/src/onboarding.rs";
 
 /// OMEGA-DELTA-0040. The coordinator that releases the startup path.
 pub const IDENTITY_STARTUP_PATH: &str = "crates/onboarding/src/identity_startup.rs";
+
+/// OMEGA-DELTA-0110. Where custody decides what a data root with no identity
+/// files, beside a keychain that already holds one, actually is.
+pub const IDENTITY_CUSTODY_PATH: &str = "crates/omega_identity/src/custody.rs";
+
+/// OMEGA-DELTA-0110. The screen that has to say which of adopt or create
+/// happens to that identity.
+pub const IDENTITY_SECTION_PATH: &str = "crates/onboarding/src/identity_section.rs";
 
 /// OMEGA-DELTA-0029. Vocabulary that would make a route irreproducible.
 ///
@@ -6165,6 +6174,166 @@ mod tests {
             "OMEGA-DELTA-0040: `release_identity_waiters` in {} no longer \
              completes the startup channel, so it releases nobody.",
             coordinator_path.display()
+        );
+    }
+
+    /// OMEGA-DELTA-0110. A profile with no identity files adopts the identity
+    /// already in custody, and the screen says that is what happened.
+    ///
+    /// The keychain is scoped per release channel and per user, not per
+    /// profile, and that is the right scope — an identity belongs to a person,
+    /// not to a directory. The defect omega#110 reported is what a profile
+    /// *concluded* from it: with no identity files of its own it read an
+    /// existing keychain entry as evidence of a failed recovery, offered
+    /// "Recover identity" as the only control, and could not complete it. A
+    /// fresh `--user-data-dir` therefore never reached a composer at all,
+    /// because OMEGA-DELTA-0040 parks the front door behind identity
+    /// onboarding.
+    ///
+    /// Four links, and each one alone is weak:
+    ///
+    /// - custody has to *distinguish* the two, or the screen has nothing to
+    ///   branch on and the fresh profile is back to reporting a repair;
+    /// - the screen has to *say which* — an adopt that does not announce
+    ///   itself is a silent pick, which is what the owner ruled out;
+    /// - the control has to *do what it says* — routing "Use this identity" to
+    ///   `create` would generate a new identity behind a sentence promising
+    ///   the custodied one;
+    /// - and the repair state has to *survive*, or this is fixed by never
+    ///   reporting damage, which is worse than the bug.
+    #[test]
+    fn a_profile_with_no_identity_files_adopts_the_custodied_identity_and_says_so() {
+        let custody_path = repository_path(IDENTITY_CUSTODY_PATH);
+        let custody = uncommented(
+            &std::fs::read_to_string(&custody_path)
+                .unwrap_or_else(|error| panic!("cannot read {}: {error}", custody_path.display())),
+        );
+        let resolve = function_body(&custody, "resolve_locked").unwrap_or_else(|| {
+            panic!(
+                "OMEGA-DELTA-0110: {} no longer has a `resolve_locked`. A check \
+                 that cannot find its subject passes for the wrong reason.",
+                custody_path.display()
+            )
+        });
+        assert!(
+            resolve.contains("CustodyState::Unadopted"),
+            "OMEGA-DELTA-0110: `resolve_locked` in {} no longer separates an \
+             unadopted identity from an interrupted transaction. A fresh \
+             `--user-data-dir` on a machine that already has an Omega identity \
+             is told setup needs repair, offered only recovery, and cannot \
+             finish it — so it never reaches a composer.",
+            custody_path.display()
+        );
+
+        let adopt = function_body(&custody, "adopt_custodied").unwrap_or_else(|| {
+            panic!(
+                "OMEGA-DELTA-0110: {} no longer has an `adopt_custodied`, so \
+                 the only way to adopt is a path that also generates.",
+                custody_path.display()
+            )
+        });
+        assert!(
+            !adopt.contains("self.generator"),
+            "OMEGA-DELTA-0110: `adopt_custodied` in {} can generate. It is \
+             reached from a screen that has already shown the owner the npub \
+             it is about to adopt; producing a different identity behind that \
+             sentence is the silent pick the screen promised not to make.",
+            custody_path.display()
+        );
+
+        let section_path = repository_path(IDENTITY_SECTION_PATH);
+        let section = uncommented(
+            &std::fs::read_to_string(&section_path)
+                .unwrap_or_else(|error| panic!("cannot read {}: {error}", section_path.display())),
+        );
+        let presentation = function_body(&section, "durable_presentation").unwrap_or_else(|| {
+            panic!(
+                "OMEGA-DELTA-0110: {} no longer has a `durable_presentation`.",
+                section_path.display()
+            )
+        });
+        let unadopted_arm = presentation
+            .split_once("CustodyState::Unadopted => IdentityPresentation {")
+            .and_then(|(_, rest)| rest.split_once("},"))
+            .map(|(arm, _)| arm)
+            .unwrap_or_else(|| {
+                panic!(
+                    "OMEGA-DELTA-0110: {} no longer presents an unadopted \
+                     identity, so a fresh profile falls back to a state that \
+                     was written for damage.",
+                    section_path.display()
+                )
+            });
+        assert!(
+            unadopted_arm.contains("IdentityAction::Adopt"),
+            "OMEGA-DELTA-0110: the unadopted screen in {} no longer offers \
+             adoption, leaving recovery as the only way out of a state nothing \
+             is wrong with.",
+            section_path.display()
+        );
+        assert!(
+            unadopted_arm.contains("adopts that identity")
+                && unadopted_arm.contains("does not create a second one"),
+            "OMEGA-DELTA-0110: the unadopted screen in {} no longer states what \
+             happens to the identity already in custody. Adopting silently and \
+             adopting visibly are the same behaviour and different products: \
+             the owner ruled that whatever happens, the sentence says which.",
+            section_path.display()
+        );
+
+        let adopt_arm = function_body(&section, "handle_action")
+            .and_then(|body| body.split_once("IdentityAction::Adopt => {"))
+            .and_then(|(_, rest)| rest.split_once("IdentityAction::Recover"))
+            .map(|(arm, _)| arm)
+            .unwrap_or_else(|| {
+                panic!(
+                    "OMEGA-DELTA-0110: {} no longer handles the adopt control.",
+                    section_path.display()
+                )
+            });
+        assert!(
+            adopt_arm.contains("backend.adopt_custodied(")
+                && !adopt_arm.contains("backend.create("),
+            "OMEGA-DELTA-0110: the adopt control in {} no longer routes to \
+             adoption. `create` falls back to generating when the store turns \
+             out to be empty, which is a new identity under a label promising \
+             the existing one.",
+            section_path.display()
+        );
+
+        assert!(
+            presentation.contains("Identity setup needs repair"),
+            "OMEGA-DELTA-0110: {} no longer reports a damaged profile at all. \
+             Fixing the fresh-profile case by never reporting damage is worse \
+             than the defect it replaces.",
+            section_path.display()
+        );
+
+        let startup_path = repository_path(IDENTITY_STARTUP_PATH);
+        let startup = uncommented(
+            &std::fs::read_to_string(&startup_path)
+                .unwrap_or_else(|error| panic!("cannot read {}: {error}", startup_path.display())),
+        );
+        // A free function at column zero, which `function_body`'s " fn <name>("
+        // needle cannot reach.
+        let gate = startup
+            .split_once("fn onboarding_required(")
+            .and_then(|(_, rest)| rest.split_once("\n}"))
+            .map(|(body, _)| body)
+            .unwrap_or_else(|| {
+                panic!(
+                    "OMEGA-DELTA-0110: {} no longer has an `onboarding_required` \
+                     gate to hold.",
+                    startup_path.display()
+                )
+            });
+        assert!(
+            !gate.contains("Unadopted"),
+            "OMEGA-DELTA-0110: the startup gate in {} treats an unadopted \
+             identity as ready. That opens a composer having silently taken an \
+             identity nobody was shown, and weakens OMEGA-DELTA-0040 in the \
+             course of fixing what onboarding concludes.",
+            startup_path.display()
         );
     }
 

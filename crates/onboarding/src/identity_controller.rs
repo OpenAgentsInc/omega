@@ -4,6 +4,7 @@ use omega_identity::{CustodyResult, IdentityInspection, ReceiptRef};
 pub(crate) enum IdentityOperation {
     Inspect,
     Create { receipt_ref: ReceiptRef },
+    AdoptCustodied { receipt_ref: ReceiptRef },
     ResumeIncomplete,
     PrepareRecovery,
     AdoptRecovery { receipt_ref: ReceiptRef },

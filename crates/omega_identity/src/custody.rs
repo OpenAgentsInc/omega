@@ -185,6 +185,39 @@ impl IdentityService {
         self.commit_secret_locked(secret, transaction)
     }
 
+    /// Adopt the identity already in secure custody into this data root.
+    ///
+    /// Deliberately not [`Self::create`]. `create` falls back to generating
+    /// when the store turns out to be empty, and this path is reached from a
+    /// screen that has already shown the owner the npub it is about to adopt.
+    /// Generating a different identity behind that sentence — if the entry were
+    /// removed between the inspection and the click — would be exactly the
+    /// silent pick the screen promised not to make, so an empty store is a
+    /// refusal here rather than a new key.
+    pub fn adopt_custodied(&self, receipt_ref: ReceiptRef) -> Result<CustodyResult, CustodyError> {
+        let _mutation_guard = IdentityMutationGuard::acquire(&self.locator)?;
+        self.require_no_reset_locked()?;
+        if let Some(result) = self.ready_idempotent_result_locked(&receipt_ref, None)? {
+            return Ok(result);
+        }
+
+        let secret = self
+            .store
+            .read(&self.locator)
+            .map_err(custody_error_from_store)?
+            .ok_or(CustodyError::CustodyDenied(CustodyState::Absent))?;
+        let identity = secret
+            .public_identity()
+            .map_err(|_| CustodyError::ReadBackMismatch)?;
+        let transaction = self.begin_or_resume_transaction_locked(
+            TransactionOperation::Create,
+            receipt_ref,
+            None,
+            Some(&identity),
+        )?;
+        self.commit_secret_locked(secret, transaction)
+    }
+
     pub fn resume_incomplete_create(&self) -> Result<CustodyResult, CustodyError> {
         let _mutation_guard = IdentityMutationGuard::acquire(&self.locator)?;
         self.require_no_reset_locked()?;
@@ -865,13 +898,24 @@ impl IdentityService {
 
         let result = self.resolve_locked().result;
         let can_recover = operation == TransactionOperation::Import
-            && matches!(result.state, CustodyState::Lost | CustodyState::Incomplete)
+            && matches!(
+                result.state,
+                CustodyState::Lost | CustodyState::Incomplete | CustodyState::Unadopted
+            )
             && result.identity.as_ref() == expected_identity;
-        if result.state != CustodyState::Absent && !can_recover {
+        // Adoption names the identity it is adopting. `create` passes `None`
+        // here, so it stays denied on an unadopted profile: replacing a
+        // custodied identity with a freshly generated one is a reset, and a
+        // reset is a separate owner-authorized decision.
+        let can_adopt_custodied = operation == TransactionOperation::Create
+            && result.state == CustodyState::Unadopted
+            && expected_identity.is_some()
+            && result.identity.as_ref() == expected_identity;
+        if result.state != CustodyState::Absent && !can_recover && !can_adopt_custodied {
             return Err(CustodyError::CustodyDenied(result.state));
         }
         let mut transaction = IdentityTransaction::new(operation, receipt_ref, candidate_ref);
-        if can_recover {
+        if can_recover || can_adopt_custodied {
             transaction.expected_identity = expected_identity.cloned();
         }
         write_json_document(&self.paths.transaction_path, &transaction)?;
@@ -1272,9 +1316,21 @@ impl IdentityService {
                             Some(secret),
                         )
                     } else {
+                        // A transaction is what makes this state damage. With
+                        // one on disk, custody was interrupted part-way and
+                        // `Incomplete` is the honest answer. Without one,
+                        // nothing was ever started here: the per-channel
+                        // keychain simply holds an identity this data root has
+                        // no files for, which is where every fresh
+                        // `--user-data-dir` on this machine starts (omega#110).
+                        let state = if transaction.is_some() {
+                            CustodyState::Incomplete
+                        } else {
+                            CustodyState::Unadopted
+                        };
                         ResolvedCustody {
                             result: CustodyResult {
-                                state: CustodyState::Incomplete,
+                                state,
                                 identity: Some(identity),
                                 receipt_ref: None,
                             },
@@ -1829,6 +1885,10 @@ mod tests {
 
     fn receipt() -> ReceiptRef {
         ReceiptRef::new("owner-action-1").expect("valid test receipt")
+    }
+
+    fn second_receipt() -> ReceiptRef {
+        ReceiptRef::new("owner-action-2").expect("valid second test receipt")
     }
 
     fn select_one(service: &IdentityService, prepared: PreparedRecovery) -> SelectedRecovery {
@@ -3124,6 +3184,128 @@ mod tests {
             "an established identity must report Ready, or onboarding would \
              show on every launch"
         );
+    }
+
+    /// omega#110. The keychain is scoped per channel and per user, not per
+    /// profile, so a brand-new `--user-data-dir` on this machine starts beside
+    /// an identity it has no files for. That is not damage, and the state it
+    /// resolves to has to say so: `Incomplete` offers a repair with nothing to
+    /// repair, and every action it admits is refused.
+    #[test]
+    fn a_fresh_profile_beside_a_custodied_identity_is_adoptable_not_damaged() {
+        let first_root = tempfile::tempdir().expect("create first profile root");
+        let store = FakeStore::empty();
+        let generator_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let first = counting_service(
+            store.clone(),
+            first_root.path().to_path_buf(),
+            generator_calls.clone(),
+        );
+        let created = first.create(receipt()).expect("create identity");
+        let identity = created.identity.expect("created public identity");
+        assert_eq!(generator_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        let second_root = tempfile::tempdir().expect("create second profile root");
+        let second = counting_service(
+            store.clone(),
+            second_root.path().to_path_buf(),
+            generator_calls.clone(),
+        );
+        let inspection = second.inspect_details().expect("inspect the fresh profile");
+
+        assert_eq!(inspection.custody.state, CustodyState::Unadopted);
+        assert_eq!(inspection.custody.identity.as_ref(), Some(&identity));
+        assert!(inspection.pending_transaction.is_none());
+        assert!(inspection.conflict.is_none());
+
+        // The onboarding gate is `custody.state != CustodyState::Ready`
+        // (`crates/onboarding/src/identity_startup.rs`). Unadopted is not Ready,
+        // so the fresh profile still waits on onboarding — this fix changes
+        // what onboarding concludes, not whether OMEGA-DELTA-0040 waits.
+        assert_ne!(inspection.custody.state, CustodyState::Ready);
+
+        let adopted = second
+            .adopt_custodied(second_receipt())
+            .expect("adopt the custodied identity");
+        assert_eq!(adopted.state, CustodyState::Ready);
+        assert_eq!(adopted.identity.as_ref(), Some(&identity));
+
+        // Adoption is adoption. Nothing was generated, and the one secret in
+        // the store was never rewritten.
+        assert_eq!(generator_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(store.state.lock().expect("lock fake store").writes, 1);
+        assert_eq!(store.state.lock().expect("lock fake store").deletes, 0);
+
+        // The first profile is untouched by the second adopting.
+        let first_after = first.inspect().expect("inspect the first profile");
+        assert_eq!(first_after.state, CustodyState::Ready);
+        assert_eq!(first_after.identity.as_ref(), Some(&identity));
+    }
+
+    /// omega#110 acceptance 4 at the custody layer. A transaction on disk is
+    /// what makes an unadopted-looking profile damaged, so the split has to be
+    /// falsifiable in both directions: without a transaction the fresh profile
+    /// is adoptable, with one it is still a repair.
+    #[test]
+    fn an_interrupted_transaction_beside_a_custodied_identity_is_still_a_repair() {
+        let first_root = tempfile::tempdir().expect("create first profile root");
+        let store = FakeStore::empty();
+        let first = service(store.clone(), first_root.path().to_path_buf());
+        let created = first.create(receipt()).expect("create identity");
+        let identity = created.identity.expect("created public identity");
+
+        let second_root = tempfile::tempdir().expect("create second profile root");
+        let second = service(store, second_root.path().to_path_buf());
+        assert_eq!(
+            second.inspect().expect("inspect before planting").state,
+            CustodyState::Unadopted
+        );
+
+        let interrupted = IdentityTransaction::new(
+            TransactionOperation::Import,
+            second_receipt(),
+            Some(CandidateRef::new("interrupted-candidate".to_string()).expect("valid candidate")),
+        );
+        write_json_document(&second.paths.transaction_path, &interrupted)
+            .expect("plant an interrupted transaction");
+
+        let inspection = second
+            .inspect_details()
+            .expect("inspect the interrupted profile");
+        assert_eq!(inspection.custody.state, CustodyState::Incomplete);
+        assert_eq!(inspection.custody.identity.as_ref(), Some(&identity));
+        assert!(inspection.pending_transaction.is_some());
+
+        // And adoption does not quietly overwrite somebody else's transaction.
+        assert!(matches!(
+            second.adopt_custodied(receipt()),
+            Err(CustodyError::CustodyDenied(CustodyState::Conflict))
+        ));
+    }
+
+    /// omega#110. Adoption adopts. If the keychain entry disappears between the
+    /// screen naming an npub and the owner clicking the control under it,
+    /// generating a different identity behind that sentence would be the silent
+    /// pick the screen promised not to make.
+    #[test]
+    fn adoption_refuses_rather_than_generating_when_custody_turns_out_empty() {
+        let temporary_directory = tempfile::tempdir().expect("create temporary directory");
+        let store = FakeStore::empty();
+        let generator_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let service = counting_service(
+            store.clone(),
+            temporary_directory.path().to_path_buf(),
+            generator_calls.clone(),
+        );
+
+        assert!(matches!(
+            service.adopt_custodied(receipt()),
+            Err(CustodyError::CustodyDenied(CustodyState::Absent))
+        ));
+        assert_eq!(generator_calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(store.state.lock().expect("lock fake store").writes, 0);
+        assert!(!service.paths.transaction_path.exists());
+        assert!(!service.paths.manifest_path.exists());
     }
 
     /// Resetting must return the profile to the first-run state, so a proof
