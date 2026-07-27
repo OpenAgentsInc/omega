@@ -13315,11 +13315,27 @@ impl ThreadView {
     /// control disabled on a genuinely new conversation.
     fn render_executor_selector(&self, cx: &mut Context<Self>) -> AnyElement {
         use crate::omega_executor_selector::{
-            SelectableExecutor, ready_here, render_executor_selector, select,
+            SelectableExecutor, ready_here, render_executor_selector, select, selected,
         };
 
         let disclosure = self.executor_disclosure(cx);
-        let current = SelectableExecutor::of(disclosure.class, &disclosure.agent_id);
+        // omega#120. The label follows the *choice*, not the connection.
+        //
+        // It read the disclosure — what is attached — which was right while
+        // every switch reconnected immediately. Since omega#117 the reconnect
+        // waits for the presses to stop, so between the keystroke and the
+        // connect the label said the old executor, and Shift-Tab looked like it
+        // was doing nothing at all. The owner cycled repeatedly and reported
+        // that it "only cycles to Codex": the selection was advancing every
+        // press (the log shows Codex, Claude, Omega, Exo) and the label was
+        // showing whichever connection had last finished.
+        //
+        // A control that does not move when pressed is broken whatever happens
+        // underneath it. The disclosure is still the fallback, and it is what a
+        // thread nobody has touched this control on shows — the automatic pick,
+        // named honestly.
+        let current =
+            selected().or_else(|| SelectableExecutor::of(disclosure.class, &disclosure.agent_id));
         // omega#116. Switchable unless a turn is actually running.
         //
         // This used to also require `is_draft_thread()`, which is
