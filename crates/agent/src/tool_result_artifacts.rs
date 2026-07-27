@@ -15,6 +15,11 @@
 //! fetch is worse than no marker, because it reads as a fetch that is available
 //! and is not.
 //!
+//! `OMEGA-DELTA-0121` finished that sentence. Two addresses were still being
+//! handed out that nothing could take: every `terminal:` address, which had no
+//! reader at all, and every `tool:` address after a reopen. See
+//! [`ToolResultArtifactRegistry::adopt`] and [`TOOL_ARTIFACTS_ARE_REBUILT`].
+//!
 //! Nothing here can reach a file, a window, or a clock.
 
 use std::sync::Arc;
@@ -41,11 +46,18 @@ pub fn tool_result_artifact_source(tool_call_id: &str) -> String {
     format!("{TOOL_ARTIFACT_SOURCE_PREFIX}{tool_call_id}")
 }
 
-/// Every complete tool result this thread produced, by source.
+/// Every complete tool result this thread can reach, by source.
 ///
-/// **Not persisted.** Like `Thread::sandbox_grants`, this lives and dies with
-/// the thread's process. What that costs, and why it is not papered over, is
-/// [`ArtifactLookup::Forgotten`].
+/// **Nothing here is written to disk, and that is the decision rather than the
+/// omission.** `OMEGA-DELTA-0121` argues it where the argument belongs; the
+/// short form is that a `tool:` result is *already* persisted — `run_tool` puts
+/// the tool's complete output in `LanguageModelToolResult::output`, which is
+/// serialized into `DbThread` — so storing the artifact too would put a second
+/// copy of the same bytes on disk to answer a question the first copy can
+/// already answer. So this registry is rebuilt from that copy on reopen rather
+/// than saved, and only the sources with no persisted copy behind them — the
+/// terminals, whose complete output is deliberately not saved — actually end at
+/// [`ArtifactLookup::Forgotten`] after a restart.
 #[derive(Debug, Default)]
 pub struct ToolResultArtifactRegistry {
     stores: HashMap<Arc<str>, ToolResultArtifactStore>,
@@ -64,9 +76,9 @@ pub enum ArtifactLookup<'a> {
     /// The source exists here; this version of it does not. Carries the
     /// versions that do, so the answer names a real address to ask with.
     NoSuchVersion { available: Vec<u32> },
-    /// Nothing was ever recorded under this source *in this process*. This is
-    /// also what a perfectly good address from before a restart gets, and the
-    /// sentence for it must say so — see [`Self::sentence`].
+    /// Nothing is recorded under this source. After `OMEGA-DELTA-0121` the
+    /// reasons differ by kind of address, and the sentence for it says which —
+    /// see [`Self::sentence`].
     Forgotten,
 }
 
@@ -121,8 +133,9 @@ impl ArtifactLookup<'_> {
                     .join(", ");
                 Some(if versions.is_empty() {
                     format!(
-                        "No version of `{}` is recorded. {ARTIFACTS_ARE_NOT_PERSISTED}",
-                        address.source()
+                        "No version of `{}` is recorded. {}",
+                        address.source(),
+                        unreachable_source_sentence(address)
                     )
                 } else {
                     format!(
@@ -132,34 +145,82 @@ impl ArtifactLookup<'_> {
                 })
             }
             Self::Forgotten => Some(format!(
-                "No tool result is recorded at `{address}` in this thread. \
-                 {ARTIFACTS_ARE_NOT_PERSISTED}"
+                "No tool result is recorded at `{address}` in this thread. {}",
+                unreachable_source_sentence(address)
             )),
         }
     }
 }
 
-/// The one place the in-memory lifetime is put into words.
+/// Why *this* address has nothing behind it, chosen by what kind of address it
+/// is.
 ///
-/// **This is the known gap in `OMEGA-DELTA-0103`, stated rather than hidden.**
-/// Artifacts are not written to disk, so a thread that was closed and reopened
-/// still carries the truncation markers in its saved messages — those are part
-/// of the message text — while the results they address are gone. The marker
-/// then points at nothing.
+/// `OMEGA-DELTA-0121`. One sentence for both kinds would have to be true of
+/// both, and the only sentence true of both is a vague one. A `tool:` address
+/// that does not resolve was never this thread's; a `terminal:` address that
+/// does not resolve very likely *was*, and stopped when the process did. Told
+/// the wrong one, a reader either re-runs a command it did not need to or gives
+/// up on a result that is one correctly-spelled address away.
+fn unreachable_source_sentence(address: &ToolResultArtifactId) -> &'static str {
+    if address.source().starts_with(TOOL_ARTIFACT_SOURCE_PREFIX) {
+        TOOL_ARTIFACTS_ARE_REBUILT
+    } else {
+        TERMINAL_ARTIFACTS_ARE_NOT_PERSISTED
+    }
+}
+
+/// The sentence for a `tool:` address with nothing behind it.
 ///
-/// Made legible rather than fixed, deliberately. The alternative is persisting
-/// every complete tool result into the thread blob, which puts the whole
-/// unbounded result back on disk for the life of the thread and grows without
-/// limit — the size property `OMEGA-DELTA-0103` exists to hold. Any bounded
-/// version of that (evict the oldest, cap the total) has this same sentence at
-/// its edge anyway, just later and with more machinery in front of it. So the
-/// requirement is the one that survives either choice: **a fetch that does not
-/// resolve says why, and never reads as "that result never existed."**
-pub const ARTIFACTS_ARE_NOT_PERSISTED: &str = "Tool result artifacts live in \
-     memory for as long as this thread is open and are never written to disk, \
-     so an address from before this thread was last reopened no longer \
-     resolves. The result existed — it is not recoverable from here. Re-run \
-     the tool call if you still need it.";
+/// **`OMEGA-DELTA-0111` declined to persist artifacts on the grounds that it
+/// would put every complete tool result on disk, unbounded. That premise was
+/// wrong, and it was wrong in a checkable way.** `Thread::run_tool` already
+/// stores the tool's *complete* output in `LanguageModelToolResult::output`,
+/// and `AgentMessage::tool_results` is serialized into `DbThread`. The
+/// unbounded copy has been on disk since long before this issue existed; the
+/// bound `OMEGA-DELTA-0111` added was on what reaches the model, never on what
+/// reaches the file.
+///
+/// So the choice was never "no copy on disk" versus "one copy on disk". It was
+/// "one copy" versus "two", and two is strictly worse: the second copy costs
+/// the same bytes again and a `DbThread` migration, to answer a question the
+/// first copy can already answer.
+///
+/// `OMEGA-DELTA-0121` takes the first copy. On reopen, `Thread::replay` reads
+/// each saved tool result back through its own tool and re-runs
+/// [`ToolResultArtifactRegistry::bound`] over it — the same pure function, over
+/// the same text, in the same order, so the same addresses come back. Nothing
+/// new is written and nothing new is kept; the registry becomes an index over
+/// bytes that were already there.
+///
+/// What is left is what this sentence is for: a source the rebuild cannot
+/// reach. A tool that is no longer loaded (an MCP server that is not
+/// connected), an output whose saved form will not read back, or an address
+/// that was never this thread's at all.
+pub const TOOL_ARTIFACTS_ARE_REBUILT: &str = "Tool result artifacts are not \
+     stored a second time; they are rebuilt when a thread is reopened, from the \
+     complete tool results the thread already saves. An address that does not \
+     resolve here is one this thread never recorded or can no longer rebuild — \
+     another thread's address, or a tool that is not loaded now, such as an MCP \
+     tool whose server is disconnected. Re-run the tool call if you still need \
+     it.";
+
+/// The sentence for a `terminal:` address with nothing behind it.
+///
+/// This is the gap that is real, and it is the narrow one. A terminal's
+/// complete output is the one result that is genuinely *not* on disk: the tool
+/// returns the preview, so the preview is what `DbThread` saves. Holding it
+/// there is the size property `OMEGA-DELTA-0103` exists for, and persisting it
+/// would be the change the previous lane described — a real second copy, of the
+/// results most likely to be enormous, and it should be argued on its own if
+/// anyone wants it.
+///
+/// So this sentence keeps the standard: it names the lifetime that caused the
+/// refusal, and never reads as a result that never existed.
+pub const TERMINAL_ARTIFACTS_ARE_NOT_PERSISTED: &str = "A terminal's complete \
+     output lives in memory for as long as this thread is open and is \
+     never written to disk, so a terminal address from before this thread was \
+     last reopened no longer resolves. The result existed — it is not \
+     recoverable from here. Re-run the command if you still need it.";
 
 impl ToolResultArtifactRegistry {
     /// Bound `text` for the event, recording the complete result first when it
@@ -184,6 +245,38 @@ impl ToolResultArtifactRegistry {
             TOOL_RESULT_PREVIEW_BYTE_BUDGET,
             artifact,
         )
+    }
+
+    /// Take over a store some other owner recorded, so its addresses resolve
+    /// here too.
+    ///
+    /// `OMEGA-DELTA-0121`. `acp_thread::Terminal` keeps its own store and
+    /// prints `terminal:<id>@v<n>` in its marker. Until this existed, nothing
+    /// read that store — `Terminal::result_artifacts` had no caller anywhere in
+    /// the tree — so every terminal address the model was handed resolved to
+    /// [`ArtifactLookup::Forgotten`], on the one path the owner's screenshot
+    /// actually came from. The whole store is taken rather than one artifact
+    /// because the version numbers have to survive the move: a re-run terminal's
+    /// second capture is `@v2`, and re-recording it into an empty store would
+    /// make it `@v1` and answer the wrong address.
+    ///
+    /// A store whose source could collide with a native tool's is refused
+    /// rather than merged. The two namespaces being separate is what stops one
+    /// tool's result being handed back under another's name, and an adopted
+    /// store is exactly where that separation would be lost by accident.
+    pub fn adopt(&mut self, store: ToolResultArtifactStore) {
+        if store.source().starts_with(TOOL_ARTIFACT_SOURCE_PREFIX) {
+            debug_assert!(
+                false,
+                "a store adopted under the `{TOOL_ARTIFACT_SOURCE_PREFIX}` \
+                 namespace would collide with a native tool's own source"
+            );
+            return;
+        }
+        if store.version_count() == 0 {
+            return;
+        }
+        self.stores.insert(Arc::from(store.source()), store);
     }
 
     /// The fetch path the marker's address points at.
@@ -382,10 +475,12 @@ mod tests {
     }
 
     #[test]
-    fn a_forgotten_address_says_artifacts_do_not_survive_a_restart() {
-        // The known gap, held to the standard the delta sets for it: when the
-        // fetch cannot resolve, the reader is told why, and never that the
-        // result never existed.
+    fn a_forgotten_tool_address_says_the_rebuild_could_not_reach_it() {
+        // `OMEGA-DELTA-0121`. A `tool:` result is on disk, so a `tool:` address
+        // that does not resolve is not a restart — it is an address this thread
+        // never recorded or can no longer rebuild. Answering it with the
+        // terminal's sentence would send a reader to re-run a call for a reason
+        // that is not the reason.
         let registry = ToolResultArtifactRegistry::default();
         let address = ToolResultArtifactId::new(tool_result_artifact_source("7:gone"), 1);
 
@@ -396,13 +491,99 @@ mod tests {
 
         assert!(sentence.contains(&address.to_string()));
         assert!(
-            sentence.contains("never written to disk") && sentence.contains("reopened"),
+            sentence.contains("rebuilt when a thread is reopened"),
+            "the refusal does not say the rebuild is what failed: {sentence}"
+        );
+        assert!(
+            !sentence.contains("never written to disk"),
+            "a `tool:` address is refused as though its result were never \
+             saved, when it is exactly the kind that is: {sentence}"
+        );
+        assert!(
+            !sentence.contains("check the ID") && !sentence.contains("does not exist"),
+            "the refusal reads as the caller's mistake: {sentence}"
+        );
+    }
+
+    #[test]
+    fn a_forgotten_terminal_address_still_names_the_lifetime_that_caused_it() {
+        // The gap that is real and stays real: a terminal's complete output is
+        // the one result `DbThread` does not hold, so there is nothing to
+        // rebuild it from. The standard `OMEGA-DELTA-0111` set for it is
+        // unchanged — name the lifetime, never read as a result that never
+        // existed.
+        let registry = ToolResultArtifactRegistry::default();
+        let address = ToolResultArtifactId::new("terminal:7", 1);
+
+        let sentence = registry
+            .lookup(&address)
+            .sentence(&address)
+            .expect("a fetch that does not resolve is a sentence, not a silence");
+
+        assert!(sentence.contains(&address.to_string()));
+        assert!(
+            sentence.contains("never written to disk")
+                && sentence.contains("reopened")
+                && sentence.contains("The result existed"),
             "the refusal does not name the lifetime that caused it, so a \
              reader concludes the result never existed: {sentence}"
         );
         assert!(
             !sentence.contains("check the ID") && !sentence.contains("does not exist"),
             "the refusal reads as the caller's mistake: {sentence}"
+        );
+    }
+
+    #[test]
+    fn a_terminals_own_store_becomes_addressable_here() {
+        // `OMEGA-DELTA-0121`. The hole this closes: `acp_thread::Terminal`
+        // recorded its complete result and printed the address, and nothing in
+        // the tree ever read that store, so the marker on the path the owner
+        // screenshotted was unspendable.
+        let mut terminal_store = ToolResultArtifactStore::new("terminal:3");
+        terminal_store.record(&blob(200));
+        let second = terminal_store.record(&blob(300));
+        assert_eq!(second.to_string(), "terminal:3@v2");
+
+        let mut registry = ToolResultArtifactRegistry::default();
+        registry.adopt(terminal_store);
+
+        assert_eq!(
+            registry
+                .lookup(&second)
+                .artifact()
+                .map(ToolResultArtifact::text),
+            Some(blob(300).as_str()),
+            "a terminal address the marker printed still does not resolve"
+        );
+        assert_eq!(
+            registry
+                .lookup(&ToolResultArtifactId::new("terminal:3", 1))
+                .artifact()
+                .map(ToolResultArtifact::text),
+            Some(blob(200).as_str()),
+            "adopting renumbered the versions, so the address the earlier \
+             marker printed now answers with a different capture"
+        );
+    }
+
+    #[test]
+    fn an_empty_store_is_not_adopted() {
+        // Adopting a terminal that never recorded anything would replace a real
+        // store with an empty one on a re-run, and turn a resolvable address
+        // into a refusal.
+        let mut registry = ToolResultArtifactRegistry::default();
+        let mut store = ToolResultArtifactStore::new("terminal:3");
+        store.record(&blob(200));
+        registry.adopt(store);
+        registry.adopt(ToolResultArtifactStore::new("terminal:3"));
+
+        assert!(
+            registry
+                .lookup(&ToolResultArtifactId::new("terminal:3", 1))
+                .artifact()
+                .is_some(),
+            "an empty store replaced a populated one"
         );
     }
 

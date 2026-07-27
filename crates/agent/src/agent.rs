@@ -3799,6 +3799,12 @@ impl TerminalHandle for AcpTerminalHandle {
             .read_with(cx, |term, cx| term.current_output(cx)))
     }
 
+    fn result_artifacts(&self, cx: &AsyncApp) -> Result<acp_thread::ToolResultArtifactStore> {
+        Ok(self
+            .terminal
+            .read_with(cx, |term, _cx| term.result_artifacts().clone()))
+    }
+
     fn kill(&self, cx: &AsyncApp) -> Result<()> {
         cx.update(|cx| {
             self.terminal.update(cx, |terminal, cx| {

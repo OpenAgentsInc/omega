@@ -105,6 +105,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0112",
     "OMEGA-DELTA-0113",
     "OMEGA-DELTA-0114",
+    "OMEGA-DELTA-0121",
 ];
 
 /// OMEGA-DELTA-0106. The community audience: a Forge repository, its members,
@@ -471,17 +472,60 @@ pub const AGENT_TERMINAL_TOOL_PATH: &str = "crates/agent/src/tools/terminal_tool
 /// learns to trust neither.
 pub const AGENT_DELETED_SECOND_TRUNCATION_SENTENCE: &str = "Command output too long";
 
-/// OMEGA-DELTA-0111. Every fact the refusal for an address that does not
-/// resolve must state.
+/// OMEGA-DELTA-0111, amended by OMEGA-DELTA-0121. Every fact the refusal for an
+/// unresolvable *terminal* address must state.
 ///
-/// The gap this delta declines to close is that artifacts do not survive a
-/// restart, so this list is the standard the gap is held to instead: a fetch
-/// that fails names the lifetime that caused it. A bare "not found" is read as
-/// "that result never existed", which is the false-absence class the marker was
-/// built against — the failure would simply have moved from the marker to the
-/// fetch.
+/// **Amended, and the reason is recorded here rather than in a commit message.**
+/// `OMEGA-DELTA-0111` applied these facts to every unresolvable address,
+/// because it believed no artifact survived a restart. `OMEGA-DELTA-0121`
+/// showed that a `tool:` result is already on disk — `run_tool` saves the
+/// complete output in `LanguageModelToolResult::output`, which `DbThread`
+/// serializes — and rebuilds those addresses on reopen. Leaving this list
+/// applied to them would force a sentence that is now false: it would tell a
+/// reader its result was never written to disk while the result sits in the
+/// same file, and send it to re-run a call it did not need to.
+///
+/// So the facts are unchanged and their scope narrowed, to the one kind of
+/// address they are still true of. A terminal's complete output really is not
+/// saved — that is `OMEGA-DELTA-0103`'s size property — so a terminal address
+/// from before a restart really is gone, and the standard still holds: a fetch
+/// that fails names the lifetime that caused it, and never reads as "that
+/// result never existed".
 pub const AGENT_UNRESOLVED_ARTIFACT_REQUIRED_FACTS: &[&str] =
     &["never written to disk", "reopened", "The result existed"];
+
+/// OMEGA-DELTA-0121. Every fact the refusal for an unresolvable *tool* address
+/// must state.
+///
+/// The counterpart to the list above, for the addresses that are rebuilt. The
+/// reader is owed the reason this one failed, and the reason is the rebuild —
+/// not a lifetime, because the bytes outlive the process.
+pub const AGENT_UNREBUILT_ARTIFACT_REQUIRED_FACTS: &[&str] =
+    &["rebuilt when a thread is reopened", "Re-run the tool call"];
+
+/// OMEGA-DELTA-0121. Where a store recorded elsewhere is taken over, so the
+/// addresses in its marker resolve.
+pub const AGENT_ARTIFACT_ADOPT_FN: &str = "pub fn adopt(&mut self, store: ToolResultArtifactStore)";
+
+/// OMEGA-DELTA-0121. Where a reopened thread rebuilds its artifacts from the
+/// complete results already saved in its messages.
+pub const AGENT_ARTIFACT_REHYDRATION_SITE: &str = "Self::bound_tool_result_content(
+                 llm_output,
+                 &tool_result_artifact_source(&tool_call_id.to_string()),
+                 &self.tool_result_artifacts,
+             );";
+
+/// OMEGA-DELTA-0121. The opening of the truncation marker, kept in one place so
+/// a caller applying its own window can find the marker instead of deleting it.
+pub const TOOL_RESULT_MARKER_PREFIX_DECLARATION: &str =
+    "pub const TRUNCATION_MARKER_PREFIX: &str = \"\\n… [tool result truncated: \";";
+
+/// OMEGA-DELTA-0121. Where the terminal tool applies the caller's own line
+/// window to a body that may already be a preview.
+pub const AGENT_TERMINAL_WINDOW_FN: &str = "fn select_terminal_output_lines(";
+
+/// OMEGA-DELTA-0121. What a thread actually writes to disk.
+pub const AGENT_THREAD_DB_PATH: &str = "crates/agent/src/db.rs";
 /// OMEGA-DELTA-0061. Where a per-spawn executor request is resolved.
 pub const SUBAGENT_EXECUTOR_PATH: &str = "crates/agent/src/tools/subagent_executor.rs";
 
@@ -14187,16 +14231,18 @@ mod tests {
             terminal_path.display()
         );
 
-        // 7. The gap this delta declines to close, held to its standard. An
-        //    address that stops resolving after a restart must say so; a bare
-        //    "not found" moves the false absence from the marker to the fetch.
+        // 7. The gap that is real, held to its standard. A terminal address
+        //    that stops resolving after a restart must say so; a bare "not
+        //    found" moves the false absence from the marker to the fetch.
+        //    Narrowed from "every address" by `OMEGA-DELTA-0121` — see
+        //    `AGENT_UNRESOLVED_ARTIFACT_REQUIRED_FACTS`.
         for fact in AGENT_UNRESOLVED_ARTIFACT_REQUIRED_FACTS {
             assert!(
                 registry.contains(fact),
                 "OMEGA-DELTA-0111: the refusal for an unresolvable address in \
-                 {} no longer states `{fact}`. Artifacts do not survive a \
-                 restart; a reader told only that the result is not there \
-                 concludes it never existed.",
+                 {} no longer states `{fact}`. A terminal's output does not \
+                 survive a restart; a reader told only that the result is not \
+                 there concludes it never existed.",
                 registry_path.display()
             );
         }
@@ -14206,14 +14252,14 @@ mod tests {
         assert!(
             without_whitespace(registry).contains(&without_whitespace(
                 "Self::Forgotten => Some(format!(
-                     \"No tool result is recorded at `{address}` in this thread. \\
-                      {ARTIFACTS_ARE_NOT_PERSISTED}\"
+                     \"No tool result is recorded at `{address}` in this thread. {}\",
+                     unreachable_source_sentence(address)
                  )),"
             )),
-            "OMEGA-DELTA-0111: the `Forgotten` arm in {} no longer carries \
-             `ARTIFACTS_ARE_NOT_PERSISTED`. The constant can be present and \
-             unused, and then a stale address is answered as a result that \
-             never existed.",
+            "OMEGA-DELTA-0111: the `Forgotten` arm in {} no longer reaches the \
+             sentence for the address it was given. The constants can be \
+             present and unused, and then a stale address is answered as a \
+             result that never existed.",
             registry_path.display()
         );
 
@@ -14225,6 +14271,206 @@ mod tests {
             registry.contains("pub const TOOL_ARTIFACT_SOURCE_PREFIX: &str = \"tool:\";"),
             "OMEGA-DELTA-0111: {} no longer namespaces a native tool's \
              artifact source apart from the terminal's.",
+            registry_path.display()
+        );
+    }
+
+    // ------ OMEGA-DELTA-0121 — every address the marker hands out is one
+    // ------ something can take
+
+    /// OMEGA-DELTA-0121. An address a truncation marker printed resolves —
+    /// including the terminal's, and including after the thread is reopened —
+    /// and a caller's own window cannot delete the marker it was handed.
+    ///
+    /// `OMEGA-DELTA-0111` closed the fetch path for `tool:` addresses and
+    /// stopped there, leaving three ways to hand out an address that nothing
+    /// could take:
+    ///
+    /// 1. **Every `terminal:` address.** `acp_thread::Terminal` recorded the
+    ///    complete result and printed `terminal:<id>@v<n>`, and
+    ///    `Terminal::result_artifacts` had no caller anywhere in the tree. The
+    ///    marker on the exact path the owner screenshotted was decoration.
+    /// 2. **Every `tool:` address after a reopen.** Declined deliberately, on
+    ///    the premise that persisting would put every complete result on disk.
+    ///    The premise was false: it is already there, in
+    ///    `LanguageModelToolResult::output`, which `DbThread` serializes. So
+    ///    the choice was one copy versus two, and this takes the one.
+    /// 3. **Any result the model windowed itself.** `head_lines` windowed the
+    ///    whole preview, and the marker is at the end, so a head window deleted
+    ///    it — a body cut twice, saying it was cut zero times, on the parameter
+    ///    the model is explicitly told to prefer over piping to `head`.
+    #[test]
+    fn every_address_a_marker_prints_resolves_and_no_window_can_erase_it() {
+        let law_path = repository_path(TOOL_RESULT_ARTIFACT_PATH);
+        let law_source = std::fs::read_to_string(&law_path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", law_path.display()));
+        let law = production_source(&law_source);
+
+        // 1. The marker's opening words exist once, as something findable. A
+        //    second copy of them in a caller is how the two drift and a window
+        //    keeps or deletes the marker by accident.
+        assert!(
+            without_whitespace(law)
+                .contains(&without_whitespace(TOOL_RESULT_MARKER_PREFIX_DECLARATION)),
+            "OMEGA-DELTA-0121: {} no longer declares the marker's opening words \
+             as `TRUNCATION_MARKER_PREFIX`. A caller applying its own window \
+             then cannot find the marker, and deleting it is silent.",
+            law_path.display()
+        );
+        assert!(
+            law.contains("pub fn split_truncation_marker(text: &str) -> (&str, &str)"),
+            "OMEGA-DELTA-0121: {} no longer offers a way to split the marker \
+             off a body. Every caller that windows an already-bounded result \
+             then has to re-derive where the marker starts.",
+            law_path.display()
+        );
+
+        // 2. The terminal's window uses it. This is the check that fails if the
+        //    window goes back to cutting the whole preview.
+        let terminal_path = repository_path(AGENT_TERMINAL_TOOL_PATH);
+        let terminal_source = std::fs::read_to_string(&terminal_path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", terminal_path.display()));
+        let terminal = production_source(&terminal_source);
+        let window = terminal
+            .split_once(AGENT_TERMINAL_WINDOW_FN)
+            .map(|(_, rest)| rest)
+            .unwrap_or_else(|| {
+                panic!(
+                    "OMEGA-DELTA-0121: {} no longer has `{AGENT_TERMINAL_WINDOW_FN}`.",
+                    terminal_path.display()
+                )
+            });
+        assert!(
+            window.contains("acp_thread::split_truncation_marker(output)"),
+            "OMEGA-DELTA-0121: the caller-requested window in {} no longer \
+             splits the record's own truncation marker off before windowing. \
+             With `head_lines` the marker is not among the first N lines, so it \
+             is the first thing the window removes, and the model is handed a \
+             twice-cut body that claims to be cut zero times.",
+            terminal_path.display()
+        );
+        assert!(
+            window.contains("selected.push_str(marker);"),
+            "OMEGA-DELTA-0121: the window in {} splits the marker off and does \
+             not put it back, which is the same silent double cut by a longer \
+             route.",
+            terminal_path.display()
+        );
+        assert!(
+            window.contains("selected.push_str(&window_note(total - shown));"),
+            "OMEGA-DELTA-0121: the window in {} drops lines without saying how \
+             many. `head: 1, tail: 1` renders the first line, a blank line, and \
+             the last — which reads as adjacency, and is the silent middle-drop \
+             omega#105 names outright.",
+            terminal_path.display()
+        );
+        // The window's note is its own sentence, not the truncation sentence.
+        // They have different remedies: widen the window versus fetch the
+        // artifact, and telling a reader to fetch lines the artifact never
+        // withheld sends it after nothing.
+        assert!(
+            !terminal.contains(TOOL_RESULT_MARKER_REQUIRED_FACTS[0]),
+            "OMEGA-DELTA-0121: {} forms the truncation sentence itself. The \
+             window's cut is not the record's cut, and one sentence for both \
+             tells a reader to spend an address for lines no artifact holds.",
+            terminal_path.display()
+        );
+
+        // 3. A terminal's own store is taken over by the thread's registry, so
+        //    the address its marker prints is one the fetch tool can take.
+        let registry_path = repository_path(AGENT_TOOL_RESULT_REGISTRY_PATH);
+        let registry_source = std::fs::read_to_string(&registry_path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", registry_path.display()));
+        let registry = production_source(&registry_source);
+        assert!(
+            registry.contains(AGENT_ARTIFACT_ADOPT_FN),
+            "OMEGA-DELTA-0121: {} no longer has `{AGENT_ARTIFACT_ADOPT_FN}`. \
+             `acp_thread::Terminal` keeps its own store, so without this \
+             nothing reads it and every `terminal:` address is decoration.",
+            registry_path.display()
+        );
+        // The whole store, not one artifact: a re-run terminal's second capture
+        // is `@v2`, and re-recording it into an empty store would answer `@v1`.
+        assert!(
+            registry.contains("self.stores.insert(Arc::from(store.source()), store);"),
+            "OMEGA-DELTA-0121: `adopt` in {} no longer takes the store whole. \
+             Re-recording its artifacts renumbers them, and the address an \
+             earlier marker printed then answers with a different capture.",
+            registry_path.display()
+        );
+        // And it cannot be used to smuggle a store into the native namespace,
+        // which is where the separation `OMEGA-DELTA-0111` relies on would be
+        // lost by accident.
+        assert!(
+            registry.contains("if store.source().starts_with(TOOL_ARTIFACT_SOURCE_PREFIX)"),
+            "OMEGA-DELTA-0121: `adopt` in {} no longer refuses a store in the \
+             native tool namespace, so an adopted store can hand back one \
+             tool's result under another's name.",
+            registry_path.display()
+        );
+
+        let routing_path = repository_path(AGENT_TOOL_RESULT_ROUTING_PATH);
+        let routing_source = std::fs::read_to_string(&routing_path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", routing_path.display()));
+        let routing = production_source(&routing_source);
+        assert!(
+            terminal.contains("event_stream.adopt_result_artifacts(artifacts, cx);"),
+            "OMEGA-DELTA-0121: {} no longer hands the terminal's captures to \
+             the thread. The seam exists and is unwired, which reads as done.",
+            terminal_path.display()
+        );
+
+        // 4. A reopened thread rebuilds its `tool:` artifacts rather than
+        //    saving a second copy of them. The rebuild is what makes the
+        //    declining of persistence honest instead of merely stated.
+        assert!(
+            without_whitespace(routing)
+                .contains(&without_whitespace(AGENT_ARTIFACT_REHYDRATION_SITE)),
+            "OMEGA-DELTA-0121: {} no longer rebuilds a reopened thread's \
+             artifacts from its saved tool results. The complete result stays \
+             on disk either way — this is only whether the address in the \
+             saved marker still reaches it.",
+            routing_path.display()
+        );
+        assert!(
+            routing.contains("fn llm_output_from_raw("),
+            "OMEGA-DELTA-0121: {} no longer reads a saved `raw_output` back \
+             into the parts it was bounded from, so there is nothing to rebuild \
+             from.",
+            routing_path.display()
+        );
+        // Nothing new goes to disk. If an artifact ever appears in `DbThread`,
+        // the second copy is back and this delta's argument has been reversed
+        // without being re-argued.
+        let db_path = repository_path(AGENT_THREAD_DB_PATH);
+        let db_source = std::fs::read_to_string(&db_path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", db_path.display()));
+        assert!(
+            !production_source(&db_source).contains("Artifact"),
+            "OMEGA-DELTA-0121: {} now persists artifacts. That is a second copy \
+             of bytes `LanguageModelToolResult::output` already holds, and it \
+             is the change this delta declined after finding the first copy. If \
+             it is wanted, argue it — do not let it arrive as a field.",
+            db_path.display()
+        );
+
+        // 5. A `tool:` address the rebuild could not reach is refused in its
+        //    own words. Answering it with the terminal's sentence would claim
+        //    the result was never saved while it sits in the same file.
+        for fact in AGENT_UNREBUILT_ARTIFACT_REQUIRED_FACTS {
+            assert!(
+                registry.contains(fact),
+                "OMEGA-DELTA-0121: the refusal for an unrebuilt `tool:` address \
+                 in {} no longer states `{fact}`.",
+                registry_path.display()
+            );
+        }
+        assert!(
+            registry.contains("fn unreachable_source_sentence(address: &ToolResultArtifactId)"),
+            "OMEGA-DELTA-0121: {} no longer chooses the refusal by the kind of \
+             address it was given. One sentence for both kinds has to be vague \
+             enough to be true of both, and a vague refusal is one a reader \
+             cannot act on.",
             registry_path.display()
         );
     }

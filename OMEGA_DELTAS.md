@@ -4686,18 +4686,13 @@ than merely stated.
   fact about the thread, and it reads as *that result never existed* — the same
   false-absence class the marker was built against, moved from the marker to the
   fetch. A malformed address is answered separately again, as the typo it is.
-- **What this does not cover, stated rather than hidden.** **Artifacts live in
-  memory for as long as the thread is open and are never written to disk.** A
-  reopened thread still carries its truncation markers — those are message text
-  and are persisted — while the results they address are gone, so those
-  addresses stop resolving. This is deliberate, not overlooked. Persisting them
-  puts every complete tool result back on disk for the life of the thread and
-  grows without limit, which is the size property `OMEGA-DELTA-0103` exists to
-  hold; and any bounded version of that (evict the oldest, cap the total) has
-  the same sentence at its edge anyway, just later and behind more machinery.
-  So the gap is held to the standard that survives either choice, and
-  `AGENT_UNRESOLVED_ARTIFACT_REQUIRED_FACTS` is that standard: the refusal names
-  the lifetime that caused it and never reads as an absent result.
+- **What this did not cover, and where it went.** This delta declined to make
+  artifacts survive a restart, on the reasoning that persisting them would put
+  every complete tool result back on disk unbounded. **`OMEGA-DELTA-0121` found
+  that premise false** — the complete result is already on disk, in
+  `LanguageModelToolResult::output` — and took the copy that was already there
+  instead. `AGENT_UNRESOLVED_ARTIFACT_REQUIRED_FACTS` still holds, narrowed to
+  the terminal addresses it is still true of. Read 0121 for the argument.
 - **Also not covered:** nothing reads a rendered pixel here either. The
   marker and the fetch are checked as text and as a round trip through a fake
   model, not as something a person saw in a real thread.
@@ -4709,6 +4704,114 @@ than merely stated.
   `test_large_native_tool_result_is_bounded_and_its_address_is_spendable`,
   `test_small_native_tool_result_is_untouched`, and
   `test_an_address_from_a_reopened_thread_says_why_it_no_longer_resolves`.
+### OMEGA-DELTA-0121 — Every address a marker prints is one something can take
+
+- **Omega before this.** `OMEGA-DELTA-0103` gave a bounded tool result a marker
+  naming an address to fetch the rest from, and `OMEGA-DELTA-0111` built the
+  fetch path. Three kinds of address were still being handed out that nothing
+  could take, and an unspendable address is the failure the marker exists to
+  prevent, arriving one layer down: the reader is told the rest is available,
+  acts as though it is, and is answered as though the result never existed.
+
+- **1. Every `terminal:` address.** `acp_thread::Terminal` recorded the complete
+  result and printed `terminal:<id>@v<n>`. `Terminal::result_artifacts` had **no
+  caller anywhere in the tree** — the store was write-only — and the fetch tool
+  reads the thread's registry, which held only `tool:` sources. So every
+  terminal marker was decoration, on the exact path the owner screenshotted, and
+  the fetch tool's own documentation advertised `terminal:2@v3` as an address to
+  copy. `ToolResultArtifactRegistry::adopt` takes the terminal's whole store —
+  whole, because a re-run terminal's second capture is `@v2` and re-recording it
+  into an empty store would answer `@v1` — and refuses any store in the `tool:`
+  namespace, so the separation `OMEGA-DELTA-0111` relies on cannot be lost by
+  adoption. It is handed over *before* `current_output` forms the preview, so
+  the marker can never exist before the artifact it names.
+
+- **2. Every `tool:` address after a reopen. The decision, argued.**
+  `OMEGA-DELTA-0111` declined to persist artifacts because "persisting them puts
+  every complete tool result back on disk for the life of the thread and grows
+  without limit, which is the size property this exists to hold." **That premise
+  is false, and checkably so.** `Thread::run_tool` puts the tool's *complete*
+  output in `LanguageModelToolResult::output`; `AgentMessage::tool_results` is
+  `Serialize`; `DbThread` holds those messages. The unbounded copy has been on
+  disk since long before omega#105 was filed. `OMEGA-DELTA-0111` bounded what
+  reaches the model, and never bounded what reaches the file — which is right,
+  because `Thread::replay` rebuilds the tool call's rendering out of that same
+  `raw_output` when the thread is reopened. The thread you reopen *shows you the
+  whole result* while the fetch tool tells the model it is not recoverable.
+
+  So the choice was never "no copy on disk" versus "one copy". It was one copy
+  versus two. Two is strictly worse: the same bytes again, plus a `DbThread`
+  migration, to answer a question the first copy already answers. And the
+  middle options — persist only what is referenced, cap the total, evict the
+  oldest — are all ways of managing a second copy, so they inherit the cost they
+  were meant to avoid and add a policy to get wrong.
+
+  This takes the first copy. `Thread::replay_tool_call` reads each saved
+  `raw_output` back through its own tool (`AnyAgentTool::llm_output_from_raw`,
+  the exact inverse of the one step `run` took to produce it) and re-runs the
+  same pure `bound` over it. Same text, same order, same addresses. Nothing new
+  is written and nothing new is kept: the registry becomes an index over bytes
+  that were already there. It is idempotent on a thread that already holds its
+  artifacts, because recording text identical to the latest version returns that
+  version rather than appending one.
+
+  A tool that cannot be reproduced exactly answers `None` rather than guessing.
+  An MCP result's text parts are saved *concatenated*, so rebuilding from them
+  would number the versions differently and resolve an address to something
+  other than what it named — a wrong answer, which is worse than a refusal that
+  says why.
+
+- **3. Any result the model windowed itself.** `terminal`'s `head_lines` and
+  `tail_lines` are model-facing, and the tool's description tells the model to
+  prefer them over piping to `head`. They windowed the *whole* preview, and
+  `OMEGA-DELTA-0103`'s marker is at the end — so a head window deleted it. The
+  model was handed a body cut twice that said it was cut zero times, on the
+  common path. The marker is now split off first (`split_truncation_marker`, in
+  the law, beside the words it searches for, so no second copy of them exists to
+  drift) and put back after. The window also *names what it dropped*: `head: 1,
+  tail: 1` rendered the first line, a blank line, and the last, which reads as
+  adjacency and is the silent middle-drop omega#105 names outright. Four
+  existing expectations changed for that, and the head/tail overlap no longer
+  prints a line twice as though the command had.
+
+  The window's note is deliberately **not** the truncation sentence. The two
+  cuts have different remedies — widen the window versus fetch the artifact —
+  and telling a reader to spend an address for lines the artifact never withheld
+  sends it after nothing.
+
+- **The refusal now depends on which kind of address failed.** A `tool:` address
+  that does not resolve was never this thread's or cannot be rebuilt; a
+  `terminal:` address that does not resolve very likely *was* this thread's and
+  stopped when the process did. One sentence for both would have to be vague
+  enough to be true of both. Told the wrong one, a reader either re-runs a
+  command it did not need to or gives up on a result one correctly-spelled
+  address away.
+
+- **The gap that remains, and it is the narrow one.** A terminal's complete
+  output is the one result `DbThread` does not hold — the tool returns the
+  preview, so the preview is what is saved. That is `OMEGA-DELTA-0103`'s size
+  property, and persisting it *would* be the second copy `OMEGA-DELTA-0111`
+  described, of the results most likely to be enormous. It stays unpersisted,
+  and `AGENT_UNRESOLVED_ARTIFACT_REQUIRED_FACTS` is the standard it is held to:
+  the refusal names the lifetime that caused it and never reads as a result that
+  never existed. A check asserts nothing artifact-shaped appears in `DbThread`,
+  so the second copy cannot arrive as a field without being re-argued.
+
+- **Still not covered:** nothing here reads a rendered pixel. The disabled
+  ceiling control from `OMEGA-DELTA-0103` and the marker text a person sees in a
+  real thread remain unverified, unchanged from what `OMEGA-DELTA-0111` said.
+
+- **Enforced by:**
+  `every_address_a_marker_prints_resolves_and_no_window_can_erase_it` in
+  `crates/omega_deltas`; plus `tool_result_artifacts::tests` in `crates/agent`
+  (`a_terminals_own_store_becomes_addressable_here`,
+  `an_empty_store_is_not_adopted`,
+  `a_forgotten_tool_address_says_the_rebuild_could_not_reach_it`,
+  `a_forgotten_terminal_address_still_names_the_lifetime_that_caused_it`),
+  `tools::terminal_tool::tests::test_select_terminal_output_keeps_the_truncation_marker_it_was_handed`,
+  `acp_thread::tool_result_artifact::tests::a_marker_can_be_found_again_by_the_words_it_was_written_with`,
+  and the end-to-end `test_a_terminal_marker_address_is_spendable` and
+  `test_an_address_still_resolves_after_the_thread_is_saved_and_reopened`.
 ### OMEGA-DELTA-0112 — An external subagent is spawned by the tool, and the panel can find it
 
 - **Upstream behaviour.** Upstream Zed has no per-spawn executor: a subagent is

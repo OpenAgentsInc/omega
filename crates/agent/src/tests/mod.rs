@@ -74,6 +74,9 @@ pub(crate) struct FakeTerminalHandle {
     wait_for_exit: Shared<Task<acp::TerminalExitStatus>>,
     output: acp::TerminalOutputResponse,
     id: acp::TerminalId,
+    /// `OMEGA-DELTA-0121`. What a real `acp_thread::Terminal` records when its
+    /// command exits, and what `result_artifacts` hands to the thread.
+    result_artifacts: acp_thread::ToolResultArtifactStore,
 }
 
 impl FakeTerminalHandle {
@@ -98,6 +101,7 @@ impl FakeTerminalHandle {
             wait_for_exit,
             output: acp::TerminalOutputResponse::new("partial output".to_string(), false),
             id: acp::TerminalId::new("fake_terminal".to_string()),
+            result_artifacts: acp_thread::ToolResultArtifactStore::new("terminal:fake_terminal"),
         }
     }
 
@@ -117,11 +121,30 @@ impl FakeTerminalHandle {
             wait_for_exit,
             output: acp::TerminalOutputResponse::new("command output".to_string(), false),
             id: acp::TerminalId::new("fake_terminal".to_string()),
+            result_artifacts: acp_thread::ToolResultArtifactStore::new("terminal:fake_terminal"),
         }
     }
 
     pub(crate) fn with_output(mut self, output: acp::TerminalOutputResponse) -> Self {
         self.output = output;
+        self
+    }
+
+    /// `OMEGA-DELTA-0121`. Give this terminal a complete result, and make its
+    /// output the bounded preview of it — the pairing a real
+    /// `acp_thread::Terminal` produces when a large command exits.
+    pub(crate) fn with_complete_result(mut self, text: &str) -> Self {
+        let id = self.result_artifacts.record(text);
+        let preview = acp_thread::preview_tool_result(
+            text,
+            text.len(),
+            text.lines().count(),
+            acp_thread::TOOL_RESULT_PREVIEW_BYTE_BUDGET,
+            Some(id),
+        );
+        let truncated = preview.is_truncated();
+        self.output = acp::TerminalOutputResponse::new(preview.text, truncated)
+            .exit_status(acp::TerminalExitStatus::new().exit_code(0));
         self
     }
 
@@ -147,6 +170,10 @@ impl crate::TerminalHandle for FakeTerminalHandle {
 
     fn current_output(&self, _cx: &AsyncApp) -> Result<acp::TerminalOutputResponse> {
         Ok(self.output.clone())
+    }
+
+    fn result_artifacts(&self, _cx: &AsyncApp) -> Result<acp_thread::ToolResultArtifactStore> {
+        Ok(self.result_artifacts.clone())
     }
 
     fn wait_for_exit(&self, _cx: &AsyncApp) -> Result<Shared<Task<acp::TerminalExitStatus>>> {
@@ -8929,8 +8956,186 @@ async fn test_an_address_from_a_reopened_thread_says_why_it_no_longer_resolves(
     };
     let text = tool_result_text(fetched);
     assert!(
-        text.contains("never written to disk") && text.contains("reopened"),
-        "a stale address is refused without naming the lifetime that caused \
-         it, so the reader concludes the result never existed: {text}"
+        text.contains("rebuilt when a thread is reopened"),
+        "an address the rebuild could not reach is refused without naming the \
+         rebuild, so the reader is left to guess whether the result ever \
+         existed: {text}"
+    );
+    assert!(
+        !text.contains("does not exist"),
+        "the refusal reads as a result that never existed: {text}"
+    );
+}
+
+// ---- OMEGA-DELTA-0121 — the addresses that were still unspendable
+
+#[gpui::test]
+async fn test_an_address_still_resolves_after_the_thread_is_saved_and_reopened(
+    cx: &mut TestAppContext,
+) {
+    // `OMEGA-DELTA-0121`. `OMEGA-DELTA-0111` declined to persist artifacts on
+    // the grounds that it would put every complete tool result on disk. It is
+    // already there: `run_tool` saves the tool's whole output in
+    // `LanguageModelToolResult::output`, and that is serialized into
+    // `DbThread`. So the registry is rebuilt from the copy that exists rather
+    // than written as a second one, and this is the check that it is.
+    let ThreadTest {
+        model,
+        thread,
+        project_context,
+        ..
+    } = setup(cx, TestModel::Fake).await;
+    let fake_model = model.as_fake();
+    thread.update(cx, |thread, _| {
+        thread.add_tool(EchoTool);
+        let artifacts = thread.tool_result_artifacts();
+        thread.add_tool(ReadToolResultArtifactTool::new(artifacts));
+    });
+
+    let full = oversized_tool_result();
+    let result = tool_result_the_model_receives(&thread, fake_model, "tool_1", &full, cx).await;
+    let preview = tool_result_text(&result);
+    let address = address_in_marker(&preview);
+    fake_model.send_last_completion_stream_text_chunk("done");
+    fake_model.end_last_completion_stream();
+    cx.run_until_parked();
+
+    let db_thread = thread.read_with(cx, |thread, cx| thread.to_db(cx)).await;
+
+    // The address the *saved* marker names, read off the persisted messages
+    // rather than remembered from before. This checks the message index the
+    // address is scoped by as well: an address that survived but pointed one
+    // message off would be worse than one that did not survive at all.
+    let saved_marker_address = db_thread
+        .messages
+        .iter()
+        .filter_map(|message| match &**message {
+            Message::Agent(agent) => Some(agent),
+            _ => None,
+        })
+        .flat_map(|agent| agent.tool_results.values())
+        .map(|result| address_in_marker(&result.text_contents()))
+        .next()
+        .expect("the saved thread still carries a truncation marker");
+    assert_eq!(
+        saved_marker_address, address,
+        "the saved marker names a different address than the live one did"
+    );
+
+    cx.update(|cx| {
+        LanguageModelRegistry::test(cx);
+    });
+    let reopened = cx.update(|cx| {
+        let live = thread.read(cx);
+        let project = live.project.clone();
+        let context_server_registry = live.context_server_registry.clone();
+        let templates = live.templates.clone();
+        cx.new(|cx| {
+            Thread::from_db(
+                acp::SessionId::new("reopened"),
+                db_thread,
+                project,
+                project_context.clone(),
+                context_server_registry,
+                templates,
+                cx,
+            )
+        })
+    });
+    reopened.update(cx, |thread, _| thread.add_tool(EchoTool));
+
+    let mut replay_events = reopened.update(cx, |thread, cx| thread.replay(cx));
+    while replay_events.next().await.is_some() {}
+
+    let parsed = crate::tool_result_artifacts::parse_artifact_address(&saved_marker_address)
+        .expect("the saved address parses");
+    let rebuilt = reopened.read_with(cx, |thread, _| {
+        thread
+            .tool_result_artifacts()
+            .borrow()
+            .lookup(&parsed)
+            .artifact()
+            .map(|artifact| artifact.text().to_owned())
+    });
+    assert_eq!(
+        rebuilt.as_deref(),
+        Some(full.as_str()),
+        "the address in the reopened thread's own saved marker resolves to \
+         nothing, while the result it names is sitting in the same file"
+    );
+}
+
+#[gpui::test]
+async fn test_a_terminal_marker_address_is_spendable(cx: &mut TestAppContext) {
+    // `OMEGA-DELTA-0121`. The hole on the path this whole issue came from.
+    // `acp_thread::Terminal` recorded the complete result and printed
+    // `terminal:<id>@v<n>` in its marker, and `Terminal::result_artifacts` had
+    // no caller anywhere in the tree — so the address was decoration, and
+    // spending it was answered as a result that could not be found.
+    let ThreadTest { model, thread, .. } = setup(cx, TestModel::Fake).await;
+    let fake_model = model.as_fake();
+    always_allow_tools(cx);
+    disable_sandboxing(cx);
+
+    let full = oversized_tool_result();
+    let environment = Rc::new(cx.update(|cx| {
+        FakeThreadEnvironment::default().with_terminal(
+            FakeTerminalHandle::new_with_immediate_exit(cx, 0).with_complete_result(&full),
+        )
+    }));
+    let project = thread.read_with(cx, |thread, _| thread.project.clone());
+    thread.update(cx, |thread, _| {
+        thread.add_tool(TerminalTool::new(project, environment));
+        let artifacts = thread.tool_result_artifacts();
+        thread.add_tool(ReadToolResultArtifactTool::new(artifacts));
+    });
+
+    thread
+        .update(cx, |thread, cx| {
+            thread.send(ClientUserMessageId::new(), ["run it"], cx)
+        })
+        .unwrap();
+    cx.run_until_parked();
+    let terminal_input = json!({ "command": "nak req", "cd": "." });
+    fake_model.send_last_completion_stream_event(LanguageModelCompletionEvent::ToolUse(
+        LanguageModelToolUse {
+            id: "tool_1".into(),
+            name: TerminalTool::NAME.into(),
+            raw_input: terminal_input.to_string(),
+            input: language_model::LanguageModelToolUseInput::Json(terminal_input),
+            is_input_complete: true,
+            thought_signature: None,
+        },
+    ));
+    fake_model.end_last_completion_stream();
+    cx.run_until_parked();
+
+    let completion = fake_model.pending_completions().pop().unwrap();
+    let last = completion.messages.last().unwrap();
+    let MessageContent::ToolResult(result) = last.content.last().unwrap() else {
+        panic!("expected a tool result, got {:?}", last.content);
+    };
+    let preview = tool_result_text(result);
+    let address = address_in_marker(&preview);
+    assert!(
+        address.starts_with("terminal:"),
+        "the terminal's marker no longer hands out a terminal address: {address}"
+    );
+
+    let parsed = crate::tool_result_artifacts::parse_artifact_address(&address)
+        .expect("the address the terminal's marker printed parses");
+    let resolved = thread.read_with(cx, |thread, _| {
+        thread
+            .tool_result_artifacts()
+            .borrow()
+            .lookup(&parsed)
+            .artifact()
+            .map(|artifact| artifact.text().to_owned())
+    });
+    assert_eq!(
+        resolved.as_deref(),
+        Some(full.as_str()),
+        "the address the terminal's own marker printed resolves to nothing, so \
+         the marker on the path the owner screenshotted is unspendable"
     );
 }

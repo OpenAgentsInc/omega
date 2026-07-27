@@ -943,6 +943,15 @@ async fn run_terminal_tool(
     let user_stopped_via_terminal = terminal.was_stopped_by_user(cx).unwrap_or(false);
     let user_stopped = user_stopped_via_signal || user_stopped_via_terminal;
 
+    // `OMEGA-DELTA-0121`. Hand this terminal's complete captures to the thread
+    // before its preview goes out, so the `terminal:<id>@v<n>` address the
+    // marker is about to print resolves the moment the model reads it. Ordered
+    // deliberately: the marker must never be able to exist before the artifact
+    // it names does.
+    if let Ok(artifacts) = terminal.result_artifacts(cx) {
+        event_stream.adopt_result_artifacts(artifacts, cx);
+    }
+
     let output = terminal.current_output(cx).map_err(|e| e.to_string())?;
 
     let result = process_content(output, &input.command, timed_out, user_stopped, selection);
@@ -1110,32 +1119,75 @@ impl TerminalOutputSelection {
     }
 }
 
+/// `OMEGA-DELTA-0121`. The note a caller-requested window leaves behind when it
+/// drops lines.
+///
+/// Deliberately not the truncation sentence — this is a different cut with a
+/// different remedy. `OMEGA-DELTA-0103`'s marker means "the record does not
+/// hold the rest here; fetch it". This means "you asked for a window, and it
+/// was narrower than the output"; the remedy is a wider `head_lines` or
+/// `tail_lines`, not a fetch. Restating the truncation sentence for it would
+/// tell a reader to spend an address for lines the artifact never withheld.
+fn window_note(omitted: usize) -> String {
+    if omitted == 1 {
+        "\n… [1 line omitted by the head_lines/tail_lines window you asked for.]".to_owned()
+    } else {
+        format!(
+            "\n… [{omitted} lines omitted by the head_lines/tail_lines window \
+             you asked for.]"
+        )
+    }
+}
+
+/// Apply the caller's own line window, keeping any bound that already fired
+/// visible and naming this one.
+///
+/// `OMEGA-DELTA-0121`. `output` is `OMEGA-DELTA-0103`'s preview and may already
+/// end in a truncation marker. Windowing the whole string was a silent second
+/// cut: with `head_lines` the marker is simply not among the first N lines, so
+/// it disappeared, and the model — which is told to prefer these parameters
+/// over piping to `head` — was handed a twice-cut body claiming to be cut zero
+/// times. The marker is split off first and put back afterwards, so the window
+/// can never be the reason the reader is not told about the bound.
 fn select_terminal_output_lines(output: &str, selection: TerminalOutputSelection) -> String {
-    match (selection.head_lines, selection.tail_lines) {
-        (None, None) => output.to_string(),
-        (Some(head_lines), None) => output
-            .lines()
-            .take(head_lines)
-            .collect::<Vec<_>>()
-            .join("\n"),
+    if !selection.is_enabled() {
+        return output.to_string();
+    }
+
+    let (body, marker) = acp_thread::split_truncation_marker(output);
+    let lines = body.lines().collect::<Vec<_>>();
+    let total = lines.len();
+
+    let (windowed, shown) = match (selection.head_lines, selection.tail_lines) {
+        (None, None) => (body.to_owned(), total),
+        (Some(head_lines), None) => {
+            let head = head_lines.min(total);
+            (lines[..head].join("\n"), head)
+        }
         (None, Some(tail_lines)) => {
-            let lines = output.lines().collect::<Vec<_>>();
-            let start = lines.len().saturating_sub(tail_lines);
-            lines[start..].join("\n")
+            let start = total.saturating_sub(tail_lines);
+            (lines[start..].join("\n"), total - start)
         }
         (Some(head_lines), Some(tail_lines)) => {
-            let lines = output.lines().collect::<Vec<_>>();
-            let head = lines
-                .iter()
-                .take(head_lines)
-                .copied()
-                .collect::<Vec<_>>()
-                .join("\n");
-            let tail_start = lines.len().saturating_sub(tail_lines);
-            let tail = lines[tail_start..].join("\n");
-            format!("{head}\n\n{tail}")
+            let head = head_lines.min(total);
+            let tail_start = total.saturating_sub(tail_lines).max(head);
+            (
+                format!(
+                    "{}\n\n{}",
+                    lines[..head].join("\n"),
+                    lines[tail_start..].join("\n")
+                ),
+                head + (total - tail_start),
+            )
         }
+    };
+
+    let mut selected = windowed;
+    if shown < total {
+        selected.push_str(&window_note(total - shown));
     }
+    selected.push_str(marker);
+    selected
 }
 
 /// Explanation appended to the model-facing result when a sandboxed command
@@ -1445,6 +1497,14 @@ mod tests {
         }
     }
 
+    // `OMEGA-DELTA-0121`. These four expectations changed with the delta, and
+    // deliberately. A window that drops lines now says how many: the issue this
+    // work is under names dropping the middle of a result silently as the
+    // failure it exists to prevent, and `head_lines`/`tail_lines` is the one
+    // place in the terminal path that still did it. `head: 2` reads the same
+    // whether it hid two lines or forty thousand, and a head joined to a tail
+    // by a blank line reads as adjacency.
+
     #[test]
     fn test_select_terminal_output_head_lines() {
         let output = "one\ntwo\nthree\nfour";
@@ -1452,6 +1512,25 @@ mod tests {
             output,
             TerminalOutputSelection {
                 head_lines: Some(2),
+                tail_lines: None,
+            },
+        );
+
+        assert_eq!(
+            result,
+            "one\ntwo\n… [2 lines omitted by the head_lines/tail_lines window you asked for.]"
+        );
+    }
+
+    #[test]
+    fn test_select_terminal_output_head_lines_covering_everything_says_nothing() {
+        // A window wider than the output hid nothing, so it must stay as quiet
+        // as no window at all. A note on every call is a note nobody reads.
+        let output = "one\ntwo";
+        let result = select_terminal_output_lines(
+            output,
+            TerminalOutputSelection {
+                head_lines: Some(9),
                 tail_lines: None,
             },
         );
@@ -1470,7 +1549,10 @@ mod tests {
             },
         );
 
-        assert_eq!(result, "three\nfour");
+        assert_eq!(
+            result,
+            "three\nfour\n… [2 lines omitted by the head_lines/tail_lines window you asked for.]"
+        );
     }
 
     #[test]
@@ -1484,11 +1566,17 @@ mod tests {
             },
         );
 
-        assert_eq!(result, "one\ntwo\n\nfour\nfive");
+        assert_eq!(
+            result,
+            "one\ntwo\n\nfour\nfive\n… [1 line omitted by the head_lines/tail_lines window you asked for.]"
+        );
     }
 
     #[test]
     fn test_select_terminal_output_head_and_tail_lines_overlap() {
+        // The head and the tail meet. They used to overlap, and the reader was
+        // shown `two` twice with nothing to say the two were one line — which
+        // reads as a command that printed it twice.
         let output = "one\ntwo\nthree";
         let result = select_terminal_output_lines(
             output,
@@ -1498,7 +1586,55 @@ mod tests {
             },
         );
 
-        assert_eq!(result, "one\ntwo\n\ntwo\nthree");
+        assert_eq!(result, "one\ntwo\n\nthree");
+    }
+
+    #[test]
+    fn test_select_terminal_output_keeps_the_truncation_marker_it_was_handed() {
+        // `OMEGA-DELTA-0121`. The defect: `head_lines` windowed the whole
+        // preview, and the marker is at the end, so the marker was the first
+        // thing a head window deleted. The model is told to prefer these
+        // parameters over piping to `head`, so this was the common path.
+        let bounded = acp_thread::preview_tool_result(
+            &(0..400)
+                .map(|index| format!("line {index} {}", "x".repeat(64)))
+                .collect::<Vec<_>>()
+                .join("\n"),
+            0,
+            0,
+            acp_thread::TOOL_RESULT_PREVIEW_BYTE_BUDGET,
+            Some(acp_thread::ToolResultArtifactId::new("terminal:1", 1)),
+        );
+        assert!(bounded.is_truncated());
+
+        let result = select_terminal_output_lines(
+            &bounded.text,
+            TerminalOutputSelection {
+                head_lines: Some(3),
+                tail_lines: None,
+            },
+        );
+
+        assert!(
+            result.contains("tool result truncated"),
+            "the caller's window deleted the record's own truncation marker, so \
+             a twice-cut body claims to be cut zero times: {result}"
+        );
+        assert!(
+            result.contains("artifact terminal:1@v1"),
+            "the address the marker handed out went with it: {result}"
+        );
+        assert!(
+            result.contains("omitted by the head_lines"),
+            "the window itself is unreported: {result}"
+        );
+        assert_eq!(
+            result.matches("tool result truncated").count(),
+            1,
+            "the marker was duplicated: {result}"
+        );
+        assert!(result.starts_with("line 0 "));
+        assert!(!result.contains("\nline 3 "));
     }
 
     #[test]
@@ -1513,7 +1649,7 @@ mod tests {
                     tail_lines: None,
                 },
             ),
-            ""
+            "\n… [3 lines omitted by the head_lines/tail_lines window you asked for.]"
         );
         assert_eq!(
             select_terminal_output_lines(
@@ -1523,7 +1659,7 @@ mod tests {
                     tail_lines: Some(0),
                 },
             ),
-            ""
+            "\n… [3 lines omitted by the head_lines/tail_lines window you asked for.]"
         );
         assert_eq!(
             select_terminal_output_lines(
@@ -1533,7 +1669,7 @@ mod tests {
                     tail_lines: Some(0),
                 },
             ),
-            "\n\n"
+            "\n\n\n… [3 lines omitted by the head_lines/tail_lines window you asked for.]"
         );
     }
 
@@ -1548,7 +1684,10 @@ mod tests {
             },
         );
 
-        assert_eq!(result, "β\nγ");
+        assert_eq!(
+            result,
+            "β\nγ\n… [1 line omitted by the head_lines/tail_lines window you asked for.]"
+        );
     }
 
     /// `OMEGA-DELTA-0111`. A truncated result carries exactly one truncation
@@ -1610,7 +1749,14 @@ mod tests {
             },
         );
 
-        assert_eq!(result, "```\none\n\nfour\n```");
+        // `OMEGA-DELTA-0121`. `one` then `four` with a blank line between them
+        // reads as adjacency; the two lines between them were dropped and
+        // nothing said so. That is the failure omega#105's notes name outright,
+        // and this was the one place in the terminal path still doing it.
+        assert_eq!(
+            result,
+            "```\none\n\nfour\n… [2 lines omitted by the head_lines/tail_lines window you asked for.]\n```"
+        );
     }
 
     #[test]
@@ -2227,7 +2373,12 @@ mod tests {
         );
 
         let result = task.await.expect("terminal command should succeed");
-        assert_eq!(result, "```\none\n\nfive\n```");
+        // `OMEGA-DELTA-0121`. The window still filters; it just no longer does
+        // it silently. See `select_terminal_output_lines`.
+        assert_eq!(
+            result,
+            "```\none\n\nfive\n… [3 lines omitted by the head_lines/tail_lines window you asked for.]\n```"
+        );
         assert_eq!(environment.terminal_output_limits(), vec![None]);
     }
 

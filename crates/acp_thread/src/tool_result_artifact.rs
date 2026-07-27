@@ -32,6 +32,32 @@ use std::sync::Arc;
 /// other bounds the height; a result can need both.
 pub const TOOL_RESULT_PREVIEW_BYTE_BUDGET: usize = 4_000;
 
+/// What the truncation marker begins with, and the only place its opening words
+/// are written down.
+///
+/// `OMEGA-DELTA-0121`. A marker is not only written; it is also *found*. A
+/// caller that applies its own line window to an already-bounded body — the
+/// terminal tool's `head_lines`, which the model is actively told to prefer
+/// over piping to `head` — has to know where the body stops and the marker
+/// starts, or its window silently deletes the marker and the reader is left
+/// with a twice-cut body that says it was cut zero times. That knowledge lives
+/// here, with the sentence, so no second copy of these words exists to drift.
+pub const TRUNCATION_MARKER_PREFIX: &str = "\n… [tool result truncated: ";
+
+/// Split `text` into the part before the truncation marker and the marker.
+///
+/// The second half is empty when nothing was ever truncated, which is the
+/// ordinary case. Searched from the right so a result that happens to *contain*
+/// these words — a transcript quoting a marker — does not have its own marker
+/// taken from it.
+#[must_use]
+pub fn split_truncation_marker(text: &str) -> (&str, &str) {
+    match text.rfind(TRUNCATION_MARKER_PREFIX) {
+        Some(at) => text.split_at(at),
+        None => (text, ""),
+    }
+}
+
 /// The address of one version of one tool result.
 ///
 /// `source` names what produced the result (a terminal id, a tool call id);
@@ -277,7 +303,7 @@ fn truncation_marker(
             .to_owned(),
     };
     format!(
-        "\n… [tool result truncated: {shown_bytes} of {total_bytes} bytes and \
+        "{TRUNCATION_MARKER_PREFIX}{shown_bytes} of {total_bytes} bytes and \
          {shown_lines} of {total_lines} lines shown, {withheld_bytes} bytes and \
          {withheld_lines} lines withheld. {whereabouts}]"
     )
@@ -545,6 +571,30 @@ mod tests {
             "an address from another source resolved here, so the source part \
              of an address is decorative"
         );
+    }
+
+    #[test]
+    fn a_marker_can_be_found_again_by_the_words_it_was_written_with() {
+        // `OMEGA-DELTA-0121`. If these drift apart, a caller applying its own
+        // window keeps the marker by accident or deletes it by accident, and
+        // the second one is a silent double cut.
+        let full = nostr_event_lines(200);
+        let preview = preview_tool_result(
+            &full,
+            full.len(),
+            200,
+            TOOL_RESULT_PREVIEW_BYTE_BUDGET,
+            Some(ToolResultArtifactId::new("terminal:blob", 1)),
+        );
+
+        let (body, marker) = split_truncation_marker(&preview.text);
+        assert!(marker.contains("tool result truncated"));
+        assert!(marker.contains("artifact terminal:blob@v1"));
+        assert_eq!(format!("{body}{marker}"), preview.text);
+        assert!(!body.contains("tool result truncated"));
+
+        let untouched = "publishing to relay.openagents.com... success.\n";
+        assert_eq!(split_truncation_marker(untouched), (untouched, ""));
     }
 
     #[test]

@@ -9,7 +9,7 @@ use crate::{
     TranscriptEntry, TranscriptRole, TranscriptWindowRequest, WebSearchTool, WriteFileTool,
     decide_permission_from_settings, tool_result_artifact_source,
 };
-use acp_thread::{ClientUserMessageId, MentionUri};
+use acp_thread::{ClientUserMessageId, MentionUri, ToolResultArtifactStore};
 use action_log::ActionLog;
 use agent_settings::UserAgentsMd;
 
@@ -804,6 +804,21 @@ pub enum AgentMessageContent {
 pub trait TerminalHandle {
     fn id(&self, cx: &AsyncApp) -> Result<acp::TerminalId>;
     fn current_output(&self, cx: &AsyncApp) -> Result<acp::TerminalOutputResponse>;
+    /// `OMEGA-DELTA-0121`. The complete captures behind the addresses
+    /// `current_output`'s truncation marker prints.
+    ///
+    /// The marker names `terminal:<id>@v<n>` and the model is invited to fetch
+    /// it. Until this existed nothing could: the store lived on
+    /// `acp_thread::Terminal` and had no reader, so the address was decoration
+    /// on the one path this whole issue was filed from. Returning the store
+    /// rather than one artifact keeps the version numbers, which are what a
+    /// re-run terminal's earlier marker still refers to.
+    ///
+    /// The default is an empty store: a handle with no captures to hand over is
+    /// answered as nothing recorded, which is what it is.
+    fn result_artifacts(&self, _cx: &AsyncApp) -> Result<ToolResultArtifactStore> {
+        Ok(ToolResultArtifactStore::new(""))
+    }
     fn wait_for_exit(&self, cx: &AsyncApp) -> Result<Shared<Task<acp::TerminalExitStatus>>>;
     fn kill(&self, cx: &AsyncApp) -> Result<()>;
     fn was_stopped_by_user(&self, cx: &AsyncApp) -> Result<bool>;
@@ -1397,7 +1412,9 @@ pub struct Thread {
     ///
     /// Shared with `read_tool_result_artifact`, which is the only thing that
     /// reads it, so the tool cannot name another thread's result. Never
-    /// persisted, for the reason `ARTIFACTS_ARE_NOT_PERSISTED` gives.
+    /// persisted: `OMEGA-DELTA-0121` rebuilds it on reopen from the complete
+    /// tool results `DbThread` already saves, rather than writing a second copy
+    /// of the same bytes. See `TOOL_ARTIFACTS_ARE_REBUILT`.
     tool_result_artifacts: Rc<RefCell<ToolResultArtifactRegistry>>,
 }
 
@@ -1751,6 +1768,27 @@ impl Thread {
             );
         }
 
+        // `OMEGA-DELTA-0121`. Rebuild this call's artifacts before anything can
+        // ask for them. The complete result is already on disk in `output` —
+        // that is what `run_tool` saved — so the registry is an index over
+        // bytes that were kept anyway, not a second copy of them.
+        //
+        // Deterministic by construction: the same text, through the same pure
+        // `bound`, in the same order, yields the same versions, so the address
+        // the saved marker prints is the address that comes back. Re-running it
+        // on a thread that already holds these artifacts is a no-op, because
+        // recording text identical to the latest version returns that version.
+        if let Some(raw_output) = output.as_ref()
+            && !tool.bounds_own_result()
+            && let Some(llm_output) = tool.llm_output_from_raw(raw_output)
+        {
+            Self::bound_tool_result_content(
+                llm_output,
+                &tool_result_artifact_source(&tool_call_id.to_string()),
+                &self.tool_result_artifacts,
+            );
+        }
+
         if let Some(output) = output.clone() {
             // For replay, we use a dummy cancellation receiver since the tool already completed
             let (_cancellation_tx, cancellation_rx) = watch::channel(false);
@@ -1920,11 +1958,12 @@ impl Thread {
             sandbox_grants: Rc::new(RefCell::new(ThreadSandboxGrants::from_db(
                 &db_thread.sandbox_grants,
             ))),
-            // Empty on purpose, and it is the gap `ARTIFACTS_ARE_NOT_PERSISTED`
-            // names: the reloaded messages still carry their truncation markers
-            // while the results those markers address are gone. The fetch path
-            // answers that with a sentence saying so, never with "no such
-            // result".
+            // Empty here and filled by `replay`, which is what every load path
+            // runs next: `OMEGA-DELTA-0121` rebuilds each `tool:` artifact from
+            // the complete result already saved in the message, so the markers
+            // the reloaded messages still carry keep pointing at something.
+            // Nothing is rebuilt at construction because the tools have not
+            // been registered yet — `tools` is empty two fields up.
             tool_result_artifacts: Rc::new(RefCell::new(ToolResultArtifactRegistry::default())),
         }
     }
@@ -5419,6 +5458,26 @@ pub trait AnyAgentTool {
     fn bounds_own_result(&self) -> bool {
         false
     }
+    /// `OMEGA-DELTA-0121`. Read a saved `raw_output` back into the model-facing
+    /// parts it was bounded from, so a reopened thread can rebuild the
+    /// artifacts its markers still address.
+    ///
+    /// This is not a second source of truth. `run` derives both `llm_output`
+    /// and `raw_output` from one value, and `raw_output` is what `DbThread`
+    /// keeps; this reverses that one step and nothing else, which is the same
+    /// reversal [`Self::replay`] already relies on to redraw a tool call.
+    ///
+    /// `None` when the parts cannot be recovered exactly. That is the honest
+    /// answer for an output whose saved form is lossy — an MCP result's text
+    /// parts are saved concatenated, so rebuilding from it would number the
+    /// versions differently and resolve an address to something that is not
+    /// what it named. A refusal that says why beats a fetch that answers wrong.
+    fn llm_output_from_raw(
+        &self,
+        _raw_output: &serde_json::Value,
+    ) -> Option<Vec<LanguageModelToolResultContent>> {
+        None
+    }
     /// See [`AgentTool::run`] for why this returns `Result<AgentToolOutput, AgentToolOutput>`.
     fn run(
         self: Arc<Self>,
@@ -5476,6 +5535,18 @@ where
 
     fn bounds_own_result(&self) -> bool {
         T::bounds_own_result()
+    }
+
+    fn llm_output_from_raw(
+        &self,
+        raw_output: &serde_json::Value,
+    ) -> Option<Vec<LanguageModelToolResultContent>> {
+        // Exactly the inverse of what `run` did below: one value in, one part
+        // out. A tool whose saved output no longer deserializes — a shape that
+        // changed between releases — answers `None` rather than guessing.
+        serde_json::from_value::<T::Output>(raw_output.clone())
+            .ok()
+            .map(|output| vec![output.into()])
     }
 
     fn run(
@@ -5816,6 +5887,28 @@ impl ToolCallEventStream {
         let Some(thread) = thread else { return };
         cx.update(|cx| {
             thread.update(cx, |_thread, cx| cx.notify()).ok();
+        });
+    }
+
+    /// `OMEGA-DELTA-0121`. Hand the complete results a tool kept for itself to
+    /// the thread's registry, so the addresses its own marker printed are ones
+    /// `read_tool_result_artifact` can take.
+    ///
+    /// This is the seam for the three tools that opt out of the outer bound
+    /// under [`AgentTool::bounds_own_result`]. Opting out says "I already
+    /// bounded this and already said so"; it must not also mean "and the
+    /// address I printed resolves nowhere". The terminal's did, for the whole
+    /// life of `OMEGA-DELTA-0103`.
+    pub fn adopt_result_artifacts(&self, store: ToolResultArtifactStore, cx: &AsyncApp) {
+        let Some(thread) = self.thread.clone() else {
+            return;
+        };
+        cx.update(|cx| {
+            thread
+                .update(cx, |thread, _cx| {
+                    thread.tool_result_artifacts.borrow_mut().adopt(store);
+                })
+                .ok();
         });
     }
 
