@@ -55,6 +55,7 @@ use language_model::{
     IconOrSvg, LanguageModel, LanguageModelId, LanguageModelProvider, LanguageModelProviderId,
     LanguageModelRegistry,
 };
+use omega_front_door::ExecutorDisclosure;
 use project::{
     AgentId, Project, ProjectItem, ProjectPath, Worktree, WorktreeId,
     trusted_worktrees::TrustedWorktrees,
@@ -3149,13 +3150,9 @@ impl NativeThreadEnvironment {
 
             let session_id = cx.update(|cx| acp_thread.read(cx).session_id().clone());
 
-            Ok(Rc::new(ExternalAcpSubagentHandle {
-                session_id,
-                acp_thread,
-                agent_id,
-                agent_name,
-                _connection: connection,
-            }) as Rc<dyn SubagentHandle>)
+            Ok(Rc::new(ExternalAcpSubagentHandle::new(
+                session_id, acp_thread, agent_id, agent_name, connection,
+            )) as Rc<dyn SubagentHandle>)
         })
     }
 
@@ -3362,21 +3359,12 @@ impl ThreadEnvironment for NativeThreadEnvironment {
             .sessions
             .get(&session_id)
             .map(|session| session.thread.clone())
-            .ok_or_else(|| {
-                // An external ACP subagent is a real session that this map
-                // genuinely does not hold — its transcript lives in the agent
-                // server's own process. Saying only "not loaded" would read as
-                // "you got the ID wrong" and send the caller checking a correct
-                // ID.
-                format!(
-                    "No transcript is available for session {session_id}. If \
-                     this was a subagent you ran on an external executor such \
-                     as `codex-acp`, its transcript belongs to that agent and \
-                     Omega cannot read it; you have its final message only. \
-                     Otherwise, check the ID — session IDs come from \
-                     `spawn_agent`."
-                )
-            })?;
+            // An external ACP subagent is a real session that this map
+            // genuinely does not hold — its transcript lives in the agent
+            // server's own process. The sentence lives with the tool that owns
+            // this tool's other sentences, beside `TranscriptAccess::refusal`,
+            // so it can be read and tested without a live agent.
+            .ok_or_else(|| crate::no_transcript_available(&session_id))?;
 
         let target = target.read(cx);
         let access =
@@ -3484,6 +3472,28 @@ pub struct ExternalAcpSubagentHandle {
 }
 
 impl ExternalAcpSubagentHandle {
+    /// Wrap an already-open external ACP session as a subagent.
+    ///
+    /// Separate from `create_external_acp_subagent` so the handle can be driven
+    /// against a real agent server without a parent `Thread` — everything below
+    /// this line is the part that had never executed, and a constructor that
+    /// only the production path can reach is a part that cannot be run.
+    pub fn new(
+        session_id: acp::SessionId,
+        acp_thread: Entity<AcpThread>,
+        agent_id: String,
+        agent_name: String,
+        connection: Rc<dyn acp_thread::AgentConnection>,
+    ) -> Self {
+        Self {
+            session_id,
+            acp_thread,
+            agent_id,
+            agent_name,
+            _connection: connection,
+        }
+    }
+
     /// The last thing the agent said, as text.
     ///
     /// Thought chunks are skipped: they are the external agent's reasoning, not
@@ -3529,11 +3539,22 @@ impl SubagentHandle for ExternalAcpSubagentHandle {
         self.session_id.clone()
     }
 
-    fn executor_label(&self) -> String {
-        format!(
-            "{} ({}, external ACP agent)",
-            self.agent_name, self.agent_id
-        )
+    /// Criterion 6. The external subagent discloses itself, in the same typed
+    /// record every other executor in Omega discloses through.
+    ///
+    /// Built from `self.agent_id` — the id this handle was opened with and
+    /// connected to — and never from the request that asked for it. The two
+    /// cannot differ today, because a refused request never reaches a handle,
+    /// and that is exactly why the source matters: if they ever could differ,
+    /// the record must report what ran.
+    ///
+    /// `AcpThread`'s own connection is not consulted for the class either.
+    /// `crates/agent_ui` classifies a live thread by downcasting its connection,
+    /// which is the right test *there* because it has no other source. Here the
+    /// handle already knows, and asking a second source for an answer it holds
+    /// is how two answers to one question get to disagree.
+    fn executor_disclosure(&self, _cx: &App) -> ExecutorDisclosure {
+        crate::external_acp_disclosure(&self.agent_id)
     }
 
     fn num_entries(&self, cx: &App) -> usize {
@@ -3584,11 +3605,24 @@ impl SubagentHandle for NativeSubagentHandle {
         self.session_id.clone()
     }
 
-    fn executor_label(&self) -> String {
-        // Named as inherited rather than as a model. The parent knows its own
-        // model; what it cannot otherwise tell is whether this subagent was
-        // routed somewhere else.
-        "Omega (native loop, inherited from parent)".to_owned()
+    /// Criterion 6, for the inherited case.
+    ///
+    /// The model is read from the **subagent's** thread, not the parent's.
+    /// `subagent_model` overrides the inherited model for every subagent, so
+    /// "the parent's model" and "the model that served this subagent" are two
+    /// facts, and only the second one is what happened.
+    fn executor_disclosure(&self, cx: &App) -> ExecutorDisclosure {
+        let (provider, model) =
+            self.subagent_thread
+                .read(cx)
+                .model()
+                .map_or((None, None), |model| {
+                    (
+                        Some(model.provider_id().0.to_string()),
+                        Some(model.id().0.to_string()),
+                    )
+                });
+        crate::native_loop_disclosure(&OMEGA_AGENT_ID.0, provider, model)
     }
 
     fn num_entries(&self, cx: &App) -> usize {

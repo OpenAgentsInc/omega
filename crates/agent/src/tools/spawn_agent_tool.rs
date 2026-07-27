@@ -8,6 +8,8 @@ use serde::{Deserialize, Deserializer, Serialize};
 use std::rc::Rc;
 use std::sync::Arc;
 
+use omega_front_door::ExecutorDisclosure;
+
 use crate::{
     AgentTool, ExecutorResolution, ThreadEnvironment, ToolCallEventStream, ToolInput,
     resolve_requested_executor,
@@ -42,7 +44,7 @@ use crate::{
 ///
 /// ### Output
 /// - You will receive only the agent's final message as output.
-/// - The result also names the `executor` that produced it, so you can tell which agent gave you which answer.
+/// - The result also carries an `executor` record naming what actually produced it — its `class` (`native_loop` or `external_acp`) and its `agent_id` — so you can tell which agent gave you which answer. An external agent does not report its model, and `provider`/`model` are absent rather than guessed when it does not.
 /// - Successful calls return a session_id that you can use for follow-up messages.
 /// - Error results may also include a session_id if a session was already created.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -80,6 +82,52 @@ where
         .map_err(serde::de::Error::custom)
 }
 
+/// What produced a subagent result, as parts rather than as a sentence.
+///
+/// A projection of [`ExecutorDisclosure`] onto the wire. It exists because the
+/// record itself lives in `omega_front_door`, a leaf crate that deliberately
+/// depends on nothing — including serde — and because the parent reading this
+/// is a model rather than a person, so it gets the fields and not the line a
+/// window renders.
+///
+/// **There is no `label` field, and that is the point.** `OMEGA-DELTA-0021`
+/// fixed executor disclosure as a typed record that a label renders, never a
+/// stored rendering, and the first cut of `OMEGA-DELTA-0061` disclosed
+/// subagents with a hand-written sentence instead. A sentence cannot be
+/// compared, cannot be re-rendered for a different reader, and cannot be
+/// checked for coherence. Every field here comes from one
+/// [`ExecutorDisclosure`], through [`From`], so there is exactly one source for
+/// what ran.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct SubagentExecutorReport {
+    /// `ExecutorClass::token()` — `native_loop` or `external_acp` for a
+    /// subagent. A stable wire token, which is what a machine reader wants.
+    pub class: String,
+    /// The executor's own identifier: `codex-acp`, `claude-acp`, or Omega's own
+    /// for an inherited subagent.
+    pub agent_id: String,
+    /// `None` is **not disclosed**, and is different from an empty string.
+    /// `AcpConnection` has no `model_selector`, so an external ACP agent does
+    /// not tell Omega which model served the turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    /// See [`provider`](Self::provider).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+}
+
+impl From<&ExecutorDisclosure> for SubagentExecutorReport {
+    fn from(disclosure: &ExecutorDisclosure) -> Self {
+        Self {
+            class: disclosure.class.token().to_owned(),
+            agent_id: disclosure.agent_id.clone(),
+            provider: disclosure.provider.clone(),
+            model: disclosure.model.clone(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 #[serde(rename_all = "snake_case")]
@@ -90,8 +138,8 @@ pub enum SpawnAgentToolOutput {
         session_info: SubagentSessionInfo,
         /// What actually ran this subagent. Reported by the handle, so a mixed
         /// fan-out is attributable result by result.
-        #[serde(default)]
-        executor: Option<String>,
+        #[serde(default, deserialize_with = "deserialize_executor_report")]
+        executor: Option<SubagentExecutorReport>,
     },
     Error {
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -99,9 +147,33 @@ pub enum SpawnAgentToolOutput {
         session_id: Option<acp::SessionId>,
         error: String,
         session_info: Option<SubagentSessionInfo>,
-        #[serde(default)]
-        executor: Option<String>,
+        #[serde(default, deserialize_with = "deserialize_executor_report")]
+        executor: Option<SubagentExecutorReport>,
     },
+}
+
+/// Read a stored `executor`, tolerating what an older build wrote there.
+///
+/// The first cut of `OMEGA-DELTA-0061` stored a rendered sentence in this
+/// field. A sentence cannot be turned back into parts, so it reads as **not
+/// disclosed** rather than being parsed into an invented class — the same rule
+/// the record itself follows for a model nobody reported.
+///
+/// The tolerance is required, not merely kind. `SpawnAgentToolOutput` is an
+/// untagged enum, so a field that fails to deserialize does not fail alone: the
+/// whole variant is rejected, serde falls through to `Error`, that fails too,
+/// and a replayed thread loses the tool call rather than losing one field of
+/// it.
+fn deserialize_executor_report<'de, D>(
+    deserializer: D,
+) -> Result<Option<SubagentExecutorReport>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let Some(value) = Option::<serde_json::Value>::deserialize(deserializer)? else {
+        return Ok(None);
+    };
+    Ok(serde_json::from_value(value).ok())
 }
 
 impl From<SpawnAgentToolOutput> for LanguageModelToolResultContent {
@@ -241,7 +313,18 @@ impl AgentTool for SpawnAgentTool {
                 })?
             };
 
-            let executor_label = subagent.executor_label();
+            // Asked of the handle, not of the request. A report derived from
+            // `input.executor` would still read "codex-acp" on a subagent that
+            // ran as something else: it would state the intention, where this
+            // states the fact.
+            let executor_report = cx.update(|cx| {
+                let disclosure = subagent.executor_disclosure(cx);
+                debug_assert!(
+                    disclosure.is_coherent(),
+                    "a subagent disclosed an incoherent record: {disclosure:?}"
+                );
+                SubagentExecutorReport::from(&disclosure)
+            });
 
             let mut session_info = cx.update(|cx| {
                 let session_info = SubagentSessionInfo {
@@ -273,7 +356,8 @@ impl AgentTool for SpawnAgentTool {
                 "Subagent Completed",
                 subagent_session = session_info.session_id.to_string(),
                 status,
-                executor = executor_label.clone(),
+                executor = executor_report.agent_id.clone(),
+                executor_class = executor_report.class.clone(),
             );
 
             session_info.message_end_index =
@@ -291,7 +375,7 @@ impl AgentTool for SpawnAgentTool {
                         session_id: session_info.session_id.clone(),
                         session_info,
                         output,
-                        executor: Some(executor_label),
+                        executor: Some(executor_report),
                     }),
                 ),
                 Err(e) => {
@@ -302,7 +386,7 @@ impl AgentTool for SpawnAgentTool {
                             session_id: Some(session_info.session_id.clone()),
                             error,
                             session_info: Some(session_info),
-                            executor: Some(executor_label),
+                            executor: Some(executor_report),
                         }),
                     )
                 }
@@ -382,5 +466,175 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(input.session_id.unwrap().to_string(), "existing-session");
+    }
+
+    fn session() -> acp::SessionId {
+        acp::SessionId::from("sub-1".to_string())
+    }
+
+    fn session_info() -> SubagentSessionInfo {
+        SubagentSessionInfo {
+            session_id: session(),
+            message_start_index: 0,
+            message_end_index: Some(1),
+        }
+    }
+
+    fn model_reads(output: SpawnAgentToolOutput) -> serde_json::Value {
+        let content: LanguageModelToolResultContent = output.into();
+        let LanguageModelToolResultContent::Text(text) = content else {
+            panic!("a spawn_agent result must be text the model can read");
+        };
+        serde_json::from_str(&text).expect("the result must be JSON")
+    }
+
+    /// Criterion 6, at the seam the parent actually reads.
+    ///
+    /// The record reaches the model, with the class and the agent id. A
+    /// disclosure the parent cannot see is not a disclosure.
+    #[test]
+    fn an_external_result_carries_its_executor_record_to_the_model() {
+        let report = SubagentExecutorReport::from(&crate::external_acp_disclosure("codex-acp"));
+        let value = model_reads(SpawnAgentToolOutput::Success {
+            session_id: session(),
+            output: "done".into(),
+            session_info: session_info(),
+            executor: Some(report),
+        });
+
+        assert_eq!(value["executor"]["class"], "external_acp");
+        assert_eq!(value["executor"]["agent_id"], "codex-acp");
+        // Absent, not empty and not invented.
+        assert!(value["executor"].get("provider").is_none());
+        assert!(value["executor"].get("model").is_none());
+    }
+
+    /// The failure arm is attributed too.
+    ///
+    /// In a mixed fan-out this is the case that matters most: three subagents
+    /// went out, one came back dead, and an unattributed error does not say
+    /// which one.
+    #[test]
+    fn a_failed_result_names_the_executor_that_failed() {
+        let report = SubagentExecutorReport::from(&crate::external_acp_disclosure("claude-acp"));
+        let value = model_reads(SpawnAgentToolOutput::Error {
+            session_id: Some(session()),
+            error: "the Claude subagent failed".into(),
+            session_info: Some(session_info()),
+            executor: Some(report),
+        });
+
+        assert_eq!(value["executor"]["class"], "external_acp");
+        assert_eq!(value["executor"]["agent_id"], "claude-acp");
+        assert!(value["error"].is_string());
+    }
+
+    /// Two results from one turn are told apart by what the model receives.
+    #[test]
+    fn a_mixed_fan_out_reaches_the_model_as_different_executors() {
+        let codex = model_reads(SpawnAgentToolOutput::Success {
+            session_id: session(),
+            output: "codex answer".into(),
+            session_info: session_info(),
+            executor: Some(SubagentExecutorReport::from(
+                &crate::external_acp_disclosure("codex-acp"),
+            )),
+        });
+        let inherited = model_reads(SpawnAgentToolOutput::Success {
+            session_id: session(),
+            output: "my own answer".into(),
+            session_info: session_info(),
+            executor: Some(SubagentExecutorReport::from(
+                &crate::native_loop_disclosure(
+                    "Omega Agent",
+                    Some("anthropic".into()),
+                    Some("claude-opus-4".into()),
+                ),
+            )),
+        });
+
+        assert_ne!(codex["executor"], inherited["executor"]);
+        assert_eq!(inherited["executor"]["class"], "native_loop");
+        assert_eq!(inherited["executor"]["model"], "claude-opus-4");
+    }
+
+    /// The record holds no rendered sentence.
+    ///
+    /// `OMEGA-DELTA-0021`'s law, applied to the wire: parts, never a line. A
+    /// stored rendering cannot be handed to a signer and cannot be re-rendered
+    /// for a different reader, which is what makes the owner's identity
+    /// decision cheap to reverse.
+    #[test]
+    fn the_reported_record_is_parts_and_not_a_sentence() {
+        let report = SubagentExecutorReport::from(&crate::external_acp_disclosure("codex-acp"));
+        let value = serde_json::to_value(&report).unwrap();
+        let object = value.as_object().expect("the report must be an object");
+
+        let mut keys: Vec<_> = object.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            ["agent_id", "class"],
+            "the report gained a field. Every field here is a part of \
+             `ExecutorDisclosure`; a rendered line under any name is the shape \
+             OMEGA-DELTA-0021 forbids."
+        );
+    }
+
+    /// A tool result written by an older build still loads.
+    ///
+    /// The first cut of this delta stored a rendered sentence in `executor`.
+    /// `SpawnAgentToolOutput` is untagged, so a field that fails to
+    /// deserialize takes the whole tool call with it — the thread would replay
+    /// missing the delegation, not merely missing its attribution.
+    #[test]
+    fn a_legacy_rendered_executor_reads_as_not_disclosed() {
+        let stored = json!({
+            "session_id": "sub-1",
+            "output": "done",
+            "session_info": {
+                "session_id": "sub-1",
+                "message_start_index": 0,
+                "message_end_index": 1,
+            },
+            "executor": "Codex (codex-acp, external ACP agent)",
+        });
+
+        let output: SpawnAgentToolOutput =
+            serde_json::from_value(stored).expect("an older tool result must still load");
+        match output {
+            SpawnAgentToolOutput::Success {
+                output, executor, ..
+            } => {
+                assert_eq!(output, "done");
+                assert_eq!(
+                    executor, None,
+                    "a sentence cannot be turned back into parts, so it must \
+                     read as not disclosed rather than as an invented class"
+                );
+            }
+            SpawnAgentToolOutput::Error { .. } => {
+                panic!("a stored success must not load as an error")
+            }
+        }
+    }
+
+    /// And a well-formed record round-trips.
+    #[test]
+    fn a_stored_executor_record_round_trips() {
+        let report = SubagentExecutorReport::from(&crate::external_acp_disclosure("codex-acp"));
+        let stored = serde_json::to_value(SpawnAgentToolOutput::Success {
+            session_id: session(),
+            output: "done".into(),
+            session_info: session_info(),
+            executor: Some(report.clone()),
+        })
+        .unwrap();
+
+        let loaded: SpawnAgentToolOutput = serde_json::from_value(stored).unwrap();
+        match loaded {
+            SpawnAgentToolOutput::Success { executor, .. } => assert_eq!(executor, Some(report)),
+            SpawnAgentToolOutput::Error { .. } => panic!("a success must load as a success"),
+        }
     }
 }

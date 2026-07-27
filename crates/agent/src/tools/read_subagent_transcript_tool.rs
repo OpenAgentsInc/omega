@@ -233,6 +233,38 @@ pub fn subagent_transcript_access(
     }
 }
 
+/// The sentence for a session Omega holds no transcript for.
+///
+/// This tool reads native threads. `OMEGA-DELTA-0061` added subagents that are
+/// *not* native threads: an external ACP subagent's session belongs to the
+/// agent server's own process, so there is no transcript here to window, and
+/// there is no scope decision to make either — the caller is refused content
+/// that Omega never had rather than content it is not allowed to see.
+///
+/// **It says both possibilities and asserts neither, and that is deliberate.**
+/// A definite answer — "session X ran on Codex" — would need Omega to remember
+/// which sessions it opened externally. That memory would be in process
+/// memory only: an external subagent has no `DbThread`, so nothing about it
+/// survives a reload. After a restart the same lookup would confidently answer
+/// "that is not an external subagent" about one that is, which is a wrong
+/// answer where this is merely an incomplete one. `OMEGA-DELTA-0061`'s own
+/// rule against two sources for one question applies here: an honest
+/// disjunction beats a second store that is right until the process ends.
+///
+/// What it must not do is read as "you got the ID wrong". That was the sentence
+/// before external subagents existed, and it sends a caller holding a perfectly
+/// good session ID looking for a bug in its own bookkeeping.
+#[must_use]
+pub fn no_transcript_available(session_id: &acp::SessionId) -> String {
+    format!(
+        "No transcript is available for session {session_id}. If this was a \
+         subagent you ran on an external executor such as `codex-acp`, its \
+         transcript belongs to that agent and Omega cannot read it; you have \
+         its final message only. Otherwise, check the ID — session IDs come \
+         from `spawn_agent`."
+    )
+}
+
 /// Who produced a message.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -607,6 +639,84 @@ mod tests {
             index,
             role: TranscriptRole::Assistant,
             blocks: vec![TranscriptBlock::Text(body.into())],
+        }
+    }
+
+    // --- A session Omega holds no transcript for. ---
+
+    /// `OMEGA-DELTA-0061` made "not in the session map" mean two different
+    /// things. The sentence has to cover both without asserting either.
+    #[test]
+    fn a_missing_transcript_names_both_reasons_and_asserts_neither() {
+        let message = no_transcript_available(&session("sub-7"));
+
+        assert!(
+            message.contains("sub-7"),
+            "the sentence must name the session asked for: {message}"
+        );
+        // The external case, said as a condition.
+        assert!(
+            message.contains("external executor"),
+            "a correct ID for an external subagent must not read as a bad ID: \
+             {message}"
+        );
+        assert!(
+            message.contains("codex-acp"),
+            "the condition must be concrete enough to recognise: {message}"
+        );
+        // What the parent still has, so it does not conclude the work is gone.
+        assert!(
+            message.contains("final message"),
+            "the parent keeps the final message, and must be told so: {message}"
+        );
+        // The other case survives. Before this delta it was the only one, and
+        // dropping it would send a caller with a genuine typo hunting an
+        // external subagent it never spawned.
+        assert!(
+            message.contains("check the ID"),
+            "a genuinely wrong ID must still be a named possibility: {message}"
+        );
+
+        // And it claims neither. A definite "this ran on Codex" would need
+        // durable memory of external sessions, which do not have any.
+        for asserted in [
+            "This was a subagent you ran",
+            "ran on an external executor.",
+            "does not exist",
+        ] {
+            assert!(
+                !message.contains(asserted),
+                "the sentence asserts `{asserted}` about a session it cannot \
+                 classify: {message}"
+            );
+        }
+    }
+
+    /// It is a different sentence from every scoping refusal.
+    ///
+    /// The two are reached by different paths and mean different things —
+    /// "Omega never had this" against "this is not yours" — and a caller that
+    /// cannot tell them apart cannot tell a bookkeeping bug from a permission
+    /// boundary.
+    #[test]
+    fn a_missing_transcript_is_not_a_scoping_refusal() {
+        let target = session("sub-7");
+        let missing = no_transcript_available(&target);
+
+        for access in [
+            TranscriptAccess::RefusedIsCaller,
+            TranscriptAccess::RefusedNotASubagent,
+            TranscriptAccess::RefusedOtherParent {
+                parent: session("other"),
+            },
+        ] {
+            let refusal = access.refusal(&target).expect("must refuse");
+            assert_ne!(refusal, missing);
+            assert!(
+                !missing.contains("You can read only the subagents you spawned"),
+                "a session Omega does not hold must not be reported as a \
+                 permission decision: {missing}"
+            );
         }
     }
 

@@ -1,4 +1,7 @@
 use super::*;
+
+/// omega#102. `ExternalAcpSubagentHandle` against a real agent binary.
+mod external_acp_subagent;
 use acp_thread::{
     AgentConnection, AgentModelGroupName, AgentModelList, ClientUserMessageId, PermissionOptions,
     ThreadStatus,
@@ -167,8 +170,11 @@ struct FakeSubagentHandle {
 }
 
 impl SubagentHandle for FakeSubagentHandle {
-    fn executor_label(&self) -> String {
-        "Fake (test)".to_owned()
+    fn executor_disclosure(&self, _cx: &App) -> omega_front_door::ExecutorDisclosure {
+        // A coherent record for a fake executor. `agent_id` is non-empty and
+        // the model is absent rather than empty, so this passes the same
+        // `is_coherent` check the real handles are held to.
+        crate::native_loop_disclosure("Fake Agent", None, None)
     }
 
     fn id(&self) -> acp::SessionId {

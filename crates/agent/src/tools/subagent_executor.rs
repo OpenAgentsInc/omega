@@ -18,7 +18,7 @@
 //! subagent that reports as Codex and is not is the same defect class as an
 //! undisclosed provider handoff.
 
-use omega_front_door::ExecutorClass;
+use omega_front_door::{ExecutorClass, ExecutorDisclosure};
 use std::fmt::Write as _;
 
 /// An agent Omega found on this machine.
@@ -188,6 +188,74 @@ pub fn resolve_subagent_executor(
          model, which is the default.",
         describe_available(installed),
     ))
+}
+
+/// The disclosure record for a subagent that ran as an external ACP agent.
+///
+/// `OMEGA-DELTA-0021` fixed the shape of executor disclosure: a **typed record
+/// that a label renders**, never a label string. That is the binding condition
+/// of the owner's 2026-07-25 identity decision, and it applies to a subagent
+/// for the same reason it applies to a thread — output that appeared inside
+/// Omega and was produced by somebody else is a false attribution claim made
+/// silently, whether the reader is a person or the parent agent.
+///
+/// The first cut of this delta disclosed subagents with a hand-written
+/// sentence, `"Codex (codex-acp, external ACP agent)"`, which is exactly the
+/// stored rendering that shape forbids: it cannot be handed to a signer, it
+/// cannot be re-rendered for a different reader, and nothing stops it drifting
+/// from what actually ran. So the parts are the record, and the sentence is
+/// derived from it.
+///
+/// `provider` and `model` are `None` because they are genuinely **not
+/// disclosed**, not because nobody looked. `AcpConnection` does not implement
+/// `AgentConnection::model_selector`, so an external agent does not tell Omega
+/// which model served the turn — Codex chooses that inside its own loop. An
+/// invented model here would be worse than an absent one: it would read as a
+/// disclosure and be a guess. `ExecutorDisclosure::label` says "model not
+/// disclosed" for exactly this case.
+///
+/// `run_ref` is `None` because only an engine lane has run authority to
+/// reference, and `route` is `None` because the router did not put this
+/// subagent here — the parent named it, in the tool call. Saying "not routed"
+/// is different from claiming a reason nobody recorded.
+#[must_use]
+pub fn external_acp_disclosure(agent_id: &str) -> ExecutorDisclosure {
+    ExecutorDisclosure {
+        class: ExecutorClass::ExternalAcp,
+        agent_id: agent_id.to_owned(),
+        provider: None,
+        model: None,
+        run_ref: None,
+        route: None,
+    }
+}
+
+/// The disclosure record for a subagent that ran on Omega's own loop.
+///
+/// The counterpart to [`external_acp_disclosure`], and the reason a mixed
+/// fan-out is attributable: three results carry three records, and an inherited
+/// one says `native_loop` with Omega's agent id where an external one says
+/// `external_acp` with the agent's.
+///
+/// The model is the **subagent's** model, read from the subagent's own thread,
+/// not the parent's. Those are usually the same and are not always: the
+/// `subagent_model` setting overrides the inherited model for every subagent,
+/// and a record that reported the parent's model would be wrong on exactly the
+/// machine where that setting is set.
+#[must_use]
+pub fn native_loop_disclosure(
+    agent_id: &str,
+    provider: Option<String>,
+    model: Option<String>,
+) -> ExecutorDisclosure {
+    ExecutorDisclosure {
+        class: ExecutorClass::NativeLoop,
+        agent_id: agent_id.to_owned(),
+        provider,
+        model,
+        run_ref: None,
+        route: None,
+    }
 }
 
 /// [`resolve_subagent_executor`] against the agents actually on this machine.
@@ -371,6 +439,125 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Criterion 6. An external subagent discloses **itself**.
+    ///
+    /// The record is coherent on `ExecutorDisclosure`'s own terms, which is the
+    /// check that catches a record built out of missing values: an empty
+    /// `agent_id`, or a `provider` that is `Some("")` because something turned
+    /// an absent value into a present empty one.
+    #[test]
+    fn an_external_subagent_discloses_its_own_executor() {
+        let disclosure = external_acp_disclosure("codex-acp");
+
+        assert_eq!(disclosure.class, ExecutorClass::ExternalAcp);
+        assert_eq!(disclosure.agent_id, "codex-acp");
+        // Not disclosed, and said so rather than invented. `AcpConnection` has
+        // no `model_selector`; Codex picks the model inside its own loop.
+        assert_eq!(disclosure.provider, None);
+        assert_eq!(disclosure.model, None);
+        // No run authority, and the router did not put it here.
+        assert_eq!(disclosure.run_ref, None);
+        assert_eq!(disclosure.route, None);
+        assert!(
+            disclosure.is_coherent(),
+            "an external subagent's record must be coherent: {disclosure:?}"
+        );
+
+        let label = disclosure.label();
+        assert!(label.contains("codex-acp"), "{label}");
+        assert!(
+            label.contains("model not disclosed"),
+            "an undisclosed model must be said, not skipped: {label}"
+        );
+    }
+
+    /// Criterion 6, the failure it exists to prevent. An external subagent must
+    /// never disclose as Omega's own loop.
+    ///
+    /// This is the same law `OMEGA-DELTA-0021` states for threads: only the
+    /// native loop is Omega's own output, so anything else claiming it is
+    /// presenting somebody else's work as Omega's.
+    #[test]
+    fn an_external_subagent_never_discloses_as_the_native_loop() {
+        for agent_id in ["codex-acp", "claude-acp", "cursor"] {
+            let disclosure = external_acp_disclosure(agent_id);
+            assert_ne!(disclosure.class, ExecutorClass::NativeLoop);
+            assert!(
+                !disclosure
+                    .label()
+                    .contains(ExecutorClass::NativeLoop.token()),
+                "`{agent_id}` must not read as the native loop"
+            );
+        }
+    }
+
+    /// Criterion 3 and 4, as an oracle over the records themselves.
+    ///
+    /// One turn, three subagents, two of them Codex and one Claude, and a
+    /// fourth on the parent's own model. Every record must be distinguishable
+    /// from the ones that ran on something else, or the parent cannot attribute
+    /// a result and the whole point of mixing executors is gone.
+    ///
+    /// The two Codex subagents disclose the *same* record on purpose: they are
+    /// the same executor, and attribution is to an executor, not to a spawn.
+    /// What must differ is Codex from Claude, and either from the parent.
+    #[test]
+    fn a_mixed_fan_out_is_attributable_record_by_record() {
+        let first_codex = external_acp_disclosure("codex-acp");
+        let second_codex = external_acp_disclosure("codex-acp");
+        let claude = external_acp_disclosure("claude-acp");
+        let inherited = native_loop_disclosure(
+            "Omega Agent",
+            Some("anthropic".to_owned()),
+            Some("claude-opus-4".to_owned()),
+        );
+
+        assert_eq!(
+            first_codex, second_codex,
+            "two subagents on the same executor disclose the same executor"
+        );
+        assert_ne!(first_codex, claude);
+        assert_ne!(first_codex.class, inherited.class);
+        assert_ne!(claude.class, inherited.class);
+
+        // And the rendered lines differ too, because the line is what a reader
+        // actually compares.
+        let lines = [first_codex.label(), claude.label(), inherited.label()];
+        assert_ne!(lines[0], lines[1]);
+        assert_ne!(lines[0], lines[2]);
+        assert_ne!(lines[1], lines[2]);
+
+        for disclosure in [&first_codex, &claude, &inherited] {
+            assert!(disclosure.is_coherent(), "{disclosure:?}");
+        }
+    }
+
+    /// An inherited subagent discloses the model that actually served it.
+    ///
+    /// `subagent_model` overrides the inherited model for every subagent, so
+    /// "the parent's model" and "the subagent's model" are not the same fact.
+    /// The record must be able to carry the second one.
+    #[test]
+    fn an_inherited_subagent_discloses_its_own_model() {
+        let parent_model = native_loop_disclosure(
+            "Omega Agent",
+            Some("anthropic".to_owned()),
+            Some("claude-opus-4".to_owned()),
+        );
+        let overridden = native_loop_disclosure(
+            "Omega Agent",
+            Some("openai".to_owned()),
+            Some("gpt-5".to_owned()),
+        );
+        assert_ne!(parent_model, overridden);
+        assert!(overridden.label().contains("gpt-5"));
+
+        // A subagent whose model is not known yet says so, and stays coherent.
+        let unknown = native_loop_disclosure("Omega Agent", None, None);
+        assert!(unknown.is_coherent(), "{unknown:?}");
+        assert!(unknown.label().contains("model not disclosed"));
     }
 
     #[test]

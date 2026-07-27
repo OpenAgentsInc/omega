@@ -3375,24 +3375,92 @@ than it sounds, because the harness omega#81's acceptance sentence names —
   Presence is decided once, before anything is created; the connect path does not
   re-derive it, because two sources for one question eventually disagree.
 - **The law: every result names what produced it.** A mixed fan-out the parent
-  cannot attribute is not finished. Each result carries an `executor` label in
-  the JSON the model reads, and the label is asked of the **handle**, not of the
-  request — a label taken from what was asked for would still read "Codex" on a
+  cannot attribute is not finished. Each result carries an `executor` record in
+  the JSON the model reads, and the record is asked of the **handle**, not of the
+  request — a record taken from what was asked for would still read "Codex" on a
   subagent that ran as something else, reporting the intention rather than the
-  fact.
-- **What this does not cover.** No external subagent has been run against a real
-  Codex or Claude binary — the resolution law, the refusals and the wiring are
-  unit- and compile-tested, but the live ACP session, its streaming and its
-  teardown have never executed here, and nothing about this has been seen in a
-  window. `ExecutorDisclosure` in the thread record is not populated for external
-  subagents: they have no native `Thread`, and the disclosure surface belongs to
-  another change. Their transcripts are not readable through
-  `read_subagent_transcript` either — the session lives in the agent server's
-  process, and OMEGA-DELTA-0060's lookup says so rather than implying a bad ID.
+  fact. The *shape* of that record is `OMEGA-DELTA-0101`; the first cut of this
+  delta reported a hand-written sentence instead, which is the thing
+  `OMEGA-DELTA-0021` forbids.
+- **What has now run, and what has not.** The live path is no longer
+  hypothetical: `crates/agent/src/tests/external_acp_subagent.rs` drives
+  `ExternalAcpSubagentHandle` against the real `codex-acp` and `claude-acp`
+  adapters — session creation, the prompt, the stream, the stop reason, the
+  final message and teardown — and runs a mixed fan-out of two Codex and one
+  Claude concurrently. It is `#[gpui::test]` behind the `e2e` feature, because a
+  child process on stdio needs no window:
+  `cargo test -p agent --features e2e --lib external_acp_subagent`.
+  What still has **not** been seen is any of it in a window: the agent panel's
+  subagent card looks the session up in the native connection's thread map, an
+  external subagent is not in it, and that is `crates/agent_ui`'s to fix.
+  Transcripts remain unreadable through `read_subagent_transcript` — the session
+  lives in the agent server's process, and OMEGA-DELTA-0060's lookup says so
+  rather than implying a bad ID.
 - **Enforced by:** `a_named_executor_is_honoured_or_refused_by_name`,
   `only_detected_agents_are_offered`, and
   `every_subagent_result_names_its_executor` in `crates/omega_deltas`; plus the
   suite in `crates/agent/src/tools/subagent_executor.rs`.
+
+### OMEGA-DELTA-0101 — A subagent discloses its executor as a record, not a sentence
+
+- **Upstream behaviour.** Upstream Zed has no executor disclosure at all: a
+  subagent is the parent's own loop, so there is nothing to attribute.
+- **Omega, before this.** `OMEGA-DELTA-0061` gave subagents executors and then
+  disclosed them outside the surface every other executor in Omega discloses
+  through. Each handle returned a hand-written sentence —
+  `"Codex (codex-acp, external ACP agent)"` and
+  `"Omega (native loop, inherited from parent)"` — and the tool put the string
+  in the result. That met "the parent can read something" and failed the
+  acceptance it was written against, which is that each subagent's
+  **`ExecutorDisclosure`** names its own executor.
+- **Why the shape is the point.** `OMEGA-DELTA-0021` fixed disclosure as a typed
+  record that a label renders, never a stored rendering. That is the binding
+  condition of the owner's 2026-07-25 identity decision — the first-party agent
+  does not sign with its own principal *on the condition that* disclosure stays
+  a record — and it is what keeps the decision cheap to reverse: a record of
+  parts can be handed to a signer, a sentence cannot. Two hand-written strings
+  also cannot be compared, cannot be checked for coherence, and one of them
+  rendered the wire token `native loop` that omega#100 had already removed from
+  what a person reads.
+- **What a subagent discloses.**
+  - An external ACP subagent: class `external_acp`, the agent id it connected
+    with, and **no model**. `AcpConnection` does not implement
+    `AgentConnection::model_selector`, so Codex genuinely does not tell Omega
+    which model served the turn. `None` is *not disclosed*; an invented model
+    would read as a disclosure while being a guess.
+  - An inherited subagent: class `native_loop`, Omega's own agent id, and the
+    **subagent's** provider and model — not the parent's. `subagent_model`
+    overrides the inherited model for every subagent, so those are two facts and
+    only the second one is what happened.
+  - Neither carries a `run_ref`, because neither has run authority, and neither
+    carries a `route`, because the router did not put it there — the parent named
+    it in the tool call. Both records satisfy
+    `ExecutorDisclosure::is_coherent`, which is the check a string could not be
+    put to.
+- **What reaches the parent.** `SubagentExecutorReport`, a projection of the
+  record onto the wire: `class`, `agent_id`, `provider`, `model`, and no
+  rendered line under any name. The parent reading it is a model, so it gets the
+  parts rather than the sentence a window renders. A result written by the older
+  build holds a string there; it reads as *not disclosed* rather than being
+  parsed into an invented class, and it must not fail to load — the output is an
+  untagged enum, so a field that fails takes the whole tool call with it.
+- **What this does not cover.** The disclosure reaches the **parent**, which is
+  the reader the acceptance is about — a model, reading a tool result. It does
+  not reach the agent panel's subagent card: that looks the session up in the
+  native connection's thread map, an external subagent is not in it, and
+  `crates/agent_ui` is where that would be fixed. So nobody has *seen* an
+  external subagent disclose itself in a window, and the record being right is
+  not the same fact as the line being drawn.
+- **Enforced by:** `a_subagents_executor_is_disclosed_as_a_record` and
+  `a_session_with_no_transcript_names_both_reasons` in `crates/omega_deltas`;
+  plus `an_external_subagent_discloses_its_own_executor`,
+  `an_external_subagent_never_discloses_as_the_native_loop`,
+  `a_mixed_fan_out_is_attributable_record_by_record` and
+  `an_inherited_subagent_discloses_its_own_model` in
+  `crates/agent/src/tools/subagent_executor.rs`, and the result-shape suite in
+  `crates/agent/src/tools/spawn_agent_tool.rs`. Against real binaries, the
+  record is asked of the handle after a live turn in
+  `crates/agent/src/tests/external_acp_subagent.rs`.
 ### OMEGA-DELTA-0092 — The Exo lane is derived from the install, not written by hand
 
 - **Upstream Zed:** an external agent is a `agent_servers` entry someone

@@ -48,6 +48,7 @@ use language_model::{
     LanguageModelToolUse, LanguageModelToolUseId, MessageContent, Role, SelectedModel, Speed,
     StopReason, TokenUsage, ZED_CLOUD_PROVIDER_ID,
 };
+use omega_front_door::ExecutorDisclosure;
 use project::{Project, trusted_worktrees::TrustedWorktrees};
 use prompt_store::ProjectContext;
 use schemars::{JsonSchema, Schema};
@@ -820,9 +821,18 @@ pub trait SubagentHandle {
     /// A mixed fan-out where the parent cannot tell which result came from
     /// which executor is not finished, so every handle must be able to say
     /// what it is. This is the handle's own answer, not the request that
-    /// produced it: if the two could differ, the label would be a claim rather
-    /// than a report.
-    fn executor_label(&self) -> String;
+    /// produced it: if the two could differ, the disclosure would be a claim
+    /// rather than a report.
+    ///
+    /// The answer is [`ExecutorDisclosure`] — the same typed record every other
+    /// executor in Omega discloses through, and not a sentence. That shape is
+    /// `OMEGA-DELTA-0021`'s law and the binding condition of the owner's
+    /// identity decision: a record of parts can be re-rendered for a different
+    /// reader or handed to a signer later, and a stored rendering cannot. It
+    /// also makes the record checkable — [`ExecutorDisclosure::is_coherent`]
+    /// can reject a record built out of missing values, and no assertion at all
+    /// can be made about a hand-written string.
+    fn executor_disclosure(&self, cx: &App) -> ExecutorDisclosure;
 }
 
 pub trait ThreadEnvironment {

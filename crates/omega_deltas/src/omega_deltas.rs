@@ -94,6 +94,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0094",
     "OMEGA-DELTA-0095",
     "OMEGA-DELTA-0100",
+    "OMEGA-DELTA-0101",
     "OMEGA-DELTA-0102",
     "OMEGA-DELTA-0103",
     "OMEGA-DELTA-0105",
@@ -358,6 +359,32 @@ pub const SUBAGENT_EXTERNAL_HANDLE_PATH: &str = "crates/agent/src/agent.rs";
 /// "could not honour this, ran something else", so a new variant must fail by
 /// existing rather than pass by not being on a denylist.
 pub const SUBAGENT_EXECUTOR_OUTCOMES: &[&str] = &["Resolved", "Refused"];
+
+/// OMEGA-DELTA-0101. Every field the wire record for a subagent's executor is
+/// allowed to have, in declaration order.
+///
+/// Asserted **exactly**, for the reason `EXECUTOR_DISCLOSURE_FIELDS` gives: a
+/// denylist on the word `label` passes for a field called `line`, `text`,
+/// `summary`, `rendered`, or `caption`. Each of these is a part of
+/// `ExecutorDisclosure`; a rendered sentence under any name is the shape
+/// `OMEGA-DELTA-0021` forbids, and it is what the first cut of
+/// `OMEGA-DELTA-0061` shipped.
+pub const SUBAGENT_EXECUTOR_REPORT_FIELDS: &[&str] = &["class", "agent_id", "provider", "model"];
+
+/// OMEGA-DELTA-0101. The two disclosure records a subagent can have, and the
+/// class each is fixed to.
+///
+/// A closed pair. `MAX_SUBAGENT_DEPTH` is 1 and neither kind of subagent has
+/// run authority, so `EngineLane` is not a third answer here — a subagent that
+/// claimed one would be claiming a run reference nothing issued.
+pub const SUBAGENT_DISCLOSURE_CONSTRUCTORS: &[(&str, &str)] = &[
+    ("external_acp_disclosure", "ExecutorClass::ExternalAcp"),
+    ("native_loop_disclosure", "ExecutorClass::NativeLoop"),
+];
+
+/// OMEGA-DELTA-0101. Where the sentence for a session Omega holds no
+/// transcript for is written.
+pub const SUBAGENT_MISSING_TRANSCRIPT_FN: &str = "pub fn no_transcript_available";
 
 /// OMEGA-DELTA-0060. The tool that reads a subagent's transcript.
 pub const SUBAGENT_TRANSCRIPT_TOOL_PATH: &str =
@@ -11248,10 +11275,11 @@ mod tests {
         let registration = std::fs::read_to_string(&registration_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", registration_path.display()));
         assert!(
-            registration.contains("fn executor_label(&self) -> String;"),
+            registration.contains("fn executor_disclosure(&self, cx: &App) -> ExecutorDisclosure;"),
             "OMEGA-DELTA-0061: {} no longer requires a subagent handle to say \
-             what ran it. Without it a mixed fan-out is three anonymous \
-             answers.",
+             what ran it, as the typed record. Without it a mixed fan-out is \
+             three anonymous answers; with a string instead of a record it is \
+             three claims nothing can check.",
             registration_path.display()
         );
 
@@ -11261,9 +11289,9 @@ mod tests {
 
         // Taken from the handle, so it reports the fact and not the request.
         assert!(
-            tool.contains("subagent.executor_label()"),
+            tool.contains("subagent.executor_disclosure(cx)"),
             "OMEGA-DELTA-0061: {} no longer asks the handle what ran the \
-             subagent. A label derived from the request reports the intention, \
+             subagent. A record derived from the request reports the intention, \
              not what happened.",
             tool_path.display()
         );
@@ -11285,24 +11313,230 @@ mod tests {
         let handle = std::fs::read_to_string(&handle_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", handle_path.display()));
         // The two handles must not report the same thing, or attribution is
-        // uniform and therefore useless.
+        // uniform and therefore useless. Each builds its record from its own
+        // fields: the external handle from the id it connected with, the
+        // native one from the subagent's own model.
+        //
+        // Whitespace-insensitive: `cargo fmt` wraps these calls, and a check
+        // pinned to a single-line form would fail on formatting rather than on
+        // behaviour.
+        let compact_handle = without_whitespace(&handle);
         assert!(
-            handle.contains(r#""Omega (native loop, inherited from parent)""#),
-            "OMEGA-DELTA-0061: {} no longer distinguishes an inherited subagent \
-             in its own label.",
+            compact_handle.contains(&without_whitespace(
+                "crate::external_acp_disclosure(&self.agent_id)"
+            )),
+            "OMEGA-DELTA-0061: {} no longer discloses the external agent from \
+             the id its own handle holds. Two subagents given different \
+             executors must not report the same thing.",
             handle_path.display()
         );
-        // Whitespace-insensitive: `cargo fmt` wraps this `format!`, and a check
-        // pinned to the single-line form would fail on formatting rather than
-        // on behaviour.
         assert!(
-            without_whitespace(&handle).contains(&without_whitespace(
-                r#"format!("{} ({}, external ACP agent)", self.agent_name, self.agent_id)"#
+            compact_handle.contains(&without_whitespace(
+                "crate::native_loop_disclosure(&OMEGA_AGENT_ID.0, provider, model)"
             )),
-            "OMEGA-DELTA-0061: {} no longer names the external agent in its own \
-             label. Two subagents given different executors must not report the \
-             same thing.",
+            "OMEGA-DELTA-0061: {} no longer distinguishes an inherited subagent \
+             from an external one in its own record.",
             handle_path.display()
+        );
+    }
+    // ------------------------------------------------------ OMEGA-DELTA-0101
+
+    /// OMEGA-DELTA-0101. A subagent's executor is a record, never a sentence.
+    ///
+    /// `OMEGA-DELTA-0021` fixed executor disclosure as a typed record that a
+    /// label renders. That is not a style preference: it is the binding
+    /// condition of the owner's 2026-07-25 identity decision, and it is what
+    /// keeps that decision cheap to reverse — a record of parts can be handed
+    /// to a signer later, a rendered line cannot.
+    ///
+    /// `OMEGA-DELTA-0061` disclosed subagents outside it, with two hand-written
+    /// sentences, `"Codex (codex-acp, external ACP agent)"` and
+    /// `"Omega (native loop, inherited from parent)"`. Nothing could compare
+    /// them, nothing could check them for coherence, and one of them rendered a
+    /// wire token that omega#100 had already removed from what a person reads.
+    /// This check is the one that stops disclosure being re-invented per
+    /// surface.
+    #[test]
+    fn a_subagents_executor_is_disclosed_as_a_record() {
+        let executor_path = repository_path(SUBAGENT_EXECUTOR_PATH);
+        let executor = std::fs::read_to_string(&executor_path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", executor_path.display()));
+
+        // Both constructors exist, and each is pinned to its class. A subagent
+        // that could pick its own class could pick the first-party one.
+        for (constructor, class) in SUBAGENT_DISCLOSURE_CONSTRUCTORS {
+            let signature = format!("pub fn {constructor}");
+            let start = executor.find(&signature).unwrap_or_else(|| {
+                panic!(
+                    "OMEGA-DELTA-0101: {} no longer builds a `{constructor}` \
+                     record. Both kinds of subagent must disclose through the \
+                     same typed record, or the one without it discloses through \
+                     a string.",
+                    executor_path.display()
+                )
+            });
+            let body_end = executor[start..]
+                .find("\n}")
+                .map_or(executor.len(), |offset| start + offset);
+            let body = &executor[start..body_end];
+            assert!(
+                body.contains(class),
+                "OMEGA-DELTA-0101: `{constructor}` in {} no longer fixes its \
+                 class to `{class}`. A subagent that can choose its own class \
+                 can claim the native loop, which is the first-party claim.",
+                executor_path.display()
+            );
+        }
+
+        // The external record never fabricates a model. `AcpConnection` has no
+        // `model_selector`, so anything but `None` here would be a guess
+        // presented as a disclosure.
+        let external_start = executor
+            .find("pub fn external_acp_disclosure")
+            .expect("checked above");
+        let external_end = executor[external_start..]
+            .find("\n}")
+            .map_or(executor.len(), |offset| external_start + offset);
+        let external = without_whitespace(&executor[external_start..external_end]);
+        for absent in ["provider:None", "model:None", "run_ref:None", "route:None"] {
+            assert!(
+                external.contains(absent),
+                "OMEGA-DELTA-0101: the external subagent record in {} no longer \
+                 leaves `{absent}`. An external ACP agent does not tell Omega \
+                 which model served the turn, and an invented one reads as a \
+                 disclosure while being a guess.",
+                executor_path.display()
+            );
+        }
+
+        // And the wire record the parent reads holds parts, never a rendering.
+        let tool_path = repository_path(SUBAGENT_SPAWN_TOOL_PATH);
+        let tool = std::fs::read_to_string(&tool_path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", tool_path.display()));
+
+        let fields = struct_fields(&tool, "SubagentExecutorReport");
+        assert!(
+            !fields.is_empty(),
+            "OMEGA-DELTA-0101: no `SubagentExecutorReport` struct found in {}. \
+             A check that reads no fields passes vacuously.",
+            tool_path.display()
+        );
+        let declared: Vec<&str> = fields.iter().map(|(name, _)| name.as_str()).collect();
+        assert_eq!(
+            declared,
+            SUBAGENT_EXECUTOR_REPORT_FIELDS,
+            "OMEGA-DELTA-0101: the wire record in {} holds different parts than \
+             `SUBAGENT_EXECUTOR_REPORT_FIELDS` declares. Every field must be a \
+             part of `ExecutorDisclosure`; a rendered line under any name — \
+             `label`, `line`, `text`, `summary` — is the shape OMEGA-DELTA-0021 \
+             forbids.",
+            tool_path.display()
+        );
+
+        // Projected from the record, so there is one source for what ran.
+        assert!(
+            without_whitespace(&tool).contains(&without_whitespace(
+                "impl From<&ExecutorDisclosure> for SubagentExecutorReport"
+            )),
+            "OMEGA-DELTA-0101: {} no longer derives the reported record from \
+             `ExecutorDisclosure`. A second way to build it is a second answer \
+             to what ran.",
+            tool_path.display()
+        );
+        // No struct literal anywhere. The declaration and the `From` impl are
+        // the two legitimate places the name is followed by a brace, so they
+        // are removed by name first; anything left is a report built by hand,
+        // beside the projection rather than out of it, and a hand-built one can
+        // disagree with the executor.
+        let literals = tool
+            .replace("pub struct SubagentExecutorReport {", "")
+            .replace(
+                "impl From<&ExecutorDisclosure> for SubagentExecutorReport {",
+                "",
+            )
+            .matches("SubagentExecutorReport {")
+            .count();
+        assert_eq!(
+            literals,
+            0,
+            "OMEGA-DELTA-0101: {} builds a `SubagentExecutorReport` by hand \
+             {literals} time(s). Every report must come from a disclosure \
+             record through the `From` impl, or one of them can disagree with \
+             the executor.",
+            tool_path.display()
+        );
+    }
+
+    /// OMEGA-DELTA-0101. A session Omega holds no transcript for says so
+    /// without guessing which kind it was.
+    ///
+    /// `OMEGA-DELTA-0061` gave "not in the session map" a second meaning: an
+    /// external ACP subagent's transcript lives in the agent server's own
+    /// process, so a perfectly good session ID now has no transcript here. The
+    /// old sentence — "check the ID you were given" — sends that caller hunting
+    /// a bug in its own bookkeeping.
+    ///
+    /// The replacement names both possibilities and asserts neither, and the
+    /// disjunction is the correct shape rather than a hedge. A definite answer
+    /// would need Omega to remember which sessions it opened externally, and an
+    /// external subagent has no `DbThread`, so that memory would not survive a
+    /// reload: after a restart it would confidently answer "not external" about
+    /// one that is. `OMEGA-DELTA-0061`'s own rule against two sources for one
+    /// question is what settles it.
+    #[test]
+    fn a_session_with_no_transcript_names_both_reasons() {
+        let tool_path = repository_path(SUBAGENT_TRANSCRIPT_TOOL_PATH);
+        let tool = std::fs::read_to_string(&tool_path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", tool_path.display()));
+
+        let start = tool
+            .find(SUBAGENT_MISSING_TRANSCRIPT_FN)
+            .unwrap_or_else(|| {
+                panic!(
+                    "OMEGA-DELTA-0101: {} no longer owns the sentence for a session \
+                 it holds no transcript for. It lives beside `TranscriptAccess` \
+                 so it can be read and tested without a live agent.",
+                    tool_path.display()
+                )
+            });
+        // Scoped to the function body, not to the file. The doc comment above
+        // it explains the two cases and therefore names every token this check
+        // looks for, so a file-wide `contains` would pass on the explanation
+        // while the sentence itself said something else — which is exactly what
+        // it did on the first attempt.
+        let body_end = tool[start..]
+            .find("\n}")
+            .map_or(tool.len(), |offset| start + offset);
+        let sentence = &tool[start..body_end];
+        for part in [
+            // The external case, so a correct ID does not read as a wrong one.
+            "external executor",
+            "codex-acp",
+            // What the parent still has.
+            "final message",
+            // And the original case, which must not be dropped.
+            "check the ID",
+        ] {
+            assert!(
+                sentence.contains(part),
+                "OMEGA-DELTA-0101: the missing-transcript sentence in {} no \
+                 longer says `{part}`. It has to cover a correct ID for an \
+                 external subagent *and* a genuinely wrong one, because it \
+                 cannot tell them apart.",
+                tool_path.display()
+            );
+        }
+
+        // The environment calls it rather than writing a second sentence.
+        let environment_path = repository_path(SUBAGENT_TRANSCRIPT_ENVIRONMENT_PATH);
+        let environment = std::fs::read_to_string(&environment_path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", environment_path.display()));
+        assert!(
+            environment.contains("crate::no_transcript_available(&session_id)"),
+            "OMEGA-DELTA-0101: {} no longer uses the tool's own sentence for a \
+             missing transcript. A second copy is a second sentence that can \
+             drift.",
+            environment_path.display()
         );
     }
     // ------------------------------------------------------ OMEGA-DELTA-0094
