@@ -139,6 +139,7 @@ members = [
     "crates/mistral",
     "crates/multi_buffer",
     "crates/net",
+    "crates/network_sniffer",
     "crates/node_runtime",
     "crates/notifications",
     "crates/oauth_callback_server",
