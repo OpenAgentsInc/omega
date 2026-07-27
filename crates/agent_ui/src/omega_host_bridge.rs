@@ -46,6 +46,7 @@ const MAX_DEVICE_RUNS: usize = 64;
 const MAX_DEVICE_LABEL_BYTES: usize = 256;
 const DEVICE_SNAPSHOT_FRAME_RESERVE_BYTES: usize = 1_024;
 const DEVICE_TRANSCRIPT_PUBLISH_INTERVAL: Duration = Duration::from_millis(250);
+const ISSUE31_AGENT_COMMAND_POLL_INTERVAL: Duration = Duration::from_millis(500);
 const CORRELATION_SCHEMA: &str = "openagents.omega.full_auto_host_correlation.v1";
 const CORRELATION_FILE: &str = "full-auto-host-correlation.json";
 
@@ -503,12 +504,15 @@ async fn sarah_request(
                     });
                 }
                 let conversation = Arc::new(Mutex::new(conversation));
-                let mut state = state.borrow_mut();
-                state.sarah_conversation = Some(conversation.clone());
-                if let Some((handle, _, _, _, _, _, journal)) = device_bridge {
-                    state.device_bridge = Some(handle);
-                    state.device_projection = Some(journal);
+                {
+                    let mut state = state.borrow_mut();
+                    state.sarah_conversation = Some(conversation.clone());
+                    if let Some((handle, _, _, _, _, _, journal)) = device_bridge {
+                        state.device_bridge = Some(handle);
+                        state.device_projection = Some(journal);
+                    }
                 }
+                start_issue31_agent_command_pump(conversation.clone(), state.clone(), cx);
                 conversation
             }
             Err(error) => return Err(error),
@@ -532,6 +536,115 @@ async fn sarah_request(
             .map_err(sarah_host_error)
     })
     .await
+}
+
+fn start_issue31_agent_command_pump(
+    conversation: Arc<Mutex<SarahConversationClient>>,
+    state: Rc<RefCell<HostBridgeState>>,
+    cx: &mut AsyncApp,
+) {
+    cx.spawn(async move |cx| {
+        loop {
+            cx.background_executor()
+                .timer(ISSUE31_AGENT_COMMAND_POLL_INTERVAL)
+                .await;
+            let conversation_for_sync = conversation.clone();
+            let pending = cx
+                .background_spawn(async move {
+                    let mut conversation = conversation_for_sync.lock().map_err(|_| {
+                        anyhow::anyhow!("Sarah Nostr transport state is unavailable")
+                    })?;
+                    conversation.sync_issue31_host()?;
+                    anyhow::Ok(conversation.pending_agent_thread_commands())
+                })
+                .await;
+            let pending = match pending {
+                Ok(pending) => pending,
+                Err(error) => {
+                    log::warn!("Issue31 mobile command sync failed: {error:#}");
+                    continue;
+                }
+            };
+            for command in pending {
+                let admitted = cx.update(|cx| {
+                    admit_issue31_agent_thread_command(&state, &command, cx)
+                });
+                if let Err(error) = admitted {
+                    log::warn!(
+                        "Issue31 mobile command {} is waiting for its thread: {error:#}",
+                        command.idempotency_ref
+                    );
+                    continue;
+                }
+                let conversation_for_completion = conversation.clone();
+                let idempotency_ref = command.idempotency_ref.clone();
+                if let Err(error) = cx
+                    .background_spawn(async move {
+                        let mut conversation =
+                            conversation_for_completion.lock().map_err(|_| {
+                                anyhow::anyhow!("Sarah Nostr transport state is unavailable")
+                            })?;
+                        conversation.complete_agent_thread_command(&idempotency_ref)?;
+                        anyhow::Ok(())
+                    })
+                    .await
+                {
+                    log::error!(
+                        "Issue31 mobile command {} was admitted but not durably completed: {error:#}",
+                        command.idempotency_ref
+                    );
+                }
+            }
+        }
+    })
+    .detach();
+}
+
+fn admit_issue31_agent_thread_command(
+    state: &Rc<RefCell<HostBridgeState>>,
+    command: &omega_effectd::Issue31PendingAgentThreadCommand,
+    cx: &mut App,
+) -> anyhow::Result<()> {
+    let thread_id = ThreadId::from_key_string(&command.thread_ref)?;
+    let binding = state
+        .borrow()
+        .workspace
+        .clone()
+        .ok_or_else(|| anyhow::anyhow!("no Omega workspace is bound"))?;
+    let workspace = binding
+        .workspace
+        .upgrade()
+        .ok_or_else(|| anyhow::anyhow!("the bound Omega workspace was closed"))?;
+    binding
+        .window
+        .update(cx, |_root, window, cx| {
+            let panel = workspace
+                .read(cx)
+                .panel::<AgentPanel>(cx)
+                .ok_or_else(|| anyhow::anyhow!("the Agent panel is unavailable"))?;
+            let conversation = panel
+                .read(cx)
+                .conversation_view_for_id(&thread_id, cx)
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("the target Agent thread is not loaded"))?;
+            let thread_view = conversation
+                .read(cx)
+                .root_thread_view()
+                .ok_or_else(|| anyhow::anyhow!("the target Agent thread is still connecting"))?;
+            thread_view
+                .update(cx, |thread_view, cx| {
+                    thread_view.admit_issue31_agent_thread_message(
+                        &command.text,
+                        command.disposition,
+                        window,
+                        cx,
+                    )
+                })
+                .map_err(anyhow::Error::msg)?;
+            publish_device_thread(state, &command.thread_ref, cx)?;
+            anyhow::Ok(())
+        })
+        .map_err(|error| anyhow::anyhow!("the Omega workspace window is unavailable: {error}"))?
 }
 
 type DeviceBridgeStartup = (

@@ -1746,6 +1746,40 @@ impl ThreadView {
         self.send_content(contents_task, false, window, cx);
     }
 
+    pub fn admit_issue31_agent_thread_message(
+        &mut self,
+        text: &str,
+        disposition: omega_effectd::Issue31AgentThreadDisposition,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<String, String> {
+        let text = text.trim();
+        if text.is_empty() || text.len() > 12_000 {
+            return Err("The mobile command text is outside its admitted bounds.".into());
+        }
+        if self.is_loading_contents {
+            return Err("The thread is still admitting another message.".into());
+        }
+        let content = vec![acp::ContentBlock::Text(acp::TextContent::new(text))];
+        if self.thread.read(cx).status() == ThreadStatus::Idle {
+            self.send_content(
+                Task::ready(Ok(Some((content, Vec::new())))),
+                false,
+                window,
+                cx,
+            );
+            return Ok("sent".into());
+        }
+        self.add_to_queue_with_steer(
+            content,
+            Vec::new(),
+            disposition == omega_effectd::Issue31AgentThreadDisposition::Steer,
+            window,
+            cx,
+        );
+        Ok(self.omega_send_disposition(cx).phrase())
+    }
+
     pub fn send_content(
         &mut self,
         contents_task: Task<anyhow::Result<Option<(Vec<acp::ContentBlock>, Vec<Entity<Buffer>>)>>>,
@@ -2204,6 +2238,17 @@ impl ThreadView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.add_to_queue_with_steer(content, tracked_buffers, false, window, cx);
+    }
+
+    fn add_to_queue_with_steer(
+        &mut self,
+        content: Vec<acp::ContentBlock>,
+        tracked_buffers: Vec<Entity<Buffer>>,
+        steer: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         // The ID must be allocated up front so the editor event subscription
         // can capture it before the entry (which owns the subscription) exists.
         let id = self.message_queue.next_id();
@@ -2237,7 +2282,7 @@ impl ThreadView {
             id,
             content,
             tracked_buffers,
-            steer: false,
+            steer,
             editor,
             _subscription: subscription,
         });

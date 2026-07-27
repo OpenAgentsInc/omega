@@ -1057,6 +1057,7 @@ pub struct SarahConversationClient {
     run_state: String,
     message_seq: u64,
     command_results: BTreeMap<String, (String, Value)>,
+    pending_agent_thread_commands: BTreeMap<String, Issue31PendingAgentThreadCommand>,
     last_gap_state: GapState,
     last_confirmed_cursor: Option<String>,
     issue31_host: Option<Issue31HostController>,
@@ -1130,11 +1131,22 @@ struct DurableIssue31HostState {
     provider_handoffs: Issue31ProviderHandoffLedger,
     command_results: BTreeMap<String, (String, Value)>,
     #[serde(default)]
+    pending_agent_thread_commands: BTreeMap<String, Issue31PendingAgentThreadCommand>,
+    #[serde(default)]
     active_turn_ref: Option<String>,
     #[serde(default = "default_run_state")]
     run_state: String,
     #[serde(default)]
     message_seq: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Issue31PendingAgentThreadCommand {
+    pub idempotency_ref: String,
+    pub thread_ref: String,
+    pub text: String,
+    pub disposition: crate::Issue31AgentThreadDisposition,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -1166,6 +1178,7 @@ impl SarahConversationClient {
             run_state: "idle".to_string(),
             message_seq: 0,
             command_results: BTreeMap::new(),
+            pending_agent_thread_commands: BTreeMap::new(),
             last_gap_state: GapState::None,
             last_confirmed_cursor: None,
             issue31_host: None,
@@ -1282,6 +1295,10 @@ impl SarahConversationClient {
             .as_ref()
             .map(|persisted| persisted.command_results.clone())
             .unwrap_or_default();
+        let pending_agent_thread_commands = persisted
+            .as_ref()
+            .map(|persisted| persisted.pending_agent_thread_commands.clone())
+            .unwrap_or_default();
         // omega#91: a handoff that was in flight when the last host process
         // ended is settled here, at load, before anything else can read the
         // ledger. The isolated provider home and the login it was driving died
@@ -1336,6 +1353,7 @@ impl SarahConversationClient {
             run_state,
             message_seq,
             command_results,
+            pending_agent_thread_commands,
             last_gap_state: GapState::None,
             last_confirmed_cursor: None,
             issue31_host: Some(issue31_host),
@@ -1653,6 +1671,28 @@ impl SarahConversationClient {
         self.push_device_pairing_events()?;
         let persistence = self.persist_issue31_host_state();
         finish_durable_operation(result, persistence)
+    }
+
+    pub fn pending_agent_thread_commands(&self) -> Vec<Issue31PendingAgentThreadCommand> {
+        self.pending_agent_thread_commands
+            .values()
+            .cloned()
+            .collect()
+    }
+
+    pub fn complete_agent_thread_command(
+        &mut self,
+        idempotency_ref: &str,
+    ) -> Result<(), SarahConversationError> {
+        let Some(command) = self.pending_agent_thread_commands.remove(idempotency_ref) else {
+            return Ok(());
+        };
+        if let Err(error) = self.persist_issue31_host_state() {
+            self.pending_agent_thread_commands
+                .insert(idempotency_ref.to_string(), command);
+            return Err(error);
+        }
+        Ok(())
     }
 
     fn pull_device_pairing_events(&mut self) -> Result<(), SarahConversationError> {
@@ -2443,6 +2483,7 @@ impl SarahConversationClient {
                 host_adjunct_emissions: self.issue31_host_adjunct_emissions.clone(),
                 provider_handoffs: self.issue31_provider_handoffs.clone(),
                 command_results: self.command_results.clone(),
+                pending_agent_thread_commands: self.pending_agent_thread_commands.clone(),
                 active_turn_ref: self.active_turn_ref.clone(),
                 run_state: self.run_state.clone(),
                 message_seq: self.message_seq,
@@ -2638,6 +2679,31 @@ impl SarahConversationClient {
                     Err(_) => failed("reason.omega.action_failed"),
                 }
             }
+            Issue31CommandArguments::AgentThreadMessage {
+                thread_ref,
+                text,
+                disposition,
+                ..
+            } => {
+                if self.pending_agent_thread_commands.len() >= MAX_COMMAND_RESULTS
+                    && !self
+                        .pending_agent_thread_commands
+                        .contains_key(idempotency_ref)
+                {
+                    unavailable("reason.omega.command_capacity")
+                } else {
+                    self.pending_agent_thread_commands.insert(
+                        idempotency_ref.to_string(),
+                        Issue31PendingAgentThreadCommand {
+                            idempotency_ref: idempotency_ref.to_string(),
+                            thread_ref: thread_ref.clone(),
+                            text: text.clone(),
+                            disposition: *disposition,
+                        },
+                    );
+                    accepted(None)
+                }
+            }
             Issue31CommandArguments::SendMessage { .. }
             | Issue31CommandArguments::InterruptTurn { .. } => Issue31CommandExecutionV2 {
                 status: Issue31CommandHandlingStatus::Refused,
@@ -2807,7 +2873,8 @@ impl SarahConversationClient {
                 ))
             }
             Issue31CommandArguments::SendMessage { .. }
-            | Issue31CommandArguments::InterruptTurn { .. } => Err(
+            | Issue31CommandArguments::InterruptTurn { .. }
+            | Issue31CommandArguments::AgentThreadMessage { .. } => Err(
                 SarahConversationError::InvalidRequest("not an owner-state action".into()),
             ),
         }
@@ -4248,6 +4315,7 @@ fn load_issue31_host_state(
             .matches_configuration(expected_configuration)
         || state.discovery_generation.is_some() != state.discovery_expires_at.is_some()
         || state.command_results.len() > MAX_COMMAND_RESULTS
+        || state.pending_agent_thread_commands.len() > MAX_COMMAND_RESULTS
         || state.relay_acknowledgements.len() > MAX_RELAY_ACKNOWLEDGEMENTS
         || state.quarantined_events.len() > MAX_QUARANTINED_ISSUE31_EVENTS
         || state.host_adjunct_emissions.len() > MAX_QUARANTINED_ISSUE31_EVENTS
@@ -4763,6 +4831,37 @@ mod tests {
         );
         assert_eq!(SARAH_EVENT_ROOM_EVENT, "sarah_room_event");
         assert_eq!(SARAH_EVENT_ROOM_STATE, "sarah_room_state");
+    }
+
+    #[test]
+    fn accepted_agent_thread_command_waits_durably_for_the_ui() {
+        let mut client = client();
+        let execution = client.execute_issue31_action_v2(
+            &Issue31CommandArguments::AgentThreadMessage {
+                action_ref: crate::ISSUE31_ACTION_AGENT_THREAD_MESSAGE.into(),
+                thread_ref: "63f9e587-cc09-4ba7-9b22-70a2ce026ead".into(),
+                text: "Steer with the mobile context".into(),
+                disposition: crate::Issue31AgentThreadDisposition::Steer,
+            },
+            "idempotency.issue31.agent_thread_message:test",
+            "grant.omega.device_1",
+            &"2".repeat(64),
+            1,
+        );
+        assert_eq!(execution.status, Issue31CommandHandlingStatus::Accepted);
+        assert_eq!(
+            client.pending_agent_thread_commands(),
+            vec![Issue31PendingAgentThreadCommand {
+                idempotency_ref: "idempotency.issue31.agent_thread_message:test".into(),
+                thread_ref: "63f9e587-cc09-4ba7-9b22-70a2ce026ead".into(),
+                text: "Steer with the mobile context".into(),
+                disposition: crate::Issue31AgentThreadDisposition::Steer,
+            }]
+        );
+        client
+            .complete_agent_thread_command("idempotency.issue31.agent_thread_message:test")
+            .expect("complete command");
+        assert!(client.pending_agent_thread_commands().is_empty());
     }
 
     #[test]
@@ -6824,6 +6923,7 @@ mod tests {
             )]),
             host_adjunct_emissions: BTreeMap::new(),
             provider_handoffs: Issue31ProviderHandoffLedger::default(),
+            pending_agent_thread_commands: BTreeMap::new(),
             command_results: BTreeMap::from([(
                 "idempotency.restart.admin".into(),
                 ("fingerprint".into(), json!({ "eventId": "1".repeat(64) })),

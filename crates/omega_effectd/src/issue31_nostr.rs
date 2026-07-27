@@ -37,6 +37,7 @@ pub const ISSUE31_PRIVATE_SEAL_KIND: u16 = 13;
 pub const ISSUE31_PRIVATE_GIFT_WRAP_KIND: u16 = 1_059;
 pub const ISSUE31_ACTION_SEND_MESSAGE: &str = "action.issue31.sarah.send";
 pub const ISSUE31_ACTION_INTERRUPT_TURN: &str = "action.issue31.sarah.interrupt";
+pub const ISSUE31_ACTION_AGENT_THREAD_MESSAGE: &str = "action.issue31.omega.agent_thread_message";
 pub const ISSUE31_ACTION_ADVANCE_READ_STATE: &str = "action.issue31.read_state.advance";
 pub const ISSUE31_ACTION_CREATE_REMINDER: &str = "action.issue31.reminder.create";
 pub const ISSUE31_ACTION_CHANGE_REMINDER: &str = "action.issue31.reminder.change";
@@ -1291,6 +1292,14 @@ pub enum Issue31CommandArguments {
         #[serde(rename = "turnRef")]
         turn_ref: String,
     },
+    AgentThreadMessage {
+        #[serde(rename = "actionRef")]
+        action_ref: String,
+        #[serde(rename = "threadRef")]
+        thread_ref: String,
+        text: String,
+        disposition: Issue31AgentThreadDisposition,
+    },
     ReadStatePatch {
         #[serde(rename = "actionRef")]
         action_ref: String,
@@ -1358,6 +1367,7 @@ impl Issue31CommandArguments {
         match self {
             Self::SendMessage { action_ref, .. }
             | Self::InterruptTurn { action_ref, .. }
+            | Self::AgentThreadMessage { action_ref, .. }
             | Self::ReadStatePatch { action_ref, .. }
             | Self::ReminderCreate { action_ref, .. }
             | Self::ReminderChange { action_ref, .. }
@@ -1393,6 +1403,18 @@ impl Issue31CommandArguments {
             } if action_ref == ISSUE31_ACTION_INTERRUPT_TURN
                 && valid_conversation_tag(conversation)
                 && valid_ref(turn_ref) =>
+            {
+                Ok(())
+            }
+            Self::AgentThreadMessage {
+                action_ref,
+                thread_ref,
+                text,
+                ..
+            } if action_ref == ISSUE31_ACTION_AGENT_THREAD_MESSAGE
+                && valid_agent_thread_ref(thread_ref)
+                && !text.is_empty()
+                && text.len() <= 12_000 =>
             {
                 Ok(())
             }
@@ -1454,6 +1476,13 @@ impl Issue31CommandArguments {
             )),
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Issue31AgentThreadDisposition {
+    Enqueue,
+    Steer,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -3508,6 +3537,7 @@ fn required_scope(action_ref: &str) -> Option<Issue31PairingScope> {
         "action.omega.send_message" | ISSUE31_ACTION_SEND_MESSAGE => {
             Some(Issue31PairingScope::SendMessage)
         }
+        ISSUE31_ACTION_AGENT_THREAD_MESSAGE => Some(Issue31PairingScope::SendMessage),
         "action.omega.interrupt_turn" | ISSUE31_ACTION_INTERRUPT_TURN => {
             Some(Issue31PairingScope::InterruptTurn)
         }
@@ -3977,6 +4007,16 @@ fn valid_ref(value: &str) -> bool {
     })
 }
 
+fn valid_agent_thread_ref(value: &str) -> bool {
+    if value.len() != 36 {
+        return valid_ref(value);
+    }
+    value.bytes().enumerate().all(|(index, byte)| match index {
+        8 | 13 | 18 | 23 => byte == b'-',
+        _ => byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'),
+    })
+}
+
 pub fn is_issue31_public_ref(value: &str) -> bool {
     valid_ref(value)
 }
@@ -4035,6 +4075,32 @@ mod tests {
     use std::cell::Cell;
 
     use super::*;
+
+    #[test]
+    fn agent_thread_command_v2_preserves_enqueue_and_steer() {
+        for disposition in [
+            Issue31AgentThreadDisposition::Enqueue,
+            Issue31AgentThreadDisposition::Steer,
+        ] {
+            let arguments = Issue31CommandArguments::AgentThreadMessage {
+                action_ref: ISSUE31_ACTION_AGENT_THREAD_MESSAGE.into(),
+                thread_ref: "63f9e587-cc09-4ba7-9b22-70a2ce026ead".into(),
+                text: "Continue from the phone".into(),
+                disposition,
+            };
+            arguments.validate().expect("valid agent thread command");
+            let encoded = serde_json::to_value(&arguments).expect("encode command");
+            assert_eq!(
+                encoded
+                    .get("disposition")
+                    .and_then(serde_json::Value::as_str),
+                Some(match disposition {
+                    Issue31AgentThreadDisposition::Enqueue => "enqueue",
+                    Issue31AgentThreadDisposition::Steer => "steer",
+                })
+            );
+        }
+    }
 
     #[test]
     fn shared_fixtures_decode_and_reconcile() {
