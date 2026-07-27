@@ -1,0 +1,630 @@
+//! Zero base's persistent sidebar: what it contains, how wide it is allowed to
+//! be, and what it remembers.
+//!
+//! `OMEGA-DELTA-0130`. The owner's words: *"i want a persistent sidebar,
+//! collapsible, kinda like the thread sidebar but also with some vertical
+//! collapsible menus. i want the last 10 chat threads as one thing, and codex
+//! etc ratelimits showing, and nostr nip 29 activity too etc — get me an
+//! initial version of that added now. default open on the zerobase chat page."*
+//!
+//! # One sidebar, not two
+//!
+//! `OMEGA-DELTA-0118` built a threads sidebar as an **overlay**: absolutely
+//! positioned over the thread surface, opened by `cmd-alt-j`, closed again to
+//! get at what was under it. That was right for a surface you visit. It is
+//! wrong for one that is *persistent* and *default open*, because an overlay
+//! that is always there is a permanent lid on the left third of the transcript.
+//!
+//! So the overlay is gone and this is what `cmd-alt-j` now toggles. **The key
+//! binding, the action and the menu entry are unchanged** — `cmd-alt-j` is
+//! still `agent::ToggleThreadsSidebar` in the `agent` namespace zero base
+//! admits, which was the entire load-bearing repair in `OMEGA-DELTA-0118` and
+//! is not touched here. What changed is what appears when you press it: the
+//! threads are now the first section of a sidebar rather than the whole of it,
+//! and pressing it collapses the sidebar to a rail rather than removing it.
+//!
+//! Keeping both would have been the worse answer, and `OMEGA-DELTA-0118`'s own
+//! notes say why: two surfaces listing the same threads is one window giving
+//! two answers to one question.
+//!
+//! # The composer, which is the constraint that actually decides this
+//!
+//! `OMEGA-DELTA-0105` records that the composer's bottom row wraps so a narrow
+//! dock does not clip **Send**. `OMEGA-DELTA-0118` protected that by refusing
+//! to take part in the layout at all — an overlay changes nobody's width. A
+//! persistent sidebar cannot make that promise, because a column that is always
+//! there is always taking width from the column beside it.
+//!
+//! The answer is not to hope the window is wide. It is [`layout`]: the sidebar
+//! is a real column, and it **yields** rather than squeezing. Below the width
+//! at which the content column can still hold a composer, the sidebar renders
+//! as a rail — a strip with the control that brings it back — and the content
+//! gets everything else. The person's preference is not overwritten when this
+//! happens, so widening the window restores the sidebar they asked for.
+//!
+//! That is a stronger promise than the overlay's, not a weaker one. The overlay
+//! never narrowed the composer and always covered it; this never covers it and
+//! never narrows it past the floor.
+//!
+//! # Adding a fourth section
+//!
+//! Three things, all in this file except the last:
+//!
+//! 1. A variant on [`SectionId`], and its entry in [`SectionId::ALL`] — which
+//!    is the draw order.
+//! 2. Its `key` and `title` arms. The key is what persists a collapsed section
+//!    across launches, so it must never be renamed once shipped.
+//! 3. One arm in the panel's `render_sidebar_section`, producing a
+//!    [`SectionBody`].
+//!
+//! `omega_deltas` asserts that every variant of [`SectionId`] appears in that
+//! match, so a section added here and forgotten there fails the suite rather
+//! than drawing an empty heading.
+//!
+//! # No section may interrupt
+//!
+//! A [`SectionBody`] cannot fail. It has rows, or it has a [`note`] — one quiet
+//! line, in place, in the section that could not load — and the sections around
+//! it do not know or care. There is no toast, no banner, no modal and no
+//! refusal anywhere in this file, and a sidebar that cannot reach a relay still
+//! draws the owner's threads.
+//!
+//! [`note`]: SectionBody::note
+
+use gpui::{Pixels, SharedString, px};
+use serde::{Deserialize, Serialize};
+
+/// The width the sidebar takes when it is expanded.
+///
+/// `OMEGA-DELTA-0118`'s overlay width, kept: the rows are the same rows, and a
+/// person who has been reading thread titles at 280px should not have to
+/// relearn where they wrap.
+pub const SIDEBAR_WIDTH: Pixels = px(280.);
+
+/// The width the sidebar takes when it is collapsed.
+///
+/// Not zero. "Persistent" was the owner's word, and a sidebar that vanishes
+/// entirely leaves the control that brings it back inside a menu — which is
+/// where `OMEGA-DELTA-0118` found it, and how it stayed broken long enough for
+/// the owner to report it.
+pub const RAIL_WIDTH: Pixels = px(30.);
+
+/// The width the content column may never be reduced below.
+///
+/// This is the number the whole layout turns on, so it is worth saying what it
+/// is and is not. It is **not** a measurement of the composer; the composer is
+/// a wrapping flex row and has no single minimum. It is the width below which
+/// that wrap is the *only* thing left protecting **Send** — the state
+/// `OMEGA-DELTA-0105` describes as already tight. `thread_view` independently
+/// picks 960px of viewport as the point where the Exo controls go compact, so
+/// this sits comfortably under that: at 880px of window the sidebar is still
+/// expanded and the content still has 600.
+pub const MIN_CONTENT_WIDTH: Pixels = px(600.);
+
+/// How many threads the first section lists.
+///
+/// The owner's number: "the last 10 chat threads as one thing".
+pub const RECENT_THREADS: usize = 10;
+
+/// Where the collapsed state is written.
+pub const STATE_KEY: &str = "omega-zero-base-sidebar";
+
+/// How wide the sidebar draws, given the room it has.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Layout {
+    /// Drawn in full, at [`SIDEBAR_WIDTH`].
+    Expanded,
+    /// Drawn as a strip carrying the control that expands it again.
+    Rail,
+}
+
+impl Layout {
+    #[must_use]
+    pub fn width(self) -> Pixels {
+        match self {
+            Layout::Expanded => SIDEBAR_WIDTH,
+            Layout::Rail => RAIL_WIDTH,
+        }
+    }
+
+    #[must_use]
+    pub fn is_expanded(self) -> bool {
+        matches!(self, Layout::Expanded)
+    }
+}
+
+/// What the sidebar may draw in `available` pixels, given what the person asked
+/// for.
+///
+/// `wants_open` is the persisted preference, and this **never writes back to
+/// it**. A window dragged narrow and then wide again shows the sidebar it
+/// showed before, because the narrow window changed what was drawn and not what
+/// was wanted. The alternative — collapsing the stored preference on a resize —
+/// is how a sidebar quietly stops coming back and the person concludes the
+/// toggle is broken.
+#[must_use]
+pub fn layout(available: Pixels, wants_open: bool) -> Layout {
+    if !wants_open {
+        return Layout::Rail;
+    }
+    if available - SIDEBAR_WIDTH < MIN_CONTENT_WIDTH {
+        return Layout::Rail;
+    }
+    Layout::Expanded
+}
+
+/// The sections, in the order they are drawn.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SectionId {
+    /// The last [`RECENT_THREADS`] conversations. `OMEGA-DELTA-0118`'s rows.
+    RecentThreads,
+    /// What is known about Codex's and Claude's rate limits, which is nothing.
+    RateLimits,
+    /// The last few messages in the public NIP-29 group.
+    NostrActivity,
+}
+
+impl SectionId {
+    /// Draw order, top to bottom.
+    ///
+    /// Threads first because that is the section with something to do in it.
+    /// The two below it are information, and information that changes slowly.
+    pub const ALL: &'static [SectionId] = &[
+        SectionId::RecentThreads,
+        SectionId::RateLimits,
+        SectionId::NostrActivity,
+    ];
+
+    /// The stable name this section is remembered under.
+    ///
+    /// Written into the key-value store. Renaming one silently un-collapses
+    /// that section for everybody who had collapsed it, so these are frozen
+    /// once shipped even if the title above them changes.
+    #[must_use]
+    pub fn key(self) -> &'static str {
+        match self {
+            SectionId::RecentThreads => "recent-threads",
+            SectionId::RateLimits => "rate-limits",
+            SectionId::NostrActivity => "nostr-activity",
+        }
+    }
+
+    #[must_use]
+    pub fn title(self) -> &'static str {
+        match self {
+            SectionId::RecentThreads => "Recent threads",
+            SectionId::RateLimits => "Rate limits",
+            SectionId::NostrActivity => "Public chat",
+        }
+    }
+}
+
+/// What the sidebar remembers between launches.
+///
+/// Deliberately small and deliberately forgiving: an unknown key in `collapsed`
+/// is ignored rather than rejected, so a build that drops a section does not
+/// make an older build's stored state unreadable.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SidebarState {
+    /// Whether the person wants the sidebar expanded. Not whether it is.
+    pub open: bool,
+    /// The `key`s of sections the person has collapsed.
+    #[serde(default)]
+    pub collapsed: Vec<String>,
+}
+
+impl SidebarState {
+    /// The state a machine that has never stored one gets.
+    ///
+    /// Open, with every section expanded. "default open on the zerobase chat
+    /// page" was the instruction, and a first launch is the case it is about:
+    /// a sidebar that starts collapsed is a feature nobody finds.
+    #[must_use]
+    pub fn default_open() -> Self {
+        Self {
+            open: true,
+            collapsed: Vec::new(),
+        }
+    }
+
+    #[must_use]
+    pub fn is_collapsed(&self, section: SectionId) -> bool {
+        self.collapsed.iter().any(|key| key == section.key())
+    }
+
+    pub fn toggle_section(&mut self, section: SectionId) {
+        if let Some(index) = self.collapsed.iter().position(|key| key == section.key()) {
+            self.collapsed.remove(index);
+        } else {
+            self.collapsed.push(section.key().to_string());
+        }
+    }
+
+    /// Read stored state, or the default when there is none or it is unreadable.
+    ///
+    /// Unreadable JSON is the default rather than an error. This is a sidebar's
+    /// collapsed state; refusing to draw it because a stored string is corrupt
+    /// would be the section that interrupts, one layer down.
+    #[must_use]
+    pub fn from_stored(stored: Option<&str>) -> Self {
+        stored
+            .and_then(|json| serde_json::from_str::<SidebarState>(json).ok())
+            .unwrap_or_else(SidebarState::default_open)
+    }
+}
+
+/// One row in a section that is not the threads list.
+///
+/// The threads section draws its own rows, because those are clickable and
+/// carry a thread's identity. Everything else is two strings and whether they
+/// are muted, and a fourth section should not have to invent a third shape.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SectionRow {
+    pub primary: SharedString,
+    pub secondary: Option<SharedString>,
+    /// Drawn dimmer: this row is about something absent, unknown, or refused.
+    pub muted: bool,
+}
+
+impl SectionRow {
+    #[must_use]
+    pub fn new(primary: impl Into<SharedString>) -> Self {
+        Self {
+            primary: primary.into(),
+            secondary: None,
+            muted: false,
+        }
+    }
+
+    #[must_use]
+    pub fn secondary(mut self, secondary: impl Into<SharedString>) -> Self {
+        self.secondary = Some(secondary.into());
+        self
+    }
+
+    #[must_use]
+    pub fn muted(mut self) -> Self {
+        self.muted = true;
+        self
+    }
+}
+
+/// What a section has to draw.
+///
+/// There is no error variant, on purpose. A section that could not load has no
+/// rows and a [`note`], which is the same shape as a section that loaded and
+/// had nothing to show. The drawing code therefore has no failure branch to get
+/// wrong, and no section can take the sidebar down with it.
+///
+/// [`note`]: SectionBody::note
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SectionBody {
+    pub rows: Vec<SectionRow>,
+    /// One quiet line, drawn under the rows — or in their place when there are
+    /// none. Never a toast, never a banner, never red.
+    pub note: Option<SharedString>,
+}
+
+impl SectionBody {
+    #[must_use]
+    pub fn rows(rows: Vec<SectionRow>) -> Self {
+        Self { rows, note: None }
+    }
+
+    /// A section with nothing to draw, and the sentence saying why.
+    #[must_use]
+    pub fn note(note: impl Into<SharedString>) -> Self {
+        Self {
+            rows: Vec::new(),
+            note: Some(note.into()),
+        }
+    }
+
+    #[must_use]
+    pub fn with_note(mut self, note: impl Into<SharedString>) -> Self {
+        self.note = Some(note.into());
+        self
+    }
+
+    /// Whether this section is drawing anything at all.
+    ///
+    /// A body with neither rows nor a note is a heading over blank space, which
+    /// is the empty gauge this delta exists to not draw.
+    #[must_use]
+    pub fn is_silent(&self) -> bool {
+        self.rows.is_empty() && self.note.is_none()
+    }
+}
+
+/// The sentence the rate-limits section always says.
+///
+/// It is the whole finding, and it is worth stating once as a constant so no
+/// second, softer version of it can appear somewhere else. The Agent Client
+/// Protocol schema Omega speaks carries exactly one usage type,
+/// `UsageUpdate` — `used` and `size` tokens for the *current context window*,
+/// plus an optional cost. There is no remaining-quota field, no reset time, no
+/// window, and no plan tier, in either schema version. And a rate limit that is
+/// hit by an external agent does not even arrive as a rate-limit error: it
+/// comes back as a generic `acp::Error` and renders as ordinary error text.
+///
+/// So there is no number to draw, and a gauge would be a picture of a number
+/// nobody has.
+pub const RATE_LIMITS_ARE_NOT_REPORTED: &str =
+    "Rate limits are not reported over ACP. Omega learns one only when a request fails.";
+
+/// The rate-limits section.
+///
+/// Each executor gets a row, and the row says the one true thing available
+/// about it. That is either "this cannot run here", with the reason the
+/// composer's selector already gives — `unavailable` is `OMEGA-DELTA-0123`'s
+/// list, passed in rather than recomputed, for the same reason
+/// `omega_threads_sidebar` takes it: two surfaces must not give two answers to
+/// "why can I not use Codex" — or "not reported", which is the truth for an
+/// executor that runs fine and tells us nothing about its quota.
+#[must_use]
+pub fn rate_limits(executors: &[(&str, Option<&str>)]) -> SectionBody {
+    let rows = executors
+        .iter()
+        .map(|(name, unavailable)| match unavailable {
+            Some(reason) => SectionRow::new(*name).secondary(*reason).muted(),
+            None => SectionRow::new(*name).secondary("not reported").muted(),
+        })
+        .collect();
+    SectionBody::rows(rows).with_note(RATE_LIMITS_ARE_NOT_REPORTED)
+}
+
+/// How far the public-chat read has got.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ChatRead {
+    /// No read has been attempted in this window yet.
+    Idle,
+    /// A read is in flight.
+    Reading,
+    /// The relay answered.
+    Read(Vec<crate::omega_nostr_activity::ActivityRow>),
+    /// The read did not finish. The sentence is drawn as a note, in place.
+    Failed(SharedString),
+}
+
+/// The public-chat section.
+///
+/// The failed case is a note and not a refusal, and it names the relay so the
+/// sentence is about something rather than about failure in general. A group
+/// that is simply quiet gets a different sentence from one that could not be
+/// reached, because those are different facts and a person deciding whether
+/// anything is wrong needs to tell them apart.
+#[must_use]
+pub fn nostr_activity(read: &ChatRead, group: Option<&str>) -> SectionBody {
+    match read {
+        ChatRead::Idle | ChatRead::Reading => SectionBody::note("Reading the public chat…"),
+        ChatRead::Failed(why) => SectionBody::note(why.clone()),
+        ChatRead::Read(rows) if rows.is_empty() => SectionBody::note(match group {
+            Some(group) => format!("No messages in {group} yet."),
+            None => "No messages yet.".to_string(),
+        }),
+        ChatRead::Read(rows) => SectionBody::rows(
+            rows.iter()
+                .map(|row| {
+                    SectionRow::new(row.content.clone())
+                        .secondary(format!("{} · {}", row.author, row.age))
+                })
+                .collect(),
+        ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::omega_nostr_activity::ActivityRow;
+
+    #[test]
+    fn a_wide_window_draws_the_sidebar_the_person_asked_for() {
+        assert_eq!(layout(px(1_400.), true), Layout::Expanded);
+    }
+
+    #[test]
+    fn a_narrow_window_yields_the_sidebar_rather_than_the_composer() {
+        // 800 - 280 = 520, under the 600 the content column must keep.
+        assert_eq!(
+            layout(px(800.), true),
+            Layout::Rail,
+            "the sidebar must give up its width before the composer gives up \
+             Send. OMEGA-DELTA-0105 records that row already wrapping to stay \
+             whole in a narrow dock."
+        );
+    }
+
+    #[test]
+    fn the_floor_is_exactly_where_it_says_it_is() {
+        // 880 - 280 = 600, exactly the floor, which is allowed.
+        assert_eq!(layout(px(880.), true), Layout::Expanded);
+        assert_eq!(layout(px(879.), true), Layout::Rail);
+    }
+
+    #[test]
+    fn a_closed_sidebar_stays_closed_however_wide_the_window_is() {
+        assert_eq!(layout(px(4_000.), false), Layout::Rail);
+    }
+
+    #[test]
+    fn a_collapsed_sidebar_still_occupies_a_rail() {
+        assert!(
+            Layout::Rail.width() > px(0.),
+            "'persistent' was the word. A sidebar that vanishes puts the control \
+             that brings it back inside a menu, which is where OMEGA-DELTA-0118 \
+             found it broken."
+        );
+        assert!(Layout::Expanded.width() > Layout::Rail.width());
+    }
+
+    #[test]
+    fn a_machine_that_has_never_stored_a_state_gets_an_open_one() {
+        let state = SidebarState::from_stored(None);
+        assert!(state.open, "the owner asked for default open on zero base");
+        for section in SectionId::ALL {
+            assert!(!state.is_collapsed(*section));
+        }
+    }
+
+    #[test]
+    fn a_corrupt_stored_state_opens_rather_than_failing() {
+        assert_eq!(
+            SidebarState::from_stored(Some("{ not json")),
+            SidebarState::default_open(),
+            "no section may interrupt, and that includes the one that reads the \
+             sidebar's own state."
+        );
+    }
+
+    #[test]
+    fn a_collapsed_section_survives_a_round_trip() {
+        let mut state = SidebarState::default_open();
+        state.toggle_section(SectionId::RateLimits);
+        let json = serde_json::to_string(&state).expect("serialises");
+        let restored = SidebarState::from_stored(Some(&json));
+
+        assert!(
+            restored.is_collapsed(SectionId::RateLimits),
+            "'persistent' covers the vertical menus too — a section collapsed \
+             before a restart must come back collapsed."
+        );
+        assert!(!restored.is_collapsed(SectionId::RecentThreads));
+        assert!(restored.open);
+    }
+
+    #[test]
+    fn toggling_a_section_twice_leaves_it_as_it_was() {
+        let mut state = SidebarState::default_open();
+        state.toggle_section(SectionId::NostrActivity);
+        assert!(state.is_collapsed(SectionId::NostrActivity));
+        state.toggle_section(SectionId::NostrActivity);
+        assert!(!state.is_collapsed(SectionId::NostrActivity));
+        assert!(
+            state.collapsed.is_empty(),
+            "an un-collapsed section must leave no entry behind, or the stored \
+             state grows without bound across a session of toggling"
+        );
+    }
+
+    #[test]
+    fn a_state_stored_by_a_build_with_a_section_this_one_lacks_still_reads() {
+        let state = SidebarState::from_stored(Some(
+            r#"{"open":true,"collapsed":["rate-limits","a-section-from-the-future"]}"#,
+        ));
+        assert!(state.open);
+        assert!(state.is_collapsed(SectionId::RateLimits));
+    }
+
+    #[test]
+    fn every_section_has_a_distinct_key_and_a_title() {
+        let mut keys: Vec<&str> = SectionId::ALL.iter().map(|id| id.key()).collect();
+        let count = keys.len();
+        keys.sort_unstable();
+        keys.dedup();
+        assert_eq!(
+            keys.len(),
+            count,
+            "two sections sharing a key collapse together and cannot be told \
+             apart in stored state"
+        );
+        for section in SectionId::ALL {
+            assert!(!section.title().is_empty());
+            assert!(!section.key().is_empty());
+        }
+    }
+
+    #[test]
+    fn the_rate_limits_section_says_what_it_does_not_know() {
+        let body = rate_limits(&[("Codex", None), ("Claude", Some("not installed"))]);
+
+        assert_eq!(body.rows.len(), 2);
+        assert_eq!(body.rows[0].primary.as_ref(), "Codex");
+        assert_eq!(
+            body.rows[0].secondary.as_deref(),
+            Some("not reported"),
+            "an executor that runs fine still reports no quota. Saying so is \
+             the honest row; a gauge would be a picture of a number nobody has."
+        );
+        assert_eq!(
+            body.rows[1].secondary.as_deref(),
+            Some("not installed"),
+            "the reason must be the one the composer's selector already gives, \
+             not a second one written here"
+        );
+        let note = body
+            .note
+            .as_deref()
+            .expect("the section states the finding");
+        assert!(note.contains("ACP") && note.contains("fails"), "{note}");
+    }
+
+    #[test]
+    fn no_section_body_can_carry_a_refusal_shape() {
+        // There is no error variant to construct. The nearest thing to a
+        // failure a section can express is a note, and a note has rows beside
+        // it or in its place — never instead of the section.
+        let failed = nostr_activity(
+            &ChatRead::Failed("relay.openagents.com did not answer.".into()),
+            Some("openagents-public"),
+        );
+        assert!(failed.rows.is_empty());
+        assert_eq!(
+            failed.note.as_deref(),
+            Some("relay.openagents.com did not answer."),
+            "a section that cannot load says so in place, quietly, and the \
+             sections around it keep working"
+        );
+        assert!(
+            !failed.is_silent(),
+            "a heading over blank space is the failure"
+        );
+    }
+
+    #[test]
+    fn a_quiet_group_and_an_unreachable_relay_read_differently() {
+        let quiet = nostr_activity(&ChatRead::Read(Vec::new()), Some("openagents-public"));
+        let broken = nostr_activity(&ChatRead::Failed("could not connect".into()), Some("g"));
+        assert_ne!(
+            quiet.note, broken.note,
+            "a person deciding whether anything is wrong has to be able to tell \
+             'nobody has spoken' from 'we could not ask'"
+        );
+        assert!(
+            quiet
+                .note
+                .as_deref()
+                .is_some_and(|note| note.contains("openagents-public")),
+            "the empty sentence names the group it is empty of"
+        );
+    }
+
+    #[test]
+    fn a_read_in_flight_is_not_an_error() {
+        for pending in [ChatRead::Idle, ChatRead::Reading] {
+            let body = nostr_activity(&pending, Some("openagents-public"));
+            assert!(!body.is_silent());
+            assert!(body.rows.is_empty());
+        }
+    }
+
+    #[test]
+    fn a_chat_row_shows_the_message_with_its_author_and_age() {
+        let body = nostr_activity(
+            &ChatRead::Read(vec![ActivityRow {
+                author: "66277e0b…a0fbb7e4".into(),
+                content: "Testing NIP-29 message".into(),
+                age: "4m".into(),
+            }]),
+            Some("openagents-public"),
+        );
+        assert_eq!(body.rows.len(), 1);
+        assert_eq!(body.rows[0].primary.as_ref(), "Testing NIP-29 message");
+        assert_eq!(
+            body.rows[0].secondary.as_deref(),
+            Some("66277e0b…a0fbb7e4 · 4m"),
+            "who said it and how long ago, on the line under what they said"
+        );
+        assert!(body.note.is_none());
+    }
+}

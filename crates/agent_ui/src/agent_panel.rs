@@ -60,7 +60,7 @@ use crate::{
     },
     ui::{AgentNotification, AgentNotificationEvent},
 };
-use crate::{omega_executor_selector, omega_threads_sidebar};
+use crate::{omega_executor_selector, omega_nostr_activity, omega_sidebar, omega_threads_sidebar};
 use agent_settings::AgentSettings;
 use ai_onboarding::AgentPanelOnboarding;
 use anyhow::{Context as _, Result, anyhow};
@@ -71,6 +71,8 @@ use collections::HashMap;
 use editor::{Editor, MultiBuffer};
 use extension_host::ExtensionStore;
 use feature_flags::{CreateThreadToolFeatureFlag, FeatureFlagAppExt as _};
+use futures::AsyncReadExt as _;
+use http_client::{AsyncBody, HttpClientWithUrl};
 
 use fs::Fs;
 use full_auto_ui::FullAutoPanel;
@@ -213,6 +215,58 @@ struct SourcePanelInitialization {
 
 /// Reads the most recently used agent across all workspaces. Used as a fallback
 /// when opening a workspace that has no per-workspace agent preference yet.
+/// Read the published manifest, then the group it names. `OMEGA-DELTA-0130`.
+///
+/// Named apart from the panel's own `read_public_chat` on purpose. Two
+/// functions whose names are prefixes of one another are two functions a
+/// source-reading check cannot tell apart, and `OMEGA-DELTA-0130`'s toast
+/// check silently read this one while the method it was about grew a toast.
+///
+/// Two hops, in this order and not the other, because the relay and the group
+/// are configuration rather than constants — the built-in `public-nostr-chat`
+/// skill states the rule: "Do not put an OpenAgents host name or group
+/// identifier in the protocol code." The manifest URL is the single piece of
+/// configuration that has to exist somewhere, and it lives in
+/// [`omega_nostr_activity::MANIFEST_URL`].
+///
+/// The timeout covers the socket, which is the hop that can hang indefinitely;
+/// the HTTP client already bounds its own.
+async fn fetch_public_chat(
+    http_client: Arc<HttpClientWithUrl>,
+    timeout: impl std::future::Future<Output = ()>,
+) -> Result<(
+    omega_nostr_activity::GroupConfig,
+    Vec<omega_nostr_activity::ChatMessage>,
+)> {
+    let mut response = http_client
+        .get(
+            omega_nostr_activity::MANIFEST_URL,
+            AsyncBody::default(),
+            true,
+        )
+        .await
+        .context("fetching the public chat manifest")?;
+    let mut body = Vec::new();
+    response
+        .body_mut()
+        .read_to_end(&mut body)
+        .await
+        .context("reading the public chat manifest")?;
+    anyhow::ensure!(
+        response.status().is_success(),
+        "the public chat manifest answered {}",
+        response.status().as_u16()
+    );
+    let config = omega_nostr_activity::parse_manifest(&String::from_utf8_lossy(&body))?;
+    let messages = omega_nostr_activity::fetch(
+        config.clone(),
+        omega_nostr_activity::RECENT_MESSAGES,
+        timeout,
+    )
+    .await?;
+    Ok((config, messages))
+}
+
 fn read_global_last_used_agent(kvp: &KeyValueStore) -> Option<Agent> {
     kvp.read_kvp(LAST_USED_AGENT_KEY)
         .log_err()
@@ -1240,13 +1294,31 @@ pub struct AgentPanel {
     /// Separate from `full_auto` for the reason above: hidden and absent are
     /// different states.
     showing_full_auto: bool,
-    /// `OMEGA-DELTA-0118`. Whether zero base's threads sidebar is on screen.
+    /// `OMEGA-DELTA-0118`, widened by `OMEGA-DELTA-0130`. What zero base's
+    /// sidebar is showing, and which of its sections are collapsed.
     ///
-    /// A bool rather than a retained view: the sidebar holds nothing a person
-    /// would lose by closing it. Its rows are a pure function of the metadata
-    /// store, recomputed on each render, so a thread renamed or archived while
-    /// it is open cannot leave a stale row behind.
-    threads_sidebar_open: bool,
+    /// Values rather than a retained view: the sidebar holds nothing a person
+    /// would lose by collapsing it. The thread rows are a pure function of the
+    /// metadata store, recomputed on each render, so a thread renamed or
+    /// archived while it is open cannot leave a stale row behind.
+    ///
+    /// This is the *preference*, not the layout. A window too narrow to hold
+    /// both the sidebar and a composer draws a rail without touching this, so
+    /// widening the window restores what the person asked for.
+    sidebar: omega_sidebar::SidebarState,
+    /// `OMEGA-DELTA-0130`. How far the public-chat read has got.
+    ///
+    /// Held rather than refetched per render because it crosses a network. It
+    /// starts [`ChatRead::Idle`] and moves once; nothing in the render path can
+    /// block on it, and every way it can fail lands in
+    /// [`omega_sidebar::ChatRead::Failed`] as one quiet line in that section.
+    ///
+    /// [`ChatRead::Idle`]: omega_sidebar::ChatRead::Idle
+    chat_read: omega_sidebar::ChatRead,
+    /// The group the read was for, for the sentence shown when it is empty.
+    chat_group: Option<SharedString>,
+    /// Held so the read dies with the panel.
+    _chat_read: Option<Task<()>>,
     /// The sentence the last refused reopen produced, if the sidebar is showing
     /// one.
     ///
@@ -1663,7 +1735,20 @@ impl AgentPanel {
             is_active: false,
             full_auto: None,
             showing_full_auto: false,
-            threads_sidebar_open: false,
+            // OMEGA-DELTA-0130. Default open, per "default open on the
+            // zerobase chat page" — `from_stored` answers that for a machine
+            // that has never stored a state, and answers with what the person
+            // last chose for one that has.
+            sidebar: omega_sidebar::SidebarState::from_stored(
+                KeyValueStore::global(cx)
+                    .read_kvp(omega_sidebar::STATE_KEY)
+                    .log_err()
+                    .flatten()
+                    .as_deref(),
+            ),
+            chat_read: omega_sidebar::ChatRead::Idle,
+            chat_group: None,
+            _chat_read: None,
             threads_sidebar_refusal: None,
             _engine_capacity_poll: None,
         };
@@ -1671,6 +1756,7 @@ impl AgentPanel {
         let mut panel = panel;
         panel.ensure_native_agent_connection(cx);
         panel.observe_engine_capacity(cx);
+        panel.read_public_chat(cx);
         panel
     }
 
@@ -3192,13 +3278,95 @@ impl AgentPanel {
     /// `multi_workspace::ToggleWorkspaceSidebar`, and that namespace is outside
     /// zero base's admitted set, so the action gate refused it before any
     /// listener ran. This is the surface the entry names instead.
+    /// `OMEGA-DELTA-0130` widened what it toggles: the same action, the same
+    /// binding, the same menu entry, now expanding and collapsing a persistent
+    /// sidebar whose first section is those threads rather than opening an
+    /// overlay that was only threads.
     pub fn toggle_threads_sidebar(&mut self, cx: &mut Context<Self>) {
-        self.threads_sidebar_open = !self.threads_sidebar_open;
+        self.sidebar.open = !self.sidebar.open;
         // A refusal belongs to the click that produced it. Carrying it across
-        // a close and a reopen would show a sentence about a thread the person
-        // is no longer looking at.
+        // a collapse and an expand would show a sentence about a thread the
+        // person is no longer looking at.
         self.threads_sidebar_refusal = None;
+        self.save_sidebar_state(cx);
         cx.notify();
+    }
+
+    /// Collapse or expand one section. `OMEGA-DELTA-0130`.
+    fn toggle_sidebar_section(
+        &mut self,
+        section: omega_sidebar::SectionId,
+        cx: &mut Context<Self>,
+    ) {
+        self.sidebar.toggle_section(section);
+        self.save_sidebar_state(cx);
+        cx.notify();
+    }
+
+    /// Write the sidebar's state, so a relaunch draws what was left behind.
+    ///
+    /// Fire and forget, and logged rather than raised. A key-value write that
+    /// fails costs the person a collapsed section after a restart; making them
+    /// read about it costs them the thing they were doing.
+    fn save_sidebar_state(&self, cx: &mut Context<Self>) {
+        let Ok(json) = serde_json::to_string(&self.sidebar) else {
+            return;
+        };
+        let kvp = KeyValueStore::global(cx);
+        cx.background_spawn(async move {
+            kvp.write_kvp(omega_sidebar::STATE_KEY.to_string(), json)
+                .await
+                .log_err();
+        })
+        .detach();
+    }
+
+    /// Read the last few messages in the public NIP-29 group.
+    ///
+    /// `OMEGA-DELTA-0130`. Started once, when the panel is built, and never
+    /// awaited by a render. Everything it can do is write one of four values
+    /// into [`Self::chat_read`], and the worst of them is a sentence.
+    ///
+    /// Only in zero base. Outside it this panel sits beside an editor with its
+    /// own sidebar and this section is not drawn, so opening a socket for it
+    /// would be a network call for pixels nobody is going to see.
+    fn read_public_chat(&mut self, cx: &mut Context<Self>) {
+        if !omega_zero_base::is_active() {
+            return;
+        }
+        let http_client = self.project.read(cx).client().http_client();
+        self.chat_read = omega_sidebar::ChatRead::Reading;
+        self._chat_read = Some(cx.spawn(async move |this, cx| {
+            let timeout = cx
+                .background_executor()
+                .timer(omega_nostr_activity::READ_TIMEOUT);
+            let read = fetch_public_chat(http_client, timeout).await;
+            this.update(cx, |this, cx| {
+                match read {
+                    Ok((config, messages)) => {
+                        this.chat_group = Some(config.group_id.into());
+                        this.chat_read = omega_sidebar::ChatRead::Read(omega_nostr_activity::rows(
+                            messages,
+                            Utc::now(),
+                            omega_nostr_activity::RECENT_MESSAGES,
+                        ));
+                    }
+                    Err(error) => {
+                        // The log carries the chain; the sidebar carries one
+                        // line. `OMEGA-DELTA-0053` records that a zero-base
+                        // window is where a notification is least likely to be
+                        // where somebody is looking, and this is a section
+                        // failing to load, not a question for anybody.
+                        log::info!("public chat section could not read: {error:#}");
+                        this.chat_read = omega_sidebar::ChatRead::Failed(
+                            "Could not read the public chat just now.".into(),
+                        );
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        }));
     }
 
     /// The rows the threads sidebar draws, newest first.
@@ -3252,7 +3420,10 @@ impl AgentPanel {
         }
 
         self.threads_sidebar_refusal = None;
-        self.threads_sidebar_open = false;
+        // OMEGA-DELTA-0130. The sidebar stays. It used to close itself here,
+        // because it was an overlay covering the thread it had just opened.
+        // A persistent sidebar is beside that thread rather than on top of it,
+        // and closing it would take away the list the person is picking from.
         self.load_agent_thread(
             Agent::from(row.agent_id.clone()),
             row.thread_id,
@@ -3265,100 +3436,91 @@ impl AgentPanel {
         );
     }
 
-    /// Draw the threads sidebar over the thread surface. `OMEGA-DELTA-0118`.
+    /// Draw zero base's persistent sidebar. `OMEGA-DELTA-0130`.
     ///
-    /// Absolutely positioned on purpose. The composer is the bottom row of the
-    /// surface underneath, and `OMEGA-DELTA-0105` records that this row already
-    /// has to wrap so a narrow dock does not clip Send. A sidebar that took
-    /// width out of the flex row would narrow that row further and clip the
-    /// control the owner presses most. An overlay changes no other element's
-    /// layout at all, so the composer sits exactly where it sat with the
-    /// sidebar closed.
-    fn render_threads_sidebar(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
-        if !self.threads_sidebar_open {
+    /// # This is a column, not an overlay, and that is the whole decision
+    ///
+    /// `OMEGA-DELTA-0118` drew this absolutely positioned, and gave the reason:
+    /// `OMEGA-DELTA-0105` records that the composer's bottom row already has to
+    /// wrap so a narrow dock does not clip **Send**, and an overlay takes width
+    /// from nobody. That was the right answer for a surface you open, look at,
+    /// and close again.
+    ///
+    /// It is the wrong answer for a persistent one. An overlay that is always
+    /// there is a permanent lid over the left of the transcript — and over the
+    /// left of the composer, which is the thing the earlier delta was protecting.
+    /// "It happens not to overlap" is not a property of a layout; it is a
+    /// property of today's widths.
+    ///
+    /// So the sidebar is a real column and it **yields**:
+    /// [`omega_sidebar::layout`] gives it its width only while the content
+    /// column can still keep [`omega_sidebar::MIN_CONTENT_WIDTH`], and draws a
+    /// rail otherwise. The person's preference is untouched by that, so a
+    /// window dragged wide again shows the sidebar they asked for. The composer
+    /// is never covered, and never narrowed past the floor.
+    ///
+    /// `None` outside zero base. The editor has its own workspace sidebar
+    /// there, and `OMEGA-DELTA-0118`'s menu entry already names one action per
+    /// mode for exactly that reason.
+    fn render_sidebar(&self, window: &Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if !omega_zero_base::is_active() {
             return None;
         }
 
-        let rows = self.threads_sidebar_rows(cx);
-        let colors = cx.theme().colors();
-
-        let list = if rows.is_empty() {
-            v_flex()
-                .id("threads-sidebar-list")
-                .flex_1()
-                .overflow_y_scroll()
-                .p_3()
-                .child(
-                    Label::new("No past conversations yet.")
-                        .color(Color::Muted)
-                        .size(LabelSize::Small),
-                )
-        } else {
-            rows.into_iter().enumerate().fold(
-                v_flex()
-                    .id("threads-sidebar-list")
-                    .flex_1()
-                    .overflow_y_scroll(),
-                |list, (index, row)| {
-                    let reopenable = row.is_reopenable();
-                    let executor = row.executor.clone();
-                    let age = row.age.clone();
-                    let title = row.title.clone();
-                    list.child(
-                        ListItem::new(("threads-sidebar-row", index))
-                            .toggle_state(false)
-                            .inset(true)
-                            .spacing(ListItemSpacing::Sparse)
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                this.open_thread_from_threads_sidebar(&row, window, cx);
-                            }))
-                            .child(
-                                v_flex()
-                                    .w_full()
-                                    .gap_0p5()
-                                    .child(
-                                        Label::new(title)
-                                            .size(LabelSize::Small)
-                                            .color(if reopenable {
-                                                Color::Default
-                                            } else {
-                                                Color::Muted
-                                            })
-                                            .truncate(),
-                                    )
-                                    .child(
-                                        h_flex()
-                                            .gap_1p5()
-                                            .child(
-                                                Label::new(age)
-                                                    .size(LabelSize::XSmall)
-                                                    .color(Color::Muted),
-                                            )
-                                            .children(executor.map(|executor| {
-                                                Label::new(executor)
-                                                    .size(LabelSize::XSmall)
-                                                    .color(Color::Muted)
-                                            })),
-                                    ),
-                            ),
-                    )
-                },
+        // The panel is the window in zero base — `OMEGA-DELTA-0052` removed the
+        // docks, so there is nothing beside it to subtract. `thread_view` reads
+        // the viewport the same way to decide when its Exo controls go compact.
+        let layout = omega_sidebar::layout(window.viewport_size().width, self.sidebar.open);
+        let (background, border, border_variant) = {
+            let colors = cx.theme().colors();
+            (
+                colors.panel_background,
+                colors.border,
+                colors.border_variant,
             )
         };
 
-        Some(
+        let column = v_flex()
+            .h_full()
+            .w(layout.width())
+            // Never squeezed by what is beside it: the yield is a decision
+            // `layout` makes with a floor in it, not one flexbox makes by
+            // running out of room.
+            .flex_shrink_0()
+            .overflow_hidden()
+            .bg(background)
+            .border_r_1()
+            .border_color(border);
+
+        if !layout.is_expanded() {
+            return Some(
+                column
+                    .id("omega-sidebar-rail")
+                    .items_center()
+                    .pt_1p5()
+                    .child(
+                        IconButton::new("expand-omega-sidebar", IconName::ChevronRight)
+                            .icon_size(IconSize::Small)
+                            .tooltip(Tooltip::text("Expand Sidebar"))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.toggle_threads_sidebar(cx);
+                            })),
+                    )
+                    .into_any_element(),
+            );
+        }
+
+        let sections = omega_sidebar::SectionId::ALL.iter().fold(
             v_flex()
-                .id("threads-sidebar")
-                .occlude()
-                .absolute()
-                .top_0()
-                .left_0()
-                .bottom_0()
-                .w(px(280.))
-                .max_w_full()
-                .bg(colors.panel_background)
-                .border_r_1()
-                .border_color(colors.border)
+                .id("omega-sidebar-sections")
+                .flex_1()
+                .overflow_y_scroll(),
+            |sections, section| sections.child(self.render_sidebar_section(*section, cx)),
+        );
+
+        Some(
+            column
+                .id("omega-sidebar")
                 .child(
                     h_flex()
                         .w_full()
@@ -3366,32 +3528,240 @@ impl AgentPanel {
                         .py_1p5()
                         .justify_between()
                         .border_b_1()
-                        .border_color(colors.border_variant)
-                        .child(Label::new("Threads").size(LabelSize::Small))
+                        .border_color(border_variant)
+                        .child(Label::new("Omega").size(LabelSize::Small))
                         .child(
-                            IconButton::new("close-threads-sidebar", IconName::Close)
+                            IconButton::new("collapse-omega-sidebar", IconName::ChevronLeft)
                                 .icon_size(IconSize::Small)
-                                .tooltip(Tooltip::text("Close Threads Sidebar"))
+                                .tooltip(Tooltip::text("Collapse Sidebar"))
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.toggle_threads_sidebar(cx);
                                 })),
                         ),
                 )
-                .children(self.threads_sidebar_refusal.clone().map(|refusal| {
-                    div()
+                .child(sections)
+                .into_any_element(),
+        )
+    }
+
+    /// One vertically collapsible section: a header that toggles, and a body.
+    ///
+    /// # Adding a fourth
+    ///
+    /// One arm here, plus a variant and its `key`/`title` in
+    /// [`omega_sidebar::SectionId`]. `omega_deltas` asserts that every variant
+    /// of that enum is named in this match, so a section added there and
+    /// forgotten here fails the suite rather than drawing an empty heading.
+    ///
+    /// # No arm may refuse
+    ///
+    /// Every arm returns something drawable. `rate_limits` and `nostr_activity`
+    /// return an [`omega_sidebar::SectionBody`], which has no error case: a
+    /// section that could not load has a note where its rows would be, and the
+    /// sections above and below it never find out.
+    fn render_sidebar_section(
+        &self,
+        section: omega_sidebar::SectionId,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let collapsed = self.sidebar.is_collapsed(section);
+        let hover_background = cx.theme().colors().element_hover;
+
+        let header = h_flex()
+            .id(SharedString::new_static(section.key()))
+            .w_full()
+            .px_2()
+            .py_1()
+            .gap_1()
+            .cursor_pointer()
+            .hover(|style| style.bg(hover_background))
+            .child(
+                Icon::new(if collapsed {
+                    IconName::ChevronRight
+                } else {
+                    IconName::ChevronDown
+                })
+                .size(IconSize::XSmall)
+                .color(Color::Muted),
+            )
+            .child(
+                Label::new(section.title())
+                    .size(LabelSize::XSmall)
+                    .color(Color::Muted),
+            )
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.toggle_sidebar_section(section, cx);
+            }));
+
+        let mut column = v_flex().w_full().child(header);
+        if collapsed {
+            return column.into_any_element();
+        }
+
+        column = match section {
+            omega_sidebar::SectionId::RecentThreads => {
+                column.child(self.render_recent_threads_section(cx))
+            }
+            omega_sidebar::SectionId::RateLimits => {
+                let unavailable = omega_executor_selector::unavailable_here();
+                let executors: Vec<(&str, Option<&str>)> =
+                    omega_executor_selector::SelectableExecutor::ALL
+                        .iter()
+                        .filter(|executor| {
+                            **executor != omega_executor_selector::SelectableExecutor::Omega
+                        })
+                        .map(|executor| {
+                            (
+                                executor.name(),
+                                unavailable
+                                    .iter()
+                                    .find(|(candidate, _)| candidate == executor)
+                                    .map(|(_, reason)| *reason),
+                            )
+                        })
+                        .collect();
+                column.child(self.render_section_body(&omega_sidebar::rate_limits(&executors)))
+            }
+            omega_sidebar::SectionId::NostrActivity => column.child(self.render_section_body(
+                &omega_sidebar::nostr_activity(&self.chat_read, self.chat_group.as_deref()),
+            )),
+        };
+        column.into_any_element()
+    }
+
+    /// The rows of a section that is not the threads list.
+    ///
+    /// Two lines and a mute, and the note underneath. The note is `Muted`
+    /// rather than `Warning`: a relay that did not answer is a thing to know,
+    /// not a thing to fix, and colouring it like an error in a panel the owner
+    /// keeps open all day would make it an alarm that never stops ringing.
+    fn render_section_body(&self, body: &omega_sidebar::SectionBody) -> AnyElement {
+        body.rows
+            .iter()
+            .enumerate()
+            .fold(v_flex().w_full().pb_1(), |column, (index, row)| {
+                column.child(
+                    v_flex()
+                        .id(("omega-sidebar-row", index))
                         .w_full()
                         .px_2()
-                        .py_1p5()
-                        .border_b_1()
-                        .border_color(colors.border_variant)
+                        .py_0p5()
+                        .gap_0p5()
                         .child(
-                            Label::new(refusal)
-                                .size(LabelSize::XSmall)
-                                .color(Color::Warning),
+                            Label::new(row.primary.clone())
+                                .size(LabelSize::Small)
+                                .color(if row.muted {
+                                    Color::Muted
+                                } else {
+                                    Color::Default
+                                })
+                                .truncate(),
                         )
-                }))
-                .child(list),
-        )
+                        .children(row.secondary.clone().map(|secondary| {
+                            Label::new(secondary)
+                                .size(LabelSize::XSmall)
+                                .color(Color::Muted)
+                                .truncate()
+                        })),
+                )
+            })
+            .children(body.note.clone().map(|note| {
+                div()
+                    .w_full()
+                    .px_2()
+                    .py_0p5()
+                    .child(Label::new(note).size(LabelSize::XSmall).color(Color::Muted))
+            }))
+            .into_any_element()
+    }
+
+    /// The last [`omega_sidebar::RECENT_THREADS`] conversations.
+    ///
+    /// The rows are `OMEGA-DELTA-0118`'s, unchanged and not recomputed here:
+    /// [`omega_threads_sidebar::rows`] still decides the order, the exclusions,
+    /// the ages and the refusals, and this takes the first ten of them. A
+    /// second thread list with its own opinion about which threads are
+    /// historical is exactly the "one window giving two answers" failure that
+    /// delta's notes name.
+    fn render_recent_threads_section(&self, cx: &mut Context<Self>) -> AnyElement {
+        let rows: Vec<omega_threads_sidebar::ThreadRow> = self
+            .threads_sidebar_rows(cx)
+            .into_iter()
+            .take(omega_sidebar::RECENT_THREADS)
+            .collect();
+
+        if rows.is_empty() {
+            return div()
+                .w_full()
+                .px_2()
+                .py_0p5()
+                .pb_1()
+                .child(
+                    Label::new("No past conversations yet.")
+                        .size(LabelSize::XSmall)
+                        .color(Color::Muted),
+                )
+                .into_any_element();
+        }
+
+        rows.into_iter()
+            .enumerate()
+            .fold(v_flex().w_full().pb_1(), |list, (index, row)| {
+                let reopenable = row.is_reopenable();
+                let executor = row.executor.clone();
+                let age = row.age.clone();
+                let title = row.title.clone();
+                list.child(
+                    ListItem::new(("threads-sidebar-row", index))
+                        .toggle_state(false)
+                        .inset(true)
+                        .spacing(ListItemSpacing::Sparse)
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.open_thread_from_threads_sidebar(&row, window, cx);
+                        }))
+                        .child(
+                            v_flex()
+                                .w_full()
+                                .gap_0p5()
+                                .child(
+                                    Label::new(title)
+                                        .size(LabelSize::Small)
+                                        .color(if reopenable {
+                                            Color::Default
+                                        } else {
+                                            Color::Muted
+                                        })
+                                        .truncate(),
+                                )
+                                .child(
+                                    h_flex()
+                                        .gap_1p5()
+                                        .child(
+                                            Label::new(age)
+                                                .size(LabelSize::XSmall)
+                                                .color(Color::Muted),
+                                        )
+                                        .children(executor.map(|executor| {
+                                            Label::new(executor)
+                                                .size(LabelSize::XSmall)
+                                                .color(Color::Muted)
+                                        })),
+                                ),
+                        ),
+                )
+            })
+            .children(self.threads_sidebar_refusal.clone().map(|refusal| {
+                // In place, in the section, where the click was. Not a toast:
+                // `OMEGA-DELTA-0053` records that a zero-base window is where a
+                // notification is least likely to be where somebody is looking,
+                // and omega#119 records what happened when refusals did toast.
+                div().w_full().px_2().py_1().child(
+                    Label::new(refusal)
+                        .size(LabelSize::XSmall)
+                        .color(Color::Warning),
+                )
+            }))
+            .into_any_element()
     }
 
     /// `OMEGA-DELTA-0034`. Connect the native agent, project or no project.
@@ -7247,11 +7617,24 @@ impl Render for AgentPanel {
                 }
             });
 
-        // OMEGA-DELTA-0118. Appended last and absolutely positioned, so it
-        // draws over the surface above without taking part in this flex column
-        // — the hierarchy the warning at the top of this function is about is
-        // unchanged by it, and the composer keeps the width it had.
-        let content = content.children(self.render_threads_sidebar(cx));
+        // OMEGA-DELTA-0130. The sidebar is a column beside this one, not an
+        // overlay on top of it. `OMEGA-DELTA-0118` drew it absolutely so it
+        // could not narrow the composer; a *persistent* sidebar cannot make
+        // that promise, so it makes a stronger one instead — `render_sidebar`
+        // yields to a rail before the content column drops below the width a
+        // composer needs, and the composer is therefore neither covered nor
+        // squeezed. `min_w_0` is what lets the content column actually shrink
+        // to the space left rather than overflowing the window.
+        let content = match self.render_sidebar(window, cx) {
+            Some(sidebar) => h_flex()
+                .size_full()
+                .items_stretch()
+                .bg(cx.theme().colors().panel_background)
+                .child(sidebar)
+                .child(v_flex().flex_1().min_w_0().h_full().child(content))
+                .into_any_element(),
+            None => content.into_any_element(),
+        };
 
         match self.visible_font_size() {
             WhichFontSize::AgentFont => {
@@ -7260,7 +7643,7 @@ impl Render for AgentPanel {
                     .child(content)
                     .into_any()
             }
-            _ => content.into_any(),
+            _ => content,
         }
     }
 }

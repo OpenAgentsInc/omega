@@ -118,6 +118,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0127",
     "OMEGA-DELTA-0128",
     "OMEGA-DELTA-0129",
+    "OMEGA-DELTA-0130",
 ];
 
 /// OMEGA-DELTA-0125. Every entry the thread header's `…` menu offers, the
@@ -2760,6 +2761,13 @@ pub const ZERO_BASE_UI_PATH: &str = "crates/zed/src/omega_zero_base_ui.rs";
 /// one. Pure functions on purpose: a window is not needed to ask whether a row
 /// is honest.
 pub const THREADS_SIDEBAR_PATH: &str = "crates/agent_ui/src/omega_threads_sidebar.rs";
+
+/// OMEGA-DELTA-0130. Zero base's persistent sidebar: what its sections are,
+/// how wide it is allowed to be beside a composer, and what it remembers.
+pub const SIDEBAR_PATH: &str = "crates/agent_ui/src/omega_sidebar.rs";
+
+/// OMEGA-DELTA-0130. The read of the public NIP-29 group the sidebar shows.
+pub const NOSTR_ACTIVITY_PATH: &str = "crates/agent_ui/src/omega_nostr_activity.rs";
 
 /// OMEGA-DELTA-0048, 0053. Where panels are added, where zero base skips them,
 /// and where the mode seals the window after the identity gate.
@@ -12852,6 +12860,22 @@ mod tests {
         })
     }
 
+    /// The part of a source file that ships, i.e. everything above `mod tests`.
+    ///
+    /// `OMEGA-DELTA-0130`. Splitting on a bare `#[cfg(test)]` looks equivalent
+    /// and is not: `agent_panel.rs` carries one on a statement two thousand
+    /// lines above its test module, so that split silently threw away most of
+    /// the production file and every check reading it passed by not looking.
+    /// That is `OMEGA-DELTA-0090`'s rule — a check that cannot find its subject
+    /// must fail rather than pass — in the one shape that does not announce
+    /// itself, so the marker here is the module header and nothing else.
+    fn outside_the_tests(source: &str) -> &str {
+        source
+            .split("#[cfg(test)]\nmod tests")
+            .next()
+            .expect("a split always yields a first part")
+    }
+
     /// Read a repository source file, or say which one could not be read.
     fn read_repository_file(relative: &str) -> String {
         let path = repository_path(relative);
@@ -16381,7 +16405,12 @@ mod tests {
         for token in [
             "_: &ToggleThreadsSidebar",
             "fn toggle_threads_sidebar",
-            "fn render_threads_sidebar",
+            // `OMEGA-DELTA-0130` renamed the drawing. The overlay called
+            // `render_threads_sidebar` became a section of a persistent
+            // sidebar, so the rows this delta is about are now drawn here.
+            // The action, the namespace and the binding did not move, which is
+            // what this delta actually secured.
+            "fn render_recent_threads_section",
             "key_context.add(\"ZeroBase\")",
         ] {
             assert!(
@@ -16415,15 +16444,39 @@ mod tests {
             panel_path.display()
         );
 
-        // 4. The overlay does not take part in the composer's layout.
-        let sidebar_render = body_of(&panel, "render_threads_sidebar");
+        // 4. The sidebar still cannot clip the composer.
+        //
+        // `OMEGA-DELTA-0118` secured this by asserting the sidebar drew
+        // `.absolute()`: an overlay takes width from nobody, so the composer
+        // kept the width it had. `OMEGA-DELTA-0130` made the sidebar
+        // persistent, and a column that is always there cannot make that
+        // promise — so it makes a stronger one, and this is where the
+        // assertion moved rather than where it was dropped.
+        //
+        // The promise now is `omega_sidebar::layout`: the sidebar is drawn at
+        // full width only while the content column keeps `MIN_CONTENT_WIDTH`,
+        // and yields to a rail otherwise. `the_sidebar_yields_before_the_composer_does`
+        // in `OMEGA-DELTA-0130` proves the function; this proves the panel
+        // asks it rather than picking a width itself.
+        let sidebar_render = body_of(&panel, "render_sidebar");
         assert!(
-            sidebar_render.contains(".absolute()"),
-            "OMEGA-DELTA-0118: `render_threads_sidebar` in {} no longer draws \
-             absolutely. `OMEGA-DELTA-0105` records that the composer row has to \
-             wrap so a narrow dock does not clip Send; a sidebar that took width \
-             out of that column would make the clip it protects against more \
-             likely, not less.",
+            sidebar_render.contains("omega_sidebar::layout(")
+                && sidebar_render.contains("layout.width()"),
+            "OMEGA-DELTA-0118, as `OMEGA-DELTA-0130` carries it: `render_sidebar` \
+             in {} no longer takes its width from `omega_sidebar::layout`. \
+             `OMEGA-DELTA-0105` records that the composer row has to wrap so a \
+             narrow dock does not clip Send. A sidebar that hard-codes its width \
+             takes that width in every window, including the one too narrow to \
+             spare it, which makes the clip it protects against more likely \
+             rather than less.",
+            panel_path.display()
+        );
+        assert!(
+            !sidebar_render.contains(".absolute()"),
+            "OMEGA-DELTA-0130: `render_sidebar` in {} draws absolutely again. \
+             An overlay is safe for a surface you open and close, and it is a \
+             permanent lid over the transcript and the composer for one that is \
+             persistent and default open — which is what the owner asked for.",
             panel_path.display()
         );
 
@@ -16597,6 +16650,289 @@ mod tests {
              then drops it. Somebody debugging a control that does nothing has \
              only the log to look in.",
             ui_path.display()
+        );
+    }
+
+    /// OMEGA-DELTA-0130. Zero base's sidebar is persistent, sectioned, and
+    /// incapable of interrupting.
+    ///
+    /// The owner: *"i want a persistent sidebar, collapsible, kinda like the
+    /// thread sidebar but also with some vertical collapsible menus. i want the
+    /// last 10 chat threads as one thing, and codex etc ratelimits showing, and
+    /// nostr nip 29 activity too etc … default open on the zerobase chat
+    /// page."*
+    ///
+    /// What a person sees is asserted in `agent_ui`'s own tests, which run the
+    /// pure functions: the layout yields to a rail before the composer loses
+    /// width, a collapsed section survives a restart, a section that cannot
+    /// load draws one quiet line, a tampered relay message is refused. This
+    /// checks the four things those tests cannot see, because they are
+    /// properties of the wiring rather than of a value.
+    #[test]
+    fn zero_bases_sidebar_is_persistent_sectioned_and_silent_when_it_fails() {
+        let panel_path = repository_path(AGENT_PANEL_PATH);
+        let panel = read_repository_file(AGENT_PANEL_PATH);
+        let sidebar_path = repository_path(SIDEBAR_PATH);
+        let sidebar = read_repository_file(SIDEBAR_PATH);
+
+        // 1. Every section that exists is drawn.
+        //
+        // This is the "adding a fourth section is cheap and obvious" promise,
+        // made checkable. A variant added to `SectionId` and forgotten in the
+        // panel's match would otherwise be a heading over blank space, and the
+        // person who added it would have no way to find out.
+        let variants: Vec<&str> = sidebar
+            .split("pub enum SectionId {")
+            .nth(1)
+            .and_then(|rest| rest.split('}').next())
+            .unwrap_or_else(|| {
+                panic!(
+                    "OMEGA-DELTA-0130: `pub enum SectionId` is gone from {}.",
+                    sidebar_path.display()
+                )
+            })
+            .lines()
+            .map(str::trim)
+            .filter(|line| line.ends_with(','))
+            .map(|line| line.trim_end_matches(','))
+            .filter(|name| {
+                name.chars().next().is_some_and(char::is_uppercase)
+                    && name.chars().all(char::is_alphanumeric)
+            })
+            .collect();
+        assert!(
+            variants.len() >= 3,
+            "OMEGA-DELTA-0130: fewer than the three sections the owner named \
+             were found in `SectionId` in {}: {variants:?}",
+            sidebar_path.display()
+        );
+        let render = body_of(&panel, "render_sidebar_section");
+        for variant in &variants {
+            // `=>` on purpose. `contains("SectionId::RecentThreads")` is also
+            // true of `SectionId::RecentThreadsSomethingElse`, so the arrow is
+            // what makes this an assertion about a match arm rather than about
+            // a prefix.
+            assert!(
+                render.contains(&format!("SectionId::{variant} =>")),
+                "OMEGA-DELTA-0130: `render_sidebar_section` in {} does not draw \
+                 `SectionId::{variant}`. A section that exists and is not drawn \
+                 is a heading over blank space, which is the empty gauge this \
+                 delta exists to not draw. Adding a section is one variant, its \
+                 key and title, and one arm here.",
+                panel_path.display()
+            );
+        }
+
+        // 2. No section may interrupt.
+        //
+        // The rule that cost the most: a section that cannot load says so in
+        // place and everything else keeps working. `SectionBody` has no error
+        // variant, so the drawing has no failure branch — but a future lane
+        // could still raise a toast from the *read*, which is the code path
+        // that actually fails. So the read, the sidebar model and the panel's
+        // sidebar drawing are all checked for notification machinery.
+        for (path, source, region) in [
+            (&sidebar_path, sidebar.as_str(), "the sidebar model"),
+            (
+                &repository_path(NOSTR_ACTIVITY_PATH),
+                read_repository_file(NOSTR_ACTIVITY_PATH).leak() as &str,
+                "the public-chat read",
+            ),
+        ] {
+            for interruption in ["StatusToast", "show_toast", "push_notification", "toast("] {
+                assert!(
+                    !source.contains(interruption),
+                    "OMEGA-DELTA-0130: {region} in {} reaches for `{interruption}`. \
+                     No section may block, refuse or interrupt: a sidebar that \
+                     cannot draw its rate limits must still draw the threads, \
+                     and a relay that did not answer is a line in a section, not \
+                     a notification over the composer. omega#119 records what \
+                     happened the last time a zero-base surface toasted.",
+                    path.display()
+                );
+            }
+        }
+        for function in [
+            "render_sidebar",
+            "render_sidebar_section",
+            "render_section_body",
+            "read_public_chat",
+            "fetch_public_chat",
+        ] {
+            let body = body_of(&panel, function);
+            assert!(
+                !body.contains("StatusToast") && !body.contains("show_toast"),
+                "OMEGA-DELTA-0130: `{function}` in {} raises a toast. The \
+                 sidebar states its failures in place, quietly, in the section \
+                 that had them.",
+                panel_path.display()
+            );
+        }
+
+        // 3. Collapsed state is written, or "persistent" is only half true.
+        //
+        // Both toggles, because they are two different things a person
+        // collapses — the sidebar as a whole, and one of its vertical menus —
+        // and the owner asked for both to stay put.
+        for toggle in ["toggle_threads_sidebar", "toggle_sidebar_section"] {
+            let body = body_of(&panel, toggle);
+            assert!(
+                body.contains("save_sidebar_state"),
+                "OMEGA-DELTA-0130: `{toggle}` in {} no longer writes the \
+                 sidebar's state. It would collapse for this launch and come \
+                 back on the next, which is not the persistence the owner asked \
+                 for and is indistinguishable from a broken toggle.",
+                panel_path.display()
+            );
+        }
+        assert!(
+            body_of(&panel, "save_sidebar_state").contains("omega_sidebar::STATE_KEY"),
+            "OMEGA-DELTA-0130: `save_sidebar_state` in {} writes somewhere other \
+             than the key the sidebar reads at startup.",
+            panel_path.display()
+        );
+
+        // 4. The rate-limits section draws no number, because there is none.
+        //
+        // The Agent Client Protocol schema Omega speaks carries one usage type,
+        // `UsageUpdate`, and it is the current context window — `used` and
+        // `size` tokens — not a quota. There is no remaining-quota field, no
+        // reset time, no window and no plan tier in either schema version, and
+        // a rate limit an external agent hits does not even arrive as a
+        // rate-limit error. So a percentage or a countdown here would be a
+        // picture of a number nobody has.
+        let rate_limits = body_of(&sidebar, "rate_limits");
+        for invention in [
+            "used_tokens",
+            "max_tokens",
+            "UsageUpdate",
+            "percent",
+            "reset",
+        ] {
+            assert!(
+                !rate_limits.contains(invention),
+                "OMEGA-DELTA-0130: `rate_limits` in {} reaches for `{invention}`. \
+                 Nothing in this process knows a Codex or Claude rate limit. The \
+                 honest section says what it does not know; a gauge would be a \
+                 drawing of a number that does not exist.",
+                sidebar_path.display()
+            );
+        }
+        assert!(
+            sidebar.contains("Rate limits are not reported over ACP"),
+            "OMEGA-DELTA-0130: {} no longer states what it does not know about \
+             rate limits. Saying nothing there is worse than saying so: an empty \
+             section reads as a section that has not loaded yet.",
+            sidebar_path.display()
+        );
+    }
+
+    /// OMEGA-DELTA-0130. The public-chat section reads, and cannot write.
+    ///
+    /// This is the first socket Omega opens to a relay from the UI.
+    /// `omega_community` says of itself that it "does not open a socket or
+    /// touch a key", and `omega_community_control` still tells a person that
+    /// nothing in this build signs or reaches a relay. This does not change
+    /// either claim about *writing*, and that has to stay true by construction
+    /// rather than by intention — a read-only viewer that grows a publish path
+    /// is a key handling question nobody asked for.
+    #[test]
+    fn the_public_chat_section_reads_and_cannot_write() {
+        let path = repository_path(NOSTR_ACTIVITY_PATH);
+        let source = read_repository_file(NOSTR_ACTIVITY_PATH);
+        let production = outside_the_tests(&source);
+
+        // 1. Nothing here signs, and nothing here publishes.
+        //
+        // `"EVENT"` and `"AUTH"` are deliberately not in this list: both are
+        // labels on frames the relay *sends*, and `read_frame` has to name them
+        // to read past them. What would make this a writer is a key and a
+        // signature, and the send below.
+        for capability in ["EventBuilder", "SecretKey", "Keys::", "sign_event", "nsec"] {
+            assert!(
+                !production.contains(capability),
+                "OMEGA-DELTA-0130: {} reaches for `{capability}`. This section \
+                 exists to draw five messages somebody else wrote. The relay \
+                 serves them to an unauthenticated connection, so there is no \
+                 key here to hold and no frame to sign — and a reader that grows \
+                 a publish path has changed what `omega_community` says about \
+                 this build without saying so.",
+                path.display()
+            );
+        }
+
+        // The socket carries exactly one frame outward, and it is the `REQ`.
+        // This is the assertion that actually forbids publishing: a `send` that
+        // is not the request is a frame this module was not built to put on a
+        // public relay under somebody's name.
+        let fetch = body_of(&source, "fetch");
+        assert_eq!(
+            fetch.matches(".send(").count(),
+            1,
+            "OMEGA-DELTA-0130: `fetch` in {} sends more than one frame. One \
+             `REQ` out, frames in until `EOSE`, close — that is the whole \
+             capability, and anything else on that socket is a write.",
+            path.display()
+        );
+        assert!(
+            fetch.contains("request_frame("),
+            "OMEGA-DELTA-0130: `fetch` in {} no longer sends the request \
+             `request_frame` builds, so what it does ask the relay for is no \
+             longer the thing the tests check.",
+            path.display()
+        );
+
+        // 2. A message that is not signed by the pubkey drawn beside it is not
+        //    drawn. `a_tampered_message_is_refused` in `agent_ui` proves the
+        //    behaviour against a real captured event; this proves the check was
+        //    not quietly removed from the path that decides.
+        let message = body_of(&source, "message");
+        assert!(
+            message.contains("is_authentic"),
+            "OMEGA-DELTA-0130: `message` in {} no longer checks the signature. \
+             The row draws an author's key beside their words; unverified, that \
+             pairing is the relay's claim rather than the author's.",
+            path.display()
+        );
+
+        // 3. The relay and the group are configuration, not constants.
+        //
+        // The built-in `public-nostr-chat` skill states this rule in as many
+        // words: "Do not put an OpenAgents host name or group identifier in the
+        // protocol code. The same client must work with another compatible
+        // Nostr relay and NIP-29 group." The manifest URL is the one piece of
+        // configuration that has to exist somewhere, and it is the only one.
+        //
+        // Comments are stripped first, deliberately. Naming the relay and the
+        // group in prose is how somebody reading this finds out what it talks
+        // to; naming them in an expression is how the next NIP-29 group stops
+        // working. Only the second is the defect.
+        let panel_path = repository_path(AGENT_PANEL_PATH);
+        let panel = read_repository_file(AGENT_PANEL_PATH);
+        let panel_production = outside_the_tests(&panel);
+        for (path, source) in [(&path, production), (&panel_path, panel_production)] {
+            let code: String = source
+                .lines()
+                .filter(|line| !line.trim_start().starts_with("//"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            for hard_coded in ["wss://relay.openagents.com", "openagents-public"] {
+                assert!(
+                    !code.contains(hard_coded),
+                    "OMEGA-DELTA-0130: {} compiles in `{hard_coded}`. The relay \
+                     and the group come from the published manifest, so the same \
+                     reader works against another NIP-29 group — which is the \
+                     rule the built-in `public-nostr-chat` skill states in as \
+                     many words.",
+                    path.display()
+                );
+            }
+        }
+        assert!(
+            body_of(&panel, "fetch_public_chat").contains("omega_nostr_activity::MANIFEST_URL"),
+            "OMEGA-DELTA-0130: `fetch_public_chat` in {} no longer reads the \
+             published manifest before connecting.",
+            panel_path.display()
         );
     }
     // ------ OMEGA-DELTA-0124 — the header says the thought, and says it once

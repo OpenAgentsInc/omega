@@ -6097,3 +6097,119 @@ question rather than leaving it to whoever next reads the menu.
   the banner is proved against the source and against a driven turn, not against
   pixels. And it does not audit the other executors' send paths for the same
   shape.
+
+### OMEGA-DELTA-0130 — Zero base gets one persistent sidebar, and every section in it can fail alone
+
+- **Upstream behaviour.** Upstream Zed's navigation lives in docks and a project
+  panel. `OMEGA-DELTA-0052` and `OMEGA-DELTA-0053` removed both from zero base:
+  no docks, no centre pane, no status bar. `OMEGA-DELTA-0118` then gave the mode
+  a threads sidebar of its own, drawn as an **overlay** — absolutely positioned
+  over the thread surface, opened with `cmd-alt-j`, closed again to see what was
+  under it.
+
+- **What the owner asked for.** *"i want a persistent sidebar, collapsible,
+  kinda like the thread sidebar but also with some vertical collapsible menus. i
+  want the last 10 chat threads as one thing, and codex etc ratelimits showing,
+  and nostr nip 29 activity too etc — get me an initial version of that added
+  now. default open on the zerobase chat page."* Then, on the third section:
+  *"for initial nip29 shit i want it showing the most recent 5 messages from the
+  default channel, the one we show at /agentchat in apps/openagents.com of
+  openagents repo."*
+
+- **One sidebar, not two.** The overlay is gone and this is what `cmd-alt-j`
+  now toggles. The action, its namespace and the menu entry are unchanged —
+  `agent::ToggleThreadsSidebar`, which was `OMEGA-DELTA-0118`'s entire
+  load-bearing repair, because `agent` is the namespace zero base admits and
+  `multi_workspace` is not. What changed is what appears: the threads are the
+  first of three sections, and pressing the binding collapses the sidebar to a
+  rail rather than removing it. Keeping both surfaces would have been two lists
+  of the same threads, which `OMEGA-DELTA-0118`'s own notes call one window
+  giving two answers to one question.
+
+- **The composer, which is what actually decides the layout.**
+  `OMEGA-DELTA-0105` records that the composer's bottom row wraps so a narrow
+  dock does not clip **Send**. `OMEGA-DELTA-0118` protected that by taking part
+  in no layout at all. A *persistent* sidebar cannot make that promise, because
+  a column that is always there always takes width from the column beside it —
+  and an overlay that is always there is a permanent lid over the transcript and
+  over the composer's left edge, which is worse. So the sidebar is a real column
+  that **yields**: `omega_sidebar::layout` gives it its 280px only while the
+  content column keeps `MIN_CONTENT_WIDTH` (600px), and draws a 30px rail
+  otherwise. The stored preference is never overwritten by that, so widening the
+  window restores the sidebar the person asked for. The composer is therefore
+  neither covered nor narrowed past the floor, which is a stronger promise than
+  "it happens not to overlap at today's widths". The composer's bottom-left is
+  untouched and still empty.
+
+- **No section may interrupt.** `SectionBody` has no error variant. A section
+  that cannot load has a quiet muted line where its rows would be, in place, and
+  the sections above and below it never find out. There is no toast, no banner,
+  no modal and no refusal on any path in the sidebar — omega#119 records what
+  happened the last time a zero-base surface toasted. A sidebar that cannot
+  reach a relay still draws the owner's threads.
+
+- **What each section actually is, stated rather than implied.**
+  - *Recent threads* is **real**. It is `OMEGA-DELTA-0118`'s rows, unchanged:
+    `omega_threads_sidebar::rows` still decides the order, the exclusions, the
+    ages and the refusals, and this takes the first ten. A thread still reopens
+    under the executor that recorded it, and a row whose executor cannot run
+    here still refuses in the composer's own words rather than dispatching a
+    load that fails in somebody else's error text.
+  - *Rate limits* is **honest and empty, on purpose**. The ACP schema Omega
+    speaks carries exactly one usage type — `UsageUpdate`, `used` and `size`
+    tokens for the current *context window*, plus an optional cost. There is no
+    remaining-quota field, no reset time, no window and no plan tier in either
+    schema version; and a rate limit an external agent hits does not even arrive
+    as a rate-limit error, because only `AuthRequired` is mapped and everything
+    else falls through to generic error text. Zed's cloud usage types exist but
+    require a sign-in zero base does not do, are host-blocked by
+    `app_identity::service_isolation`, and measure edit predictions rather than
+    Codex or Claude. Nothing in the tree reads `~/.codex` or `~/.claude`, and
+    several tests exist specifically to keep it that way. So the section names
+    each executor, says "not reported" — or, for one that cannot run here, gives
+    `OMEGA-DELTA-0123`'s reason verbatim — and states the finding once. **No
+    gauge, no percentage, no countdown**: those would be pictures of numbers
+    nobody has.
+  - *Public chat* is **real, and is the first socket Omega opens to a relay from
+    the UI**. It reads the manifest at `openagents.com`, then the NIP-29 group
+    that manifest names, and draws the five most recent kind-9 messages —
+    the same relay, group and kind the `/agentchat` page reads. Signatures are
+    verified against the pubkey drawn beside them.
+
+- **The read is a read.** `auth.directRead` is `public` and the relay serves the
+  group's history unauthenticated, so there is no signer here, no key, no NIP-42
+  exchange and no publish path: one `REQ` out, frames in until `EOSE`, close.
+  `omega_community`'s claim that this build does not sign or write to a relay is
+  unchanged, and a delta check forbids the socket carrying a second frame. The
+  relay URL and group id are read from the manifest rather than compiled in,
+  which is the rule the built-in `public-nostr-chat` skill states.
+
+- **Adding a fourth section.** A variant on `omega_sidebar::SectionId` and its
+  entry in `ALL`, its frozen `key` and its `title`, and one arm in the panel's
+  `render_sidebar_section`. The delta check reads the enum and asserts every
+  variant is named in that match, so a section added and forgotten fails the
+  suite rather than drawing a heading over blank space.
+
+- **Enforced by:** `zero_bases_sidebar_is_persistent_sectioned_and_silent_when_it_fails`
+  and `the_public_chat_section_reads_and_cannot_write` in `crates/omega_deltas`,
+  for the wiring; `zero_bases_threads_sidebar_is_its_own_and_reopens_by_executor`
+  in the same file, whose composer-clipping assertion moved from "draws
+  absolutely" to "takes its width from `omega_sidebar::layout`" rather than
+  being dropped; and the unit tests in `crates/agent_ui/src/omega_sidebar.rs`
+  and `crates/agent_ui/src/omega_nostr_activity.rs`, which are where the
+  behaviour lives — the sidebar yielding to a rail at 800px and not at 880px, a
+  collapsed section surviving a round trip, a corrupt stored state opening
+  rather than failing, a quiet group and an unreachable relay reading
+  differently, the relay's non-standard three-element `EOSE` ending the read,
+  and a real captured event verifying while the same event with one word changed
+  is refused.
+
+- **What this does not cover.** **Nobody has watched it draw in a window.**
+  Everything above is proved headlessly. Three things are knowingly not done in
+  this first version: the public-chat section shows truncated pubkeys rather
+  than kind-0 display names, it reads once when the panel is built rather than
+  holding a live subscription, and it reads no moderation state — a message
+  deleted after the fetch stays drawn until the next one. The rate-limits
+  section draws no number because none exists; if ACP ever grows a quota field,
+  or if reading Codex's and Claude's own on-disk state is ever wanted, that is a
+  new decision with its own privacy question and not a gap in this one.

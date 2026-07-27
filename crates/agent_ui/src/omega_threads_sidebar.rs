@@ -237,7 +237,11 @@ fn reopen_refusal(
 /// A future timestamp reads as `now` rather than a negative age. Clocks move
 /// backwards, and a thread claiming to be `-3s` old would look like a defect in
 /// the list rather than a defect in the clock.
-fn short_age(updated_at: DateTime<Utc>, now: DateTime<Utc>) -> String {
+///
+/// `OMEGA-DELTA-0130` made this public rather than copying it. The sidebar's
+/// public-chat section ages a Nostr message the same way, and two age
+/// formatters in one column would eventually disagree about what `1h` means.
+pub fn short_age(updated_at: DateTime<Utc>, now: DateTime<Utc>) -> String {
     let seconds = now.signed_duration_since(updated_at).num_seconds();
     if seconds <= 0 {
         return "now".to_string();
