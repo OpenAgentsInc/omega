@@ -115,6 +115,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0124",
     "OMEGA-DELTA-0125",
     "OMEGA-DELTA-0126",
+    "OMEGA-DELTA-0127",
 ];
 
 /// OMEGA-DELTA-0125. Every entry the thread header's `…` menu offers, the
@@ -17317,6 +17318,92 @@ mod tests {
             "OMEGA-DELTA-0126: a self-modification grant that no longer \
              matches the machine cancels the turn again. It authorizes \
              nothing, which is not the same as stopping somebody's message."
+        );
+    }
+
+    // ------ OMEGA-DELTA-0127
+
+    /// OMEGA-DELTA-0127. Exo's own session configuration reaches the composer.
+    ///
+    /// `exo acp` advertises a model selector in the ordinary ACP shape, and
+    /// every part of Omega that renders one already existed. The one thing
+    /// that did not was the pass-through: `ExoHarnessConnection::new_session`
+    /// installs the facade over the thread in place of the inner
+    /// `AcpConnection`, so the facade is what `ConversationView` asks — and the
+    /// trait's default answer is `None`, which parsed Exo's options, held them,
+    /// and never offered them.
+    ///
+    /// Both halves of the pair, because an agent sending `modes` and an agent
+    /// sending `configOptions` are two halves of one upstream mechanism, and
+    /// forwarding only one is how a future Exo that switched silently loses its
+    /// controls.
+    #[test]
+    fn exos_own_session_configuration_reaches_the_composer() {
+        let connection = read_repository_file(EXO_CONNECTION_PATH);
+        for method in ["session_config_options", "session_modes"] {
+            let body = function_body(&connection, method).unwrap_or_else(|| {
+                panic!(
+                    "OMEGA-DELTA-0127: the Exo connection no longer overrides \
+                     `{method}`, so the facade answers the trait's default \
+                     `None` and Exo's own controls are parsed and discarded."
+                )
+            });
+            assert!(
+                body.contains(&format!("self.acp.{method}(session_id, cx)")),
+                "OMEGA-DELTA-0127: the Exo connection's `{method}` no longer \
+                 delegates to the `exo acp` connection underneath it."
+            );
+        }
+        // Not a bespoke control. A selector Omega drew for Exo would be a
+        // second thing to keep in step with what Exo can do, and it would miss
+        // the keybindings `ConfigOptionsView` binds by option category.
+        assert!(
+            !named_in_code(&connection, "ConfigOptionsView"),
+            "OMEGA-DELTA-0127: the Exo connection builds a configuration view \
+             of its own. The generic one renders whatever an ACP agent \
+             advertises; a second one renders whatever somebody remembered."
+        );
+    }
+
+    /// OMEGA-DELTA-0127. Where the composer reads an agent's config options.
+    ///
+    /// Upstream's fact, asserted because the Exo pass-through is worth nothing
+    /// if this moves. `ConversationView` reads them off the connection the
+    /// *thread* holds, and for an Exo thread that is the facade — which is
+    /// exactly why the facade had to answer.
+    #[test]
+    fn an_agents_config_options_are_read_off_the_threads_own_connection() {
+        let view = read_repository_file(CONVERSATION_VIEW_PATH);
+        // Scoped to the function that builds the view. The same line appears
+        // twice in this file, so a check over the whole of it stayed green
+        // with the one that matters deleted — watched passing against exactly
+        // that mutation before this was narrowed.
+        let build = function_body(&view, "new_thread_view").expect(
+            "OMEGA-DELTA-0127: the composer no longer has `new_thread_view`, \
+             which is where an agent's controls are built.",
+        );
+        let call = build
+            .find("connection.session_config_options(&session_id, cx)")
+            .expect(
+                "OMEGA-DELTA-0127: the composer no longer builds its config \
+                 options from a connection, so an ACP agent advertising them \
+                 has nowhere to be drawn.",
+            );
+        // The *binding in force at the call*, not "the file says this
+        // somewhere". `new_thread_view` binds `connection` twice, so both a
+        // whole-file check and a whole-function one stayed green with the one
+        // that matters replaced — watched passing against exactly that.
+        let before = &build[..call];
+        let binding = before
+            .rfind("let connection =")
+            .expect("OMEGA-DELTA-0127: nothing binds `connection` before the call");
+        assert!(
+            before[binding..].contains("thread.read(cx).connection()"),
+            "OMEGA-DELTA-0127: the connection the composer asks for config \
+             options is no longer the thread's own. For an Exo thread the \
+             thread's connection is the facade, which is the only object whose \
+             pass-through is consulted; anything else reads a connection that \
+             never had Exo's options."
         );
     }
 }

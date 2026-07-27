@@ -62,10 +62,20 @@ pub struct ExoPin {
 /// The pin. Audited in the openagents teardown
 /// `docs/teardowns/2026-07-25-exoharness-exo-teardown.md` and driven for real
 /// by omega#87.
+///
+/// Moved from `cd7c0d29` / `c61846e3` by `OMEGA-DELTA-0126` and
+/// `OMEGA-DELTA-0127`, across two Exo commits. `4a18b568` stopped routing
+/// every `gemini-*` binding through the OpenAI branch, which selects the
+/// Responses API that Google implements at no base URL — the first turn on a
+/// Gemini binding answered `HTTP 404 Not Found`. `9dd709d1` made `exo acp`
+/// advertise the conversation's model as an ACP config option, which is the
+/// control in the composer's row. The pin moves with them because its whole
+/// claim is that it describes the source the running bytes were built from;
+/// leaving it behind would have made it describe a checkout nobody has.
 pub const EXO_PIN: ExoPin = ExoPin {
     upstream: "https://github.com/OpenAgentsInc/exo",
-    source_commit: "cd7c0d29db869e953fb7261d8390ca93007d36a6",
-    source_tree: "c61846e3f44daaf445930d1a499432ca9b069306",
+    source_commit: "9dd709d15f7d5a891d72978610ada8868a80d3b7",
+    source_tree: "b94d8c29fce1b3320bd72e0504c34d5a4efbfb06",
     version: "0.1.0",
 };
 

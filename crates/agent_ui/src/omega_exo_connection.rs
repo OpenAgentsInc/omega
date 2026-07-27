@@ -1111,6 +1111,45 @@ impl AgentConnection for ExoHarnessConnection {
         })
     }
 
+    /// `OMEGA-DELTA-0127`, omega#112. Exo's own session configuration, passed
+    /// through.
+    ///
+    /// `exo acp` advertises a model selector in its `session/new` response, in
+    /// the ordinary ACP shape, so the whole of Omega's side is *not
+    /// intercepting it*: `AcpConnection` already parses `configOptions`,
+    /// `ConfigOptionsView` already draws one dropdown per advertised option in
+    /// the composer's bottom-right row, and `omega_router` already delegates
+    /// this method to whichever executor is attached. Without this override the
+    /// facade — which `new_session` installs over the thread in place of the
+    /// inner connection — answered the trait's default `None`, and Exo's
+    /// options were parsed, held, and never asked for.
+    ///
+    /// Deliberately not a bespoke Exo control. A selector Omega drew itself
+    /// would be a second thing to keep in step with what Exo can actually do,
+    /// and it would not have been reachable by the keybindings
+    /// `ConfigOptionsView` already binds by category.
+    fn session_config_options(
+        &self,
+        session_id: &acp::SessionId,
+        cx: &App,
+    ) -> Option<Rc<dyn acp_thread::AgentSessionConfigOptions>> {
+        self.acp.session_config_options(session_id, cx)
+    }
+
+    /// The same pass-through, for an agent that advertises modes instead.
+    ///
+    /// Exo advertises none today. It is here because the pair is one seam: an
+    /// agent sending `modes` and an agent sending `configOptions` are the two
+    /// halves of one upstream mechanism, and overriding one of them is how a
+    /// future Exo that switched to the other silently loses its controls.
+    fn session_modes(
+        &self,
+        session_id: &acp::SessionId,
+        cx: &App,
+    ) -> Option<Rc<dyn acp_thread::AgentSessionModes>> {
+        self.acp.session_modes(session_id, cx)
+    }
+
     fn auth_methods(&self) -> &[acp::AuthMethod] {
         &[]
     }

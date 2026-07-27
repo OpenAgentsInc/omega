@@ -5859,3 +5859,74 @@ question rather than leaving it to whoever next reads the menu.
   choosable from Omega: the lane names one agent and one conversation, and
   changing either is still an edit to the lane file. And it adds secret-store
   fields to the Exo lane and to nothing else.
+
+### OMEGA-DELTA-0127 — Exo says what it can be run with, and Omega already knew how to draw it
+
+- **Upstream Zed:** an ACP agent may return `configOptions` from `session/new`,
+  and `ConfigOptionsView` draws one control per advertised option into the
+  composer's row. Codex's model and reasoning-effort knobs are exactly this and
+  there is no Codex-specific UI anywhere.
+- **Omega, before this:** the owner asked for a control for choosing what Exo
+  runs — *"ideally theres an ACP control or otherwise a dropdown for selecting
+  which to use for exo cuz id like to try some w gemini some w codex"*. Exo had
+  no such control, and neither side of the wire was ready: `exo acp` answered
+  `session/new` with a session id and nothing else, and
+  `ExoHarnessConnection` — the facade `new_session` installs over the thread in
+  place of the inner `AcpConnection` — answered the trait's default `None` for
+  `session_config_options`, so options would have been parsed, held, and never
+  asked for.
+- **Omega now:** the facade passes both `session_config_options` and
+  `session_modes` through to the `exo acp` connection underneath it. That is
+  the whole of the Omega-side change. Nothing new is drawn, because
+  `ConfigOptionsView` already draws it, in the composer's bottom-right row
+  beside the executor selector, with the keybindings it binds by option
+  category.
+- **`exo acp` now advertises a model selector**, in `OpenAgentsInc/exo`. One
+  `select` option, id `model`, category `model`: every registered LLM binding
+  is an option, the current value is the conversation's model override if it
+  has one and the agent record's model otherwise, and
+  `session/set_config_option` writes a **conversation-level** override. That
+  last word is the point — two conversations on one Exo agent can run on two
+  models and neither changes what a third gets, which is what "some threads
+  with Gemini" means. `apply_conversation_model_override` runs inside every
+  send, so a change lands on the next turn with nothing restarted.
+- **The unit of choice was a real question and this is the answer to half of
+  it.** Exo binds a *harness* and a *model*, and they are not the same axis. The
+  model is per-conversation, switchable while a thread is running, and needs no
+  process rebuilt — so it is a dropdown, and it is this one. The harness is
+  fixed when `exo acp` builds its executor, and the three interesting values —
+  `codex`, `claude-code`, `cursor` — are TypeScript presets that resolve a
+  module and can npm-install on first use. Switching one mid-session means
+  rebuilding the harness and reopening the conversation underneath a live ACP
+  connection, with an install possibly happening inside the switch. **That is
+  not built, and no control claims it is**: the harness axis is still which Exo
+  agent the lane names. A dropdown that listed harnesses and could not change
+  one would be worse than no dropdown.
+- **An empty root advertises nothing rather than an empty dropdown.** A root
+  with no registered model binding returns no `configOptions` at all, because a
+  select with zero options is a control that opens onto nothing and a client
+  cannot tell that apart from a broken agent.
+- **A `currentValue` is always in its own list.** A conversation whose override
+  names a binding that has since been unregistered gets that name inserted as an
+  option marked `not a registered binding`, rather than advertising a current
+  value no option matches — which renders as a selector with nothing selected.
+- **Nothing bespoke, on purpose.** A model selector Omega drew for Exo would be
+  a second thing to keep in step with what Exo can actually do, and it would not
+  be reachable by the keybindings `ConfigOptionsView` already binds by category.
+  `exos_own_session_configuration_reaches_the_composer` asserts the Exo
+  connection builds no configuration view of its own.
+- **Enforced by:** `exos_own_session_configuration_reaches_the_composer` and
+  `an_agents_config_options_are_read_off_the_threads_own_connection` in
+  `crates/omega_deltas`. The second pins an upstream fact — the composer reads
+  config options off the connection the *thread* holds, which for an Exo thread
+  is the facade, which is precisely why the facade had to answer.
+- **Driven, not asserted.** `exo acp` was run against the owner's root and
+  `session/new` returned the option — `"id": "model"`, `"category": "model"`,
+  `"currentValue": "gemini-flash"` — and `session/set_config_option` returned
+  the refreshed list. Two bindings are registered on that root, so the dropdown
+  has something to switch between.
+- **What this does not cover.** **No window has been opened**, so the control's
+  rendering beside the executor selector is unproved against pixels. It does not
+  make the harness choosable, it does not persist a default across threads, and
+  it says nothing about what happens if a binding is unregistered while a turn
+  is in flight.
