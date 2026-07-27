@@ -1,0 +1,24 @@
+[package]
+name = "omega_device_bridge"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license = "GPL-3.0-or-later"
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/omega_device_bridge.rs"
+doctest = false
+
+[dependencies]
+async-io.workspace = true
+async-tungstenite = { workspace = true, features = ["async-std-runtime"] }
+futures.workspace = true
+log.workspace = true
+nostr.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+smol.workspace = true
+thiserror.workspace = true

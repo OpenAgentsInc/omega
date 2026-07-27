@@ -25,6 +25,7 @@ http_client.workspace = true
 log.workspace = true
 nostr = { workspace = true, features = ["nip59"] }
 omega_acp_server.workspace = true
+omega_device_bridge.workspace = true
 omega_identity.workspace = true
 paths.workspace = true
 rand.workspace = true

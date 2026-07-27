@@ -11990,6 +11990,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "omega_device_bridge"
+version = "0.1.0"
+dependencies = [
+ "async-io",
+ "async-tungstenite",
+ "futures 0.3.32",
+ "log",
+ "nostr",
+ "serde",
+ "serde_json",
+ "smol",
+ "thiserror 2.0.17",
+]
+
+[[package]]
 name = "omega_effectd"
 version = "0.1.0"
 dependencies = [
@@ -12006,6 +12021,7 @@ dependencies = [
  "log",
  "nostr",
  "omega_acp_server",
+ "omega_device_bridge",
  "omega_identity",
  "paths",
  "rand 0.9.4",

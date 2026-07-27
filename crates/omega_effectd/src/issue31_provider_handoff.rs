@@ -81,8 +81,7 @@ pub const ISSUE31_HANDOFF_OUTCOME_EXPIRED: &str = "outcome.omega.handoff_expired
 pub const ISSUE31_HANDOFF_OUTCOME_FAILED: &str = "outcome.omega.handoff_failed";
 
 pub const ISSUE31_HANDOFF_REASON_ACCOUNT_REVOKED: &str = "reason.omega.handoff_account_revoked";
-pub const ISSUE31_HANDOFF_REASON_ACCOUNT_WITHDRAWN: &str =
-    "reason.omega.handoff_account_withdrawn";
+pub const ISSUE31_HANDOFF_REASON_ACCOUNT_WITHDRAWN: &str = "reason.omega.handoff_account_withdrawn";
 pub const ISSUE31_HANDOFF_REASON_LANE_CONFLICT: &str = "reason.omega.handoff_account_lane_conflict";
 pub const ISSUE31_HANDOFF_REASON_HOST_RESTARTED: &str = "reason.omega.handoff_host_restarted";
 pub const ISSUE31_HANDOFF_REASON_DEADLINE_PASSED: &str = "reason.omega.handoff_deadline_passed";
@@ -591,7 +590,13 @@ mod tests {
             ledger.get(&handoff_ref).expect("record").state,
             Issue31ProviderHandoffState::Requested,
         );
-        assert!(ledger.get(&handoff_ref).expect("record").account_ref.is_none());
+        assert!(
+            ledger
+                .get(&handoff_ref)
+                .expect("record")
+                .account_ref
+                .is_none()
+        );
 
         let roster = [account(
             "account.claude.1",
@@ -605,7 +610,10 @@ mod tests {
         assert_eq!(bound.account_ref.as_deref(), Some("account.claude.1"));
         // The account-to-lane relation is why this handoff chose this account.
         assert_eq!(bound.lane_ref.as_deref(), Some("lane.claude-local"));
-        assert!(bound.outcome_ref.is_none(), "an open handoff has no outcome");
+        assert!(
+            bound.outcome_ref.is_none(),
+            "an open handoff has no outcome"
+        );
 
         assert_eq!(ledger.advance(Some(&roster), NOW_MS + 2_000), 1);
         let done = ledger.get(&handoff_ref).expect("record").clone();
@@ -671,7 +679,12 @@ mod tests {
     #[test]
     fn a_host_with_no_account_for_the_provider_waits_and_then_expires() {
         let (mut ledger, handoff_ref) = opened();
-        let roster = [account("account.codex.1", "openai", "lane.codex-local", "ready")];
+        let roster = [account(
+            "account.codex.1",
+            "openai",
+            "lane.codex-local",
+            "ready",
+        )];
         assert_eq!(ledger.advance(Some(&roster), NOW_MS + 1_000), 0);
         assert_eq!(
             ledger.get(&handoff_ref).expect("record").state,
@@ -679,10 +692,7 @@ mod tests {
             "the owner may still be completing the login at the host",
         );
         assert_eq!(
-            ledger.advance(
-                Some(&roster),
-                NOW_MS + ISSUE31_PROVIDER_HANDOFF_DEADLINE_MS
-            ),
+            ledger.advance(Some(&roster), NOW_MS + ISSUE31_PROVIDER_HANDOFF_DEADLINE_MS),
             1,
         );
         let expired = ledger.get(&handoff_ref).expect("record").clone();
@@ -908,7 +918,10 @@ mod tests {
             ),
             Err(Issue31ProviderHandoffError::BoundExhausted),
         );
-        assert_eq!(ledger.projected(NOW_MS).rows.len(), MAX_ISSUE31_PROVIDER_HANDOFFS);
+        assert_eq!(
+            ledger.projected(NOW_MS).rows.len(),
+            MAX_ISSUE31_PROVIDER_HANDOFFS
+        );
     }
 
     #[test]
@@ -1122,7 +1135,12 @@ mod shared_fixture {
             .filter_map(|handoff| handoff.get("state").and_then(serde_json::Value::as_str))
             .collect();
         for state in [
-            "requested", "active", "completed", "refused", "failed", "expired",
+            "requested",
+            "active",
+            "completed",
+            "refused",
+            "failed",
+            "expired",
         ] {
             assert!(states.contains(&state), "{state} is unrepresented");
         }

@@ -7,11 +7,11 @@ use async_tungstenite::WebSocketStream;
 use async_tungstenite::async_std::{ConnectStream, connect_async};
 use async_tungstenite::tungstenite::Message;
 use futures::{FutureExt, StreamExt, pin_mut, select};
-use nostr::{Event, EventBuilder, JsonUtil, Kind, PublicKey, RelayUrl};
 #[cfg(any(test, feature = "test-support"))]
 use nostr::Keys;
 #[cfg(any(test, feature = "test-support"))]
 use nostr::nips::nip59;
+use nostr::{Event, EventBuilder, JsonUtil, Kind, PublicKey, RelayUrl};
 
 #[cfg(any(test, feature = "test-support"))]
 async fn nip59_extract_rumor(
@@ -823,10 +823,10 @@ impl WebSocketRelayAdapter {
                     }
                     #[cfg(any(test, feature = "test-support"))]
                     RelayCustody::Keys(keys) => {
-                        let gift = smol::block_on(crate::nostr_websocket_relay::nip59_extract_rumor(
-                            keys, event,
-                        ))
-                            .map_err(|error| SarahConversationError::Relay(error.to_string()))?;
+                        let gift = smol::block_on(
+                            crate::nostr_websocket_relay::nip59_extract_rumor(keys, event),
+                        )
+                        .map_err(|error| SarahConversationError::Relay(error.to_string()))?;
                         if gift.rumor.kind != Kind::PrivateDirectMessage {
                             return Ok(None);
                         }
@@ -1750,7 +1750,10 @@ mod tests {
 
         let conversation_ref = format!("sarah.live.{}", &keys.public_key().to_hex()[..16]);
         let record = EventBuilder::new(Kind::Custom(SARAH_TURN_RECORD_KIND), "live round trip")
-            .tag(nostr::Tag::parse(["conversation", conversation_ref.as_str()]).expect("conversation tag"))
+            .tag(
+                nostr::Tag::parse(["conversation", conversation_ref.as_str()])
+                    .expect("conversation tag"),
+            )
             .sign_with_keys(&keys)
             .expect("signed turn record");
 
@@ -1771,9 +1774,13 @@ mod tests {
                     )
                     .sign_with_keys(&keys)
                     .expect("signed auth event");
-                relay.authenticate(&auth_event).expect("NIP-42 authenticate");
+                relay
+                    .authenticate(&auth_event)
+                    .expect("NIP-42 authenticate");
                 assert!(relay.is_authenticated(), "relay must accept our auth");
-                relay.publish(&record).expect("publish after authenticating");
+                relay
+                    .publish(&record)
+                    .expect("publish after authenticating");
             }
             Err(error) => panic!("unexpected publish error: {error}"),
         }
@@ -1786,10 +1793,16 @@ mod tests {
             .query(&conversation_ref, None, 10)
             .expect("query the live relay");
         assert!(
-            page.events.iter().any(|event| event.event_id == record.id.to_hex()),
+            page.events
+                .iter()
+                .any(|event| event.event_id == record.id.to_hex()),
             "published event must read back from the live relay"
         );
-        assert_eq!(page.gap_state, GapState::None, "no gap on a fresh conversation");
+        assert_eq!(
+            page.gap_state,
+            GapState::None,
+            "no gap on a fresh conversation"
+        );
 
         // Only now, with a publish and a query both acknowledged, is the relay
         // proven healthy rather than merely reachable.
@@ -1945,8 +1958,7 @@ mod tests {
             "failover",
             nostr::Timestamp::now().as_secs(),
         );
-        let mut failover =
-            live_authenticated_adapter(vec![dead_url.clone(), url.clone()], &keys);
+        let mut failover = live_authenticated_adapter(vec![dead_url.clone(), url.clone()], &keys);
         live_publish(&mut failover, &auth_url, &keys, &record).expect("publish must fail over");
         let event_id = record.id.to_hex();
         let acknowledged = failover.acknowledged_relays(&event_id);
@@ -1986,7 +1998,11 @@ mod tests {
             !outage.publication_complete(&outage_record.id.to_hex()),
             "a total relay outage must never report a completed publication"
         );
-        assert!(outage.acknowledged_relays(&outage_record.id.to_hex()).is_empty());
+        assert!(
+            outage
+                .acknowledged_relays(&outage_record.id.to_hex())
+                .is_empty()
+        );
         eprintln!("live relay OK: failover credited only {url}; total outage stayed incomplete");
     }
 
@@ -2296,7 +2312,11 @@ mod tests {
             .record_emitted_pairing("d".repeat(64), grant)
             .expect("record grant");
         let revocation = controller
-            .revoke_grant(&grant_ref, now + 1, Some("reason.omega.owner_revoked".into()))
+            .revoke_grant(
+                &grant_ref,
+                now + 1,
+                Some("reason.omega.owner_revoked".into()),
+            )
             .expect("revoke");
         controller
             .record_emitted_pairing("e".repeat(64), revocation)
@@ -2874,15 +2894,20 @@ mod tests {
         )
         .expect("production conversation tags");
         let stranger = Keys::generate();
-        leaky_tags
-            .push(nostr::Tag::parse(["p", stranger.public_key().to_hex().as_str()]).expect("p tag"));
+        leaky_tags.push(
+            nostr::Tag::parse(["p", stranger.public_key().to_hex().as_str()]).expect("p tag"),
+        );
         let mut leaky = EventBuilder::new(Kind::PrivateDirectMessage, "leaky")
             .tags(leaky_tags)
             .build(owner.public_key());
         leaky.ensure_id();
-        let leaky_wrap =
-            smol::block_on(EventBuilder::gift_wrap(&owner, &owner.public_key(), leaky, []))
-                .expect("gift wrap");
+        let leaky_wrap = smol::block_on(EventBuilder::gift_wrap(
+            &owner,
+            &owner.public_key(),
+            leaky,
+            [],
+        ))
+        .expect("gift wrap");
         assert!(
             relay.admit_event(&leaky_wrap, conversation_ref).is_err(),
             "a conversation rumor naming a third recipient must still be refused"
@@ -2907,7 +2932,9 @@ mod tests {
         ))
         .expect("gift wrap");
         assert!(
-            relay.admit_event(&elsewhere_wrap, conversation_ref).is_err(),
+            relay
+                .admit_event(&elsewhere_wrap, conversation_ref)
+                .is_err(),
             "a conversation rumor addressed to another pair must still be refused"
         );
     }

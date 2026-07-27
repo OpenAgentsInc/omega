@@ -33,6 +33,10 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
+use crate::issue31_provider_handoff::{
+    ISSUE31_ACTION_REQUEST_PROVIDER_HANDOFF, Issue31ProviderHandoffLedger,
+    Issue31ProviderRosterAccount,
+};
 use crate::protocol::{MAX_FRAME_BYTES, PROTOCOL_SCHEMA};
 use crate::{
     ISSUE31_ADJUNCT_DELIVERY_KEYS, ISSUE31_COMMAND_SCHEMA, ISSUE31_COMMAND_SCHEMA_V2,
@@ -41,17 +45,13 @@ use crate::{
     ISSUE31_PAIRING_SCHEMA, Issue31AuthorityDecisionProjection, Issue31CommandArguments,
     Issue31CommandEvent, Issue31CommandExecution, Issue31CommandExecutionV2,
     Issue31CommandHandlingStatus, Issue31CommandRecord, Issue31CommandRecordV2,
-    Issue31CommandStatus, Issue31HostConfiguration, Issue31HostController, Issue31HostDiscovery,
-    Issue31HostDiscoveryV2, Issue31NostrError, Issue31OwnerProjectionBody,
-    Issue31GrantState, Issue31OwnerProjectionInput, Issue31PairingEvent, Issue31PairingRecord,
-    Issue31SourceRole, Issue31TargetOutcomeProjection, Issue31WithheldCause,
-    Issue31WithheldSourceCount, Issue31WithheldSourcesInput, SARAH_AUTHORITY_RECEIPT_KIND,
-    SARAH_ENGRAM_KIND, SARAH_READ_STATE_KIND, SARAH_REMINDER_KIND, emit_issue31_owner_projection,
+    Issue31CommandStatus, Issue31GrantState, Issue31HostConfiguration, Issue31HostController,
+    Issue31HostDiscovery, Issue31HostDiscoveryV2, Issue31NostrError, Issue31OwnerProjectionBody,
+    Issue31OwnerProjectionInput, Issue31PairingEvent, Issue31PairingRecord, Issue31SourceRole,
+    Issue31TargetOutcomeProjection, Issue31WithheldCause, Issue31WithheldSourceCount,
+    Issue31WithheldSourcesInput, SARAH_AUTHORITY_RECEIPT_KIND, SARAH_ENGRAM_KIND,
+    SARAH_READ_STATE_KIND, SARAH_REMINDER_KIND, emit_issue31_owner_projection,
     emit_issue31_withheld_sources,
-};
-use crate::issue31_provider_handoff::{
-    ISSUE31_ACTION_REQUEST_PROVIDER_HANDOFF, Issue31ProviderHandoffLedger,
-    Issue31ProviderRosterAccount,
 };
 
 pub use crate::openagents_binding::BindingState;
@@ -1724,7 +1724,11 @@ impl SarahConversationClient {
             }
             Ok(response)
         })();
-        self.issue31_host = Some(if result.is_ok() { candidate } else { controller });
+        self.issue31_host = Some(if result.is_ok() {
+            candidate
+        } else {
+            controller
+        });
         let persistence = self.persist_issue31_host_state();
         finish_durable_operation(result, persistence)
     }
@@ -2959,7 +2963,10 @@ impl SarahConversationClient {
     /// documents to. A key is recorded only after both records were committed
     /// to the durable outbox.
     pub fn issue31_published_host_adjunct_grants(&self) -> Vec<String> {
-        self.issue31_host_adjunct_emissions.keys().cloned().collect()
+        self.issue31_host_adjunct_emissions
+            .keys()
+            .cloned()
+            .collect()
     }
 
     /// Owner-private records still waiting for a relay acknowledgement.
@@ -3099,9 +3106,7 @@ impl SarahConversationClient {
             let key = format!("{}:{}", grant.grant_ref, grant.generation);
             let digest = format!(
                 "{:x}",
-                Sha256::digest(
-                    [host_content.as_bytes(), detail_content.as_bytes()].concat()
-                )
+                Sha256::digest([host_content.as_bytes(), detail_content.as_bytes()].concat())
             );
             if self.issue31_host_adjunct_emissions.get(&key) == Some(&digest) {
                 continue;
@@ -5028,10 +5033,12 @@ mod tests {
     #[test]
     fn the_host_snapshot_and_its_detail_are_addressed_to_each_admitted_device() {
         let source: Issue31HostProjectionSource = Arc::new(|request| {
-            Ok(Some(host_documents(request.host_ref, "snapshot.omega.issue31.aa")))
+            Ok(Some(host_documents(
+                request.host_ref,
+                "snapshot.omega.issue31.aa",
+            )))
         });
-        let (mut client, controller, device_public_key_hex) =
-            paired_adjunct_client(Some(source));
+        let (mut client, controller, device_public_key_hex) = paired_adjunct_client(Some(source));
         let grant = controller.active_grants(200).expect("grants")[0].clone();
         client.ensure_connected().expect("connect the mock relay");
         client
@@ -5085,7 +5092,10 @@ mod tests {
     #[test]
     fn an_unchanged_reading_is_not_republished() {
         let source: Issue31HostProjectionSource = Arc::new(|request| {
-            Ok(Some(host_documents(request.host_ref, "snapshot.omega.issue31.aa")))
+            Ok(Some(host_documents(
+                request.host_ref,
+                "snapshot.omega.issue31.aa",
+            )))
         });
         let (mut client, controller, _device) = paired_adjunct_client(Some(source));
         client.ensure_connected().expect("connect the mock relay");
@@ -5103,7 +5113,10 @@ mod tests {
 
         // A changed reading is a different snapshot and does go out again.
         let changed: Issue31HostProjectionSource = Arc::new(|request| {
-            Ok(Some(host_documents(request.host_ref, "snapshot.omega.issue31.bb")))
+            Ok(Some(host_documents(
+                request.host_ref,
+                "snapshot.omega.issue31.bb",
+            )))
         });
         client.set_issue31_host_projection_source(changed);
         client
@@ -5178,7 +5191,11 @@ mod tests {
         });
         client.set_issue31_host_projection_source(source);
         client.ensure_connected().expect("connect the mock relay");
-        assert!(client.publish_issue31_host_adjuncts(&controller, 200).is_err());
+        assert!(
+            client
+                .publish_issue31_host_adjuncts(&controller, 200)
+                .is_err()
+        );
         assert!(client.issue31_private_outbox.is_empty());
     }
 
@@ -5198,7 +5215,11 @@ mod tests {
         });
         let (mut client, controller, _device) = paired_adjunct_client(Some(source));
         client.ensure_connected().expect("connect the mock relay");
-        assert!(client.publish_issue31_host_adjuncts(&controller, 200).is_err());
+        assert!(
+            client
+                .publish_issue31_host_adjuncts(&controller, 200)
+                .is_err()
+        );
     }
 
     /// Pair one device with the host so the projection pass has somewhere to
@@ -5386,7 +5407,10 @@ mod tests {
             .expect("a clean pass");
         assert_eq!(
             withheld_substance(&clean_client, &grant_ref, 1),
-            Some((crate::ISSUE31_WITHHELD_COVERAGE_COMPLETE.to_string(), vec![]))
+            Some((
+                crate::ISSUE31_WITHHELD_COVERAGE_COMPLETE.to_string(),
+                vec![]
+            ))
         );
     }
 
@@ -5467,7 +5491,10 @@ mod tests {
             .expect("the catching-up pass");
         assert_eq!(
             withheld_substance(&client, &grant_ref, 1),
-            Some((crate::ISSUE31_WITHHELD_COVERAGE_COMPLETE.to_string(), vec![]))
+            Some((
+                crate::ISSUE31_WITHHELD_COVERAGE_COMPLETE.to_string(),
+                vec![]
+            ))
         );
         let after_catching_up = withheld_outbox_refs(&client);
         assert_eq!(after_catching_up.len(), 2);
@@ -5812,13 +5839,9 @@ mod tests {
             "arguments.omega.provider_handoff.anthropic",
         );
         let result = controller
-            .handle_command_event(
-                intent,
-                104,
-                |action_ref, arguments_ref, idempotency_ref| {
-                    client.execute_issue31_action(action_ref, arguments_ref, idempotency_ref)
-                },
-            )
+            .handle_command_event(intent, 104, |action_ref, arguments_ref, idempotency_ref| {
+                client.execute_issue31_action(action_ref, arguments_ref, idempotency_ref)
+            })
             .expect("the host answers an admitted handoff request")
             .expect("a command result");
         let Issue31CommandRecord::CommandResult {
@@ -5844,7 +5867,10 @@ mod tests {
             .get(outcome_ref)
             .expect("the outcome names the record the host made")
             .clone();
-        assert_eq!(record.state, workroom_receipts::Issue31ProviderHandoffState::Requested);
+        assert_eq!(
+            record.state,
+            workroom_receipts::Issue31ProviderHandoffState::Requested
+        );
         assert!(!record.is_terminal());
         assert!(record.requested_at_ms.is_some(), "the host stamped it");
         assert!(record.account_ref.is_none(), "nothing is bound yet");
@@ -5868,16 +5894,15 @@ mod tests {
             "arguments.omega.provider_handoff.anthropic",
         );
         let result = controller
-            .handle_command_event(
-                intent,
-                104,
-                |action_ref, arguments_ref, idempotency_ref| {
-                    client.execute_issue31_action(action_ref, arguments_ref, idempotency_ref)
-                },
-            )
+            .handle_command_event(intent, 104, |action_ref, arguments_ref, idempotency_ref| {
+                client.execute_issue31_action(action_ref, arguments_ref, idempotency_ref)
+            })
             .expect("the controller answers")
             .expect("a command result");
-        let Issue31CommandRecord::CommandResult { status, reason_ref, .. } = &result else {
+        let Issue31CommandRecord::CommandResult {
+            status, reason_ref, ..
+        } = &result
+        else {
             panic!("expected a command result");
         };
         assert_eq!(*status, Issue31CommandStatus::Refused);
@@ -5886,7 +5911,11 @@ mod tests {
             client.issue31_provider_handoff_refs().is_empty(),
             "a request the host never admitted is not a handoff that failed",
         );
-        assert!(client.issue31_projected_provider_handoffs(1_000_000).is_empty());
+        assert!(
+            client
+                .issue31_projected_provider_handoffs(1_000_000)
+                .is_empty()
+        );
     }
 
     #[test]
@@ -5902,16 +5931,15 @@ mod tests {
             "arguments.omega.none",
         );
         let result = controller
-            .handle_command_event(
-                intent,
-                104,
-                |action_ref, arguments_ref, idempotency_ref| {
-                    client.execute_issue31_action(action_ref, arguments_ref, idempotency_ref)
-                },
-            )
+            .handle_command_event(intent, 104, |action_ref, arguments_ref, idempotency_ref| {
+                client.execute_issue31_action(action_ref, arguments_ref, idempotency_ref)
+            })
             .expect("the controller answers")
             .expect("a command result");
-        let Issue31CommandRecord::CommandResult { status, reason_ref, .. } = &result else {
+        let Issue31CommandRecord::CommandResult {
+            status, reason_ref, ..
+        } = &result
+        else {
             panic!("expected a command result");
         };
         assert_eq!(*status, Issue31CommandStatus::Refused);
@@ -6958,12 +6986,13 @@ mod tests {
         // surface at the same time. omega#49 asks for a result on both, and a
         // host that can only ever hold one grant proves the fan-out by
         // assertion rather than by running it.
-        let device_public_key_hexes: Vec<String> = std::env::var("OMEGA_DEVICE_PROOF_DEVICE_PUBKEY")
-            .expect("OMEGA_DEVICE_PROOF_DEVICE_PUBKEY must be the surfaces' 64-hex device keys")
-            .split(',')
-            .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty())
-            .collect();
+        let device_public_key_hexes: Vec<String> =
+            std::env::var("OMEGA_DEVICE_PROOF_DEVICE_PUBKEY")
+                .expect("OMEGA_DEVICE_PROOF_DEVICE_PUBKEY must be the surfaces' 64-hex device keys")
+                .split(',')
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+                .collect();
         assert!(
             !device_public_key_hexes.is_empty(),
             "OMEGA_DEVICE_PROOF_DEVICE_PUBKEY must name at least one device key"
@@ -7004,11 +7033,12 @@ mod tests {
         // Sarah publishes for the whole run, not only during the seed, so a
         // send from the device can be answered while the harness is live.
         let mut sarah_publisher = {
-            let mut sarah_relay = crate::nostr_websocket_relay::WebSocketRelayAdapter::new_for_keys(
-                vec![relay_url.clone()],
-                sarah_keys.clone(),
-            )
-            .expect("sarah adapter");
+            let mut sarah_relay =
+                crate::nostr_websocket_relay::WebSocketRelayAdapter::new_for_keys(
+                    vec![relay_url.clone()],
+                    sarah_keys.clone(),
+                )
+                .expect("sarah adapter");
             sarah_relay.connect().expect("sarah connect");
             Some(sarah_relay)
         };
@@ -7049,17 +7079,18 @@ mod tests {
                 nip44::Version::default(),
             )
             .expect("nip44 encrypt the engram");
-            let engram = EventBuilder::new(
-                Kind::Custom(crate::SARAH_ENGRAM_KIND),
-                engram_ciphertext,
-            )
-            .tag(Tag::parse(["d", &"1".repeat(64)]).expect("d tag"))
-            .tag(Tag::parse(["p", owner_public_key_hex.as_str()]).expect("p tag"))
-            .tag(Tag::parse(["alt", "encrypted agent memory record"]).expect("alt tag"))
-            .tag(Tag::parse(["conversation", conversation_ref.as_str()]).expect("conversation tag"))
-            .custom_created_at(nostr::Timestamp::from(now))
-            .sign_with_keys(&sarah_keys)
-            .expect("signed engram");
+            let engram =
+                EventBuilder::new(Kind::Custom(crate::SARAH_ENGRAM_KIND), engram_ciphertext)
+                    .tag(Tag::parse(["d", &"1".repeat(64)]).expect("d tag"))
+                    .tag(Tag::parse(["p", owner_public_key_hex.as_str()]).expect("p tag"))
+                    .tag(Tag::parse(["alt", "encrypted agent memory record"]).expect("alt tag"))
+                    .tag(
+                        Tag::parse(["conversation", conversation_ref.as_str()])
+                            .expect("conversation tag"),
+                    )
+                    .custom_created_at(nostr::Timestamp::from(now))
+                    .sign_with_keys(&sarah_keys)
+                    .expect("signed engram");
             device_proof_publish(sarah_relay, &auth_url, &sarah_keys, &engram)
                 .expect("publish the engram");
             eprintln!("device-proof: seeded engram {}", engram.id.to_hex());
@@ -7070,17 +7101,14 @@ mod tests {
                 // contract, so the host quarantines it and must say so.
                 // Also 44300: a source the host never receives cannot be
                 // quarantined, so on kind 14 this proved nothing either.
-                let unreadable = EventBuilder::new(
-                    Kind::Custom(SARAH_TURN_RECORD_KIND),
-                    "",
-                )
-                .tag(
-                    Tag::parse(["conversation", conversation_ref.as_str()])
-                        .expect("conversation tag"),
-                )
-                .custom_created_at(nostr::Timestamp::from(now + 1))
-                .sign_with_keys(&sarah_keys)
-                .expect("signed unreadable source");
+                let unreadable = EventBuilder::new(Kind::Custom(SARAH_TURN_RECORD_KIND), "")
+                    .tag(
+                        Tag::parse(["conversation", conversation_ref.as_str()])
+                            .expect("conversation tag"),
+                    )
+                    .custom_created_at(nostr::Timestamp::from(now + 1))
+                    .sign_with_keys(&sarah_keys)
+                    .expect("signed unreadable source");
                 device_proof_publish(sarah_relay, &auth_url, &sarah_keys, &unreadable)
                     .expect("publish the unreadable source");
                 eprintln!(
@@ -7206,7 +7234,9 @@ mod tests {
             }
             for (key, substance) in &client.issue31_withheld_emissions {
                 let line = format!("{substance:?}");
-                if announced_grants.insert(format!("withheld:{key}"), line.clone()).as_ref()
+                if announced_grants
+                    .insert(format!("withheld:{key}"), line.clone())
+                    .as_ref()
                     != Some(&line)
                 {
                     eprintln!("device-proof: withheld {key} · {line}");
@@ -7284,5 +7314,4 @@ mod tests {
         }
         eprintln!("device-proof: host stopped after {seconds}s");
     }
-
 }

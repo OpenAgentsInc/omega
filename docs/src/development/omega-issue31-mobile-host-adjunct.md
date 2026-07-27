@@ -19,6 +19,34 @@ inspector. It has no GPUI, network, process, or durable-state dependency.
 Runtime production of the snapshot stays with Omega's operation owners and
 `omega_effectd`; the later Full Auto mobile packet connects that runtime.
 
+## Direct device bridge {#direct-device-bridge}
+
+Omega provides the authenticated
+`openagents.omega.device_bridge.v1` WebSocket transport for a paired mobile
+device. The socket implementation lives in the GPUI-free
+`omega_device_bridge` crate. `omega_effectd` owns its lifecycle and adapts the
+durable Issue 31 grant controller to the transport.
+
+The bridge binds only a literal loopback address or a Tailscale address in
+`100.64.0.0/10` or `fd7a:115c:a1e0::/48`. It does not resolve hostnames or
+accept a wildcard or public bind. The client proves possession of its Nostr
+device key with a signed kind `27272` event. The event binds the host key,
+protocol, grant reference, resume cursor, and a fresh nonce.
+
+After admission, the host sends a snapshot followed by generation-fenced,
+monotonically sequenced deltas. A cursor from another generation, a cursor
+ahead of the host, or a cursor older than the bounded delta journal receives a
+fresh snapshot. A contiguous cursor receives only the missing deltas.
+
+The direct bridge reads the same `Issue31HostController` grant fold and
+device-wide revocation scan used by relay admission. Expiry closes a live
+session with `grant_expired`. Revocation closes it with `grant_revoked`, and
+the same grant is refused on reconnect.
+
+Version 1 is read-only. The only accepted client frames after `hello` are
+`heartbeat` and `bye`. Any command or unknown frame receives a typed
+`protocol_error` close. Both directions enforce the 64 KiB frame limit.
+
 ## Coverage boundary {#coverage-boundary}
 
 The adjunct has exactly four host-owned projections:
@@ -235,13 +263,13 @@ is `requested`.
 
 Each record has one lifecycle, and every field on it is a host measurement:
 
-| Field           | How the host measures it                                         |
-| --------------- | ---------------------------------------------------------------- |
-| `requestedAtMs` | One reading of `now`, taken when the host admitted the command    |
-| `accountRef`    | Chosen from the host's own provider roster, never supplied        |
-| `state`         | Advanced by at most one roster observation per host pump pass     |
-| `reasonClass`   | Why a non-successful handoff ended that way                       |
-| `outcomeRef`    | Present exactly when the handoff is terminal                      |
+| Field           | How the host measures it                                       |
+| --------------- | -------------------------------------------------------------- |
+| `requestedAtMs` | One reading of `now`, taken when the host admitted the command |
+| `accountRef`    | Chosen from the host's own provider roster, never supplied     |
+| `state`         | Advanced by at most one roster observation per host pump pass  |
+| `reasonClass`   | Why a non-successful handoff ended that way                    |
+| `outcomeRef`    | Present exactly when the handoff is terminal                   |
 
 Terminal outcomes are `outcome.omega.handoff_connected` (a ready account for
 that provider, bound to its lane), `outcome.omega.handoff_refused` with
@@ -349,15 +377,15 @@ The production Nostr record contract is frozen independently under
 `crates/omega_effectd/fixtures` and mirrored byte-for-byte by OpenAgents
 Mobile:
 
-| Fixture | SHA-256 |
-| --- | --- |
-| `openagents.omega.issue31.host_discovery.v1.canonical.json` | `f68dab0de93f533a97b59ebac2db7ea28e66a8aef913e108bfb5c1fa74618f6b` |
-| `openagents.omega.issue31.pairing.v1.canonical.json` | `82b36c29d74b3f07ef5d50941532eb038d4f2839d640019b136e013b7dc426fa` |
-| `openagents.omega.issue31.command.v1.canonical-intent.json` | `c990ba250393d271bc4040d2f11fefea909c3bb733e0a33895512c28151c56c2` |
-| `openagents.omega.issue31.command.v1.canonical-result.json` | `89581c5090117eecf766884dd762db99f301b6669a123ca034ff634f6b883ee8` |
-| `openagents.omega.issue31.host_discovery.v2.canonical.json` | `a5604d4c792a5ed556f023e150f01b371c5cf702b95b72786e0c7a9adbbdcb1c` |
-| `openagents.omega.issue31.command.v2.canonical-intent.json` | `7bb7b23680be10756184668ae7722c09c634a1941b086f66d0425da4e8371bbe` |
-| `openagents.omega.issue31.command.v2.canonical-result.json` | `51bca57e14c3d45518c342c2d1f848972281de848f809c34566ed183c7e4e387` |
+| Fixture                                                       | SHA-256                                                            |
+| ------------------------------------------------------------- | ------------------------------------------------------------------ |
+| `openagents.omega.issue31.host_discovery.v1.canonical.json`   | `f68dab0de93f533a97b59ebac2db7ea28e66a8aef913e108bfb5c1fa74618f6b` |
+| `openagents.omega.issue31.pairing.v1.canonical.json`          | `82b36c29d74b3f07ef5d50941532eb038d4f2839d640019b136e013b7dc426fa` |
+| `openagents.omega.issue31.command.v1.canonical-intent.json`   | `c990ba250393d271bc4040d2f11fefea909c3bb733e0a33895512c28151c56c2` |
+| `openagents.omega.issue31.command.v1.canonical-result.json`   | `89581c5090117eecf766884dd762db99f301b6669a123ca034ff634f6b883ee8` |
+| `openagents.omega.issue31.host_discovery.v2.canonical.json`   | `a5604d4c792a5ed556f023e150f01b371c5cf702b95b72786e0c7a9adbbdcb1c` |
+| `openagents.omega.issue31.command.v2.canonical-intent.json`   | `7bb7b23680be10756184668ae7722c09c634a1941b086f66d0425da4e8371bbe` |
+| `openagents.omega.issue31.command.v2.canonical-result.json`   | `51bca57e14c3d45518c342c2d1f848972281de848f809c34566ed183c7e4e387` |
 | `openagents.omega.issue31.owner_projection.v1.canonical.json` | `2a8bec5fa23f27d20db35f3d76bd59817672431328f191bc4302dfa37e7f804d` |
 
 The pairing fixture includes the host-authored Sarah identity binding. A hash

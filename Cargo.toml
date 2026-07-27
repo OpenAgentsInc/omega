@@ -150,6 +150,7 @@ members = [
     "crates/omega_community",
     "crates/omega_deltas",
     "crates/omega_acp_server",
+    "crates/omega_device_bridge",
     "crates/omega_front_door",
     "crates/omega_harness",
     "crates/omega_effectd",
@@ -432,6 +433,7 @@ omega_audience = { path = "crates/omega_audience" }
 omega_community = { path = "crates/omega_community" }
 omega_deltas = { path = "crates/omega_deltas" }
 omega_acp_server = { path = "crates/omega_acp_server" }
+omega_device_bridge = { path = "crates/omega_device_bridge" }
 omega_front_door = { path = "crates/omega_front_door" }
 omega_harness = { path = "crates/omega_harness" }
 omega_effectd = { path = "crates/omega_effectd" }

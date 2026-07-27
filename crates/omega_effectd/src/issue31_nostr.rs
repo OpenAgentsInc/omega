@@ -2388,6 +2388,13 @@ impl Issue31HostController {
             .collect()
     }
 
+    pub fn device_bridge_grant_state(
+        &self,
+        grant_ref: &str,
+    ) -> Result<Option<Issue31GrantState>, Issue31NostrError> {
+        fold_issue31_grant(&self.pairing_events, grant_ref)
+    }
+
     pub fn pairing_event_was_processed(&self, event_id: &str) -> bool {
         self.processed_pairing_event_ids.contains(event_id)
     }
@@ -3976,7 +3983,10 @@ mod tests {
                 serde_json::from_str(&emission.content).expect("emitted content is JSON");
             let fixture: serde_json::Value =
                 serde_json::from_slice(bytes).expect("fixture is JSON");
-            assert_eq!(emitted, fixture, "{label} emitted bytes differ from fixture");
+            assert_eq!(
+                emitted, fixture,
+                "{label} emitted bytes differ from fixture"
+            );
         }
     }
 
@@ -4160,7 +4170,10 @@ mod tests {
                 serde_json::from_str(&emission.content).expect("emitted content is JSON");
             let fixture: serde_json::Value =
                 serde_json::from_slice(bytes).expect("fixture is JSON");
-            assert_eq!(emitted, fixture, "{label} emitted bytes differ from fixture");
+            assert_eq!(
+                emitted, fixture,
+                "{label} emitted bytes differ from fixture"
+            );
         }
     }
 
@@ -4254,7 +4267,8 @@ mod tests {
             contexts.push_str(&format!("\"{}\":1784937608", "\\\"".repeat(120)));
             let _ = index;
         }
-        let plaintext = format!("{{\"v\":1,\"client_id\":\"omega-host\",\"contexts\":{{{contexts}}}}}");
+        let plaintext =
+            format!("{{\"v\":1,\"client_id\":\"omega-host\",\"contexts\":{{{contexts}}}}}");
         assert!(
             plaintext.len() <= 524_288,
             "the oversized body must stay inside its own plaintext bound"
@@ -4472,8 +4486,10 @@ mod tests {
             200,
         )
         .expect_err("a revoked device must be refused a pairing challenge");
-        assert!(matches!(refusal, Issue31NostrError::Invalid(message) if message
-            .contains("device admission was revoked")));
+        assert!(
+            matches!(refusal, Issue31NostrError::Invalid(message) if message
+            .contains("device admission was revoked"))
+        );
         // The only grant on record is still the revoked one.
         let projections = controller.grant_projections(200).expect("grant list");
         assert_eq!(projections.len(), 1);
@@ -4490,7 +4506,9 @@ mod tests {
         let encoded = serde_json::to_vec(&controller).expect("serialize controller");
         let mut reloaded: Issue31HostController =
             serde_json::from_slice(&encoded).expect("deserialize controller");
-        reloaded.validate_persisted_state().expect("persisted state");
+        reloaded
+            .validate_persisted_state()
+            .expect("persisted state");
         // Exactly what start-up does: re-apply the owner's configured allowlist.
         reloaded
             .set_admitted_device_policy(
@@ -4546,7 +4564,11 @@ mod tests {
         assert!(!controller.device_admission_is_revoked(&device_public_key_hex));
         // A *new* revocation is a new event id, so it is not cleared and blocks again.
         let revocation = controller
-            .revoke_grant(&new_grant_ref, 300, Some("reason.omega.owner_revoked".into()))
+            .revoke_grant(
+                &new_grant_ref,
+                300,
+                Some("reason.omega.owner_revoked".into()),
+            )
             .expect("revoke the new grant");
         controller
             .record_emitted_pairing(

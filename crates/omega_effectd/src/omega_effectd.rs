@@ -13,7 +13,10 @@ mod protocol;
 mod sarah_conversation;
 mod supervisor;
 
-use std::{rc::Rc, sync::Arc};
+use std::{
+    rc::Rc,
+    sync::{Arc, RwLock},
+};
 
 use anyhow::{Result, anyhow};
 use gpui::{App, Global};
@@ -29,6 +32,14 @@ pub use openagents_binding::{
 pub use issue31_nostr::*;
 pub use issue31_provider_handoff::*;
 pub use nostr_websocket_relay::WebSocketRelayAdapter;
+pub use omega_device_bridge::{
+    BindRefusal as DeviceBridgeBindRefusal, BridgeBindHost, BridgeError as DeviceBridgeError,
+    ByeReason as DeviceBridgeByeReason, Cursor as DeviceBridgeCursor, ExecutorDisclosure,
+    GrantAdmission as DeviceBridgeGrantAdmission, GrantRefusalReason, MessageRole, MirrorChange,
+    MirrorHealth, MirrorMessage, MirrorRun, MirrorSnapshot, MirrorThread, ProjectionJournal,
+    RunState, ServerConfig as DeviceBridgeServerConfig, ServerFrame as DeviceBridgeServerFrame,
+    ServerHandle as DeviceBridgeServerHandle, ThreadState,
+};
 pub use openagents_session::{
     OpenAgentsSession, OpenAgentsSessionPhase, VerifiedOpenAgentsSession, init_openagents_session,
     openagents_session,
@@ -40,17 +51,15 @@ pub use protocol::{
     ProtocolErrorCode, RunSnapshot, SERVICE_VERSION,
 };
 pub use sarah_conversation::{
-    BootstrapResult, ConversationIdentity, GapState, InterruptTurnResult, MockRelayAdapter,
-    RelayTransport, RoomSnapshotResult, RoomStateEvent, SARAH_EVENT_ROOM_EVENT,
-    SARAH_EVENT_ROOM_STATE, SARAH_FRAMED_METHODS, SARAH_METHOD_BOOTSTRAP,
-    SARAH_METHOD_DEVICE_GRANTS, SARAH_METHOD_INTERRUPT_TURN, SARAH_METHOD_READMIT_DEVICE,
-    SARAH_METHOD_RENEW_DEVICE_GRANT, SARAH_METHOD_REVOKE_DEVICE_GRANT,
-    SARAH_METHOD_ROOM_SNAPSHOT, SARAH_METHOD_SEND_MESSAGE,
-    SARAH_METHOD_SESSION_STATUS, Issue31HostProjectionDocuments, Issue31HostProjectionRequest,
-    Issue31HostProjectionSource, Issue31ProviderRosterSource,
-    SarahConversationClient, SarahConversationConfig,
-    SarahConversationError, SendMessageResult, SessionStatusResult, SigningIdentity,
-    asserts_no_khala_sync_client,
+    BootstrapResult, ConversationIdentity, GapState, InterruptTurnResult,
+    Issue31HostProjectionDocuments, Issue31HostProjectionRequest, Issue31HostProjectionSource,
+    Issue31ProviderRosterSource, MockRelayAdapter, RelayTransport, RoomSnapshotResult,
+    RoomStateEvent, SARAH_EVENT_ROOM_EVENT, SARAH_EVENT_ROOM_STATE, SARAH_FRAMED_METHODS,
+    SARAH_METHOD_BOOTSTRAP, SARAH_METHOD_DEVICE_GRANTS, SARAH_METHOD_INTERRUPT_TURN,
+    SARAH_METHOD_READMIT_DEVICE, SARAH_METHOD_RENEW_DEVICE_GRANT, SARAH_METHOD_REVOKE_DEVICE_GRANT,
+    SARAH_METHOD_ROOM_SNAPSHOT, SARAH_METHOD_SEND_MESSAGE, SARAH_METHOD_SESSION_STATUS,
+    SarahConversationClient, SarahConversationConfig, SarahConversationError, SendMessageResult,
+    SessionStatusResult, SigningIdentity, asserts_no_khala_sync_client,
 };
 pub use supervisor::{
     AttentionDecision, MAX_FRAME_BYTES, OmegaEffectdCommand, OmegaEffectdHostFuture,
@@ -59,6 +68,75 @@ pub use supervisor::{
 };
 
 pub type SharedOmegaEffectdSupervisor = Rc<AsyncMutex<OmegaEffectdSupervisor>>;
+pub type SharedIssue31HostController = Arc<RwLock<Issue31HostController>>;
+
+struct Issue31DeviceBridgeAuthority {
+    controller: SharedIssue31HostController,
+}
+
+impl omega_device_bridge::GrantAuthority for Issue31DeviceBridgeAuthority {
+    fn authorize(
+        &self,
+        device_public_key_hex: &str,
+        host_public_key_hex: &str,
+        grant_ref: Option<&str>,
+        pairing_secret: Option<&str>,
+        now_millis: u64,
+    ) -> std::result::Result<DeviceBridgeGrantAdmission, GrantRefusalReason> {
+        if pairing_secret.is_some() && grant_ref.is_none() {
+            return Err(GrantRefusalReason::PairingRefused);
+        }
+        let grant_ref = grant_ref.ok_or(GrantRefusalReason::GrantMissing)?;
+        let controller = self
+            .controller
+            .read()
+            .map_err(|_| GrantRefusalReason::GrantMissing)?;
+        let grant = controller
+            .device_bridge_grant_state(grant_ref)
+            .map_err(|_| GrantRefusalReason::GrantMissing)?
+            .ok_or(GrantRefusalReason::GrantMissing)?;
+        if grant.host_public_key_hex != host_public_key_hex
+            || grant.device_public_key_hex != device_public_key_hex
+        {
+            return Err(GrantRefusalReason::GrantMissing);
+        }
+        if grant.status == Issue31GrantStatus::Revoked
+            || controller.device_admission_is_revoked(device_public_key_hex)
+        {
+            return Err(GrantRefusalReason::GrantRevoked);
+        }
+        let now_seconds = now_millis / 1_000;
+        if grant
+            .expires_at
+            .is_some_and(|expires_at| now_seconds >= expires_at)
+        {
+            return Err(GrantRefusalReason::GrantExpired);
+        }
+        let expires_at = grant
+            .expires_at
+            .and_then(|expires_at| expires_at.checked_mul(1_000))
+            .unwrap_or(253_402_300_799_000);
+        Ok(DeviceBridgeGrantAdmission {
+            grant_ref: grant.grant_ref,
+            host_public_key_hex: grant.host_public_key_hex,
+            device_public_key_hex: grant.device_public_key_hex,
+            expires_at,
+            generation: grant.generation,
+        })
+    }
+}
+
+pub fn start_device_bridge_server(
+    config: DeviceBridgeServerConfig,
+    controller: SharedIssue31HostController,
+    journal: ProjectionJournal,
+) -> Result<DeviceBridgeServerHandle, DeviceBridgeError> {
+    DeviceBridgeServerHandle::spawn(
+        config,
+        Arc::new(Issue31DeviceBridgeAuthority { controller }),
+        journal,
+    )
+}
 
 enum OmegaEffectdRuntime {
     Available(SharedOmegaEffectdSupervisor),
@@ -201,6 +279,50 @@ mod tests {
         assert!(
             resolve_effectd_command(Some(OsStr::new(&missing)), &executable).is_err(),
             "an explicit missing component must not fall back"
+        );
+    }
+
+    #[test]
+    fn device_bridge_uses_the_durable_issue31_revocation_state() {
+        let (configuration, mut controller, device_public_key_hex, grant_ref) =
+            crate::issue31_nostr::paired_fixture(vec![Issue31PairingScope::ObserveIssue31]);
+        let authority = Issue31DeviceBridgeAuthority {
+            controller: Arc::new(RwLock::new(controller.clone())),
+        };
+        let admission = omega_device_bridge::GrantAuthority::authorize(
+            &authority,
+            &device_public_key_hex,
+            &configuration.host_public_key_hex,
+            Some(&grant_ref),
+            None,
+            200_000,
+        )
+        .expect("active grant is admitted");
+        assert_eq!(admission.grant_ref, grant_ref);
+
+        let revocation = controller
+            .revoke_grant(
+                &admission.grant_ref,
+                201,
+                Some("reason.omega.owner_revoked".into()),
+            )
+            .expect("revoke");
+        controller
+            .record_emitted_pairing("f".repeat(64), revocation)
+            .expect("record revocation");
+        let authority = Issue31DeviceBridgeAuthority {
+            controller: Arc::new(RwLock::new(controller)),
+        };
+        assert_eq!(
+            omega_device_bridge::GrantAuthority::authorize(
+                &authority,
+                &device_public_key_hex,
+                &configuration.host_public_key_hex,
+                Some(&admission.grant_ref),
+                None,
+                202_000,
+            ),
+            Err(GrantRefusalReason::GrantRevoked)
         );
     }
 

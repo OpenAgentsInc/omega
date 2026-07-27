@@ -1125,6 +1125,12 @@ pub const ACP_SERVER_PATH: &str = "crates/omega_acp_server/src/omega_acp_server.
 /// OMEGA-DELTA-0041. That crate's manifest, which must not reach GPUI.
 pub const ACP_SERVER_MANIFEST_PATH: &str = "crates/omega_acp_server/Cargo.toml";
 
+/// OMEGA-DELTA-0154. The GPUI-free authenticated mobile bridge transport.
+pub const DEVICE_BRIDGE_PATH: &str = "crates/omega_device_bridge/src/omega_device_bridge.rs";
+
+/// OMEGA-DELTA-0154. The bridge manifest must not reach GPUI.
+pub const DEVICE_BRIDGE_MANIFEST_PATH: &str = "crates/omega_device_bridge/Cargo.toml";
+
 /// OMEGA-DELTA-0041. The supervisor layer that owns the listener's lifecycle.
 pub const EFFECTD_PATH: &str = "crates/omega_effectd/src/omega_effectd.rs";
 
@@ -19390,6 +19396,66 @@ mod tests {
             assert!(
                 without_whitespace(&proof).contains(&without_whitespace(required)),
                 "OMEGA-DELTA-0153: the background proof lost `{required}`."
+            );
+        }
+    }
+
+    /// OMEGA-DELTA-0154. The mobile bridge socket is confined to loopback and
+    /// tailnet addresses, accepts no command frame, and reads the same durable
+    /// revocation state as the relay lane.
+    #[test]
+    fn device_bridge_preserves_its_authority_partition() {
+        let manifest = read_repository_file(DEVICE_BRIDGE_MANIFEST_PATH);
+        for forbidden in [
+            "gpui.workspace",
+            "workspace.workspace",
+            "agent_ui.workspace",
+            "project.workspace",
+            "editor.workspace",
+        ] {
+            assert!(
+                !manifest.contains(forbidden),
+                "OMEGA-DELTA-0154: {} depends on `{forbidden}`; GPUI must not \
+                 own the device bridge socket.",
+                repository_path(DEVICE_BRIDGE_MANIFEST_PATH).display()
+            );
+        }
+
+        let bridge = without_comments(&read_repository_file(DEVICE_BRIDGE_PATH));
+        let shipped_bridge = bridge
+            .split_once("#[cfg(test)]")
+            .map(|(shipped, _)| shipped)
+            .expect("the device bridge has executable tests");
+        for required in [
+            "if address.is_loopback() || is_tailnet(address)",
+            "Err(BindRefusal::NotLoopbackOrTailnet(address))",
+            "Some(\"heartbeat\") => {}",
+            "Some(\"bye\") => return Ok(())",
+            "reason: ByeReason::ProtocolError",
+            "const MAX_FRAME_BYTES: usize = 64 * 1024",
+        ] {
+            assert!(
+                shipped_bridge.contains(required),
+                "OMEGA-DELTA-0154: the bridge lost `{required}`."
+            );
+        }
+        assert!(
+            !shipped_bridge.contains("0.0.0.0")
+                && !shipped_bridge.contains("MirrorChange::Command")
+                && !shipped_bridge.contains("ServerFrame::Command"),
+            "OMEGA-DELTA-0154: the shipped bridge restored a public bind or a \
+             command-bearing protocol frame."
+        );
+
+        let effectd = without_comments(&read_repository_file(EFFECTD_PATH));
+        for required in [
+            "device_bridge_grant_state(grant_ref)",
+            "controller.device_admission_is_revoked(device_public_key_hex)",
+            "DeviceBridgeServerHandle::spawn(",
+        ] {
+            assert!(
+                effectd.contains(required),
+                "OMEGA-DELTA-0154: omega-effectd no longer enforces `{required}`."
             );
         }
     }
