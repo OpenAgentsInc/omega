@@ -2,7 +2,7 @@ mod thread_switcher;
 
 use acp_thread::ThreadStatus;
 use action_log::DiffStats;
-use agent::{ThreadStore, OMEGA_AGENT_ID};
+use agent::{OMEGA_AGENT_ID, ThreadStore};
 use agent_client_protocol::schema::v1 as acp;
 use agent_settings::AgentSettings;
 use agent_ui::terminal_thread_metadata_store::{
@@ -54,7 +54,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use theme::{ActiveTheme, CLIENT_SIDE_DECORATION_ROUNDING};
 use ui::{
-    AgentThreadStatus, CommonAnimationExt, ContextMenu, ContextMenuEntry, Divider, GradientFade,
+    AgentThreadStatus, CommonAnimationExt, ContextMenu, ContextMenuEntry, GradientFade,
     HighlightedLabel, KeyBinding, PopoverMenu, PopoverMenuHandle, ProjectEmptyState, ScrollAxes,
     Scrollbars, Tab, ThreadItem, ThreadItemWorktreeInfo, TintColor, Tooltip, WithScrollbar,
     prelude::*, render_modifiers, right_click_menu,
@@ -63,8 +63,8 @@ use unicode_segmentation::UnicodeSegmentation as _;
 use util::ResultExt as _;
 use util::path_list::PathList;
 use workspace::{
-    CloseWindow, FocusWorkspaceSidebar, MultiWorkspace, MultiWorkspaceEvent, NextProject,
-    NextThread, Open, OpenMode, PreviousProject, PreviousThread, ProjectGroupKey, SaveIntent,
+    FocusWorkspaceSidebar, MultiWorkspace, MultiWorkspaceEvent, NextProject, NextThread, Open,
+    OpenMode, PreviousProject, PreviousThread, ProjectGroupKey, SaveIntent,
     Sidebar as WorkspaceSidebar, SidebarSide, Toast, ToggleWorkspaceSidebar, Workspace,
     notifications::NotificationId, sidebar_side_context_menu,
 };
@@ -7491,39 +7491,18 @@ impl Sidebar {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let has_query = self.has_filter_query(cx);
-        let sidebar_on_left = self.side(cx) == SidebarSide::Left;
-        let sidebar_on_right = self.side(cx) == SidebarSide::Right;
-        let not_fullscreen = !window.is_fullscreen();
-        let traffic_lights = cfg!(target_os = "macos") && not_fullscreen && sidebar_on_left;
-        let left_window_controls = !cfg!(target_os = "macos") && not_fullscreen && sidebar_on_left;
-        let right_window_controls =
-            !cfg!(target_os = "macos") && not_fullscreen && sidebar_on_right;
         let header_height = platform_title_bar_height(window);
 
         h_flex()
             .h(header_height)
             .mt_px()
             .pb_px()
-            .when(left_window_controls, |this| {
-                this.children(Self::render_left_window_controls(window, cx))
-            })
-            .map(|this| {
-                if traffic_lights {
-                    this.pl(px(ui::utils::TRAFFIC_LIGHT_PADDING))
-                } else if !left_window_controls {
-                    this.pl_1p5()
-                } else {
-                    this
-                }
-            })
-            .when(!right_window_controls, |this| this.pr_1p5())
+            .pl_1p5()
+            .pr_1p5()
             .gap_1()
             .when(!no_open_projects, |this| {
                 this.border_b_1()
                     .border_color(cx.theme().colors().border)
-                    .when(traffic_lights, |this| {
-                        this.child(Divider::vertical().color(ui::DividerColor::Border))
-                    })
                     .child(
                         div().ml_1().child(
                             Icon::new(IconName::MagnifyingGlass)
@@ -7553,25 +7532,6 @@ impl Sidebar {
                             }),
                     )
             })
-            .when(right_window_controls, |this| {
-                this.children(Self::render_right_window_controls(window, cx))
-            })
-    }
-
-    fn render_left_window_controls(window: &Window, cx: &mut App) -> Option<AnyElement> {
-        platform_title_bar::render_left_window_controls(
-            cx.button_layout(),
-            Box::new(CloseWindow),
-            window,
-        )
-    }
-
-    fn render_right_window_controls(window: &Window, cx: &mut App) -> Option<AnyElement> {
-        platform_title_bar::render_right_window_controls(
-            cx.button_layout(),
-            Box::new(CloseWindow),
-            window,
-        )
     }
 
     fn render_sidebar_toggle_button(&self, _cx: &mut Context<Self>) -> impl IntoElement {
@@ -8099,9 +8059,8 @@ impl Render for Sidebar {
                     // rounded corners.
                     Decorations::Client { tiling, .. } => el
                         .absolute()
-                        .top(if tiling.top { px(0.) } else { px(-1.) })
+                        .top(px(0.))
                         .bottom(if tiling.bottom { px(0.) } else { px(-1.) })
-                        .when(!tiling.top, |el| el.pt_px())
                         .when(!tiling.bottom, |el| el.pb_px())
                         .map(|el| {
                             if on_left {
@@ -8114,14 +8073,8 @@ impl Render for Sidebar {
                                     .when(!tiling.right, |el| el.pr(px(1.)))
                             }
                         })
-                        .when(on_left && !(tiling.top || tiling.left), |el| {
-                            el.rounded_tl(CLIENT_SIDE_DECORATION_ROUNDING)
-                        })
                         .when(on_left && !(tiling.bottom || tiling.left), |el| {
                             el.rounded_bl(CLIENT_SIDE_DECORATION_ROUNDING)
-                        })
-                        .when(!on_left && !(tiling.top || tiling.right), |el| {
-                            el.rounded_tr(CLIENT_SIDE_DECORATION_ROUNDING)
                         })
                         .when(!on_left && !(tiling.bottom || tiling.right), |el| {
                             el.rounded_br(CLIENT_SIDE_DECORATION_ROUNDING)

@@ -19283,20 +19283,33 @@ mod tests {
         );
     }
 
-    /// OMEGA-DELTA-0147. Sealing removes titlebar controls, not the standard
+    /// OMEGA-DELTA-0147. Sealing removes titlebar controls, not the full-width
     /// platform region that makes a normal window movable.
     #[test]
-    fn sealed_zero_base_keeps_only_zeds_platform_drag_strip() {
+    fn sealed_zero_base_keeps_a_full_width_platform_drag_strip() {
         let workspace = without_comments(&read_repository_file(WORKSPACE_RENDER_PATH));
         let compact_workspace = without_whitespace(&workspace);
         assert!(
             compact_workspace.contains(&without_whitespace(
-                ".when_some(self.titlebar_item.clone(),"
-            )) && !compact_workspace.contains(&without_whitespace(
-                "self.titlebar_item.clone().filter(|_| !zero_base_sealed)"
+                "self.multi_workspace.is_none().then(|| self.titlebar_item.clone()).flatten()"
             )),
-            "OMEGA-DELTA-0147: sealed zero base no longer renders the titlebar \
-             view, so its window has no region a person can drag."
+            "OMEGA-DELTA-0147: a standalone workspace no longer renders its \
+             titlebar view, or a multi-workspace window renders the same \
+             titlebar twice."
+        );
+
+        let multi_workspace_path = "crates/workspace/src/multi_workspace.rs";
+        let multi_workspace = without_comments(&read_repository_file(multi_workspace_path));
+        let compact_multi_workspace = without_whitespace(&multi_workspace);
+        assert!(
+            compact_multi_workspace.contains(&without_whitespace(
+                "let titlebar_item = workspace.read(cx).titlebar_item();"
+            )) && compact_multi_workspace
+                .contains(&without_whitespace(".when_some(titlebar_item,")),
+            "OMEGA-DELTA-0147: {} no longer owns the active workspace's \
+             titlebar above the sidebar row, so the drag strip cannot span \
+             the full window.",
+            repository_path(multi_workspace_path).display()
         );
 
         let title_bar_path = "crates/title_bar/src/title_bar.rs";

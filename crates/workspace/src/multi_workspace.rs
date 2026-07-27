@@ -2179,7 +2179,9 @@ impl Render for MultiWorkspace {
 
         let workspace = self.workspace().clone();
         let workspace_key_context = workspace.update(cx, |workspace, cx| workspace.key_context(cx));
-        let root = workspace.update(cx, |workspace, cx| workspace.actions(h_flex(), window, cx));
+        let titlebar_item = workspace.read(cx).titlebar_item();
+        let titlebar_focus_handle = workspace.read(cx).titlebar_focus_handle();
+        let root = workspace.update(cx, |workspace, cx| workspace.actions(v_flex(), window, cx));
 
         client_side_decorations(
             root.key_context(workspace_key_context)
@@ -2266,16 +2268,52 @@ impl Render for MultiWorkspace {
                         ))
                     },
                 )
-                .children(left_sidebar)
+                .when_some(titlebar_item, |this, item| {
+                    this.child(
+                        div()
+                            .id("titlebar-region")
+                            .track_focus(&titlebar_focus_handle)
+                            .tab_group()
+                            .role(gpui::Role::Toolbar)
+                            .aria_label("Title bar")
+                            .on_key_down(cx.listener(
+                                |multi_workspace, event: &gpui::KeyDownEvent, window, cx| {
+                                    if event.keystroke.modifiers.modified() {
+                                        return;
+                                    }
+                                    let forward = match event.keystroke.key.as_str() {
+                                        "right" => true,
+                                        "left" => false,
+                                        _ => return,
+                                    };
+                                    multi_workspace.workspace().update(cx, |workspace, cx| {
+                                        workspace.move_titlebar_item_focus(forward, window, cx);
+                                    });
+                                    cx.stop_propagation();
+                                },
+                            ))
+                            .w_full()
+                            .child(item),
+                    )
+                })
                 .child(
-                    div()
+                    h_flex()
                         .flex()
                         .flex_1()
-                        .size_full()
+                        .min_h_0()
+                        .w_full()
                         .overflow_hidden()
-                        .child(self.workspace().clone()),
+                        .children(left_sidebar)
+                        .child(
+                            div()
+                                .flex()
+                                .flex_1()
+                                .size_full()
+                                .overflow_hidden()
+                                .child(self.workspace().clone()),
+                        )
+                        .children(right_sidebar),
                 )
-                .children(right_sidebar)
                 .child(self.workspace().read(cx).modal_layer.clone())
                 .children(self.sidebar_overlay.as_ref().map(|view| {
                     deferred(div().absolute().size_full().inset_0().occlude().child(

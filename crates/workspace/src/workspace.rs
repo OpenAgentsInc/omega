@@ -3110,6 +3110,10 @@ impl Workspace {
         self.titlebar_item.clone()
     }
 
+    pub(crate) fn titlebar_focus_handle(&self) -> FocusHandle {
+        self.titlebar_focus_handle.clone()
+    }
+
     /// Call the given callback with a workspace whose project is local or remote via WSL (allowing host access).
     ///
     /// If the given workspace has a local project, then it will be passed
@@ -8328,7 +8332,7 @@ impl Workspace {
     /// toolbar in response to arrow keys. Navigation is clamped to the title
     /// bar so arrows move between items and stop at the ends (ARIA toolbar
     /// semantics); Tab is still used to leave the toolbar.
-    fn move_titlebar_item_focus(
+    pub(crate) fn move_titlebar_item_focus(
         &mut self,
         forward: bool,
         window: &mut Window,
@@ -9099,36 +9103,42 @@ impl Render for Workspace {
             // the platform drag strip in sealed zero base. Its inherited
             // controls remain absent, while the window retains the standard
             // Zed drag and double-click behavior.
-            .when_some(self.titlebar_item.clone(), |this, item| {
-                this.child(
-                    div()
-                        .id("titlebar-region")
-                        .track_focus(&self.titlebar_focus_handle)
-                        .tab_group()
-                        .role(gpui::Role::Toolbar)
-                        .aria_label("Title bar")
-                        .on_key_down(cx.listener(
-                            |workspace, event: &gpui::KeyDownEvent, window, cx| {
-                                if event.keystroke.modifiers.modified() {
-                                    return;
-                                }
-                                match event.keystroke.key.as_str() {
-                                    "right" => {
-                                        workspace.move_titlebar_item_focus(true, window, cx);
-                                        cx.stop_propagation();
+            .when_some(
+                self.multi_workspace
+                    .is_none()
+                    .then(|| self.titlebar_item.clone())
+                    .flatten(),
+                |this, item| {
+                    this.child(
+                        div()
+                            .id("titlebar-region")
+                            .track_focus(&self.titlebar_focus_handle)
+                            .tab_group()
+                            .role(gpui::Role::Toolbar)
+                            .aria_label("Title bar")
+                            .on_key_down(cx.listener(
+                                |workspace, event: &gpui::KeyDownEvent, window, cx| {
+                                    if event.keystroke.modifiers.modified() {
+                                        return;
                                     }
-                                    "left" => {
-                                        workspace.move_titlebar_item_focus(false, window, cx);
-                                        cx.stop_propagation();
+                                    match event.keystroke.key.as_str() {
+                                        "right" => {
+                                            workspace.move_titlebar_item_focus(true, window, cx);
+                                            cx.stop_propagation();
+                                        }
+                                        "left" => {
+                                            workspace.move_titlebar_item_focus(false, window, cx);
+                                            cx.stop_propagation();
+                                        }
+                                        _ => {}
                                     }
-                                    _ => {}
-                                }
-                            },
-                        ))
-                        .w_full()
-                        .child(item),
-                )
-            })
+                                },
+                            ))
+                            .w_full()
+                            .child(item),
+                    )
+                },
+            )
             .on_modifiers_changed(move |_, _, cx| {
                 for &id in &notification_entities {
                     cx.notify(id);
