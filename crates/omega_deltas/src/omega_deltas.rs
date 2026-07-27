@@ -109,6 +109,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0119",
     "OMEGA-DELTA-0121",
     "OMEGA-DELTA-0122",
+    "OMEGA-DELTA-0123",
 ];
 
 /// OMEGA-DELTA-0119. The read-only sheet a transcript file link opens in a
@@ -765,6 +766,10 @@ pub const THREAD_VIEW_PATH: &str = "crates/agent_ui/src/conversation_view/thread
 /// OMEGA-DELTA-0115. The four names, what they attach, and the standing
 /// choice between them.
 pub const EXECUTOR_SELECTOR_PATH: &str = "crates/agent_ui/src/omega_executor_selector.rs";
+
+/// OMEGA-DELTA-0123. The shared menu component, whose treatment of a disabled
+/// entry decides where an unavailable executor's reason can be put.
+pub const CONTEXT_MENU_PATH: &str = "crates/ui/src/components/context_menu.rs";
 
 /// OMEGA-DELTA-0045. The host method the engine calls to disclose a handoff.
 pub const HOST_BRIDGE_PATH: &str = "crates/agent_ui/src/omega_host_bridge.rs";
@@ -15590,5 +15595,252 @@ mod tests {
              which is the drift this was meant to make impossible.",
             editor_path.display()
         );
+    }
+
+    // ------ OMEGA-DELTA-0123 — a name that cannot run says so, and Omega
+    // still creates nothing of Exo's
+
+    /// OMEGA-DELTA-0123. The list of what cannot run is the complement of the
+    /// list of what can, and both reach the menu.
+    ///
+    /// The defect this refuses is a silent omission. `OMEGA-DELTA-0115` built
+    /// the ready list on one rule — "a name appears only when it can run" —
+    /// which is right, and shipped it with no second half, so a name that could
+    /// not run was rendered as *nothing at all*. On a machine with an Exo
+    /// checkout, an `exo` binary and no state root, the composer's menu was
+    /// three words long and said nothing about the fourth. The owner opened it,
+    /// did not find Exo, and had to ask why it was not there — which is exactly
+    /// the cost the short list was supposed to save, paid before the click
+    /// instead of after it.
+    ///
+    /// So `ready` is untouched and `unavailable` is added beside it. Nothing
+    /// new becomes clickable; what changes is that the absence has a sentence.
+    #[test]
+    fn a_name_that_cannot_run_is_still_named_and_still_not_offered() {
+        let selector_path = repository_path(EXECUTOR_SELECTOR_PATH);
+        let selector = read_repository_file(EXECUTOR_SELECTOR_PATH);
+
+        assert!(
+            selector.contains("pub fn unavailable(")
+                && selector.contains("pub fn unavailable_here()"),
+            "OMEGA-DELTA-0123: {} no longer says why a name is missing. \
+             Without the complement of `ready`, an executor that cannot run \
+             here is indistinguishable from one that does not exist, which is \
+             the question the owner had to ask out loud.",
+            selector_path.display()
+        );
+
+        let menu = body_of(&selector, "build_menu");
+        assert!(
+            menu.contains("unavailable_here()"),
+            "OMEGA-DELTA-0123: the menu in {} no longer draws the names that \
+             cannot run. A reason computed and never rendered is the same as \
+             no reason.",
+            selector_path.display()
+        );
+        assert!(
+            menu.contains(".disabled(true)"),
+            "OMEGA-DELTA-0123: the menu in {} offers the names that cannot \
+             run. `OMEGA-DELTA-0115`'s rule stands whole — these entries are \
+             there to be read, and a clickable one would be the connect-time \
+             failure that rule exists to prevent.",
+            selector_path.display()
+        );
+        // The whole composition, not `choice.name()` alone. The first version
+        // of this assertion looked for `choice.name()` and was vacuous: the
+        // *ready* loop three lines above renders `choice.name()` too, so the
+        // check stayed green with the reason removed from the disabled label
+        // entirely. Found by mutating it, which is the only way a check like
+        // this is ever found to be about nothing.
+        assert!(
+            without_whitespace(menu).contains(&without_whitespace(
+                "format!(\"{} — {reason}\", choice.name())"
+            )),
+            "OMEGA-DELTA-0123: the reason in {} no longer reaches the disabled \
+             label. See `a_disabled_menu_entry_still_cannot_be_selected`: a \
+             disabled entry has no other surface a person can reach, so a name \
+             rendered without its reason is back to saying nothing.",
+            selector_path.display()
+        );
+    }
+
+    /// OMEGA-DELTA-0123. The premise that put the reason in the label.
+    ///
+    /// `ContextMenu::select_index` registers a documentation aside only for an
+    /// item that `is_selectable`, and an entry is selectable exactly when it is
+    /// not disabled. So an aside on a disabled entry is unreachable — and the
+    /// component still draws an `Info` icon beside one, which is an affordance
+    /// for something that never appears.
+    ///
+    /// This is asserted rather than commented because it is a fact about
+    /// *upstream* code, which a rebase changes without touching anything of
+    /// ours. If it stops being true the long-form refusal becomes available and
+    /// the decision above is worth revisiting; until then, a check that fails
+    /// is how anyone finds out.
+    #[test]
+    fn a_disabled_menu_entry_still_cannot_be_selected() {
+        let menu_path = repository_path(CONTEXT_MENU_PATH);
+        let menu = read_repository_file(CONTEXT_MENU_PATH);
+
+        assert!(
+            without_whitespace(&menu).contains(&without_whitespace(
+                "ContextMenuItem::Entry(ContextMenuEntry { disabled, .. }) => !disabled,"
+            )),
+            "OMEGA-DELTA-0123: {} changed how a disabled entry is selected. \
+             The executor menu puts an unavailable name's reason in its label \
+             because a disabled entry's documentation aside is never \
+             registered; if that is no longer so, the aside is available and \
+             the label can go back to being one word.",
+            menu_path.display()
+        );
+    }
+
+    /// OMEGA-DELTA-0123. One cached answer to "is there a lane".
+    ///
+    /// `exo_lane_resolves` and `exo_absence_here` read the same two files under
+    /// the same two rules. Two independent caches of that would eventually
+    /// disagree, and the visible form of the disagreement is a menu that offers
+    /// Exo and explains its absence in the same list.
+    #[test]
+    fn there_is_one_answer_to_whether_an_exo_lane_resolves() {
+        let selector_path = repository_path(EXECUTOR_SELECTOR_PATH);
+        let selector = read_repository_file(EXECUTOR_SELECTOR_PATH);
+
+        assert!(
+            without_whitespace(body_of(&selector, "exo_lane_resolves"))
+                .contains(&without_whitespace("exo_absence_here().is_none()")),
+            "OMEGA-DELTA-0123: `exo_lane_resolves` in {} reads the lane for \
+             itself again. It is defined as the absence of an absence so that \
+             the offer and the explanation cannot both be drawn.",
+            selector_path.display()
+        );
+
+        let absence = body_of(&selector, "exo_absence_here");
+        assert!(
+            absence.contains("path.exists()") && absence.contains("ExoLaneConfig::load"),
+            "OMEGA-DELTA-0123: `exo_absence_here` in {} no longer follows \
+             `ExoLaneConfig::resolve`'s first rule. A lane file that exists is \
+             the answer even when it is broken; falling through to derivation \
+             there reports the wrong `.exo`, which is the `OMEGA-DELTA-0042` \
+             failure reached from the other side.",
+            selector_path.display()
+        );
+        assert!(
+            absence.contains("derive_lane_from_env"),
+            "OMEGA-DELTA-0123: `exo_absence_here` in {} no longer asks the \
+             derivation why there is no lane, so every machine without a lane \
+             file would give the same sentence regardless of what is installed.",
+            selector_path.display()
+        );
+    }
+
+    /// OMEGA-DELTA-0123. Every refusal has a sentence a menu can hold.
+    ///
+    /// The enum's own documentation promised this and nothing provided it:
+    /// eight typed refusals were built so a caller could say which one, and the
+    /// only caller discarded the value entirely. A variant added later with no
+    /// arm here would not compile, which is the point of a total match; this
+    /// check guards the weaker thing a match cannot — that the summaries stay
+    /// short enough to render beside a name in a four-item menu.
+    #[test]
+    fn every_exo_refusal_has_a_sentence_short_enough_to_read() {
+        let detect_path = repository_path(EXO_DETECT_PATH);
+        let detect = read_repository_file(EXO_DETECT_PATH);
+
+        assert!(
+            detect.contains("pub const fn summary(&self) -> &'static str"),
+            "OMEGA-DELTA-0123: {} no longer summarises its refusals. \
+             `Display` spells every path it looked at, which is what a log \
+             wants and more than a menu can hold.",
+            detect_path.display()
+        );
+
+        let variants = [
+            "NoCheckout",
+            "NotTheExoOmegaDrives",
+            "NotBuilt",
+            "NoStateRoot",
+            "NoAgent",
+            "SeveralAgents",
+            "NoConversation",
+            "SeveralConversations",
+        ];
+        let summary = body_of(&detect, "summary");
+
+        // Its own arm, and the `=>` is the load-bearing part. Looking for the
+        // variant's name alone was the first version of this check and it was
+        // vacuous: `Self::NoStateRoot { .. } | Self::NoAgent { .. } => "…"`
+        // folds two refusals into one sentence and leaves both names in the
+        // source, so the check passed on exactly the edit it exists to refuse.
+        for variant in variants {
+            assert!(
+                summary.contains(&format!("Self::{variant} {{ .. }} =>")),
+                "OMEGA-DELTA-0123: `{variant}` has no arm of its own in {}. \
+                 \"Exo is not installed\" and \"Exo has never been run here\" \
+                 are different things to do next, and a refusal folded into \
+                 another one's wording sends somebody to fix the wrong thing.",
+                detect_path.display()
+            );
+        }
+        assert_eq!(
+            summary.matches("=>").count(),
+            variants.len(),
+            "OMEGA-DELTA-0123: `summary` in {} has {} arms for {} refusals. \
+             The count is checked as well as the names because a fold leaves \
+             every name in the file and only the arms get shorter.",
+            detect_path.display(),
+            summary.matches("=>").count(),
+            variants.len()
+        );
+    }
+
+    /// OMEGA-DELTA-0123. Omega still creates nothing of Exo's.
+    ///
+    /// The other way to make Exo appear was to give it something to appear
+    /// *for*: create the state root, the agent and the conversation the
+    /// derivation looks for. This refuses that, and the refusal is the delta's
+    /// substance rather than an aside.
+    ///
+    /// Three reasons, none of them stylistic. `.exo` is single-writer storage
+    /// and Omega cannot know whether an `exo serve` already holds the root it
+    /// would write into. A root alone resolves nothing — `agent_slug` refuses
+    /// an empty one — so creating a root means creating an agent, which means
+    /// choosing a model binding and a provider secret, which is somebody's
+    /// money and somebody's credentials. And `OMEGA-DELTA-0107` already settled
+    /// the neighbouring question: Omega reads a server the owner runs and
+    /// starts none. Writing into that server's storage is the same claim of
+    /// authority arriving by a different door.
+    ///
+    /// So the composer explains the absence and a person fixes it. Enforced by
+    /// absence, because "we did not add a write" stays true only while somebody
+    /// is checking.
+    #[test]
+    fn omega_creates_no_exo_state_root_agent_or_conversation() {
+        for relative in [EXO_DETECT_PATH, EXECUTOR_SELECTOR_PATH] {
+            let path = repository_path(relative);
+            let source = read_repository_file(relative);
+            // Fixtures in the crate's own tests write directories and files on
+            // purpose. The claim is about what a shipped Omega does.
+            let shipped = &source[..source.find("#[cfg(test)]").unwrap_or(source.len())];
+
+            for write in [
+                "create_dir",
+                "fs::write",
+                "File::create",
+                "remove_dir",
+                "remove_file",
+            ] {
+                assert!(
+                    !shipped.contains(write),
+                    "OMEGA-DELTA-0123: {} calls `{write}`. Omega derives an \
+                     Exo lane from what is already there and creates none of \
+                     it: `.exo` is single-writer storage Omega cannot prove is \
+                     unheld, and an agent worth deriving carries a model \
+                     binding and a provider secret that are the owner's to \
+                     choose. See also `OMEGA-DELTA-0107`.",
+                    path.display()
+                );
+            }
+        }
     }
 }

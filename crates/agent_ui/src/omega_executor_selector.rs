@@ -234,6 +234,112 @@ pub fn ready_here() -> Vec<SelectableExecutor> {
     ready(omega_agent_detect::detected(), exo_lane_resolves())
 }
 
+/// Why each name that cannot run a turn here is not on the ready list.
+///
+/// `OMEGA-DELTA-0123`. The complement of [`ready`], and the correction to the
+/// version of this file that had only [`ready`].
+///
+/// A name that is simply left out is indistinguishable from a name that does
+/// not exist. The owner opened this menu, did not find Exo, and had to ask why
+/// — which is the same cost the short list was meant to stop somebody paying
+/// after a click, moved to before it. Both halves are kept because they answer
+/// different questions: [`ready`] decides what may be **clicked**, and this
+/// decides what may be **read**.
+///
+/// `exo_absence` is `None` exactly when the lane resolves, so the two functions
+/// cannot disagree about Exo — this one derives its own answer by calling
+/// [`ready`], and `every_name_is_either_ready_or_explained` asserts the two
+/// lists partition [`SelectableExecutor::ALL`] with nothing in both and nothing
+/// in neither.
+///
+/// A pure function of what was found, for the reason [`ready`] is one.
+#[must_use]
+pub fn unavailable(
+    detected: &[DetectedAgent],
+    exo_absence: Option<&'static str>,
+) -> Vec<(SelectableExecutor, &'static str)> {
+    let ready = ready(detected, exo_absence.is_none());
+    SelectableExecutor::ALL
+        .iter()
+        .copied()
+        .filter(|choice| !ready.contains(choice))
+        .map(|choice| {
+            let reason = match choice {
+                // Unreachable: `ready` never omits the native loop. Written as
+                // a value rather than a panic because a menu is not worth
+                // aborting over, and written at all because a total match is
+                // what stops a fifth variant arriving here unnoticed.
+                SelectableExecutor::Omega => "compiled in",
+                SelectableExecutor::Exo => exo_absence.unwrap_or("no Exo lane"),
+                SelectableExecutor::Codex | SelectableExecutor::Claude => {
+                    // The two halves `ready` checks, told apart. "Installed and
+                    // Omega cannot drive it" and "not installed" are different
+                    // things to do next, and collapsing them would send
+                    // somebody to install what they already have.
+                    if choice
+                        .adapter_id()
+                        .is_some_and(|adapter| detected.iter().any(|agent| agent.id == adapter))
+                    {
+                        "installed; Omega hosts no adapter for it"
+                    } else {
+                        "not installed"
+                    }
+                }
+            };
+            (choice, reason)
+        })
+        .collect()
+}
+
+/// [`unavailable`] against this machine.
+#[must_use]
+pub fn unavailable_here() -> Vec<(SelectableExecutor, &'static str)> {
+    unavailable(omega_agent_detect::detected(), exo_absence_here())
+}
+
+/// Why no Exo lane resolves on this machine, when none does.
+///
+/// `OMEGA-DELTA-0123`. The two rules are `ExoLaneConfig::resolve`'s own, in its
+/// order, because a second opinion about which lane this machine has is exactly
+/// the half-read configuration `OMEGA-DELTA-0042` exists to prevent:
+///
+/// 1. A lane file that **exists** is the answer, even when it is broken.
+///    `resolve` does not fall through to derivation there, so neither does
+///    this, and the sentence says the file rather than the install.
+/// 2. Otherwise the derivation's own refusal, in [`ExoLaneUnderivable::summary`]
+///    's width.
+///
+/// `resolve`'s third rule — derive only for the product's own lane path — is
+/// satisfied by construction here, because the path is `data_dir_path()` and
+/// nothing else can be passed in.
+///
+/// Cached for the life of the process for the reason
+/// `omega_agent_detect::detected` is: the composer asks this on every draw and
+/// answering it walks the filesystem.
+///
+/// [`ExoLaneUnderivable::summary`]: omega_agent_detect::exo::ExoLaneUnderivable::summary
+#[must_use]
+pub fn exo_absence_here() -> Option<&'static str> {
+    static ABSENCE: OnceLock<Option<&'static str>> = OnceLock::new();
+    *ABSENCE.get_or_init(|| {
+        let path = ExoLaneConfig::data_dir_path();
+        if path.exists() {
+            return ExoLaneConfig::load(&path)
+                .is_none()
+                .then_some("its lane file cannot be read");
+        }
+        omega_agent_detect::exo::derive_lane_from_env()
+            .err()
+            .map(|underivable| {
+                // The whole refusal, with every path it looked at, goes to the
+                // log. The menu gets the sentence. Both, because the short one
+                // is what gets read and the long one is what gets acted on.
+                log::info!("OMEGA-DELTA-0123: Exo is not offered: {underivable}");
+                underivable.summary()
+            })
+    })
+}
+
 /// Whether an Exo lane resolves on this machine.
 ///
 /// `ExoLaneConfig::resolve` is deliberately the predicate rather than
@@ -243,13 +349,12 @@ pub fn ready_here() -> Vec<SelectableExecutor> {
 /// owner wrote a lane file by hand, and asking a wider one would offer a lane
 /// the attach then declines.
 ///
-/// Cached for the life of the process for the reason
-/// `omega_agent_detect::detected` is: the composer asks this on every draw and
-/// answering it walks the filesystem.
+/// Defined as "there is no absence" rather than as a second reading of the same
+/// files. `OMEGA-DELTA-0123` added [`exo_absence_here`], and two cached answers
+/// to one question is how a menu ends up disabling a name it is also offering.
 #[must_use]
 pub fn exo_lane_resolves() -> bool {
-    static RESOLVES: OnceLock<bool> = OnceLock::new();
-    *RESOLVES.get_or_init(|| ExoLaneConfig::resolve(&ExoLaneConfig::data_dir_path()).is_some())
+    exo_absence_here().is_none()
 }
 
 /// A person's standing choice of executor, if they have made one.
@@ -452,6 +557,38 @@ fn build_menu(
                         on_select(choice, window, cx);
                     }),
             );
+        }
+
+        // `OMEGA-DELTA-0123`. The names that are not ready, and why, under the
+        // ones that are.
+        //
+        // Read from this machine rather than passed in, matching
+        // `exo_lane_resolves` above: this is the one part of the menu whose
+        // content is a fact about the install rather than about the thread, and
+        // threading it through `render_executor_selector` would put it in every
+        // call site for the benefit of none of them.
+        //
+        // **The reason is in the label, not in a documentation aside.** That is
+        // not a style choice. `ContextMenu::select_index` registers an aside
+        // only for an item that `is_selectable`, and `is_selectable` is
+        // `!disabled` for an entry — so an aside on a disabled entry is never
+        // shown, and the `Info` icon the component draws beside one has nothing
+        // behind it. A reason that cannot be reached is not a reason.
+        // `a_disabled_menu_entry_still_cannot_be_selected` fails if that ever
+        // stops being true, because then the long form becomes available and
+        // this decision is worth revisiting.
+        let unavailable = unavailable_here();
+        if !unavailable.is_empty() {
+            menu = menu.separator();
+            for (choice, reason) in unavailable {
+                menu.push_item(
+                    ContextMenuEntry::new(SharedString::from(format!(
+                        "{} — {reason}",
+                        choice.name()
+                    )))
+                    .disabled(true),
+                );
+            }
         }
 
         // omega#112. No explanatory footer in the menu.
@@ -694,6 +831,133 @@ mod tests {
                 ),
             }
         }
+    }
+
+    /// `OMEGA-DELTA-0123`. Nothing is silently missing.
+    ///
+    /// The two lists partition the four names: nothing in both, and — the half
+    /// that matters — nothing in neither. A name dropped from `ready` with no
+    /// entry here is exactly the absence the owner had to ask about.
+    #[test]
+    fn every_name_is_either_ready_or_explained() {
+        let machines: [(Vec<DetectedAgent>, Option<&'static str>); 4] = [
+            (Vec::new(), Some("Exo has never been run here")),
+            (vec![codex()], Some("Exo is not installed")),
+            (vec![copilot()], Some("your Exo has no agent")),
+            (vec![codex(), claude()], None),
+        ];
+
+        for (detected, absence) in machines {
+            let ready = ready(&detected, absence.is_none());
+            let unavailable = unavailable(&detected, absence);
+
+            let mut named: Vec<SelectableExecutor> = ready
+                .iter()
+                .copied()
+                .chain(unavailable.iter().map(|(choice, _)| *choice))
+                .collect();
+            named.sort_by_key(|choice| choice.token());
+
+            let mut all = SelectableExecutor::ALL.to_vec();
+            all.sort_by_key(|choice| choice.token());
+
+            assert_eq!(
+                named, all,
+                "every name is either offered or explained, exactly once — \
+                 {detected:?} with {absence:?} leaves one unaccounted for"
+            );
+        }
+    }
+
+    /// `OMEGA-DELTA-0123`. The native loop is never explained away.
+    ///
+    /// It is compiled in, so an entry saying why it is missing would be a menu
+    /// disabling the one executor that cannot be absent.
+    #[test]
+    fn omega_is_never_among_the_unavailable() {
+        for absence in [None, Some("Exo is not installed")] {
+            assert!(
+                !unavailable(&[], absence)
+                    .iter()
+                    .any(|(choice, _)| *choice == SelectableExecutor::Omega)
+            );
+        }
+    }
+
+    /// `OMEGA-DELTA-0123`. An agent that is not installed says so, and the
+    /// other arm is unreachable while the two lists agree.
+    ///
+    /// The honest version of this check, and the second one written. The first
+    /// claimed to hold "not installed" and "installed and undrivable" apart,
+    /// and could not: for Codex and Claude the second case cannot happen at
+    /// all. `ready` offers a name when it is **detected and drivable**, and
+    /// `DRIVABLE_AGENT_IDS` names both of them — so a detected Codex is always
+    /// offered and never explained, and the "installed; Omega hosts no adapter
+    /// for it" arm is dead code. Collapsing that arm into the other passed the
+    /// test, which is how the claim was found to be empty.
+    ///
+    /// So the arm is kept and the *reachability* is what is asserted. It is the
+    /// truthful answer on the day somebody removes an id from
+    /// `DRIVABLE_AGENT_IDS` while it is still one of the four names, and this
+    /// check fails on exactly that edit — which is when the sentence starts
+    /// being read by somebody.
+    #[test]
+    fn an_agent_that_is_not_installed_says_so() {
+        let reason = |detected: &[DetectedAgent], choice: SelectableExecutor| {
+            unavailable(detected, None)
+                .into_iter()
+                .find(|(name, _)| *name == choice)
+                .map(|(_, reason)| reason)
+        };
+
+        assert_eq!(
+            reason(&[], SelectableExecutor::Codex),
+            Some("not installed")
+        );
+        assert_eq!(
+            reason(&[claude()], SelectableExecutor::Codex),
+            Some("not installed"),
+            "one of the two being present says nothing about the other"
+        );
+        assert_eq!(
+            reason(&[codex(), claude()], SelectableExecutor::Codex),
+            None,
+            "a detected, drivable agent is offered rather than explained"
+        );
+
+        for choice in SelectableExecutor::ALL {
+            let Some(adapter) = choice.adapter_id() else {
+                continue;
+            };
+            assert!(
+                crate::omega_agent_attach::DRIVABLE_AGENT_IDS.contains(&adapter),
+                "{} is one of the four names and Omega no longer hosts an \
+                 adapter for it. The \"installed; Omega hosts no adapter for \
+                 it\" reason becomes reachable at that moment — check it says \
+                 something useful before shipping this.",
+                choice.name()
+            );
+        }
+    }
+
+    /// `OMEGA-DELTA-0123`. Exo's reason is the derivation's, not one invented
+    /// here.
+    #[test]
+    fn exos_reason_is_carried_through_rather_than_reworded() {
+        let absence = omega_agent_detect::exo::ExoLaneUnderivable::NoStateRoot {
+            searched: vec![PathBuf::from("/nowhere/.exo")],
+        }
+        .summary();
+
+        assert_eq!(
+            unavailable(&[], Some(absence))
+                .into_iter()
+                .find(|(choice, _)| *choice == SelectableExecutor::Exo)
+                .map(|(_, reason)| reason),
+            Some("Exo has never been run here"),
+            "the menu says what the derivation refused, so a new refusal \
+             variant reaches a person without an edit here"
+        );
     }
 
     /// Nothing is chosen until a person chooses.

@@ -225,6 +225,41 @@ pub enum ExoLaneUnderivable {
     },
 }
 
+impl ExoLaneUnderivable {
+    /// The refusal in the width a menu has. `OMEGA-DELTA-0123`.
+    ///
+    /// [`Display`] spells every path it looked at, which is what a log wants
+    /// and is far more than a person reading a list of four words can take in.
+    /// This is the other half of the same sentence: what is wrong, in the words
+    /// somebody would use out loud.
+    ///
+    /// It exists because the enum's own documentation already promised it and
+    /// nothing delivered it. That doc says *"'Exo is not installed', 'that is
+    /// the other Exo', 'Exo has never been run here' and 'Exo has four agents
+    /// and Omega will not choose for you' are four different sentences and four
+    /// different things for a person to do next"* — and then the only caller,
+    /// the composer's executor list, threw the whole value away and rendered
+    /// the absence as nothing at all. The type was built to be read and had no
+    /// reader.
+    ///
+    /// `&'static str` rather than a formatted string, deliberately. A summary
+    /// that could interpolate a path would grow one, and then this would be
+    /// `Display` again with a different name.
+    #[must_use]
+    pub const fn summary(&self) -> &'static str {
+        match self {
+            Self::NoCheckout { .. } => "Exo is not installed",
+            Self::NotTheExoOmegaDrives { .. } => "a different Exo is installed",
+            Self::NotBuilt { .. } => "Exo is installed and not built",
+            Self::NoStateRoot { .. } => "Exo has never been run here",
+            Self::NoAgent { .. } => "your Exo has no agent",
+            Self::SeveralAgents { .. } => "your Exo has several agents; name one",
+            Self::NoConversation { .. } => "that Exo agent has no conversation",
+            Self::SeveralConversations { .. } => "several conversations; name one",
+        }
+    }
+}
+
 impl std::fmt::Display for ExoLaneUnderivable {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -333,10 +368,7 @@ pub struct ExoLaneOverrides {
 /// [`ExoLaneUnderivable::NoCheckout`] when nothing was found, or
 /// [`ExoLaneUnderivable::NotTheExoOmegaDrives`] when a named one is the other
 /// Exo.
-pub fn find_checkout(
-    named: Option<&Path>,
-    home: &Path,
-) -> Result<PathBuf, ExoLaneUnderivable> {
+pub fn find_checkout(named: Option<&Path>, home: &Path) -> Result<PathBuf, ExoLaneUnderivable> {
     if let Some(named) = named {
         return admit_checkout(named);
     }
@@ -354,9 +386,11 @@ pub fn find_checkout(
     for candidate in &searched {
         match admit_checkout(candidate) {
             Ok(checkout) => return Ok(checkout),
-            Err(refusal @ ExoLaneUnderivable::NotTheExoOmegaDrives {
-                upstream: Some(_), ..
-            }) => {
+            Err(
+                refusal @ ExoLaneUnderivable::NotTheExoOmegaDrives {
+                    upstream: Some(_), ..
+                },
+            ) => {
                 wrong_exo.get_or_insert(refusal);
             }
             Err(_) => {}
@@ -385,8 +419,8 @@ pub fn admit_checkout(checkout: &Path) -> Result<PathBuf, ExoLaneUnderivable> {
     if !checkout.is_dir() {
         return Err(refuse(None));
     }
-    let config = std::fs::read_to_string(checkout.join(".git").join("config"))
-        .map_err(|_| refuse(None))?;
+    let config =
+        std::fs::read_to_string(checkout.join(".git").join("config")).map_err(|_| refuse(None))?;
     let mut refused: Option<String> = None;
     for url in git_config_urls(&config) {
         if EXO_PIN.admits_upstream(&url).is_ok() {
@@ -827,11 +861,11 @@ pub fn derive_lane_from_env() -> Result<DerivedExoLane, ExoLaneUnderivable> {
             .map(|value| value.trim().to_owned())
             .filter(|value| !value.is_empty())
     };
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .ok_or_else(|| ExoLaneUnderivable::NoCheckout {
+    let home = std::env::var_os("HOME").map(PathBuf::from).ok_or_else(|| {
+        ExoLaneUnderivable::NoCheckout {
             searched: Vec::new(),
-        })?;
+        }
+    })?;
     let overrides = ExoLaneOverrides {
         checkout: path(CHECKOUT_ENV_VAR),
         root: path(ROOT_ENV_VAR),
@@ -937,7 +971,10 @@ mod tests {
         let checkout = write_machine(home.path());
         let root = checkout.join(STATE_ROOT_DIRECTORY);
 
-        assert_eq!(agents_directory(&root), root.join("exoharness").join("agents"));
+        assert_eq!(
+            agents_directory(&root),
+            root.join("exoharness").join("agents")
+        );
         assert!(
             !root.join("agents").exists(),
             "the fixture must not also write the wrong layout, or this proves \
@@ -1021,7 +1058,11 @@ mod tests {
     #[test]
     fn a_remote_spelled_over_ssh_is_the_same_repository() {
         let home = tempfile::tempdir().expect("a temporary home");
-        let checkout = write_checkout(home.path(), "work/exo", "git@github.com:OpenAgentsInc/exo.git");
+        let checkout = write_checkout(
+            home.path(),
+            "work/exo",
+            "git@github.com:OpenAgentsInc/exo.git",
+        );
         write_binary(&checkout, "target/debug/exo");
 
         assert_eq!(
@@ -1099,7 +1140,10 @@ mod tests {
         let refusal = derive_lane(&ExoLaneOverrides::default(), home.path())
             .expect_err("Omega does not create an Exo agent");
 
-        assert!(matches!(refusal, ExoLaneUnderivable::NoAgent { .. }), "{refusal:?}");
+        assert!(
+            matches!(refusal, ExoLaneUnderivable::NoAgent { .. }),
+            "{refusal:?}"
+        );
     }
 
     #[test]
@@ -1129,10 +1173,7 @@ mod tests {
         let agents = agents(&checkout.join(STATE_ROOT_DIRECTORY));
         write_record(&agents.join("second-id"), "another");
         write_record(
-            &agents
-                .join("second-id")
-                .join("conversations")
-                .join("c"),
+            &agents.join("second-id").join("conversations").join("c"),
             "other-conversation",
         );
 
@@ -1219,7 +1260,10 @@ mod tests {
         let elsewhere = home.path().join("somewhere-else");
         let agents = agents(&elsewhere.join(STATE_ROOT_DIRECTORY));
         write_record(&agents.join("id"), "zerobase");
-        write_record(&agents.join("id").join("conversations").join("c"), "zb-proof");
+        write_record(
+            &agents.join("id").join("conversations").join("c"),
+            "zb-proof",
+        );
 
         let lane = derive_lane(
             &ExoLaneOverrides {
@@ -1232,7 +1276,10 @@ mod tests {
 
         assert_eq!(lane.root, elsewhere.join(STATE_ROOT_DIRECTORY));
         assert_eq!(lane.agent, "zerobase");
-        assert_eq!(lane.checkout, checkout, "the checkout is still the checkout");
+        assert_eq!(
+            lane.checkout, checkout,
+            "the checkout is still the checkout"
+        );
     }
 
     /// A root that merely exists is the same dead end as no root.
@@ -1547,6 +1594,9 @@ mod tests {
         let refusal = derive_lane(&ExoLaneOverrides::default(), home.path())
             .expect_err("a half-read record is not an agent");
 
-        assert!(matches!(refusal, ExoLaneUnderivable::NoAgent { .. }), "{refusal:?}");
+        assert!(
+            matches!(refusal, ExoLaneUnderivable::NoAgent { .. }),
+            "{refusal:?}"
+        );
     }
 }

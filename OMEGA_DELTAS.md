@@ -5146,3 +5146,105 @@ than merely stated.
   and they stay open. The loading field is also not persisted: text typed into
   it and then abandoned by closing the window before the connection lands is
   gone, because `draft_prompt` belongs to a thread and there is no thread.
+
+### OMEGA-DELTA-0123 — An executor that cannot run here says so, and Omega still creates nothing of Exo's
+
+- **Upstream Zed:** there is no executor selector. The agent panel picks between
+  configured agent servers, and one that is not configured is simply not there.
+- **Omega, before this:** `OMEGA-DELTA-0115` built the composer's selector on
+  one rule — *a name appears only when it can run* — and shipped it with no
+  second half. So a name that could not run was rendered as **nothing at all**.
+  On this machine, which has an Exo checkout and a built `exo` binary, the menu
+  read `Omega  Codex  Claude` and said nothing about the fourth name. The owner
+  opened it, did not find Exo, and had to ask why it was missing.
+- **Omega now:** `ready` is untouched, and `unavailable` is added beside it as
+  its exact complement. Every one of the four names is either offered or
+  explained; a disabled entry under a separator carries the short reason —
+  `Exo — Exo has never been run here`, `Codex — not installed`. Nothing new
+  became clickable.
+- **The short list was right and incomplete.** `OMEGA-DELTA-0115`'s reason for
+  the filter still holds in full: *"a selector offering a name that fails when
+  it is clicked is worse than one that never offered it, because the person then
+  has to work out whether they broke something."* The unnoticed cost is that the
+  person has to work that out anyway, from a menu with no entry, with less to go
+  on. Silence does not remove the question; it removes the answer. So both
+  halves are kept, and they answer different questions — `ready` decides what
+  may be **clicked**, `unavailable` decides what may be **read**.
+- **The reason is in the label because a disabled entry has nowhere else.**
+  `ContextMenu::select_index` registers a documentation aside only for an item
+  that `is_selectable`, and `is_selectable` is `!disabled` for an entry — so an
+  aside on a disabled entry never appears, and the `Info` icon the component
+  draws beside one is an affordance for something that is not there. That is a
+  fact about upstream code, which a rebase can change without touching anything
+  of ours, so `a_disabled_menu_entry_still_cannot_be_selected` asserts it: if it
+  stops being true, the long form becomes available and the label can go back to
+  being one word.
+- **The sentence is the type's, not the menu's.**
+  `ExoLaneUnderivable::summary` gives each of the eight refusals its own line.
+  That type's documentation already argued for exactly this — *"'Exo is not
+  installed', 'that is the other Exo', 'Exo has never been run here' and 'Exo
+  has four agents and Omega will not choose for you' are four different
+  sentences and four different things for a person to do next"* — and then its
+  only caller discarded the value and rendered the absence as nothing. The enum
+  was built to be read and had no reader. A summary that could interpolate a
+  path would grow one and become `Display` again, so it is `&'static str`.
+- **Omega still creates nothing of Exo's, and that is the decision, not an
+  omission.** The other way to make the name appear was to give it something to
+  appear for: create the state root, the agent and the conversation the
+  derivation looks for. Refused for three reasons. `.exo` is single-writer
+  storage and Omega cannot prove no `exo serve` already holds the root it would
+  write into. A root alone resolves nothing — `agent_slug` refuses an empty one
+  — so creating a root means creating an agent, which means choosing a model
+  binding and a provider secret, which is the owner's money and the owner's
+  credentials. And `OMEGA-DELTA-0107` already settled the neighbouring question:
+  Omega reads a durable log from a server the owner runs and starts none;
+  writing into that server's storage is the same claim of authority through a
+  different door. `omega_creates_no_exo_state_root_agent_or_conversation`
+  enforces the absence, because "we did not add a write" stays true only while
+  somebody is checking.
+- **The other rejected option: offer Exo whenever the binary is present, and
+  derive the lane lazily at connect.** That was measured before it was refused,
+  and it fails twice. `exo acp` takes an existing agent *and* an existing
+  conversation as arguments, so on a machine with a binary and an empty root
+  there is nothing to attach to. And with a file-backed secret store the turn
+  fails at `session/prompt` — not at connect — with `failed to decrypt secret
+  payload`, because `initialize` and `session/new` succeed without ever touching
+  a secret. A name offered on binary-presence would therefore fail *after* the
+  first message was typed, which is the worst version of the failure
+  `OMEGA-DELTA-0115` exists to prevent.
+- **One answer to "is there a lane".** `exo_lane_resolves` is now the absence of
+  an absence rather than a second cached read of the same two files. Two caches
+  of one question is how a menu ends up offering Exo and explaining its absence
+  in the same list.
+- **Enforced by:** `a_name_that_cannot_run_is_still_named_and_still_not_offered`,
+  `a_disabled_menu_entry_still_cannot_be_selected`,
+  `there_is_one_answer_to_whether_an_exo_lane_resolves`,
+  `every_exo_refusal_has_a_sentence_short_enough_to_read` and
+  `omega_creates_no_exo_state_root_agent_or_conversation` in
+  `crates/omega_deltas`, plus `every_name_is_either_ready_or_explained`,
+  `omega_is_never_among_the_unavailable`,
+  `an_agent_that_is_not_installed_says_so` and
+  `exos_reason_is_carried_through_rather_than_reworded` in `crates/agent_ui`.
+  Each was watched failing against a mutation of the thing it guards. Three of
+  them were vacuous when first written and only mutation found it: one looked
+  for `choice.name()`, which the *offered* loop renders too, and stayed green
+  with the reason removed from the disabled label entirely; one looked for a
+  refusal's variant name, which survives being folded into another arm; and one
+  claimed to hold "not installed" and "installed and undrivable" apart when
+  the second case cannot occur at all — `ready` offers a name only when it is
+  detected **and** drivable, so for Codex and Claude that arm is unreachable.
+  The arm is kept, because it is the truthful answer if `DRIVABLE_AGENT_IDS`
+  ever stops naming one of the four, and the check now asserts that
+  reachability rather than pretending to exercise it.
+- **What this does not cover.** **No window has been opened**, so nothing here
+  proves the rendered menu: that the separator and the disabled entries draw,
+  that the label fits the popover's width, or that the owner now sees `Exo —
+  Exo has never been run here` where there was blank space. **And this does not
+  make Exo run on this machine.** No lane resolves here, and the composer now
+  says so instead of saying nothing; what a person must do about it is
+  `docs/exo/` in the `openagents` repository. The lane file's schema still
+  carries no secret-store fields, so `AgentServerCommand { env: None }` hands
+  the `exo acp` child whatever environment Omega was launched with — which for
+  a Dock or Finder launch is neither `EXO_SECRET_BACKEND` nor
+  `EXO_MASTER_KEY_PATH`. That gap is measured and written down and is not
+  repaired here.
