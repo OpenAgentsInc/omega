@@ -116,6 +116,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0125",
     "OMEGA-DELTA-0126",
     "OMEGA-DELTA-0127",
+    "OMEGA-DELTA-0128",
 ];
 
 /// OMEGA-DELTA-0125. Every entry the thread header's `…` menu offers, the
@@ -176,6 +177,16 @@ pub const THREAD_MENU_ENTRIES_NOT_DECIDED_HERE: &[&str] =
 /// One name, checked, so the guard cannot be spelled three ways in one menu and
 /// leave a reader unsure which entries it covers.
 pub const THREAD_MENU_GUARD: &str = "offers_editor_surfaces";
+
+/// OMEGA-DELTA-0128. What to append to markdown that has not finished
+/// arriving, so it renders as the construct it is going to be.
+pub const MARKDOWN_STREAMING_PATH: &str = "crates/markdown/src/streaming.rs";
+
+/// OMEGA-DELTA-0128. The renderer that decides what is parsed.
+pub const MARKDOWN_PATH: &str = "crates/markdown/src/markdown.rs";
+
+/// OMEGA-DELTA-0128. Where a turn's text and a tool call's body arrive.
+pub const ACP_THREAD_PATH: &str = "crates/acp_thread/src/acp_thread.rs";
 
 /// OMEGA-DELTA-0119. The read-only sheet a transcript file link opens in a
 /// mode that draws no editor.
@@ -17405,5 +17416,104 @@ mod tests {
              pass-through is consulted; anything else reads a connection that \
              never had Exo's options."
         );
+    }
+
+    // ------ OMEGA-DELTA-0128 — markdown still arriving is drawn as what it is
+    // ------ going to be, and as what it was the moment it stops
+
+    /// OMEGA-DELTA-0128. Four claims that a rebase of `markdown.rs` or
+    /// `acp_thread.rs` could silently revert, and that no amount of the
+    /// renderer's own tests would then notice, because the tests would still
+    /// be exercising the repair — just one nothing calls.
+    ///
+    /// The repair's *behaviour* is proved in `crates/markdown/src/streaming.rs`
+    /// and at the thread seam in `crates/acp_thread`. What is proved here is
+    /// that it stays a suffix, stays off outside a stream, stays off the
+    /// clipboard, and that both paths that arm it also end it.
+    #[test]
+    fn markdown_still_arriving_completes_its_markers_and_gives_them_back() {
+        let streaming_path = repository_path(MARKDOWN_STREAMING_PATH);
+        let streaming_source = std::fs::read_to_string(&streaming_path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", streaming_path.display()));
+        assert!(
+            production_source(&streaming_source)
+                .contains("pub fn completion_suffix(source: &str) -> String"),
+            "OMEGA-DELTA-0128: {} no longer offers `completion_suffix`.              Without it a half-written `**bold` is drawn as its own asterisks              for as long as it takes the closing pair to arrive.",
+            streaming_path.display()
+        );
+
+        let markdown_path = repository_path(MARKDOWN_PATH);
+        let markdown_source = std::fs::read_to_string(&markdown_path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", markdown_path.display()));
+        let markdown = production_source(&markdown_source);
+
+        // 1. A suffix, in that order. Streamdown repairs by rewriting the
+        //    middle of the string; here that would move the offset of every
+        //    byte after the edit, and the rendered output carries those offsets
+        //    back into the source for selection, copy-as-markdown,
+        //    click-to-source, autoscroll and search highlights. All of them
+        //    would then be addressed to the wrong characters, silently.
+        assert!(
+            without_whitespace(markdown)
+                .contains(&without_whitespace(r#"format!("{source}{completion}")"#)),
+            "OMEGA-DELTA-0128: {} no longer builds the parsed source by              appending the completion to what the model sent. Anything but a              suffix moves the byte offsets the rendered output carries back              into the source, and every one of them is then addressed to the              wrong characters.",
+            markdown_path.display()
+        );
+
+        // 2. Off unless a stream is running. This is what keeps the promise
+        //    that every character the model sent ends up on screen: a `**` it
+        //    meant literally is completed while more may be coming and is drawn
+        //    as itself once nothing is.
+        assert!(
+            without_whitespace(markdown).contains(&without_whitespace(
+                "if self.is_streaming && !should_parse_links_only"
+            )),
+            "OMEGA-DELTA-0128: {} no longer gates the repair on a stream being              in progress. Ungated, a `**` the model meant literally is drawn as              emphasis for the life of the thread and the reader never gets the              asterisks back.",
+            markdown_path.display()
+        );
+
+        // 3. Invented markers are not the model's text and must not reach a
+        //    clipboard.
+        assert!(
+            without_whitespace(markdown).contains(&without_whitespace(
+                "self.source.len() - self.streaming_completion_len"
+            )),
+            "OMEGA-DELTA-0128: {} no longer clamps a selection to what was              actually sent, so copy-as-markdown can hand somebody markers this              renderer invented.",
+            markdown_path.display()
+        );
+
+        // 4. Both paths that arm the repair also end it. An arm with no end is
+        //    the failure in 2, reached one caller further out.
+        let thread_path = repository_path(ACP_THREAD_PATH);
+        let thread_source = std::fs::read_to_string(&thread_path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", thread_path.display()));
+        let thread = production_source(&thread_source);
+        for (arms, ends, what) in [
+            (
+                "markdown.append_streamed(&buffer.pending[..byte_boundary], cx)",
+                "markdown.finish_streaming(cx);",
+                "the turn's own text, and every thought in it",
+            ),
+            (
+                "Some(suffix) => markdown.append_streamed(suffix, cx)",
+                "markdown.update(cx, |markdown, cx| markdown.finish_streaming(cx))",
+                "a tool call's body",
+            ),
+        ] {
+            assert!(
+                without_whitespace(thread).contains(&without_whitespace(arms)),
+                "OMEGA-DELTA-0128: {} no longer streams {what} into the \
+                 renderer, so its half-written markers are drawn as \
+                 themselves again.",
+                thread_path.display()
+            );
+            assert!(
+                without_whitespace(thread).contains(&without_whitespace(ends)),
+                "OMEGA-DELTA-0128: {} no longer ends the stream for {what}. \
+                 The repair then never switches off, and a marker the model \
+                 meant literally is never given back.",
+                thread_path.display()
+            );
+        }
     }
 }

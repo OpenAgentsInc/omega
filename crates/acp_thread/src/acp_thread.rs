@@ -1087,6 +1087,25 @@ impl ToolCall {
             }
             self.raw_output = Some(raw_output);
         }
+
+        // OMEGA-DELTA-0128. A tool call that has stopped is not going to send
+        // any more of its body, so the renderer stops completing the markers in
+        // it and shows what the tool actually wrote.
+        if matches!(
+            self.status,
+            ToolCallStatus::Completed
+                | ToolCallStatus::Failed
+                | ToolCallStatus::Rejected
+                | ToolCallStatus::Canceled
+        ) {
+            for content in &self.content {
+                if let ToolCallContent::ContentBlock(ContentBlock::Markdown { markdown }) = content
+                {
+                    markdown.update(cx, |markdown, cx| markdown.finish_streaming(cx));
+                }
+            }
+        }
+
         Ok(())
     }
 
@@ -1499,7 +1518,7 @@ impl ContentBlock {
             let current = markdown.source().to_string();
             match new_content.strip_prefix(&current) {
                 Some("") => {}
-                Some(suffix) => markdown.append(suffix, cx),
+                Some(suffix) => markdown.append_streamed(suffix, cx),
                 None => markdown.reset(new_content.clone().into(), cx),
             }
         });
@@ -2995,11 +3014,18 @@ impl AcpThread {
         cx: &mut Context<Self>,
     ) {
         if let Some(buffer) = streaming_text_buffer.take() {
-            if !buffer.pending.is_empty() {
-                buffer
-                    .target
-                    .update(cx, |markdown, cx| markdown.append(&buffer.pending, cx));
-            }
+            buffer.target.update(cx, |markdown, cx| {
+                if !buffer.pending.is_empty() {
+                    markdown.append(&buffer.pending, cx);
+                }
+                // OMEGA-DELTA-0128. A flush is the end of this markdown's
+                // stream — the turn stopped, or a new entry took over — so the
+                // markers the renderer was completing stop being completed and
+                // the reader gets the raw text back. A flush that turns out to
+                // be premature costs nothing: the next `append_streamed`
+                // re-arms it.
+                markdown.finish_streaming(cx);
+            });
         }
     }
 
@@ -3031,7 +3057,7 @@ impl AcpThread {
                             .min(pending_len);
 
                         buffer.target.update(cx, |markdown: &mut Markdown, cx| {
-                            markdown.append(&buffer.pending[..byte_boundary], cx);
+                            markdown.append_streamed(&buffer.pending[..byte_boundary], cx);
                             buffer.pending.drain(..byte_boundary);
                         });
 
@@ -5485,6 +5511,167 @@ mod tests {
             "Underlying terminal should contain output from before kill, got: {}",
             inner_content
         );
+    }
+
+    /// OMEGA-DELTA-0128. The same for a tool call's body, which streams
+    /// through a different path and ends on the call's own status rather than
+    /// on the turn's.
+    #[gpui::test]
+    async fn a_streaming_tool_call_body_completes_its_markers_until_the_call_stops(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        init_test(cx);
+
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+        let connection = Rc::new(FakeAgentConnection::new());
+        let thread = cx
+            .update(|cx| {
+                connection.new_session(project, PathList::new(&[Path::new(path!("/test"))]), cx)
+            })
+            .await
+            .unwrap();
+
+        let id = acp::ToolCallId::new("call");
+        let update = |text: &str, status: acp::ToolCallStatus| {
+            acp::SessionUpdate::ToolCall(
+                acp::ToolCall::new(id.clone(), "Label")
+                    .kind(acp::ToolKind::Fetch)
+                    .status(status)
+                    .content(vec![text.into()]),
+            )
+        };
+
+        thread
+            .update(cx, |thread, cx| {
+                thread.handle_session_update(update("Now ", acp::ToolCallStatus::InProgress), cx)
+            })
+            .unwrap();
+        thread
+            .update(cx, |thread, cx| {
+                thread.handle_session_update(
+                    update("Now **Searching", acp::ToolCallStatus::InProgress),
+                    cx,
+                )
+            })
+            .unwrap();
+        cx.run_until_parked();
+
+        let body = thread.read_with(cx, |thread, _| tool_call_body_markdown(thread, &id));
+        body.read_with(cx, |markdown, _| {
+            assert_eq!(markdown.source().as_ref(), "Now **Searching");
+            assert_eq!(
+                markdown.parsed_markdown().source().as_ref(),
+                "Now **Searching**",
+                "the markers in flight should have been completed for the parse"
+            );
+        });
+
+        thread
+            .update(cx, |thread, cx| {
+                thread.handle_session_update(
+                    update("Now **Searching", acp::ToolCallStatus::Completed),
+                    cx,
+                )
+            })
+            .unwrap();
+        cx.run_until_parked();
+
+        body.read_with(cx, |markdown, _| {
+            assert_eq!(
+                markdown.parsed_markdown().source().as_ref(),
+                "Now **Searching",
+                "a tool call that has stopped is owed its raw asterisks back"
+            );
+        });
+    }
+
+    fn tool_call_body_markdown(thread: &AcpThread, id: &acp::ToolCallId) -> Entity<Markdown> {
+        let (_, call) = thread.tool_call(id).expect("the tool call exists");
+        for content in &call.content {
+            if let ToolCallContent::ContentBlock(ContentBlock::Markdown { markdown }) = content {
+                return markdown.clone();
+            }
+        }
+        panic!("the tool call has no markdown body");
+    }
+
+    /// OMEGA-DELTA-0128. The wiring, at the seam it actually runs at: a
+    /// thought streams in through the reveal buffer, and while it does, the
+    /// renderer is parsing the markers that finish what is in flight. When the
+    /// stream ends it parses what the model actually sent.
+    ///
+    /// The behaviour of the completion itself is proved in the `markdown`
+    /// crate; what is proved here is that this path reaches it and that the
+    /// end of the stream is noticed.
+    #[gpui::test]
+    async fn a_streaming_thought_completes_its_markers_until_the_stream_ends(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        init_test(cx);
+
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+        let connection = Rc::new(FakeAgentConnection::new());
+        let thread = cx
+            .update(|cx| {
+                connection.new_session(project, PathList::new(&[Path::new(path!("/test"))]), cx)
+            })
+            .await
+            .unwrap();
+
+        // The first chunk builds the block; the second is the one that streams
+        // into it, which is the path this delta changes.
+        thread.update(cx, |thread, cx| {
+            thread.push_assistant_content_block("Now ".into(), true, cx);
+            thread.push_assistant_content_block("**Searching".into(), true, cx);
+        });
+        cx.executor().advance_clock(Duration::from_millis(
+            StreamingTextBuffer::TASK_UPDATE_MS * 64,
+        ));
+        cx.run_until_parked();
+
+        let thought = thread.read_with(cx, |thread, _| streamed_thought_markdown(thread));
+        thought.read_with(cx, |markdown, _| {
+            assert_eq!(markdown.source().as_ref(), "Now **Searching");
+            assert_eq!(
+                markdown.parsed_markdown().source().as_ref(),
+                "Now **Searching**",
+                "the markers in flight should have been completed for the parse"
+            );
+        });
+
+        // A new entry ends this one's stream.
+        thread.update(cx, |thread, cx| {
+            thread.push_user_content_block(None, "stop".into(), cx);
+        });
+        cx.run_until_parked();
+
+        thought.read_with(cx, |markdown, _| {
+            assert_eq!(
+                markdown.parsed_markdown().source().as_ref(),
+                "Now **Searching",
+                "once the stream ends the reader is owed the raw asterisks back"
+            );
+        });
+    }
+
+    fn streamed_thought_markdown(thread: &AcpThread) -> Entity<Markdown> {
+        for entry in &thread.entries {
+            let AgentThreadEntry::AssistantMessage(message) = entry else {
+                continue;
+            };
+            for chunk in &message.chunks {
+                if let AssistantMessageChunk::Thought {
+                    block: ContentBlock::Markdown { markdown },
+                    ..
+                } = chunk
+                {
+                    return markdown.clone();
+                }
+            }
+        }
+        panic!("the thread has no thought block");
     }
 
     #[gpui::test]
@@ -10159,7 +10346,10 @@ mod tests {
         thread.update(cx, |thread, cx| {
             assert!(
                 thread.push_system_note(
-                    note("handoff.provider.1", "Provider handoff: codex-local to claude-local"),
+                    note(
+                        "handoff.provider.1",
+                        "Provider handoff: codex-local to claude-local"
+                    ),
                     cx,
                 ),
                 "the first append of a note id must land"
@@ -10174,7 +10364,10 @@ mod tests {
             );
             assert!(
                 thread.push_system_note(
-                    note("handoff.provider.2", "Provider handoff: claude-local to codex-local"),
+                    note(
+                        "handoff.provider.2",
+                        "Provider handoff: claude-local to codex-local"
+                    ),
                     cx,
                 ),
                 "a different note id is a different disclosure"

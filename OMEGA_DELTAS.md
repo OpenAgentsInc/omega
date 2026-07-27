@@ -5930,3 +5930,107 @@ question rather than leaving it to whoever next reads the menu.
   make the harness choosable, it does not persist a default across threads, and
   it says nothing about what happens if a binding is unregistered while a turn
   is in flight.
+### OMEGA-DELTA-0128 — Markdown still arriving is drawn as what it is going to be, and as what it was the moment it stops
+
+- **Upstream behaviour.** Upstream Zed parses the markdown source it has. This
+  is not a bug in the parser — while a model streams, the source is a *prefix*,
+  and a prefix of `**Searching**` is `**Searching`, whose asterisks a correct
+  parser has no choice but to render literally. So the reader watches raw syntax
+  appear and snap into styled text, once per construct, for the whole message.
+
+- **What the owner saw.** A live build, a thinking block, and `**Searching`
+  drawn with its asterisks showing in the header. His instruction: *"You're
+  showing a bunch of open markdown tags before it gets to the final one, and you
+  probably need to take a page out of the streamdown playbook."* The same class
+  lands anywhere a token boundary falls mid-syntax: a half-written `**bold`, a
+  `[link](htt`, an unclosed backtick, a table with only its header row so far.
+
+- **The choice, because it is a real trade.** Three answers were available.
+  *Render as plain text until closed* is the upstream behaviour and is what the
+  owner is complaining about. *Hide until closed* never shows a wrong style, but
+  text then appears late and in bursts, which reads as the model stalling.
+  *Complete and render* — treat `**bold` as though the closing pair had arrived
+  — reads best while streaming and can be briefly wrong if the next token turns
+  the construct into something else. Streamdown (`packages/remend`, read at
+  `~/work/projects/repos/streamdown`) takes the third, and so does this: it
+  repairs the source before parsing and turns the repair off for the final,
+  non-streaming render so nothing invented outlives the stream. The flicker the
+  third answer risks is bounded by not repairing a delimiter whose meaning the
+  next byte decides.
+
+- **Two deliberate differences from streamdown.**
+
+  **1. Every repair is a suffix.** Streamdown rewrites in the middle of the
+  string: it deletes an unfinished image, strips a half-typed HTML tag, moves a
+  `_` in front of a trailing newline. It can, because it hands a string to
+  `react-markdown` and nothing downstream refers back to the source by offset.
+  Here the rendered output carries byte ranges into the source for selection,
+  copy-as-markdown, click-to-source, autoscroll and search highlights, and a
+  middle edit shifts every offset after it — so all of them would be addressed
+  to the wrong characters, silently and only while streaming, which is the
+  hardest possible shape of bug to see. So the repair may only be appended.
+  Every byte the model sent keeps the offset it was parsed at, and only invented
+  bytes live past what was sent. `ParsedMarkdown::streaming_completion_len`
+  records how many, and a selection is clamped to what was actually sent so the
+  invented markers cannot reach a clipboard.
+
+  **2. Nothing is ever deleted.** Streamdown drops an incomplete image and an
+  incomplete HTML tag. The promise here is that every character the model sent
+  is on screen, so where a construct cannot be completed it is left exactly as
+  it came and renders as its own literal text — which is the honest thing for it
+  to look like. An image with half a destination is left alone for that reason
+  rather than completed: completing it would draw a broken image where the words
+  the model sent used to be.
+
+- **The repair is off unless a stream is running, and that is what keeps the
+  promise.** A model that writes a literal `**` and never closes it must end up
+  with `**` on screen. `Markdown::append_streamed` arms the repair and
+  `Markdown::finish_streaming` ends it, so the last parse of every message is of
+  the raw source. An end that turns out to be premature costs nothing — the next
+  streamed append re-arms it — but an arm with no end would leave a literal
+  marker hidden for the life of the thread, so both paths that arm it end it:
+  the turn's own text and thoughts end at `flush_streaming_text`, and a tool
+  call's body ends when the call reaches a terminal status.
+
+- **What is completed.** Emphasis (`*`, `**`, `***`, `_`, `__`), strikethrough
+  (`~~`), inline code of any backtick-run length, a link destination that has
+  been opened with `](`, headings and lists by virtue of being ordinary blocks,
+  and a table header row waiting for its delimiter. Emphasis is matched with
+  CommonMark's left- and right-flanking rules rather than by counting
+  delimiters, which is what keeps `2 * 3`, `snake_case_name`, a `*` bullet and a
+  `***` thematic break from being treated as unfinished emphasis. A `~` opens
+  nothing on its own, so `~/work` keeps its tilde. A paragraph about to be
+  turned into a heading by a `-` that is on its way to being a list bullet gets
+  a zero-width space, which is streamdown's trick for the same case.
+
+- **What is not.** A bare `[` with no `](` yet is left alone: nothing says it is
+  a link, and `[` reads perfectly well as itself, where streamdown guesses and
+  substitutes a placeholder destination. Images are left alone, above. HTML
+  blocks, indented code blocks and the inside of an unterminated fence are left
+  alone entirely — all three are already showing their source on purpose. A
+  table header row is only completed once it is newline-terminated, because
+  firing on `| Name | Size |` while it is still being written builds a table
+  whose column count changes under the reader, which is worse to watch than the
+  pipes. A table whose delimiter row is being typed *is* completed, so the pipes
+  do not come back for the several ticks that takes. Nothing is done about
+  footnotes, link reference definitions, or math.
+
+- **Enforced by:** `markdown_still_arriving_completes_its_markers_and_gives_them_back`
+  in `crates/omega_deltas`, for the four things a rebase could silently revert;
+  the `streaming` tests in `crates/markdown/src/streaming.rs`, which feed seven
+  documents one byte at a time and assert the repair is a suffix and is itself
+  complete at every prefix; `no_prefix_of_a_streamed_document_draws_a_marker_with_text_after_it`
+  and `every_word_that_has_arrived_is_drawn_at_every_prefix` in
+  `crates/markdown/src/markdown.rs`, which are the owner's complaint and the
+  no-loss promise stated as oracles over the rendered text;
+  `a_streamed_message_draws_its_markers_and_gives_them_back_at_the_end` in the
+  same file, through the real entity and element; and
+  `a_streaming_thought_completes_its_markers_until_the_stream_ends` and
+  `a_streaming_tool_call_body_completes_its_markers_until_the_call_stops` in
+  `crates/acp_thread`, at the seams the two streaming paths actually run at.
+
+- **What this does not cover.** **Nobody has watched it stream in a window.**
+  Every claim above is proved headlessly, including through the real
+  `MarkdownElement`, and the byte-at-a-time sweeps are the reason to believe the
+  boundary cases. What is not proved is a human watching a live model write a
+  table and a fenced block back to back and reporting that nothing jumped.

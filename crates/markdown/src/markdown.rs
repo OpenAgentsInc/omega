@@ -3,6 +3,7 @@ mod mermaid;
 pub mod parser;
 mod path_range;
 mod selection;
+mod streaming;
 
 use base64::Engine as _;
 use futures::FutureExt as _;
@@ -406,6 +407,7 @@ pub struct Markdown {
     context_menu_selected_markdown: Option<SharedString>,
     search_highlights: Vec<Range<usize>>,
     active_search_highlight: Option<usize>,
+    is_streaming: bool,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -599,6 +601,7 @@ impl Markdown {
             context_menu_selected_markdown: None,
             search_highlights: Vec::new(),
             active_search_highlight: None,
+            is_streaming: false,
         };
         this.parse(cx);
         this
@@ -737,8 +740,31 @@ impl Markdown {
         self.parse(cx);
     }
 
+    /// OMEGA-DELTA-0128. Append text that is arriving from a model mid-turn,
+    /// so the markers of a construct that has not closed yet are completed
+    /// rather than shown. See `streaming`.
+    ///
+    /// The caller owes a `finish_streaming` when the turn ends. Until it comes,
+    /// a `**` the model meant literally is drawn as emphasis, which is the
+    /// whole trade; after it comes, the raw source is what is parsed and every
+    /// character the model sent is on screen.
+    pub fn append_streamed(&mut self, text: &str, cx: &mut Context<Self>) {
+        self.is_streaming = true;
+        self.append(text, cx);
+    }
+
+    /// OMEGA-DELTA-0128. Nothing more is coming, so stop completing markers
+    /// the model may have meant literally.
+    pub fn finish_streaming(&mut self, cx: &mut Context<Self>) {
+        if !mem::take(&mut self.is_streaming) {
+            return;
+        }
+        self.parse(cx);
+    }
+
     pub fn replace(&mut self, source: impl Into<SharedString>, cx: &mut Context<Self>) {
         self.source = source.into();
+        self.is_streaming = false;
         self.parse(cx);
     }
 
@@ -778,6 +804,7 @@ impl Markdown {
             return;
         }
         self.source = source;
+        self.is_streaming = false;
         self.selection = Selection::default();
         self.autoscroll_request = None;
         self.pending_parse = None;
@@ -819,7 +846,11 @@ impl Markdown {
         if self.selection.end <= self.selection.start {
             return None;
         }
-        self.source.get(self.selection.start..self.selection.end)
+        // OMEGA-DELTA-0128. A selection is measured against the source that was
+        // parsed, which while a turn streams carries markers this renderer
+        // appended. They are not the model's text and are not this to give out.
+        let end = self.selection.end.min(self.source.len());
+        self.source.get(self.selection.start..end)
     }
 
     pub fn set_search_highlights(
@@ -954,6 +985,23 @@ impl Markdown {
     fn start_background_parse(&self, cx: &Context<Self>) -> Task<()> {
         let source = self.source.clone();
         let should_parse_links_only = self.options.parse_links_only;
+        // OMEGA-DELTA-0128. Only ever a suffix: every byte the model sent keeps
+        // the offset it is parsed at, so the ranges the rendered output carries
+        // back into the source stay addressed to the right characters.
+        //
+        // Links-only mode renders plain text with the URLs picked out; there is
+        // no markdown syntax on screen to complete.
+        let (source, streaming_completion_len) = if self.is_streaming && !should_parse_links_only {
+            let completion = streaming::completion_suffix(&source);
+            if completion.is_empty() {
+                (source, 0)
+            } else {
+                let len = completion.len();
+                (SharedString::new(format!("{source}{completion}")), len)
+            }
+        } else {
+            (source, 0)
+        };
         let should_parse_html = self.options.parse_html;
         let should_render_mermaid_diagrams = self.options.render_mermaid_diagrams;
         let should_parse_heading_slugs = self.options.parse_heading_slugs;
@@ -967,6 +1015,7 @@ impl Markdown {
                     ParsedMarkdown {
                         events: Arc::from(parse_links_only(source.as_ref())),
                         source,
+                        streaming_completion_len,
                         languages_by_name: TreeMap::default(),
                         languages_by_path: TreeMap::default(),
                         root_block_starts: Arc::default(),
@@ -1054,6 +1103,7 @@ impl Markdown {
             (
                 ParsedMarkdown {
                     source,
+                    streaming_completion_len,
                     events: Arc::from(events),
                     languages_by_name,
                     languages_by_path,
@@ -1182,7 +1232,14 @@ impl Selection {
 
 #[derive(Debug, Clone, Default)]
 pub struct ParsedMarkdown {
+    /// OMEGA-DELTA-0128. While a turn streams this carries the markers that
+    /// complete whatever construct is in flight, appended to what the model
+    /// actually sent — see `streaming`. Every event range indexes *this*, so
+    /// slicing it is always in bounds; `Markdown::source` is the honest text.
     pub source: SharedString,
+    /// OMEGA-DELTA-0128. How many bytes at the end of `source` were appended
+    /// rather than sent.
+    pub streaming_completion_len: usize,
     pub events: Arc<[(Range<usize>, MarkdownEvent)]>,
     pub languages_by_name: TreeMap<SharedString, Arc<Language>>,
     pub languages_by_path: TreeMap<Arc<str>, Arc<Language>>,
@@ -1226,6 +1283,10 @@ impl ParsedMarkdown {
     /// With an exception of a single inline code span, which is returned as plain
     /// text, since copying a command or identifier is the dominant use case there.
     pub fn rebalanced_markdown_for_selection(&self, selection: Range<usize>) -> String {
+        // OMEGA-DELTA-0128. Markers this renderer appended are not the model's
+        // text, so they must not end up on somebody's clipboard.
+        let sent = self.source.len() - self.streaming_completion_len;
+        let selection = selection.start.min(sent)..selection.end.min(sent);
         selection::rebalanced_markdown_for_selection(
             &self.source,
             &self.events,
@@ -4151,7 +4212,7 @@ impl RenderedText {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui::{RenderImage, TestAppContext, UpdateGlobal, size};
+    use gpui::{RenderImage, TestAppContext, UpdateGlobal, VisualTestContext, size};
     use language::{Language, LanguageConfig, LanguageMatcher};
     use std::cell::RefCell;
     use std::sync::{
@@ -5794,5 +5855,142 @@ mod tests {
                 px(24.0)
             );
         });
+    }
+
+    /// The plain text a reader actually sees, which is where a marker that
+    /// leaked into the render shows up.
+    fn visible_text(source: &str) -> String {
+        use pulldown_cmark::{Event, Parser, Tag, TagEnd};
+        let mut text = String::new();
+        // Alt text is not something a reader sees; once a construct becomes an
+        // image its words are off the screen, which is exactly the kind of loss
+        // this is watching for.
+        let mut in_image = false;
+        for event in Parser::new_ext(source, parser::PARSE_OPTIONS) {
+            match event {
+                Event::Start(Tag::Image { .. }) => in_image = true,
+                Event::End(TagEnd::Image) => in_image = false,
+                Event::Text(run) | Event::Code(run) if !in_image => text.push_str(&run),
+                Event::SoftBreak | Event::HardBreak if !in_image => text.push(' '),
+                _ => {}
+            }
+        }
+        text
+    }
+
+    /// OMEGA-DELTA-0128. The complaint, as an oracle: a marker may sit at the
+    /// very end of what has arrived, because nothing yet says what it is, but
+    /// it must never be drawn with the text it opened trailing after it. That
+    /// is the `**Searching` the owner watched.
+    ///
+    /// Byte-at-a-time because this class of bug lives entirely at token
+    /// boundaries, and the boundaries that break it are not the ones anybody
+    /// thinks to write down.
+    #[test]
+    fn no_prefix_of_a_streamed_document_draws_a_marker_with_text_after_it() {
+        let document = "Now **searching** for it, then ~~stopping~~, then \
+                        *starting* over with __force__ and ***everything***.";
+
+        for end in 0..=document.len() {
+            if !document.is_char_boundary(end) {
+                continue;
+            }
+            let prefix = &document[..end];
+            let repaired = format!("{prefix}{}", streaming::completion_suffix(prefix));
+            let drawn = visible_text(&repaired);
+            let settled = drawn.trim_end_matches(['*', '_', '~', '`']);
+            for marker in ["**", "~~", "__", "***"] {
+                assert!(
+                    !settled.contains(marker),
+                    "{prefix:?} drew {drawn:?}, which shows {marker:?} with \
+                     text after it"
+                );
+            }
+        }
+    }
+
+    /// OMEGA-DELTA-0128. The other half of the trade: the repair may hide a
+    /// marker, and it may never lose a word. Every word that has finished
+    /// arriving is on screen at every prefix.
+    #[test]
+    fn every_word_that_has_arrived_is_drawn_at_every_prefix() {
+        let document = "Now **searching** for it, then ~~stopping~~, then \
+                        *starting* over with __force__ and `a_value` and \
+                        ![a picture](https://example.com/a.png) here.";
+
+        for end in 0..=document.len() {
+            if !document.is_char_boundary(end) {
+                continue;
+            }
+            let prefix = &document[..end];
+            let repaired = format!("{prefix}{}", streaming::completion_suffix(prefix));
+            let drawn = visible_text(&repaired);
+            let raw = visible_text(prefix);
+            let mut words = raw
+                .split(|char: char| !char.is_alphanumeric() && char != '_')
+                .filter(|word| !word.is_empty())
+                .collect::<Vec<_>>();
+            // The last word may be half-typed and is allowed to be absent only
+            // in the sense that it is still itself a prefix; drop it.
+            words.pop();
+            for word in words {
+                assert!(
+                    drawn.contains(word),
+                    "{prefix:?} drew {drawn:?}, which has lost {word:?}"
+                );
+            }
+        }
+    }
+
+    /// OMEGA-DELTA-0128. What the owner sees, through the real entity and the
+    /// real element rather than through the string function: markers while the
+    /// turn streams, and the raw text back the moment it stops.
+    #[gpui::test]
+    async fn a_streamed_message_draws_its_markers_and_gives_them_back_at_the_end(
+        cx: &mut TestAppContext,
+    ) {
+        ensure_theme_initialized(cx);
+        let (_, cx) = cx.add_window_view(|_, _| TestWindow);
+        let markdown = cx.new(|cx| Markdown::new(SharedString::default(), None, None, cx));
+
+        let message = "Now **searching**";
+        let mut sent = String::new();
+        for char in message.chars() {
+            sent.push(char);
+            markdown.update(cx, |markdown, cx| {
+                markdown.append_streamed(&char.to_string(), cx)
+            });
+            cx.run_until_parked();
+
+            let drawn = draw_text(&markdown, cx);
+            let settled = drawn.trim_end_matches('*');
+            assert!(
+                !settled.contains("**"),
+                "after {sent:?} the element drew {drawn:?}"
+            );
+        }
+        assert_eq!(draw_text(&markdown, cx), "Now searching");
+
+        // The model wrote a `**` it never closed. Once the turn stops, the
+        // reader is owed the asterisks back.
+        markdown.update(cx, |markdown, cx| {
+            markdown.append_streamed(" and **more", cx)
+        });
+        cx.run_until_parked();
+        assert_eq!(draw_text(&markdown, cx), "Now searching and more");
+
+        markdown.update(cx, |markdown, cx| markdown.finish_streaming(cx));
+        cx.run_until_parked();
+        assert_eq!(draw_text(&markdown, cx), "Now searching and **more");
+    }
+
+    fn draw_text(markdown: &Entity<Markdown>, cx: &mut VisualTestContext) -> String {
+        let length = markdown.read_with(cx, |markdown, _| markdown.source().len());
+        let (rendered, _) = cx.draw(
+            Default::default(),
+            size(px(600.0), px(600.0)),
+            |_window, _cx| MarkdownElement::new(markdown.clone(), MarkdownStyle::default()),
+        );
+        rendered.text.text_for_range(0..length.max(1))
     }
 }

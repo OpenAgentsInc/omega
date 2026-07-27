@@ -57,6 +57,9 @@ urlencoding.workspace = true
 
 [dev-dependencies]
 env_logger.workspace = true
+# OMEGA-DELTA-0128. `Markdown::parsed_markdown`, so a test can see what was
+# actually handed to the parser rather than only what the model sent.
+markdown = { workspace = true, features = ["test-support"] }
 gpui = { workspace = true, "features" = ["test-support"] }
 indoc.workspace = true
 parking_lot.workspace = true
