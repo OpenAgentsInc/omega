@@ -1427,6 +1427,11 @@ mod tests {
             // can only ask for subagents it spawned, so there is no per-call
             // permission to configure.
             "read_subagent_transcript",
+            // Reading a tool result artifact is scoped structurally too: the
+            // tool holds this thread's registry and can address nothing else,
+            // and the content it returns is content this thread already
+            // produced. There is no per-call permission to configure.
+            "read_tool_result_artifact",
         ];
 
         let tool_info_ids: Vec<&str> = TOOLS.iter().map(|t| t.id).collect();

@@ -4639,3 +4639,73 @@ than merely stated.
   none of them can be produced from here. The bound itself is also untested
   against a real hang — the test asserts the constant's shape, not that a wedged
   npx resolve ends in a sentence.
+
+
+### OMEGA-DELTA-0111 — Every tool result is bounded, and the address the marker prints can be spent
+
+- **Upstream Zed / Omega before this:** `OMEGA-DELTA-0103` bounded the terminal
+  path and left the rest of the agent unbounded. Every native tool that returns
+  a text block — `read_file`, `grep`, `edit_file`, `fetch`, `diagnostics`, the
+  MCP tools — put whatever it produced onto the record whole. And the marker
+  `OMEGA-DELTA-0103` did emit named an artifact nothing could fetch: the address
+  was honest and unspendable.
+- **Omega:** the bound is applied once, in `Thread::run_tool`, on the way from a
+  tool's output to `LanguageModelToolResult`. A result over
+  `TOOL_RESULT_PREVIEW_BYTE_BUDGET` is recorded whole in the thread's
+  `ToolResultArtifactRegistry` under `tool:<tool call id>` and the event carries
+  `OMEGA-DELTA-0103`'s preview and marker. A new tool `read_tool_result_artifact`
+  takes the address the marker prints and returns the complete text, windowed by
+  line and bounded by bytes.
+- **The bound is where every tool passes, not in each tool.** A per-tool bound
+  is one a new tool is unbounded by *forgetting*, and the tool that forgets will
+  be the one nobody tested. `AgentTool::bounds_own_result` defaults to `false`
+  for the same reason: the unbounded result is the dangerous one, so a tool that
+  does not answer gets bounded rather than exempted.
+- **Three tools opt out, and each already carries its own visible marker.** The
+  two terminal variants (`OMEGA-DELTA-0103` records and previews inside
+  `acp_thread::Terminal`), `read_subagent_transcript` (`OMEGA-DELTA-0060` bounds
+  it to `MAX_TRANSCRIPT_BYTES` and marks every bound that fires), and the fetch
+  tool itself. Bounding an already-bounded body twice is worse than either
+  alone: the second cut removes the first cut's marker and reports the preview's
+  own size as the total.
+- **One truncation sentence for the whole system.** The agent half calls
+  `preview_tool_result` and never restates it — including inside
+  `read_tool_result_artifact`, whose own byte backstop speaks the same sentence
+  that sent the reader there. A second, differently worded sentence is how a
+  reader learns to skip both. The check asserts these files reuse the law and do
+  not contain the sentence.
+- **The second, wronger sentence is deleted.** `terminal_tool::process_content`
+  wrapped a truncated response in `Command output too long. The first {} bytes:`
+  — a second truncation sentence on top of `OMEGA-DELTA-0103`'s accurate one,
+  whose byte count was computed from the *formatted* string, fences and prefix
+  included, so the number it printed was never the number of bytes shown.
+  `output.truncated` is already carried by the marker inside the body.
+- **An address that does not resolve says why.** `ArtifactLookup` has three
+  answers, not two: found, wrong version (which names the versions that exist),
+  and forgotten. A bare "not found" would collapse a caller's off-by-one into a
+  fact about the thread, and it reads as *that result never existed* — the same
+  false-absence class the marker was built against, moved from the marker to the
+  fetch. A malformed address is answered separately again, as the typo it is.
+- **What this does not cover, stated rather than hidden.** **Artifacts live in
+  memory for as long as the thread is open and are never written to disk.** A
+  reopened thread still carries its truncation markers — those are message text
+  and are persisted — while the results they address are gone, so those
+  addresses stop resolving. This is deliberate, not overlooked. Persisting them
+  puts every complete tool result back on disk for the life of the thread and
+  grows without limit, which is the size property `OMEGA-DELTA-0103` exists to
+  hold; and any bounded version of that (evict the oldest, cap the total) has
+  the same sentence at its edge anyway, just later and behind more machinery.
+  So the gap is held to the standard that survives either choice, and
+  `AGENT_UNRESOLVED_ARTIFACT_REQUIRED_FACTS` is that standard: the refusal names
+  the lifetime that caused it and never reads as an absent result.
+- **Also not covered:** nothing reads a rendered pixel here either. The
+  marker and the fetch are checked as text and as a round trip through a fake
+  model, not as something a person saw in a real thread.
+- **Enforced by:**
+  `every_tool_result_is_bounded_and_the_marker_it_prints_can_be_spent` in
+  `crates/omega_deltas`; plus unit tests in `crates/agent`
+  (`tool_result_artifacts::tests`, `tools::read_tool_result_artifact_tool::tests`)
+  and the end-to-end
+  `test_large_native_tool_result_is_bounded_and_its_address_is_spendable`,
+  `test_small_native_tool_result_is_untouched`, and
+  `test_an_address_from_a_reopened_thread_says_why_it_no_longer_resolves`.

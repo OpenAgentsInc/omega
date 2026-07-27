@@ -540,6 +540,14 @@ impl AgentTool for ReadSubagentTranscriptTool {
         acp::ToolKind::Read
     }
 
+    fn bounds_own_result() -> bool {
+        // `OMEGA-DELTA-0060` bounds this to `MAX_TRANSCRIPT_BYTES` and marks
+        // every bound that fires, including the message index to ask again
+        // with. A second bound at 4,000 bytes would cut those markers off and
+        // leave a reader who paged to the end believing they had the transcript.
+        true
+    }
+
     fn initial_title(
         &self,
         input: Result<Self::Input, serde_json::Value>,

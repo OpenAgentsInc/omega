@@ -10,6 +10,7 @@ mod tests;
 mod thread;
 mod thread_store;
 mod tool_permissions;
+mod tool_result_artifacts;
 mod tools;
 
 use context_server::ContextServerId;
@@ -26,6 +27,7 @@ pub use templates::*;
 pub use thread::*;
 pub use thread_store::*;
 pub use tool_permissions::*;
+pub use tool_result_artifacts::*;
 pub use tools::*;
 
 use acp_thread::{

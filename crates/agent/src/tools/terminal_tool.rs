@@ -293,6 +293,14 @@ impl AgentTool for TerminalTool {
         acp::ToolKind::Execute
     }
 
+    fn bounds_own_result() -> bool {
+        // `OMEGA-DELTA-0103`. `acp_thread::Terminal` records the complete
+        // result as an artifact and `current_output` already returns a preview
+        // ending in the marker. Bounding it again would cut that marker off and
+        // report the preview's own size as the total.
+        true
+    }
+
     fn allow_in_restricted_mode() -> bool {
         false
     }
@@ -333,6 +341,14 @@ impl AgentTool for SandboxedTerminalTool {
 
     fn kind() -> acp::ToolKind {
         acp::ToolKind::Execute
+    }
+
+    fn bounds_own_result() -> bool {
+        // `OMEGA-DELTA-0103`. `acp_thread::Terminal` records the complete
+        // result as an artifact and `current_output` already returns a preview
+        // ending in the marker. Bounding it again would cut that marker off and
+        // report the preview's own size as the total.
+        true
     }
 
     fn allow_in_restricted_mode() -> bool {
@@ -1160,15 +1176,14 @@ fn process_content(
     #[cfg(not(target_os = "windows"))]
     let interop_blocked = false;
 
+    // `OMEGA-DELTA-0111`. No second truncation sentence here. `output.output`
+    // already ends in `OMEGA-DELTA-0103`'s marker when a bound fired, naming
+    // the withheld bytes and lines and the artifact to fetch from. The sentence
+    // that used to sit here said neither: it counted the *formatted* string,
+    // fences and all, so the number it printed was never the number of bytes
+    // shown — and a reader shown two truncation sentences with different
+    // arithmetic learns to trust neither.
     let content = format!("```\n{content}\n```");
-    let content = if output.truncated {
-        format!(
-            "Command output too long. The first {} bytes:\n\n{content}",
-            content.len(),
-        )
-    } else {
-        content
-    };
 
     let content = if user_stopped {
         if is_empty {
@@ -1534,6 +1549,49 @@ mod tests {
         );
 
         assert_eq!(result, "β\nγ");
+    }
+
+    /// `OMEGA-DELTA-0111`. A truncated result carries exactly one truncation
+    /// sentence, and it is `OMEGA-DELTA-0103`'s marker inside the body.
+    ///
+    /// What was here before said `Command output too long. The first N bytes:`
+    /// and computed N from the *formatted* string — fences, prefix and all — so
+    /// the number it printed was never the number of bytes shown. It also sat
+    /// on top of the accurate marker, and a reader shown two truncation
+    /// sentences with different arithmetic learns to trust neither.
+    #[test]
+    fn a_truncated_result_carries_one_truncation_sentence_and_it_is_the_markers() {
+        let body = "one\ntwo\n… [tool result truncated: 8 of 4000 bytes and 2 of \
+                    99 lines shown, 3992 bytes and 97 lines withheld. Full \
+                    result: artifact terminal:1@v1.]";
+        let output = acp::TerminalOutputResponse::new(body.to_string(), true)
+            .exit_status(acp::TerminalExitStatus::new().exit_code(0));
+
+        let result = process_content(
+            output,
+            "nak req",
+            false,
+            false,
+            TerminalOutputSelection {
+                head_lines: None,
+                tail_lines: None,
+            },
+        );
+
+        assert_eq!(
+            result,
+            format!("```\n{body}\n```"),
+            "`process_content` wrapped the body in a second truncation sentence"
+        );
+        assert_eq!(
+            result.matches("truncated").count(),
+            1,
+            "the result states truncation more than once: {result}"
+        );
+        assert!(
+            !result.contains("Command output too long"),
+            "the deleted sentence is back: {result}"
+        );
     }
 
     #[test]

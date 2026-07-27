@@ -3,10 +3,11 @@ use crate::{
     CreateThreadTool, DbLanguageModel, DbThread, DeletePathTool, DiagnosticsTool, EditFileTool,
     FetchTool, FindPathTool, FindReferencesTool, GetCodeActionsTool, GoToDefinitionTool, GrepTool,
     ListAgentsAndModelsTool, ListDirectoryTool, MovePathTool, ProjectSnapshot, ReadFileTool,
-    ReadSubagentTranscriptTool, RenameTool, SandboxedTerminalTool, SpawnAgentTool,
-    SubagentExecutor, SubagentTranscript, SystemPromptTemplate, Template, Templates, TerminalTool,
-    ToolPermissionDecision, TranscriptBlock, TranscriptEntry, TranscriptRole,
-    TranscriptWindowRequest, WebSearchTool, WriteFileTool, decide_permission_from_settings,
+    ReadSubagentTranscriptTool, ReadToolResultArtifactTool, RenameTool, SandboxedTerminalTool,
+    SpawnAgentTool, SubagentExecutor, SubagentTranscript, SystemPromptTemplate, Template,
+    Templates, TerminalTool, ToolPermissionDecision, ToolResultArtifactRegistry, TranscriptBlock,
+    TranscriptEntry, TranscriptRole, TranscriptWindowRequest, WebSearchTool, WriteFileTool,
+    decide_permission_from_settings, tool_result_artifact_source,
 };
 use acp_thread::{ClientUserMessageId, MentionUri};
 use action_log::ActionLog;
@@ -1391,6 +1392,13 @@ pub struct Thread {
     /// already-granted permissions skip the approval prompt.
     /// Never persisted — lives and dies with this thread.
     sandbox_grants: Rc<RefCell<ThreadSandboxGrants>>,
+    /// `OMEGA-DELTA-0111`. Every complete tool result this thread produced,
+    /// addressed by the truncation marker on the preview that replaced it.
+    ///
+    /// Shared with `read_tool_result_artifact`, which is the only thing that
+    /// reads it, so the tool cannot name another thread's result. Never
+    /// persisted, for the reason `ARTIFACTS_ARE_NOT_PERSISTED` gives.
+    tool_result_artifacts: Rc<RefCell<ToolResultArtifactRegistry>>,
 }
 
 impl Thread {
@@ -1527,6 +1535,7 @@ impl Thread {
             inherits_parent_model_settings: true,
             sandboxed_terminal_temp_dir: None,
             sandbox_grants: Rc::new(RefCell::new(ThreadSandboxGrants::default())),
+            tool_result_artifacts: Rc::new(RefCell::new(ToolResultArtifactRegistry::default())),
         }
     }
 
@@ -1911,6 +1920,12 @@ impl Thread {
             sandbox_grants: Rc::new(RefCell::new(ThreadSandboxGrants::from_db(
                 &db_thread.sandbox_grants,
             ))),
+            // Empty on purpose, and it is the gap `ARTIFACTS_ARE_NOT_PERSISTED`
+            // names: the reloaded messages still carry their truncation markers
+            // while the results those markers address are gone. The fetch path
+            // answers that with a sentence saying so, never with "no such
+            // result".
+            tool_result_artifacts: Rc::new(RefCell::new(ToolResultArtifactRegistry::default())),
         }
     }
 
@@ -2279,6 +2294,13 @@ impl Thread {
             self.add_tool(ReadSubagentTranscriptTool::new(environment.clone()));
         }
 
+        // Registered at every depth and behind no gate: any tool at any depth
+        // can produce a bounded result, and a marker whose fetch path is absent
+        // is the failure `OMEGA-DELTA-0111` exists to close.
+        self.add_tool(ReadToolResultArtifactTool::new(
+            self.tool_result_artifacts.clone(),
+        ));
+
         // Sibling-thread tools are exposed at every depth: a subagent should
         // still be able to kick off independent sibling work on behalf of the
         // user, even when it can no longer nest further subagents. Visibility
@@ -2286,6 +2308,15 @@ impl Thread {
         // `Thread::enabled_tools`.
         self.add_tool(CreateThreadTool::new(environment.clone()));
         self.add_tool(ListAgentsAndModelsTool::new(environment));
+    }
+
+    /// `OMEGA-DELTA-0111`. This thread's artifact registry, for wiring
+    /// `read_tool_result_artifact` where `add_default_tools` is not what wired
+    /// it. Handing out the `Rc` rather than the contents is deliberate: the
+    /// fetch tool must read the *live* registry, so an artifact recorded after
+    /// the tool was built is still addressable.
+    pub fn tool_result_artifacts(&self) -> Rc<RefCell<ToolResultArtifactRegistry>> {
+        self.tool_result_artifacts.clone()
     }
 
     pub fn add_tool<T: AgentTool>(&mut self, tool: T) {
@@ -3707,6 +3738,11 @@ impl Thread {
 
         let fs = self.project.read(cx).fs().clone();
         let tool_call_id = scoped_tool_call_id(owning_message_ix, &tool_use_id);
+        // `OMEGA-DELTA-0111`. Where this call's complete results are recorded,
+        // and the source the marker will address them by.
+        let artifacts = self.tool_result_artifacts.clone();
+        let artifact_source = tool_result_artifact_source(&tool_call_id.to_string());
+        let bounds_own_result = tool.bounds_own_result();
         let tool_event_stream = ToolCallEventStream::new(
             tool_use_id.clone(),
             tool_call_id,
@@ -3765,17 +3801,60 @@ impl Thread {
                 Err(output) => (true, output),
             };
 
+            // `OMEGA-DELTA-0111`. The record is bounded here rather than in
+            // each tool, so a tool cannot be unbounded by forgetting. The whole
+            // result becomes an artifact and the event carries a preview naming
+            // what it withheld and where the rest is.
+            let content = if bounds_own_result {
+                output.llm_output
+            } else {
+                Self::bound_tool_result_content(output.llm_output, &artifact_source, &artifacts)
+            };
+
             (
                 owning_message_ix,
                 LanguageModelToolResult {
                     tool_use_id,
                     tool_name,
                     is_error,
-                    content: output.llm_output,
+                    content,
                     output: Some(output.raw_output),
                 },
             )
         })
+    }
+
+    /// Bound every text part of a tool result, recording each over-budget part
+    /// as an artifact first.
+    ///
+    /// Image parts pass through untouched: they are not text, `preview_tool_result`
+    /// is arithmetic over text, and a byte budget is not the bound an image
+    /// needs. Text parts are bounded individually because that is what a
+    /// reader's context carries individually; each over-budget one gets its own
+    /// version under this call's source, so a marker's address names the part it
+    /// is attached to rather than a concatenation nobody sent.
+    fn bound_tool_result_content(
+        content: Vec<LanguageModelToolResultContent>,
+        source: &str,
+        artifacts: &Rc<RefCell<ToolResultArtifactRegistry>>,
+    ) -> Vec<LanguageModelToolResultContent> {
+        content
+            .into_iter()
+            .map(|part| match part {
+                LanguageModelToolResultContent::Text(text) => {
+                    let preview = artifacts.borrow_mut().bound(source, &text);
+                    if preview.is_truncated() {
+                        LanguageModelToolResultContent::Text(Arc::from(preview.text))
+                    } else {
+                        // Unchanged, and identically so: a result that fits gets
+                        // no artifact, no marker, and no new allocation that
+                        // could differ from what the tool returned.
+                        LanguageModelToolResultContent::Text(text)
+                    }
+                }
+                image => image,
+            })
+            .collect()
     }
 
     fn handle_tool_use_json_parse_error_event(
@@ -5256,6 +5335,20 @@ where
         true
     }
 
+    /// `OMEGA-DELTA-0111`. Whether this tool's result is already bounded and
+    /// already says so in its own text.
+    ///
+    /// The default is `false`, deliberately: an unbounded result is the
+    /// dangerous one, so a tool that forgets to answer gets bounded rather than
+    /// exempted. A tool opting out must have a visible truncation marker of its
+    /// own, because `Thread::run_tool` will then not add one — and bounding an
+    /// already-bounded body twice is worse than either, since the second cut
+    /// removes the first cut's marker and reports the preview's size as the
+    /// total.
+    fn bounds_own_result() -> bool {
+        false
+    }
+
     /// Runs the tool with the provided input.
     ///
     /// Returns `Result<Self::Output, Self::Output>` rather than `Result<Self::Output, anyhow::Error>`
@@ -5322,6 +5415,10 @@ pub trait AnyAgentTool {
     fn allow_in_restricted_mode(&self) -> bool {
         true
     }
+    /// See [`AgentTool::bounds_own_result`].
+    fn bounds_own_result(&self) -> bool {
+        false
+    }
     /// See [`AgentTool::run`] for why this returns `Result<AgentToolOutput, AgentToolOutput>`.
     fn run(
         self: Arc<Self>,
@@ -5375,6 +5472,10 @@ where
 
     fn allow_in_restricted_mode(&self) -> bool {
         T::allow_in_restricted_mode()
+    }
+
+    fn bounds_own_result(&self) -> bool {
+        T::bounds_own_result()
     }
 
     fn run(

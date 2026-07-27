@@ -101,6 +101,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0106",
     "OMEGA-DELTA-0107",
     "OMEGA-DELTA-0110",
+    "OMEGA-DELTA-0111",
     "OMEGA-DELTA-0113",
     "OMEGA-DELTA-0114",
 ];
@@ -441,6 +442,45 @@ pub const TOOL_RESULT_MARKER_REQUIRED_FACTS: &[&str] = &[
     "withheld",
     "Full result: artifact",
 ];
+
+/// OMEGA-DELTA-0111. Where a native tool's complete results are kept and its
+/// addresses are resolved.
+pub const AGENT_TOOL_RESULT_REGISTRY_PATH: &str = "crates/agent/src/tool_result_artifacts.rs";
+
+/// OMEGA-DELTA-0111. The tool that spends the address the marker hands out.
+pub const AGENT_TOOL_RESULT_FETCH_TOOL_PATH: &str =
+    "crates/agent/src/tools/read_tool_result_artifact_tool.rs";
+
+/// OMEGA-DELTA-0111. Its name, as the model sees it.
+pub const AGENT_TOOL_RESULT_FETCH_TOOL_NAME: &str = "read_tool_result_artifact";
+
+/// OMEGA-DELTA-0111. Where every tool result is bounded and the fetch tool is
+/// registered.
+pub const AGENT_TOOL_RESULT_ROUTING_PATH: &str = "crates/agent/src/thread.rs";
+
+/// OMEGA-DELTA-0111. Where the second, wronger truncation sentence used to be.
+pub const AGENT_TERMINAL_TOOL_PATH: &str = "crates/agent/src/tools/terminal_tool.rs";
+
+/// OMEGA-DELTA-0111. The sentence deleted from `terminal_tool::process_content`.
+///
+/// It was a second truncation sentence sitting on top of `OMEGA-DELTA-0103`'s
+/// accurate one, and its byte count was measured off the *formatted* string —
+/// fences and all — so the number it printed was never the number of bytes
+/// shown. Two truncation sentences with different arithmetic is how a reader
+/// learns to trust neither.
+pub const AGENT_DELETED_SECOND_TRUNCATION_SENTENCE: &str = "Command output too long";
+
+/// OMEGA-DELTA-0111. Every fact the refusal for an address that does not
+/// resolve must state.
+///
+/// The gap this delta declines to close is that artifacts do not survive a
+/// restart, so this list is the standard the gap is held to instead: a fetch
+/// that fails names the lifetime that caused it. A bare "not found" is read as
+/// "that result never existed", which is the false-absence class the marker was
+/// built against — the failure would simply have moved from the marker to the
+/// fetch.
+pub const AGENT_UNRESOLVED_ARTIFACT_REQUIRED_FACTS: &[&str] =
+    &["never written to disk", "reopened", "The result existed"];
 /// OMEGA-DELTA-0061. Where a per-spawn executor request is resolved.
 pub const SUBAGENT_EXECUTOR_PATH: &str = "crates/agent/src/tools/subagent_executor.rs";
 
@@ -13923,6 +13963,198 @@ mod tests {
             "OMEGA-DELTA-0103: the preview budget has fallen to about the size \
              of the rendering ceiling. If one bound can stand in for the other, \
              somebody will delete one of them."
+        );
+    }
+
+    // ------ OMEGA-DELTA-0111 — the agent half: every tool bounded, one
+    // ------ sentence, and an address that can be spent
+
+    /// OMEGA-DELTA-0111. A native tool's result is bounded by the record, and
+    /// the address its marker prints is one the model can take.
+    ///
+    /// `OMEGA-DELTA-0103` bounded the terminal and left the marker unspendable:
+    /// nothing could fetch the artifact it named. A marker naming a fetch that
+    /// does not exist is worse than no marker, because a reader acts on it.
+    #[test]
+    fn every_tool_result_is_bounded_and_the_marker_it_prints_can_be_spent() {
+        // 1. The bound is applied where every tool passes, not in each tool.
+        //    A per-tool bound is one a new tool is unbounded by forgetting.
+        let routing_path = repository_path(AGENT_TOOL_RESULT_ROUTING_PATH);
+        let routing_source = std::fs::read_to_string(&routing_path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", routing_path.display()));
+        let routing = production_source(&routing_source);
+        let compact_routing = without_whitespace(routing);
+
+        assert!(
+            compact_routing.contains(&without_whitespace(
+                "let content = if bounds_own_result {
+                     output.llm_output
+                 } else {
+                     Self::bound_tool_result_content(output.llm_output, &artifact_source, &artifacts)
+                 };"
+            )),
+            "OMEGA-DELTA-0111: `run_tool` in {} no longer routes a tool result \
+             through the bound before it becomes a `LanguageModelToolResult`. \
+             Every native tool is then unbounded again, and the one that puts \
+             forty lines of hex into the record will be the one nobody tested.",
+            routing_path.display()
+        );
+
+        // 2. The opt-out defaults to bounded. A tool that forgets to answer
+        //    must be bounded, not exempted.
+        assert!(
+            compact_routing.contains(&without_whitespace(
+                "fn bounds_own_result() -> bool {
+                     false
+                 }"
+            )),
+            "OMEGA-DELTA-0111: `AgentTool::bounds_own_result` in {} no longer \
+             defaults to `false`. An unbounded result is the dangerous one, so \
+             the default has to be the safe answer.",
+            routing_path.display()
+        );
+
+        // 3. The fetch path is registered, unconditionally. Gating it behind a
+        //    depth or a flag leaves markers nothing can spend.
+        assert!(
+            compact_routing.contains(&without_whitespace(
+                "self.add_tool(ReadToolResultArtifactTool::new(
+                     self.tool_result_artifacts.clone(),
+                 ));"
+            )),
+            "OMEGA-DELTA-0111: {} no longer registers `{AGENT_TOOL_RESULT_FETCH_TOOL_NAME}`. \
+             The truncation marker then hands out an address nothing can take, \
+             which reads to the model as a fetch that is available and is not.",
+            routing_path.display()
+        );
+
+        // 4. The fetch tool exists, under the name the marker's reader will ask
+        //    for, and it holds the thread's own registry rather than naming a
+        //    thread — the scoping shape `OMEGA-DELTA-0060` uses.
+        let fetch_path = repository_path(AGENT_TOOL_RESULT_FETCH_TOOL_PATH);
+        let fetch_source = std::fs::read_to_string(&fetch_path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", fetch_path.display()));
+        let fetch = production_source(&fetch_source);
+        assert!(
+            fetch.contains(&format!(
+                "const NAME: &'static str = \"{AGENT_TOOL_RESULT_FETCH_TOOL_NAME}\";"
+            )),
+            "OMEGA-DELTA-0111: {} no longer registers under \
+             `{AGENT_TOOL_RESULT_FETCH_TOOL_NAME}`. The address in the marker \
+             is spendable only by a tool the model can actually call.",
+            fetch_path.display()
+        );
+        assert!(
+            fetch.contains("artifacts: Rc<RefCell<ToolResultArtifactRegistry>>"),
+            "OMEGA-DELTA-0111: {} no longer holds this thread's registry. A \
+             tool that took a thread id instead could be asked for another \
+             thread's result, and the scope would stop being structural.",
+            fetch_path.display()
+        );
+        // The other half of that scope, and the one a model can reach: the
+        // input names an address and nothing else. A session or thread field
+        // would make the scope a decision the tool has to get right on every
+        // call rather than one it cannot express.
+        let input_fields = fetch
+            .split_once("pub struct ReadToolResultArtifactToolInput {")
+            .and_then(|(_, rest)| rest.split_once("\n}"))
+            .map(|(fields, _)| fields)
+            .unwrap_or_else(|| {
+                panic!(
+                    "OMEGA-DELTA-0111: {} no longer declares \
+                     `ReadToolResultArtifactToolInput`.",
+                    fetch_path.display()
+                )
+            });
+        for forbidden in ["session", "thread"] {
+            assert!(
+                !input_fields.contains(&format!("pub {forbidden}")),
+                "OMEGA-DELTA-0111: `ReadToolResultArtifactToolInput` in {} takes \
+                 a `{forbidden}` field. The tool then addresses somewhere other \
+                 than the thread that is asking, and its scope stops being \
+                 something a bug cannot widen.",
+                fetch_path.display()
+            );
+        }
+
+        // 5. One truncation sentence for the whole system. The agent half must
+        //    reuse `preview_tool_result`, never restate it.
+        let registry_path = repository_path(AGENT_TOOL_RESULT_REGISTRY_PATH);
+        let registry_source = std::fs::read_to_string(&registry_path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", registry_path.display()));
+        let registry = production_source(&registry_source);
+        for (path, source) in [(&registry_path, registry), (&fetch_path, fetch)] {
+            assert!(
+                source.contains("preview_tool_result("),
+                "OMEGA-DELTA-0111: {} no longer calls `preview_tool_result`. \
+                 A second bound written here is a second sentence, and two \
+                 sentences drift.",
+                path.display()
+            );
+            assert!(
+                !source.contains(TOOL_RESULT_MARKER_REQUIRED_FACTS[0]),
+                "OMEGA-DELTA-0111: {} forms the truncation sentence itself \
+                 rather than reusing `OMEGA-DELTA-0103`'s. The one a reader \
+                 gets then stops being the one the 0103 checks read.",
+                path.display()
+            );
+        }
+
+        // 6. The second, wronger sentence is gone. It counted the *formatted*
+        //    string, so the number it printed was never the number of bytes
+        //    shown, and it sat on top of an accurate marker.
+        let terminal_path = repository_path(AGENT_TERMINAL_TOOL_PATH);
+        let terminal_source = std::fs::read_to_string(&terminal_path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", terminal_path.display()));
+        assert!(
+            !production_source(&terminal_source).contains(AGENT_DELETED_SECOND_TRUNCATION_SENTENCE),
+            "OMEGA-DELTA-0111: `{AGENT_DELETED_SECOND_TRUNCATION_SENTENCE}` is \
+             back in {}. It is a second truncation sentence over \
+             `OMEGA-DELTA-0103`'s, and its byte count is measured off the \
+             fenced string rather than the result, so it states a number that \
+             is not the number of bytes shown.",
+            terminal_path.display()
+        );
+
+        // 7. The gap this delta declines to close, held to its standard. An
+        //    address that stops resolving after a restart must say so; a bare
+        //    "not found" moves the false absence from the marker to the fetch.
+        for fact in AGENT_UNRESOLVED_ARTIFACT_REQUIRED_FACTS {
+            assert!(
+                registry.contains(fact),
+                "OMEGA-DELTA-0111: the refusal for an unresolvable address in \
+                 {} no longer states `{fact}`. Artifacts do not survive a \
+                 restart; a reader told only that the result is not there \
+                 concludes it never existed.",
+                registry_path.display()
+            );
+        }
+        // The sentence existing is not the same as the sentence being *used*.
+        // An earlier cut of this check read only the constant, and passed while
+        // the branch that answers a stale address said "No such artifact".
+        assert!(
+            without_whitespace(registry).contains(&without_whitespace(
+                "Self::Forgotten => Some(format!(
+                     \"No tool result is recorded at `{address}` in this thread. \\
+                      {ARTIFACTS_ARE_NOT_PERSISTED}\"
+                 )),"
+            )),
+            "OMEGA-DELTA-0111: the `Forgotten` arm in {} no longer carries \
+             `ARTIFACTS_ARE_NOT_PERSISTED`. The constant can be present and \
+             unused, and then a stale address is answered as a result that \
+             never existed.",
+            registry_path.display()
+        );
+
+        // 8. The two source namespaces stay apart. `terminal:<id>` and
+        //    `tool:<call id>` are separate stores, so an address that resolved
+        //    in the wrong one would hand back another tool's result under this
+        //    one's name.
+        assert!(
+            registry.contains("pub const TOOL_ARTIFACT_SOURCE_PREFIX: &str = \"tool:\";"),
+            "OMEGA-DELTA-0111: {} no longer namespaces a native tool's \
+             artifact source apart from the terminal's.",
+            registry_path.display()
         );
     }
 }

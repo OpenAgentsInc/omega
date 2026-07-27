@@ -4889,6 +4889,7 @@ async fn setup(cx: &mut TestAppContext, model: TestModel) -> ThreadTest {
                             StreamingJsonErrorContextTool::NAME: true,
                             StreamingFailingEchoTool::NAME: true,
                             TerminalTool::NAME: true,
+                            ReadToolResultArtifactTool::NAME: true,
                         }
                     }
                 }
@@ -8726,4 +8727,210 @@ async fn test_mid_turn_model_and_settings_refresh(cx: &mut TestAppContext) {
 
     // Thinking should now be enabled.
     assert!(model_b_completions[0].thinking_allowed);
+}
+
+// ---- OMEGA-DELTA-0111 — a native tool's result is bounded, and its address
+// ---- is one the model can actually spend.
+
+/// The body a tool returns, and the fragment only the artifact can answer for.
+///
+/// Deliberately far over `TOOL_RESULT_PREVIEW_BYTE_BUDGET` and shaped like the
+/// thing this delta exists for: many long lines of opaque hex.
+fn oversized_tool_result() -> String {
+    (0..400)
+        .map(|index| {
+            format!(
+                "{{\"id\":\"{index:064x}\",\"sig\":\"{}\"}}",
+                "ab".repeat(64)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Drive one `echo` call returning `text` and return the tool result the model
+/// is actually sent.
+async fn tool_result_the_model_receives(
+    thread: &Entity<Thread>,
+    fake_model: &FakeLanguageModel,
+    tool_use_id: &str,
+    text: &str,
+    cx: &mut TestAppContext,
+) -> LanguageModelToolResult {
+    thread
+        .update(cx, |thread, cx| {
+            thread.send(ClientUserMessageId::new(), ["go"], cx)
+        })
+        .unwrap();
+    cx.run_until_parked();
+
+    fake_model.send_last_completion_stream_event(LanguageModelCompletionEvent::ToolUse(
+        LanguageModelToolUse {
+            id: tool_use_id.into(),
+            name: EchoTool::NAME.into(),
+            raw_input: json!({ "text": text }).to_string(),
+            input: language_model::LanguageModelToolUseInput::Json(json!({ "text": text })),
+            is_input_complete: true,
+            thought_signature: None,
+        },
+    ));
+    fake_model.end_last_completion_stream();
+    cx.run_until_parked();
+
+    let completion = fake_model.pending_completions().pop().unwrap();
+    let last = completion.messages.last().unwrap();
+    let MessageContent::ToolResult(result) = last.content.last().unwrap() else {
+        panic!("expected a tool result, got {:?}", last.content);
+    };
+    result.clone()
+}
+
+fn tool_result_text(result: &LanguageModelToolResult) -> String {
+    match result.content.as_slice() {
+        [language_model::LanguageModelToolResultContent::Text(text)] => text.to_string(),
+        other => panic!("expected one text part, got {other:?}"),
+    }
+}
+
+/// The address a truncation marker printed, read back out of the marker.
+fn address_in_marker(text: &str) -> String {
+    text.rsplit_once("Full result: artifact ")
+        .and_then(|(_, rest)| rest.split_once('.'))
+        .map(|(address, _)| address.to_owned())
+        .unwrap_or_else(|| panic!("no artifact address in the marker: {text}"))
+}
+
+#[gpui::test]
+async fn test_large_native_tool_result_is_bounded_and_its_address_is_spendable(
+    cx: &mut TestAppContext,
+) {
+    let ThreadTest { model, thread, .. } = setup(cx, TestModel::Fake).await;
+    let fake_model = model.as_fake();
+    thread.update(cx, |thread, _| {
+        thread.add_tool(EchoTool);
+        let artifacts = thread.tool_result_artifacts();
+        thread.add_tool(ReadToolResultArtifactTool::new(artifacts));
+    });
+
+    let full = oversized_tool_result();
+    let result = tool_result_the_model_receives(&thread, fake_model, "tool_1", &full, cx).await;
+    let preview = tool_result_text(&result);
+
+    // 1. The event is bounded, and says so.
+    assert!(
+        preview.len() <= acp_thread::TOOL_RESULT_PREVIEW_BYTE_BUDGET,
+        "an unbounded native tool result reached the model: {} bytes",
+        preview.len()
+    );
+    assert!(
+        preview.contains("tool result truncated"),
+        "the preview is a silent cut: {preview}"
+    );
+    assert!(
+        !preview.contains(full.lines().last().unwrap()),
+        "the whole result is still on the event"
+    );
+
+    // 2. The address the marker printed is one the model can spend, through the
+    //    tool, after the turn that produced it has ended.
+    let address = address_in_marker(&preview);
+    thread
+        .update(cx, |thread, cx| {
+            thread.send(ClientUserMessageId::new(), ["fetch it"], cx)
+        })
+        .unwrap();
+    cx.run_until_parked();
+    fake_model.send_last_completion_stream_event(LanguageModelCompletionEvent::ToolUse(
+        LanguageModelToolUse {
+            id: "tool_2".into(),
+            name: ReadToolResultArtifactTool::NAME.into(),
+            raw_input: json!({ "artifact": address, "offset": 399 }).to_string(),
+            input: language_model::LanguageModelToolUseInput::Json(
+                json!({ "artifact": address, "offset": 399 }),
+            ),
+            is_input_complete: true,
+            thought_signature: None,
+        },
+    ));
+    fake_model.end_last_completion_stream();
+    cx.run_until_parked();
+
+    let completion = fake_model.pending_completions().pop().unwrap();
+    let last = completion.messages.last().unwrap();
+    let MessageContent::ToolResult(fetched) = last.content.last().unwrap() else {
+        panic!("expected a tool result, got {:?}", last.content);
+    };
+    let fetched = tool_result_text(fetched);
+    assert!(
+        fetched.contains(full.lines().last().unwrap()),
+        "the address the marker handed out did not resolve to the line the \
+         preview withheld, so the marker was unspendable: {fetched}"
+    );
+}
+
+#[gpui::test]
+async fn test_small_native_tool_result_is_untouched(cx: &mut TestAppContext) {
+    let ThreadTest { model, thread, .. } = setup(cx, TestModel::Fake).await;
+    let fake_model = model.as_fake();
+    thread.update(cx, |thread, _| thread.add_tool(EchoTool));
+
+    let body = "publishing to relay.openagents.com... success.";
+    let result = tool_result_the_model_receives(&thread, fake_model, "tool_1", body, cx).await;
+
+    assert_eq!(
+        tool_result_text(&result),
+        body,
+        "a result that fits was rewritten anyway: no artifact, no marker, no \
+         ceremony is the whole point"
+    );
+}
+
+#[gpui::test]
+async fn test_an_address_from_a_reopened_thread_says_why_it_no_longer_resolves(
+    cx: &mut TestAppContext,
+) {
+    // The known gap in `OMEGA-DELTA-0103`, held to the standard the delta sets
+    // for it. A fresh thread stands in for a reopened one: it carries no
+    // artifacts, exactly as `Thread::from_db` leaves it, so the address a saved
+    // marker still names cannot resolve. The requirement is not that it
+    // resolves — it is that the answer says why, and never reads as "that
+    // result never existed".
+    let ThreadTest { model, thread, .. } = setup(cx, TestModel::Fake).await;
+    let fake_model = model.as_fake();
+    thread.update(cx, |thread, _| {
+        let artifacts = thread.tool_result_artifacts();
+        thread.add_tool(ReadToolResultArtifactTool::new(artifacts));
+    });
+
+    thread
+        .update(cx, |thread, cx| {
+            thread.send(ClientUserMessageId::new(), ["fetch it"], cx)
+        })
+        .unwrap();
+    cx.run_until_parked();
+    let stale = json!({ "artifact": "tool:0:tool_1@v1" });
+    fake_model.send_last_completion_stream_event(LanguageModelCompletionEvent::ToolUse(
+        LanguageModelToolUse {
+            id: "tool_2".into(),
+            name: ReadToolResultArtifactTool::NAME.into(),
+            raw_input: stale.to_string(),
+            input: language_model::LanguageModelToolUseInput::Json(stale),
+            is_input_complete: true,
+            thought_signature: None,
+        },
+    ));
+    fake_model.end_last_completion_stream();
+    cx.run_until_parked();
+
+    let completion = fake_model.pending_completions().pop().unwrap();
+    let last = completion.messages.last().unwrap();
+    let MessageContent::ToolResult(fetched) = last.content.last().unwrap() else {
+        panic!("expected a tool result, got {:?}", last.content);
+    };
+    let text = tool_result_text(fetched);
+    assert!(
+        text.contains("never written to disk") && text.contains("reopened"),
+        "a stale address is refused without naming the lifetime that caused \
+         it, so the reader concludes the result never existed: {text}"
+    );
 }
