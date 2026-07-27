@@ -1862,8 +1862,33 @@ impl ConversationView {
                         .agent_display_name(&self.agent.agent_id())
                         .unwrap_or_else(|| self.agent.agent_id().0.to_string().into());
 
-                    let new_placeholder =
-                        placeholder_text(agent_display_name.as_ref(), has_slash_completions);
+                    // omega#112. Name the executor that will actually read
+                    // this, not the router that will hand it over.
+                    //
+                    // `agent_display_name` comes from `self.agent.agent_id()`,
+                    // which is Omega's own router — so the composer said
+                    // "Message the Omega Agent" while Codex was running the
+                    // turn. The owner: "if im talking to Codex it should say
+                    // message Codex".
+                    //
+                    // Read from the same disclosure record the executor
+                    // selector reads, so the placeholder and the dropdown
+                    // cannot disagree about who is listening. A disclosure that
+                    // is not one of the four selectable names falls back to the
+                    // router's name rather than inventing a fifth.
+                    let executor_name = thread_view.read(cx).executor_disclosure(cx);
+                    let executor_name = crate::omega_executor_selector::SelectableExecutor::of(
+                        executor_name.class,
+                        executor_name.agent_id.as_ref(),
+                    )
+                    .map(|executor| executor.name().to_owned());
+
+                    let new_placeholder = placeholder_text(
+                        executor_name
+                            .as_deref()
+                            .unwrap_or(agent_display_name.as_ref()),
+                        has_slash_completions,
+                    );
 
                     thread_view.update(cx, |thread_view, cx| {
                         let mut session_capabilities = thread_view.session_capabilities.write();
@@ -7324,6 +7349,19 @@ pub(crate) mod tests {
     #[gpui::test]
     async fn test_thread_search_includes_expanded_thinking_blocks(cx: &mut TestAppContext) {
         init_test(cx);
+
+        // omega#112. Ask for a collapsed block rather than inheriting one.
+        //
+        // This test is about what search does with a *collapsed* thinking
+        // block, and it used to get one for free because "auto" was the
+        // shipped default. Omega now ships "always_expanded", so the premise
+        // has to be stated: without this the test builds an expanded block and
+        // then asserts the behaviour of a collapsed one.
+        cx.update(|cx| {
+            let mut settings = AgentSettings::get_global(cx).clone();
+            settings.thinking_display = settings::ThinkingBlockDisplay::Auto;
+            AgentSettings::override_global(settings, cx);
+        });
 
         let connection = StubAgentConnection::new();
         connection.set_next_prompt_updates(vec![

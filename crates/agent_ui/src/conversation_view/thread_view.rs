@@ -13189,12 +13189,29 @@ impl ThreadView {
             enabled,
             Rc::new(move |choice, window, cx| {
                 select(choice);
-                // The same move `OMEGA-DELTA-0114`'s button makes: record the
-                // choice, then re-drive the connect. `reset` is what rebuilds
-                // the connection, and the connection is where the choice is
-                // read — nothing else in this window can attach a different
-                // executor.
-                let _ = server_view.update(cx, |view, cx| view.reset(window, cx));
+                // omega#112. A *new* thread, not a reset of this one.
+                //
+                // `reset` rebuilds the connection but keeps the thread's
+                // existing id, and that id belongs to whichever adapter created
+                // it. Switching Codex to Claude therefore asked Claude to
+                // resume a session it had never opened, and Codex's own words
+                // came back through the failure:
+                //
+                //     Failed to Launch
+                //     Internal error: { "details": "no rollout found for
+                //     thread id 019fa1b3-064a-7642-96db-106d2cccf72f" }
+                //
+                // A rollout is Codex's session file. There was nothing wrong
+                // with the request except that it named another agent's
+                // conversation.
+                //
+                // A session id is not portable between executors, so switching
+                // is starting somewhere new rather than continuing somewhere
+                // old. That is also what the control already means: it is
+                // disabled once a turn has run, so the only thread it can
+                // switch is one nothing has been said in yet.
+                let _ = server_view;
+                window.dispatch_action(NewThread.boxed_clone(), cx);
             }),
         )
     }

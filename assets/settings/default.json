@@ -1287,8 +1287,19 @@
     "terminal_init_command": "",
     // How thinking blocks should be displayed by default in the agent panel.
     //
-    // Default: auto
-    "thinking_display": "auto",
+    // omega#112. Omega ships "always_expanded" rather than upstream's "auto".
+    //
+    // Under "auto" a thinking block expands while the model is producing it and
+    // collapses the moment the turn moves on — so the reasoning is readable
+    // only in the seconds you happen to be watching, and a transcript read
+    // afterwards is a column of collapsed headers. The owner: "i want it to
+    // stay expanded for all thinking things by default".
+    //
+    // This is a default, not a law: "auto", "preview" and "always_collapsed"
+    // all still work, and the per-block toggle is unchanged.
+    //
+    // Default: always_expanded
+    "thinking_display": "always_expanded",
     // Whether clicking the stop button on a running terminal tool should also cancel the agent's generation.
     // Note that this only applies to the stop button, not to ctrl+c inside the terminal.
     //
