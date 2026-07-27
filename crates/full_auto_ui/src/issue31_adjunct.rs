@@ -713,7 +713,8 @@ mod tests {
             .projections
             .iter()
             .find(|projection| {
-                projection.capability == workroom_receipts::Issue31ProjectionCapability::FullAutoRuns
+                projection.capability
+                    == workroom_receipts::Issue31ProjectionCapability::FullAutoRuns
             })
             .expect("full auto runs projection");
         assert_eq!(runs.record_refs.len(), published.detail.runs.len());
@@ -791,7 +792,8 @@ mod tests {
             .projections
             .iter()
             .find(|projection| {
-                projection.capability == workroom_receipts::Issue31ProjectionCapability::FullAutoRuns
+                projection.capability
+                    == workroom_receipts::Issue31ProjectionCapability::FullAutoRuns
             })
             .expect("full auto runs projection");
         assert!(runs.permitted_action_refs.is_empty());

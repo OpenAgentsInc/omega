@@ -25,6 +25,11 @@ const MAX_FUTURE_PROOF_SECONDS: u64 = 30;
 const DEFAULT_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
 const DEFAULT_DELTA_CAPACITY: usize = 1_024;
 const MAX_RECENT_PROOFS: usize = 4_096;
+const MAX_PROJECTED_THREADS: usize = 64;
+const MAX_PROJECTED_RUNS: usize = 64;
+const MAX_TRANSCRIPT_MESSAGES: usize = 64;
+const MAX_TRANSCRIPT_TEXT_BYTES: usize = 8 * 1024;
+const MAX_RECEIPT_REFS: usize = 32;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -453,6 +458,7 @@ impl ProjectionJournal {
     }
 
     pub fn replace_snapshot(&self, mut snapshot: MirrorSnapshot) -> Result<(), BridgeError> {
+        validate_snapshot(&snapshot)?;
         let mut state = self.state.write().map_err(|_| BridgeError::StatePoisoned)?;
         snapshot.sequence = 0;
         state.snapshot = snapshot;
@@ -468,8 +474,16 @@ impl ProjectionJournal {
             .sequence
             .checked_add(1)
             .ok_or(BridgeError::SequenceExhausted)?;
-        state.snapshot.sequence = sequence;
-        apply_change(&mut state.snapshot, &change);
+        let mut next_snapshot = state.snapshot.clone();
+        next_snapshot.sequence = sequence;
+        apply_change(&mut next_snapshot, &change);
+        validate_snapshot(&next_snapshot)?;
+        validate_frame_size(&ServerFrame::Delta {
+            generation,
+            sequence,
+            change: change.clone(),
+        })?;
+        state.snapshot = next_snapshot;
         state.deltas.push_back(DeltaRecord {
             generation,
             sequence,
@@ -533,6 +547,53 @@ impl ProjectionJournal {
             sequence: state.snapshot.sequence,
         })
     }
+
+    pub fn snapshot(&self) -> Result<MirrorSnapshot, BridgeError> {
+        self.state
+            .read()
+            .map(|state| state.snapshot.clone())
+            .map_err(|_| BridgeError::StatePoisoned)
+    }
+}
+
+fn validate_snapshot(snapshot: &MirrorSnapshot) -> Result<(), BridgeError> {
+    if snapshot.threads.len() > MAX_PROJECTED_THREADS {
+        return Err(BridgeError::ProjectionOutOfBounds("thread count"));
+    }
+    if snapshot.runs.len() > MAX_PROJECTED_RUNS {
+        return Err(BridgeError::ProjectionOutOfBounds("run count"));
+    }
+    if snapshot.threads.iter().any(|thread| {
+        thread.transcript.len() > MAX_TRANSCRIPT_MESSAGES
+            || thread
+                .transcript
+                .iter()
+                .any(|message| message.text.len() > MAX_TRANSCRIPT_TEXT_BYTES)
+    }) {
+        return Err(BridgeError::ProjectionOutOfBounds("transcript preview"));
+    }
+    if snapshot
+        .runs
+        .iter()
+        .any(|run| run.receipt_refs.len() > MAX_RECEIPT_REFS)
+    {
+        return Err(BridgeError::ProjectionOutOfBounds(
+            "receipt reference count",
+        ));
+    }
+    validate_frame_size(&ServerFrame::Snapshot {
+        snapshot: snapshot.clone(),
+    })
+}
+
+fn validate_frame_size(frame: &ServerFrame) -> Result<(), BridgeError> {
+    let encoded = serde_json::to_vec(frame)?;
+    if encoded.len() > MAX_FRAME_BYTES {
+        return Err(BridgeError::ProjectionFrameTooLarge {
+            encoded_bytes: encoded.len(),
+        });
+    }
+    Ok(())
 }
 
 fn apply_change(snapshot: &mut MirrorSnapshot, change: &MirrorChange) {
@@ -597,6 +658,12 @@ pub enum BridgeError {
     StatePoisoned,
     #[error("device bridge sequence is exhausted")]
     SequenceExhausted,
+    #[error("device bridge projection exceeds the {0} limit")]
+    ProjectionOutOfBounds(&'static str),
+    #[error(
+        "device bridge projection frame is {encoded_bytes} bytes, above the {MAX_FRAME_BYTES}-byte limit"
+    )]
+    ProjectionFrameTooLarge { encoded_bytes: usize },
     #[error("device bridge background thread panicked")]
     ThreadPanicked,
     #[error("device pairing bootstrap is invalid or expired")]
@@ -1214,6 +1281,124 @@ mod tests {
                 ServerFrame::Delta { sequence: 3, .. }
             ]
         ));
+    }
+
+    #[test]
+    fn projection_journey_covers_thread_run_receipt_and_engine_restart() {
+        let journal = ProjectionJournal::with_capacity(MirrorSnapshot::empty("Omega", 7, 1), 16);
+        journal
+            .publish(MirrorChange::ThreadUpsert {
+                thread: MirrorThread {
+                    thread_ref: "thread.1".into(),
+                    title: "Mobile projection".into(),
+                    executor: ExecutorDisclosure {
+                        executor_id: "claude-acp".into(),
+                        executor_name: "Claude Code".into(),
+                        model_id: Some("claude-opus".into()),
+                        model_name: Some("Claude Opus".into()),
+                    },
+                    state: ThreadState::Running,
+                    transcript: vec![MirrorMessage {
+                        message_ref: "message.1".into(),
+                        role: MessageRole::User,
+                        text: "Inspect the workspace".into(),
+                        created_at: 2,
+                    }],
+                    updated_at: 2,
+                },
+            })
+            .expect("thread start");
+        journal
+            .publish(MirrorChange::TranscriptAppend {
+                thread_ref: "thread.1".into(),
+                message: MirrorMessage {
+                    message_ref: "message.2".into(),
+                    role: MessageRole::Assistant,
+                    text: "The workspace contains".into(),
+                    created_at: 3,
+                },
+                updated_at: 3,
+            })
+            .expect("stream transcript");
+        journal
+            .publish(MirrorChange::RunUpsert {
+                run: MirrorRun {
+                    run_ref: "run.1".into(),
+                    title: "Mobile projection".into(),
+                    lane: "claude-local".into(),
+                    state: RunState::Completed,
+                    receipt_refs: vec!["receipt.1".into()],
+                    updated_at: 4,
+                },
+            })
+            .expect("run completion");
+
+        let snapshot = journal.snapshot().expect("snapshot");
+        assert_eq!(
+            snapshot.threads[0].executor.model_id.as_deref(),
+            Some("claude-opus")
+        );
+        assert_eq!(snapshot.threads[0].transcript.len(), 2);
+        assert_eq!(snapshot.runs[0].receipt_refs, ["receipt.1"]);
+
+        let before_restart = journal.cursor().expect("cursor");
+        let mut restarted = snapshot;
+        restarted.generation = 8;
+        restarted.health = MirrorHealth {
+            engine_up: true,
+            engine_generation: 8,
+            lane_ready: true,
+            observed_at: 5,
+        };
+        journal.replace_snapshot(restarted).expect("engine restart");
+        assert!(matches!(
+            journal
+                .frames_after(Some(before_restart))
+                .expect("old generation resnapshot")
+                .as_slice(),
+            [ServerFrame::Snapshot { snapshot }]
+                if snapshot.generation == 8 && snapshot.sequence == 0
+        ));
+    }
+
+    #[test]
+    fn oversized_transcript_preview_is_rejected_without_advancing_the_cursor() {
+        let journal = ProjectionJournal::new(MirrorSnapshot::empty("Omega", 1, 1));
+        let cursor = journal.cursor().expect("initial cursor");
+        let error = journal
+            .publish(MirrorChange::ThreadUpsert {
+                thread: MirrorThread {
+                    thread_ref: "thread.oversized".into(),
+                    title: "Oversized".into(),
+                    executor: ExecutorDisclosure {
+                        executor_id: "omega-agent".into(),
+                        executor_name: "Omega".into(),
+                        model_id: None,
+                        model_name: None,
+                    },
+                    state: ThreadState::Running,
+                    transcript: vec![MirrorMessage {
+                        message_ref: "message.oversized".into(),
+                        role: MessageRole::Assistant,
+                        text: "x".repeat(MAX_TRANSCRIPT_TEXT_BYTES + 1),
+                        created_at: 2,
+                    }],
+                    updated_at: 2,
+                },
+            })
+            .expect_err("oversized transcript must fail");
+        assert!(matches!(
+            error,
+            BridgeError::ProjectionOutOfBounds("transcript preview")
+        ));
+        assert_eq!(journal.cursor().expect("unchanged cursor"), cursor);
+        assert!(
+            journal
+                .snapshot()
+                .expect("unchanged snapshot")
+                .threads
+                .is_empty()
+        );
     }
 
     #[test]

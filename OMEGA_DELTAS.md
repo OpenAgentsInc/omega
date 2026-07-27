@@ -6801,3 +6801,21 @@ grants nor receives a private identity key.
 - **Enforced by:** `mobile_discovery_and_qr_pairing_keep_engine_authority` in
   `crates/omega_deltas`, plus discovery, QR, and one-use grant tests in
   `omega_effectd` and `omega_device_bridge`.
+
+### OMEGA-DELTA-0156 — The mobile mirror projects live Omega state
+
+The authenticated direct bridge starts with active and recent Agent threads,
+typed executor and model disclosure, bounded user/assistant transcript
+previews, Full Auto run lifecycle and authority receipt references, and engine
+generation and lane readiness. Subsequent thread, transcript, run, and health
+changes are ordered deltas from that same projection.
+
+The run feed reads the existing Issue 31 Full Auto observation used by the Sync
+lane. GPUI does not create a second run registry. Tool calls, raw provider
+payloads, credentials, exact paths, and unbounded transcript or artifact data
+do not enter the mirror. A generation change resets the cursor and requires a
+fresh snapshot.
+
+- **Enforced by:** `mobile_mirror_projects_live_state_without_new_authority` in
+  `crates/omega_deltas`, plus projection journey, redaction, bound, resume, and
+  restart tests in `omega_device_bridge`, `full_auto_ui`, and `agent_ui`.

@@ -1,5 +1,5 @@
 use std::cell::RefCell;
-use std::collections::HashMap as StdHashMap;
+use std::collections::{HashMap as StdHashMap, HashSet};
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -38,6 +38,14 @@ const ACP_CANCEL_GRACE_PERIOD: Duration = Duration::from_secs(10);
 const MAX_ASSISTANT_TEXT_BYTES: usize = 24 * 1024;
 const MAX_EVIDENCE_TURNS: usize = 48;
 const MAX_TOTAL_ASSISTANT_TEXT_BYTES: usize = 6 * 1024;
+const MAX_DEVICE_TRANSCRIPT_MESSAGES: usize = 64;
+const MAX_DEVICE_TRANSCRIPT_TEXT_BYTES: usize = 8 * 1024;
+const MAX_DEVICE_TRANSCRIPT_TOTAL_BYTES: usize = 32 * 1024;
+const MAX_DEVICE_THREADS: usize = 64;
+const MAX_DEVICE_RUNS: usize = 64;
+const MAX_DEVICE_LABEL_BYTES: usize = 256;
+const DEVICE_SNAPSHOT_FRAME_RESERVE_BYTES: usize = 1_024;
+const DEVICE_TRANSCRIPT_PUBLISH_INTERVAL: Duration = Duration::from_millis(250);
 const CORRELATION_SCHEMA: &str = "openagents.omega.full_auto_host_correlation.v1";
 const CORRELATION_FILE: &str = "full-auto-host-correlation.json";
 
@@ -126,6 +134,7 @@ pub fn persist_engine_lane_run_for_tests(
         load_error: None,
         sarah_conversation: None,
         device_bridge: None,
+        device_projection: None,
     };
     persist_correlation_journal(&state)
 }
@@ -232,6 +241,7 @@ struct HostBridgeState {
     load_error: Option<String>,
     sarah_conversation: Option<Arc<Mutex<SarahConversationClient>>>,
     device_bridge: Option<omega_effectd::DeviceBridgeServerHandle>,
+    device_projection: Option<omega_effectd::ProjectionJournal>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -335,6 +345,7 @@ pub fn omega_effectd_host_handler(cx: &App) -> OmegaEffectdHostHandler {
         load_error,
         sarah_conversation: None,
         device_bridge: None,
+        device_projection: None,
     }));
     Rc::new(move |request| {
         let async_cx = async_cx.clone();
@@ -471,8 +482,8 @@ async fn sarah_request(
         Some(conversation) => conversation,
         None => match production_sarah_conversation() {
             Ok(conversation) => {
-                let device_bridge = start_device_bridge(&conversation)?;
-                if let Some((_, engine, endpoint, host_public_key_hex, generation, scopes)) =
+                let device_bridge = start_device_bridge(&conversation, state, cx)?;
+                if let Some((_, engine, endpoint, host_public_key_hex, generation, scopes, _)) =
                     device_bridge.as_ref()
                 {
                     let engine = engine.clone();
@@ -494,7 +505,10 @@ async fn sarah_request(
                 let conversation = Arc::new(Mutex::new(conversation));
                 let mut state = state.borrow_mut();
                 state.sarah_conversation = Some(conversation.clone());
-                state.device_bridge = device_bridge.map(|(handle, ..)| handle);
+                if let Some((handle, _, _, _, _, _, journal)) = device_bridge {
+                    state.device_bridge = Some(handle);
+                    state.device_projection = Some(journal);
+                }
                 conversation
             }
             Err(error) => return Err(error),
@@ -502,6 +516,10 @@ async fn sarah_request(
     };
     let params = request.params;
     let generation = request.generation;
+    cx.update(|cx| {
+        refresh_device_generation(state, generation, cx)
+            .map_err(|error| unavailable(format!("Device mirror refresh failed: {error:#}")))
+    })?;
     cx.background_spawn(async move {
         let mut conversation = conversation
             .lock()
@@ -523,10 +541,13 @@ type DeviceBridgeStartup = (
     String,
     u64,
     Vec<omega_effectd::Issue31PairingScope>,
+    omega_effectd::ProjectionJournal,
 );
 
 fn start_device_bridge(
     conversation: &SarahConversationClient,
+    state: &Rc<RefCell<HostBridgeState>>,
+    cx: &mut AsyncApp,
 ) -> Result<Option<DeviceBridgeStartup>, HostResponseError> {
     let Some((engine, endpoint, host_public_key_hex, generation, scopes)) =
         conversation.device_pairing_runtime()
@@ -544,14 +565,12 @@ fn start_device_bridge(
         port: endpoint.port,
         heartbeat_interval: Duration::from_secs(5),
     };
-    let projected_at = u64::try_from(Utc::now().timestamp_millis()).unwrap_or(0);
-    let journal = omega_effectd::ProjectionJournal::new(omega_effectd::MirrorSnapshot::empty(
-        "Local Omega",
-        generation,
-        projected_at,
-    ));
+    let snapshot = cx
+        .update(|cx| device_mirror_snapshot(&state.borrow(), generation, cx))
+        .map_err(|error| unavailable(format!("Device mirror snapshot failed: {error:#}")))?;
+    let journal = omega_effectd::ProjectionJournal::new(snapshot);
     let handle =
-        omega_effectd::start_pairable_device_bridge_server(config, engine.clone(), journal)
+        omega_effectd::start_pairable_device_bridge_server(config, engine.clone(), journal.clone())
             .map_err(|error| {
                 unavailable(format!("Omega device bridge failed to start: {error}"))
             })?;
@@ -562,7 +581,535 @@ fn start_device_bridge(
         host_public_key_hex,
         generation,
         scopes,
+        journal,
     )))
+}
+
+fn device_mirror_snapshot(
+    state: &HostBridgeState,
+    generation: u64,
+    cx: &App,
+) -> anyhow::Result<omega_effectd::MirrorSnapshot> {
+    let projected_at = current_unix_millis();
+    let reading = full_auto_ui::issue31_device_mirror_reading();
+    let mut runs = reading
+        .as_ref()
+        .map_or_else(Vec::new, |reading| reading.runs.clone());
+    for thread in &state.threads {
+        if !runs.iter().any(|run| run.run_ref == thread.operation_ref) {
+            runs.push(device_mirror_run(thread, projected_at));
+        }
+    }
+    runs.sort_by(|left, right| {
+        right
+            .updated_at
+            .cmp(&left.updated_at)
+            .then_with(|| left.run_ref.cmp(&right.run_ref))
+    });
+    runs.truncate(MAX_DEVICE_RUNS);
+    let mut threads = state
+        .threads
+        .iter()
+        .map(|thread| device_mirror_thread(thread, projected_at, cx))
+        .collect::<Vec<_>>();
+    let mut projected_thread_refs = threads
+        .iter()
+        .map(|thread| thread.thread_ref.clone())
+        .collect::<HashSet<_>>();
+    if let Some(workspace) = state
+        .workspace
+        .as_ref()
+        .and_then(|binding| binding.workspace.upgrade())
+        && let Some(panel) = workspace.read(cx).panel::<AgentPanel>(cx)
+    {
+        let panel = panel.read(cx);
+        if let Some(conversation) = panel.active_conversation_view() {
+            let projected = device_loaded_thread(conversation, projected_at, cx);
+            if projected_thread_refs.insert(projected.thread_ref.clone()) {
+                threads.push(projected);
+            }
+        }
+        for conversation in panel.retained_threads().values() {
+            let projected = device_loaded_thread(conversation, projected_at, cx);
+            if projected_thread_refs.insert(projected.thread_ref.clone()) {
+                threads.push(projected);
+            }
+        }
+    }
+    threads.sort_by(|left, right| {
+        right
+            .updated_at
+            .cmp(&left.updated_at)
+            .then_with(|| left.thread_ref.cmp(&right.thread_ref))
+    });
+    threads.truncate(MAX_DEVICE_THREADS);
+    bound_device_mirror_snapshot(omega_effectd::MirrorSnapshot {
+        desktop_name: "Local Omega".to_string(),
+        generation,
+        sequence: 0,
+        threads,
+        runs,
+        health: omega_effectd::MirrorHealth {
+            engine_up: true,
+            engine_generation: reading
+                .as_ref()
+                .map_or(generation, |reading| reading.engine_generation),
+            lane_ready: reading.as_ref().is_some_and(|reading| reading.lane_ready),
+            observed_at: projected_at,
+        },
+        projected_at,
+    })
+}
+
+fn bound_device_mirror_snapshot(
+    mut snapshot: omega_effectd::MirrorSnapshot,
+) -> anyhow::Result<omega_effectd::MirrorSnapshot> {
+    let frame_budget =
+        omega_effectd::MAX_FRAME_BYTES.saturating_sub(DEVICE_SNAPSHOT_FRAME_RESERVE_BYTES);
+    loop {
+        if serde_json::to_vec(&snapshot)?.len() <= frame_budget {
+            return Ok(snapshot);
+        }
+        if let Some((thread_index, _)) = snapshot
+            .threads
+            .iter()
+            .enumerate()
+            .filter(|(_, thread)| !thread.transcript.is_empty())
+            .max_by_key(|(_, thread)| thread.transcript.len())
+        {
+            snapshot.threads[thread_index].transcript.remove(0);
+            continue;
+        }
+        if snapshot.runs.pop().is_some() {
+            continue;
+        }
+        if snapshot.threads.pop().is_some() {
+            continue;
+        }
+        anyhow::bail!("the empty device mirror snapshot exceeds its transport frame budget");
+    }
+}
+
+fn device_mirror_thread(
+    thread: &HostThread,
+    projected_at: u64,
+    cx: &App,
+) -> omega_effectd::MirrorThread {
+    let (title, executor, state, transcript) = thread
+        .conversation
+        .as_ref()
+        .and_then(WeakEntity::upgrade)
+        .and_then(|conversation| {
+            let thread_view = conversation.read(cx).root_thread_view()?;
+            let disclosure = thread_view.read(cx).executor_disclosure(cx);
+            let root_thread = conversation.read(cx).root_thread(cx)?;
+            let root_thread = root_thread.read(cx);
+            let title = root_thread
+                .title()
+                .map_or_else(|| thread.operation_ref.clone(), |title| title.to_string());
+            let state = device_thread_state(root_thread.status(), thread);
+            let transcript = device_transcript(
+                &thread.thread_id.to_key_string(),
+                root_thread.entries(),
+                projected_at,
+                cx,
+            );
+            Some((
+                device_public_label(&title, &thread.operation_ref),
+                device_executor_disclosure(&disclosure),
+                state,
+                transcript,
+            ))
+        })
+        .unwrap_or_else(|| {
+            (
+                device_public_label(&thread.operation_ref, "Full Auto run"),
+                fallback_device_executor_disclosure(thread),
+                device_thread_state(ThreadStatus::Idle, thread),
+                Vec::new(),
+            )
+        });
+    omega_effectd::MirrorThread {
+        thread_ref: thread.thread_id.to_key_string(),
+        title,
+        executor,
+        state,
+        transcript,
+        updated_at: thread
+            .turns
+            .last()
+            .map_or(projected_at, |turn| timestamp_millis(&turn.updated_at)),
+    }
+}
+
+fn device_loaded_thread(
+    conversation: &Entity<ConversationView>,
+    projected_at: u64,
+    cx: &App,
+) -> omega_effectd::MirrorThread {
+    let conversation = conversation.read(cx);
+    let thread_ref = conversation.thread_id.to_key_string();
+    let Some(thread_view) = conversation.root_thread_view() else {
+        return omega_effectd::MirrorThread {
+            thread_ref,
+            title: "Omega thread".to_string(),
+            executor: omega_effectd::ExecutorDisclosure {
+                executor_id: "omega-agent".to_string(),
+                executor_name: "Omega".to_string(),
+                model_id: None,
+                model_name: None,
+            },
+            state: omega_effectd::ThreadState::Idle,
+            transcript: Vec::new(),
+            updated_at: projected_at,
+        };
+    };
+    let disclosure = thread_view.read(cx).executor_disclosure(cx);
+    let Some(thread) = conversation.root_thread(cx) else {
+        return omega_effectd::MirrorThread {
+            thread_ref,
+            title: "Omega thread".to_string(),
+            executor: device_executor_disclosure(&disclosure),
+            state: omega_effectd::ThreadState::Idle,
+            transcript: Vec::new(),
+            updated_at: projected_at,
+        };
+    };
+    let thread = thread.read(cx);
+    omega_effectd::MirrorThread {
+        thread_ref: thread_ref.clone(),
+        title: thread.title().map_or_else(
+            || "Omega thread".to_string(),
+            |title| device_public_label(&title, "Omega thread"),
+        ),
+        executor: device_executor_disclosure(&disclosure),
+        state: if thread.status() == ThreadStatus::Generating {
+            omega_effectd::ThreadState::Running
+        } else if thread.had_error() {
+            omega_effectd::ThreadState::Failed
+        } else {
+            omega_effectd::ThreadState::Idle
+        },
+        transcript: device_transcript(&thread_ref, thread.entries(), projected_at, cx),
+        updated_at: projected_at,
+    }
+}
+
+fn device_transcript(
+    thread_ref: &str,
+    entries: &[AgentThreadEntry],
+    projected_at: u64,
+    cx: &App,
+) -> Vec<omega_effectd::MirrorMessage> {
+    let start = entries.len().saturating_sub(MAX_DEVICE_TRANSCRIPT_MESSAGES);
+    let mut transcript = entries
+        .iter()
+        .enumerate()
+        .skip(start)
+        .filter_map(|(index, entry)| {
+            let (role, text) = match entry {
+                AgentThreadEntry::UserMessage(_) => {
+                    (omega_effectd::MessageRole::User, entry.to_markdown(cx))
+                }
+                AgentThreadEntry::AssistantMessage(message) => (
+                    omega_effectd::MessageRole::Assistant,
+                    message.to_markdown(cx),
+                ),
+                AgentThreadEntry::SystemNote(_)
+                | AgentThreadEntry::ToolCall(_)
+                | AgentThreadEntry::Elicitation(_)
+                | AgentThreadEntry::CompletedPlan(_)
+                | AgentThreadEntry::ContextCompaction(_) => return None,
+            };
+            if !full_auto_ui::issue31_device_mirror_text_is_safe(&text) {
+                return None;
+            }
+            let preview = device_transcript_preview(&text);
+            let text = full_auto_ui::issue31_device_mirror_text(
+                &preview,
+                MAX_DEVICE_TRANSCRIPT_TEXT_BYTES,
+            )?;
+            Some(omega_effectd::MirrorMessage {
+                message_ref: format!("{thread_ref}.entry.{index}"),
+                role,
+                text,
+                created_at: projected_at,
+            })
+        })
+        .collect::<Vec<_>>();
+    while transcript
+        .iter()
+        .map(|message| message.text.len())
+        .sum::<usize>()
+        > MAX_DEVICE_TRANSCRIPT_TOTAL_BYTES
+    {
+        transcript.remove(0);
+    }
+    transcript
+}
+
+fn device_executor_disclosure(
+    disclosure: &omega_front_door::ExecutorDisclosure,
+) -> omega_effectd::ExecutorDisclosure {
+    let executor_name = match disclosure.agent_id.as_str() {
+        CODEX_AGENT_ID => "Codex",
+        CLAUDE_AGENT_ID => "Claude Code",
+        "omega-agent" => "Omega",
+        _ => disclosure.agent_id.as_str(),
+    };
+    omega_effectd::ExecutorDisclosure {
+        executor_id: device_public_label(&disclosure.agent_id, "external-acp"),
+        executor_name: device_public_label(executor_name, "External executor"),
+        model_id: disclosure.model.as_deref().and_then(|model| {
+            full_auto_ui::issue31_device_mirror_text(model, MAX_DEVICE_LABEL_BYTES)
+        }),
+        model_name: disclosure.model.as_deref().and_then(|model| {
+            full_auto_ui::issue31_device_mirror_text(model, MAX_DEVICE_LABEL_BYTES)
+        }),
+    }
+}
+
+fn fallback_device_executor_disclosure(thread: &HostThread) -> omega_effectd::ExecutorDisclosure {
+    let (executor_id, executor_name) = match thread.lane.as_str() {
+        CLAUDE_LOCAL_LANE => (CLAUDE_AGENT_ID, "Claude Code"),
+        _ => (CODEX_AGENT_ID, "Codex"),
+    };
+    omega_effectd::ExecutorDisclosure {
+        executor_id: executor_id.to_string(),
+        executor_name: executor_name.to_string(),
+        model_id: thread
+            .turns
+            .last()
+            .and_then(|turn| turn.model.as_deref())
+            .and_then(|model| {
+                full_auto_ui::issue31_device_mirror_text(model, MAX_DEVICE_LABEL_BYTES)
+            }),
+        model_name: thread
+            .turns
+            .last()
+            .and_then(|turn| turn.model.as_deref())
+            .and_then(|model| {
+                full_auto_ui::issue31_device_mirror_text(model, MAX_DEVICE_LABEL_BYTES)
+            }),
+    }
+}
+
+fn device_thread_state(status: ThreadStatus, thread: &HostThread) -> omega_effectd::ThreadState {
+    if status == ThreadStatus::Generating {
+        return omega_effectd::ThreadState::Running;
+    }
+    match thread
+        .turns
+        .last()
+        .and_then(|turn| turn.disposition.as_deref())
+    {
+        Some("completed") => omega_effectd::ThreadState::Completed,
+        Some("failed" | "timed_out" | "owner_interrupted") => omega_effectd::ThreadState::Failed,
+        Some(_) => omega_effectd::ThreadState::Waiting,
+        None if thread.turns.is_empty() => omega_effectd::ThreadState::Idle,
+        None => omega_effectd::ThreadState::Running,
+    }
+}
+
+fn device_mirror_run(thread: &HostThread, projected_at: u64) -> omega_effectd::MirrorRun {
+    let state = match thread
+        .turns
+        .last()
+        .and_then(|turn| turn.disposition.as_deref())
+    {
+        Some("completed") => omega_effectd::RunState::Completed,
+        Some("owner_interrupted") => omega_effectd::RunState::Cancelled,
+        Some("failed" | "timed_out") => omega_effectd::RunState::Failed,
+        Some(_) => omega_effectd::RunState::Paused,
+        None if thread.turns.is_empty() => omega_effectd::RunState::Queued,
+        None => omega_effectd::RunState::Running,
+    };
+    omega_effectd::MirrorRun {
+        run_ref: thread.operation_ref.clone(),
+        title: thread.operation_ref.clone(),
+        lane: thread.lane.clone(),
+        state,
+        receipt_refs: Vec::new(),
+        updated_at: thread
+            .turns
+            .last()
+            .map_or(projected_at, |turn| timestamp_millis(&turn.updated_at)),
+    }
+}
+
+fn device_transcript_preview(text: &str) -> String {
+    if text.len() <= MAX_DEVICE_TRANSCRIPT_TEXT_BYTES {
+        return text.to_string();
+    }
+    let suffix = "\n\n[Transcript preview truncated; full content remains on the desktop.]";
+    let budget = MAX_DEVICE_TRANSCRIPT_TEXT_BYTES.saturating_sub(suffix.len());
+    format!("{}{suffix}", truncate_utf8(text, budget))
+}
+
+fn device_label_preview(text: &str) -> String {
+    truncate_utf8(text, MAX_DEVICE_LABEL_BYTES)
+}
+
+fn device_public_label(text: &str, fallback: &str) -> String {
+    let preview = device_label_preview(text);
+    full_auto_ui::issue31_device_mirror_text(&preview, MAX_DEVICE_LABEL_BYTES)
+        .unwrap_or_else(|| fallback.to_string())
+}
+
+fn timestamp_millis(timestamp: &str) -> u64 {
+    chrono::DateTime::parse_from_rfc3339(timestamp)
+        .ok()
+        .and_then(|timestamp| u64::try_from(timestamp.timestamp_millis()).ok())
+        .unwrap_or_else(current_unix_millis)
+}
+
+fn current_unix_millis() -> u64 {
+    u64::try_from(Utc::now().timestamp_millis()).unwrap_or(0)
+}
+
+fn publish_device_thread(
+    state: &Rc<RefCell<HostBridgeState>>,
+    thread_ref: &str,
+    cx: &App,
+) -> anyhow::Result<()> {
+    let (journal, thread) = {
+        let state = state.borrow();
+        let Some(journal) = state.device_projection.clone() else {
+            return Ok(());
+        };
+        let thread = state
+            .threads
+            .iter()
+            .find(|thread| thread.thread_id.to_key_string() == thread_ref)
+            .cloned();
+        (journal, thread)
+    };
+    let Some(thread) = thread else {
+        journal.publish(omega_effectd::MirrorChange::ThreadRemove {
+            thread_ref: thread_ref.to_string(),
+        })?;
+        return Ok(());
+    };
+    let projected_at = current_unix_millis();
+    let projected = device_mirror_thread(&thread, projected_at, cx);
+    let previous = journal
+        .snapshot()?
+        .threads
+        .into_iter()
+        .find(|candidate| candidate.thread_ref == projected.thread_ref);
+    match previous {
+        None => {
+            journal.publish(omega_effectd::MirrorChange::ThreadUpsert { thread: projected })?;
+        }
+        Some(previous) if device_thread_metadata_changed(&previous, &projected) => {
+            journal.publish(omega_effectd::MirrorChange::ThreadUpsert { thread: projected })?;
+        }
+        Some(previous) => {
+            publish_device_transcript_delta(&journal, &previous, &projected)?;
+        }
+    }
+
+    if let Some(reading) = full_auto_ui::issue31_device_mirror_reading() {
+        let snapshot = journal.snapshot()?;
+        for run in reading.runs {
+            if !snapshot.runs.iter().any(|existing| existing == &run) {
+                journal.publish(omega_effectd::MirrorChange::RunUpsert { run })?;
+            }
+        }
+        let health = omega_effectd::MirrorHealth {
+            engine_up: true,
+            engine_generation: reading.engine_generation,
+            lane_ready: reading.lane_ready,
+            observed_at: reading.observed_at_ms,
+        };
+        if snapshot.health != health {
+            journal.publish(omega_effectd::MirrorChange::Health { health })?;
+        }
+    } else {
+        let run = device_mirror_run(&thread, projected_at);
+        if !journal
+            .snapshot()?
+            .runs
+            .iter()
+            .any(|existing| existing == &run)
+        {
+            journal.publish(omega_effectd::MirrorChange::RunUpsert { run })?;
+        }
+    }
+    Ok(())
+}
+
+fn device_thread_metadata_changed(
+    previous: &omega_effectd::MirrorThread,
+    current: &omega_effectd::MirrorThread,
+) -> bool {
+    previous.title != current.title
+        || previous.executor != current.executor
+        || previous.state != current.state
+}
+
+fn publish_device_transcript_delta(
+    journal: &omega_effectd::ProjectionJournal,
+    previous: &omega_effectd::MirrorThread,
+    current: &omega_effectd::MirrorThread,
+) -> anyhow::Result<()> {
+    if current.transcript.starts_with(&previous.transcript) {
+        for message in current.transcript.iter().skip(previous.transcript.len()) {
+            journal.publish(omega_effectd::MirrorChange::TranscriptAppend {
+                thread_ref: current.thread_ref.clone(),
+                message: message.clone(),
+                updated_at: current.updated_at,
+            })?;
+        }
+        return Ok(());
+    }
+    if previous.transcript.len() == current.transcript.len()
+        && let (Some(previous_message), Some(current_message)) =
+            (previous.transcript.last(), current.transcript.last())
+        && previous_message.message_ref == current_message.message_ref
+        && previous_message.role == current_message.role
+        && current_message.text.starts_with(&previous_message.text)
+        && current_message.text.len() > previous_message.text.len()
+    {
+        let suffix = current_message
+            .text
+            .get(previous_message.text.len()..)
+            .ok_or_else(|| anyhow::anyhow!("device transcript delta split a UTF-8 boundary"))?;
+        journal.publish(omega_effectd::MirrorChange::TranscriptAppend {
+            thread_ref: current.thread_ref.clone(),
+            message: omega_effectd::MirrorMessage {
+                message_ref: format!(
+                    "{}.segment.{}",
+                    current_message.message_ref,
+                    previous_message.text.len()
+                ),
+                role: current_message.role.clone(),
+                text: suffix.to_string(),
+                created_at: current_message.created_at,
+            },
+            updated_at: current.updated_at,
+        })?;
+        return Ok(());
+    }
+    journal.publish(omega_effectd::MirrorChange::ThreadUpsert {
+        thread: current.clone(),
+    })?;
+    Ok(())
+}
+
+fn refresh_device_generation(
+    state: &Rc<RefCell<HostBridgeState>>,
+    generation: u64,
+    cx: &App,
+) -> anyhow::Result<()> {
+    let journal = state.borrow().device_projection.clone();
+    let Some(journal) = journal else {
+        return Ok(());
+    };
+    if journal.cursor()?.generation != generation {
+        journal.replace_snapshot(device_mirror_snapshot(&state.borrow(), generation, cx)?)?;
+    }
+    Ok(())
 }
 
 fn sarah_host_error(error: omega_effectd::SarahConversationError) -> HostResponseError {
@@ -757,6 +1304,10 @@ fn create_thread(
         revision: 1,
     });
     persist_state(state)?;
+    cx.update(|cx| {
+        publish_device_thread(state, &thread_ref, cx)
+            .map_err(|error| internal(format!("Device thread projection failed: {error:#}")))
+    })?;
     Ok(json!({ "threadRef": thread_ref }))
 }
 
@@ -956,7 +1507,35 @@ async fn dispatch_turn(
     let send = thread.update(cx, |thread, cx| {
         thread.send(vec![params.message.into()], cx)
     });
+    cx.update(|cx| {
+        publish_device_thread(state, &params.thread_ref, cx)
+            .map_err(|error| internal(format!("Device turn projection failed: {error:#}")))
+    })?;
+    let state_for_stream = state.clone();
+    let thread_for_stream = thread.clone();
+    let thread_ref_for_stream = params.thread_ref.clone();
+    cx.spawn(async move |cx| {
+        loop {
+            cx.background_executor()
+                .timer(DEVICE_TRANSCRIPT_PUBLISH_INTERVAL)
+                .await;
+            let (generating, projection_result) = cx.update(|cx| {
+                let generating = thread_for_stream.read(cx).status() == ThreadStatus::Generating;
+                let projection_result =
+                    publish_device_thread(&state_for_stream, &thread_ref_for_stream, cx);
+                (generating, projection_result)
+            });
+            if let Err(error) = projection_result {
+                log::error!("failed to publish streaming device thread projection: {error:#}");
+            }
+            if !generating {
+                break;
+            }
+        }
+    })
+    .detach();
     let turn_ref = params.turn_ref;
+    let thread_ref_for_completion = params.thread_ref;
     let state_for_completion = state.clone();
     let thread_for_completion = thread.clone();
     cx.spawn(async move |cx| {
@@ -1010,6 +1589,11 @@ async fn dispatch_turn(
             record_turn_completion(&state_for_completion, &turn_ref, end_entry_index, outcome)
         {
             log::error!("failed to persist Omega Full Auto host correlation: {error:#}");
+        }
+        if let Err(error) = cx.update(|cx| {
+            publish_device_thread(&state_for_completion, &thread_ref_for_completion, cx)
+        }) {
+            log::error!("failed to publish completed device thread projection: {error:#}");
         }
     })
     .detach();
@@ -1169,6 +1753,10 @@ fn refresh_evidence(
             })
         })
         .collect::<Vec<_>>();
+    cx.update(|cx| {
+        publish_device_thread(state, &params.thread_ref, cx)
+            .map_err(|error| internal(format!("Device evidence projection failed: {error:#}")))
+    })?;
     Ok(json!({
         "present": true,
         "revision": revision,
@@ -1246,6 +1834,10 @@ async fn interrupt_turn(
         }
     }
     persist_state(state)?;
+    cx.update(|cx| {
+        publish_device_thread(state, &params.thread_ref, cx)
+            .map_err(|error| internal(format!("Device interruption projection failed: {error:#}")))
+    })?;
     Ok(json!({ "interrupted": true }))
 }
 
@@ -1303,6 +1895,10 @@ async fn append_system_note(
             cx,
         )
     });
+    cx.update(|cx| {
+        publish_device_thread(state, &params.thread_ref, cx)
+            .map_err(|error| internal(format!("Device note projection failed: {error:#}")))
+    })?;
     Ok(json!({ "appended": appended }))
 }
 
@@ -1755,6 +2351,88 @@ mod tests {
     }
 
     #[test]
+    fn device_transcript_previews_are_bounded_on_utf8_boundaries() {
+        let text = format!("{}é", "x".repeat(MAX_DEVICE_TRANSCRIPT_TEXT_BYTES));
+        let preview = device_transcript_preview(&text);
+        assert!(preview.is_char_boundary(preview.len()));
+        assert!(preview.len() <= MAX_DEVICE_TRANSCRIPT_TEXT_BYTES);
+        assert!(preview.contains("Transcript preview truncated"));
+    }
+
+    #[test]
+    fn a_streamed_assistant_suffix_advances_the_device_projection() {
+        let disclosure = omega_effectd::ExecutorDisclosure {
+            executor_id: CLAUDE_AGENT_ID.to_string(),
+            executor_name: "Claude Code".to_string(),
+            model_id: Some("claude-opus".to_string()),
+            model_name: Some("claude-opus".to_string()),
+        };
+        let previous = omega_effectd::MirrorThread {
+            thread_ref: "thread.1".to_string(),
+            title: "Projection".to_string(),
+            executor: disclosure.clone(),
+            state: omega_effectd::ThreadState::Running,
+            transcript: vec![omega_effectd::MirrorMessage {
+                message_ref: "message.1".to_string(),
+                role: omega_effectd::MessageRole::Assistant,
+                text: "Hello".to_string(),
+                created_at: 1,
+            }],
+            updated_at: 1,
+        };
+        let mut current = previous.clone();
+        current.transcript[0].text = "Hello world".to_string();
+        current.updated_at = 2;
+        let mut snapshot = omega_effectd::MirrorSnapshot::empty("Omega", 1, 1);
+        snapshot.threads.push(previous.clone());
+        let journal = omega_effectd::ProjectionJournal::new(snapshot);
+
+        publish_device_transcript_delta(&journal, &previous, &current).expect("streaming suffix");
+
+        let projected = journal.snapshot().expect("projected snapshot");
+        assert_eq!(projected.sequence, 1);
+        assert_eq!(projected.threads[0].transcript.len(), 2);
+        assert_eq!(projected.threads[0].transcript[1].text, " world");
+        assert_eq!(projected.threads[0].executor, disclosure);
+    }
+
+    #[test]
+    fn a_large_initial_projection_is_reduced_to_one_transport_frame() {
+        let disclosure = omega_effectd::ExecutorDisclosure {
+            executor_id: "omega-agent".to_string(),
+            executor_name: "Omega".to_string(),
+            model_id: None,
+            model_name: None,
+        };
+        let mut snapshot = omega_effectd::MirrorSnapshot::empty("Omega", 1, 1);
+        for thread_index in 0..8 {
+            snapshot.threads.push(omega_effectd::MirrorThread {
+                thread_ref: format!("thread.{thread_index}"),
+                title: format!("Thread {thread_index}"),
+                executor: disclosure.clone(),
+                state: omega_effectd::ThreadState::Running,
+                transcript: (0..16)
+                    .map(|message_index| omega_effectd::MirrorMessage {
+                        message_ref: format!("message.{thread_index}.{message_index}"),
+                        role: omega_effectd::MessageRole::Assistant,
+                        text: "x".repeat(4 * 1024),
+                        created_at: 1,
+                    })
+                    .collect(),
+                updated_at: 1,
+            });
+        }
+
+        let bounded = bound_device_mirror_snapshot(snapshot).expect("bounded snapshot");
+
+        assert!(
+            serde_json::to_vec(&bounded).expect("snapshot bytes").len()
+                <= omega_effectd::MAX_FRAME_BYTES - DEVICE_SNAPSHOT_FRAME_RESERVE_BYTES
+        );
+        assert!(!bounded.threads.is_empty());
+    }
+
+    #[test]
     fn evidence_keys_remain_bounded_for_maximum_turn_refs() {
         let turn_ref = format!("{}é", "x".repeat(178));
         assert_eq!(turn_ref.len(), 180);
@@ -1801,6 +2479,7 @@ mod tests {
             load_error: None,
             sarah_conversation: None,
             device_bridge: None,
+            device_projection: None,
         };
 
         persist_correlation_journal(&state).expect("persist correlation journal");
@@ -1847,6 +2526,7 @@ mod tests {
             load_error: None,
             sarah_conversation: None,
             device_bridge: None,
+            device_projection: None,
         };
         persist_correlation_journal(&state).expect("persist correlation journal");
 
@@ -1939,6 +2619,7 @@ mod tests {
             load_error: None,
             sarah_conversation: None,
             device_bridge: None,
+            device_projection: None,
         }));
 
         record_turn_completion(&state, "turn.full-auto.1", 7, HostTurnOutcome::Completed)
@@ -1994,6 +2675,7 @@ mod tests {
             load_error: None,
             sarah_conversation: None,
             device_bridge: None,
+            device_projection: None,
         }));
 
         record_turn_completion(

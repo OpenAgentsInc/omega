@@ -424,6 +424,39 @@ Mobile:
 The pairing fixture includes the host-authored Sarah identity binding. A hash
 change is therefore a cross-repository contract change, not formatting churn.
 
+## Direct mirror projection {#direct-mirror-projection}
+
+Once a scoped device grant is admitted, the direct WebSocket bridge sends the
+current Omega projection as one snapshot and then ordered deltas. The snapshot
+contains:
+
+- up to 64 active or recently loaded Agent threads, including title, turn
+  state, and the typed executor and model disclosure shown by the desktop;
+- up to 64 Full Auto runs with queued, running, paused, completed, failed, or
+  cancelled state and up to 32 authority receipt references;
+- engine availability, generation, lane readiness, and observation time.
+
+Thread transcripts contain at most 64 user or assistant entries. Each entry is
+an 8 KiB UTF-8-safe preview and must pass the same public-text gate as the Sync
+projection. System notes, tool-call records, elicitation payloads,
+completed-plan internals, compaction records, raw provider payloads,
+credentials, and exact private paths are excluded at the desktop projection
+boundary. The bridge validates the same count and size limits again before it
+advances a cursor, and the encoded snapshot or delta must fit the 64 KiB frame
+limit.
+
+Full Auto rows come from `latest_issue31_live_reading`, the same engine
+observation used by the Sync projection. The device bridge does not maintain a
+second run registry, and GPUI owns neither run authority nor receipt truth.
+Thread deltas are produced from the live Agent thread entities; the existing
+correlation journal remains only the run-to-thread binding used across a
+restart.
+
+A client may resume from a generation and sequence cursor while retained
+deltas are contiguous. A gap or generation mismatch returns a canonical
+snapshot. When the engine generation changes, Omega replaces the projection,
+resets sequence to zero, and makes every old-generation cursor resnapshot.
+
 ## Verification {#verification}
 
 ```sh

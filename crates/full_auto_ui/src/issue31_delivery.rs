@@ -24,7 +24,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use omega_effectd::{
     Issue31HostProjectionDocuments, Issue31HostProjectionRequest, Issue31HostProjectionSource,
-    Issue31ProviderRosterAccount, Issue31ProviderRosterSource,
+    Issue31ProviderRosterAccount, Issue31ProviderRosterSource, MirrorRun, RunState,
 };
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -196,10 +196,7 @@ pub fn issue31_host_projection_documents(
         observed_at_ms: reading.generated_at_ms(),
         owner_grant_ref: Some(request.grant_ref),
         record_refs: &["record.omega.host-announcement", "record.omega.owner-grant"],
-        permitted_action_refs: &[
-            "action.omega.device.renew",
-            "action.omega.device.revoke",
-        ],
+        permitted_action_refs: &["action.omega.device.renew", "action.omega.device.revoke"],
     };
     let publication = publish_issue31_host_snapshot(&sources, &identity)?;
     Ok(Issue31HostProjectionDocuments {
@@ -223,6 +220,131 @@ pub fn set_issue31_live_reading(reading: Issue31FullAutoReading) {
 /// The most recent observation, or `None` if the host has never looked.
 pub fn latest_issue31_live_reading() -> Option<Issue31FullAutoReading> {
     reading_cache().lock().ok().and_then(|cache| cache.clone())
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Issue31DeviceMirrorReading {
+    pub engine_generation: u64,
+    pub observed_at_ms: u64,
+    pub lane_ready: bool,
+    pub runs: Vec<MirrorRun>,
+}
+
+pub fn issue31_device_mirror_reading() -> Option<Issue31DeviceMirrorReading> {
+    let reading = latest_issue31_live_reading()?;
+    Some(device_mirror_reading_from(&reading))
+}
+
+pub fn issue31_device_mirror_text_is_safe(value: &str) -> bool {
+    !value.is_empty()
+        && !value
+            .chars()
+            .any(|character| character.is_control() && !matches!(character, '\n' | '\t'))
+        && !value.lines().any(|line| {
+            let line = line.trim();
+            !line.is_empty()
+                && !workroom_receipts::is_issue31_public_text(line, line.chars().count())
+        })
+}
+
+pub fn issue31_device_mirror_text(value: &str, maximum_bytes: usize) -> Option<String> {
+    if !issue31_device_mirror_text_is_safe(value) {
+        return None;
+    }
+    let mut boundary = value.len().min(maximum_bytes);
+    while !value.is_char_boundary(boundary) {
+        boundary -= 1;
+    }
+    let preview = value[..boundary].to_string();
+    Some(preview)
+}
+
+fn device_mirror_reading_from(reading: &Issue31FullAutoReading) -> Issue31DeviceMirrorReading {
+    let lane_ready = reading
+        .capacity
+        .get("lanes")
+        .and_then(Value::as_array)
+        .is_some_and(|lanes| {
+            lanes.iter().any(|lane| {
+                matches!(
+                    lane.get("state").and_then(Value::as_str),
+                    Some("available" | "busy")
+                )
+            })
+        });
+    let mut runs = reading
+        .run_details
+        .iter()
+        .filter_map(|run| {
+            let run_ref = bounded_mirror_ref(run.get("runRef")?.as_str()?)?;
+            let title_candidate = bounded_mirror_label(
+                run.get("title")
+                    .or_else(|| run.get("objective"))
+                    .and_then(Value::as_str)?,
+            );
+            let title = issue31_device_mirror_text(&title_candidate, 256)
+                .unwrap_or_else(|| run_ref.clone());
+            let lane = bounded_mirror_ref(
+                run.get("laneRef")
+                    .or_else(|| run.get("lane"))
+                    .and_then(Value::as_str)
+                    .unwrap_or_default(),
+            )?;
+            let state = match run.get("state").and_then(Value::as_str)? {
+                "queued" | "starting" => RunState::Queued,
+                "running" => RunState::Running,
+                "paused" => RunState::Paused,
+                "completed" => RunState::Completed,
+                "cancelled" | "canceled" | "stopped" => RunState::Cancelled,
+                "failed" | "blocked" => RunState::Failed,
+                _ => return None,
+            };
+            let receipt_refs = reading
+                .evidence
+                .iter()
+                .filter_map(|(_, receipt)| {
+                    (receipt.get("runRef").and_then(Value::as_str) == Some(run_ref.as_str()))
+                        .then(|| receipt.get("authorityReceiptRef").and_then(Value::as_str))
+                        .flatten()
+                        .and_then(bounded_mirror_ref)
+                })
+                .take(32)
+                .collect();
+            Some(MirrorRun {
+                run_ref,
+                title,
+                lane,
+                state,
+                receipt_refs,
+                updated_at: reading.generated_at_ms(),
+            })
+        })
+        .take(64)
+        .collect::<Vec<_>>();
+    runs.sort_by(|left, right| {
+        right
+            .updated_at
+            .cmp(&left.updated_at)
+            .then_with(|| left.run_ref.cmp(&right.run_ref))
+    });
+    Issue31DeviceMirrorReading {
+        engine_generation: reading.host_generation,
+        observed_at_ms: reading.generated_at_ms(),
+        lane_ready,
+        runs,
+    }
+}
+
+fn bounded_mirror_ref(value: &str) -> Option<String> {
+    (!value.is_empty() && value.len() <= 180).then(|| value.to_string())
+}
+
+fn bounded_mirror_label(value: &str) -> String {
+    let mut boundary = value.len().min(256);
+    while !value.is_char_boundary(boundary) {
+        boundary -= 1;
+    }
+    value[..boundary].to_string()
 }
 
 /// How the Sarah host pump reads this host's provider roster (omega#91).
@@ -343,6 +465,52 @@ mod tests {
     }
 
     #[test]
+    fn device_mirror_uses_the_sync_reading_and_projects_only_allowlisted_run_fields() {
+        let mut reading = reading();
+        reading.evidence.push((
+            json!({"reportRef": "report.1"}),
+            json!({
+                "runRef": "run.full-auto.ms0o1ae4.9wjcec9p",
+                "authorityReceiptRef": "receipt.1",
+                "providerPayload": {"secret": "must not project"},
+            }),
+        ));
+
+        let projected = device_mirror_reading_from(&reading);
+
+        assert_eq!(projected.engine_generation, 19);
+        assert!(projected.lane_ready);
+        assert_eq!(projected.runs.len(), 1);
+        assert_eq!(projected.runs[0].lane, "codex-local");
+        assert_eq!(projected.runs[0].state, RunState::Running);
+        assert_eq!(projected.runs[0].receipt_refs, ["receipt.1"]);
+        let encoded = serde_json::to_string(&projected.runs[0]).expect("run projection");
+        assert!(!encoded.contains("objective"));
+        assert!(!encoded.contains("doneCondition"));
+        assert!(!encoded.contains("worktree"));
+        assert!(!encoded.contains("providerPayload"));
+        assert!(!encoded.contains("secret"));
+    }
+
+    #[test]
+    fn device_mirror_text_refuses_credentials_and_private_paths() {
+        assert_eq!(
+            issue31_device_mirror_text("A bounded owner-facing message", 256).as_deref(),
+            Some("A bounded owner-facing message")
+        );
+        assert_eq!(
+            issue31_device_mirror_text("First line\n\n  Second line", 256).as_deref(),
+            Some("First line\n\n  Second line")
+        );
+        assert!(issue31_device_mirror_text("sk-secret", 256).is_none());
+        assert!(issue31_device_mirror_text("/Users/owner/private/project", 256).is_none());
+        let secret_after_preview_boundary = format!("{}\nsk-secret", "x".repeat(9_000));
+        assert!(!issue31_device_mirror_text_is_safe(
+            &secret_after_preview_boundary
+        ));
+    }
+
+    #[test]
     fn documents_carry_the_grant_host_and_one_shared_snapshot() {
         let documents = issue31_host_projection_documents(
             &reading(),
@@ -385,7 +553,10 @@ mod tests {
                 "grantRef",
                 "expectedGeneration",
             ] {
-                assert!(document.get(key).is_none(), "{key} must be the pump's to add");
+                assert!(
+                    document.get(key).is_none(),
+                    "{key} must be the pump's to add"
+                );
             }
         }
     }
@@ -395,10 +566,7 @@ mod tests {
         // The pump publishes only when the digest changes, so a stable
         // reference is what stops a device being re-sent the same snapshot
         // forever.
-        assert_eq!(
-            reading().snapshot_ref(&[]),
-            reading().snapshot_ref(&[])
-        );
+        assert_eq!(reading().snapshot_ref(&[]), reading().snapshot_ref(&[]));
         // A handoff change alone is a different world, and has to move the
         // reference the detail is published under (omega#91).
         let handoffs = [json!({ "handoffRef": "handoff.omega.1" })];
@@ -777,13 +945,19 @@ mod tests {
             .and_then(Value::as_str)
             .expect("handoffRef")
             .to_string();
-        eprintln!("live relay OK: handoff {handoff_ref} appeared as {:?}", appeared[0].get("state"));
+        eprintln!(
+            "live relay OK: handoff {handoff_ref} appeared as {:?}",
+            appeared[0].get("state")
+        );
 
         // Pass two: it binds to the account the host's own roster reports.
         observe();
         client.sync_issue31_host().expect("second pump pass");
         let bound = observed(&client);
-        assert_eq!(bound[0].get("state").and_then(Value::as_str), Some("active"));
+        assert_eq!(
+            bound[0].get("state").and_then(Value::as_str),
+            Some("active")
+        );
         assert_eq!(
             bound[0].get("accountRef").and_then(Value::as_str),
             Some("account.claude.1"),
@@ -1038,21 +1212,13 @@ mod tests {
             &relay_url,
             &unscoped_device,
             &host_keys,
-            &device_handoff_intent(
-                &unscoped_grant,
-                &owner_public_key_hex,
-                &denied_idempotency,
-            ),
+            &device_handoff_intent(&unscoped_grant, &owner_public_key_hex, &denied_idempotency),
         );
         publish_device_command(
             &relay_url,
             &scoped_device,
             &host_keys,
-            &device_handoff_intent(
-                &scoped_grant,
-                &owner_public_key_hex,
-                &refused_idempotency,
-            ),
+            &device_handoff_intent(&scoped_grant, &owner_public_key_hex, &refused_idempotency),
         );
         for pass in 0..3 {
             observe();
@@ -1068,10 +1234,7 @@ mod tests {
         assert_eq!(settled.len(), 1, "one admitted ask, one record");
         assert_eq!(
             settled[0].get("handoffRef").and_then(Value::as_str),
-            Some(
-                Issue31ProviderHandoffLedger::handoff_ref_for(&refused_idempotency)
-                    .as_str()
-            ),
+            Some(Issue31ProviderHandoffLedger::handoff_ref_for(&refused_idempotency).as_str()),
         );
         assert!(
             !client.issue31_provider_handoff_refs().contains(
@@ -1186,7 +1349,9 @@ mod tests {
                     )
                     .sign_with_keys(keys)
                     .expect("signed auth event");
-                relay.authenticate(&auth_event).expect("NIP-42 authenticate");
+                relay
+                    .authenticate(&auth_event)
+                    .expect("NIP-42 authenticate");
                 relay.publish(record).expect("publish after auth");
             }
         }
@@ -1465,21 +1630,23 @@ mod tests {
             // See the named substitution above: no workspace, no admitted agent
             // authority, so every lane is honestly unavailable.
             let mut guard = smol::block_on(supervisor.lock());
-            guard.set_host_handler(std::rc::Rc::new(|request: omega_effectd::HostRequestFrame| {
-                Box::pin(async move {
-                    match request.method {
-                        omega_effectd::HostMethod::LaneReadiness => Ok(json!({
-                            "known": false,
-                            "admitted": false,
-                            "fullAuto": false,
-                            "state": "unavailable",
-                        })),
-                        _ => Err(omega_effectd::HostResponseError::unavailable(
-                            "This headless host answers only lane_readiness.",
-                        )),
-                    }
-                }) as omega_effectd::OmegaEffectdHostFuture
-            }));
+            guard.set_host_handler(std::rc::Rc::new(
+                |request: omega_effectd::HostRequestFrame| {
+                    Box::pin(async move {
+                        match request.method {
+                            omega_effectd::HostMethod::LaneReadiness => Ok(json!({
+                                "known": false,
+                                "admitted": false,
+                                "fullAuto": false,
+                                "state": "unavailable",
+                            })),
+                            _ => Err(omega_effectd::HostResponseError::unavailable(
+                                "This headless host answers only lane_readiness.",
+                            )),
+                        }
+                    }) as omega_effectd::OmegaEffectdHostFuture
+                },
+            ));
         }
 
         let initialized = smol::block_on(async {
@@ -1546,9 +1713,7 @@ mod tests {
         let device_public_key_hex = std::env::var("OMEGA_LIVE_DEVICE_PUBKEY")
             .ok()
             .map(|value| value.trim().to_ascii_lowercase())
-            .filter(|value| {
-                value.len() == 64 && value.chars().all(|byte| byte.is_ascii_hexdigit())
-            })
+            .filter(|value| value.len() == 64 && value.chars().all(|byte| byte.is_ascii_hexdigit()))
             .unwrap_or_else(|| nostr::Keys::generate().public_key().to_hex());
         let signer = omega_effectd::SigningIdentity::from_keys(host_keys.clone());
         let owner_public_key_hex = signer.public_key_hex.clone();

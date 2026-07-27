@@ -15,27 +15,28 @@ mod thread_run_link;
 
 pub use dispatch::{DispatchRefusal, FullAutoDispatch};
 pub use draft::{
-    validate_launcher_draft, FullAutoLauncherDraft, LauncherValidation, DEFAULT_DONE_CONDITION,
-    DEFAULT_TURN_CAP, FULL_AUTO_ACTIVE_LIMIT, FULL_AUTO_WORKSPACE_REF,
+    DEFAULT_DONE_CONDITION, DEFAULT_TURN_CAP, FULL_AUTO_ACTIVE_LIMIT, FULL_AUTO_WORKSPACE_REF,
+    FullAutoLauncherDraft, LauncherValidation, validate_launcher_draft,
 };
 pub use evidence_chain::FullAutoEvidenceView;
 pub use issue31_adjunct::{
-    publish_issue31_host_snapshot, Issue31HostIdentitySource, Issue31HostProjectionError,
-    Issue31HostPublication,
-    project_issue31_full_auto_adjunct, Issue31FullAutoLiveSources, Issue31FullAutoProjectionError,
+    Issue31FullAutoLiveSources, Issue31FullAutoProjectionError, Issue31HostIdentitySource,
+    Issue31HostProjectionError, Issue31HostPublication, project_issue31_full_auto_adjunct,
+    publish_issue31_host_snapshot,
 };
 pub use issue31_delivery::{
+    Issue31DeviceMirrorReading, Issue31FullAutoReading, issue31_device_mirror_reading,
+    issue31_device_mirror_text, issue31_device_mirror_text_is_safe,
     issue31_host_projection_documents, issue31_host_projection_source,
-    issue31_provider_roster_source,
-    latest_issue31_live_reading, set_issue31_live_reading, Issue31FullAutoReading,
+    issue31_provider_roster_source, latest_issue31_live_reading, set_issue31_live_reading,
 };
 pub use issue31_observation::{
-    observe_issue31_full_auto, Issue31ObservationError, MAX_ISSUE31_PROJECTED_RUNS,
+    Issue31ObservationError, MAX_ISSUE31_PROJECTED_RUNS, observe_issue31_full_auto,
 };
 pub use panel::FullAutoPanel;
-pub use provider_roster::{parse_provider_accounts, ProviderAccountRow};
+pub use provider_roster::{ProviderAccountRow, parse_provider_accounts};
 pub use thread_run_link::{
-    project_thread_run_link, ThreadRunLink, ThreadRunRecords, THREAD_RUN_LINK_MAX_AGE_MS,
+    THREAD_RUN_LINK_MAX_AGE_MS, ThreadRunLink, ThreadRunRecords, project_thread_run_link,
 };
 
 #[cfg(test)]

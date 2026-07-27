@@ -144,6 +144,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0153",
     "OMEGA-DELTA-0154",
     "OMEGA-DELTA-0155",
+    "OMEGA-DELTA-0156",
 ];
 
 pub const GOOGLE_PROVIDER_PATH: &str = "crates/language_models/src/provider/google.rs";
@@ -19502,5 +19503,57 @@ mod tests {
                 && panel.contains("issue_device_pairing_bootstrap(cx)"),
             "OMEGA-DELTA-0155: GPUI no longer renders the engine-owned phone pairing surface."
         );
+    }
+
+    /// OMEGA-DELTA-0156. The phone reads bounded thread/run/health state from
+    /// existing desktop and engine projections, never from a new GPUI-owned
+    /// registry or raw provider payload.
+    #[test]
+    fn mobile_mirror_projects_live_state_without_new_authority() {
+        let host_bridge = without_comments(&read_repository_file(
+            "crates/agent_ui/src/omega_host_bridge.rs",
+        ));
+        for required in [
+            "device_mirror_snapshot(&state.borrow(), generation, cx)",
+            "thread_view.read(cx).executor_disclosure(cx)",
+            "full_auto_ui::issue31_device_mirror_reading()",
+            "full_auto_ui::issue31_device_mirror_text_is_safe(",
+            "full_auto_ui::issue31_device_mirror_text(",
+            "AgentThreadEntry::ToolCall(_)",
+            "journal.replace_snapshot(device_mirror_snapshot(",
+        ] {
+            assert!(
+                host_bridge.contains(required),
+                "OMEGA-DELTA-0156: the desktop mirror lost `{required}`."
+            );
+        }
+
+        let delivery = without_comments(&read_repository_file(
+            "crates/full_auto_ui/src/issue31_delivery.rs",
+        ));
+        for required in [
+            "latest_issue31_live_reading()",
+            "authorityReceiptRef",
+            ".take(64)",
+            ".take(32)",
+        ] {
+            assert!(
+                delivery.contains(required),
+                "OMEGA-DELTA-0156: the shared Full Auto projection lost `{required}`."
+            );
+        }
+
+        let bridge = without_comments(&read_repository_file(DEVICE_BRIDGE_PATH));
+        for required in [
+            "MAX_PROJECTED_THREADS: usize = 64",
+            "MAX_TRANSCRIPT_MESSAGES: usize = 64",
+            "MAX_TRANSCRIPT_TEXT_BYTES: usize = 8 * 1024",
+            "validate_snapshot(&next_snapshot)",
+        ] {
+            assert!(
+                bridge.contains(required),
+                "OMEGA-DELTA-0156: the bridge projection boundary lost `{required}`."
+            );
+        }
     }
 }

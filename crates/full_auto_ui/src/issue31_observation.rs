@@ -250,11 +250,16 @@ mod tests {
             smol::block_on(observe_issue31_full_auto(&supervisor)).expect("the daemon answered");
         assert_eq!(reading.run_details.len(), 1);
         assert_eq!(
-            reading.run_details[0].get("runRef").and_then(|v| v.as_str()),
+            reading.run_details[0]
+                .get("runRef")
+                .and_then(|v| v.as_str()),
             Some("run.omega.1"),
         );
         assert_eq!(
-            reading.capacity.get("activeRunCount").and_then(|v| v.as_u64()),
+            reading
+                .capacity
+                .get("activeRunCount")
+                .and_then(|v| v.as_u64()),
             Some(1),
             "the capacity record must be the daemon's own, not a constructed one",
         );
