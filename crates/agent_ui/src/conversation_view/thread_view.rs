@@ -819,7 +819,30 @@ impl ThreadView {
         let parent_session_id = thread.read(cx).parent_session_id().cloned();
 
         let has_slash_completions = session_capabilities.read().has_slash_completions();
-        let placeholder = placeholder_text(agent_display_name.as_ref(), has_slash_completions);
+        // omega#112. Name the executor here too, not only when commands update.
+        //
+        // The update path fixed earlier fires on `AvailableCommandsUpdated`,
+        // which Codex sends and Claude does not — so selecting Claude attached
+        // Claude, drew Claude's own controls, and left the composer saying
+        // "Message the Omega Agent". Construction is also the path a switch
+        // takes, since `reset_onto_new_executor` builds a new thread view.
+        //
+        // Same source as the selector and the update path: the thread's own
+        // disclosure record. Three places now agree because all three read one
+        // record, rather than three strings that happen to match.
+        let placeholder = {
+            use crate::omega_executor_disclosure::ThreadExecutorDisclosure as _;
+            let disclosure = thread.read(cx).omega_executor_disclosure(cx);
+            let executor = crate::omega_executor_selector::SelectableExecutor::of(
+                disclosure.class,
+                disclosure.agent_id.as_ref(),
+            )
+            .map(|executor| executor.name().to_owned());
+            placeholder_text(
+                executor.as_deref().unwrap_or(agent_display_name.as_ref()),
+                has_slash_completions,
+            )
+        };
 
         let mut should_auto_submit = false;
         let mut show_external_source_prompt_warning = false;
