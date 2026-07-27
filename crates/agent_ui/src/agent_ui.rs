@@ -34,6 +34,7 @@ pub mod omega_file_peek;
 pub mod omega_host_bridge;
 pub mod omega_router;
 pub mod omega_send_queue;
+pub mod omega_threads_sidebar;
 mod profile_selector;
 mod terminal_codegen;
 mod terminal_inline_assistant;
@@ -336,6 +337,14 @@ actions!(
         ScrollOutputToNextMessage,
         /// Toggles in-thread search over the current agent thread's contents.
         ToggleSearch,
+        /// Toggles zero base's threads sidebar, listing past conversations.
+        ///
+        /// `OMEGA-DELTA-0118`. Deliberately in the `agent` namespace rather
+        /// than `multi_workspace`: that namespace is outside zero base's
+        /// admitted set, so the entry that named it was refused before any
+        /// listener ran. `agent` is already admitted, so this reaches its
+        /// handler without touching the admitted set.
+        ToggleThreadsSidebar,
         /// Import agent threads from other Omega release channels (e.g. Preview, Nightly).
         ImportThreadsFromOtherChannels,
         /// Starts a new terminal thread.

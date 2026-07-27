@@ -14,7 +14,7 @@
 
 use gpui::App;
 use omega_zero_base::{ADMITTED_ACTIONS, ADMITTED_NAMESPACES};
-use workspace::{Toast, Workspace, notifications::NotificationId};
+use workspace::{MultiWorkspace, Toast, Workspace, notifications::NotificationId};
 
 /// Install the refusal gate and the palette restriction, once, at app init.
 ///
@@ -61,25 +61,48 @@ fn install_action_gate(cx: &mut App) {
 /// Deferred because the gate runs inside a window update and a toast is a
 /// second one. A refusal a person cannot read is a silent no-op with extra
 /// steps, so this also logs at `info` for the case where no window is up.
+///
+/// # The window root is `MultiWorkspace`, and this used to miss it
+///
+/// `OMEGA-DELTA-0118`. Every Omega window is opened with a `MultiWorkspace`
+/// root wrapping the `Workspace`, so `downcast::<Workspace>()` on the active
+/// window handle answered `None` — always, on every machine. The `let else`
+/// returned, no toast was ever shown, and **every refusal this gate has ever
+/// made has been silent**. `OMEGA-DELTA-0053` records the owner pressing a
+/// denied status-bar control and reporting that "nothing happened"; that is
+/// this, and so is the "Toggle Threads Sidebar" entry that `OMEGA-DELTA-0118`
+/// repairs. The mode's whole safety argument is that a hidden surface is safe
+/// *because* something refuses it out loud, and the out-loud half was off.
 fn report_refusal(action_name: &'static str, cx: &mut App) {
     let sentence = omega_zero_base::refusal(action_name);
     log::info!("{sentence}");
     cx.defer(move |cx| {
-        let Some(workspace) = cx
-            .active_window()
-            .and_then(|window| window.downcast::<Workspace>())
-        else {
+        let Some(window) = cx.active_window() else {
             return;
         };
-        workspace
-            .update(cx, |workspace, _window, cx| {
-                struct ZeroBaseRefusal;
-                workspace.show_toast(
-                    Toast::new(NotificationId::unique::<ZeroBaseRefusal>(), sentence).autohide(),
-                    cx,
-                );
+        let workspace = window
+            .downcast::<MultiWorkspace>()
+            .and_then(|window| {
+                window
+                    .read(cx)
+                    .ok()
+                    .map(|multi_workspace| multi_workspace.workspace().clone())
             })
-            .ok();
+            .or_else(|| {
+                window
+                    .downcast::<Workspace>()
+                    .and_then(|window| window.entity(cx).ok())
+            });
+        let Some(workspace) = workspace else {
+            return;
+        };
+        workspace.update(cx, |workspace, cx| {
+            struct ZeroBaseRefusal;
+            workspace.show_toast(
+                Toast::new(NotificationId::unique::<ZeroBaseRefusal>(), sentence).autohide(),
+                cx,
+            );
+        });
     });
 }
 

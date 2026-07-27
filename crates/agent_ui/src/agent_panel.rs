@@ -54,12 +54,13 @@ use crate::{
     AgentDiffPane, ConversationView, CopyThreadToClipboard, Follow, LoadThreadFromClipboard,
     NewTerminalThread, NewThread, OpenActiveThreadAsMarkdown, OpenAgentDiff, ResetFastModeWarnings,
     ResetTrialEndUpsell, ResetTrialUpsell, ShowAllSidebarThreadMetadata, ShowThreadMetadata,
-    ToggleNewThreadMenu, ToggleOptionsMenu,
+    ToggleNewThreadMenu, ToggleOptionsMenu, ToggleThreadsSidebar,
     conversation_view::{
         AcpThreadViewEvent, RootThreadUpdated, ThreadView, reset_fast_mode_warnings,
     },
     ui::{AgentNotification, AgentNotificationEvent},
 };
+use crate::{omega_executor_selector, omega_threads_sidebar};
 use agent_settings::AgentSettings;
 use ai_onboarding::AgentPanelOnboarding;
 use anyhow::{Context as _, Result, anyhow};
@@ -93,8 +94,9 @@ use terminal_view::{TerminalView, terminal_panel::TerminalPanel};
 use text::OffsetRangeExt;
 use theme_settings::ThemeSettings;
 use ui::{
-    ContextMenu, ContextMenuEntry, GradientFade, IconButton, KeyBinding, PopoverMenu,
-    PopoverMenuHandle, ProjectEmptyState, Tab, Tooltip, prelude::*, utils::WithRemSize,
+    ContextMenu, ContextMenuEntry, GradientFade, IconButton, KeyBinding, ListItem, ListItemSpacing,
+    PopoverMenu, PopoverMenuHandle, ProjectEmptyState, Tab, Tooltip, prelude::*,
+    utils::WithRemSize,
 };
 use util::ResultExt as _;
 use workspace::{
@@ -1217,6 +1219,21 @@ pub struct AgentPanel {
     /// Separate from `full_auto` for the reason above: hidden and absent are
     /// different states.
     showing_full_auto: bool,
+    /// `OMEGA-DELTA-0118`. Whether zero base's threads sidebar is on screen.
+    ///
+    /// A bool rather than a retained view: the sidebar holds nothing a person
+    /// would lose by closing it. Its rows are a pure function of the metadata
+    /// store, recomputed on each render, so a thread renamed or archived while
+    /// it is open cannot leave a stale row behind.
+    threads_sidebar_open: bool,
+    /// The sentence the last refused reopen produced, if the sidebar is showing
+    /// one.
+    ///
+    /// Rendered inside the sidebar rather than as a toast. The person is
+    /// already looking at the list they clicked, and `OMEGA-DELTA-0053` records
+    /// that a zero-base window is exactly where a notification is least likely
+    /// to be where somebody is looking.
+    threads_sidebar_refusal: Option<SharedString>,
     /// `OMEGA-DELTA-0035`. The poll that feeds the router the engine's framed
     /// `get_capacity` answer.
     ///
@@ -1625,6 +1642,8 @@ impl AgentPanel {
             is_active: false,
             full_auto: None,
             showing_full_auto: false,
+            threads_sidebar_open: false,
+            threads_sidebar_refusal: None,
             _engine_capacity_poll: None,
         };
 
@@ -3142,6 +3161,216 @@ impl AgentPanel {
         } else {
             self.open_full_auto(true, window, cx);
         }
+    }
+
+    /// Show or hide zero base's threads sidebar. `OMEGA-DELTA-0118`.
+    ///
+    /// The owner's words, testing a live build: *"this 'Toggle Threads Sidebar'
+    /// does nothing when i click on it but i want it. i want threads sidebar to
+    /// see historical chats."* It did nothing because the entry named
+    /// `multi_workspace::ToggleWorkspaceSidebar`, and that namespace is outside
+    /// zero base's admitted set, so the action gate refused it before any
+    /// listener ran. This is the surface the entry names instead.
+    pub fn toggle_threads_sidebar(&mut self, cx: &mut Context<Self>) {
+        self.threads_sidebar_open = !self.threads_sidebar_open;
+        // A refusal belongs to the click that produced it. Carrying it across
+        // a close and a reopen would show a sentence about a thread the person
+        // is no longer looking at.
+        self.threads_sidebar_refusal = None;
+        cx.notify();
+    }
+
+    /// The rows the threads sidebar draws, newest first.
+    ///
+    /// Recomputed per render from the metadata store rather than cached. The
+    /// store is already in memory and the list is bounded, so a cache would buy
+    /// nothing and could disagree with the thread the person just renamed.
+    fn threads_sidebar_rows(&self, cx: &App) -> Vec<omega_threads_sidebar::ThreadRow> {
+        let Some(store) = ThreadMetadataStore::try_global(cx) else {
+            return Vec::new();
+        };
+        let registered: Vec<AgentId> = self
+            .project
+            .read(cx)
+            .agent_server_store()
+            .read(cx)
+            .external_agents()
+            .cloned()
+            .collect();
+        omega_threads_sidebar::rows(
+            store.read(cx).entries(),
+            Utc::now(),
+            &omega_executor_selector::unavailable_here(),
+            &registered,
+        )
+    }
+
+    /// Reopen a past conversation from the threads sidebar.
+    ///
+    /// The executor travels with the thread: `load_agent_thread` is handed the
+    /// `agent_id` the store recorded, never the one currently selected. A
+    /// session id names a conversation inside the agent server that created it,
+    /// so resuming a Codex session on Claude's connection reaches an adapter
+    /// that has never heard of it. When the recorded executor cannot run here
+    /// at all, the row already carries the sentence saying so and this shows it
+    /// rather than dispatching a load that fails in somebody else's error text.
+    fn open_thread_from_threads_sidebar(
+        &mut self,
+        row: &omega_threads_sidebar::ThreadRow,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(refusal) = row.refusal.clone() {
+            log::info!(
+                "threads sidebar refused {}: {refusal}",
+                row.thread_id.to_key_string()
+            );
+            self.threads_sidebar_refusal = Some(refusal);
+            cx.notify();
+            return;
+        }
+
+        self.threads_sidebar_refusal = None;
+        self.threads_sidebar_open = false;
+        self.load_agent_thread(
+            Agent::from(row.agent_id.clone()),
+            row.thread_id,
+            Some(row.folder_paths.clone()),
+            Some(row.title.clone()),
+            true,
+            AgentThreadSource::AgentPanel,
+            window,
+            cx,
+        );
+    }
+
+    /// Draw the threads sidebar over the thread surface. `OMEGA-DELTA-0118`.
+    ///
+    /// Absolutely positioned on purpose. The composer is the bottom row of the
+    /// surface underneath, and `OMEGA-DELTA-0105` records that this row already
+    /// has to wrap so a narrow dock does not clip Send. A sidebar that took
+    /// width out of the flex row would narrow that row further and clip the
+    /// control the owner presses most. An overlay changes no other element's
+    /// layout at all, so the composer sits exactly where it sat with the
+    /// sidebar closed.
+    fn render_threads_sidebar(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        if !self.threads_sidebar_open {
+            return None;
+        }
+
+        let rows = self.threads_sidebar_rows(cx);
+        let colors = cx.theme().colors();
+
+        let list = if rows.is_empty() {
+            v_flex()
+                .id("threads-sidebar-list")
+                .flex_1()
+                .overflow_y_scroll()
+                .p_3()
+                .child(
+                    Label::new("No past conversations yet.")
+                        .color(Color::Muted)
+                        .size(LabelSize::Small),
+                )
+        } else {
+            rows.into_iter().enumerate().fold(
+                v_flex()
+                    .id("threads-sidebar-list")
+                    .flex_1()
+                    .overflow_y_scroll(),
+                |list, (index, row)| {
+                    let reopenable = row.is_reopenable();
+                    let executor = row.executor.clone();
+                    let age = row.age.clone();
+                    let title = row.title.clone();
+                    list.child(
+                        ListItem::new(("threads-sidebar-row", index))
+                            .toggle_state(false)
+                            .inset(true)
+                            .spacing(ListItemSpacing::Sparse)
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.open_thread_from_threads_sidebar(&row, window, cx);
+                            }))
+                            .child(
+                                v_flex()
+                                    .w_full()
+                                    .gap_0p5()
+                                    .child(
+                                        Label::new(title)
+                                            .size(LabelSize::Small)
+                                            .color(if reopenable {
+                                                Color::Default
+                                            } else {
+                                                Color::Muted
+                                            })
+                                            .truncate(),
+                                    )
+                                    .child(
+                                        h_flex()
+                                            .gap_1p5()
+                                            .child(
+                                                Label::new(age)
+                                                    .size(LabelSize::XSmall)
+                                                    .color(Color::Muted),
+                                            )
+                                            .children(executor.map(|executor| {
+                                                Label::new(executor)
+                                                    .size(LabelSize::XSmall)
+                                                    .color(Color::Muted)
+                                            })),
+                                    ),
+                            ),
+                    )
+                },
+            )
+        };
+
+        Some(
+            v_flex()
+                .id("threads-sidebar")
+                .occlude()
+                .absolute()
+                .top_0()
+                .left_0()
+                .bottom_0()
+                .w(px(280.))
+                .max_w_full()
+                .bg(colors.panel_background)
+                .border_r_1()
+                .border_color(colors.border)
+                .child(
+                    h_flex()
+                        .w_full()
+                        .px_2()
+                        .py_1p5()
+                        .justify_between()
+                        .border_b_1()
+                        .border_color(colors.border_variant)
+                        .child(Label::new("Threads").size(LabelSize::Small))
+                        .child(
+                            IconButton::new("close-threads-sidebar", IconName::Close)
+                                .icon_size(IconSize::Small)
+                                .tooltip(Tooltip::text("Close Threads Sidebar"))
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.toggle_threads_sidebar(cx);
+                                })),
+                        ),
+                )
+                .children(self.threads_sidebar_refusal.clone().map(|refusal| {
+                    div()
+                        .w_full()
+                        .px_2()
+                        .py_1p5()
+                        .border_b_1()
+                        .border_color(colors.border_variant)
+                        .child(
+                            Label::new(refusal)
+                                .size(LabelSize::XSmall)
+                                .color(Color::Warning),
+                        )
+                }))
+                .child(list),
+        )
     }
 
     /// `OMEGA-DELTA-0034`. Connect the native agent, project or no project.
@@ -6047,10 +6276,28 @@ impl AgentPanel {
                                 .action("Profiles", Box::new(ManageProfiles::default()));
                         }
 
+                        // OMEGA-DELTA-0118. The entry names the action that
+                        // works in the mode this window is in.
+                        //
+                        // It used to name `multi_workspace::ToggleWorkspaceSidebar`
+                        // in both, and in zero base that namespace is refused
+                        // at dispatch — a control that is drawn and denied,
+                        // which is the failure `OMEGA-DELTA-0053` names. The
+                        // editor keeps the workspace sidebar, which is the
+                        // project switcher and is the right answer there;
+                        // zero base has no `MultiWorkspace` surface and gets
+                        // this panel's own.
                         menu = menu
                             .action("Settings", Box::new(OpenSettings))
                             .separator()
-                            .action("Toggle Threads Sidebar", Box::new(ToggleWorkspaceSidebar));
+                            .action(
+                                "Toggle Threads Sidebar",
+                                if omega_zero_base::is_active() {
+                                    Box::new(ToggleThreadsSidebar) as Box<dyn Action>
+                                } else {
+                                    Box::new(ToggleWorkspaceSidebar) as Box<dyn Action>
+                                },
+                            );
 
                         if has_auth_methods || supports_logout {
                             menu = menu.separator()
@@ -6814,6 +7061,14 @@ impl AgentPanel {
     fn key_context(&self) -> KeyContext {
         let mut key_context = KeyContext::new_with_defaults();
         key_context.add("AgentPanel");
+        // OMEGA-DELTA-0118. So a shipped binding can name a key that means one
+        // thing in zero base and something else in the editor, without either
+        // of them being deleted. `cmd-alt-j` opens the workspace sidebar in the
+        // editor and this panel's threads sidebar in zero base, which is the
+        // only sidebar a sealed window has.
+        if omega_zero_base::is_active() {
+            key_context.add("ZeroBase");
+        }
         key_context
     }
 }
@@ -6844,6 +7099,9 @@ impl Render for AgentPanel {
             }))
             .on_action(cx.listener(|this, _: &OpenSettings, window, cx| {
                 this.open_configuration(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &ToggleThreadsSidebar, _window, cx| {
+                this.toggle_threads_sidebar(cx);
             }))
             .on_action(cx.listener(Self::open_active_thread_as_markdown))
             .on_action(cx.listener(Self::manage_skills))
@@ -6915,6 +7173,12 @@ impl Render for AgentPanel {
                     }
                 }
             });
+
+        // OMEGA-DELTA-0118. Appended last and absolutely positioned, so it
+        // draws over the surface above without taking part in this flex column
+        // — the hierarchy the warning at the top of this function is about is
+        // unchanged by it, and the composer keeps the width it had.
+        let content = content.children(self.render_threads_sidebar(cx));
 
         match self.visible_font_size() {
             WhichFontSize::AgentFont => {

@@ -266,6 +266,19 @@
     },
   },
   {
+    // OMEGA-DELTA-0118. The same key, the sidebar the window actually has.
+    //
+    // `cmd-alt-j` opens the workspace sidebar in the editor, and nothing is
+    // taken away from it here: this is a second, narrower context, and a
+    // sealed zero base has no `MultiWorkspace` sidebar for the editor binding
+    // to reach.
+    "context": "AgentPanel && ZeroBase",
+    "use_key_equivalents": true,
+    "bindings": {
+      "cmd-alt-j": "agent::ToggleThreadsSidebar",
+    },
+  },
+  {
     "context": "AgentPanel > Markdown",
     "use_key_equivalents": true,
     "bindings": {

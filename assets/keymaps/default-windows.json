@@ -229,6 +229,14 @@
     },
   },
   {
+    // OMEGA-DELTA-0118. The same key, the sidebar the window actually has.
+    "context": "AgentPanel && ZeroBase",
+    "use_key_equivalents": true,
+    "bindings": {
+      "ctrl-alt-j": "agent::ToggleThreadsSidebar",
+    },
+  },
+  {
     "context": "AgentPanel > Markdown",
     "use_key_equivalents": true,
     "bindings": {

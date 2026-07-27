@@ -107,6 +107,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0114",
     "OMEGA-DELTA-0116",
     "OMEGA-DELTA-0117",
+    "OMEGA-DELTA-0118",
     "OMEGA-DELTA-0119",
     "OMEGA-DELTA-0121",
     "OMEGA-DELTA-0122",
@@ -2663,6 +2664,12 @@ pub const ZERO_BASE_MODE_PATH: &str = "crates/omega_zero_base/src/omega_zero_bas
 /// OMEGA-DELTA-0048, 0050, 0052. The surface: the palette restriction and the
 /// action gate. It carried the visible way out until `OMEGA-DELTA-0052`.
 pub const ZERO_BASE_UI_PATH: &str = "crates/zed/src/omega_zero_base_ui.rs";
+
+/// OMEGA-DELTA-0118. The rows zero base's threads sidebar lists, and the
+/// decision about what happens when the recorded executor is not the current
+/// one. Pure functions on purpose: a window is not needed to ask whether a row
+/// is honest.
+pub const THREADS_SIDEBAR_PATH: &str = "crates/agent_ui/src/omega_threads_sidebar.rs";
 
 /// OMEGA-DELTA-0048, 0053. Where panels are added, where zero base skips them,
 /// and where the mode seals the window after the identity gate.
@@ -16162,5 +16169,287 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// OMEGA-DELTA-0118. Zero base's threads sidebar is its own, and a thread
+    /// reopens on the executor that recorded it.
+    ///
+    /// The entry read "Toggle Threads Sidebar" and did nothing, because it named
+    /// `multi_workspace::ToggleWorkspaceSidebar` and that namespace is refused
+    /// at dispatch. The cheap repair is one name added to `ADMITTED_NAMESPACES`,
+    /// and it would put the editor's project switcher back inside the sealed
+    /// mode — `OMEGA-DELTA-0052` undone by a constant. So the first half of this
+    /// check is that the admitted set did not move, and the second is that the
+    /// surface which replaces it exists and reopens honestly.
+    #[test]
+    fn zero_bases_threads_sidebar_is_its_own_and_reopens_by_executor() {
+        // 1. The admitted set did not move. This is the assertion the whole
+        //    delta is shaped around.
+        let mode_path = repository_path(ZERO_BASE_MODE_PATH);
+        let mode = read_repository_file(ZERO_BASE_MODE_PATH);
+        let admitted_namespaces = mode
+            .split("pub const ADMITTED_NAMESPACES")
+            .nth(1)
+            .and_then(|rest| rest.split("];").next())
+            .unwrap_or_else(|| {
+                panic!(
+                    "OMEGA-DELTA-0118: `ADMITTED_NAMESPACES` is gone from {}.",
+                    mode_path.display()
+                )
+            });
+        assert!(
+            !admitted_namespaces.contains("multi_workspace")
+                && !admitted_namespaces.contains("workspace\""),
+            "OMEGA-DELTA-0118: {} admits a workspace namespace. The threads \
+             sidebar was made reachable without one, through `agent`, which was \
+             already admitted. Admitting `multi_workspace` here would put the \
+             project switcher — projects, imports, `NewThread`, a folder picker \
+             and windows to move a project into — inside a mode `OMEGA-DELTA-0052` \
+             sealed, which is that delta weakened by one line in a constant.",
+            mode_path.display()
+        );
+        let admitted_actions = mode
+            .split("pub const ADMITTED_ACTIONS")
+            .nth(1)
+            .and_then(|rest| rest.split("];").next())
+            .unwrap_or_else(|| {
+                panic!(
+                    "OMEGA-DELTA-0118: `ADMITTED_ACTIONS` is gone from {}.",
+                    mode_path.display()
+                )
+            });
+        assert!(
+            !admitted_actions.contains("ToggleWorkspaceSidebar"),
+            "OMEGA-DELTA-0118: {} admits `ToggleWorkspaceSidebar` by name. Same \
+             failure as admitting its namespace, spelled one action at a time.",
+            mode_path.display()
+        );
+
+        // 2. The action exists in the namespace zero base already admits.
+        let actions_path = repository_path(AGENT_SERVER_FACTORY_PATH);
+        let actions = read_repository_file(AGENT_SERVER_FACTORY_PATH);
+        let agent_actions = actions
+            .split("actions!(\n    agent,")
+            .nth(1)
+            .and_then(|rest| rest.split(");").next())
+            .unwrap_or_else(|| {
+                panic!(
+                    "OMEGA-DELTA-0118: the `agent` actions block is gone from {}.",
+                    actions_path.display()
+                )
+            });
+        assert!(
+            agent_actions.contains("ToggleThreadsSidebar"),
+            "OMEGA-DELTA-0118: `ToggleThreadsSidebar` is not in the `agent` \
+             actions block in {}. Its namespace is the whole reason the entry \
+             reaches a listener at all: `agent` is admitted and `multi_workspace` \
+             is not. Moving it to another namespace makes the menu entry silent \
+             again.",
+            actions_path.display()
+        );
+
+        // 3. The panel handles it, names it in the menu only in zero base, and
+        //    declares the key context the shipped binding is scoped to.
+        let panel_path = repository_path(AGENT_PANEL_PATH);
+        let panel = read_repository_file(AGENT_PANEL_PATH);
+        for token in [
+            "_: &ToggleThreadsSidebar",
+            "fn toggle_threads_sidebar",
+            "fn render_threads_sidebar",
+            "key_context.add(\"ZeroBase\")",
+        ] {
+            assert!(
+                panel.contains(token),
+                "OMEGA-DELTA-0118: {} lost `{token}`. Without it the entry the \
+                 owner presses reaches nothing, which is the state this delta \
+                 repaired.",
+                panel_path.display()
+            );
+        }
+        let menu = panel
+            .split("\"Toggle Threads Sidebar\"")
+            .nth(1)
+            .and_then(|rest| rest.split(';').next())
+            .unwrap_or_else(|| {
+                panic!(
+                    "OMEGA-DELTA-0118: the \"Toggle Threads Sidebar\" entry is \
+                     gone from {}.",
+                    panel_path.display()
+                )
+            });
+        assert!(
+            menu.contains("omega_zero_base::is_active()")
+                && menu.contains("ToggleThreadsSidebar")
+                && menu.contains("ToggleWorkspaceSidebar"),
+            "OMEGA-DELTA-0118: the \"Toggle Threads Sidebar\" entry in {} no \
+             longer names one action per mode. The editor keeps the workspace \
+             sidebar, which is not refused there; zero base names its own. An \
+             entry that names the refused action in both is a control that is \
+             drawn and denied, which `OMEGA-DELTA-0053` forbids.",
+            panel_path.display()
+        );
+
+        // 4. The overlay does not take part in the composer's layout.
+        let sidebar_render = body_of(&panel, "render_threads_sidebar");
+        assert!(
+            sidebar_render.contains(".absolute()"),
+            "OMEGA-DELTA-0118: `render_threads_sidebar` in {} no longer draws \
+             absolutely. `OMEGA-DELTA-0105` records that the composer row has to \
+             wrap so a narrow dock does not clip Send; a sidebar that took width \
+             out of that column would make the clip it protects against more \
+             likely, not less.",
+            panel_path.display()
+        );
+
+        // 5. The reopen carries the thread's own executor, not the selected one.
+        let reopen = body_of(&panel, "open_thread_from_threads_sidebar");
+        assert!(
+            reopen.contains("Agent::from(row.agent_id"),
+            "OMEGA-DELTA-0118: `open_thread_from_threads_sidebar` in {} no \
+             longer reopens under the executor the store recorded. A session id \
+             names a conversation inside the agent server that created it, so \
+             resuming a Codex session on Claude's connection answers `no rollout \
+             found for thread id ...` — an adapter's error about a file, in \
+             answer to a person asking for their chat back.",
+            panel_path.display()
+        );
+        assert!(
+            !reopen.contains("self.selected_agent"),
+            "OMEGA-DELTA-0118: `open_thread_from_threads_sidebar` in {} reopens \
+             under the selected executor. That is the exact substitution the \
+             bullet above forbids.",
+            panel_path.display()
+        );
+        assert!(
+            reopen.contains("row.refusal"),
+            "OMEGA-DELTA-0118: `open_thread_from_threads_sidebar` in {} no \
+             longer checks the row's refusal before loading. The one case that \
+             cannot work must say so where the person clicked, rather than \
+             failing three layers down in somebody else's error text.",
+            panel_path.display()
+        );
+
+        // 6. The rows: ordered, aged, bounded, and refusing by name.
+        let rows_path = repository_path(THREADS_SIDEBAR_PATH);
+        let rows_source = read_repository_file(THREADS_SIDEBAR_PATH);
+        let indented = with_free_functions_indented(&rows_source);
+        // `body_of` finds `fn name(`, and this one is `pub fn rows<'a>(`. The
+        // generic parameter is between the name and the paren, so the helper
+        // misses it — and `OMEGA-DELTA-0090`'s rule says a check that cannot
+        // find its subject must fail rather than pass, which is why this reads
+        // it explicitly instead of falling back to the whole file.
+        let rows = rows_source
+            .split("pub fn rows<")
+            .nth(1)
+            .map(|rest| rest.split("\npub fn ").next().unwrap_or(rest))
+            .unwrap_or_else(|| {
+                panic!(
+                    "OMEGA-DELTA-0118: `pub fn rows` is gone from {}.",
+                    rows_path.display()
+                )
+            });
+        for (token, why) in [
+            (
+                "right.updated_at.cmp(&left.updated_at)",
+                "newest first is the order the owner asked for — \"historical \
+                 chats\" with the recent ones out of reach is the same as none",
+            ),
+            (
+                "short_age(",
+                "two threads named by the same summarisation model carry the \
+                 same title; omega#100 already paid for this in the @-mention \
+                 list",
+            ),
+            (
+                "take(MAX_ROWS)",
+                "the drawing is what costs, and an unbounded list of every \
+                 thread a person has ever had is a window that stops responding",
+            ),
+            (
+                "!thread.is_draft()",
+                "a draft has no transcript, and the top row would be the empty \
+                 composer the person is already looking at",
+            ),
+            (
+                "!thread.archived",
+                "archiving is the act of saying \"not in the list\"",
+            ),
+        ] {
+            assert!(
+                rows.contains(token),
+                "OMEGA-DELTA-0118: `rows` in {} lost `{token}`: {why}.",
+                rows_path.display()
+            );
+        }
+
+        let refusal = body_of(&indented, "reopen_refusal");
+        assert!(
+            refusal.contains("unavailable")
+                && refusal.contains("find(|(candidate, _)| *candidate == executor)"),
+            "OMEGA-DELTA-0118: `reopen_refusal` in {} no longer asks \
+             `OMEGA-DELTA-0123`'s list whether the recorded executor can run \
+             here. Without that question every row claims to be reopenable and \
+             the ones that are not fail at the adapter.",
+            rows_path.display()
+        );
+        assert!(
+            refusal.contains("{reason}"),
+            "OMEGA-DELTA-0118: `reopen_refusal` in {} no longer renders the \
+             reason `OMEGA-DELTA-0123` gave. The composer's selector explains \
+             every name it cannot offer; a row that wrote its own explanation \
+             would be the same window answering \"why can I not use Codex\" \
+             twice, and \"not installed\" beside \"installed; Omega hosts no \
+             adapter for it\" sends somebody to install what they have.",
+            rows_path.display()
+        );
+        assert!(
+            !refusal.contains("not installed") && !refusal.contains("on PATH"),
+            "OMEGA-DELTA-0118: `reopen_refusal` in {} spells a reason of its \
+             own. Those belong to `unavailable` in the executor selector, and \
+             two copies drift.",
+            rows_path.display()
+        );
+
+        // 7. The keymaps: a narrower context added, and nothing removed.
+        for keymap in [
+            "assets/keymaps/default-macos.json",
+            "assets/keymaps/default-linux.json",
+            "assets/keymaps/default-windows.json",
+        ] {
+            let path = repository_path(keymap);
+            let source = read_repository_file(keymap);
+            assert!(
+                source.contains("\"AgentPanel && ZeroBase\"")
+                    && source.contains("agent::ToggleThreadsSidebar"),
+                "OMEGA-DELTA-0118: {} does not bind the threads sidebar in zero \
+                 base. The owner reaches it by `cmd-alt-j`; a menu entry alone \
+                 takes the key away from him.",
+                path.display()
+            );
+            assert!(
+                source.contains("multi_workspace::ToggleWorkspaceSidebar"),
+                "OMEGA-DELTA-0118: {} no longer binds the editor's workspace \
+                 sidebar. `OMEGA-DELTA-0048` deletes no shipped binding, and the \
+                 built-in keymap is unwrapped at startup — a binding naming a \
+                 missing action kills the process while `cargo check` stays \
+                 green, which is how `0.2.0-rc6` died.",
+                path.display()
+            );
+        }
+
+        // 8. The refusal a person reads reaches the window it is shown in.
+        let ui_path = repository_path(ZERO_BASE_UI_PATH);
+        let ui = read_repository_file(ZERO_BASE_UI_PATH);
+        let report = body_of(&ui, "report_refusal");
+        assert!(
+            report.contains("downcast::<MultiWorkspace>()"),
+            "OMEGA-DELTA-0118: `report_refusal` in {} does not resolve the \
+             workspace through the `MultiWorkspace` root. Every Omega window is \
+             opened with that root, so `downcast::<Workspace>()` alone answers \
+             `None` on every machine and no refusal toast is ever shown. The \
+             mode's safety argument is that hiding a surface is safe because \
+             something refuses it out loud; this is the out-loud half.",
+            ui_path.display()
+        );
     }
 }

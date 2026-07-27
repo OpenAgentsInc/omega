@@ -5400,3 +5400,117 @@ than merely stated.
   executor nobody chose — but a warm adapter belonging to a closed window still
   lives until then, and one belonging to a crashed Omega is not reclaimed at
   all.
+
+### OMEGA-DELTA-0118 — Zero base's threads sidebar is its own, and a thread reopens on the executor that made it
+
+- **Upstream Zed:** thread history lives in the workspace sidebar, beside the
+  projects. There is no mode in which the workspace is absent, so there is no
+  second place for it to live.
+- **Omega, before this:** the agent panel's `…` menu carried an entry reading
+  "Toggle Threads Sidebar", bound `cmd-alt-j`, and in zero base pressing it did
+  nothing at all. The owner, testing a live build: *"this 'Toggle Threads
+  Sidebar' does nothing when i click on it but i want it. i want threads sidebar
+  to see historical chats."*
+- **What it actually was.** Not an unimplemented feature and not a zero-width
+  panel. The entry named `multi_workspace::ToggleWorkspaceSidebar`, and
+  `multi_workspace` is outside zero base's admitted set, so `App::set_action_gate`
+  refused it **before any listener ran**. It was a control that is drawn and
+  denied, which is the exact failure `OMEGA-DELTA-0053` names about the
+  status-bar dock button — "if the gate refuses an action, its control must not
+  be drawn" — reappearing on a surface that mode still renders.
+- **Admitting the namespace would have been the wrong repair, and this is the
+  part that decided the shape.** `multi_workspace`'s sidebar is the project
+  switcher: projects, workspaces, thread import, a folder picker, `NewThread`,
+  and windows it can move a project into. It hangs off `MultiWorkspace`, which
+  is *above* the `Workspace` that `OMEGA-DELTA-0053` seals, so nothing about the
+  seal contains it. One name added to `ADMITTED_NAMESPACES` would have put the
+  editor's whole navigation back inside a mode whose premise is that it is
+  absent — `OMEGA-DELTA-0052` weakened by one line in a constant, which is how
+  that kind of thing always goes. So zero base gets a surface of its own,
+  reachable through `agent::ToggleThreadsSidebar`, and the `agent` namespace was
+  already admitted: **`ADMITTED_NAMESPACES` and `ADMITTED_ACTIONS` are byte-for-byte
+  unchanged by this delta.**
+- **The menu entry names the action that works in the mode the window is in.**
+  In `--full-editor` it still names `multi_workspace::ToggleWorkspaceSidebar`,
+  because there the project switcher is the right answer and it is not refused.
+  In zero base it names the panel's own. Two entries with one label is not a
+  fork of the feature: it is one label over the only sidebar each window has.
+- **Nothing was deleted, and `cmd-alt-j` still means what it meant.** The
+  editor's binding is untouched in all three shipped keymaps. What was added is
+  a narrower context, `AgentPanel && ZeroBase`, which is why the panel's key
+  context now carries `ZeroBase` when the mode is on. `OMEGA-DELTA-0048`'s rule
+  holds: no shipped binding is removed, and `keymaps_name_no_deleted_action`
+  stays green.
+- **Every refusal this gate has ever made was silent, and that is why "nothing
+  happened" rather than "no".** `report_refusal` resolved its window with
+  `active_window().downcast::<Workspace>()`. Every Omega window is opened with a
+  `MultiWorkspace` root wrapping the workspace, so that downcast answered `None`
+  on every machine, the `let else` returned, and **no zero-base refusal toast has
+  ever been shown**. `OMEGA-DELTA-0053` records the owner pressing a denied
+  status-bar control and reporting that nothing happened; that was this. The
+  mode's entire safety argument is that hiding a surface is safe *because*
+  something refuses it out loud, and the out-loud half was switched off by a type
+  parameter. It now reads the workspace through the `MultiWorkspace` root, and
+  falls back to a bare `Workspace` root so a test window still gets its toast.
+- **What the sidebar shows.** Past conversations, newest first, each row a title,
+  a compact age — `3s`, `4m`, `2h`, `5d` — and the executor that ran it when that
+  is not Omega's own loop. The age is not decoration: omega#100 found in the
+  `@`-mention list that threads are named by a summarisation model, so two
+  conversations routinely carry the same title, and the owner's words there were
+  "if the last two chats have same name i cant tell the difference". The same
+  list, ordered by the same field, needs the same answer. Nothing is drawn for
+  Omega's own loop, which is `OMEGA-DELTA-0021`'s convention everywhere else in
+  this crate: naming Omega inside Omega is noise, and absence already means the
+  default.
+- **Drafts are not history.** A draft is a thread whose first message was never
+  sent — no session id, no transcript. The person asked for historical chats, and
+  a list whose top row is the empty composer he is looking at buries what he
+  opened it to find. Archived threads are excluded for the reason archiving
+  exists. The list is bounded at 200 rows, which bounds the drawing rather than
+  the query: the store is already in memory.
+- **A thread reopens on the executor that recorded it, never on the one
+  selected.** A session id is not portable — it names a conversation inside the
+  agent server that created it — so resuming a Codex session on Claude's
+  connection reaches an adapter that has never heard of it and answers `no
+  rollout found for thread id ...`. That sentence is about a rollout file; the
+  question was "can I have my chat back". `load_agent_thread` is therefore handed
+  `metadata.agent_id`, which means the ordinary cross-executor case simply works:
+  a Codex thread opened while Claude is selected opens **on Codex**.
+- **The one case that cannot work refuses in a sentence, before it reaches an
+  adapter.** When the recorded executor cannot run on this machine at all — it
+  is on `omega_executor_selector::unavailable_here`, or an unrecognised adapter
+  id is not registered — the row is drawn muted and clicking it says so in the
+  sidebar. The refusal is rendered where the person is already looking rather
+  than as a toast, which is the same judgement the bullet above records about
+  notifications in a sealed window.
+- **The reason in that sentence is `OMEGA-DELTA-0123`'s, not a second one.**
+  That delta had just made the composer's selector explain every name it cannot
+  offer — `Codex — not installed`, `installed; Omega hosts no adapter for it`,
+  the Exo lane's own refusal — and `unavailable` is where those live. The first
+  version of this sidebar wrote its own remedies, and a row reading "Codex is
+  not installed" two inches above a menu reading "installed; Omega hosts no
+  adapter for it" would send somebody to install what they already have. So the
+  list is passed in rather than recomputed, and what this adds is only the part
+  the menu has no reason to know: the transcript is inside that executor, so no
+  other one can produce it.
+- **It cannot push the composer around, structurally.** The sidebar is an
+  absolutely positioned child appended last to the panel's flex column, so it
+  takes part in no other element's layout. `OMEGA-DELTA-0105` records that the
+  composer row already has to wrap so a narrow dock does not clip Send; a sidebar
+  that took width out of that row would have made the clip it protects against
+  more likely, not less. Closing is the same action again, `cmd-alt-j`, or the
+  close control in the sidebar's own header.
+- **Enforced by:** `zero_bases_threads_sidebar_is_its_own_and_reopens_by_executor`
+  in `crates/omega_deltas/`, and nine unit tests in
+  `crates/agent_ui/src/omega_threads_sidebar.rs` covering the order, the age, the
+  draft and archive exclusions, the executor naming, the bound, and both
+  refusals — including that the sidebar spells no reason of its own. Each assertion in the delta check was watched failing against the
+  source with the corresponding edit reverted.
+- **What this does not cover.** **No window has been opened.** Nothing in this
+  repository starts the binary, so the drawing is unproved: the overlay's width
+  against a narrow dock, the rows against a long title, and the refusal line's
+  wrapping have not been photographed. It also says nothing about keyboard
+  navigation *inside* the list — the sidebar is click-driven and does not take
+  focus, deliberately, because stealing focus from the composer to browse
+  history is the trade the owner has not asked for. And it does not make the
+  sidebar's open state persist: closing the process closes the sidebar.
