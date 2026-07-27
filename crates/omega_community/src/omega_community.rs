@@ -26,6 +26,19 @@
 //! The signing is somebody's own — a [`SignedRecord`] is *accepted*, never
 //! produced, so a person's key stays theirs and Omega never holds one to hold.
 //!
+//! # What `OMEGA-DELTA-0113` added
+//!
+//! The first cut of this crate described a room and could not be used to enter
+//! one. Four modules close that: [`Invitation`] is a room and the Forge's
+//! answer in a line somebody can paste, [`JoinedRooms`] is the durable set that
+//! becomes the composer's selector, [`RoomPresence`] is who Omega has actually
+//! verified writing here, and [`parse_command`] is the grammar of an
+//! instruction typed into a conversation rather than clicked in a pane.
+//!
+//! All four keep this crate's rule: they are values and functions of values.
+//! The clock, the key, the storage and the transport all arrive from the edge,
+//! which is `agent_ui::omega_community_control`.
+//!
 //! # GitHub is still where the code goes
 //!
 //! This is worth stating in the crate that names the Forge, because the Forge
@@ -38,7 +51,11 @@
 
 #![deny(missing_docs)]
 
+mod command;
+mod invitation;
+mod joined;
 mod outbox;
+mod presence;
 mod record;
 
 use std::fmt;
@@ -46,10 +63,17 @@ use std::fmt;
 use omega_audience::{Audience, AudienceId, AudienceIdError, AudienceRoster};
 use serde::{Deserialize, Serialize};
 
-pub use outbox::{
-    MAX_DELIVERY_ATTEMPTS, Outbox, OutboxEntry, QueueOutcome, RelayOutcome, TERMINAL_OK_PREFIXES,
-    UnknownRecord,
+pub use command::{
+    COMMAND_HELP, COMMAND_PREFIX, COMMAND_VERBS, Command, CommandRefused, JOIN, LEAVE, POST,
+    STATUS, WHO, parse as parse_command,
 };
+pub use invitation::{INVITATION_FIELDS, INVITATION_TAG, Invitation, InvitationRefused};
+pub use joined::{JoinOutcome, JoinRefused, JoinReport, JoinedRoom, JoinedRooms};
+pub use outbox::{
+    Delivery, MAX_DELIVERY_ATTEMPTS, Outbox, OutboxEntry, QueueOutcome, RelayOutcome,
+    TERMINAL_OK_PREFIXES, UnknownRecord,
+};
+pub use presence::{Participant, RoomPresence};
 pub use record::{
     AuthorizedMessage, MESSAGE_KIND, PostRefused, REPOSITORY_ANNOUNCEMENT_KIND, RecordRefused,
     SignedRecord, UnsignedRecord, binding_of, may_post,

@@ -4302,6 +4302,88 @@ than merely stated.
   control and the label a person sees are unverified. The artifact lives in
   memory for the life of the thread; it does not survive a restart, and no check
   asserts that it does.
+### OMEGA-DELTA-0113 — A joined Forge room reaches the composer's selector, and is operated from a line
+
+- **Upstream Zed:** the composer has no audience. A conversation is local, there
+  is no room to be invited into, and no way to say from inside the conversation
+  that a person now belongs to one.
+- **Omega before this change:** `OMEGA-DELTA-0094` gave a thread an audience and
+  a control to read it on; `OMEGA-DELTA-0106` said what a shared audience stands
+  on. Neither connected them. The only non-Local entry any selector could show
+  was the `OMEGA_AUDIENCE_PREVIEW` fixture, and joining a room was not something
+  a person could do at all — `omega#108` recorded it plainly: "it ships no
+  transport, no composer control, and no pane."
+- **Omega now:** an invitation is a line, accepting it is a line, and the room
+  it admits you to is in the composer's audience selector for as long as you are
+  in it. `omega_community::JoinedRooms` is the durable set,
+  `agent_ui::omega_community_control` is the edge that stores it and reads a
+  key, and `omega_audience_control` builds its roster from that seam rather than
+  keeping a second list beside it.
+- **The room is a line, not a pane.** The owner's requirement in omega#108 is
+  that "joining, seeing who is present, and posting are conversation actions"
+  rather than a separate administrative surface. So `omega_community_control`
+  renders nothing and has no menu; its whole control surface is `run`, which
+  takes a line somebody typed. The grammar lives in `omega_community::command`,
+  where it is checked without a window.
+- **The recogniser is a literal, deliberately.** `parse` answers `None` for
+  anything not beginning with `/community`, and refuses an unknown verb by name
+  rather than resolving it to the nearest one. A person writing "I should join
+  the omega room" to their agent has described an intention, not issued an
+  instruction, and a recogniser that could not tell those apart is one that
+  sometimes publishes on a hunch. "Did you mean post" is a helpful sentence and
+  a dangerous behaviour.
+- **A verb that takes nothing refuses the rest of the line.** `\/community leave
+  the room when you are done` reads like a sentence; ignoring the tail would
+  have left the room.
+- **An invitation carries the Forge's own answer, and grants nothing.**
+  `FORGE-04` binds one npub per tenant and issues the roles; with no transport,
+  the binding travels in the invitation instead of being fetched. It is a claim
+  and not an authority: what it decides is which room appears in *this* person's
+  selector, which is their decision about their own machine. The Forge still
+  issues the credentials, and the relay still refuses an event from somebody it
+  does not admit.
+- **An unrecognised invitation field is refused; an unrecognised role is kept.**
+  The opposite calls, on purpose. A role this build has not heard of grants
+  nothing, so refusing it would lock somebody out of a room they are in. A field
+  may be part of the room's address, and joining while discarding it is joining
+  something other than what was sent.
+- **A room a person cannot read never reaches the selector.** `JoinedRooms::join`
+  asks the Forge's answer before it records anything, so a revoked binding is
+  refused at the join. A selector entry that fails on the first send is worse
+  than no entry: it is an invitation to type the message again.
+- **Leaving keeps nothing, and says what that costs.** The room goes, and the
+  threads recorded in it stop resolving — `Unknown audience` rather than
+  private, because a conversation held in a room this profile has left was never
+  private and Omega will not start saying it was.
+- **"Who is here" answers what Omega has verified, and names its own basis.**
+  The Forge answers about one binding at a time, so there is no roll to read.
+  `RoomPresence` lists the keys that have signed a record in the room, and says
+  in the same breath that this is not a member list. "3 people are here" would
+  have been a confident wrong answer to a question this cannot answer.
+- **Nothing reports a send that did not happen.** `\/community post` runs the
+  whole authorization — `may_publish`, the room match, the Forge's roles — and
+  composes the exact bytes, and then says that nothing in this build signs or
+  reaches a relay. The message is not queued and it is not lost; there is
+  nowhere for it to go. The refusals, though, are real today, and they are
+  omega#108's own falsifiers.
+- **The key is read at the edge and nowhere else.** `omega_community` still
+  names no key type outside its tests, so a person's identity stays theirs;
+  `omega_community_control` reads the public half from `omega_identity`, which
+  is where a check can see it.
+- **Enforced by:** `the_selector_offers_the_rooms_a_person_joined`,
+  `the_room_is_operated_from_a_line_and_not_a_pane`, and
+  `posting_is_authorized_before_a_single_byte_is_composed` in
+  `crates/omega_deltas/`, plus the crate's own checks in
+  `crates/omega_community/`. `OMEGA-DELTA-0106`'s dependency and
+  key/host bans now cover every file in the crate rather than the three it
+  shipped with, so a new module cannot be the one that quietly opens a socket.
+- **What this does not cover.** There is still no transport and no signer wired,
+  so nothing leaves the machine and no record arrives — which means acceptance 2
+  of omega#108 (a message visible to the other member) is not reachable in this
+  build and is honestly reported as such rather than simulated. `run` is not yet
+  called from the composer's send path; the line a person types has an executor
+  and not yet a caller.
+
 ### OMEGA-DELTA-0107 — Omega reads Exo's durable log from a server the owner runs, and starts none
 
 - **Upstream Zed:** no Exo, no exoharness, no second agent runtime whose durable

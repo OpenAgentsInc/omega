@@ -495,6 +495,29 @@ pub(crate) mod tests {
         signed_message(text)
     }
 
+    /// A second key's record, for the presence tests. A different person, so
+    /// the room has somebody in it other than the profile asking.
+    pub(crate) fn another_signed_message_for_tests(text: &str, created_at: u64) -> SignedRecord {
+        let repository = omega_repository();
+        let keys = Keys::new(SecretKey::from_slice(&[9u8; 32]).expect("a valid test secret"));
+        let audience = roster_with_room().describe(&repository.audience_id().expect("an identity"));
+
+        let unsigned = AuthorizedMessage::prepare(
+            &repository,
+            &membership(MembershipState::Active, &[RoleRef::Member]),
+            &audience,
+            keys.public_key(),
+            text,
+        )
+        .expect("a member of the room may post")
+        .into_unsigned(created_at);
+
+        let event = sign(&keys, unsigned.event().clone());
+        unsigned
+            .accept_signature(event)
+            .expect("a signature over exactly those bytes")
+    }
+
     fn signed_message(text: &str) -> SignedRecord {
         let repository = omega_repository();
         let keys = test_keys();

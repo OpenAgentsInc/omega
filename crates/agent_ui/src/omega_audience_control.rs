@@ -111,7 +111,20 @@ fn loaded(cx: &mut App) -> Loaded {
         .and_then(|raw| serde_json::from_str(&raw).log_err())
         .unwrap_or_default();
 
-    let roster = AudienceRoster::new(preview_audience());
+    // `OMEGA-DELTA-0113`, omega#108. The rooms this profile has joined, then
+    // the fixture if the environment asked for it. Real places first: the
+    // fixture is a rendering aid and an entry above somebody's actual workspace
+    // would be the fixture presenting itself as the more important of the two.
+    //
+    // Read through the seam rather than built here, because what a joined room
+    // *is* — a Forge repository, a membership the Forge granted, a refusal when
+    // it did not — belongs in `omega_community`, and this module's job is the
+    // window.
+    let roster = AudienceRoster::new(
+        crate::omega_community_control::joined_audiences(cx)
+            .into_iter()
+            .chain(preview_audience()),
+    );
 
     // A selection that names an audience this profile no longer has resolves
     // to Local rather than staying pointed at it. Leaving a community and
@@ -132,6 +145,23 @@ fn loaded(cx: &mut App) -> Loaded {
     };
     cx.default_global::<OmegaAudience>().loaded = Some(loaded.clone());
     loaded
+}
+
+/// Drops the cached roster, selection and book so the next read rebuilds them.
+///
+/// `OMEGA-DELTA-0113`, omega#108. Joining or leaving a room changes what the
+/// selector offers, and the roster is hydrated once and held in a global.
+/// Without this, a person who joins a room in the conversation sees the
+/// composer keep offering the list it had at launch, which reads as the join
+/// not having worked.
+///
+/// It drops the whole `Loaded`, not just the roster, because the selection is
+/// filtered against the roster when it is read: leaving the room a person had
+/// selected has to fall back to Local, and that decision is made in
+/// [`loaded`].
+pub fn forget_roster(cx: &mut App) {
+    cx.default_global::<OmegaAudience>().loaded = None;
+    cx.refresh_windows();
 }
 
 /// The fixture audience, when the environment asks for it.

@@ -101,6 +101,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0106",
     "OMEGA-DELTA-0107",
     "OMEGA-DELTA-0110",
+    "OMEGA-DELTA-0113",
 ];
 
 /// OMEGA-DELTA-0106. The community audience: a Forge repository, its members,
@@ -112,6 +113,38 @@ pub const COMMUNITY_RECORD_PATH: &str = "crates/omega_community/src/record.rs";
 
 /// OMEGA-DELTA-0106. Where what has not reached the relay stays visible.
 pub const COMMUNITY_OUTBOX_PATH: &str = "crates/omega_community/src/outbox.rs";
+
+/// OMEGA-DELTA-0113. What an invitation carries, and how it is read.
+pub const COMMUNITY_INVITATION_PATH: &str = "crates/omega_community/src/invitation.rs";
+
+/// OMEGA-DELTA-0113. Every room this profile has joined.
+pub const COMMUNITY_JOINED_PATH: &str = "crates/omega_community/src/joined.rs";
+
+/// OMEGA-DELTA-0113. Who Omega has verified in a room, and on what basis.
+pub const COMMUNITY_PRESENCE_PATH: &str = "crates/omega_community/src/presence.rs";
+
+/// OMEGA-DELTA-0113. The grammar of an instruction typed into the conversation.
+pub const COMMUNITY_COMMAND_PATH: &str = "crates/omega_community/src/command.rs";
+
+/// OMEGA-DELTA-0113. The edge that stores the rooms, reads a key, and answers.
+pub const COMMUNITY_CONTROL_PATH: &str = "crates/agent_ui/src/omega_community_control.rs";
+
+/// OMEGA-DELTA-0106, widened by OMEGA-DELTA-0113. Every source file in the room
+/// crate.
+///
+/// Listed rather than walked, so that adding a module is a deliberate act that
+/// puts the new file under the same key and host bans as the rest. A check that
+/// globbed would silently cover a new file, which sounds better and means the
+/// ban is never read by the person adding one.
+pub const COMMUNITY_SOURCE_PATHS: &[&str] = &[
+    COMMUNITY_PATH,
+    COMMUNITY_RECORD_PATH,
+    COMMUNITY_OUTBOX_PATH,
+    COMMUNITY_INVITATION_PATH,
+    COMMUNITY_JOINED_PATH,
+    COMMUNITY_PRESENCE_PATH,
+    COMMUNITY_COMMAND_PATH,
+];
 
 /// OMEGA-DELTA-0106. The manifest that keeps the room out of the transport
 /// business.
@@ -12962,7 +12995,7 @@ mod tests {
             );
         }
 
-        for relative in [COMMUNITY_PATH, COMMUNITY_RECORD_PATH, COMMUNITY_OUTBOX_PATH] {
+        for relative in COMMUNITY_SOURCE_PATHS.iter().copied() {
             let source = read_repository_file(relative);
             let production = source
                 .split("#[cfg(test)]")
@@ -13038,6 +13071,170 @@ mod tests {
             "OMEGA-DELTA-0106: `may_post` in {} matches on `ThreadAudience` \
              itself. That is the second copy of the rule, written out.",
             record_path.display()
+        );
+    }
+
+    /// OMEGA-DELTA-0113. A room a person joined is in the composer's selector,
+    /// and it gets there before the next launch.
+    ///
+    /// omega#108 deliverable 2. Two halves, and the second is the one that
+    /// looks optional and is not. The roster is hydrated once and held in a
+    /// global; without dropping it, somebody joins a room in the conversation,
+    /// reads a sentence saying they joined, opens the selector, and sees the
+    /// list the composer had at launch. Nothing is broken and nothing says so.
+    #[test]
+    fn the_selector_offers_the_rooms_a_person_joined() {
+        let control_path = repository_path(AUDIENCE_CONTROL_PATH);
+        let control = uncommented(&read_repository_file(AUDIENCE_CONTROL_PATH));
+        let indented = with_free_functions_indented(&control);
+
+        let loaded = body_of(&indented, "loaded");
+        assert!(
+            loaded.contains("omega_community_control::joined_audiences(cx)"),
+            "OMEGA-DELTA-0113: `loaded` in {} no longer reads the rooms this \
+             profile joined. The selector would offer Local and the \
+             `OMEGA_AUDIENCE_PREVIEW` fixture, which is the state omega#108 \
+             exists to leave.",
+            control_path.display()
+        );
+        assert!(
+            control.contains("pub fn forget_roster"),
+            "OMEGA-DELTA-0113: {} no longer offers a way to drop the cached \
+             roster. Joining is a conversation action, and the composer holds \
+             its list in a global.",
+            control_path.display()
+        );
+
+        let room_path = repository_path(COMMUNITY_CONTROL_PATH);
+        let rooms = uncommented(&read_repository_file(COMMUNITY_CONTROL_PATH));
+        let indented = with_free_functions_indented(&rooms);
+        for act in ["join", "leave"] {
+            assert!(
+                body_of(&indented, act).contains("forget_roster(cx)"),
+                "OMEGA-DELTA-0113: `{act}` in {} no longer drops the cached \
+                 roster. The record changes, the selector does not, and the \
+                 person is told the opposite of what they can see.",
+                room_path.display()
+            );
+        }
+    }
+
+    /// OMEGA-DELTA-0113. The room is operated from a line, not from a pane.
+    ///
+    /// The owner's requirement in omega#108, and the one a later change is most
+    /// likely to undo by being helpful: somebody adds a button, then a menu,
+    /// then a settings section, and each step is small. So the edge module is
+    /// held to rendering nothing at all.
+    ///
+    /// The other half is the recogniser. `parse` must answer `None` for a line
+    /// that does not begin with the literal prefix — a person writing "I should
+    /// join the omega room" to their agent has described an intention, and a
+    /// recogniser that could not tell that from an instruction is one that
+    /// sometimes publishes on a hunch.
+    #[test]
+    fn the_room_is_operated_from_a_line_and_not_a_pane() {
+        let control_path = repository_path(COMMUNITY_CONTROL_PATH);
+        let control = read_repository_file(COMMUNITY_CONTROL_PATH);
+        let production = control
+            .split("#[cfg(test)]")
+            .next()
+            .expect("splitting always yields a first part");
+
+        for pane in [
+            "PopoverMenu",
+            "ContextMenu",
+            "IconButton",
+            "Button::new",
+            "fn render",
+        ] {
+            assert!(
+                !production.contains(pane),
+                "OMEGA-DELTA-0113: {} names `{pane}`. omega#108's owner asked \
+                 that joining, seeing who is present, and posting be \
+                 conversation actions rather than a separate administrative \
+                 surface, and a pane arrives one helpful control at a time.",
+                control_path.display()
+            );
+        }
+        assert!(
+            production.contains("pub fn run("),
+            "OMEGA-DELTA-0113: {} no longer offers `run`. It is the whole \
+             control surface: a line somebody typed.",
+            control_path.display()
+        );
+
+        let command_path = repository_path(COMMUNITY_COMMAND_PATH);
+        let command = read_repository_file(COMMUNITY_COMMAND_PATH);
+        let indented = with_free_functions_indented(&uncommented(&command));
+        let parse = body_of(&indented, "parse");
+        assert!(
+            parse.contains("strip_prefix(COMMAND_PREFIX)") && parse.contains("return None"),
+            "OMEGA-DELTA-0113: `parse` in {} no longer recognises an \
+             instruction by a literal prefix and declines everything else. \
+             Almost every line in a conversation is not an instruction.",
+            command_path.display()
+        );
+        assert!(
+            !parse.contains("contains(") && !parse.contains("starts_with(JOIN"),
+            "OMEGA-DELTA-0113: `parse` in {} looks for a verb inside a \
+             sentence. That is the inference this grammar exists to refuse.",
+            command_path.display()
+        );
+    }
+
+    /// OMEGA-DELTA-0113. Posting authorizes before it composes, and the
+    /// authorization is the room's, not a second copy of it.
+    ///
+    /// omega#108: "Authorization and audience checks happen **before** an
+    /// effect, not after." `AuthorizedMessage::prepare` is the only constructor
+    /// that performs them, so the way this is lost is not by deleting the call
+    /// — it is by the edge composing an `UnsignedRecord` some other way, or by
+    /// re-deciding on the audience here with a `match` that looks equivalent.
+    #[test]
+    fn posting_is_authorized_before_a_single_byte_is_composed() {
+        let control_path = repository_path(COMMUNITY_CONTROL_PATH);
+        let control = uncommented(&read_repository_file(COMMUNITY_CONTROL_PATH));
+        let indented = with_free_functions_indented(&control);
+        let post = body_of(&indented, "post");
+
+        let authorize = post.find("AuthorizedMessage::prepare").unwrap_or_else(|| {
+            panic!(
+                "OMEGA-DELTA-0113: `post` in {} no longer calls \
+                 `AuthorizedMessage::prepare`. It is the only constructor that \
+                 asks the audience rule, the room binding and the Forge's roles, \
+                 and it asks them before anything is composed.",
+                control_path.display()
+            )
+        });
+        let compose = post.find("into_unsigned").unwrap_or_else(|| {
+            panic!(
+                "OMEGA-DELTA-0113: `post` in {} no longer composes the bytes it \
+                 authorized. A check that cannot find what it is about must \
+                 fail rather than pass.",
+                control_path.display()
+            )
+        });
+        assert!(
+            authorize < compose,
+            "OMEGA-DELTA-0113: `post` in {} composes before it authorizes. \
+             omega#108 asks for the check before the effect, and composing \
+             somebody's message into signable bytes is the first half of the \
+             effect.",
+            control_path.display()
+        );
+        assert!(
+            !post.contains("ThreadAudience::Known"),
+            "OMEGA-DELTA-0113: `post` in {} decides about the audience itself. \
+             That is the second copy of `may_publish`, written out at the edge \
+             where it is furthest from the rule it duplicates.",
+            control_path.display()
+        );
+        assert!(
+            control.contains("NOTHING_IS_WIRED_TO_SEND"),
+            "OMEGA-DELTA-0113: {} no longer says that nothing signs or reaches \
+             a relay. A verb that reports a send into a room nothing reaches is \
+             the one failure this surface must not have.",
+            control_path.display()
         );
     }
 
