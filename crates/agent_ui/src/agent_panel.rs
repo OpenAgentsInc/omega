@@ -3514,6 +3514,7 @@ impl AgentPanel {
         // docks, so there is nothing beside it to subtract. `thread_view` reads
         // the viewport the same way to decide when its Exo controls go compact.
         let layout = omega_sidebar::layout(window.viewport_size().width, self.sidebar.open);
+        let traffic_lights = cfg!(target_os = "macos") && !window.is_fullscreen();
         let (background, border) = {
             let colors = cx.theme().colors();
             (colors.panel_background, colors.border)
@@ -3536,7 +3537,8 @@ impl AgentPanel {
                 column
                     .id("omega-sidebar-rail")
                     .items_center()
-                    .pt_1p5()
+                    .when(traffic_lights, |this| this.pt(Tab::container_height(cx)))
+                    .when(!traffic_lights, |this| this.pt_1p5())
                     .child(
                         IconButton::new("expand-omega-sidebar", IconName::ChevronRight)
                             .icon_size(IconSize::Small)
@@ -3572,6 +3574,9 @@ impl AgentPanel {
                         .h(Tab::container_height(cx))
                         .flex_shrink_0()
                         .px_2()
+                        .when(traffic_lights, |this| {
+                            this.pl(px(ui::utils::TRAFFIC_LIGHT_PADDING))
+                        })
                         .justify_between()
                         .bg(cx.theme().colors().tab_bar_background)
                         .border_b_1()

@@ -18086,6 +18086,12 @@ mod tests {
              `border_variant` again, which is a lighter weight than the \
              toolbar's `border` right next to it."
         );
+        assert!(
+            sidebar_header.contains("ui::utils::TRAFFIC_LIGHT_PADDING"),
+            "OMEGA-DELTA-0131: the sidebar header no longer reserves the macOS \
+             traffic-light safe area, so its Omega label is hidden behind the \
+             close, minimize and zoom controls."
+        );
     }
 
     /// OMEGA-DELTA-0132. The Exo child is told where Exo's harness lives.

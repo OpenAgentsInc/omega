@@ -6228,6 +6228,11 @@ for that stretch is three `OMEGA-DELTA-0115: a person chose …` lines, each
 followed a second later by an ACP connection and by nothing else — no
 `OMEGA-DELTA-0095` attach, no Exo lane, because the router never ran.
 
+The sidebar header is part of the same truthful labeling contract. On macOS it
+reserves the platform traffic-light safe area before drawing **Omega**, rather
+than placing the label behind the close, minimize and zoom controls. When the
+sidebar is collapsed, its expand control starts below that title-bar row.
+
 **So in zero base a new thread is built on Omega's router and nothing else.**
 The router implements all four executors; sitting directly on one of them is
 precisely what took the choice away. The clamp is in `AgentPanel::selected_agent`
