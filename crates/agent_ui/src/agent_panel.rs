@@ -1861,10 +1861,8 @@ impl AgentPanel {
 
     /// The agent a **new** thread here is built on.
     ///
-    /// `OMEGA-DELTA-0131`, omega#121. Zero base has one agent selection and it
-    /// is the executor selector in the composer. The panel has another — Zed's,
-    /// kept per workspace and again globally as the last-used agent — and the
-    /// two were not connected to each other.
+    /// `OMEGA-DELTA-0131`, omega#121. The panel's inherited agent selection is
+    /// kept per workspace and globally as the last-used agent.
     ///
     /// The owner selected Exo, the selector said Exo, he typed `who are you`,
     /// and Codex answered. Every other surface was telling the truth: the
@@ -1877,8 +1875,8 @@ impl AgentPanel {
     /// choice.
     ///
     /// So in zero base a new thread is built on Omega's router and nothing
-    /// else. The router implements all four executors; sitting directly on one
-    /// of them is what took the choice away.
+    /// else. `OMEGA-DELTA-0150` additionally keeps the router's unpinned
+    /// decision on Omega's native loop.
     ///
     /// **The clamp is here, on the accessor, and not on the stored field.**
     /// That is the correction to the first version of this fix, which clamped
@@ -1899,9 +1897,8 @@ impl AgentPanel {
         } else if omega_zero_base::is_active() && !matches!(self.selected_agent, Agent::NativeAgent)
         {
             log::info!(
-                "OMEGA-DELTA-0131: a new thread in zero base is built on Omega's \
-                 router rather than on {} directly, so the executor selector is \
-                 the only agent choice there is",
+                "OMEGA-DELTA-0150: a new thread in zero base is built on Omega's \
+                 native router rather than on {} directly",
                 self.selected_agent.label()
             );
             Agent::NativeAgent

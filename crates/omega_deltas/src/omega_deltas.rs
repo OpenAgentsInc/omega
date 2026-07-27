@@ -138,6 +138,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0147",
     "OMEGA-DELTA-0148",
     "OMEGA-DELTA-0149",
+    "OMEGA-DELTA-0150",
 ];
 
 /// OMEGA-DELTA-0125. Every entry the thread header's `…` menu offers, the
@@ -9427,11 +9428,10 @@ mod tests {
             law_path.display()
         );
         assert!(
-            unpinned.contains("if inputs.external_acp.is_some() {")
-                && unpinned.contains("reason: RouteReason::DetectedExternalAcp"),
-            "OMEGA-DELTA-0055: {} no longer routes an unpinned thread to an \
-             attached external agent. With the pin control removed, that leaves \
-             the Exo lane unreachable by any means.",
+            unpinned.contains("RouteDecision::native(RouteReason::UnpinnedDefault, None)")
+                && !unpinned.contains("ExecutorClass::ExternalAcp")
+                && !unpinned.contains("DetectedExternalAcp"),
+            "OMEGA-DELTA-0150: an unpinned new chat in {} can leave Omega.",
             law_path.display()
         );
         assert!(
@@ -9442,14 +9442,6 @@ mod tests {
              be able to reach one.",
             law_path.display()
         );
-        assert!(
-            law.contains("DetectedExternalAcp,"),
-            "OMEGA-DELTA-0055: {} no longer declares the reason an automatic \
-             route is recorded under. A route the journal cannot name is a \
-             route nobody can explain afterwards.",
-            law_path.display()
-        );
-
         let mode_path = repository_path(ZERO_BASE_MODE_PATH);
         let mode = std::fs::read_to_string(&mode_path).unwrap_or_default();
         assert!(
@@ -9677,8 +9669,7 @@ mod tests {
         assert!(
             resolve.contains("omega_agent_detect::exo::derive_lane_from_env()"),
             "OMEGA-DELTA-0092: {} no longer derives a lane from the install. \
-             `OMEGA-DELTA-0055` routes an unpinned thread to the external agent \
-             that is attached; without this, nothing attaches one.",
+             Without this, Omega cannot preload or deliberately route to it.",
             lane_path.display()
         );
         assert!(
@@ -13005,8 +12996,7 @@ mod tests {
             router.contains("omega_agent_attach::connect_detected_executor")
                 && router.contains("with_external_acp(installed)"),
             "OMEGA-DELTA-0095: {} no longer registers the installed coding \
-             agent as the router's external executor, so an unpinned thread \
-             falls to the native loop on a machine with Codex.",
+             agent behind Omega's router for deliberate internal use.",
             router_path.display()
         );
 
@@ -15391,14 +15381,13 @@ mod tests {
 
     // ------ OMEGA-DELTA-0115
 
-    /// OMEGA-DELTA-0115 and OMEGA-DELTA-0149. The provider's own controls
-    /// remain, while the executor dropdown is absent.
+    /// OMEGA-DELTA-0149 and OMEGA-DELTA-0150. Executor and external-provider
+    /// controls are absent from Omega's composer.
     ///
-    /// The provider controls and selector used to be entangled in an either/or.
-    /// The provider controls now remain independently, while both the executor
-    /// selector and inherited model selector are checked by absence.
+    /// Routing infrastructure remains behind Omega; its external executors do
+    /// not contribute controls to the zero-base composer.
     #[test]
-    fn the_composer_hides_the_executor_selector_and_keeps_provider_controls() {
+    fn the_composer_shows_no_executor_or_external_provider_controls() {
         let view_path = repository_path(THREAD_VIEW_PATH);
         let view = read_repository_file(THREAD_VIEW_PATH);
         let bar = body_of(&view, "render_zero_base_executor_bar");
@@ -15411,12 +15400,9 @@ mod tests {
             view_path.display()
         );
         assert!(
-            bar.contains(".children(self.config_options_view.clone())"),
-            "OMEGA-DELTA-0115: zero base's composer bar in {} no longer draws \
-             the attached executor's own controls. They are Codex's settings \
-             and the selector is whether it is Codex at all; the owner asked \
-             for both, and an either/or hides one of them exactly when it is \
-             wanted.",
+            !bar.contains("config_options_view"),
+            "OMEGA-DELTA-0150: zero base's composer bar in {} draws controls \
+             supplied by an external executor.",
             view_path.display()
         );
         assert!(
@@ -15442,83 +15428,42 @@ mod tests {
         );
     }
 
-    /// OMEGA-DELTA-0115. Choosing actually re-attaches.
-    ///
-    /// The failure this refuses is a control that sets a value nothing reads.
-    /// `OmegaAgentConnection` holds one external-ACP slot, filled once at
-    /// connect: a pin chooses among the classes the router already has and
-    /// cannot make Claude reachable on a machine where Codex filled that slot.
-    /// So the router's `connect` is the only place a choice can take effect,
-    /// and this holds it there.
+    /// OMEGA-DELTA-0150. Retired UI selection cannot change what owns a new
+    /// chat.
     #[test]
-    fn choosing_an_executor_changes_what_the_router_attaches() {
+    fn a_retired_executor_selection_cannot_take_over_a_new_chat() {
         let router_path = repository_path(ROUTER_DISPATCH_PATH);
         let router = without_whitespace(&code_of(&read_repository_file(ROUTER_DISPATCH_PATH)));
 
         assert!(
             router.contains(&without_whitespace(
                 "crate::omega_executor_selector::attach_plan(
-                    crate::omega_executor_selector::selected(),
+                    None,
                     &installed_agents,
                     exo_lane_path.is_some(),
                 )"
             )),
-            "OMEGA-DELTA-0115: {} no longer asks what the person chose before \
-             it attaches. The selector would then be a control that sets a \
-             value nothing reads, which is worse than no control.",
+            "OMEGA-DELTA-0150: {} still lets retired selector state decide \
+             which executor is attached behind Omega.",
             router_path.display()
         );
         assert!(
             router.contains(&without_whitespace(
                 "if let (true, Some(exo_lane_path)) = (plan.exo, exo_lane_path) {"
             )),
-            "OMEGA-DELTA-0115: {} no longer lets a choice keep the Exo lane \
-             out of the external slot. The lane wins that slot by default, so \
-             a person who asked for Claude on a machine with Exo would never \
-             reach Claude.",
+            "OMEGA-DELTA-0150: {} no longer keeps explicit Exo attachment \
+             behind its process flag.",
             router_path.display()
         );
 
-        // Only a person chooses. `select` is the whole switching mechanism,
-        // and called from a turn it would be a thread quietly moving
-        // executors — the defect class the disclosure surface exists to stop.
-        // Counted across the tree for the reason
-        // `only_a_person_sends_a_thread_to_omegas_own_loop` counts its own.
-        let checks = normalize_path(&repository_path("crates/omega_deltas"));
-        let mut callers = Vec::new();
-        for_each_source_file(&repository_path("crates"), &["rs"], |path, source| {
-            if normalize_path(path).starts_with(&checks) {
-                return;
-            }
-            for line in code_of(source).lines() {
-                let trimmed = line.trim();
-                if trimmed.starts_with("pub fn ") || trimmed.starts_with("fn ") {
-                    continue;
-                }
-                if trimmed.contains("executor_selector::select(") || trimmed == "select(choice);" {
-                    callers.push(
-                        path.display()
-                            .to_string()
-                            .rsplit("crates/")
-                            .next()
-                            .unwrap_or_default()
-                            .to_owned(),
-                    );
-                }
-            }
-        });
-        assert_eq!(
-            callers,
-            vec![
-                THREAD_VIEW_PATH
-                    .strip_prefix("crates/")
-                    .expect("the thread view lives under crates/")
-            ],
-            "OMEGA-DELTA-0115: the executor choice is made somewhere other \
-             than the composer's own control. A choice made by a turn, a tool, \
-             or a retry is a thread moving executors without its reader \
-             asking, which is what every disclosure surface here exists to \
-             make impossible."
+        let thread_source = read_repository_file(THREAD_VIEW_PATH);
+        let thread_view = body_of(&thread_source, "render_zero_base_executor_bar");
+        assert!(
+            !thread_source.contains("_: &CycleExecutor")
+                && !thread_view.contains("render_executor_selector")
+                && !thread_view.contains("config_options_view"),
+            "OMEGA-DELTA-0150: the new-chat composer can still expose or invoke \
+             an external executor."
         );
     }
 

@@ -552,11 +552,9 @@ impl RouteDecision {
         };
         let fallback_lands_native = !self.reason.is_fallback()
             || (self.chosen == ExecutorClass::NativeLoop && self.pin.is_some());
-        // OMEGA-DELTA-0055. Both unpinned reasons carry no pin, and the
-        // detected one names the class it detected. Without the second clause a
-        // decision could claim it detected an external agent and run on the
-        // native loop, which is the same lie `fallback_lands_native` catches
-        // from the other direction.
+        // `DetectedExternalAcp` is retained for old durable records even though
+        // OMEGA-DELTA-0150 no longer emits it. Such a record still has to name
+        // the external class it actually ran.
         let unpinned_is_unpinned = !matches!(
             self.reason,
             RouteReason::UnpinnedDefault | RouteReason::DetectedExternalAcp
@@ -719,37 +717,9 @@ pub fn select_lane(lanes: &[EngineLane], pinned: Option<&str>) -> Option<String>
 #[must_use]
 pub fn route(inputs: &RouteInputs) -> RouteDecision {
     let Some(pin) = inputs.pin.clone() else {
-        // OMEGA-DELTA-0055. Nothing pinned, and something is attached.
-        //
-        // The pin used to be the only door into the Exo lane. The owner asked
-        // for the control that set it to go — "that UI selector makes no sense,
-        // i have no fucking clue what youre talking about so the user won't,
-        // remove that UI piece and handle it smartly in the background" — and
-        // removing the door without replacing it would have made the lane
-        // unreachable rather than automatic. So an unpinned thread runs on the
-        // external ACP agent when one is connected.
-        //
-        // Owner gate 8 is untouched, and the distinction is the whole reason
-        // this is admissible. The gate says no model-initiated path may start
-        // Full Auto authority. An engine lane *is* that authority, and an
-        // unpinned thread still never reaches one — the arm below is unchanged
-        // and still requires a pin. An external ACP agent is not that
-        // authority: `omega_exo_lane`'s module docs record the same reasoning
-        // in the other direction when they choose `ExternalAcp` for Exo
-        // *because* it is neither the first-party claim nor Full Auto.
-        //
-        // It is also not model-initiated. Nothing a turn can say attaches an
-        // external agent; that is a connection the process made at startup from
-        // what is installed on the machine.
-        if inputs.external_acp.is_some() {
-            return RouteDecision {
-                chosen: ExecutorClass::ExternalAcp,
-                reason: RouteReason::DetectedExternalAcp,
-                pin: None,
-                lane_ref: None,
-            };
-        }
-        // Nothing pinned and nothing attached. The native loop.
+        // OMEGA-DELTA-0150. A new chat is always Omega. External executors may
+        // be attached and warmed behind the router, but detection is not
+        // authority to hand them the person's conversation.
         return RouteDecision::native(RouteReason::UnpinnedDefault, None);
     };
 
@@ -931,29 +901,14 @@ mod tests {
         assert!(decision.is_coherent());
     }
 
-    /// `OMEGA-DELTA-0055`. An unpinned thread runs on the external agent that
-    /// is attached, and says which reason it was.
-    ///
-    /// This is what replaced the pin control the owner asked to remove. Before
-    /// it, `route` returned the native loop for every unpinned thread, so a
-    /// window with Exo attached still talked to whatever model provider was
-    /// configured — which is exactly what the owner was looking at when he
-    /// said the selector made no sense.
-    ///
-    /// Falsified by deleting the `external_acp` arm in `route`: this test fails
-    /// on `chosen`, and nothing else in the suite does, which is why it exists
-    /// rather than being folded into the test above.
+    /// `OMEGA-DELTA-0150`. Detection keeps an external executor ready without
+    /// making it the owner of a new chat.
     #[test]
-    fn an_unpinned_thread_runs_on_the_external_agent_that_is_attached() {
+    fn an_unpinned_thread_stays_on_omega_when_an_external_agent_is_attached() {
         let decision = route(&RouteInputs::native_only().with_external_acp("codex-acp"));
 
-        assert_eq!(decision.chosen, ExecutorClass::ExternalAcp);
-        assert_eq!(decision.reason, RouteReason::DetectedExternalAcp);
-        assert!(
-            !decision.reason.is_fallback(),
-            "detection is not a pin that could not be honoured; a fallback \
-             phrase here would tell a person something went wrong"
-        );
+        assert_eq!(decision.chosen, ExecutorClass::NativeLoop);
+        assert_eq!(decision.reason, RouteReason::UnpinnedDefault);
         assert!(decision.pin.is_none(), "nothing pinned it");
         assert!(decision.lane_ref.is_none());
         assert!(decision.is_coherent());
@@ -1285,9 +1240,11 @@ mod tests {
             }
         }
 
-        // A round-trip suite that never reaches a reason proves nothing about
-        // it. Every admitted reason has to appear.
-        for reason in RouteReason::all() {
+        // Every reason the current law emits has to appear.
+        for reason in RouteReason::all()
+            .iter()
+            .filter(|reason| **reason != RouteReason::DetectedExternalAcp)
+        {
             assert!(
                 seen_reasons.contains(reason),
                 "no input in this suite produced {}; the round-trip check is \
@@ -1295,6 +1252,18 @@ mod tests {
                 reason.token()
             );
         }
+
+        // OMEGA-DELTA-0150 keeps the retired reason readable for old journals.
+        let legacy = RouteDecision {
+            chosen: ExecutorClass::ExternalAcp,
+            reason: RouteReason::DetectedExternalAcp,
+            pin: None,
+            lane_ref: None,
+        };
+        assert_eq!(
+            RouteDecision::parse_canonical_record(&legacy.canonical_record()),
+            Some(legacy)
+        );
     }
 
     /// A lane whose reference contains a character the record uses structurally

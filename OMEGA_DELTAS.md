@@ -2842,15 +2842,9 @@ than it sounds, because the harness omega#81's acceptance sentence names —
   exactly that. The owner: *"that UI selector makes no sense, i have no fucking
   clue what youre talking about so the user won't, remove that UI piece and
   handle it smartly in the background"*.
-- **Omega now:** the control is removed, and an unpinned thread runs on the
-  external ACP agent that is attached, under the new reason
-  `RouteReason::DetectedExternalAcp`. With nothing attached it still runs on the
-  native loop, as before.
-- **Removal and automatic routing are one change.** `OMEGA-DELTA-0049`'s prose
-  said a thread routes to Exo exactly when a person pins `ExternalAcp` on it, so
-  the pin was the *only door* into the lane. Deleting the control on its own
-  would have made Exo unreachable rather than automatic, and the mode's one
-  capability would have gone with it. That is why one check asserts both halves.
+- **Omega now:** the control is removed. `OMEGA-DELTA-0150` later made every
+  unpinned new chat run on Omega's native loop, even when external executors are
+  detected and preloaded behind the router.
 - **Owner gate 8 is untouched, and the distinction is why this is admissible.**
   The gate forbids any model-initiated path from starting Full Auto authority.
   An engine lane *is* that authority: the engine-lane arm of `route` is
@@ -2861,11 +2855,9 @@ than it sounds, because the harness omega#81's acceptance sentence names —
   turn can say attaches an external agent, because that connection is made at
   startup from what is installed on the machine. `PinGesture` still has exactly
   two variants and nothing new calls `pin_session`.
-- **The reason is a new one rather than a reused one.** `DetectedExternalAcp` is
-  not `PinHonored` (nothing was pinned) and not a fallback (nothing went wrong).
-  Reusing either would have made the journal describe a route that did not
-  happen, and a fallback phrase would have told a person something failed. The
-  reason set moved from nine to ten, which its own closed-set test records.
+- **Old records remain readable.** `DetectedExternalAcp` remains in the durable
+  reason vocabulary because older sessions may carry it. The current unpinned
+  law no longer produces it.
 - **What the disclosure line says now.** It still names who ran the turn and on
   what model, because a person is entitled to know which runtime and model spent
   their budget — the owner objected to the *selector*, not to being told. The
@@ -5106,8 +5098,8 @@ than merely stated.
   cannot drift into a reflow under the caret at handover.
 - **The bottom-left is still empty once loaded.** `be27475c11` emptied it at the
   owner's request and `OMEGA-DELTA-0116` keeps it empty; the indicator is there
-  *only* while connecting, and the provider controls stay on the right where
-  `render_zero_base_executor_bar` puts them. The row carries
+  *only* while connecting. `OMEGA-DELTA-0150` later removed external provider
+  controls from the zero-base row. The row carries
   `flex_wrap` for the same reason the real one does: unwrapped, a narrow window
   pushes Send off the edge, and a disabled control nobody can see is
   indistinguishable from one that was never built.
@@ -6692,12 +6684,34 @@ so removing the section cannot corrupt a person's other sidebar preferences.
 
 Zero base does not show the executor dropdown in the composer. Omega is the
 only public executor, so a selector with one usable choice is unnecessary
-chrome. The attached provider's own controls and the send/stop control remain.
+chrome. `OMEGA-DELTA-0150` subsequently removed external provider controls too;
+the send/stop control remains.
 
 This is a presentation boundary only. Codex and Claude Code detection,
 attachment, warming, and Omega's internal routing remain loaded exactly as
 before. Exo retains its process-level `--enable-exo` boundary but is not exposed
 through a composer selector.
 
-- **Enforced by:** `the_composer_hides_the_executor_selector_and_keeps_provider_controls`
+- **Enforced by:** `the_composer_shows_no_executor_or_external_provider_controls`
   and `only_omega_is_an_ordinary_selectable_executor` in `crates/omega_deltas`.
+
+### OMEGA-DELTA-0150 — Every new chat belongs to Omega
+
+A new zero-base chat always creates its session on Omega's native loop. Merely
+detecting or attaching Codex, Claude Code, or Exo is not authority to hand that
+executor the conversation. The unpinned routing decision is therefore always
+`NativeLoop` with `UnpinnedDefault`.
+
+External executors remain detected, attached, and warmed behind Omega so its
+internal routing and delegation infrastructure stays available. They do not
+contribute selector, model, mode, reasoning, or fast-mode controls to the
+zero-base composer, and the retired keyboard executor cycle cannot switch a
+draft away from Omega.
+
+`DetectedExternalAcp` remains readable in durable route records for sessions
+created by older builds, but the current routing law no longer emits it.
+
+- **Enforced by:** `routing_is_decided_rather_than_selected` and
+  `the_composer_shows_no_executor_or_external_provider_controls` in
+  `crates/omega_deltas`, plus router behavior tests in `omega_front_door` and
+  `agent_ui`.

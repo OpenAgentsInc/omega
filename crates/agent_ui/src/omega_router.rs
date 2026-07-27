@@ -950,18 +950,11 @@ impl agent_servers::AgentServer for OmegaRouterServer {
         cx.spawn(async move |cx| {
             let native = native.await?;
             let mut router = OmegaAgentConnection::new(native, RouteJournal::at(journal_path));
-            // `OMEGA-DELTA-0115`. What the person chose in the composer, if
-            // they chose anything. `None` is *no choice made* and reproduces
-            // this connect exactly as it behaved before the control existed:
-            // the Exo lane, then the detected agent.
-            //
-            // The plan is computed here rather than inside either attach
-            // because the choice is between them — the router holds one
-            // external-ACP slot, the Exo lane wins it by default, and a person
-            // who asked for Claude on a machine with an Exo lane would
-            // otherwise never reach Claude however the second attach behaved.
+            // `OMEGA-DELTA-0150`. External executors remain attached behind
+            // Omega, but a retired UI selection cannot decide this connection.
+            // The pure routing law keeps every unpinned new chat native.
             let plan = crate::omega_executor_selector::attach_plan(
-                crate::omega_executor_selector::selected(),
+                None,
                 &installed_agents,
                 exo_lane_path.is_some(),
             );
@@ -1294,20 +1287,13 @@ mod tests {
             AgentId::new("codex-local")
         );
 
-        // OMEGA-DELTA-0055 changed what unpinned means. This router has an
-        // external ACP agent attached, and an unpinned thread now goes to it
-        // rather than to the native loop — that is the whole point of removing
-        // the pin control: a person no longer has to know the word
-        // `external_acp` to reach Codex.
-        //
-        // The property this test is named for is unchanged: dispatch follows
-        // the recorded decision. So the assertion still pairs the chosen class
-        // with the executor actually dispatched to.
+        // OMEGA-DELTA-0150. Detection keeps the external executor attached,
+        // but an unpinned new chat belongs to Omega.
         let unpinned = router.decide("s-unpinned", None);
-        assert_eq!(unpinned.chosen, ExecutorClass::ExternalAcp);
+        assert_eq!(unpinned.chosen, ExecutorClass::NativeLoop);
         assert_eq!(
             router.executor(unpinned.chosen).agent_id(),
-            AgentId::new("codex-acp")
+            AgentId::new("omega-agent")
         );
     }
 
@@ -1453,18 +1439,14 @@ mod tests {
         // Its own session id; see `an_unhonourable_pin_is_kept_and_explained`.
         let session = acp::SessionId::new("s-human-pin");
 
-        // OMEGA-DELTA-0055. An external agent is attached here, so an unpinned
-        // thread is routed to it and the reason recorded is
-        // `DetectedExternalAcp`, not `UnpinnedDefault`. What this test is for
-        // is the *move* that follows — a human pin relocating a live thread and
-        // saying why — and that is unchanged.
+        // OMEGA-DELTA-0150. Attachment alone does not move an unpinned chat.
         assert_eq!(
             router.decide(session.0.as_ref(), None).reason,
-            RouteReason::DetectedExternalAcp
+            RouteReason::UnpinnedDefault
         );
         assert_eq!(
             router.executor_for(&session).agent_id(),
-            AgentId::new("codex-acp")
+            AgentId::new("omega-agent")
         );
 
         let decision = router.pin_session(
