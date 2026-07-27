@@ -95,6 +95,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0095",
     "OMEGA-DELTA-0100",
     "OMEGA-DELTA-0102",
+    "OMEGA-DELTA-0103",
     "OMEGA-DELTA-0105",
     "OMEGA-DELTA-0106",
 ];
@@ -312,6 +313,36 @@ pub const TOOL_OUTPUT_CEILING_LINES: usize = 16;
 /// `TerminalView::MAX_EMBEDDED_LINES`. A result under it renders at its natural
 /// height, so forty lines of JSON take forty lines of the window.
 pub const UPSTREAM_TOOL_OUTPUT_CEILING_LINES: usize = 1_000;
+
+/// OMEGA-DELTA-0103. The law of the bound: artifact, preview, and the one
+/// sentence that names what was withheld.
+pub const TOOL_RESULT_ARTIFACT_PATH: &str = "crates/acp_thread/src/tool_result_artifact.rs";
+
+/// OMEGA-DELTA-0103. Where a terminal's result becomes an artifact and its
+/// event becomes a preview.
+pub const TOOL_RESULT_RECORD_PATH: &str = "crates/acp_thread/src/terminal.rs";
+
+/// OMEGA-DELTA-0103. Bytes of a tool result the event carries inline.
+///
+/// Deliberately far above `TOOL_OUTPUT_CEILING_LINES` worth of text: this
+/// bounds a model's context, not a reader's screen, and the two bounds are
+/// independent. Four thousand bytes of unwrapped Nostr JSON is still about
+/// forty lines, which is the height `OMEGA-DELTA-0080` exists to stop.
+pub const TOOL_RESULT_PREVIEW_BYTE_BUDGET: usize = 4_000;
+
+/// OMEGA-DELTA-0103. Every fact the truncation marker must state.
+///
+/// A closed list rather than one substring, because the failure this delta is
+/// named for is a marker that says *something* was cut without saying how much
+/// or where the rest is — which leaves a reader unable to decide whether to
+/// fetch, and so no better off than with no marker at all.
+pub const TOOL_RESULT_MARKER_REQUIRED_FACTS: &[&str] = &[
+    "tool result truncated",
+    "bytes and",
+    "lines shown",
+    "withheld",
+    "Full result: artifact",
+];
 /// OMEGA-DELTA-0061. Where a per-spawn executor request is resolved.
 pub const SUBAGENT_EXECUTOR_PATH: &str = "crates/agent/src/tools/subagent_executor.rs";
 
@@ -12491,6 +12522,178 @@ mod tests {
              `the_registry_and_the_checks_agree` fails on, and the contributor \
              is left reading a failure about a list they were never told about.",
             discipline_path.display()
+        );
+    }
+
+    // ------ OMEGA-DELTA-0103 — Tool results as artifacts, events as previews
+
+    /// OMEGA-DELTA-0103. A large tool result leaves a bounded event and a
+    /// complete artifact, and the event says so.
+    ///
+    /// `OMEGA-DELTA-0080` bounds what a *reader* sees. This bounds what the
+    /// *record* holds, which is what the model's context, a transcript reader,
+    /// and a receipt all carry. Neither replaces the other, and the check that
+    /// keeps them from being confused is the last one here.
+    #[test]
+    fn a_tool_result_is_an_artifact_and_its_event_is_a_marked_preview() {
+        let law_path = repository_path(TOOL_RESULT_ARTIFACT_PATH);
+        let law_source = std::fs::read_to_string(&law_path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", law_path.display()));
+        let law = production_source(&law_source);
+        let compact_law = without_whitespace(law);
+
+        // 1. The budget is the one this delta records. A budget that drifts
+        // upward silently is how the whole blob comes back.
+        let declared_budget = law
+            .split_once("pub const TOOL_RESULT_PREVIEW_BYTE_BUDGET: usize = ")
+            .and_then(|(_, rest)| rest.split_once(';'))
+            .map(|(value, _)| value.replace('_', ""))
+            .and_then(|value| value.trim().parse::<usize>().ok());
+        assert_eq!(
+            declared_budget,
+            Some(TOOL_RESULT_PREVIEW_BYTE_BUDGET),
+            "OMEGA-DELTA-0103: {} declares a preview budget of {declared_budget:?}, \
+             not the {TOOL_RESULT_PREVIEW_BYTE_BUDGET} bytes this delta records. \
+             The event's size property is whatever that number says it is.",
+            law_path.display()
+        );
+
+        // 2. The marker states every fact a reader needs to decide whether to
+        // fetch. "Something was cut" is not one of them.
+        for fact in TOOL_RESULT_MARKER_REQUIRED_FACTS {
+            assert!(
+                law.contains(fact),
+                "OMEGA-DELTA-0103: the truncation marker in {} no longer states \
+                 `{fact}`. A marker that does not name the withheld amount and \
+                 where the rest is leaves a reader unable to decide whether to \
+                 fetch, which is no better than no marker.",
+                law_path.display()
+            );
+        }
+        assert_eq!(
+            law.matches("tool result truncated").count(),
+            1,
+            "OMEGA-DELTA-0103: {} forms the truncation sentence more than once. \
+             Two sentences drift, and the one a reader gets stops being the one \
+             the checks read.",
+            law_path.display()
+        );
+
+        // 3. Room for the marker is reserved inside the budget, and the reserve
+        // is measured off the marker rather than guessed. `OMEGA-DELTA-0060`'s
+        // property: the budget can never be the reason the reader is not told
+        // about the budget. Its version used a hand-written constant; a
+        // constant is a number that can fall behind the sentence it protects.
+        assert!(
+            compact_law.contains(&without_whitespace("let reserve = truncation_marker("))
+                && compact_law.contains(&without_whitespace(
+                    "let shown = clip_to_line(body, budget.saturating_sub(reserve));"
+                )),
+            "OMEGA-DELTA-0103: {} no longer reserves the marker's own length \
+             inside the budget before clipping. Under a tight budget the marker \
+             is then the first thing the budget removes.",
+            law_path.display()
+        );
+
+        // 4. The full result is never in the event. It is in the artifact, and
+        // the artifact is complete.
+        assert!(
+            law.contains(
+                "pub fn get(&self, id: &ToolResultArtifactId) -> Option<&ToolResultArtifact>"
+            ),
+            "OMEGA-DELTA-0103: {} no longer offers a fetch path by address. \
+             Without it the marker names somewhere a reader cannot go, and the \
+             full result is simply gone.",
+            law_path.display()
+        );
+
+        // 5. The record path. A terminal records the complete result when the
+        // command exits, and hands out a preview — never the result — after.
+        let record_path = repository_path(TOOL_RESULT_RECORD_PATH);
+        let record_source = std::fs::read_to_string(&record_path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", record_path.display()));
+        let record = production_source(&record_source);
+        let compact_record = without_whitespace(record);
+
+        assert!(
+            compact_record.contains(&without_whitespace(
+                "let complete = this.terminal.read(cx).get_content();
+                 if complete.len() > TOOL_RESULT_PREVIEW_BYTE_BUDGET {
+                     this.result_artifacts.record(&complete);
+                 }"
+            )),
+            "OMEGA-DELTA-0103: {} no longer records the complete result as an \
+             artifact when the command exits. The preview's marker then names \
+             an address that resolves to nothing, and the full result is \
+             unreachable — the exact failure the fetch path exists to prevent.",
+            record_path.display()
+        );
+
+        assert_eq!(
+            record.matches("preview_tool_result(").count(),
+            2,
+            "OMEGA-DELTA-0103: `current_output` in {} has {} calls to \
+             `preview_tool_result`, not the two branches this delta bounds. A \
+             branch that skips it puts the whole result back on the event, and \
+             the one that skips it will be the long-running command nobody \
+             tested.",
+            record_path.display(),
+            record.matches("preview_tool_result(").count()
+        );
+        assert!(
+            !compact_record.contains(&without_whitespace(
+                "acp::TerminalOutputResponse::new(output.content.clone(),"
+            )),
+            "OMEGA-DELTA-0103: {} puts `output.content` on the event directly \
+             again, so the event carries the whole result and the artifact is \
+             decoration.",
+            record_path.display()
+        );
+
+        // 6. The seam with OMEGA-DELTA-0080. The ceiling's label reads the
+        // record's own total, so a body that is a preview cannot describe
+        // itself as the whole result.
+        let ceiling_path = repository_path(TOOL_OUTPUT_CEILING_PATH);
+        let ceiling_source = std::fs::read_to_string(&ceiling_path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", ceiling_path.display()));
+        assert!(
+            without_whitespace(&ceiling_source).contains(&without_whitespace(
+                "pub(crate) fn tool_output_ceiling_label(
+                     total_lines: usize,
+                     displayed_lines: usize,
+                     is_capped: bool,
+                     record_total_lines: Option<usize>,
+                 ) -> Option<SharedString> {"
+            )),
+            "OMEGA-DELTA-0103: `tool_output_ceiling_label` in {} no longer \
+             takes the record's total. It then counts only the lines that \
+             reached the surface, and a reader who lifts the ceiling and \
+             reaches the last line concludes they have the whole result.",
+            ceiling_path.display()
+        );
+
+        let render_path = repository_path(TOOL_OUTPUT_CEILING_RENDER_PATH);
+        let render_source = std::fs::read_to_string(&render_path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", render_path.display()));
+        assert!(
+            without_whitespace(&render_source).contains(&without_whitespace(
+                "terminal.read(cx).result_record_total_lines(cx),"
+            )),
+            "OMEGA-DELTA-0103: {} no longer passes the record's total into the \
+             ceiling control, so the input exists and is always `None` — a \
+             repair that is present and unwired is worse than an absent one, \
+             because it reads as done.",
+            render_path.display()
+        );
+
+        // 7. The two bounds stay independent. A preview sized for a context
+        // budget is still about forty lines of Nostr JSON, so the record's
+        // bound must never be mistaken for the reader's.
+        assert!(
+            TOOL_RESULT_PREVIEW_BYTE_BUDGET > TOOL_OUTPUT_CEILING_LINES * 40,
+            "OMEGA-DELTA-0103: the preview budget has fallen to about the size \
+             of the rendering ceiling. If one bound can stand in for the other, \
+             somebody will delete one of them."
         );
     }
 }

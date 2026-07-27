@@ -57,30 +57,71 @@ pub(crate) const COLLAPSED_TOOL_OUTPUT_LINES: usize = 16;
 /// names the count of lines it is hiding, because "Show more" does not tell a
 /// reader whether opening it is worth the screen it costs.
 ///
-/// **This is the only place the sentence is formed, and omega#105 must extend
-/// it rather than add a second one.** That issue bounds the *record*: a tool
-/// result becomes an artifact, and the event carries a preview plus a marker
-/// naming the withheld amount. When it lands, the body this function describes
-/// may already be a preview, so `total_lines` would count the preview and this
-/// label would state a total that is not the total. A reader who lifts the
-/// ceiling and sees the last line would conclude they had the whole result.
-/// The repair is a third input here — the amount the record withheld — not a
-/// second sentence somewhere else.
+/// **This is the only place the sentence is formed.** `OMEGA-DELTA-0103`
+/// bounds the *record*: a tool result becomes an artifact, and the event
+/// carries a preview plus a marker naming the withheld amount. So the body this
+/// function describes may itself be short of the result — `total_lines` counts
+/// only what reached this surface, and on its own this label would state a
+/// total that is not the total. A reader who lifted the ceiling and reached the
+/// last line would conclude they had the whole result.
+///
+/// `record_total_lines` is the repair, and it is here rather than in a second
+/// sentence elsewhere for the reason `OMEGA-DELTA-0060` gives: a reader who is
+/// told about one bound and not the other has been told the body is complete.
+/// Pass the line count of the complete artifact when the record holds more than
+/// this surface does, and `None` when the body *is* the result — which is the
+/// ordinary case, and must stay as silent as it was before.
 pub(crate) fn tool_output_ceiling_label(
     total_lines: usize,
     displayed_lines: usize,
     is_capped: bool,
+    record_total_lines: Option<usize>,
 ) -> Option<SharedString> {
-    if is_capped {
+    // A record that claims fewer lines than are already on screen is not a
+    // record of this body; ignore it rather than report a negative remainder.
+    let withheld = record_total_lines
+        .unwrap_or(total_lines)
+        .saturating_sub(total_lines);
+
+    let toggle = if is_capped {
         match total_lines.saturating_sub(displayed_lines) {
             0 => None,
-            1 => Some("Show 1 more line".into()),
-            hidden => Some(format!("Show {hidden} more lines").into()),
+            1 => Some("Show 1 more line".to_owned()),
+            hidden => Some(format!("Show {hidden} more lines")),
         }
     } else if total_lines > COLLAPSED_TOOL_OUTPUT_LINES {
-        Some("Show fewer lines".into())
+        Some("Show fewer lines".to_owned())
     } else {
         None
+    };
+
+    match (toggle, withheld) {
+        (None, 0) => None,
+        (None, 1) => Some("1 more line is withheld from this result".into()),
+        (None, withheld) => {
+            Some(format!("{withheld} more lines are withheld from this result").into())
+        }
+        (Some(toggle), 0) => Some(toggle.into()),
+        (Some(toggle), 1) => Some(format!("{toggle} · 1 more withheld").into()),
+        (Some(toggle), withheld) => Some(format!("{toggle} · {withheld} more withheld").into()),
+    }
+}
+
+/// `OMEGA-DELTA-0103`. Whether the ceiling control has anything to toggle.
+///
+/// A label can now exist for a body the ceiling never bound — one that is short
+/// on screen because the *record* withheld the rest. The sentence still belongs
+/// to `tool_output_ceiling_label`; what changes is that the control carrying it
+/// must not pretend to open something.
+pub(crate) fn tool_output_ceiling_is_toggleable(
+    total_lines: usize,
+    displayed_lines: usize,
+    is_capped: bool,
+) -> bool {
+    if is_capped {
+        total_lines > displayed_lines
+    } else {
+        total_lines > COLLAPSED_TOOL_OUTPUT_LINES
     }
 }
 
@@ -801,37 +842,97 @@ mod tests {
 
         // A short result is whole on screen, so no control is drawn — capped or
         // not, the ceiling never bound.
-        assert_eq!(tool_output_ceiling_label(2, 2, true), None);
-        assert_eq!(tool_output_ceiling_label(2, 2, false), None);
+        assert_eq!(tool_output_ceiling_label(2, 2, true, None), None);
+        assert_eq!(tool_output_ceiling_label(2, 2, false, None), None);
         assert_eq!(
             tool_output_ceiling_label(
                 COLLAPSED_TOOL_OUTPUT_LINES,
                 COLLAPSED_TOOL_OUTPUT_LINES,
-                true
+                true,
+                None
             ),
             None
         );
 
         // A capped result names the exact count it is hiding.
         assert_eq!(
-            tool_output_ceiling_label(40, COLLAPSED_TOOL_OUTPUT_LINES, true),
+            tool_output_ceiling_label(40, COLLAPSED_TOOL_OUTPUT_LINES, true, None),
             Some("Show 24 more lines".into())
         );
         assert_eq!(
-            tool_output_ceiling_label(COLLAPSED_TOOL_OUTPUT_LINES + 1, 16, true),
+            tool_output_ceiling_label(COLLAPSED_TOOL_OUTPUT_LINES + 1, 16, true, None),
             Some("Show 1 more line".into())
         );
 
         // With the ceiling lifted, the control offers the way back — and only
         // for a result the ceiling would have bound.
         assert_eq!(
-            tool_output_ceiling_label(40, 40, false),
+            tool_output_ceiling_label(40, 40, false, None),
             Some("Show fewer lines".into())
         );
         assert_eq!(
-            tool_output_ceiling_label(COLLAPSED_TOOL_OUTPUT_LINES, 16, false),
+            tool_output_ceiling_label(COLLAPSED_TOOL_OUTPUT_LINES, 16, false, None),
             None
         );
+
+        // A record that holds no more than this surface changes nothing. This
+        // is the whole of today's terminal-backed path, and it must read
+        // exactly as it did before `OMEGA-DELTA-0103`.
+        assert_eq!(
+            tool_output_ceiling_label(40, COLLAPSED_TOOL_OUTPUT_LINES, true, Some(40)),
+            Some("Show 24 more lines".into())
+        );
+        assert_eq!(tool_output_ceiling_label(2, 2, true, Some(2)), None);
+        assert_eq!(tool_output_ceiling_label(2, 2, true, Some(1)), None);
+    }
+
+    /// `OMEGA-DELTA-0103`. The falsifier. Strip the record's total from the
+    /// label and a body that is a preview reads exactly like a complete one.
+    #[test]
+    fn test_tool_output_ceiling_label_names_what_the_record_withheld() {
+        use super::{
+            COLLAPSED_TOOL_OUTPUT_LINES, tool_output_ceiling_is_toggleable,
+            tool_output_ceiling_label,
+        };
+
+        // The owner's case, bounded twice: forty lines reached this surface out
+        // of four hundred in the record, and sixteen of the forty are on
+        // screen. Both remainders are named, and neither is the other.
+        let capped = tool_output_ceiling_label(40, COLLAPSED_TOOL_OUTPUT_LINES, true, Some(400))
+            .expect("a doubly-bounded body draws a control");
+        assert_eq!(capped, "Show 24 more lines · 360 more withheld");
+        assert_ne!(
+            Some(capped),
+            tool_output_ceiling_label(40, COLLAPSED_TOOL_OUTPUT_LINES, true, None),
+            "a preview and a complete result of the same height read the same"
+        );
+
+        // Lifted, the reader can reach the last line on screen — which is
+        // exactly when being told the record holds more matters most.
+        assert_eq!(
+            tool_output_ceiling_label(40, 40, false, Some(400)),
+            Some("Show fewer lines · 360 more withheld".into())
+        );
+
+        // A body short enough that the ceiling never bound it still has to say
+        // so, and the control that carries the sentence must not claim to open
+        // anything.
+        assert_eq!(
+            tool_output_ceiling_label(3, 3, true, Some(400)),
+            Some("397 more lines are withheld from this result".into())
+        );
+        assert!(!tool_output_ceiling_is_toggleable(3, 3, true));
+        assert_eq!(
+            tool_output_ceiling_label(3, 3, true, Some(4)),
+            Some("1 more line is withheld from this result".into())
+        );
+        assert!(tool_output_ceiling_is_toggleable(
+            40,
+            COLLAPSED_TOOL_OUTPUT_LINES,
+            true
+        ));
+        assert!(tool_output_ceiling_is_toggleable(40, 40, false));
+        assert!(!tool_output_ceiling_is_toggleable(40, 40, true));
     }
 
     #[test]

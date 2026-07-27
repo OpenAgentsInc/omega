@@ -4146,3 +4146,91 @@ than merely stated.
   selector, the invitation flow, and the conversation actions omega#108 asks for
   are still owed. Nothing becomes public by default; public read stays
   per-repository and behind the Forge epic's own promise gates.
+
+### OMEGA-DELTA-0103 — A tool result is an artifact; its event is a preview that names what it withheld
+
+- **Upstream Zed:** a terminal tool result goes onto the event whole. The only
+  bound is `output_byte_limit` — 16 KiB, applied by `terminal_tool` — and it is
+  silent in the text: the response carries a separate `truncated` boolean, and
+  the body it cut says nothing about having been cut. Nothing keeps the full
+  result anywhere, so what the limit removed is gone.
+- **Omega:** a terminal result over `TOOL_RESULT_PREVIEW_BYTE_BUDGET` (4,000
+  bytes) is recorded whole as a versioned artifact addressed
+  `terminal:<id>@v<n>`, and the event carries a preview ending in a marker that
+  names the bytes and lines withheld and the address to fetch the rest from. A
+  result under the budget is untouched: no artifact, no marker, no ceremony.
+- **Why:** omega#105, from the owner's 2026-07-26 screenshots. A thread ran
+  several `nak` commands returning raw Nostr events, and about forty lines of
+  hexadecimal identifiers and signatures went into the record. `OMEGA-DELTA-0080`
+  hides that from a reader. It does not stop the model's own context, a
+  transcript reader, or a receipt from carrying the blob, because a rendering
+  ceiling is a property of one surface and this is a property of the record.
+- **The marker is the whole point, and it is one sentence.** `truncation_marker`
+  is the only place the withheld amount is put into words, and it states what is
+  missing before it states where the rest is, so a reader who stops after the
+  first clause has still been told the body is incomplete. Silently dropping the
+  middle of a result is how a reader concludes something did not happen when it
+  did — the failure class behind the false greens of 2026-07-26.
+- **Room for the marker is reserved inside the budget**, following
+  `OMEGA-DELTA-0060`: the bound can never be the reason the reader is not told
+  about the bound. The reserve here is the marker *rendered at its widest* —
+  every count at its total, which no real count can exceed — rather than
+  `OMEGA-DELTA-0060`'s hand-written 320. A constant is a number that falls
+  behind the sentence it protects; this one cannot. Squeeze the budget to zero
+  and the marker survives alone.
+- **A result cut twice reports both cuts through one marker.** The terminal's
+  own `output_byte_limit` runs before the preview ever sees the text, so the
+  totals are passed in rather than measured off the body. Measuring the body
+  would describe the second cut and silently absorb the first.
+- **The artifact is complete, never a preview.** An artifact that were itself
+  bounded would leave the full result nowhere, and the fetch path would answer
+  with the thing the reader already had.
+- **Versions accumulate; addresses do not move.** A source alone would silently
+  re-point at a later capture, which is how a reader ends up quoting output that
+  no longer exists. Recording text identical to the current latest returns that
+  version rather than appending, so a version number counts changes and not
+  reads.
+- **A running command has no artifact, and says so.** There is no complete
+  result to version until the command exits, so the marker says the command is
+  still running instead of naming an address that resolves to nothing.
+- **The store lives on the terminal, which is what outlives the turn.** A
+  finished `ToolCall` still owns its `acp_thread::Terminal` entity, so an
+  artifact recorded during the turn is still addressable after it ends. There is
+  no second index to drift from it.
+- **This and `OMEGA-DELTA-0080` are independent, and both are needed.** 4,000
+  bytes of unwrapped Nostr JSON is still about forty lines — the height the
+  owner objected to — so a preview cannot replace a 16-line ceiling, and a
+  ceiling cannot replace a bounded record. The check asserts the budget stays
+  far above the ceiling's worth of text, so neither can be deleted in favour of
+  the other.
+- **The seam between them is one function, and it is now closed.**
+  `tool_output_ceiling_label` takes `record_total_lines`. Without it the label
+  counts only the lines that reached the surface, and a reader who lifts the
+  ceiling and reaches the last line concludes they have the whole result. When
+  the record holds no more than the body — every terminal-backed result today —
+  the input is `None` and the sentence is byte-for-byte the one
+  `OMEGA-DELTA-0080` shipped. When it holds more, the label names both
+  remainders: `Show 24 more lines · 360 more withheld`. A body short enough that
+  the ceiling never bound it still draws the control, disabled, because it has
+  nothing to open and must not pretend otherwise.
+
+- **Enforced by:** `a_tool_result_is_an_artifact_and_its_event_is_a_marked_preview`
+  in `crates/omega_deltas/`, which pins the budget, every fact the marker must
+  state, the single sentence, the reserve, the fetch path, the recording at
+  exit, both preview branches of `current_output`, and the wiring of the
+  record's total into the ceiling control. The arithmetic runs through its real
+  functions in `crates/acp_thread/src/tool_result_artifact.rs`'s tests — including
+  the falsifier, `a_truncated_preview_is_distinguishable_from_a_complete_one` —
+  and the label in `test_tool_output_ceiling_label_names_what_the_record_withheld`
+  (`crates/agent_ui/`).
+- **What this does not cover.** The bound is applied at
+  `acp_thread::Terminal::current_output`, which is the terminal tool's result
+  path. A tool that returns a text content block rather than a terminal — every
+  native tool in `crates/agent/` — is unbounded still; that half needs
+  `crates/agent/src/thread.rs` to route its results through
+  `preview_tool_result`, and a `read_tool_result_artifact` tool to spend the
+  address the marker hands out. Until it does, the model can read a marker it
+  has no way to act on. Nothing here reads a rendered pixel, so the disabled
+  control and the label a person sees are unverified. The artifact lives in
+  memory for the life of the thread; it does not survive a restart, and no check
+  asserts that it does.

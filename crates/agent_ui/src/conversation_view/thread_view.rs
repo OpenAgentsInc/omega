@@ -25,7 +25,9 @@ use sandbox::{SandboxFsPolicy, SandboxNetPolicy, SandboxPolicy};
 use crate::completion_provider::{AvailableSkill, PromptLocalCommand, pluralize};
 // `OMEGA-DELTA-0080`. The ceiling on a tool call's result body, and the label
 // of the control that lifts it.
-use crate::entry_view_state::{COLLAPSED_TOOL_OUTPUT_LINES, tool_output_ceiling_label};
+use crate::entry_view_state::{
+    COLLAPSED_TOOL_OUTPUT_LINES, tool_output_ceiling_is_toggleable, tool_output_ceiling_label,
+};
 use crate::message_editor::SharedSessionCapabilities;
 use crate::ui::{
     SandboxGroup, SandboxRow, SandboxSection, SandboxStatusTooltip, TerminalSandboxWarning,
@@ -8130,6 +8132,10 @@ impl ThreadView {
                             // many lines the ceiling is hiding.
                             let ceiling_toggle = self.render_terminal_output_ceiling_toggle(
                                 &terminal_view,
+                                // `OMEGA-DELTA-0103`. The record's own total,
+                                // so a body that is a preview cannot describe
+                                // itself as the whole result.
+                                terminal.read(cx).result_record_total_lines(cx),
                                 border_color,
                                 window,
                                 cx,
@@ -8180,13 +8186,20 @@ impl ThreadView {
     /// `OMEGA-DELTA-0080`. The control under a tool call's result body that
     /// lifts the height ceiling, or puts it back.
     ///
-    /// Returns `None` when the body already shows every line it has, so a
-    /// short result gains nothing it does not need. The label names the count
-    /// of hidden lines, because "Show more" does not tell a reader whether
-    /// opening it is worth the screen.
+    /// Returns `None` when the body already shows every line it has *and* the
+    /// record holds no more, so a short whole result gains nothing it does not
+    /// need. The label names the count of hidden lines, because "Show more"
+    /// does not tell a reader whether opening it is worth the screen.
+    ///
+    /// `OMEGA-DELTA-0103`. `record_total_lines` is the complete result's line
+    /// count when the record holds more than this body does. It can make a
+    /// control appear for a body the ceiling never bound — a preview short
+    /// enough to fit is still not the result — and such a control has nothing
+    /// to open, so it is drawn disabled rather than as a dead button.
     fn render_terminal_output_ceiling_toggle(
         &self,
         terminal_view: &Entity<TerminalView>,
+        record_total_lines: Option<usize>,
         border_color: Hsla,
         window: &Window,
         cx: &Context<Self>,
@@ -8207,7 +8220,10 @@ impl ThreadView {
             }
         };
 
-        let label = tool_output_ceiling_label(total_lines, displayed_lines, is_capped)?;
+        let label =
+            tool_output_ceiling_label(total_lines, displayed_lines, is_capped, record_total_lines)?;
+        let is_toggleable =
+            tool_output_ceiling_is_toggleable(total_lines, displayed_lines, is_capped);
 
         let terminal_view = terminal_view.clone();
         let button_id = SharedString::from(format!(
@@ -8225,8 +8241,11 @@ impl ThreadView {
                         .full_width()
                         .label_size(LabelSize::Small)
                         .color(Color::Muted)
+                        .disabled(!is_toggleable)
                         .start_icon(
-                            Icon::new(if is_capped {
+                            Icon::new(if !is_toggleable {
+                                IconName::Info
+                            } else if is_capped {
                                 IconName::ChevronDown
                             } else {
                                 IconName::ChevronUp

@@ -21,6 +21,11 @@ use std::{
 use task::Shell;
 use util::get_default_system_shell_preferring_bash;
 
+use crate::tool_result_artifact::{
+    TOOL_RESULT_PREVIEW_BYTE_BUDGET, ToolResultArtifact, ToolResultArtifactId,
+    ToolResultArtifactStore, preview_tool_result,
+};
+
 /// Request to run a terminal command inside an OS-level sandbox.
 ///
 /// Passed to [`super::AcpThread::create_terminal`]. The actual sandboxing
@@ -322,6 +327,14 @@ pub struct Terminal {
     /// sandboxed or after it finishes. Dropping it tears down the proxy on a
     /// background thread (see `sandbox::Sandbox`'s `Drop`).
     _sandbox: Option<SandboxConfigHandle>,
+    /// `OMEGA-DELTA-0103`. Every complete capture of this terminal's result.
+    ///
+    /// Held here rather than on the thread because the terminal is what the
+    /// thread keeps: a finished `ToolCall` still owns this entity, so an
+    /// artifact recorded during the turn is still addressable after it ends.
+    /// Empty for a result that fits in the preview budget — that result is
+    /// already carried whole by the event, and a second copy buys nothing.
+    result_artifacts: ToolResultArtifactStore,
 }
 
 pub struct TerminalOutput {
@@ -357,8 +370,10 @@ impl Terminal {
             }
         })
         .detach();
+        let result_artifacts = ToolResultArtifactStore::new(format!("terminal:{id}"));
         Self {
             id,
+            result_artifacts,
             _sandbox: sandbox,
             command: cx.new(|cx| {
                 Markdown::new(
@@ -381,6 +396,16 @@ impl Terminal {
                     this.update(cx, |this, cx| {
                         let (content, original_content_len) = this.truncated_output(cx);
                         let content_line_count = this.terminal.read(cx).total_lines();
+
+                        // `OMEGA-DELTA-0103`. The command has exited, so there
+                        // is a complete result to version. Record it before
+                        // anything reads the bounded one, or the marker the
+                        // reader gets points at an address that resolves to
+                        // nothing.
+                        let complete = this.terminal.read(cx).get_content();
+                        if complete.len() > TOOL_RESULT_PREVIEW_BYTE_BUDGET {
+                            this.result_artifacts.record(&complete);
+                        }
 
                         this.output = Some(TerminalOutput {
                             ended_at: Instant::now(),
@@ -439,24 +464,79 @@ impl Terminal {
         self.user_stopped.load(Ordering::SeqCst)
     }
 
+    /// The event this terminal's result goes out on.
+    ///
+    /// `OMEGA-DELTA-0103`. What leaves here is a preview, not the result: the
+    /// full text stays in [`Self::result_artifacts`] and the preview names the
+    /// address to fetch it from. Every consumer downstream of this — the
+    /// model's context above all — is bounded by that, rather than by whatever
+    /// each of them remembers to do for itself.
+    ///
+    /// A result inside the budget is returned exactly as it always was.
     pub fn current_output(&self, cx: &App) -> acp::TerminalOutputResponse {
         if let Some(output) = self.output.as_ref() {
             let exit_status = output.exit_status.map(portable_pty::ExitStatus::from);
+            // Totals come from the complete artifact when there is one, so a
+            // result cut by `output_byte_limit` before it ever reached here is
+            // reported through the same marker rather than absorbed silently.
+            let (total_bytes, total_lines) = match self.result_artifacts.latest() {
+                Some(artifact) => (artifact.byte_count(), artifact.line_count()),
+                None => (output.original_content_len, output.content_line_count),
+            };
+            let preview = preview_tool_result(
+                &output.content,
+                total_bytes,
+                total_lines,
+                TOOL_RESULT_PREVIEW_BYTE_BUDGET,
+                self.result_artifacts.latest().map(|a| a.id().clone()),
+            );
 
-            acp::TerminalOutputResponse::new(
-                output.content.clone(),
-                output.original_content_len > output.content.len(),
-            )
-            .exit_status(
+            let truncated = preview.is_truncated();
+            acp::TerminalOutputResponse::new(preview.text, truncated).exit_status(
                 acp::TerminalExitStatus::new()
                     .exit_code(exit_status.as_ref().map(|e| e.exit_code()))
                     .signal(exit_status.and_then(|e| e.signal().map(ToOwned::to_owned))),
             )
         } else {
+            // Still running: there is no complete result to version yet, so the
+            // marker says that instead of naming an address that resolves to
+            // nothing.
             let (current_content, original_len) = self.truncated_output(cx);
-            let truncated = current_content.len() < original_len;
-            acp::TerminalOutputResponse::new(current_content, truncated)
+            let preview = preview_tool_result(
+                &current_content,
+                original_len,
+                self.terminal.read(cx).total_lines(),
+                TOOL_RESULT_PREVIEW_BYTE_BUDGET,
+                None,
+            );
+            let truncated = preview.is_truncated();
+            acp::TerminalOutputResponse::new(preview.text, truncated)
         }
+    }
+
+    /// `OMEGA-DELTA-0103`. The fetch path: every complete capture of this
+    /// terminal's result, addressable by the id the preview's marker names.
+    pub fn result_artifacts(&self) -> &ToolResultArtifactStore {
+        &self.result_artifacts
+    }
+
+    /// The complete result at `id`, or `None` when nothing was recorded there.
+    pub fn result_artifact(&self, id: &ToolResultArtifactId) -> Option<&ToolResultArtifact> {
+        self.result_artifacts.get(id)
+    }
+
+    /// `OMEGA-DELTA-0103`. Lines the complete result has, when it is longer
+    /// than the body a surface can render. `None` when the body is the whole
+    /// result, which is the ordinary case and must stay silent.
+    ///
+    /// This is what `tool_output_ceiling_label` needs as its extra input: a
+    /// ceiling that counts only the lines in front of it would state a total
+    /// that is not the total, and a reader who lifted the ceiling and reached
+    /// the last line would conclude they had the whole result.
+    pub fn result_record_total_lines(&self, cx: &App) -> Option<usize> {
+        let artifact = self.result_artifacts.latest()?;
+        let rendered_lines = self.terminal.read(cx).total_lines();
+        (artifact.line_count() > rendered_lines).then_some(artifact.line_count())
     }
 
     fn truncated_output(&self, cx: &App) -> (String, usize) {
