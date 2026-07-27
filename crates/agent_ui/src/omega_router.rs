@@ -678,11 +678,28 @@ impl AgentConnection for OmegaAgentConnection {
             );
             executor.resume_session(session_id, project, work_dirs, title, cx)
         } else {
-            Task::ready(Err(anyhow::anyhow!(
-                "{} cannot reopen a thread it ran: it supports neither loading \
-                 nor resuming a session",
+            // omega#115. A fresh thread, not a dead window.
+            //
+            // Returning an error here fails the *launch*: Omega reopens the
+            // last thread at startup, so a thread run by an executor that
+            // cannot reopen sessions left the owner staring at an empty window
+            // saying "Failed to Launch". Nothing in the app worked, and the one
+            // thing he had not done was anything wrong.
+            //
+            // Reopening is a convenience; being able to type is not. So the
+            // conversation that cannot be restored is replaced by a new one on
+            // the same folder, and the reason is logged with the executor
+            // named. The old thread is not lost — it is in the metadata store
+            // and the threads sidebar; it simply cannot be *continued* by the
+            // executor that ran it.
+            log::info!(
+                "starting a new thread instead of reopening {}: {} supports \
+                 neither loading nor resuming a session, and a launch must not \
+                 fail because an old thread cannot be continued",
+                session_id.0,
                 executor.telemetry_id()
-            )))
+            );
+            self.new_session(project, work_dirs, cx)
         }
     }
 
