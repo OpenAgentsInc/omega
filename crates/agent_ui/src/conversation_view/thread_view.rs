@@ -13673,6 +13673,58 @@ impl Render for ThreadView {
                     mode_selector.read(cx).menu_handle().toggle(window, cx);
                 }
             }))
+            // omega#112. Shift-Tab cycles the executor.
+            //
+            // The owner asked for it on the same key that used to cycle session
+            // modes. That is a real trade and worth naming: modes are one
+            // executor's own setting and are still reachable from its controls
+            // in the composer, while the executor is the choice *above* all of
+            // them — which of four agents reads what you type. On a two-key
+            // budget the outer choice wins.
+            //
+            // Same rules as the menu, because it is the same act: only the
+            // executors ready on this machine, only before the first message,
+            // and the switch runs through `reset_onto_new_executor` so the
+            // connection is rebuilt and the session is new.
+            .on_action(cx.listener(|this, _: &CycleExecutor, window, cx| {
+                use crate::omega_executor_selector::{
+                    SelectableExecutor, ready_here, select, selected,
+                };
+
+                if !this.thread.read(cx).is_draft_thread() || this.in_flight_prompt.is_some() {
+                    return;
+                }
+
+                let ready = ready_here();
+                if ready.len() < 2 {
+                    return;
+                }
+
+                let current = selected()
+                    .or_else(|| {
+                        let disclosure = this.executor_disclosure(cx);
+                        SelectableExecutor::of(disclosure.class, disclosure.agent_id.as_ref())
+                    })
+                    .unwrap_or(ready[0]);
+
+                // Wrap forward through what is ready, in the menu's fixed order,
+                // so the key and the menu never disagree about what comes next.
+                let next = ready
+                    .iter()
+                    .position(|executor| *executor == current)
+                    .map_or(ready[0], |at| ready[(at + 1) % ready.len()]);
+                if next == current {
+                    return;
+                }
+
+                select(next);
+                let Some(server_view) = this.server_view.upgrade() else {
+                    return;
+                };
+                server_view.update(cx, |view, cx| {
+                    view.reset_onto_new_executor(window, cx);
+                });
+            }))
             .on_action(cx.listener(|this, _: &CycleModeSelector, window, cx| {
                 if this.thread.read(cx).status() != ThreadStatus::Idle {
                     return;

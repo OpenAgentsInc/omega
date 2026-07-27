@@ -231,6 +231,8 @@ actions!(
         ToggleProfileSelector,
         /// Cycles through available session modes.
         CycleModeSelector,
+        /// Cycles the thread's executor through the ones ready on this machine.
+        CycleExecutor,
         /// Cycles through favorited models in the ACP model selector.
         CycleFavoriteModels,
         /// Expands the message editor to full size.
