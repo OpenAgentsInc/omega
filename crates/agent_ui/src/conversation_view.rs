@@ -4039,13 +4039,19 @@ fn render_agent_markdown(
         })
         .image_resolver(move |dest_url| resolve_agent_image(dest_url, &worktree_roots))
         .on_url_click(move |text, window, cx| {
-            // `OMEGA-DELTA-0119`. In a sealed zero base the ordinary handler
-            // opens the file into a centre pane `OMEGA-DELTA-0053` does not
-            // draw, so the click succeeds where nobody can see it. The reader
-            // takes the click only there; a full editor keeps its editor.
+            // `OMEGA-DELTA-0139`. Plain clicks open the ordinary editable
+            // editor. A secondary click preserves the compact reader for
+            // people who only want to inspect the source without changing
+            // their workspace layout.
+            let mode = if window.modifiers().secondary() {
+                crate::omega_file_peek::TranscriptFileOpenMode::ReadOnlyPeek
+            } else {
+                crate::omega_file_peek::TranscriptFileOpenMode::EditablePane
+            };
             if crate::omega_file_peek::open_from_transcript_link(
                 &text,
                 &peek_roots,
+                mode,
                 &workspace,
                 window,
                 cx,

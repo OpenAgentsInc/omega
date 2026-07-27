@@ -209,10 +209,12 @@ though it were the present is a mistake this document exists to stop.
 The default surface: one thread, a composer, and nothing else. `--full-editor`
 opens the editor.
 
-Sealed, structurally: while sealed the window renders no centre pane group, no
-tab bar, no title bar and no status bar. It is not the editor hidden behind a
-zoomed panel — that was the previous mechanism, and one sidebar toggle defeated
-it.
+Sealed, structurally: the window starts with no centre pane group, tab bar,
+title bar, or status bar. It is not the editor hidden behind a zoomed panel.
+A plain click on a transcript file link is the narrow exception: it reveals the
+ordinary editable centre pane beside the thread for that file. Command-click
+keeps the compact read-only peek, and closing the last editor tab restores the
+agent-only surface.
 
 There is no way out at runtime. Started in zero base means staying there for the
 life of the process.

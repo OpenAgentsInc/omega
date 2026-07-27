@@ -127,6 +127,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0136",
     "OMEGA-DELTA-0137",
     "OMEGA-DELTA-0138",
+    "OMEGA-DELTA-0139",
 ];
 
 /// OMEGA-DELTA-0125. Every entry the thread header's `…` menu offers, the
@@ -198,8 +199,8 @@ pub const MARKDOWN_PATH: &str = "crates/markdown/src/markdown.rs";
 /// OMEGA-DELTA-0128. Where a turn's text and a tool call's body arrive.
 pub const ACP_THREAD_PATH: &str = "crates/acp_thread/src/acp_thread.rs";
 
-/// OMEGA-DELTA-0119. The read-only sheet a transcript file link opens in a
-/// mode that draws no editor.
+/// OMEGA-DELTA-0119. The read-only sheet available for transcript file links
+/// and reader commands in a mode that starts without an editor.
 pub const FILE_PEEK_PATH: &str = "crates/agent_ui/src/omega_file_peek.rs";
 
 /// OMEGA-DELTA-0124. Where a thinking block is split into the muted lines its
@@ -9056,7 +9057,7 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------
-    // OMEGA-DELTA-0053 — A sealed zero base does not render the editor
+    // OMEGA-DELTA-0053 — A sealed zero base starts without the editor
     // ---------------------------------------------------------------------
 
     /// OMEGA-DELTA-0053. Zero base subtracts the editor rather than covering
@@ -9072,9 +9073,10 @@ mod tests {
     /// The action gate cannot catch that. It refuses *actions*, and the control
     /// that did it is an ordinary click listener on the title bar that calls a
     /// workspace method. So the answer is structural: once sealed, the
-    /// workspace renders no centre pane, no title bar and no status bar, and
-    /// the reveal path returns early instead of closing the one panel the
-    /// window has.
+    /// workspace starts with no centre pane, title bar, or status bar, and the
+    /// generic reveal path returns early instead of closing the one panel the
+    /// window has. `OMEGA-DELTA-0139` adds a separate,
+    /// transcript-file-only reveal path.
     ///
     /// The seal is later than the mode on purpose, and the check pins that too.
     /// `OMEGA-DELTA-0040`'s identity onboarding is a centre-pane item, so
@@ -9082,7 +9084,7 @@ mod tests {
     /// identity gate — a worse dead end than the one `OMEGA-DELTA-0051`
     /// repaired, and the same shape.
     #[test]
-    fn a_sealed_zero_base_renders_no_editor() {
+    fn a_sealed_zero_base_starts_without_an_editor() {
         let mode_path = repository_path(ZERO_BASE_MODE_PATH);
         let mode = std::fs::read_to_string(&mode_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", mode_path.display()));
@@ -9106,8 +9108,8 @@ mod tests {
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", workspace_path.display()));
         assert!(
             workspace.contains("let zero_base_sealed = omega_zero_base::is_sealed();"),
-            "OMEGA-DELTA-0053: {} no longer reads the seal, so its render draws \
-             the editor in zero base again.",
+            "OMEGA-DELTA-0053: {} no longer reads the seal, so its initial \
+             render draws the editor in zero base again.",
             workspace_path.display()
         );
         for structural in [
@@ -15717,8 +15719,7 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------
-    // OMEGA-DELTA-0119 — a transcript file link opens a reader, not a pane
-    // nobody draws
+    // OMEGA-DELTA-0119 — a transcript file link always has a visible result
     // ---------------------------------------------------------------------
 
     /// OMEGA-DELTA-0119. Clicking a file path in the transcript shows the file.
@@ -15731,11 +15732,10 @@ mod tests {
     /// invisible success reads exactly like an unimplemented handler, and a
     /// person reports the second.
     ///
-    /// So the reader must exist, must take the click *before* the handler that
-    /// opens a pane, must be read-only, must open no pane itself, and must draw
-    /// something when the path resolves to nothing — because a repair whose
-    /// failure mode is a silent click is the same bug wearing a different
-    /// cause.
+    /// So the reader must exist, must take the click *before* the generic link
+    /// handler, must remain read-only when selected, and must draw something
+    /// when the path resolves to nothing — because a repair whose failure mode
+    /// is a silent click is the same bug wearing a different cause.
     #[test]
     fn a_transcript_file_link_opens_a_reader_in_zero_base() {
         let peek_path = repository_path(FILE_PEEK_PATH);
@@ -15761,10 +15761,9 @@ mod tests {
         );
         assert!(
             peek.contains("editor.set_read_only(true);"),
-            "OMEGA-DELTA-0119: the reader in {} is no longer read-only. Zero \
-             base refuses `workspace::Save`, so a sheet that accepts typing has \
-             nowhere to put it — a larger version of the lie this delta \
-             repairs.",
+            "OMEGA-DELTA-0119: the modal reader in {} is no longer read-only. \
+             Editing belongs to the ordinary workspace pane; a compact peek \
+             must not accept changes.",
             peek_path.display()
         );
         assert!(
@@ -15775,21 +15774,6 @@ mod tests {
              the composer.",
             peek_path.display()
         );
-        for pane_opener in [
-            "open_abs_path_at_point",
-            "workspace.open_path",
-            "open_abs_path(",
-            "add_item_to_active_pane",
-        ] {
-            assert!(
-                !peek.contains(pane_opener),
-                "OMEGA-DELTA-0119: the reader in {} calls `{pane_opener}`. That \
-                 is the call whose result nobody can see in a sealed zero base, \
-                 and routing back to it would restore the dead click with an \
-                 extra step.",
-                peek_path.display()
-            );
-        }
         assert!(
             peek.contains("PeekState::Unresolved"),
             "OMEGA-DELTA-0119: {} lost the state a link that resolves to \
@@ -18693,6 +18677,76 @@ mod tests {
                 && documentation.contains("--agent-profile wide"),
             "OMEGA-DELTA-0138: the operator protocol no longer states the \
              evidence boundary or the same-task profile comparison."
+        );
+    }
+
+    /// OMEGA-DELTA-0139. A normal transcript file click opens a real editable
+    /// tab beside chat, while a secondary click preserves the read-only peek.
+    #[test]
+    fn transcript_file_links_choose_editing_or_peeking() {
+        let conversation = read_repository_file(CONVERSATION_VIEW_PATH);
+        for required in [
+            "window.modifiers().secondary()",
+            "TranscriptFileOpenMode::ReadOnlyPeek",
+            "TranscriptFileOpenMode::EditablePane",
+        ] {
+            assert!(
+                conversation.contains(required),
+                "OMEGA-DELTA-0139: transcript click dispatch lost `{required}`."
+            );
+        }
+
+        let opener = without_comments(&read_repository_file(FILE_PEEK_PATH));
+        for required in [
+            "TranscriptFileOpenMode::EditablePane =>",
+            "workspace.reveal_zero_base_center(window, cx);",
+            "crate::open_abs_path_at_point(workspace, abs_path, point, window, cx);",
+            "TranscriptFileOpenMode::ReadOnlyPeek =>",
+            "open_request(workspace, request, window, cx);",
+            "editor.set_read_only(true);",
+            "PeekState::Unresolved",
+        ] {
+            assert!(
+                opener.contains(required),
+                "OMEGA-DELTA-0139: transcript file opening lost `{required}`."
+            );
+        }
+
+        let workspace =
+            without_comments(&read_repository_file("crates/workspace/src/workspace.rs"));
+        for required in [
+            "zero_base_center_visible: bool",
+            "self.zero_base_center_visible = true;",
+            ".when(self.zero_base_center_visible, |this|",
+            ".child(self.render_center(\n",
+            "self.restore_zero_base_agent_surface(window, cx);",
+        ] {
+            assert!(
+                workspace.contains(required),
+                "OMEGA-DELTA-0139: zero-base editor layout lost `{required}`."
+            );
+        }
+
+        let zero_base = read_repository_file("crates/omega_zero_base/src/omega_zero_base.rs");
+        let actions = zero_base
+            .split_once("pub const ADMITTED_ACTIONS: &[&str] = &[")
+            .and_then(|(_, rest)| rest.split_once("];"))
+            .map(|(actions, _)| actions)
+            .expect("OMEGA-DELTA-0139: cannot find the admitted action list");
+        assert!(
+            actions.contains("\"workspace::Save\""),
+            "OMEGA-DELTA-0139: the editable transcript tab cannot use the \
+             standard save action."
+        );
+        let namespaces = zero_base
+            .split_once("pub const ADMITTED_NAMESPACES: &[&str] = &[")
+            .and_then(|(_, rest)| rest.split_once("];"))
+            .map(|(namespaces, _)| namespaces)
+            .expect("OMEGA-DELTA-0139: cannot find the admitted namespace list");
+        assert!(
+            !namespaces.contains("\"workspace\""),
+            "OMEGA-DELTA-0139: the entire workspace namespace was admitted; \
+             this change authorizes only saving the file opened from chat."
         );
     }
 }

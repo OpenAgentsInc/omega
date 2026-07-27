@@ -1,4 +1,4 @@
-//! Reading a file — or a rendered thread — in a mode that draws no editor.
+//! Opening files and generated text from the agent surface.
 //!
 //! `OMEGA-DELTA-0119`. The agent writes `crates/agent/src/templates/system_prompt.hbs`
 //! into a message. The code-span resolver in [`crate::conversation_view`]
@@ -13,22 +13,13 @@
 //! nothing happen cannot tell that apart from an unimplemented handler, and the
 //! second is the one they will report.
 //!
-//! # What this is, and what it is not
-//!
-//! This is a **reader**, not the editor coming back. `OMEGA-DELTA-0052` removed
-//! the docks and the way out of zero base, and nothing here weakens that:
-//!
-//! - It is **read-only**. The buffer is opened, the editor refuses edits, and
-//!   there is no save path. Zero base refuses `workspace::Save` at the action
-//!   gate, so an editable peek would be a surface that takes typing and then
-//!   drops it — a worse lie than the one being fixed.
-//! - It is a **modal sheet**, drawn by the workspace's modal layer. That layer
-//!   is rendered by `MultiWorkspace` outside the seal, which is why the command
-//!   palette still opens in zero base. It is absolutely positioned and takes
-//!   part in no layout, so it cannot clip or push the composer — the composer
-//!   wraps for that reason, and this must not undo it.
-//! - It opens **no dock, no pane and no tab**. Dismissing it leaves a window
-//!   with exactly the surface zero base had before.
+//! `OMEGA-DELTA-0139` makes a transcript file link a deliberate two-way
+//! interaction. A plain click reveals the workspace's ordinary centre pane and
+//! opens the file there, so it is editable, saveable, and behaves like every
+//! other editor tab. A secondary click (Command-click on macOS, Control-click
+//! elsewhere) preserves the compact read-only modal from
+//! `OMEGA-DELTA-0119`. Generated thread markdown and rules-menu entries remain
+//! modal readers because they are separate commands, not transcript links.
 //!
 //! # There is no silent failure
 //!
@@ -101,7 +92,16 @@ pub struct PeekRequest {
     pub anchor: Option<PeekAnchor>,
 }
 
-/// Open the reader for a transcript link, or decline the click.
+/// How a transcript file link should open.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TranscriptFileOpenMode {
+    /// Reveal the normal workspace editor and open a saveable file tab.
+    EditablePane,
+    /// Preserve the compact, read-only modal reader.
+    ReadOnlyPeek,
+}
+
+/// Open a transcript file link, or decline the click.
 ///
 /// Returns `true` when this took the click. Declining leaves
 /// `thread_view::open_link` to do what it always did, which is what should
@@ -116,6 +116,7 @@ pub struct PeekRequest {
 pub fn open_from_transcript_link(
     url: &str,
     roots: &[PathBuf],
+    mode: TranscriptFileOpenMode,
     workspace: &WeakEntity<Workspace>,
     window: &mut Window,
     cx: &mut App,
@@ -130,10 +131,48 @@ pub fn open_from_transcript_link(
         return false;
     };
 
-    workspace.update(cx, |workspace, cx| {
-        open_request(workspace, request, window, cx);
+    workspace.update(cx, |workspace, cx| match mode {
+        TranscriptFileOpenMode::EditablePane => {
+            open_editable_request(workspace, request, window, cx);
+        }
+        TranscriptFileOpenMode::ReadOnlyPeek => {
+            open_request(workspace, request, window, cx);
+        }
     });
     true
+}
+
+fn open_editable_request(
+    workspace: &mut Workspace,
+    request: PeekRequest,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    let project = workspace.project().clone();
+    let candidates = request.candidates.clone();
+    let anchor = request.anchor;
+    let workspace = cx.weak_entity();
+    window
+        .spawn(cx, async move |cx| {
+            let Some(abs_path) = first_existing_file(&candidates, &project, cx).await else {
+                workspace.update_in(cx, |workspace, window, cx| {
+                    open_request(workspace, request, window, cx);
+                })?;
+                return anyhow::Ok(());
+            };
+            let point = anchor.map(|anchor| {
+                Point::new(
+                    anchor.line.saturating_sub(1),
+                    anchor.column.unwrap_or(1).saturating_sub(1),
+                )
+            });
+            workspace.update_in(cx, |workspace, window, cx| {
+                workspace.reveal_zero_base_center(window, cx);
+                crate::open_abs_path_at_point(workspace, abs_path, point, window, cx);
+            })?;
+            anyhow::Ok(())
+        })
+        .detach_and_log_err(cx);
 }
 
 /// Open the reader on a file this window already knows the path of.
@@ -422,7 +461,7 @@ impl FilePeek {
         let candidates = request.candidates.clone();
         let anchor = request.anchor;
         let open = cx.spawn_in(window, async move |this, cx| {
-            let found = Self::first_existing_file(&candidates, &project, cx).await;
+            let found = first_existing_file(&candidates, &project, cx).await;
             let Some(abs_path) = found else {
                 this.update(cx, |this, cx| {
                     this.state = PeekState::Unresolved;
@@ -561,28 +600,6 @@ impl FilePeek {
         }
     }
 
-    /// The first candidate that is an existing file, or `None`.
-    ///
-    /// A directory is skipped rather than accepted, so a link that happens to
-    /// name one falls through to the same "nothing here" sentence as a link
-    /// that names nothing.
-    async fn first_existing_file(
-        candidates: &[PathBuf],
-        project: &Entity<Project>,
-        cx: &mut gpui::AsyncApp,
-    ) -> Option<PathBuf> {
-        let fs = project.read_with(cx, |project, _| project.fs().clone());
-        for candidate in candidates {
-            let Ok(Some(metadata)) = fs.metadata(candidate).await else {
-                continue;
-            };
-            if !metadata.is_dir {
-                return Some(candidate.clone());
-            }
-        }
-        None
-    }
-
     fn cancel(&mut self, _: &menu::Cancel, _: &mut Window, cx: &mut Context<Self>) {
         cx.emit(DismissEvent);
     }
@@ -645,6 +662,27 @@ impl FilePeek {
             }))
             .into_any_element()
     }
+}
+
+/// The first candidate that is an existing file, or `None`.
+///
+/// A directory is skipped rather than accepted, so a link that happens to name
+/// one falls through to the same visible failure as a link that names nothing.
+async fn first_existing_file(
+    candidates: &[PathBuf],
+    project: &Entity<Project>,
+    cx: &mut gpui::AsyncApp,
+) -> Option<PathBuf> {
+    let fs = project.read_with(cx, |project, _| project.fs().clone());
+    for candidate in candidates {
+        let Ok(Some(metadata)) = fs.metadata(candidate).await else {
+            continue;
+        };
+        if !metadata.is_dir {
+            return Some(candidate.clone());
+        }
+    }
+    None
 }
 
 impl Focusable for FilePeek {

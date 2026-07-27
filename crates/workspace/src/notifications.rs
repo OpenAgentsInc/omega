@@ -1305,10 +1305,7 @@ pub mod simple_message_notification {
                     ErrorSeverity::Critical
                 }
                 fn primary_action(&self) -> ErrorAction {
-                    ErrorAction::link(
-                        "See Docs",
-                        "https://github.com/OpenAgentsInc/omega#readme",
-                    )
+                    ErrorAction::link("See Docs", "https://github.com/OpenAgentsInc/omega#readme")
                 }
             }
 

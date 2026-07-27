@@ -6528,3 +6528,21 @@ packaged evidence and cannot authorize a release or public reliability claim.
   `slim_agent_claims_are_bound_to_journeys_comparison_and_delta_sweep` in
   `crates/omega_deltas`, `script/prove-omega-slim-agent --harness-check`,
   `eval_cli` unit tests, and `zed_eval` launcher and harness tests.
+
+### OMEGA-DELTA-0139 — Transcript file links choose editing or peeking
+
+In sealed zero base, a plain click on a transcript file link resolves the file
+against the thread's working directories, reveals the ordinary centre pane
+beside the agent surface, and opens a normal editable tab at the requested
+line. The standard save action is admitted individually; the rest of the
+workspace action namespace remains refused. Repeated clicks reuse the ordinary
+workspace tab behavior, and closing the final editor tab restores the
+agent-only surface.
+
+A secondary click—Command-click on macOS and Control-click elsewhere—preserves
+the existing compact read-only modal. Missing files still produce that modal's
+visible diagnostic rather than a dead click. Non-file and web links continue
+to fall through to the ordinary transcript link handler.
+
+- **Enforced by:** `transcript_file_links_choose_editing_or_peeking` in
+  `crates/omega_deltas`, plus the transcript-link parsing tests in `agent_ui`.

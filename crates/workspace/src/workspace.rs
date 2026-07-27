@@ -1366,6 +1366,7 @@ pub struct Workspace {
     weak_self: WeakEntity<Self>,
     workspace_actions: Vec<Box<dyn Fn(Div, &Workspace, &mut Window, &mut Context<Self>) -> Div>>,
     zoomed: Option<AnyWeakView>,
+    zero_base_center_visible: bool,
     previous_dock_drag_coordinates: Option<Point<Pixels>>,
     zoomed_position: Option<DockPosition>,
     maximized_pane: Option<WeakEntity<Pane>>,
@@ -1822,6 +1823,7 @@ impl Workspace {
         Workspace {
             weak_self: weak_handle.clone(),
             zoomed: None,
+            zero_base_center_visible: false,
             zoomed_position: None,
             maximized_pane: None,
             previous_dock_drag_coordinates: None,
@@ -4442,6 +4444,40 @@ impl Workspace {
         self.open_panel::<T>(window, cx);
     }
 
+    /// Reveal the ordinary editor beside the agent surface in sealed zero base.
+    ///
+    /// Transcript file links are the only entry point. The centre stays absent
+    /// at startup, and closing its final item restores the agent-only surface.
+    pub fn reveal_zero_base_center(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !omega_zero_base::is_sealed() {
+            return;
+        }
+        self.zero_base_center_visible = true;
+        for dock in self.all_docks() {
+            dock.update(cx, |dock, cx| dock.zoom_out(window, cx));
+        }
+        self.zoomed = None;
+        self.zoomed_position = None;
+        cx.emit(Event::ZoomChanged);
+        cx.notify();
+    }
+
+    fn restore_zero_base_agent_surface(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.zero_base_center_visible = false;
+        let panel_and_dock = self.all_docks().into_iter().find_map(|dock| {
+            let panel = dock.read(cx).active_panel().cloned()?;
+            dock.read(cx).is_open().then_some((panel, dock))
+        });
+        if let Some((panel, dock)) = panel_and_dock {
+            let panel_view = panel.to_any();
+            dock.update(cx, |dock, cx| {
+                dock.set_panel_zoomed(&panel_view, true, window, cx);
+            });
+            window.focus(&panel.panel_focus_handle(cx), cx);
+        }
+        cx.notify();
+    }
+
     pub fn close_panel<T: Panel>(&self, window: &mut Window, cx: &mut Context<Self>) {
         for dock in self.all_docks().iter() {
             dock.update(cx, |dock, cx| {
@@ -5699,6 +5735,13 @@ impl Workspace {
                 cx.emit(Event::ItemRemoved {
                     item_id: item.item_id(),
                 });
+                if omega_zero_base::is_sealed()
+                    && self.zero_base_center_visible
+                    && self.panes.contains(pane)
+                    && pane.read(cx).items_len() == 0
+                {
+                    self.restore_zero_base_agent_surface(window, cx);
+                }
             }
             pane::Event::Focus => {
                 window.invalidate_character_coordinates();
@@ -9195,12 +9238,10 @@ impl Render for Workspace {
                                 ))
                             })
                             .child({
-                                // OMEGA-DELTA-0053. A sealed zero base draws
-                                // its docks and no centre. `render_center` is
-                                // the editor pane group and its tab bar, and
-                                // the welcome surface the owner was shown is an
-                                // item inside it. Not calling it is what makes
-                                // the mode a subtraction rather than a cover.
+                                // OMEGA-DELTA-0139. Sealed zero base still
+                                // starts with no centre. A transcript file
+                                // link can reveal the normal editor beside the
+                                // agent dock; no other action restores it.
                                 if zero_base_sealed {
                                     div()
                                         .flex()
@@ -9212,6 +9253,21 @@ impl Render for Workspace {
                                             window,
                                             cx,
                                         ))
+                                        .when(self.zero_base_center_visible, |this| {
+                                            this.child(
+                                                div()
+                                                    .flex()
+                                                    .flex_col()
+                                                    .flex_1()
+                                                    .min_w_0()
+                                                    .overflow_hidden()
+                                                    .child(self.render_center(
+                                                        &pane_render_context,
+                                                        window,
+                                                        cx,
+                                                    )),
+                                            )
+                                        })
                                         .children(self.render_dock(
                                             DockPosition::Right,
                                             &self.right_dock,

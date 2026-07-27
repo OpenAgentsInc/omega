@@ -163,9 +163,13 @@ pub const ADMITTED_ACTIONS: &[&str] = &[
     // folder.
     //
     // `workspace::OpenFiles` and the rest of the namespace stay refused. The
-    // point is choosing what the thread can see, not opening the editor's file
-    // surfaces inside a mode that does not render them.
+    // point is choosing what the thread can see, not opening arbitrary editor
+    // surfaces.
     "workspace::Open",
+    // OMEGA-DELTA-0139, omega#119. A plain transcript file-link click reveals
+    // the ordinary editable centre pane. Admit its standard save action
+    // without admitting the rest of the workspace namespace.
+    "workspace::Save",
 ];
 
 /// Enter zero base, from the parsed command line and from nowhere else.
@@ -211,13 +215,11 @@ pub fn seal() {
 
 /// Has zero base's surface taken the window over?
 ///
-/// `OMEGA-DELTA-0053`. While this is true the workspace renders no editor pane,
-/// no tab bar, no title bar and no status bar — they are **not rendered**,
-/// rather than covered by a zoomed panel. Hiding the editor by zooming a panel
-/// over it was the previous mechanism, and one sidebar toggle released the zoom
-/// and put Zed's whole "Welcome back" surface on the screen, with New File,
-/// Open Project, Open Settings and Explore Extensions on it, inside a mode
-/// whose premise is that those are not present.
+/// `OMEGA-DELTA-0053`. While this is true the workspace starts with no editor
+/// pane, tab bar, title bar, or status bar. They are not merely covered by a
+/// zoomed panel. `OMEGA-DELTA-0139` permits one explicit exception: a transcript
+/// file-link click can reveal an editable centre pane beside the agent surface
+/// until its final tab closes.
 #[must_use]
 pub fn is_sealed() -> bool {
     is_active() && SEALED.load(Ordering::SeqCst)

@@ -196,9 +196,6 @@ impl WorkspaceError for PortalError {
     }
 
     fn primary_action(&self) -> ErrorAction {
-        ErrorAction::link(
-            "See docs",
-            "https://github.com/OpenAgentsInc/omega#readme",
-        )
+        ErrorAction::link("See docs", "https://github.com/OpenAgentsInc/omega#readme")
     }
 }
