@@ -1752,11 +1752,7 @@ async fn drive_omega_send(cx: &mut AsyncApp) {
     }
 }
 
-async fn run_omega_send(
-    send: &OmegaSend,
-    deadline: Instant,
-    cx: &mut AsyncApp,
-) -> Result<()> {
+async fn run_omega_send(send: &OmegaSend, deadline: Instant, cx: &mut AsyncApp) -> Result<()> {
     let window = omega_send_wait_for(deadline, cx, "a workspace window", |cx| {
         cx.windows()
             .into_iter()

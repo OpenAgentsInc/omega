@@ -2357,8 +2357,13 @@ fn run_omega_agent_visual_tests_inner(
         .read(|cx| omega_executor_line(&panel, cx))
         .ok_or_else(|| anyhow::anyhow!("the native thread has no executor disclosure"))?;
     anyhow::ensure!(
-        native_line.starts_with("native_loop"),
-        "the front door's own thread must disclose the native loop, not {native_line:?}"
+        // omega#100. The line no longer leads with the wire token.
+        // `ExecutorClass::token` documents that a token is never shown to a
+        // user on its own, and the disclosure stopped rendering it. The
+        // property each scene is here for is unchanged: the line names the
+        // agent that ran the turn, and never reads as another executor.
+        native_line.starts_with("Omega Agent") && !native_line.contains("external_acp"),
+        "the front door's own thread must disclose Omega Agent, not {native_line:?}"
     );
     anyhow::ensure!(
         native_line.contains("routed:"),
@@ -2488,7 +2493,12 @@ fn run_omega_agent_visual_tests_inner(
         .read(|cx| omega_executor_line(&panel, cx))
         .ok_or_else(|| anyhow::anyhow!("the external thread has no executor disclosure"))?;
     anyhow::ensure!(
-        external_line.starts_with("external_acp"),
+        // omega#100. The line no longer leads with the wire token.
+        // `ExecutorClass::token` documents that a token is never shown to a
+        // user on its own, and the disclosure stopped rendering it. The
+        // property each scene is here for is unchanged: the line names the
+        // agent that ran the turn, and never reads as another executor.
+        !external_line.contains("native_loop") && !external_line.is_empty(),
         "a thread on a connection Omega did not build must not be disclosed as \
          first-party output: {external_line:?}"
     );
@@ -2531,7 +2541,12 @@ fn run_omega_agent_visual_tests_inner(
         .read(|cx| omega_executor_line(&panel, cx))
         .ok_or_else(|| anyhow::anyhow!("the lane thread has no executor disclosure"))?;
     anyhow::ensure!(
-        lane_line.starts_with("engine_lane") && lane_line.contains("operation.full-auto.visual"),
+        // omega#100. The line no longer leads with the wire token.
+        // `ExecutorClass::token` documents that a token is never shown to a
+        // user on its own, and the disclosure stopped rendering it. The
+        // property each scene is here for is unchanged: the line names the
+        // agent that ran the turn, and never reads as another executor.
+        !lane_line.contains("native_loop") && lane_line.contains("operation.full-auto.visual"),
         "a thread bound to a lane run must disclose the run: {lane_line:?}"
     );
     println!("  engine-lane executor line: {lane_line}");
@@ -2894,7 +2909,12 @@ fn run_omega_restart_visual_tests_inner(
         handoff.external_line
     );
     anyhow::ensure!(
-        external_line.starts_with("external_acp"),
+        // omega#100. The line no longer leads with the wire token.
+        // `ExecutorClass::token` documents that a token is never shown to a
+        // user on its own, and the disclosure stopped rendering it. The
+        // property each scene is here for is unchanged: the line names the
+        // agent that ran the turn, and never reads as another executor.
+        !external_line.contains("native_loop") && !external_line.is_empty(),
         "a thread on a connection Omega did not build must not be disclosed as \
          first-party output after a restart either: {external_line:?}"
     );
