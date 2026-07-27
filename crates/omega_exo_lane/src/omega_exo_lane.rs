@@ -92,6 +92,7 @@ pub mod command;
 pub mod endpoint;
 pub mod pin;
 pub mod protocol;
+pub mod secret_store;
 pub mod turn;
 
 pub use capability::{ExoAgent, ExoAgentReadError, ExoConversation, ExoMount, SelfModification};
@@ -99,6 +100,10 @@ pub use command::{ADMITTED_LANE_ARGV, ARGUMENT_TERMINATOR, ExoArg, ExoCommand, E
 pub use endpoint::{EXO_SERVE_DEFAULT_BIND, LoopbackEndpoint, OffLoopback};
 pub use pin::{EXO_HARNESS_ID, EXO_PIN, ExoPin, ExoPinMismatch, ObservedExoCheckout, admits_bytes};
 pub use protocol::{EXO_REQUEST_KIND_COUNT, ExoRequestKind};
+pub use secret_store::{
+    APPLE_KEYCHAIN_BACKEND, ExoSecretStore, FILE_BACKEND, MASTER_KEY_PATH_ENV_VAR,
+    SECRET_BACKEND_ENV_VAR,
+};
 pub use turn::{ExoToolActivity, ExoTurn, NotATurn};
 
 use omega_front_door::{ExecutorClass, ExecutorDisclosure, RouteReason};

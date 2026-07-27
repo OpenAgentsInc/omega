@@ -5756,3 +5756,106 @@ question rather than leaving it to whoever next reads the menu.
   `OMEGA-DELTA-0052`'s reasoning — so those keys still refuse, and after this
   change they refuse *audibly*. That is the intended end state and not a
   leftover.
+### OMEGA-DELTA-0126 — A lane names the key that opens its root, and an ordinary Exo turn is ordinary
+
+- **Upstream Zed:** an agent server is launched from settings, and its
+  environment is whatever those settings say. There is no Exo, no state root and
+  no secret store, so none of this exists to get wrong.
+- **Omega, before this:** `connect_configured_lane` built its child with
+  `AgentServerCommand { env: None }`, and `env: None` does not mean "no
+  environment" — it means **inherit whatever Omega was launched with**. Exo
+  encrypts the provider credentials in its state root and learns which key opens
+  them from `EXO_SECRET_BACKEND` and `EXO_MASTER_KEY_PATH`. So a file-backed
+  root worked from a terminal that had exported them and failed from the Dock,
+  which has neither — and it failed at `session/prompt`, **after** the person
+  had typed and sent their first message, with `failed to decrypt secret
+  payload`: a sentence that reads like a corrupt state root and is not.
+- **Omega now:** the lane carries the store. `ExoSecretStore` is a sixth field
+  on `ExoLaneConfig` and on `DerivedExoLane`, `openagents.omega.exo_lane.v1`
+  gained two optional keys (`secret_backend`, `master_key_path`), and both spawn
+  sites — the `exo acp` child and the five observation commands — are launched
+  with `child_env()`. The same root now behaves the same way from a Dock launch
+  and a shell launch, which it did not before.
+- **The store cannot be read off the root, so the lane has to carry it.** Exo's
+  secret file is the same AES-GCM envelope whichever backend holds the key:
+  `{metadata, secret: {algorithm, nonce, ciphertext}}`, byte-identical for the
+  keychain and for a file. There is no field to look at. That is why this is a
+  schema change and not a smarter reader — the information genuinely is not
+  there, and any reader that appeared to find it would be guessing.
+- **A derived lane finds the store from the one trace the file backend leaves.**
+  Exo's own `default_master_key_path` writes `$XDG_CONFIG_HOME/exo/master.key`,
+  else `$HOME/.config/exo/master.key`, and nothing but the file backend ever
+  writes it. `secret_store` takes a person's exported `EXO_SECRET_BACKEND`
+  first, then `EXO_MASTER_KEY_PATH` alone, then that file if it is there, then
+  nothing. **Nothing** — not `AppleKeychain` — because the two are the same
+  behaviour today and stop being the same the moment Exo's default moves, and a
+  lane that names a backend Exo did not pick is a lane that breaks on an Exo
+  upgrade for a reason nobody can see.
+- **A backend Exo does not have is refused at the lane file, not at the model
+  call.** `ExoSecretStore::parse` is closed over Exo's two, so a typo yields no
+  store and a logged warning rather than an argument Exo rejects seconds later
+  inside somebody's first turn.
+- **`ExoSecretStore` names a key and cannot read one.** The same boundary
+  `ExoRoot` draws around the state root: there is no method here that opens a
+  keychain or reads a key file, and `a_secret_store_is_a_name_and_never_a_key`
+  fails if one appears. If it could read, a provider credential would be inside
+  Omega's address space and "Omega never holds Exo's credentials" would stop
+  being true.
+- **This delta amends `OMEGA-DELTA-0042`: the turn-level self-modification gate
+  was wrong and is gone.** That gate refused any turn whose agent reported a
+  capability that *could* widen it — and `tool_creation: enabled` is Exo's
+  default on every agent `exo agent create` makes. So the first thing the owner
+  ever did with Exo — select it, type `hi` — produced a red **An Error
+  Happened** banner reading *"this Exo turn can modify itself; use the dedicated
+  confirmation control for this exact draft"*, and a `Refused` dot in the
+  composer. Exo did not work at all.
+- **Why it was wrong, stated so nobody reintroduces it.** A gate has to name the
+  act it prevents. "The person typed a word" is not an act; it is the whole
+  product. The dangerous acts, if any, are specific — Exo writing into its own
+  checkout, editing its own agent record, writing through a read-write mount —
+  and every one of them happens **inside Exo**, where Omega cannot see it and
+  therefore cannot gate it at the point it happens. A gate that cannot reach the
+  act it names does not become correct by moving upstream until it reaches
+  something it *can* stop; it becomes a gate on the wrong thing. The refusal was
+  not protecting anybody, because the capability it fired on was configuration
+  Exo ships by default rather than anything the turn was about to do.
+- **What replaced it: saying, not refusing.** The preflight still reads the
+  agent, and the observed capabilities still reach the runtime inspector and the
+  log — that was always the useful half. The turn runs. The one-turn
+  confirmation control is kept and still mints a grant that rides on the receipt
+  for a person who wants one, but no turn requires it, and a grant that no
+  longer matches the machine now lets the turn run **without** authority and
+  records that, rather than cancelling somebody's message.
+- **A policy decision must never be an error banner.** `An Error Happened` is
+  the surface for things that went wrong; a refusal that went exactly as
+  designed rendered there reads as a bug, which is precisely how the owner read
+  it. Nothing on the Exo turn path calls `bail!` for a policy reason any more —
+  `no_exo_policy_decision_reaches_the_person_as_an_error` asserts it.
+- **`OMEGA-DELTA-0107` is untouched.** Omega still starts no `exo serve`, and
+  still creates no root, agent or conversation. That law is about Omega claiming
+  authority over Exo's storage and processes; it never had anything to do with
+  gating a person's message, and the gate was not protecting it.
+- **Enforced by:** `an_exo_lane_names_the_key_that_opens_its_root`,
+  `an_exo_child_is_launched_with_the_lane_and_not_with_omegas_environment`,
+  `a_derived_lane_finds_the_file_backend_by_the_key_exo_writes`,
+  `no_exo_policy_decision_reaches_the_person_as_an_error` and
+  `an_observed_exo_capability_is_said_and_never_refused` in
+  `crates/omega_deltas`, plus the `secret_store` module's own six tests in
+  `crates/omega_exo_lane` and `secret_store`'s in `crates/omega_agent_detect`.
+  Each assertion was watched failing against a mutation of the exact thing it
+  guards.
+- **Driven, not asserted.** `exo acp` was run against the owner's root at
+  `~/work/exo/.exo` with the exact argv and the exact two variables
+  `connect_configured_lane` now produces, from an environment stripped of every
+  `EXO_*` and `OMEGA_EXO_*` variable — the Dock launch, reproduced. `hi`
+  returned `stopReason: end_turn` with the reply streamed as
+  `agent_message_chunk` deltas. The same invocation with the two variables
+  removed returns `failed to decrypt secret payload`, which is the defect this
+  delta closes, still reproducible on demand.
+- **What this does not cover.** **No window has been opened.** Nothing here
+  starts Omega, so the selector's rendering with Exo present, the disappearance
+  of the red banner, and the composer's dot after a completed Exo turn are
+  unproved against pixels. It also does not make the harness or the model
+  choosable from Omega: the lane names one agent and one conversation, and
+  changing either is still an edit to the lane file. And it adds secret-store
+  fields to the Exo lane and to nothing else.

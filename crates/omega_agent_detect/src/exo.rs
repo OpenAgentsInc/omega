@@ -56,7 +56,7 @@
 
 use std::path::{Path, PathBuf};
 
-use omega_exo_lane::EXO_PIN;
+use omega_exo_lane::{EXO_PIN, ExoSecretStore};
 
 /// Directories under `$HOME` an Exo checkout is looked for in, in order.
 ///
@@ -102,6 +102,20 @@ pub const AGENT_ENV_VAR: &str = "OMEGA_EXO_AGENT";
 
 /// Names the conversation slug when the agent holds more than one.
 pub const CONVERSATION_ENV_VAR: &str = "OMEGA_EXO_CONVERSATION";
+
+/// Where Exo keeps a master key file when nobody names one, under a config
+/// directory. `OMEGA-DELTA-0126`.
+///
+/// Exo's own `default_master_key_path`, spelled here because this module has to
+/// look for the file Exo would have written. The parent is
+/// `$XDG_CONFIG_HOME/exo` when that is set, and `$HOME/.config/exo` otherwise.
+pub const MASTER_KEY_FILE: &str = "master.key";
+
+/// The config directory Exo's default master-key path is relative to.
+pub const CONFIG_DIRECTORY: &str = ".config";
+
+/// The subdirectory of it that is Exo's.
+pub const CONFIG_SUBDIRECTORY: &str = "exo";
 
 /// The state root's name inside the checkout.
 ///
@@ -151,6 +165,12 @@ pub struct DerivedExoLane {
     pub agent: String,
     /// The conversation slug.
     pub conversation: String,
+    /// Which key opens the root's secrets. `OMEGA-DELTA-0126`.
+    ///
+    /// `None` means the lane names none and Exo uses its own default, which on
+    /// macOS is the keychain and needs no environment at all. See
+    /// [`secret_store`] for why this cannot be read off the root.
+    pub secret_store: Option<ExoSecretStore>,
 }
 
 /// Which field of a lane could not be derived, and what was looked at.
@@ -355,6 +375,16 @@ pub struct ExoLaneOverrides {
     pub agent: Option<String>,
     /// The conversation slug, instead of the only one there is.
     pub conversation: Option<String>,
+    /// `EXO_SECRET_BACKEND`, when the process was started with one.
+    ///
+    /// A person who launched Omega from a shell that exports it has already
+    /// said which backend their root uses, and that statement outranks
+    /// [`secret_store`]'s search.
+    pub secret_backend: Option<String>,
+    /// `EXO_MASTER_KEY_PATH`, on the same terms.
+    pub master_key: Option<PathBuf>,
+    /// `$XDG_CONFIG_HOME`, which moves Exo's default master-key path.
+    pub config_home: Option<PathBuf>,
 }
 
 /// The checkout to use, given what the caller named and where `home` is.
@@ -807,6 +837,62 @@ pub fn chosen_working_directory(
     omega_workdir::plausible_project_root(&working_directory, home).ok()
 }
 
+/// Which key opens this machine's Exo root. `OMEGA-DELTA-0126`, omega#112.
+///
+/// Not derived from the root, because it cannot be: Exo's on-disk secret file
+/// is the same AES-GCM envelope whichever backend holds the key, so the root
+/// carries no evidence of which one wrote it. What this reads instead is the
+/// *one trace the file backend leaves outside the root* — the master key file.
+/// Exo's own `default_master_key_path` writes it at `$XDG_CONFIG_HOME/exo/
+/// master.key`, else `$HOME/.config/exo/master.key`, and only the file backend
+/// ever writes it. A machine with that file has a file-backed Exo.
+///
+/// The order is a person's statement first, then the trace, then nothing:
+///
+/// 1. `EXO_SECRET_BACKEND` in the environment, with `EXO_MASTER_KEY_PATH` if it
+///    is there too. Somebody who exported them said which backend they have,
+///    and the search must not overrule them.
+/// 2. `EXO_MASTER_KEY_PATH` alone, which is a file-backed root by
+///    [`ExoSecretStore::parse`]'s rule.
+/// 3. Exo's default master-key path, when a file is actually there.
+/// 4. `None` — no store named, and Exo uses its own default. That is the right
+///    answer for a keychain-backed root, and it is the answer on the great
+///    majority of machines, because the keychain is what Exo picks on macOS
+///    unless somebody chose otherwise.
+///
+/// Returning `None` rather than guessing [`ExoSecretStore::AppleKeychain`] is
+/// deliberate: the two are the same behaviour today and they stop being the
+/// same the moment Exo's default moves, and a lane that names a backend Exo did
+/// not pick is a lane that broke on an Exo upgrade for a reason nobody can see.
+///
+/// Inputs are parameters, for this module's usual reason.
+#[must_use]
+pub fn secret_store(overrides: &ExoLaneOverrides, home: &Path) -> Option<ExoSecretStore> {
+    if let Some(store) = ExoSecretStore::parse(
+        overrides.secret_backend.as_deref(),
+        overrides.master_key.as_deref(),
+    ) {
+        return Some(store);
+    }
+    let default_master_key = default_master_key_path(overrides.config_home.as_deref(), home);
+    default_master_key.is_file().then(|| ExoSecretStore::File {
+        master_key: Some(default_master_key),
+    })
+}
+
+/// Exo's `default_master_key_path`, spelled against explicit inputs.
+///
+/// An empty `$XDG_CONFIG_HOME` is treated as unset, which is the rule Exo's own
+/// implementation uses — it checks the value is not empty before joining onto
+/// it — and it matters, because an empty variable joined onto would name
+/// `exo/master.key` relative to whatever directory Omega happened to start in.
+fn default_master_key_path(config_home: Option<&Path>, home: &Path) -> PathBuf {
+    let parent = config_home
+        .filter(|path| !path.as_os_str().is_empty())
+        .map_or_else(|| home.join(CONFIG_DIRECTORY), Path::to_path_buf);
+    parent.join(CONFIG_SUBDIRECTORY).join(MASTER_KEY_FILE)
+}
+
 fn display_paths(paths: &[PathBuf]) -> String {
     paths
         .iter()
@@ -834,12 +920,17 @@ pub fn derive_lane(
     let root = state_root(overrides, &checkout)?;
     let agent = agent_slug(overrides.agent.as_deref(), &root)?;
     let conversation = conversation_slug(overrides.conversation.as_deref(), &root, &agent)?;
+    // Last, and not fallible: a machine that names no secret store still has a
+    // lane, because Exo's own default opens the great majority of roots. This
+    // is the one field whose absence is not a refusal.
+    let secret_store = secret_store(overrides, home);
     Ok(DerivedExoLane {
         binary,
         checkout,
         root,
         agent,
         conversation,
+        secret_store,
     })
 }
 
@@ -878,6 +969,13 @@ pub fn derive_lane_from_env() -> Result<DerivedExoLane, ExoLaneUnderivable> {
         lane_file: path(LANE_FILE_ENV_VAR),
         agent: text(AGENT_ENV_VAR),
         conversation: text(CONVERSATION_ENV_VAR),
+        // Exo's own variable names, not Omega's. A person who exported them for
+        // an `exo` in a terminal has already configured the lane, and asking
+        // them to say the same thing again under an `OMEGA_` prefix would be a
+        // second spelling of one fact.
+        secret_backend: text(omega_exo_lane::SECRET_BACKEND_ENV_VAR),
+        master_key: path(omega_exo_lane::MASTER_KEY_PATH_ENV_VAR),
+        config_home: path("XDG_CONFIG_HOME"),
     };
     derive_lane(&overrides, &home)
 }

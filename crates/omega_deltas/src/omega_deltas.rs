@@ -114,6 +114,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0123",
     "OMEGA-DELTA-0124",
     "OMEGA-DELTA-0125",
+    "OMEGA-DELTA-0126",
 ];
 
 /// OMEGA-DELTA-0125. Every entry the thread header's `…` menu offers, the
@@ -2708,6 +2709,12 @@ pub const EXO_LANE_COMMAND_PATH: &str = "crates/omega_exo_lane/src/command.rs";
 
 /// OMEGA-DELTA-0042. The half that spawns a process and builds a thread.
 pub const EXO_CONNECTION_PATH: &str = "crates/agent_ui/src/omega_exo_connection.rs";
+
+/// OMEGA-DELTA-0126. The law for which key opens the lane's root.
+pub const EXO_SECRET_STORE_PATH: &str = "crates/omega_exo_lane/src/secret_store.rs";
+
+/// OMEGA-DELTA-0126. Where a lane with no lane file gets its secret store.
+pub const EXO_DERIVATION_PATH: &str = "crates/omega_agent_detect/src/exo.rs";
 
 /// OMEGA-DELTA-0051. The first-run page zero base reduces to its identity step.
 pub const ONBOARDING_BASICS_PAGE_PATH: &str = "crates/onboarding/src/basics_page.rs";
@@ -6303,6 +6310,19 @@ mod tests {
     /// started on, and the test asserts it found a plausible body rather than
     /// an empty string, so a parse that silently matched nothing fails instead
     /// of passing.
+    /// OMEGA-DELTA-0126. The braced body of a named struct.
+    ///
+    /// The sibling of `function_body`, and for the same reason: "the file
+    /// contains this field name somewhere" is a weaker claim than "this type
+    /// has this field", and the weaker one stays true when the field moves to a
+    /// different struct in the same file.
+    fn struct_body<'a>(source: &'a str, name: &str) -> Option<&'a str> {
+        let start = source.find(&format!("struct {name} {{"))?;
+        let open = source[start..].find('{')? + start;
+        let close = source[open..].find("\n}")? + open;
+        Some(&source[open..close])
+    }
+
     fn function_body<'a>(source: &'a str, name: &str) -> Option<&'a str> {
         // `OMEGA-DELTA-0116` added the second spelling. The first matches
         // anything with a word in front of `fn` — `pub fn`, `async fn`, `pub
@@ -17092,4 +17112,211 @@ mod tests {
     // `OMEGA-DELTA-0118`'s `zero_bases_threads_sidebar_is_its_own`. There is no
     // second check for it here on purpose: two checks over one line is how one
     // of them ends up guarding a spelling nobody kept.
+
+    // ------ OMEGA-DELTA-0126
+
+    /// OMEGA-DELTA-0126. The lane carries the key, because the root cannot.
+    ///
+    /// Exo's secret file is the same AES-GCM envelope whichever backend wrote
+    /// it, so the only place this fact can live is the lane. Three claims: the
+    /// configuration has the field, the lane file's two optional keys are read
+    /// into it, and a backend Exo does not have is refused here rather than
+    /// forwarded to Exo's command line to fail at the model call.
+    #[test]
+    fn an_exo_lane_names_the_key_that_opens_its_root() {
+        let connection = read_repository_file(EXO_CONNECTION_PATH);
+        let config = struct_body(&connection, "ExoLaneConfig").expect(
+            "OMEGA-DELTA-0126: `ExoLaneConfig` is gone, so nothing carries the \
+             Exo lane's configuration.",
+        );
+        assert!(
+            config.contains("secret_store: Option<ExoSecretStore>"),
+            "OMEGA-DELTA-0126: `ExoLaneConfig` no longer carries a secret \
+             store. `env: None` on the child means it inherits Omega's own \
+             environment, which is how a Dock-launched Omega failed on the \
+             first message with `failed to decrypt secret payload`."
+        );
+        let load = function_body(&connection, "load")
+            .expect("OMEGA-DELTA-0126: the Exo lane file is no longer read");
+        for key in ["\"secret_backend\"", "\"master_key_path\""] {
+            assert!(
+                load.contains(key),
+                "OMEGA-DELTA-0126: the Exo lane file's reader no longer reads \
+                 {key}, so a lane that states its secret store is ignored."
+            );
+        }
+        assert!(
+            load.contains("ExoSecretStore::parse("),
+            "OMEGA-DELTA-0126: the lane file's secret backend no longer goes \
+             through `ExoSecretStore::parse`, which is the one place a backend \
+             Exo does not have is refused before it reaches Exo."
+        );
+    }
+
+    /// OMEGA-DELTA-0126. Both spawn sites are launched with the lane's store.
+    ///
+    /// `env: None` is the defect: it does not mean "no environment", it means
+    /// "inherit Omega's". This asserts the ACP child names `child_env`, that
+    /// the observation commands do too, and that `child_env` is built from the
+    /// store rather than from anything ambient.
+    #[test]
+    fn an_exo_child_is_launched_with_the_lane_and_not_with_omegas_environment() {
+        let connection = read_repository_file(EXO_CONNECTION_PATH);
+        let connect = function_body(&connection, "connect_configured_lane")
+            .expect("OMEGA-DELTA-0126: the Exo lane no longer connects");
+        assert!(
+            connect.contains("env: Some(config.child_env())"),
+            "OMEGA-DELTA-0126: the `exo acp` child is no longer launched with \
+             the lane's own environment. `env: None` hands it whatever Omega \
+             was launched with, and the same root then works from a terminal \
+             and fails from the Dock."
+        );
+        let run = function_body(&connection, "run")
+            .expect("OMEGA-DELTA-0126: the Exo observation commands are gone");
+        assert!(
+            run.contains(".envs(self.config.child_env())"),
+            "OMEGA-DELTA-0126: the observation commands are no longer launched \
+             with the lane's environment, so the two spawn sites disagree \
+             about which key opens the root."
+        );
+        let child_env =
+            function_body(&connection, "child_env").expect("OMEGA-DELTA-0126: `child_env` is gone");
+        assert!(
+            child_env.contains("self.secret_store") && child_env.contains("ExoSecretStore::env"),
+            "OMEGA-DELTA-0126: `child_env` no longer builds itself from the \
+             lane's secret store, so what reaches the child is not what the \
+             lane says."
+        );
+        assert!(
+            !named_in_code(child_env, "std::env::var"),
+            "OMEGA-DELTA-0126: `child_env` reads the ambient environment. Its \
+             whole purpose is that the child's environment comes from the lane."
+        );
+    }
+
+    /// OMEGA-DELTA-0126. A derived lane finds the file backend by the file.
+    ///
+    /// The file backend's one trace outside the root is the master key at Exo's
+    /// own default path. Absence of that trace must derive *no* store rather
+    /// than `AppleKeychain`, so that a lane never names a backend Exo did not
+    /// pick.
+    #[test]
+    fn a_derived_lane_finds_the_file_backend_by_the_key_exo_writes() {
+        let derivation = read_repository_file(EXO_DERIVATION_PATH);
+        let derived = struct_body(&derivation, "DerivedExoLane")
+            .expect("OMEGA-DELTA-0126: `DerivedExoLane` is gone");
+        assert!(
+            derived.contains("secret_store: Option<ExoSecretStore>"),
+            "OMEGA-DELTA-0126: a derived lane no longer carries a secret \
+             store, so a machine with no lane file cannot name its key."
+        );
+        let store = function_body(&derivation, "secret_store")
+            .expect("OMEGA-DELTA-0126: the secret store is no longer derived");
+        assert!(
+            store.contains("ExoSecretStore::parse(") && store.contains("overrides.secret_backend"),
+            "OMEGA-DELTA-0126: the derivation no longer takes an exported \
+             `EXO_SECRET_BACKEND` first. A person who said which backend they \
+             have must not be overruled by a search."
+        );
+        assert!(
+            store.contains("default_master_key_path(") && store.contains("is_file()"),
+            "OMEGA-DELTA-0126: the derivation no longer looks for the master \
+             key file Exo itself writes, which is the only trace a file-backed \
+             root leaves outside the root."
+        );
+        assert!(
+            !store.contains("ExoSecretStore::AppleKeychain"),
+            "OMEGA-DELTA-0126: the derivation falls back to naming the \
+             keychain. Naming no store and naming Exo's current default are \
+             the same behaviour only until that default moves."
+        );
+        let default_path = function_body(&derivation, "default_master_key_path")
+            .expect("OMEGA-DELTA-0126: Exo's default master-key path is gone");
+        assert!(
+            default_path.contains("is_empty()"),
+            "OMEGA-DELTA-0126: an empty `$XDG_CONFIG_HOME` is joined onto, \
+             which names `exo/master.key` relative to wherever Omega started."
+        );
+    }
+
+    /// OMEGA-DELTA-0126, amending OMEGA-DELTA-0042. An observed capability is
+    /// said, never refused.
+    ///
+    /// The gate that stood here refused any turn whose agent reported a
+    /// capability that could widen it, and `tool_creation: enabled` is Exo's
+    /// default on every agent `exo agent create` makes — so typing `hi`
+    /// produced an error banner and no turn. The capabilities are still read
+    /// and still shown; what is gone is the refusal.
+    #[test]
+    fn an_observed_exo_capability_is_said_and_never_refused() {
+        let connection = read_repository_file(EXO_CONNECTION_PATH);
+        let prompt = function_body(&connection, "prompt")
+            .expect("OMEGA-DELTA-0126: the Exo ACP turn path is gone");
+        assert!(
+            prompt.contains("requested_capabilities()"),
+            "OMEGA-DELTA-0126: the turn no longer reads the agent's \
+             capabilities at all. They stopped being a gate; they did not stop \
+             being worth knowing."
+        );
+        let capabilities = prompt
+            .find("requested_capabilities()")
+            .expect("the capabilities are read");
+        let send = prompt
+            .find("acp.prompt(params")
+            .expect("OMEGA-DELTA-0126: the turn no longer sends");
+        // Narrowed deliberately to the two spellings a *policy* refusal has
+        // on this path. A `return Err` between these points is a preflight
+        // failure or a receipt that could not be written — things that did go
+        // wrong, which is the one case an error is the right surface for.
+        let between = &prompt[capabilities..send];
+        assert!(
+            !between.contains("bail!"),
+            "OMEGA-DELTA-0126: reading the Exo agent's capabilities can stop \
+             the send again. That refusal fired on Exo's own default \
+             configuration, so an ordinary message got a red banner instead of \
+             an answer. A gate must name the act it prevents, and every act \
+             worth preventing here happens inside Exo where Omega cannot see \
+             it."
+        );
+        assert!(
+            !prompt.contains("ExoTurnPhase::Refused"),
+            "OMEGA-DELTA-0126: the turn path can set the `Refused` phase \
+             again, which is the red dot the owner saw beside the banner."
+        );
+    }
+
+    /// OMEGA-DELTA-0126. A policy decision is never an error banner.
+    ///
+    /// `An Error Happened` is the surface for a thing that went wrong. A
+    /// refusal that went exactly as designed rendered there reads as a bug,
+    /// which is how the owner read it. This asserts the two sentences that
+    /// produced it are gone from the source, so reintroducing either is a diff
+    /// somebody has to write.
+    #[test]
+    fn no_exo_policy_decision_reaches_the_person_as_an_error() {
+        let connection = read_repository_file(EXO_CONNECTION_PATH);
+        assert!(
+            !connection.contains("this Exo turn can modify itself"),
+            "OMEGA-DELTA-0126: the Exo turn path says `this Exo turn can \
+             modify itself` again. That sentence reached the person through \
+             `bail!`, so it was rendered by `An Error Happened` — and it fired \
+             on Exo's default configuration, which means an ordinary message."
+        );
+        let prompt = function_body(&connection, "prompt")
+            .expect("OMEGA-DELTA-0126: the Exo ACP turn path is gone");
+        // Scoped to the turn path. `confirm_self_modification` still errors on
+        // a grant it cannot mint, and that is a person who pressed a dedicated
+        // control being told the press did nothing — not a turn being stopped.
+        assert!(
+            !prompt.contains("grant refused"),
+            "OMEGA-DELTA-0126: a grant the machine no longer matches refuses \
+             the turn again, on the path an ordinary message takes."
+        );
+        assert!(
+            prompt.contains("the turn ran without it"),
+            "OMEGA-DELTA-0126: a self-modification grant that no longer \
+             matches the machine cancels the turn again. It authorizes \
+             nothing, which is not the same as stopping somebody's message."
+        );
+    }
 }

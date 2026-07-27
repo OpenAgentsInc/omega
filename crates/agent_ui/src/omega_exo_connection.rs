@@ -59,10 +59,10 @@ use anyhow::{Context as _, Result, anyhow, bail};
 use gpui::{App, AsyncApp, Entity, SharedString, Task, WeakEntity};
 use omega_exo_lane::{
     EXO_HARNESS_ID, EXO_PIN, ExoAgent, ExoCommand, ExoConversation, ExoLaneIdentity,
-    ExoModelBinding, ExoMount, ExoRoot, ExoSelfModificationConsentOrigin, ExoSelfModificationGrant,
-    ExoSelfModificationGrantRequest, ExoSelfModificationReceipt, LoopbackEndpoint,
-    ObservedExoCapabilityState, ObservedExoCheckout, ObservedReadWriteMount, ObservedToolModule,
-    admits_bytes,
+    ExoModelBinding, ExoMount, ExoRoot, ExoSecretStore, ExoSelfModificationConsentOrigin,
+    ExoSelfModificationGrant, ExoSelfModificationGrantRequest, ExoSelfModificationReceipt,
+    LoopbackEndpoint, ObservedExoCapabilityState, ObservedExoCheckout, ObservedReadWriteMount,
+    ObservedToolModule, admits_bytes,
 };
 use omega_exo_log::{ExoDurableHistory, ExoHistoryUnavailable, ExoId, ExoReadClient};
 use omega_harness::MeasuredDigest;
@@ -106,6 +106,18 @@ pub struct ExoLaneConfig {
     pub agent: String,
     /// The conversation slug the lane sends to.
     pub conversation: String,
+    /// Which key opens this root's secrets. `OMEGA-DELTA-0126`, omega#112.
+    ///
+    /// The sixth field, and the first one that is optional, because `None` is a
+    /// working lane: Exo's default backend opens most roots without being
+    /// told. What it is not is *inheritance* — before this field existed the
+    /// `exo acp` child got whatever environment Omega was launched with, so the
+    /// same root worked from a terminal and failed from the Dock, on the first
+    /// message, with `failed to decrypt secret payload`.
+    ///
+    /// Still nothing Omega writes: it names a key the way every other field
+    /// names something Exo owns. See [`ExoSecretStore`].
+    pub secret_store: Option<ExoSecretStore>,
 }
 
 impl ExoLaneConfig {
@@ -143,13 +155,46 @@ impl ExoLaneConfig {
                 .filter(|value| !value.trim().is_empty())
                 .map(str::to_owned)
         };
+        // `OMEGA-DELTA-0126`. Two optional fields, read with the same `field`
+        // helper as the five required ones, so a blank string means "not
+        // stated" here exactly as it does there. A backend name Exo does not
+        // have yields `None` from `ExoSecretStore::parse` rather than reaching
+        // Exo's command line: the lane then names no store, Exo uses its
+        // default, and the person is told by the log rather than by a turn that
+        // fails at the model call.
+        let secret_store = ExoSecretStore::parse(
+            field("secret_backend").as_deref(),
+            field("master_key_path").as_ref().map(std::path::Path::new),
+        );
+        if secret_store.is_none() && field("secret_backend").is_some() {
+            log::warn!(
+                "OMEGA-DELTA-0126: the Exo lane file names a secret backend Exo does not have; \
+                 the lane names no store and Exo will use its own default"
+            );
+        }
         Some(Self {
             binary: PathBuf::from(field("binary")?),
             checkout: PathBuf::from(field("checkout")?),
             root: ExoRoot::at(field("root")?),
             agent: field("agent")?,
             conversation: field("conversation")?,
+            secret_store,
         })
+    }
+
+    /// The environment the `exo` child is launched with.
+    ///
+    /// Empty when the lane names no secret store, which is not the same as
+    /// `None`: `AgentServerCommand`'s `env` is applied on top of the inherited
+    /// environment, so an empty map and no map do the same thing, and always
+    /// producing a map means the code path that carries the store is the one
+    /// that runs on every machine rather than a branch only some take.
+    #[must_use]
+    pub fn child_env(&self) -> collections::HashMap<String, String> {
+        self.secret_store
+            .iter()
+            .flat_map(ExoSecretStore::env)
+            .collect()
     }
 
     /// The lane this path stands for: the file if there is one, otherwise the
@@ -200,6 +245,7 @@ impl ExoLaneConfig {
                     root: ExoRoot::at(derived.root.to_string_lossy().into_owned()),
                     agent: derived.agent,
                     conversation: derived.conversation,
+                    secret_store: derived.secret_store,
                 })
             }
             Err(underivable) => {
@@ -702,6 +748,12 @@ impl ExoDriver {
         let argv = command.argv(&self.config.root);
         let output = smol::process::Command::new(&self.config.binary)
             .args(&argv)
+            // `OMEGA-DELTA-0126`. The same store the turn's child gets. None of
+            // these five commands decrypts a secret today, so this changes no
+            // observed behaviour — which is the point: a reader comparing the
+            // two spawn sites should not have to work out why one of them names
+            // the key and the other does not.
+            .envs(self.config.child_env())
             .stdin(Stdio::null())
             .output()
             .await
@@ -913,7 +965,10 @@ pub async fn connect_configured_lane(
             config.agent.clone(),
             config.conversation.clone(),
         ],
-        env: None,
+        // `OMEGA-DELTA-0126`. Was `None`, and `None` means "inherit whatever
+        // Omega was launched with" — which made the same root work from a
+        // terminal and fail from the Dock, on the person's first message.
+        env: Some(config.child_env()),
     };
     let acp = Rc::new(
         AcpConnection::stdio(
@@ -1103,48 +1158,55 @@ impl AgentConnection for ExoHarnessConnection {
                 }
             };
             *inspection_cell.borrow_mut() = ready_inspection(&observed);
+            // `OMEGA-DELTA-0126`, amending `OMEGA-DELTA-0042`. An observed
+            // capability is a thing to *say*, never a reason to refuse the
+            // turn.
+            //
+            // What stood here refused any turn whose agent reported a
+            // capability that could widen it — and `tool_creation: enabled` is
+            // Exo's default on every agent `exo agent create` makes. So typing
+            // `hi` produced a red error banner and no turn. A gate has to name
+            // the act it prevents; "the person typed a word" is not an act. The
+            // acts that would be worth preventing all happen inside Exo, where
+            // Omega cannot see them and therefore cannot gate them where they
+            // occur, and a gate that cannot reach its act does not become
+            // correct by moving upstream until it catches something.
             let capabilities = observed.observed.requested_capabilities();
-            let authority_receipt = if capabilities.is_empty() {
-                None
-            } else {
-                let Some(grant) = pending_grant else {
-                    let message = "this Exo turn can modify itself; use the dedicated confirmation control for this exact draft";
-                    let receipt = refused_tier_c_receipt(
-                        observed.observed.clone(),
-                        turn_ref.clone(),
-                        None,
-                        format!("refused: {message}"),
-                    );
-                    *receipt_cell.borrow_mut() = Some(receipt.clone());
-                    persist_tier_c_receipt(receipt).await?;
-                    set_turn_snapshot(
-                        &turn_cell,
-                        ExoTurnPhase::Refused,
-                        Some(message.to_owned()),
-                    );
-                    bail!("{message}");
-                };
-                let requested_objective = Some(grant.request().objective.clone());
-                match grant.consume(&observed.observed, &turn_ref, now_ms()) {
-                    Ok(authority) => Some(authority),
-                    Err(refusal) => {
-                        let message = format!(
-                            "Exo self-modification grant refused: {refusal:?}"
-                        );
-                        let receipt = refused_tier_c_receipt(
-                            observed.observed.clone(),
-                            turn_ref.clone(),
-                            requested_objective,
-                            format!("refused: {refusal:?}"),
-                        );
-                        *receipt_cell.borrow_mut() = Some(receipt.clone());
-                        persist_tier_c_receipt(receipt).await?;
-                        set_turn_snapshot(
-                            &turn_cell,
-                            ExoTurnPhase::Refused,
-                            Some(message.clone()),
-                        );
-                        bail!("{message}");
+            if !capabilities.is_empty() {
+                log::info!(
+                    "OMEGA-DELTA-0126: this Exo agent is configured with {} capabilit{} \
+                     that can widen a turn; the turn runs and the inspector names them",
+                    capabilities.len(),
+                    if capabilities.len() == 1 { "y" } else { "ies" }
+                );
+            }
+            let authority_receipt = match pending_grant {
+                None => None,
+                Some(grant) => {
+                    let requested_objective = Some(grant.request().objective.clone());
+                    match grant.consume(&observed.observed, &turn_ref, now_ms()) {
+                        Ok(authority) => Some(authority),
+                        // A grant that no longer matches what is on the machine
+                        // does not authorize anything — but it is also not a
+                        // reason to stop the person's message. The turn runs as
+                        // an ordinary turn, with no authority attached and a
+                        // receipt saying so, which is a truer record than a
+                        // turn that never ran.
+                        Err(refusal) => {
+                            let receipt = refused_tier_c_receipt(
+                                observed.observed.clone(),
+                                turn_ref.clone(),
+                                requested_objective,
+                                format!("not authorized: {refusal:?}; the turn ran without it"),
+                            );
+                            *receipt_cell.borrow_mut() = Some(receipt.clone());
+                            persist_tier_c_receipt(receipt).await?;
+                            log::info!(
+                                "OMEGA-DELTA-0126: the Exo self-modification grant no longer \
+                                 matches this machine ({refusal:?}); the turn runs without it"
+                            );
+                            None
+                        }
                     }
                 }
             };
@@ -1196,11 +1258,9 @@ impl AgentConnection for ExoHarnessConnection {
                         response,
                     ),
                 },
-                Err(error) => set_turn_snapshot(
-                    &turn_cell,
-                    ExoTurnPhase::Failed,
-                    Some(error.to_string()),
-                ),
+                Err(error) => {
+                    set_turn_snapshot(&turn_cell, ExoTurnPhase::Failed, Some(error.to_string()))
+                }
             }
             if is_tier_c_turn {
                 if let Some(receipt) = receipt_cell.borrow_mut().as_mut() {
@@ -1216,12 +1276,11 @@ impl AgentConnection for ExoHarnessConnection {
                             receipt.exo_session_id = meta_value(meta, "exo.session_id");
                             receipt.exo_turn_id = meta_value(meta, "exo.turn_id");
                             receipt.latest_event_id = meta_value(meta, "exo.latest_event_id");
-                            receipt.verification =
-                                if receipt.latest_event_id.is_some() {
-                                    "Exo returned its durable latest event reference".to_owned()
-                                } else {
-                                    "Exo returned no durable event reference".to_owned()
-                                };
+                            receipt.verification = if receipt.latest_event_id.is_some() {
+                                "Exo returned its durable latest event reference".to_owned()
+                            } else {
+                                "Exo returned no durable event reference".to_owned()
+                            };
                         }
                         Err(error) => {
                             receipt.recorded_at_ms = now_ms();
