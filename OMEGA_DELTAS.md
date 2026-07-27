@@ -6034,3 +6034,66 @@ question rather than leaving it to whoever next reads the menu.
   `MarkdownElement`, and the byte-at-a-time sweeps are the reason to believe the
   boundary cases. What is not proved is a human watching a live model write a
   table and a fenced block back to back and reporting that nothing jumped.
+
+### OMEGA-DELTA-0129 — Nothing stands between the keystroke and the model
+
+- **Upstream Zed:** an agent server is launched and prompted. There is no
+  preflight, because there was nothing upstream wanted to be true about the
+  agent before letting somebody talk to it.
+- **Omega, before this:** the owner selected Exo, saw a green **ready**, typed
+  `who are you`, pressed send, and got a red **An Error Happened** reading *"the
+  Exo checkout is not at the pinned commit"*. His words: *"You showed me a green
+  dot that said ready and then you're giving me this bullshit."*
+- **omega#118 removed that one. This removes the rest, and the ability to add
+  another.** The pin was the third refusal to fire on an ordinary message —
+  `OMEGA-DELTA-0126` had already removed the self-modification gate, which fired
+  on Exo's own default `tool_creation: enabled`. Under the pin sat the endpoint
+  check, the observation's own `Err`, and two receipt writes, each able to end a
+  turn after it was typed. Removing them one at a time is how a night is spent
+  discovering the next one.
+- **So the rule, not the fix:** *by the time a person is typing, every question
+  about whether this can run has already been answered. If it cannot run, it
+  must not have said ready.*
+  `nothing_can_refuse_an_exo_turn_between_the_keystroke_and_the_model` enforces
+  it literally — no `bail!`, no `return Err(`, no `?;` anywhere from the start
+  of the spawned turn to `acp.prompt`. Not a list of forbidden checks, because
+  the failure was always the *next* check nobody had listed.
+- **The endpoint check moved rather than went.** An off-loopback
+  `EXO_EXOHARNESS_URL` would send the person's prompt to an unauthenticated
+  server holding Exo's secrets, and that is worth refusing. It is not worth
+  refusing *after they typed it*. It is asked once now, in
+  `connect_configured_lane`, where a refusal means **Exo is never offered** — so
+  the selector cannot show a name that would reject a message. Same boundary,
+  answered while the answer is still free.
+- **The observation informs; it does not decide.** `preflight` still runs and
+  still fills the runtime inspector, because what it learns is worth showing. A
+  failure now sets the inspector to unavailable, writes a log line, and the turn
+  is sent anyway. `observed` became an `Option` so that "the turn can run
+  without it" is a fact the compiler keeps rather than a promise a future edit
+  can quietly break.
+- **`ExoTurnPhase::Refused` is deleted, not merely unused.** An unused variant
+  is an invitation, and this work accepted it twice. The way a refusal stays
+  gone is that there is no state to put a person's message into.
+- **A receipt that cannot be written no longer eats a turn.**
+  `record_tier_c_receipt` logs where `persist_tier_c_receipt` returned. Omega's
+  bookkeeping about a turn must not be able to destroy the turn.
+- **What may still be an error:** a genuine runtime failure. Exo's process
+  dying, an API key rejected, the ACP stream ending badly — those happen *after*
+  the send and are reported, because they are things that went wrong rather than
+  policy that went right.
+- **Enforced by:**
+  `nothing_can_refuse_an_exo_turn_between_the_keystroke_and_the_model`,
+  `an_exo_turn_has_no_refused_state`,
+  `a_failed_exo_observation_does_not_stop_the_turn` and
+  `an_exo_receipt_that_cannot_be_written_does_not_stop_the_turn` in
+  `crates/omega_deltas`, plus the amended
+  `the_exo_lane_exposes_no_endpoint_off_this_machine`, which now asserts the
+  endpoint is answered at connect rather than on the turn path.
+- **Driven, not asserted.** `exo acp` was run against the owner's root at
+  `~/work/exo/.exo` with the exact argv and environment the lane produces, from
+  a shell stripped of every `EXO_*` variable. `who are you` returned
+  `stopReason: end_turn` with the answer streamed back.
+- **What this does not cover.** **No window has been opened**, so the absence of
+  the banner is proved against the source and against a driven turn, not against
+  pixels. And it does not audit the other executors' send paths for the same
+  shape.

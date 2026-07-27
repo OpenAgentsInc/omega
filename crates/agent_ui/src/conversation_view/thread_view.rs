@@ -12682,7 +12682,7 @@ impl ThreadView {
             ExoTurnPhase::Inspecting | ExoTurnPhase::Working => Color::Accent,
             ExoTurnPhase::Cancelling => Color::Warning,
             ExoTurnPhase::Cancelled => Color::Muted,
-            ExoTurnPhase::Refused | ExoTurnPhase::Failed => Color::Error,
+            ExoTurnPhase::Failed => Color::Error,
         }
     }
 

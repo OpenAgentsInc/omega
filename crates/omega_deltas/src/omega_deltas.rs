@@ -117,6 +117,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0126",
     "OMEGA-DELTA-0127",
     "OMEGA-DELTA-0128",
+    "OMEGA-DELTA-0129",
 ];
 
 /// OMEGA-DELTA-0125. Every entry the thread header's `…` menu offers, the
@@ -7986,7 +7987,13 @@ mod tests {
         let connection_path = repository_path(EXO_CONNECTION_PATH);
         let connection = std::fs::read_to_string(&connection_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", connection_path.display()));
-        let body = function_body(&connection, "check_endpoint").unwrap_or_else(|| {
+        // `OMEGA-DELTA-0129` moved *when* this is asked, not whether. The
+        // boundary is real — an off-loopback `EXO_EXOHARNESS_URL` sends the
+        // person's prompt to an unauthenticated server holding Exo's secrets —
+        // and refusing it after they typed it is the defect that delta removes.
+        // So it is asked once, at connect, where the answer is "Exo is not
+        // offered" instead of "your message is rejected".
+        let body = function_body(&connection, "endpoint_is_on_this_machine").unwrap_or_else(|| {
             panic!(
                 "OMEGA-DELTA-0042: {} no longer checks where Exo is. \
                  `EXO_EXOHARNESS_URL` in the inherited environment redirects \
@@ -7996,18 +8003,17 @@ mod tests {
         });
         assert!(
             body.contains("EXO_EXOHARNESS_URL") && body.contains("LoopbackEndpoint::parse"),
-            "OMEGA-DELTA-0042: `check_endpoint` no longer parses the inherited \
+            "OMEGA-DELTA-0042: the endpoint check no longer parses the inherited \
              endpoint through the type that refuses a non-loopback one."
         );
-        let turn = function_body(&connection, "observe").expect("the ACP observation exists");
+        let connect = function_body(&connection, "connect_configured_lane")
+            .expect("the Exo lane still connects");
         assert!(
-            turn.contains("self.check_endpoint()"),
-            "OMEGA-DELTA-0042: the ACP preflight no longer checks where Exo is."
-        );
-        let prompt = function_body(&connection, "prompt").expect("the ACP prompt path exists");
-        assert!(
-            prompt.contains("driver.preflight().await") && prompt.contains("acp.prompt(params"),
-            "OMEGA-DELTA-0042: the ACP prompt must finish its preflight before it sends."
+            connect.contains("endpoint_is_on_this_machine()"),
+            "OMEGA-DELTA-0042, OMEGA-DELTA-0129: the lane no longer checks where \
+             Exo is before attaching. It must be answered at connect — the one \
+             place a refusal means `Exo is not offered` rather than `your \
+             message is rejected`."
         );
     }
 
@@ -17554,5 +17560,115 @@ mod tests {
                 thread_path.display()
             );
         }
+    }
+
+    // ------ OMEGA-DELTA-0129
+
+    /// OMEGA-DELTA-0129. Nothing stands between the keystroke and the model.
+    ///
+    /// The owner selected Exo, saw a green **ready**, typed `who are you`, and
+    /// got a red banner: *"the Exo checkout is not at the pinned commit"*. That
+    /// was the third refusal to fire on an ordinary message — after the
+    /// self-modification gate, and with the endpoint check and a receipt write
+    /// still under it. Removing them one at a time is how a night is spent
+    /// discovering the next one.
+    ///
+    /// So this is not a check on any of them. It is a check that the send path
+    /// has **no early exit at all** between the person pressing send and Exo
+    /// being asked. A genuine runtime failure — Exo's process dying, a key
+    /// rejected — happens *after* the send and is still an error, which is
+    /// what the tail of the function is for.
+    #[test]
+    fn nothing_can_refuse_an_exo_turn_between_the_keystroke_and_the_model() {
+        let connection = read_repository_file(EXO_CONNECTION_PATH);
+        let prompt = function_body(&connection, "prompt")
+            .expect("OMEGA-DELTA-0129: the Exo ACP turn path is gone");
+        let send = prompt
+            .find("acp.prompt(params")
+            .expect("OMEGA-DELTA-0129: the turn no longer sends");
+        let before_the_send = &prompt[..send];
+        for exit in ["bail!", "return Err(", "?;"] {
+            assert!(
+                !before_the_send.contains(exit),
+                "OMEGA-DELTA-0129: `{exit}` appears before the Exo send. Every \
+                 one of those is a question about whether Exo can run, asked at \
+                 the one moment it must never be asked — after the person has \
+                 typed. By then the answer has to already be yes, because the \
+                 selector said `ready`, and a `ready` that can be contradicted \
+                 one keystroke later is a lie. If something genuinely cannot \
+                 run, do not offer it."
+            );
+        }
+    }
+
+    /// OMEGA-DELTA-0129. There is no `Refused` for a turn to be in.
+    ///
+    /// The variant is deleted rather than left unused. An unused variant is an
+    /// invitation, and this work accepted it twice — the self-modification gate
+    /// and the pin check both reached for it. The way a refusal stays gone is
+    /// that there is nothing to set.
+    #[test]
+    fn an_exo_turn_has_no_refused_state() {
+        for relative in [EXO_CONNECTION_PATH, THREAD_VIEW_PATH] {
+            let source = read_repository_file(relative);
+            assert!(
+                !named_in_code(&source, "ExoTurnPhase::Refused"),
+                "OMEGA-DELTA-0129: {relative} names a `Refused` turn phase. It \
+                 was deleted so that a future precondition has no state to put \
+                 a person's message into."
+            );
+        }
+    }
+
+    /// OMEGA-DELTA-0129. The observation informs; it does not decide.
+    ///
+    /// omega#118 took the pin's veto out of the observation. The observation
+    /// itself still had one: a failed `preflight` returned `Err` and the turn
+    /// never happened. `observed` is an `Option` now, which makes "the turn can
+    /// run without it" a fact the compiler keeps rather than a promise.
+    #[test]
+    fn a_failed_exo_observation_does_not_stop_the_turn() {
+        let connection = read_repository_file(EXO_CONNECTION_PATH);
+        let prompt = function_body(&connection, "prompt")
+            .expect("OMEGA-DELTA-0129: the Exo ACP turn path is gone");
+        assert!(
+            prompt.contains("driver.preflight().await"),
+            "OMEGA-DELTA-0129: the observation no longer runs. It stopped \
+             deciding; it must not also stop happening — the runtime inspector \
+             and the disclosure line read what it learns."
+        );
+        assert!(
+            prompt.contains("let observed = match driver.preflight().await {")
+                && prompt.contains("None\n                }\n            };"),
+            "OMEGA-DELTA-0129: a failed observation no longer yields `None`. \
+             If it yields anything else, it can end the turn again."
+        );
+        assert!(
+            prompt.contains("observed.as_ref()"),
+            "OMEGA-DELTA-0129: the turn path no longer treats the observation \
+             as optional, so it is back to requiring one."
+        );
+    }
+
+    /// OMEGA-DELTA-0129. A receipt that cannot be written does not eat a turn.
+    ///
+    /// Bookkeeping about a turn must not be able to destroy the turn.
+    #[test]
+    fn an_exo_receipt_that_cannot_be_written_does_not_stop_the_turn() {
+        let connection = read_repository_file(EXO_CONNECTION_PATH);
+        let recorder = function_body(&connection, "record_tier_c_receipt")
+            .expect("OMEGA-DELTA-0129: the non-failing receipt writer is gone");
+        assert!(
+            recorder.contains("log::warn!"),
+            "OMEGA-DELTA-0129: a receipt that cannot be written is no longer \
+             logged, so the failure is silent instead of harmless."
+        );
+        let prompt = function_body(&connection, "prompt")
+            .expect("OMEGA-DELTA-0129: the Exo ACP turn path is gone");
+        assert!(
+            !prompt.contains("persist_tier_c_receipt"),
+            "OMEGA-DELTA-0129: the turn path writes a receipt through the \
+             fallible path again. It must go through `record_tier_c_receipt`."
+        );
     }
 }

@@ -335,7 +335,6 @@ pub enum ExoTurnPhase {
     Cancelling,
     Completed,
     Cancelled,
-    Refused,
     Failed,
 }
 
@@ -349,7 +348,6 @@ impl ExoTurnPhase {
             Self::Cancelling => "Cancelling",
             Self::Completed => "Completed",
             Self::Cancelled => "Cancelled",
-            Self::Refused => "Refused",
             Self::Failed => "Failed",
         }
     }
@@ -532,7 +530,7 @@ impl ExoHarnessConnection {
     ///
     /// # Unset is "not configured", and never "no history"
     ///
-    /// On an ordinary machine the variable is unset — [`ExoDriver::check_endpoint`]
+    /// On an ordinary machine the variable is unset — [`endpoint_is_on_this_machine`]
     /// treats that as the ordinary, safe case, because the CLI reads the state
     /// root on disk and no socket exists at all. That produces
     /// [`ExoHistoryUnavailable::NotConfigured`], which carries a sentence, and
@@ -790,22 +788,6 @@ impl ExoDriver {
     /// off-machine without a single Omega command line changing. So the
     /// environment is read and parsed through [`LoopbackEndpoint`], whose only
     /// constructor refuses anything that is not this machine.
-    fn check_endpoint(&self) -> Result<()> {
-        let Ok(url) = std::env::var("EXO_EXOHARNESS_URL") else {
-            // Unset is the ordinary case and the safe one: the CLI reads the
-            // state root on disk and no socket exists at all.
-            return Ok(());
-        };
-        let endpoint = LoopbackEndpoint::parse(&url).map_err(|refusal| {
-            anyhow!(
-                "{refusal}: the Exo lane will not talk to {url}. Exo's server has no \
-                 authentication and full access to its secrets."
-            )
-        })?;
-        log::info!("OMEGA-DELTA-0042: the Exo lane is pointed at {endpoint}, which is loopback");
-        Ok(())
-    }
-
     /// Refuse an Exo that is not the pinned one.
     async fn check_pin(&self) -> Result<(ObservedExoCheckout, MeasuredDigest)> {
         let git = async |args: &[&str]| -> Result<String> {
@@ -863,7 +845,6 @@ impl ExoDriver {
 
     /// Read the exact agent and conversation capability state.
     async fn observe(&self) -> Result<ObservedTurn> {
-        self.check_endpoint()?;
         let (checkout, binary_digest) = self.check_pin().await?;
         let shown = self
             .run(&ExoCommand::ShowAgent {
@@ -952,6 +933,32 @@ impl ExoDriver {
 /// `OMEGA-DELTA-0092`, omega#100. "No lane file" stopped meaning "no lane":
 /// see [`ExoLaneConfig::resolve`] for which of the two this path is and why the
 /// distinction is drawn where it is.
+/// `OMEGA-DELTA-0129`. May this machine's Exo be driven at all?
+///
+/// The one question left that can refuse, and it is asked **at connect**, where
+/// the answer is "then Exo is not offered" rather than "your message is
+/// rejected". `EXO_EXOHARNESS_URL` redirects Exo off the state root and onto an
+/// HTTP server with no authentication and full access to its secrets; a
+/// non-loopback one would send the person's prompt to a stranger. That is worth
+/// refusing. It is not worth refusing *after they typed it*, which is where it
+/// used to be asked — inside the preflight, on the turn path.
+///
+/// Unset is the ordinary case and the safe one: the CLI reads the state root on
+/// disk and no socket exists at all.
+fn endpoint_is_on_this_machine() -> Result<()> {
+    let Ok(url) = std::env::var("EXO_EXOHARNESS_URL") else {
+        return Ok(());
+    };
+    let endpoint = LoopbackEndpoint::parse(&url).map_err(|refusal| {
+        anyhow!(
+            "{refusal}: the Exo lane will not talk to {url}. Exo's server has no \
+             authentication and full access to its secrets."
+        )
+    })?;
+    log::info!("OMEGA-DELTA-0042: the Exo lane is pointed at {endpoint}, which is loopback");
+    Ok(())
+}
+
 pub async fn connect_configured_lane(
     lane_path: &std::path::Path,
     project: Entity<Project>,
@@ -961,6 +968,13 @@ pub async fn connect_configured_lane(
     let Some(config) = ExoLaneConfig::resolve(lane_path) else {
         return Ok(None);
     };
+    // `OMEGA-DELTA-0129`. Asked here and nowhere else. A lane that must not be
+    // driven is a lane that is never attached, so the executor selector does
+    // not offer Exo and nobody can type into it.
+    if let Err(refusal) = endpoint_is_on_this_machine() {
+        log::warn!("OMEGA-DELTA-0129: no Exo lane: {refusal}");
+        return Ok(None);
+    }
     let frozen = frozen_exo_digest();
     log::info!(
         "OMEGA-DELTA-0042: Exo harness lane configured at {} ({} {}), pin {}",
@@ -1069,6 +1083,18 @@ fn refused_tier_c_receipt(
         verification: "Omega refused the turn before it crossed ACP".to_owned(),
         reconnect: "not applicable; the turn did not start".to_owned(),
         rollback: "not applicable; the turn did not start".to_owned(),
+    }
+}
+
+/// `OMEGA-DELTA-0129`. Write the receipt, and never fail a turn over it.
+///
+/// Every caller on the turn path used `?` on the write. A receipt is Omega's
+/// bookkeeping about a turn; a disk that would not take it is not a reason to
+/// discard somebody's message, and it was among the last things on this path
+/// that could return `Err` after the person had pressed send.
+async fn record_tier_c_receipt(receipt: ExoTierCReceipt) {
+    if let Err(error) = persist_tier_c_receipt(receipt).await {
+        log::warn!("OMEGA-DELTA-0129: an Exo receipt could not be written ({error})");
     }
 }
 
@@ -1183,8 +1209,8 @@ impl AgentConnection for ExoHarnessConnection {
         cx: &mut App,
     ) -> Task<Result<acp::PromptResponse>> {
         self.set_turn(
-            ExoTurnPhase::Inspecting,
-            Some("Checking the pinned Exo runtime before this turn".to_owned()),
+            ExoTurnPhase::Working,
+            Some("Sending this turn to Exo".to_owned()),
         );
         let driver = Rc::clone(&self.driver);
         let acp = Rc::clone(&self.acp);
@@ -1194,26 +1220,42 @@ impl AgentConnection for ExoHarnessConnection {
         let inspection_cell = self.inspection.clone();
         let turn_cell = self.turn.clone();
         cx.spawn(async move |cx| {
-            let turn_ref = exo_turn_ref(&params.session_id, &params.prompt)?;
+            // `OMEGA-DELTA-0129`. Nothing between the keystroke and the model.
+            //
+            // The observation still runs, because the inspector is worth
+            // filling and the disclosure line reads from it. What it can no
+            // longer do is **stop the turn**. Every early exit that lived here
+            // was a question about whether Exo could run, asked at the one
+            // moment it must never be asked: after the person has typed. By
+            // then the answer has to already be yes, because the selector said
+            // `ready` — and a `ready` that can be contradicted one keystroke
+            // later is a lie. omega#118 removed the pin's veto from inside the
+            // observation; this removes the observation's own.
+            //
+            // `turn_ref` is derived from the session id and prompt already in
+            // hand, so its failure has a value rather than a return.
+            let turn_ref = exo_turn_ref(&params.session_id, &params.prompt)
+                .unwrap_or_else(|_| format!("exo-turn:{}", params.session_id.0));
             let observed = match driver.preflight().await {
-                Ok(observed) => observed,
+                Ok(observed) => {
+                    *inspection_cell.borrow_mut() = ready_inspection(&observed);
+                    Some(observed)
+                }
                 Err(error) => {
+                    // Recorded where a person can look for it, and nowhere
+                    // else. Not a banner, not a phase, not a return.
                     let message = error.to_string();
-                    {
-                        let mut inspection = inspection_cell.borrow_mut();
-                        inspection.phase = ExoInspectionPhase::Unavailable;
-                        inspection.refreshed_at_ms = Some(now_ms());
-                        inspection.error = Some(message.clone());
-                    }
-                    set_turn_snapshot(
-                        &turn_cell,
-                        ExoTurnPhase::Failed,
-                        Some(format!("Runtime check failed: {message}")),
+                    let mut inspection = inspection_cell.borrow_mut();
+                    inspection.phase = ExoInspectionPhase::Unavailable;
+                    inspection.refreshed_at_ms = Some(now_ms());
+                    inspection.error = Some(message.clone());
+                    log::info!(
+                        "OMEGA-DELTA-0129: the Exo runtime observation failed ({message}); \
+                         the turn is sent anyway"
                     );
-                    return Err(error);
+                    None
                 }
             };
-            *inspection_cell.borrow_mut() = ready_inspection(&observed);
             // `OMEGA-DELTA-0126`, amending `OMEGA-DELTA-0042`. An observed
             // capability is a thing to *say*, never a reason to refuse the
             // turn.
@@ -1227,18 +1269,23 @@ impl AgentConnection for ExoHarnessConnection {
             // Omega cannot see them and therefore cannot gate them where they
             // occur, and a gate that cannot reach its act does not become
             // correct by moving upstream until it catches something.
-            let capabilities = observed.observed.requested_capabilities();
-            if !capabilities.is_empty() {
-                log::info!(
-                    "OMEGA-DELTA-0126: this Exo agent is configured with {} capabilit{} \
-                     that can widen a turn; the turn runs and the inspector names them",
-                    capabilities.len(),
-                    if capabilities.len() == 1 { "y" } else { "ies" }
-                );
+            if let Some(observed) = observed.as_ref() {
+                let capabilities = observed.observed.requested_capabilities();
+                if !capabilities.is_empty() {
+                    log::info!(
+                        "OMEGA-DELTA-0126: this Exo agent is configured with {} capabilit{} \
+                         that can widen a turn; the turn runs and the inspector names them",
+                        capabilities.len(),
+                        if capabilities.len() == 1 { "y" } else { "ies" }
+                    );
+                }
             }
-            let authority_receipt = match pending_grant {
-                None => None,
-                Some(grant) => {
+            // A grant is a *record* a person asked for, never a permission the
+            // turn waits on. `OMEGA-DELTA-0129`: nothing in here can fail the
+            // send — not a grant that no longer matches, and not a receipt that
+            // could not be written.
+            let authority_receipt = match (pending_grant, observed.as_ref()) {
+                (Some(grant), Some(observed)) => {
                     let requested_objective = Some(grant.request().objective.clone());
                     match grant.consume(&observed.observed, &turn_ref, now_ms()) {
                         Ok(authority) => Some(authority),
@@ -1256,7 +1303,7 @@ impl AgentConnection for ExoHarnessConnection {
                                 format!("not authorized: {refusal:?}; the turn ran without it"),
                             );
                             *receipt_cell.borrow_mut() = Some(receipt.clone());
-                            persist_tier_c_receipt(receipt).await?;
+                            record_tier_c_receipt(receipt).await;
                             log::info!(
                                 "OMEGA-DELTA-0126: the Exo self-modification grant no longer \
                                  matches this machine ({refusal:?}); the turn runs without it"
@@ -1265,6 +1312,7 @@ impl AgentConnection for ExoHarnessConnection {
                         }
                     }
                 }
+                _ => None,
             };
             let is_tier_c_turn = authority_receipt.is_some();
             if let Some(authority) = authority_receipt {
@@ -1286,10 +1334,7 @@ impl AgentConnection for ExoHarnessConnection {
                 active_tier_c_turn.set(true);
                 let receipt = receipt_cell.borrow().clone();
                 if let Some(receipt) = receipt {
-                    if let Err(error) = persist_tier_c_receipt(receipt).await {
-                        active_tier_c_turn.set(false);
-                        return Err(error);
-                    }
+                    record_tier_c_receipt(receipt).await;
                 }
             }
             set_turn_snapshot(
@@ -1347,13 +1392,10 @@ impl AgentConnection for ExoHarnessConnection {
                     }
                 }
                 let receipt = receipt_cell.borrow().clone();
-                let persisted = if let Some(receipt) = receipt {
-                    persist_tier_c_receipt(receipt).await
-                } else {
-                    Ok(())
-                };
+                if let Some(receipt) = receipt {
+                    record_tier_c_receipt(receipt).await;
+                }
                 active_tier_c_turn.set(false);
-                persisted?;
             }
             response
         })
@@ -1607,7 +1649,6 @@ mod tests {
             ExoTurnPhase::Cancelling,
             ExoTurnPhase::Completed,
             ExoTurnPhase::Cancelled,
-            ExoTurnPhase::Refused,
             ExoTurnPhase::Failed,
         ];
         let labels = phases.map(ExoTurnPhase::label);
