@@ -8130,57 +8130,71 @@ impl ThreadView {
             })
             .overflow_hidden()
             .child(header)
-            .when(is_expanded && terminal_view.is_some(), |this| {
-                this.child(
-                    div()
-                        .pt_2()
-                        .border_t_1()
-                        .when(tool_failed || command_failed, |card| card.border_dashed())
-                        .border_color(border_color)
-                        .bg(cx.theme().colors().editor_background)
-                        .rounded_b_md()
-                        .text_ui_sm(cx)
-                        .h_full()
-                        .children(terminal_view.map(|terminal_view| {
-                            // `OMEGA-DELTA-0080`. Build the footer before the
-                            // element consumes the handle, so it can say how
-                            // many lines the ceiling is hiding.
-                            let ceiling_toggle = self.render_terminal_output_ceiling_toggle(
-                                &terminal_view,
-                                // `OMEGA-DELTA-0103`. The record's own total,
-                                // so a body that is a preview cannot describe
-                                // itself as the whole result.
-                                terminal.read(cx).result_record_total_lines(cx),
-                                border_color,
-                                window,
-                                cx,
-                            );
+            // omega#112. Also: only when there is something to show.
+            //
+            // A finished command that printed nothing was still given a whole
+            // terminal element — a dark box with a blinking cursor that took
+            // focus when clicked. Four appeared in one transcript, under
+            // commands like `find ... 2>/dev/null` that legitimately match
+            // nothing.
+            //
+            // A *running* terminal still draws, because a command that has not
+            // printed yet is not a command that printed nothing, and the live
+            // pane is how a person watches it work.
+            .when(
+                is_expanded && terminal_view.is_some() && terminal.read(cx).has_output_to_render(),
+                |this| {
+                    this.child(
+                        div()
+                            .pt_2()
+                            .border_t_1()
+                            .when(tool_failed || command_failed, |card| card.border_dashed())
+                            .border_color(border_color)
+                            .bg(cx.theme().colors().editor_background)
+                            .rounded_b_md()
+                            .text_ui_sm(cx)
+                            .h_full()
+                            .children(terminal_view.map(|terminal_view| {
+                                // `OMEGA-DELTA-0080`. Build the footer before the
+                                // element consumes the handle, so it can say how
+                                // many lines the ceiling is hiding.
+                                let ceiling_toggle = self.render_terminal_output_ceiling_toggle(
+                                    &terminal_view,
+                                    // `OMEGA-DELTA-0103`. The record's own total,
+                                    // so a body that is a preview cannot describe
+                                    // itself as the whole result.
+                                    terminal.read(cx).result_record_total_lines(cx),
+                                    border_color,
+                                    window,
+                                    cx,
+                                );
 
-                            let element = if terminal_view
-                                .read(cx)
-                                .content_mode(window, cx)
-                                .is_scrollable()
-                            {
-                                div().h_72().child(terminal_view).into_any_element()
-                            } else {
-                                terminal_view.into_any_element()
-                            };
+                                let element = if terminal_view
+                                    .read(cx)
+                                    .content_mode(window, cx)
+                                    .is_scrollable()
+                                {
+                                    div().h_72().child(terminal_view).into_any_element()
+                                } else {
+                                    terminal_view.into_any_element()
+                                };
 
-                            // `OMEGA-DELTA-0080`. The control is a sibling of
-                            // the capped body, never a child of it, following
-                            // `OMEGA-DELTA-0060`: the bound can never be the
-                            // reason the reader is not told about the bound.
-                            div()
-                                .on_action(cx.listener(|_this, _: &NewTerminal, window, cx| {
-                                    window.dispatch_action(NewThread.boxed_clone(), cx);
-                                    cx.stop_propagation();
-                                }))
-                                .child(element)
-                                .children(ceiling_toggle)
-                                .into_any_element()
-                        })),
-                )
-            })
+                                // `OMEGA-DELTA-0080`. The control is a sibling of
+                                // the capped body, never a child of it, following
+                                // `OMEGA-DELTA-0060`: the bound can never be the
+                                // reason the reader is not told about the bound.
+                                div()
+                                    .on_action(cx.listener(|_this, _: &NewTerminal, window, cx| {
+                                        window.dispatch_action(NewThread.boxed_clone(), cx);
+                                        cx.stop_propagation();
+                                    }))
+                                    .child(element)
+                                    .children(ceiling_toggle)
+                                    .into_any_element()
+                            })),
+                    )
+                },
+            )
             .when_some(confirmation_options, |this, options| {
                 let is_first = self.is_first_tool_call(active_session_id, &tool_call.id, cx);
                 let allow_disabled = self.sandbox_confusables_block_allow(tool_call, cx);

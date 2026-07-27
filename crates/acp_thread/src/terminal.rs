@@ -473,6 +473,23 @@ impl Terminal {
     /// each of them remembers to do for itself.
     ///
     /// A result inside the budget is returned exactly as it always was.
+    /// Whether this terminal has anything worth drawing a pane for.
+    ///
+    /// omega#112. A finished command that printed nothing was still given a
+    /// full terminal element: a dark box with a blinking cursor that took focus
+    /// when clicked. The owner found four of them in one transcript, under
+    /// commands like `find ... 2>/dev/null` that legitimately match nothing.
+    ///
+    /// A terminal that is still running answers `true` — the live pane is the
+    /// point, and a command that has not printed *yet* is not a command that
+    /// printed nothing. Only a finished, empty one is hidden.
+    pub fn has_output_to_render(&self) -> bool {
+        match self.output.as_ref() {
+            Some(output) => !output.content.trim().is_empty(),
+            None => true,
+        }
+    }
+
     pub fn current_output(&self, cx: &App) -> acp::TerminalOutputResponse {
         if let Some(output) = self.output.as_ref() {
             let exit_status = output.exit_status.map(portable_pty::ExitStatus::from);
@@ -649,4 +666,56 @@ pub async fn create_terminal_entity(
             )
         })
         .await
+}
+
+#[cfg(test)]
+mod empty_terminal_pane_tests {
+    use super::*;
+
+    fn finished_with(content: &str) -> TerminalOutput {
+        TerminalOutput {
+            ended_at: Instant::now(),
+            exit_status: None,
+            content: content.to_owned(),
+            original_content_len: content.len(),
+            content_line_count: content.lines().count(),
+        }
+    }
+
+    // omega#112. The three cases the owner's screenshot separates: a command
+    // that printed something, a command that finished having printed nothing,
+    // and a command still running.
+    #[test]
+    fn only_a_finished_and_empty_terminal_has_nothing_to_render() {
+        assert!(
+            has_output_to_render(Some(&finished_with("total 8\ndrwxr-xr-x"))),
+            "a finished command that printed output must still draw its pane"
+        );
+        assert!(
+            !has_output_to_render(Some(&finished_with(""))),
+            "a finished command that printed nothing must not draw a pane; an \
+             empty terminal element is a dark box with a cursor in it"
+        );
+        assert!(
+            !has_output_to_render(Some(&finished_with("  \n\n \t "))),
+            "whitespace is not output. `find ... 2>/dev/null` matching nothing \
+             can still leave a newline behind, and a pane containing one blank \
+             line is the same box"
+        );
+        assert!(
+            has_output_to_render(None),
+            "a running terminal must draw, or there is nowhere to watch the \
+             command work. Not having printed *yet* is not having printed \
+             nothing"
+        );
+    }
+
+    /// The rule under test, extracted so it can be exercised without building a
+    /// `Terminal` (which needs a window, a project and a spawned process).
+    fn has_output_to_render(output: Option<&TerminalOutput>) -> bool {
+        match output {
+            Some(output) => !output.content.trim().is_empty(),
+            None => true,
+        }
+    }
 }
