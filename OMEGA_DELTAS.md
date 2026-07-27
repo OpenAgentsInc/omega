@@ -2672,11 +2672,19 @@ than it sounds, because the harness omega#81's acceptance sentence names —
 - **`--zero-base` is accepted and does nothing.** It asks for what it already
   gets. Keeping it means commands, scripts and muscle memory that carry it keep
   working instead of failing on an unknown argument.
-- **A command line that names something to edit implies the editor.** A path, a
-  diff pair, `--dev-container` and `--demo-workroom` each open the editor with no
-  flag. `omega src/main.rs` that opened a single chat thread with no way to reach
-  that file would be a regression, not a subtraction, and zero base does not
-  render the workroom surface `--demo-workroom` exists to open.
+- **A command line that names an editor surface implies the editor.** A diff
+  pair, `--dev-container` and `--demo-workroom` each open the editor with no
+  flag, because zero base draws none of the three surfaces they ask for.
+- **Amended by `OMEGA-DELTA-0116`: a path argument used to be on that list, and
+  is not.** The reasoning was that `omega src/main.rs` opening a single chat
+  thread with no way to reach that file would be a regression rather than a
+  subtraction. The owner overruled it, and the reason he was right is in this
+  entry's own sentence: *"booting the full editor must require a separate
+  flag."* A positional path is not a flag. It was the one term on the list
+  nobody types on purpose, and it made `omega <directory>` — the most ordinary
+  command there is — the command-line twin of the way out this delta had just
+  removed from inside the app. The check that required it here now requires its
+  absence, in `OMEGA-DELTA-0116`.
 - **Absent, not unrendered — and this is the part that needed the check.** The
   cheap version of this change is one `when(false)` that hides the button, and
   it leaves `omega_zero_base::leave` on the crate, the `Leave` action in the
@@ -4877,3 +4885,105 @@ than merely stated.
   on exactly that. What is not proved is the drawing: the card's layout with an
   executor name in it, three of them in one turn, has not been rendered in a
   window. omega#109's acceptance 3 stays open for that reason and no other.
+
+
+### OMEGA-DELTA-0116 — A path argument names the project, never the mode, and the folder it names is on screen
+
+- **Upstream Zed:** `zed <path>` opens `<path>` in the editor. There is no mode
+  to change, so the argument can only mean one thing.
+- **Omega, before this:** `OMEGA-DELTA-0052` made zero base the default and
+  removed the way out of it, then read a non-empty `paths_or_urls` as *"this
+  names something to edit"*. So `omega --user-data-dir <profile>
+  /Users/…/work/omega` booted the full editor — file tree, dock, status bar —
+  while a bare `omega` stayed in zero base.
+- **Omega now:** a path argument sets the **project** and leaves the **mode**
+  alone. `omega <path>` opens zero base with `<path>` as the folder the thread
+  reads, searches and runs in. `--full-editor` is the flag that opens the
+  editor.
+- **Why this was the same defect twice.** The owner's rule, given when zero base
+  became the default, is quoted in `OMEGA-DELTA-0052`: *"they must be stuck in
+  zero base with no way out if it was started in this mode. which must be the
+  default starting now. booting the full editor must require a separate flag."*
+  A positional path is not a flag. `OMEGA-DELTA-0052` removed the way out from
+  inside the app and left its twin on the command line — and left it reachable
+  **by accident**, because opening a project is the most ordinary thing a person
+  types. The owner found it in about ten seconds.
+- **Three flags stay on the list, and the distinction is the whole rule.**
+  `--diff`, `--dev-container` and `--demo-workroom` still imply the editor.
+  Every one of them is a flag somebody typed on purpose, and every one asks for
+  a surface zero base does not draw at all — so opening them in zero base would
+  be a command that silently shows nothing, which is a worse answer than
+  `--full-editor`. The term that was removed is the only one that was not a
+  flag, and it is the one the owner hit. If the owner wants those three to
+  require `--full-editor` as well, that is a one-line change to a predicate that
+  now exists to be read.
+- **A path that no longer changes the mode has to do something.** Otherwise the
+  repair turns `omega <path>` from "opens the wrong product" into "does nothing
+  visible", which is not obviously better. `resolve_zero_base_project_arguments`
+  rewrites the parsed arguments into the folder they name, so everything
+  downstream — the open listener, the workspace, the worktree, the `cwd` an
+  external agent is spawned in — keeps its single existing meaning for a path.
+- **A file argument becomes the folder that holds it.** Zero base has no pane to
+  open a buffer into, so `omega src/main.rs` can only usefully mean "work in
+  `src`". A single-file worktree would be the `OMEGA-DELTA-0054` failure with
+  one file in it instead of none: `grep`, `find_path`, `list_directory` and
+  `terminal` would all still have essentially nothing to operate on.
+- **`OMEGA-DELTA-0054` keeps the one answer.** `project_root_named` is
+  `plausible_project_root` with two more jobs — resolve a relative argument
+  against the working directory, and climb from a file to its directory — and it
+  lives in `omega_workdir` beside the rule it applies. An argument gets no
+  exemption: `omega /` and `omega ~` are still refused. A path that names nothing
+  is refused rather than climbed, because falling back to the parent of a typo
+  opens a directory nobody named, which is the failure that module exists to
+  prevent.
+- **The second half is how the first half was found.** The owner asked the agent
+  which directory it was in and got the build worktree. That answer was correct:
+  an external agent is spawned in the project root, and the project root was
+  whatever directory the launcher happened to be in. Nothing in the window said
+  so — there was no way to notice before asking and no way to check the answer
+  after. The panel header now names the folder in zero base, with the whole path
+  in its tooltip.
+- **It goes in the header, and specifically not in the composer's bottom-left.**
+  The owner looked at the running app and had that corner emptied (`be27475c11`)
+  and asked for it to stay empty. The header already carries what the thread
+  *is* — its agent and its title — and where it runs belongs with those. A check
+  fails if the working directory's spelling reaches the composer.
+- **Only when there is a folder.** With none, the composer already says *"No
+  folder open — file search and terminal have nothing to read"* and offers the
+  control that fixes it. Repeating that in the header would be the same fact
+  twice, which is the exact objection that emptied the bottom-left.
+- **The glance is shortened from the front, not the back.** The two directories
+  the owner confused were a checkout and a build worktree; the build worktree's
+  head is `/private/tmp/claude-501/…`, which identifies nothing, and its tail is
+  the only part that does. An end-truncated label would therefore have been most
+  misleading in exactly the case that produced this delta, so
+  `short_display_for_person` keeps the last three components and marks the cut
+  with a leading `…`. `$HOME` becomes `~` for the same reason: a home prefix
+  spends width the tail needs. The whole path is in the tooltip, unabbreviated —
+  this is the glance, not the record.
+- **Enforced by:** `a_path_argument_sets_the_project_and_never_the_mode` in
+  `crates/omega_deltas`, plus
+  `a_directory_argument_is_the_project_it_names`,
+  `a_relative_argument_is_resolved_against_the_working_directory`,
+  `a_file_argument_names_the_directory_that_holds_it`,
+  `an_argument_that_names_nothing_is_refused_rather_than_climbed`,
+  `an_argument_is_still_refused_when_it_is_not_a_project`,
+  `a_working_directory_is_written_the_way_a_person_wrote_it` and
+  `shortening_keeps_the_end_that_identifies_a_directory` in
+  `crates/omega_workdir`. Each assertion in the delta check was watched failing
+  against the source before the repair, and against the repair reverted one
+  piece at a time: the restored `paths_or_urls` term, a deleted resolver, a
+  resolver that decides for itself what a project root is, a
+  `project_root_named` that no longer climbs from a file, a deleted header
+  method, a header that spells the path itself, a label that is built and never
+  rendered, and the spelling moved into the composer.
+- **`OMEGA-DELTA-0052` is amended, and not to make a check pass.** Its list of
+  implied terms lost `paths_or_urls` and its prose says why. Both halves it
+  actually defends are re-asserted here: the default still points at zero base,
+  and `--full-editor` is still what asks for the editor.
+- **What this does not cover.** **No window has been opened.** No check in this
+  repository starts the binary, so nothing here proves what a person sees:
+  `omega <path>` staying in zero base, the header carrying the folder, or an
+  agent answering with the directory that was typed. Those three are omega#111's
+  acceptance and they stay open. The header's label is also unproved against a
+  narrow panel — `truncate()` is asserted, a rendered width is not.

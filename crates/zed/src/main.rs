@@ -206,7 +206,7 @@ fn main() {
     #[cfg(unix)]
     util::prevent_root_execution();
 
-    let args = Args::parse();
+    let mut args = Args::parse();
 
     // `zed --askpass` Makes zed operate in nc/netcat mode for use with askpass
     #[cfg(not(target_os = "windows"))]
@@ -288,19 +288,30 @@ fn main() {
     // still the parsed command line, still once, still never a settings key.
     // Only the direction of the default changed.
     //
-    // A command line that names something to edit implies the editor without
-    // the flag. `omega src/main.rs` opening a single chat thread with no way to
-    // reach that file would be a regression rather than a subtraction, and the
-    // same is true of a diff pair, a dev container, and the demo workroom —
-    // that last one because zero base does not render the workroom surface the
-    // flag exists to open. `--zero-base` is accepted and does nothing, because
-    // it now asks for what it already gets.
-    let names_something_to_edit = !args.paths_or_urls.is_empty()
-        || !args.diff.is_empty()
-        || args.dev_container
-        || args.demo_workroom;
-    if !args.full_editor && !names_something_to_edit {
+    // OMEGA-DELTA-0116, omega#111. A path argument used to be in this list, and
+    // that made `omega <directory>` a way out of the mode the owner asked to
+    // have no way out of — reachable *by accident*, because opening a project
+    // is the most ordinary thing a person types. It is gone. A path argument
+    // names the **project**; it does not name the **mode**.
+    //
+    // What is left is three flags, and each is a flag: a person types
+    // `--diff`, `--dev-container` or `--demo-workroom` on purpose, and each
+    // asks for a surface zero base does not draw at all, so opening them here
+    // would be a command that silently shows nothing. The owner's sentence is
+    // "booting the full editor must require a separate flag", and every term
+    // below is one. A positional path is the one term that was not, and it is
+    // the one the owner hit.
+    //
+    // `--zero-base` is accepted and does nothing, because it now asks for what
+    // it already gets.
+    let names_an_editor_surface = !args.diff.is_empty() || args.dev_container || args.demo_workroom;
+    if !args.full_editor && !names_an_editor_surface {
         omega_zero_base::enter_from_command_line();
+        // OMEGA-DELTA-0116. Now that the path no longer changes the mode, it
+        // has to do the thing it was actually typed for. Zero base draws no
+        // buffer, so the argument is resolved to the directory the thread can
+        // see rather than left as a file to open in a pane that is not there.
+        resolve_zero_base_project_arguments(&mut args);
     }
 
     // OMEGA-DELTA-0093. Read beside zero base, and for the same reason: both
@@ -1628,6 +1639,72 @@ pub(crate) async fn restore_or_create_workspace(
     Ok(())
 }
 
+/// Turn zero base's path arguments into the project they name.
+///
+/// `OMEGA-DELTA-0116`, omega#111. `omega <path>` no longer changes the mode, so
+/// it has to mean something in the mode it stays in — and in zero base a path
+/// can only mean one thing, because there is no pane to open a file into. Each
+/// argument becomes the directory the thread's `grep`, `read_file`,
+/// `list_directory` and `terminal` operate on, which is also the directory an
+/// external agent is spawned in, which is the answer the owner did not get when
+/// he asked one where it was.
+///
+/// Rewriting the parsed arguments, rather than deciding again further down, is
+/// deliberate: everything after this point — the open listener, the workspace,
+/// the worktree, the agent's `cwd` — already agrees on what a path argument
+/// means, and adding a second path for zero base would be a second answer to a
+/// question `OMEGA-DELTA-0054` already answers once.
+///
+/// # What it does not touch
+///
+/// Anything containing `://`. An argument carrying a URL scheme is a request
+/// the open listener parses itself, and reinterpreting one here would be this
+/// function guessing at a scheme it does not own. An argument that names no
+/// directory is left exactly as typed and logged: refusing to open it is
+/// `OMEGA-DELTA-0054`'s rule, and quietly dropping it would turn a typo into a
+/// window that opens on something else without saying so.
+fn resolve_zero_base_project_arguments(args: &mut Args) {
+    if args.paths_or_urls.is_empty() {
+        return;
+    }
+    let Ok(cwd) = std::env::current_dir() else {
+        log::info!(
+            "OMEGA-DELTA-0116: the working directory cannot be read, so a \
+             relative path argument names nothing; arguments are left as typed"
+        );
+        return;
+    };
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+
+    let mut roots: Vec<String> = Vec::new();
+    for argument in std::mem::take(&mut args.paths_or_urls) {
+        if argument.contains("://") {
+            roots.push(argument);
+            continue;
+        }
+        match omega_workdir::project_root_named(Path::new(&argument), &cwd, home.as_deref()) {
+            Ok(root) => {
+                log::info!(
+                    "OMEGA-DELTA-0116: `{argument}` names {} as zero base's project",
+                    root.display()
+                );
+                let root = root.to_string_lossy().into_owned();
+                if !roots.contains(&root) {
+                    roots.push(root);
+                }
+            }
+            Err(reason) => {
+                log::info!(
+                    "OMEGA-DELTA-0116: `{argument}` names no project ({reason:?}); \
+                     it is left as typed"
+                );
+                roots.push(argument);
+            }
+        }
+    }
+    args.paths_or_urls = roots;
+}
+
 /// Open the working directory as zero base's project, if it is one.
 ///
 /// `OMEGA-DELTA-0054`, omega#100. Returns whether a workspace was opened, so
@@ -1640,6 +1717,12 @@ pub(crate) async fn restore_or_create_workspace(
 /// workspace exactly as it always has, because the editor is a surface a person
 /// then chooses a folder in, and choosing for them would be the change nobody
 /// asked for.
+///
+/// `OMEGA-DELTA-0116`. This is the *bare* `omega` path, and only that. When a
+/// path argument was given it has already become the workspace by the time this
+/// runs, through the open listener, so the working directory is the fallback
+/// for a launch that named nothing rather than a second opinion about one that
+/// did.
 async fn open_zero_base_project(app_state: &Arc<AppState>, cx: &mut AsyncApp) -> bool {
     if !omega_zero_base::is_active() {
         return false;
@@ -1955,6 +2038,10 @@ struct Args {
     /// Non-existing paths and directories will ignore `:line:row` suffix.
     ///
     /// URLs can use `file://`, the current Omega channel scheme, or the legacy `zed://` scheme.
+    ///
+    /// OMEGA-DELTA-0116. In zero base a path names the folder the thread works
+    /// in — a file argument names the folder that holds it — and it never opens
+    /// the editor. Use --full-editor for that.
     paths_or_urls: Vec<String>,
 
     /// Opens the explicitly fictional, offline-safe public demo workroom.
@@ -1981,8 +2068,10 @@ struct Args {
     /// choice is read here, once, and never written anywhere, so ending the
     /// process leaves nothing to repair.
     ///
-    /// A path, a diff pair, a dev container or the demo workroom already names
-    /// something to edit, so each implies the editor without this flag.
+    /// OMEGA-DELTA-0116. A path argument does *not* imply the editor. It names
+    /// the folder the thread works in and leaves the mode alone. A diff pair, a
+    /// dev container and the demo workroom still imply it, because each is a
+    /// flag asking for a surface zero base does not draw.
     #[arg(long)]
     full_editor: bool,
 

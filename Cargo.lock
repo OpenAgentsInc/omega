@@ -557,6 +557,7 @@ dependencies = [
  "omega_front_door",
  "omega_harness",
  "omega_identity",
+ "omega_workdir",
  "omega_zero_base",
  "ordered-float 2.10.1",
  "parking_lot",

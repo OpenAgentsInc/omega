@@ -6450,6 +6450,8 @@ impl AgentPanel {
                 .into_any_element()
         });
 
+        let zero_base_working_directory = self.render_zero_base_working_directory(cx);
+
         let toolbar_content = {
             let new_thread_menu = PopoverMenu::new("new_thread_menu")
                 .trigger_with_tooltip(
@@ -6491,7 +6493,8 @@ impl AgentPanel {
                         .child(match empty_thread_title {
                             Some(title) => title,
                             None => self.render_title_view(window, cx),
-                        }),
+                        })
+                        .children(zero_base_working_directory),
                 )
                 .child(
                     h_flex()
@@ -6516,6 +6519,72 @@ impl AgentPanel {
             .border_b_1()
             .border_color(cx.theme().colors().border)
             .child(toolbar_content)
+    }
+
+    /// The folder this thread can see, named in the header.
+    ///
+    /// `OMEGA-DELTA-0116`, omega#111. The owner asked an agent which directory
+    /// it was in and got one he did not expect. He was right and the answer was
+    /// right: an external agent is spawned in the project's root, and the
+    /// project was whatever directory the launcher happened to be in. Nothing
+    /// in the window said so, so there was no way to notice before asking, and
+    /// no way to check the answer afterwards.
+    ///
+    /// A coding agent whose folder is invisible is a bad surface, and it is a
+    /// worse one now that `omega <path>` sets that folder rather than opening
+    /// the editor: a command whose only effect is invisible is indistinguishable
+    /// from a command that did nothing.
+    ///
+    /// # Where it goes, and where it must not
+    ///
+    /// The header. The owner has just had the composer's bottom-left emptied
+    /// (`be27475c11`) and asked for it to stay empty, so this is not a second
+    /// attempt at that corner. The header already carries what the thread *is*
+    /// — its agent and its title — and where it runs belongs with those.
+    ///
+    /// # Only when there is one
+    ///
+    /// When there is no folder the composer already says so, and says more than
+    /// a header can: *"No folder open — file search and terminal have nothing to
+    /// read"*, with the control that fixes it. Repeating it here would be the
+    /// same fact twice, which is the objection that emptied the bottom-left.
+    fn render_zero_base_working_directory(&self, cx: &App) -> Option<AnyElement> {
+        if !omega_zero_base::is_active() {
+            return None;
+        }
+        let root = self
+            .project
+            .read(cx)
+            .visible_worktrees(cx)
+            .next()?
+            .read(cx)
+            .abs_path();
+        let home = std::env::var_os("HOME").map(PathBuf::from);
+        let glance = omega_workdir::short_display_for_person(&root, home.as_deref(), 3);
+        let whole = omega_workdir::display_for_person(&root, home.as_deref());
+
+        Some(
+            h_flex()
+                .id("omega-zero-base-working-directory")
+                .min_w_0()
+                .gap_1()
+                .child(Label::new("·").color(Color::Muted).size(LabelSize::Small))
+                .child(
+                    Label::new(glance)
+                        .color(Color::Muted)
+                        .size(LabelSize::Small)
+                        .truncate(),
+                )
+                .tooltip(move |_, cx| {
+                    Tooltip::with_meta(
+                        whole.clone(),
+                        None,
+                        "The folder this thread can read, search and run in",
+                        cx,
+                    )
+                })
+                .into_any_element(),
+        )
     }
 
     fn dismiss_ai_onboarding(&mut self, cx: &mut Context<Self>) {

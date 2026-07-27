@@ -217,6 +217,13 @@ it.
 There is no way out at runtime. Started in zero base means staying there for the
 life of the process.
 
+A **path argument names the project, not the mode**. `omega <path>` opens zero
+base with `<path>` as the folder the thread reads, searches and runs in; a file
+argument names the folder that holds it. The folder is named in the panel
+header, because an agent whose directory is invisible cannot be checked. Only
+`--full-editor`, `--diff`, `--dev-container` and `--demo-workroom` open the
+editor, and all four are flags — see `OMEGA-DELTA-0116`.
+
 ### Words for evidence
 
 **Falsify** — break the thing the check protects and watch the check fail. The

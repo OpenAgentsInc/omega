@@ -105,6 +105,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0112",
     "OMEGA-DELTA-0113",
     "OMEGA-DELTA-0114",
+    "OMEGA-DELTA-0116",
     "OMEGA-DELTA-0121",
 ];
 
@@ -6123,8 +6124,15 @@ mod tests {
     /// an empty string, so a parse that silently matched nothing fails instead
     /// of passing.
     fn function_body<'a>(source: &'a str, name: &str) -> Option<&'a str> {
-        let needle = format!(" fn {name}(");
-        let start = source.find(&needle)? + needle.len();
+        // `OMEGA-DELTA-0116` added the second spelling. The first matches
+        // anything with a word in front of `fn` — `pub fn`, `async fn`, `pub
+        // async fn` — and silently misses a private free function at column
+        // zero, which is what a startup helper nobody else calls looks like.
+        // Watched missing one before this line existed.
+        let (start, needle) = [format!(" fn {name}("), format!("\nfn {name}(")]
+            .into_iter()
+            .find_map(|needle| source.find(&needle).map(|start| (start, needle)))?;
+        let start = start + needle.len();
         let open = source[start..].find('{')? + start;
         let mut depth = 0usize;
         for (offset, character) in source[open..].char_indices() {
@@ -8638,17 +8646,23 @@ mod tests {
             startup_path.display()
         );
         assert!(
-            startup.contains("if !args.full_editor && !names_something_to_edit {"),
+            startup.contains("if !args.full_editor && !names_an_editor_surface {"),
             "OMEGA-DELTA-0052: {} no longer defaults to zero base. `omega` with \
              no arguments must open one Exo thread; the editor is what the flag \
              asks for, not the other way round.",
             startup_path.display()
         );
-        // A path argument implies the editor. Without this, `omega src/main.rs`
-        // opens a chat thread with no way to reach the file it was given, which
-        // is a regression rather than a subtraction.
+        // Amended by `OMEGA-DELTA-0116`. This loop used to require
+        // `!args.paths_or_urls.is_empty()` here too, on the reasoning that
+        // `omega src/main.rs` opening a chat thread with no way to reach that
+        // file would be a regression rather than a subtraction. The owner
+        // overruled it: a path argument is not a flag, it is the most ordinary
+        // thing a person types, and it was reaching the editor *by accident* —
+        // the same way out this delta had just removed from inside the app.
+        // `OMEGA-DELTA-0116` owns the new rule and checks the removal; what is
+        // left here is the half that still holds. Each remaining term is a
+        // flag, and each names a surface zero base does not draw.
         for implied in [
-            "!args.paths_or_urls.is_empty()",
             "!args.diff.is_empty()",
             "args.dev_container",
             "args.demo_workroom",
@@ -14993,6 +15007,208 @@ mod tests {
              or a retry is a thread moving executors without its reader \
              asking, which is what every disclosure surface here exists to \
              make impossible."
+        );
+    }
+
+    // ------ OMEGA-DELTA-0116 — a path argument names the project, never the
+    // ------ mode
+
+    /// OMEGA-DELTA-0116. `omega <path>` sets the folder and leaves the mode
+    /// alone, and the folder it sets is named where a person can read it.
+    ///
+    /// `OMEGA-DELTA-0052` removed the way out of zero base from inside the app
+    /// and left one on the command line. `omega --user-data-dir <profile>
+    /// /Users/…/work/omega` booted the full editor — file tree, dock, status
+    /// bar — because a non-empty `paths_or_urls` was read as "this names
+    /// something to edit". The owner found it in about ten seconds, and the
+    /// reason it is worth a delta rather than a one-line fix is *how* it was
+    /// reachable: not by a flag somebody typed on purpose, but by opening a
+    /// project, which is the most ordinary thing a person types.
+    ///
+    /// It is invisible to the compiler for the reason every zero-base defect
+    /// has been. The mode is decided in the argument parser and read through a
+    /// process global, so `cargo check`, `cargo test` and clippy were all green
+    /// across a command line that opened the wrong product entirely.
+    ///
+    /// The second half is the one that made the first half findable. The owner
+    /// asked the agent which directory it was in and got the build worktree,
+    /// because an external agent is spawned in the project root and the project
+    /// root was wherever the launcher happened to be. Nothing in the window
+    /// said so. Fixing the flag without naming the folder would leave `omega
+    /// <path>` a command whose entire effect is invisible — indistinguishable,
+    /// from inside the app, from a command that did nothing.
+    #[test]
+    fn a_path_argument_sets_the_project_and_never_the_mode() {
+        let startup_path = repository_path(STARTUP_PATH);
+        let startup = std::fs::read_to_string(&startup_path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", startup_path.display()));
+
+        // The predicate that decides the mode, read as a declaration rather
+        // than searched for across the file: `paths_or_urls` appears elsewhere
+        // in this file for entirely legitimate reasons, and a whole-file
+        // `contains` would either never fail or fail for the wrong reason.
+        //
+        // Read to the first `;` rather than through `declaration_body`, which
+        // stops at a closing brace and would therefore swallow the whole of
+        // `main` — and pass, because `paths_or_urls` legitimately appears
+        // further down it. Watched failing that way first.
+        let deciding = startup
+            .split_once("let names_an_editor_surface =")
+            .and_then(|(_, rest)| rest.split_once(';'))
+            .map(|(body, _)| body)
+            .unwrap_or_else(|| {
+                panic!(
+                    "OMEGA-DELTA-0116: {} no longer decides the mode in one \
+                     named predicate. The rule being enforced is a property of \
+                     that list — every term is a flag — and a rule about a list \
+                     needs the list to be somewhere it can be read.",
+                    startup_path.display()
+                )
+            });
+        assert!(
+            !uncommented(deciding).contains("paths_or_urls"),
+            "OMEGA-DELTA-0116: the mode predicate in {} reads the path \
+             arguments again. A path argument names the **project**; it must \
+             not name the **mode**. This is the way out of zero base that \
+             `OMEGA-DELTA-0052` removed from inside the app, reachable from the \
+             command line and reachable by accident — the owner typed the most \
+             ordinary command there is and got the full editor.",
+            startup_path.display()
+        );
+        // The half of `OMEGA-DELTA-0052` this must not have quietly bought its
+        // repair with: the default still points at zero base, and the flag is
+        // still what asks for the editor.
+        assert!(
+            startup.contains("if !args.full_editor && !names_an_editor_surface {")
+                && startup.contains("omega_zero_base::enter_from_command_line();"),
+            "OMEGA-DELTA-0116: {} no longer defaults to zero base. Fixing which \
+             arguments change the mode must not change which way the mode \
+             points when nobody says anything.",
+            startup_path.display()
+        );
+
+        // Having stopped changing the mode, the path has to do the thing it was
+        // typed for. Zero base draws no pane, so a path can only mean a folder.
+        let resolver = function_body(&startup, "resolve_zero_base_project_arguments")
+            .unwrap_or_else(|| {
+                panic!(
+                    "OMEGA-DELTA-0116: {} no longer turns zero base's path \
+                     arguments into the folder they name. Without it `omega \
+                     <path>` is a command with no visible effect at all: it \
+                     stopped opening the editor and started doing nothing.",
+                    startup_path.display()
+                )
+            });
+        assert!(
+            resolver.len() > 200,
+            "OMEGA-DELTA-0116: the body read for the path resolver is too short \
+             to be the real one, so the checks below would pass without reading \
+             it"
+        );
+        assert!(
+            uncommented(resolver).contains("omega_workdir::project_root_named("),
+            "OMEGA-DELTA-0116: {} decides for itself what a path argument \
+             names. `OMEGA-DELTA-0054` owns the question \"is this a directory \
+             somebody chose\", and a second answer to it in the argument parser \
+             is how the thread's folder and its Exo lane end up derived from \
+             different directories on the same launch.",
+            startup_path.display()
+        );
+        assert!(
+            startup.contains("resolve_zero_base_project_arguments(&mut args);"),
+            "OMEGA-DELTA-0116: {} never calls the resolver, so the argument is \
+             parsed into a folder nothing opens.",
+            startup_path.display()
+        );
+
+        let workdir_path = repository_path(WORKDIR_PATH);
+        let workdir = std::fs::read_to_string(&workdir_path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", workdir_path.display()));
+        let named = function_body(&workdir, "project_root_named").unwrap_or_else(|| {
+            panic!(
+                "OMEGA-DELTA-0116: {} no longer has `project_root_named`, so \
+                 nothing turns a path argument into a project root in one \
+                 testable place. Startup is the one path no test in this \
+                 repository reaches, which is why this lives here and takes its \
+                 inputs as parameters.",
+                workdir_path.display()
+            )
+        });
+        assert!(
+            uncommented(named).contains("plausible_project_root("),
+            "OMEGA-DELTA-0116: `project_root_named` in {} no longer applies \
+             `OMEGA-DELTA-0054`'s rule. An argument gets no exemption: `omega \
+             /` and `omega ~` are still directories nobody meant to point an \
+             agent at.",
+            workdir_path.display()
+        );
+        assert!(
+            uncommented(named).contains("is_file()") && uncommented(named).contains("parent()"),
+            "OMEGA-DELTA-0116: `project_root_named` in {} no longer resolves a \
+             file argument to the directory that holds it. `omega src/main.rs` \
+             in zero base cannot show a buffer, so a single-file worktree gives \
+             the thread's `grep` and `terminal` one file to work on — which is \
+             the `OMEGA-DELTA-0054` failure with one file in it instead of \
+             none.",
+            workdir_path.display()
+        );
+
+        // The folder is named where a person can read it, and specifically not
+        // in the corner the owner has just had emptied.
+        let panel_path = repository_path(AGENT_PANEL_PATH);
+        let panel = std::fs::read_to_string(&panel_path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", panel_path.display()));
+        let header =
+            function_body(&panel, "render_zero_base_working_directory").unwrap_or_else(|| {
+                panic!(
+                    "OMEGA-DELTA-0116: {} no longer names the folder the thread \
+                     works in. A coding agent whose project directory is \
+                     invisible is a bad surface — the owner had to *ask* one \
+                     where it was to discover it was in the wrong place — and \
+                     it is a worse one now that a path argument's only effect \
+                     is to set that folder.",
+                    panel_path.display()
+                )
+            });
+        assert!(
+            uncommented(header).contains("omega_zero_base::is_active()")
+                && uncommented(header).contains("visible_worktrees("),
+            "OMEGA-DELTA-0116: the header in {} no longer reads the folder off \
+             the project. A directory the header believes and the agent's `cwd` \
+             disagree about is worse than no label: it would have confirmed the \
+             wrong answer the owner already had.",
+            panel_path.display()
+        );
+        assert!(
+            uncommented(header).contains("omega_workdir::short_display_for_person(")
+                && uncommented(header).contains("omega_workdir::display_for_person("),
+            "OMEGA-DELTA-0116: the header in {} spells the directory itself. \
+             The glance and the whole path are one function each in \
+             `omega_workdir` so that what the label shows and what the tooltip \
+             shows cannot drift into two different directories.",
+            panel_path.display()
+        );
+        assert!(
+            panel.contains(".children(zero_base_working_directory)"),
+            "OMEGA-DELTA-0116: {} builds the working-directory label and never \
+             puts it in the toolbar. An element nothing renders is the same as \
+             no element, and this whole half exists because the fact was \
+             already true and already invisible.",
+            panel_path.display()
+        );
+
+        let composer_path = repository_path(THREAD_VIEW_PATH);
+        let composer = std::fs::read_to_string(&composer_path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", composer_path.display()));
+        assert!(
+            !composer.contains("display_for_person"),
+            "OMEGA-DELTA-0116: {} writes the working directory into the \
+             composer. The owner had the composer's bottom-left emptied \
+             (`be27475c11`) and asked for it to stay empty; this fact goes in \
+             the header, and putting it back there would be this delta \
+             undoing a decision the owner made while looking at the running \
+             app.",
+            composer_path.display()
         );
     }
 }
