@@ -5491,6 +5491,7 @@ pub mod test {
                 items: Box::new([]),
             };
             Self {
+                kind: SettingsWindowKind::Legacy,
                 title_bar: None,
                 original_window: None,
                 worktree_root_dirs: HashMap::default(),

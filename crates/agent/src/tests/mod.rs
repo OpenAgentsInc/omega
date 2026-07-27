@@ -4901,6 +4901,9 @@ async fn setup(cx: &mut TestAppContext, model: TestModel) -> ThreadTest {
         json!({
             "agent": {
                 "default_profile": "test-profile",
+                "tool_permissions": {
+                    "default": "confirm"
+                },
                 "profiles": {
                     "test-profile": {
                         "name": "Test Profile",
@@ -4946,6 +4949,7 @@ async fn setup(cx: &mut TestAppContext, model: TestModel) -> ThreadTest {
 
         watch_settings(fs.clone(), cx);
     });
+    cx.run_until_parked();
 
     let templates = Templates::new();
 
@@ -5629,6 +5633,7 @@ async fn test_subagent_tool_call_end_to_end(cx: &mut TestAppContext) {
     // Ensure empty threads are not saved, even if they get mutated.
     thread.update(cx, |thread, cx| {
         thread.set_model(model.clone(), cx);
+        thread.set_profile(AgentProfileId("editor".into()), cx);
     });
     cx.run_until_parked();
 
@@ -5766,6 +5771,7 @@ async fn test_subagent_tool_output_does_not_include_thinking(cx: &mut TestAppCon
     // Ensure empty threads are not saved, even if they get mutated.
     thread.update(cx, |thread, cx| {
         thread.set_model(model.clone(), cx);
+        thread.set_profile(AgentProfileId("editor".into()), cx);
     });
     cx.run_until_parked();
 
@@ -5916,6 +5922,7 @@ async fn test_subagent_tool_call_cancellation_during_task_prompt(cx: &mut TestAp
     // Ensure empty threads are not saved, even if they get mutated.
     thread.update(cx, |thread, cx| {
         thread.set_model(model.clone(), cx);
+        thread.set_profile(AgentProfileId("editor".into()), cx);
     });
     cx.run_until_parked();
 
@@ -6047,6 +6054,7 @@ async fn test_subagent_tool_resume_session(cx: &mut TestAppContext) {
 
     thread.update(cx, |thread, cx| {
         thread.set_model(model.clone(), cx);
+        thread.set_profile(AgentProfileId("editor".into()), cx);
     });
     cx.run_until_parked();
 
@@ -6398,6 +6406,7 @@ async fn test_lsp_tools_gated_by_feature_flag(cx: &mut TestAppContext) {
             cx,
         );
         thread.add_default_tools(environment, cx);
+        thread.set_profile(AgentProfileId("editor".into()), cx);
         thread
     });
 
@@ -6538,6 +6547,7 @@ async fn test_sibling_thread_tools_gated_by_feature_flag(cx: &mut TestAppContext
             cx,
         );
         thread.add_default_tools(environment, cx);
+        thread.set_profile(AgentProfileId("editor".into()), cx);
         thread
     });
 
@@ -6700,6 +6710,7 @@ async fn test_subagent_context_window_warning(cx: &mut TestAppContext) {
 
     thread.update(cx, |thread, cx| {
         thread.set_model(model.clone(), cx);
+        thread.set_profile(AgentProfileId("editor".into()), cx);
     });
     cx.run_until_parked();
 
@@ -6828,6 +6839,7 @@ async fn test_subagent_no_context_window_warning_when_already_at_warning(cx: &mu
 
     thread.update(cx, |thread, cx| {
         thread.set_model(model.clone(), cx);
+        thread.set_profile(AgentProfileId("editor".into()), cx);
     });
     cx.run_until_parked();
 
@@ -7007,6 +7019,7 @@ async fn test_subagent_error_propagation(cx: &mut TestAppContext) {
 
     thread.update(cx, |thread, cx| {
         thread.set_model(model.clone(), cx);
+        thread.set_profile(AgentProfileId("editor".into()), cx);
     });
     cx.run_until_parked();
 

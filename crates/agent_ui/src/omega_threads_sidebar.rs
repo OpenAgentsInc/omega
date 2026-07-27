@@ -294,7 +294,7 @@ mod tests {
     #[test]
     fn rows_are_newest_first_and_carry_an_age() {
         let now = at(10);
-        let entries = vec![
+        let entries = [
             thread("older", "omega", at(0), true),
             thread("newer", "omega", at(9), true),
         ];
@@ -310,7 +310,7 @@ mod tests {
     #[test]
     fn a_draft_is_not_a_historical_chat() {
         let now = at(10);
-        let entries = vec![
+        let entries = [
             thread("sent", "omega", at(9), true),
             thread("never sent", "omega", at(9), false),
         ];
@@ -325,7 +325,7 @@ mod tests {
         let now = at(10);
         let mut archived = thread("archived", "omega", at(9), true);
         archived.archived = true;
-        let entries = vec![archived];
+        let entries = [archived];
         let rows = rows(entries.iter(), now, ALL_READY, &[]);
 
         assert!(rows.is_empty());
@@ -334,7 +334,7 @@ mod tests {
     #[test]
     fn omega_is_not_named_on_a_row_and_another_executor_is() {
         let now = at(10);
-        let entries = vec![
+        let entries = [
             thread("native", "omega", at(9), true),
             thread("codex", agent_servers::CODEX_ID, at(8), true),
         ];
@@ -347,7 +347,7 @@ mod tests {
     #[test]
     fn a_thread_reopens_under_its_own_executor_while_that_executor_can_run() {
         let now = at(10);
-        let entries = vec![thread("codex", agent_servers::CODEX_ID, at(9), true)];
+        let entries = [thread("codex", agent_servers::CODEX_ID, at(9), true)];
 
         // Claude selected, Codex installed: the thread is still reopenable,
         // because it reopens on Codex rather than on whatever is selected.
@@ -358,7 +358,7 @@ mod tests {
     #[test]
     fn a_thread_whose_executor_cannot_run_here_refuses_by_name() {
         let now = at(10);
-        let entries = vec![thread("codex", agent_servers::CODEX_ID, at(9), true)];
+        let entries = [thread("codex", agent_servers::CODEX_ID, at(9), true)];
         let rows = rows(
             entries.iter(),
             now,
@@ -386,7 +386,7 @@ mod tests {
     #[test]
     fn an_unknown_adapter_is_reopenable_only_while_it_is_registered() {
         let now = at(10);
-        let entries = vec![thread("other", "somebody-elses-agent", at(9), true)];
+        let entries = [thread("other", "somebody-elses-agent", at(9), true)];
 
         let refused = rows(entries.iter(), now, ALL_READY, &[]);
         assert!(

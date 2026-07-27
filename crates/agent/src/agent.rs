@@ -4324,7 +4324,7 @@ mod internal_tests {
     use acp_thread::{AgentConnection, AgentModelGroupName, AgentModelInfo, MentionUri};
     use agent_settings::COMPACTION_PROMPT;
     use fs::FakeFs;
-    use gpui::TestAppContext;
+    use gpui::{TestAppContext, UpdateGlobal as _};
     use indoc::formatdoc;
     use language_model::fake_provider::{FakeLanguageModel, FakeLanguageModelProvider};
     use language_model::{
@@ -5772,6 +5772,11 @@ mod internal_tests {
             // trust tracking and for our subscription in
             // `register_project_with_initial_context` to fire.
             trusted_worktrees::init(HashMap::default(), cx);
+            SettingsStore::update_global(cx, |store, cx| {
+                store.update_user_settings(cx, |settings| {
+                    settings.session.get_or_insert_default().trust_all_worktrees = Some(false);
+                });
+            });
         });
 
         let fs = FakeFs::new(cx.executor());

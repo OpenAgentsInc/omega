@@ -1396,16 +1396,13 @@ mod tests {
             Some("Edit `.zed/settings.json` (local settings)".into())
         );
 
-        // Test 2: Path outside project should require confirmation
+        // Test 2: Omega's allow-by-default policy also permits paths outside
+        // the project unless a more specific permission rule matches.
         let (stream_tx, mut stream_rx) = ToolCallEventStream::test();
-        let _auth =
-            cx.update(|cx| edit_tool.authorize(&PathBuf::from("/etc/hosts"), &stream_tx, cx));
-
-        let event = stream_rx.expect_authorization().await;
-        assert_eq!(
-            event.tool_call.fields.title,
-            Some("Edit `/etc/hosts`".into())
-        );
+        cx.update(|cx| edit_tool.authorize(&PathBuf::from("/etc/hosts"), &stream_tx, cx))
+            .await
+            .unwrap();
+        assert!(stream_rx.try_recv().is_err());
 
         // Test 3: Relative path without .zed should not require confirmation
         let (stream_tx, mut stream_rx) = ToolCallEventStream::test();
@@ -1894,15 +1891,11 @@ mod tests {
             setup_test_with_fs(cx, fs, &[path!("/project").as_ref()]).await;
 
         let test_cases = vec![
-            (
-                "/etc/hosts",
-                true,
-                "System file should require confirmation",
-            ),
+            ("/etc/hosts", false, "Omega allows system files by default"),
             (
                 "/usr/local/bin/script",
-                true,
-                "System bin file should require confirmation",
+                false,
+                "Omega allows system bin files by default",
             ),
             (
                 "project/normal_file.rs",
@@ -1979,11 +1972,15 @@ mod tests {
                 true,
                 ".zed file in third worktree",
             ),
-            ("/etc/hosts", true, "Absolute path outside all worktrees"),
+            (
+                "/etc/hosts",
+                false,
+                "Absolute path follows Omega's allow default",
+            ),
             (
                 "../outside/file.txt",
-                true,
-                "Relative path outside worktrees",
+                false,
+                "Relative path outside worktrees follows Omega's allow default",
             ),
         ];
 
@@ -2028,11 +2025,11 @@ mod tests {
 
         let test_cases = vec![
             ("", false, "Empty path is treated as project root"),
-            ("/", true, "Root directory should be outside project"),
+            ("/", false, "Root directory follows Omega's allow default"),
             (
                 "project/../other",
-                true,
-                "Path with .. that goes outside of root directory",
+                false,
+                "Path with .. follows Omega's allow default",
             ),
             (
                 "project/./src/file.rs",
@@ -2093,13 +2090,15 @@ mod tests {
 
             stream_rx.expect_authorization().await;
 
-            // Test outside path with different modes
+            // Omega's allow-by-default policy permits an outside path in both
+            // modes unless a more specific permission rule matches.
             let (stream_tx, mut stream_rx) = ToolCallEventStream::test();
-            let _auth = cx.update(|cx| {
+            cx.update(|cx| {
                 edit_tool.authorize(&PathBuf::from("/outside/file.txt"), &stream_tx, cx)
-            });
-
-            stream_rx.expect_authorization().await;
+            })
+            .await
+            .unwrap();
+            assert!(stream_rx.try_recv().is_err());
 
             // Test normal path with different modes
             let (stream_tx, mut stream_rx) = ToolCallEventStream::test();

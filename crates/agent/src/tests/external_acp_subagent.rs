@@ -333,6 +333,7 @@ fn spawn_through_the_tool(
     };
     // One event stream per tool call, which is what a real turn builds.
     let (event_stream, _events) = ToolCallEventStream::test();
+    #[allow(clippy::arc_with_non_send_sync)]
     let tool = Arc::new(SpawnAgentTool::new(
         environment.clone() as Rc<dyn crate::ThreadEnvironment>
     ));
@@ -550,6 +551,7 @@ async fn reading_an_external_subagent_transcript_refuses_with_its_own_reason(
     let (_output, _executor, session_id) = succeeded(spawned);
 
     let (event_stream, _events) = ToolCallEventStream::test();
+    #[allow(clippy::arc_with_non_send_sync)]
     let tool = Arc::new(ReadSubagentTranscriptTool::new(
         parent.environment.clone() as Rc<dyn crate::ThreadEnvironment>
     ));
