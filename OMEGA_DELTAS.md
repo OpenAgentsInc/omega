@@ -3487,6 +3487,19 @@ than it sounds, because the harness omega#81's acceptance sentence names —
   one it tried, because a refusal that names a single path gets read as a
   statement about every path — which is precisely how the wrong summary was
   drawn from a message that was itself true.
+- **The working-directory candidate has to be a directory somebody chose.**
+  macOS hands a Finder or Dock launch a working directory of `/`, and a packaged
+  Omega is started that way far more often than from a terminal. Read raw, the
+  candidate above becomes `/.exo` on exactly the launch a new person makes —
+  inert at best, and at worst a path nobody named offered to the search that
+  decides which `.exo` somebody's first message lands in. `OMEGA-DELTA-0054`
+  already answers "is this a directory a person chose" on this same startup
+  path, to decide what a thread's `grep` and `read_file` can see, so
+  `derive_lane_from_env` asks it rather than deciding again: two answers to that
+  question would eventually disagree about one launch, with the thread opened on
+  one directory and its Exo lane derived from another. The gate is on the
+  candidate and not on the derivation — a Finder launch still reaches
+  `<checkout>/.exo` and everything after it.
 - **A root holding an agent beats one that merely exists.** An empty root is the
   same dead end as no root, so preferring an earlier empty candidate over a
   later working one would reintroduce the failure the search exists to remove.
@@ -3528,15 +3541,20 @@ than it sounds, because the harness omega#81's acceptance sentence names —
   compiler: the resolution runs when the router is built in a launched process,
   which is the path `cargo check`, `cargo test` and clippy were all green across
   when it was broken before.
-- **What it derives on this machine.** Run from `scratchpad/exo-lane`, the
-  working-directory candidate answers and the whole lane resolves — binary
-  `~/work/exo/target/release/exo`, checkout `~/work/exo`, root
-  `scratchpad/exo-lane/.exo`, agent `zerobase`, conversation `zb-proof` — which
-  is field for field the lane file that was written there by hand, including
-  the same choice of conversation among the agent's three. Run from a directory
-  with no `.exo`, and with no variable set, it still derives nothing and names
-  both places it looked; that is the honest answer under this policy rather
-  than a residual defect.
+- **What it derived on this machine, and what it derives now.** Run from
+  `scratchpad/exo-lane`, the working-directory candidate answered and the whole
+  lane resolved — binary `~/work/exo/target/release/exo`, checkout `~/work/exo`,
+  root `scratchpad/exo-lane/.exo`, agent `zerobase`, conversation `zb-proof` —
+  which was field for field the lane file that had been written there by hand,
+  including the same choice of conversation among the agent's three. **That root
+  is gone.** `scratchpad/` no longer exists, and a search of `$HOME` finds no
+  `.exo` and no `exoharness` store anywhere on this disk: the checkout is ours
+  and the binary is built, and there is now no Exo state root on this machine at
+  all. So `cargo run -p omega_agent_detect --example detect` reports the three
+  agents on `PATH` and `exo lane: none`, naming both places it looked. That is
+  the honest answer under this policy rather than a residual defect — and it is
+  a fact about the machine, not about the search: no candidate order and no
+  remembered root can derive a lane to a root that is not there.
 
 ### OMEGA-DELTA-0093 — A turn can be driven without a keyboard, over the send a typed message uses
 
@@ -3772,3 +3790,54 @@ than it sounds, because the harness omega#81's acceptance sentence names —
   itself, and the agent panel reports the failure rather than opening on the
   native loop. That is the stated rule, and it is the one behaviour here worth
   watching in a window first.
+
+### OMEGA-DELTA-0100 — The composer stays at the bottom and the transcript grows up to it
+
+- **Upstream Zed:** an empty thread gives the composer the whole panel. The
+  message list collapses to nothing, the composer takes `flex_1().size_full()`,
+  and the column between them is `justify_between()`. In a dock-sized panel that
+  reads as a roomy new-thread surface, which is what it is for.
+- **Omega, before this:** the rule was already inverted in zero base, by omega#99
+  and omega#100, and nothing asserted it. Zero base zooms the panel to the whole
+  window, and at that size upstream's rule put the text field at the top of the
+  screen, the model and pin dropdowns at the very bottom, and a field of dead
+  black between them. The owner asked for the input to sit at the bottom, the
+  way a chat surface puts it.
+- **Omega now:** in zero base the composer hugs its content and the transcript
+  above it takes the remaining space, so a thread grows upward from a composer
+  that stays where it is. Outside zero base the upstream rule is untouched.
+- **Three facts produce it, and each is separately load-bearing.**
+  `composer_fills_panel` is `!has_messages && !omega_zero_base::is_active()`, so
+  the composer gives the space up. The empty-transcript branch takes it, with
+  `flex_1().size_full()` on a thread with no messages — without that, nothing
+  claims the space and the composer floats back up; without the first, two
+  elements both expand. And the conversation is drawn *before* the composer in
+  the column, which is the whole of "the transcript grows upward" and is the one
+  fact a reader assumes rather than checks.
+- **Why it needed a check at all.** This is omega#100's fifth acceptance, and
+  the only evidence for it was four PNG baselines compared at a 0.99 pixel
+  threshold. A rebase restoring the upstream branch would be a large visual
+  change and would fail that comparison — but only for somebody who regenerates
+  the baselines, and those four are exactly the ones that need a live Exo state
+  root to produce. There is no Exo state root on this machine (see
+  `OMEGA-DELTA-0092`), so today they cannot be regenerated at all: the sole
+  check on the layout rule was one that cannot currently be run. A source check
+  does not replace the picture — it cannot see a layout — but it does make the
+  three facts a rebase has to delete on purpose rather than by accident.
+- **The empty-transcript assertion is scoped to its branch.**
+  `flex_1().size_full()` also appears on the branch that *has* messages, so a
+  whole-file `contains` stays green with the zero-base branch deleted — the
+  branch that does the pushing. The check reads from the branch's own condition
+  and was watched failing with that branch removed.
+- **The order assertion reads the last `.child(conversation)`.** Three earlier
+  spellings sit inside the Exo inspector's own match and are not the column the
+  composer is in.
+- **Enforced by:**
+  `the_composer_stays_at_the_bottom_and_the_transcript_grows_up_to_it` in
+  `crates/omega_deltas/`. All three assertions were watched failing against a
+  falsified `thread_view.rs`, which was then restored byte for byte.
+- **What this does not cover.** It is a source check and it proves no pixel. The
+  acceptance still asks for a capture somebody opened, and the capture still has
+  to come from the visual runner, which builds its workspace in-process and
+  never takes the launch path. It says nothing about the composer *outside* zero
+  base, where the upstream rule stands.

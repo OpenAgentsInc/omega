@@ -303,13 +303,16 @@ pub struct ExoLaneOverrides {
     pub checkout: Option<PathBuf>,
     /// The state root, instead of looking for one. Always wins.
     pub root: Option<PathBuf>,
-    /// Where the process was started, which may hold an `.exo`.
+    /// Where the process was started, when that is somewhere a person chose.
     ///
     /// A parameter and not a `current_dir()` call, for this module's usual
     /// reason, and for a sharper one: the working directory is the single fact
     /// that distinguishes the machine this derivation was first written against
     /// — where it found nothing — from the same machine a directory later,
     /// where it finds a working lane.
+    ///
+    /// See [`chosen_working_directory`] for why "somewhere a person chose" is
+    /// not the same as "wherever the process was started".
     pub working_directory: Option<PathBuf>,
     /// A lane file whose `root` is worth trying. See [`LANE_FILE_ENV_VAR`].
     pub lane_file: Option<PathBuf>,
@@ -737,6 +740,39 @@ fn record_field(record: &Path, field: &str) -> Option<String> {
         .map(str::to_owned)
 }
 
+/// The working directory, when it is one somebody chose to be in.
+///
+/// `OMEGA-DELTA-0092`, omega#100. The root search's second candidate is
+/// `<working directory>/.exo`, because Exo's `--root` default is `.exo`
+/// relative to the directory `exo` was run from. That is true of a person in a
+/// shell and false of a launcher: macOS hands a Finder or Dock launch a working
+/// directory of `/`, and a packaged Omega is started that way far more often
+/// than from a terminal.
+///
+/// So an ungated read makes the candidate `/.exo` on exactly the launch a new
+/// person makes — inert at best, and at worst a path nobody named offered to
+/// the search that decides which `.exo` somebody's first message lands in.
+/// Every other candidate here is either an explicit instruction or a location
+/// tied to something the person set up; a launcher's `/` is neither.
+///
+/// The plausibility rule is [`omega_workdir::plausible_project_root`]'s and not
+/// a second one written here. `OMEGA-DELTA-0054` already asks "is this a
+/// directory a person chose" on this same startup path, to decide what the
+/// thread's `grep` and `read_file` can see, and two answers to that question
+/// would eventually disagree about the same launch — the thread opened on one
+/// directory and its Exo lane derived from another.
+///
+/// Inputs are parameters for this module's usual reason: startup is the path no
+/// test in this repository reaches.
+#[must_use]
+pub fn chosen_working_directory(
+    working_directory: Option<PathBuf>,
+    home: Option<&Path>,
+) -> Option<PathBuf> {
+    let working_directory = working_directory?;
+    omega_workdir::plausible_project_root(&working_directory, home).ok()
+}
+
 fn display_paths(paths: &[PathBuf]) -> String {
     paths
         .iter()
@@ -791,23 +827,24 @@ pub fn derive_lane_from_env() -> Result<DerivedExoLane, ExoLaneUnderivable> {
             .map(|value| value.trim().to_owned())
             .filter(|value| !value.is_empty())
     };
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .ok_or_else(|| ExoLaneUnderivable::NoCheckout {
+            searched: Vec::new(),
+        })?;
     let overrides = ExoLaneOverrides {
         checkout: path(CHECKOUT_ENV_VAR),
         root: path(ROOT_ENV_VAR),
         // A working directory that cannot be read is treated as no working
         // directory, exactly as `omega_workdir` treats it: the other candidates
         // still stand, and guessing one here would put a lane somewhere nobody
-        // named.
-        working_directory: std::env::current_dir().ok(),
+        // named. A working directory a *launcher* chose is treated the same way
+        // and for the same reason — see `chosen_working_directory`.
+        working_directory: chosen_working_directory(std::env::current_dir().ok(), Some(&home)),
         lane_file: path(LANE_FILE_ENV_VAR),
         agent: text(AGENT_ENV_VAR),
         conversation: text(CONVERSATION_ENV_VAR),
     };
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .ok_or_else(|| ExoLaneUnderivable::NoCheckout {
-            searched: Vec::new(),
-        })?;
     derive_lane(&overrides, &home)
 }
 
@@ -1370,6 +1407,70 @@ mod tests {
             "a refusal that names one place gets read as a statement about \
              every place"
         );
+    }
+
+    /// The candidate the correction added is inert in the launch a new person
+    /// makes, unless the launcher's directory is rejected.
+    ///
+    /// macOS starts a bundled application with a working directory of `/`, so a
+    /// raw read makes the second candidate `/.exo` on every Finder and Dock
+    /// launch. Asserting the *policy* rather than the outcome, because `/.exo`
+    /// does not exist on this machine and a test that only checked the derived
+    /// lane would pass for that reason instead of this one.
+    #[test]
+    fn a_launcher_directory_is_not_a_working_directory_candidate() {
+        let home = tempfile::tempdir().expect("a temporary home");
+
+        for launcher in ["/", "/Applications/Omega.app/Contents/MacOS", "/usr/bin"] {
+            assert_eq!(
+                chosen_working_directory(Some(PathBuf::from(launcher)), Some(home.path())),
+                None,
+                "{launcher} is what a launcher hands over, not somewhere a \
+                 person chose to be, and a root derived from it is a lane \
+                 pointed at a directory nobody named"
+            );
+        }
+        assert_eq!(
+            chosen_working_directory(Some(home.path().to_path_buf()), Some(home.path())),
+            None,
+            "the home directory itself is rejected by OMEGA-DELTA-0054 and \
+             must be rejected here by the same rule, not by a second one"
+        );
+    }
+
+    #[test]
+    fn a_directory_a_person_is_in_is_still_a_working_directory_candidate() {
+        let home = tempfile::tempdir().expect("a temporary home");
+        let chosen = home.path().join("a-directory-somebody-cd-ed-into");
+        fs::create_dir_all(&chosen).expect("the fixture directory is created");
+
+        assert_eq!(
+            chosen_working_directory(Some(chosen.clone()), Some(home.path())),
+            Some(chosen),
+            "gating the candidate must not remove it; this is the candidate \
+             that found the only working root this has ever run against"
+        );
+    }
+
+    /// The gate is applied to the candidate, not to the whole derivation.
+    #[test]
+    fn a_launcher_directory_does_not_stop_the_checkout_root_from_answering() {
+        let home = tempfile::tempdir().expect("a temporary home");
+        let checkout = write_machine(home.path());
+
+        let lane = derive_lane(
+            &ExoLaneOverrides {
+                working_directory: chosen_working_directory(
+                    Some(PathBuf::from("/")),
+                    Some(home.path()),
+                ),
+                ..ExoLaneOverrides::default()
+            },
+            home.path(),
+        )
+        .expect("the checkout's own root still answers on a Finder launch");
+
+        assert_eq!(lane.root, checkout.join(STATE_ROOT_DIRECTORY));
     }
 
     #[test]

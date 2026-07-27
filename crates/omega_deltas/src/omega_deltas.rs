@@ -93,6 +93,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0093",
     "OMEGA-DELTA-0094",
     "OMEGA-DELTA-0095",
+    "OMEGA-DELTA-0100",
 ];
 
 /// OMEGA-DELTA-0094. The audience rules, which know nothing about a window.
@@ -8664,6 +8665,47 @@ mod tests {
              `exo-explore/exo`, which shares nothing with ours but a name.",
             detect_path.display()
         );
+        // The working-directory candidate has to be a directory somebody chose,
+        // and the one place that decides it is `omega_workdir`.
+        //
+        // macOS hands a Finder or Dock launch a working directory of `/`. Read
+        // raw, the candidate the search added becomes `/.exo`: inert in the
+        // launch a new person actually makes, and — if such a root ever exists
+        // — a path nobody named offered to the search that decides which `.exo`
+        // somebody's first message lands in. `omega_workdir` already answers
+        // "is this a directory a person chose", for `OMEGA-DELTA-0054` and on
+        // this same startup path; a second answer to that question in this file
+        // is how the two eventually disagree about the same launch.
+        let from_env = function_body(&detect, "derive_lane_from_env").unwrap_or_else(|| {
+            panic!(
+                "OMEGA-DELTA-0092: cannot find the environment read in {}",
+                detect_path.display()
+            )
+        });
+        assert!(
+            uncommented(from_env).contains("working_directory: chosen_working_directory("),
+            "OMEGA-DELTA-0092: {} reads the working directory raw again. A \
+             launcher hands over `/`, so an ungated read offers `/.exo` to the \
+             root search on every Finder and Dock launch — the one launch a new \
+             person makes.",
+            detect_path.display()
+        );
+        let chosen = function_body(&detect, "chosen_working_directory").unwrap_or_else(|| {
+            panic!(
+                "OMEGA-DELTA-0092: {} no longer decides which working \
+                 directories are candidates in one testable place. It is a \
+                 parameter everywhere else in this crate for the same reason: \
+                 startup is the path no test here reaches.",
+                detect_path.display()
+            )
+        });
+        assert!(
+            uncommented(chosen).contains("omega_workdir::plausible_project_root"),
+            "OMEGA-DELTA-0092: {} decides for itself whether a working \
+             directory is one a person chose. `OMEGA-DELTA-0054` owns that \
+             question, and two answers to it disagree about the same launch.",
+            detect_path.display()
+        );
 
         let lane_path = repository_path(EXO_LANE_RESOLUTION_PATH);
         let lane = std::fs::read_to_string(&lane_path)
@@ -8848,6 +8890,102 @@ mod tests {
              OMEGA-DELTA-0054's failure, and reporting success there reports a \
              turn that did not start.",
             panel_path.display()
+        );
+    }
+
+    /// OMEGA-DELTA-0100. The composer stays at the bottom and the transcript
+    /// grows up into the space above it.
+    ///
+    /// omega#100's fifth acceptance. Three facts in `thread_view.rs` produce
+    /// it, and until now none of them was asserted anywhere — the property was
+    /// carried only by four PNG baselines compared at a 0.99 pixel threshold.
+    /// That is weak evidence for a layout rule in two ways. A rebase that
+    /// restored the upstream branch would move the composer to the top of a
+    /// zoomed window, which is a large visual change and would fail the
+    /// comparison — but only if somebody regenerates the baselines, and those
+    /// four are the ones that need a live Exo state root to produce. On a
+    /// machine with no root they cannot be regenerated at all, so the only
+    /// check on the rule is one that cannot currently be run.
+    ///
+    /// The three facts, and why each is separately load-bearing:
+    ///
+    /// **The composer does not absorb an empty thread.** Upstream gives the
+    /// composer the whole panel when there are no messages. In a dock-sized
+    /// panel that reads as a roomy new-thread surface; zoomed to the window,
+    /// which is what zero base does, it put the text field at the top of the
+    /// screen with a field of dead black under it.
+    ///
+    /// **The empty transcript takes that space instead.** The inverse of the
+    /// same rule, in the other branch. Both are needed: with only the first,
+    /// nothing claims the space and the composer floats; with only the second,
+    /// two elements both expand.
+    ///
+    /// **The conversation is drawn before the composer.** The order in the
+    /// column is the "grows upward" claim itself, and it is the one fact a
+    /// reader would assume rather than check.
+    #[test]
+    fn the_composer_stays_at_the_bottom_and_the_transcript_grows_up_to_it() {
+        let path = repository_path(THREAD_VIEW_PATH);
+        let source = std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
+        let source = uncommented(&source);
+
+        assert!(
+            source.contains(
+                "let composer_fills_panel = !has_messages && !omega_zero_base::is_active();"
+            ),
+            "OMEGA-DELTA-0100: {} lets the composer absorb an empty thread in \
+             zero base again. Upstream's rule reads as a roomy new-thread \
+             surface in a dock-sized panel; zoomed to the whole window it puts \
+             the input at the top of the screen with dead black beneath it.",
+            path.display()
+        );
+
+        // Scoped to the branch, not to the file: `flex_1().size_full()` also
+        // appears on the branch that has messages, so a whole-file `contains`
+        // would stay green with the empty-transcript branch deleted — which is
+        // the branch that does the pushing.
+        let empty = source
+            .split_once("} else if omega_zero_base::is_active() {")
+            .map(|(_, rest)| rest)
+            .unwrap_or_else(|| {
+                panic!(
+                    "OMEGA-DELTA-0100: {} no longer has a zero-base branch for \
+                     an empty transcript, so nothing claims the space and the \
+                     composer floats back up.",
+                    path.display()
+                )
+            });
+        let empty = &empty[..empty.len().min(400)];
+        assert!(
+            empty.contains("this.flex_1().size_full().into_any()"),
+            "OMEGA-DELTA-0100: {}'s empty transcript no longer takes the space \
+             above the composer in zero base. The composer gave that space up \
+             in the check above; if nothing else claims it the input floats to \
+             the top, which is the layout the owner asked to be rid of.",
+            path.display()
+        );
+
+        // The last one, because the three earlier spellings are inside the Exo
+        // inspector's own match and are not the column the composer sits in.
+        let conversation = source.rfind(".child(conversation)").unwrap_or_else(|| {
+            panic!("OMEGA-DELTA-0100: {} draws no conversation", path.display())
+        });
+        let composer = source
+            .find(".child(self.render_message_editor(window, cx))")
+            .unwrap_or_else(|| {
+                panic!(
+                    "OMEGA-DELTA-0100: {} draws no composer in its column",
+                    path.display()
+                )
+            });
+        assert!(
+            conversation < composer,
+            "OMEGA-DELTA-0100: {} draws the composer above the conversation. \
+             The order in the column is the whole of \"the transcript grows \
+             upward from the composer\", and it is the one fact a reader \
+             assumes rather than checks.",
+            path.display()
         );
     }
 

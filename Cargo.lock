@@ -11960,6 +11960,7 @@ name = "omega_agent_detect"
 version = "0.1.0"
 dependencies = [
  "omega_exo_lane",
+ "omega_workdir",
  "serde_json",
  "tempfile",
 ]
