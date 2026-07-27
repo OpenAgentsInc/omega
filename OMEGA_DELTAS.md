@@ -6498,3 +6498,33 @@ created.
 - **Enforced by:** `delegate_names_never_substitutes_and_discloses_what_ran` in
   `crates/omega_deltas`, resolver and result unit tests in `agent`, and
   `CommandAgentServer` tests in `agent_servers`.
+
+### OMEGA-DELTA-0138 — Slim-agent claims require one integrated proof record
+
+The slim-agent proof protocol validates three distinct observations. The
+out-of-box journey binds a candidate, source commit, empty external-executor
+inventory, exact five-tool request surface, direct
+`google/gemini-3.6-flash` model, coding change, passing verification command,
+completed turn, and content-addressed transcript. The harness journey binds an
+exact installed executor to its successful disclosure and readable session
+address, then requires the same target to return `no_executor` after removal.
+The eval comparison requires the basic and wide profiles to use the same model,
+source commit, and task IDs.
+
+`eval-cli` now selects `basic` or `wide` explicitly and writes that choice to
+`result.json`. The `zed-eval` launcher records and forwards the selection to
+both Harbor and Pier agents. The fixed basic surface refuses
+`ZED_EVAL_DISABLE_TOOLS`; a comparison cannot quietly make that profile easier
+by removing one of its five tools. A skipped basic-versus-wide run is a typed
+gap in the proof output, not a passing comparison.
+
+The integrated sweep requires OMEGA-DELTA-0133 through OMEGA-DELTA-0138 in
+both the ledger and the mechanical registry. The proof output remains
+`incomplete` when any installed journey is absent, invalid, from a different
+source commit, or when the eval comparison is skipped. Fixture evidence is not
+packaged evidence and cannot authorize a release or public reliability claim.
+
+- **Enforced by:**
+  `slim_agent_claims_are_bound_to_journeys_comparison_and_delta_sweep` in
+  `crates/omega_deltas`, `script/prove-omega-slim-agent --harness-check`,
+  `eval_cli` unit tests, and `zed_eval` launcher and harness tests.

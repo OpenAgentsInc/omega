@@ -1,0 +1,578 @@
+#!/usr/bin/env python3
+"""Validate candidate-bound Omega slim-agent journey evidence."""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import re
+import subprocess
+import sys
+import tempfile
+from datetime import datetime
+from pathlib import Path
+from typing import Any
+
+
+ROOT = Path(__file__).resolve().parent.parent
+DEFAULT_OUTPUT = ROOT / "target/omega-slim-agent-proof"
+FIVE_TOOLS = ["bash", "delegate", "edit", "read", "write"]
+SLIM_DELTAS = [
+    "OMEGA-DELTA-0133",
+    "OMEGA-DELTA-0134",
+    "OMEGA-DELTA-0135",
+    "OMEGA-DELTA-0136",
+    "OMEGA-DELTA-0137",
+    "OMEGA-DELTA-0138",
+]
+HEX_40 = re.compile(r"^[0-9a-f]{40}$")
+HEX_64 = re.compile(r"^[0-9a-f]{64}$")
+
+
+class ProofError(RuntimeError):
+    pass
+
+
+def reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ProofError(f"duplicate JSON key: {key}")
+        result[key] = value
+    return result
+
+
+def load_json(path: Path, label: str) -> dict[str, Any]:
+    try:
+        value = json.loads(
+            path.read_text(encoding="utf-8"),
+            object_pairs_hook=reject_duplicate_keys,
+        )
+    except (OSError, json.JSONDecodeError, ProofError) as error:
+        raise ProofError(f"cannot read {label} {path}: {error}") from error
+    if not isinstance(value, dict):
+        raise ProofError(f"{label} must be a JSON object")
+    return value
+
+
+def require_exact_keys(value: dict[str, Any], expected: set[str], label: str) -> None:
+    actual = set(value)
+    if actual != expected:
+        raise ProofError(
+            f"{label} keys differ: missing={sorted(expected - actual)}, "
+            f"unknown={sorted(actual - expected)}"
+        )
+
+
+def require_nonempty_string(value: Any, label: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ProofError(f"{label} must be a nonempty string")
+    return value
+
+
+def validate_observed_at(value: Any, label: str) -> None:
+    text = require_nonempty_string(value, label)
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError as error:
+        raise ProofError(f"{label} must be an ISO-8601 timestamp") from error
+    if parsed.tzinfo is None:
+        raise ProofError(f"{label} must include a timezone")
+
+
+def validate_binding(value: dict[str, Any], label: str) -> str:
+    source_commit = require_nonempty_string(value.get("source_commit"), f"{label}.source_commit")
+    if HEX_40.fullmatch(source_commit) is None:
+        raise ProofError(f"{label}.source_commit must be 40 lowercase hexadecimal characters")
+    candidate_digest = require_nonempty_string(
+        value.get("candidate_digest"), f"{label}.candidate_digest"
+    )
+    if HEX_64.fullmatch(candidate_digest) is None:
+        raise ProofError(
+            f"{label}.candidate_digest must be 64 lowercase hexadecimal characters"
+        )
+    validate_observed_at(value.get("observed_at"), f"{label}.observed_at")
+    return source_commit
+
+
+def validate_reference(value: Any, label: str) -> None:
+    if not isinstance(value, dict):
+        raise ProofError(f"{label} must be an object")
+    require_exact_keys(value, {"path", "sha256"}, label)
+    path = require_nonempty_string(value["path"], f"{label}.path")
+    if Path(path).is_absolute() or ".." in Path(path).parts:
+        raise ProofError(f"{label}.path must be a safe relative path")
+    digest = require_nonempty_string(value["sha256"], f"{label}.sha256")
+    if HEX_64.fullmatch(digest) is None:
+        raise ProofError(f"{label}.sha256 must be 64 lowercase hexadecimal characters")
+
+
+def validate_installed_journey(value: dict[str, Any]) -> str:
+    label = "installed journey"
+    require_exact_keys(
+        value,
+        {
+            "schema",
+            "source_commit",
+            "candidate_digest",
+            "observed_at",
+            "profile",
+            "model",
+            "installed_external_executors",
+            "model_visible_tools",
+            "task",
+            "turn",
+            "transcript",
+        },
+        label,
+    )
+    if value["schema"] != "openagents.omega.slim-agent-installed-journey.v1":
+        raise ProofError(f"{label}.schema is not supported")
+    source_commit = validate_binding(value, label)
+    if value["profile"] != "basic":
+        raise ProofError(f"{label}.profile must be basic")
+    if value["installed_external_executors"] != []:
+        raise ProofError(f"{label} must run with no installed external executor")
+    model_visible_tools = value["model_visible_tools"]
+    if (
+        not isinstance(model_visible_tools, list)
+        or any(not isinstance(tool, str) for tool in model_visible_tools)
+        or sorted(model_visible_tools) != FIVE_TOOLS
+    ):
+        raise ProofError(f"{label}.model_visible_tools must be exactly {FIVE_TOOLS}")
+    if value["model"] != {
+        "provider": "google",
+        "model": "gemini-3.6-flash",
+        "transport": "direct",
+    }:
+        raise ProofError(f"{label}.model must be the default direct Google model")
+
+    task = value["task"]
+    if not isinstance(task, dict):
+        raise ProofError(f"{label}.task must be an object")
+    require_exact_keys(
+        task,
+        {
+            "id",
+            "instruction_sha256",
+            "worktree_before_sha256",
+            "worktree_after_sha256",
+            "verification_command",
+            "verification_exit_code",
+        },
+        f"{label}.task",
+    )
+    require_nonempty_string(task["id"], f"{label}.task.id")
+    for key in (
+        "instruction_sha256",
+        "worktree_before_sha256",
+        "worktree_after_sha256",
+    ):
+        digest = require_nonempty_string(task[key], f"{label}.task.{key}")
+        if HEX_64.fullmatch(digest) is None:
+            raise ProofError(f"{label}.task.{key} must be a SHA-256 digest")
+    if task["worktree_before_sha256"] == task["worktree_after_sha256"]:
+        raise ProofError(f"{label}.task must record a coding change")
+    require_nonempty_string(
+        task["verification_command"], f"{label}.task.verification_command"
+    )
+    if task["verification_exit_code"] != 0:
+        raise ProofError(f"{label}.task verification must pass")
+
+    turn = value["turn"]
+    if not isinstance(turn, dict):
+        raise ProofError(f"{label}.turn must be an object")
+    require_exact_keys(turn, {"status", "stop_reason", "tool_calls"}, f"{label}.turn")
+    if turn["status"] != "completed" or turn["stop_reason"] != "end_turn":
+        raise ProofError(f"{label}.turn must complete with end_turn")
+    if not isinstance(turn["tool_calls"], list):
+        raise ProofError(f"{label}.turn.tool_calls must be an array")
+    unknown_tools = sorted(set(turn["tool_calls"]) - set(FIVE_TOOLS))
+    if unknown_tools:
+        raise ProofError(f"{label}.turn used tools outside the basic surface: {unknown_tools}")
+    validate_reference(value["transcript"], f"{label}.transcript")
+    return source_commit
+
+
+def validate_harness_journey(value: dict[str, Any]) -> str:
+    label = "harness journey"
+    require_exact_keys(
+        value,
+        {
+            "schema",
+            "source_commit",
+            "candidate_digest",
+            "observed_at",
+            "installed",
+            "removed",
+            "transcript",
+        },
+        label,
+    )
+    if value["schema"] != "openagents.omega.slim-agent-harness-journey.v1":
+        raise ProofError(f"{label}.schema is not supported")
+    source_commit = validate_binding(value, label)
+
+    installed = value["installed"]
+    if not isinstance(installed, dict):
+        raise ProofError(f"{label}.installed must be an object")
+    require_exact_keys(
+        installed,
+        {
+            "requested_executor",
+            "status",
+            "failure_class",
+            "final_message",
+            "session_address",
+            "disclosure",
+        },
+        f"{label}.installed",
+    )
+    requested = require_nonempty_string(
+        installed["requested_executor"], f"{label}.installed.requested_executor"
+    )
+    if installed["status"] != "completed" or installed["failure_class"] is not None:
+        raise ProofError(f"{label}.installed must complete without a failure class")
+    require_nonempty_string(
+        installed["final_message"], f"{label}.installed.final_message"
+    )
+    require_nonempty_string(
+        installed["session_address"], f"{label}.installed.session_address"
+    )
+    disclosure = installed["disclosure"]
+    if not isinstance(disclosure, dict):
+        raise ProofError(f"{label}.installed.disclosure must be an object")
+    require_exact_keys(
+        disclosure,
+        {"executor", "executor_chain", "provider", "model"},
+        f"{label}.installed.disclosure",
+    )
+    if disclosure["executor"] != requested:
+        raise ProofError(f"{label}.installed substituted the requested executor")
+    chain = disclosure["executor_chain"]
+    if not isinstance(chain, list) or len(chain) < 2 or chain[0] != "omega-agent":
+        raise ProofError(f"{label}.installed disclosure must name the Omega executor chain")
+    if requested not in chain:
+        raise ProofError(f"{label}.installed disclosure omits the requested executor")
+    require_nonempty_string(
+        disclosure["provider"], f"{label}.installed.disclosure.provider"
+    )
+    require_nonempty_string(disclosure["model"], f"{label}.installed.disclosure.model")
+
+    removed = value["removed"]
+    if not isinstance(removed, dict):
+        raise ProofError(f"{label}.removed must be an object")
+    require_exact_keys(
+        removed,
+        {"requested_executor", "status", "failure_class"},
+        f"{label}.removed",
+    )
+    if removed != {
+        "requested_executor": requested,
+        "status": "failed",
+        "failure_class": "no_executor",
+    }:
+        raise ProofError(f"{label}.removed must return typed no_executor for the same target")
+    validate_reference(value["transcript"], f"{label}.transcript")
+    return source_commit
+
+
+def validate_eval_comparison(value: dict[str, Any]) -> tuple[str, bool]:
+    label = "eval comparison"
+    require_exact_keys(
+        value,
+        {
+            "schema",
+            "source_commit",
+            "observed_at",
+            "model",
+            "task_ids",
+            "basic",
+            "wide",
+        },
+        label,
+    )
+    if value["schema"] != "openagents.omega.slim-agent-eval-comparison.v1":
+        raise ProofError(f"{label}.schema is not supported")
+    source_commit = require_nonempty_string(
+        value["source_commit"], f"{label}.source_commit"
+    )
+    if HEX_40.fullmatch(source_commit) is None:
+        raise ProofError(f"{label}.source_commit must be a full commit")
+    validate_observed_at(value["observed_at"], f"{label}.observed_at")
+    if value["model"] != "google/gemini-3.6-flash":
+        raise ProofError(f"{label}.model must be google/gemini-3.6-flash")
+    task_ids = value["task_ids"]
+    if (
+        not isinstance(task_ids, list)
+        or not task_ids
+        or any(not isinstance(task_id, str) or not task_id for task_id in task_ids)
+        or len(task_ids) != len(set(task_ids))
+    ):
+        raise ProofError(f"{label}.task_ids must be a nonempty unique string array")
+
+    statuses: list[str] = []
+    for profile in ("basic", "wide"):
+        result = value[profile]
+        if not isinstance(result, dict):
+            raise ProofError(f"{label}.{profile} must be an object")
+        status = result.get("status")
+        statuses.append(status)
+        if status == "completed":
+            require_exact_keys(
+                result, {"status", "task_ids", "run_ref"}, f"{label}.{profile}"
+            )
+            if result["task_ids"] != task_ids:
+                raise ProofError(f"{label}.{profile} did not run the exact task set")
+            require_nonempty_string(result["run_ref"], f"{label}.{profile}.run_ref")
+        elif status == "skipped":
+            require_exact_keys(
+                result, {"status", "reason"}, f"{label}.{profile}"
+            )
+            require_nonempty_string(result["reason"], f"{label}.{profile}.reason")
+        else:
+            raise ProofError(f"{label}.{profile}.status must be completed or skipped")
+    if len(set(statuses)) != 1:
+        raise ProofError(f"{label} cannot compare one completed profile with one skipped profile")
+    return source_commit, statuses[0] == "completed"
+
+
+def validate_delta_sweep() -> None:
+    ledger = (ROOT / "OMEGA_DELTAS.md").read_text(encoding="utf-8")
+    checks = (ROOT / "crates/omega_deltas/src/omega_deltas.rs").read_text(
+        encoding="utf-8"
+    )
+    for delta in SLIM_DELTAS:
+        if ledger.count(f"### {delta} ") != 1:
+            raise ProofError(f"{delta} must appear exactly once as a ledger heading")
+        if checks.count(f'"{delta}"') < 1:
+            raise ProofError(f"{delta} is absent from the mechanical delta registry")
+
+
+def repository_state() -> tuple[str, bool]:
+    try:
+        commit = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=ROOT,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        dirty = bool(
+            subprocess.run(
+                ["git", "status", "--porcelain", "--untracked-files=no"],
+                cwd=ROOT,
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+        )
+    except subprocess.CalledProcessError as error:
+        raise ProofError("cannot read the Omega repository state") from error
+    if HEX_40.fullmatch(commit) is None:
+        raise ProofError("the Omega repository HEAD is not a full commit")
+    return commit, dirty
+
+
+def write_result(
+    output: Path,
+    checks: dict[str, str],
+    blockers: list[str],
+    source_commit: str | None,
+) -> None:
+    output.mkdir(parents=True, exist_ok=True)
+    status = "passed" if not blockers and all(value == "passed" for value in checks.values()) else "incomplete"
+    result = {
+        "schema": "openagents.omega.slim-agent-proof.v1",
+        "status": status,
+        "source_commit": source_commit,
+        "checks": checks,
+        "blockers": blockers,
+        "authority_boundary": "This record validates supplied observations. A fixture or development receipt is not a signed packaged-release claim.",
+    }
+    (output / "proof.json").write_text(
+        json.dumps(result, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+
+def self_test() -> None:
+    digest = "a" * 64
+    commit = "b" * 40
+    reference = {"path": "evidence/transcript.json", "sha256": digest}
+    installed = {
+        "schema": "openagents.omega.slim-agent-installed-journey.v1",
+        "source_commit": commit,
+        "candidate_digest": digest,
+        "observed_at": "2026-07-27T00:00:00Z",
+        "profile": "basic",
+        "model": {
+            "provider": "google",
+            "model": "gemini-3.6-flash",
+            "transport": "direct",
+        },
+        "installed_external_executors": [],
+        "model_visible_tools": FIVE_TOOLS,
+        "task": {
+            "id": "fixture",
+            "instruction_sha256": digest,
+            "worktree_before_sha256": "c" * 64,
+            "worktree_after_sha256": "d" * 64,
+            "verification_command": "test",
+            "verification_exit_code": 0,
+        },
+        "turn": {
+            "status": "completed",
+            "stop_reason": "end_turn",
+            "tool_calls": ["read", "edit", "bash"],
+        },
+        "transcript": reference,
+    }
+    harness = {
+        "schema": "openagents.omega.slim-agent-harness-journey.v1",
+        "source_commit": commit,
+        "candidate_digest": digest,
+        "observed_at": "2026-07-27T00:00:00Z",
+        "installed": {
+            "requested_executor": "codex-acp",
+            "status": "completed",
+            "failure_class": None,
+            "final_message": "done",
+            "session_address": "session:test",
+            "disclosure": {
+                "executor": "codex-acp",
+                "executor_chain": ["omega-agent", "codex-acp"],
+                "provider": "openai",
+                "model": "codex",
+            },
+        },
+        "removed": {
+            "requested_executor": "codex-acp",
+            "status": "failed",
+            "failure_class": "no_executor",
+        },
+        "transcript": reference,
+    }
+    comparison = {
+        "schema": "openagents.omega.slim-agent-eval-comparison.v1",
+        "source_commit": commit,
+        "observed_at": "2026-07-27T00:00:00Z",
+        "model": "google/gemini-3.6-flash",
+        "task_ids": ["fixture"],
+        "basic": {
+            "status": "completed",
+            "task_ids": ["fixture"],
+            "run_ref": "eval:basic",
+        },
+        "wide": {
+            "status": "completed",
+            "task_ids": ["fixture"],
+            "run_ref": "eval:wide",
+        },
+    }
+    validate_installed_journey(installed)
+    validate_harness_journey(harness)
+    _, completed = validate_eval_comparison(comparison)
+    if not completed:
+        raise ProofError("self-test comparison did not complete")
+    invalid = dict(installed)
+    invalid["model_visible_tools"] = FIVE_TOOLS + ["search_web"]
+    try:
+        validate_installed_journey(invalid)
+    except ProofError:
+        pass
+    else:
+        raise ProofError("self-test accepted a sixth basic tool")
+
+    with tempfile.TemporaryDirectory() as directory:
+        path = Path(directory) / "duplicate.json"
+        path.write_text('{"schema":"a","schema":"b"}', encoding="utf-8")
+        try:
+            load_json(path, "duplicate fixture")
+        except ProofError:
+            pass
+        else:
+            raise ProofError("self-test accepted a duplicate JSON key")
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--harness-check", action="store_true")
+    parser.add_argument("--installed-journey", type=Path)
+    parser.add_argument("--harness-journey", type=Path)
+    parser.add_argument("--eval-comparison", type=Path)
+    parser.add_argument("--out", type=Path, default=DEFAULT_OUTPUT)
+    arguments = parser.parse_args()
+
+    if arguments.harness_check:
+        self_test()
+        validate_delta_sweep()
+        print("Omega slim-agent proof harness OK")
+        return 0
+
+    checks: dict[str, str] = {}
+    blockers: list[str] = []
+    source_commits: list[str] = []
+
+    for name, path, validator in (
+        ("installed_journey", arguments.installed_journey, validate_installed_journey),
+        ("harness_journey", arguments.harness_journey, validate_harness_journey),
+    ):
+        if path is None:
+            checks[name] = "missing"
+            blockers.append(f"{name} evidence was not supplied")
+            continue
+        try:
+            source_commits.append(validator(load_json(path, name)))
+            checks[name] = "passed"
+        except ProofError as error:
+            checks[name] = "failed"
+            blockers.append(str(error))
+
+    if arguments.eval_comparison is None:
+        checks["eval_comparison"] = "missing"
+        blockers.append("eval comparison evidence was not supplied")
+    else:
+        try:
+            source_commit, completed = validate_eval_comparison(
+                load_json(arguments.eval_comparison, "eval comparison")
+            )
+            source_commits.append(source_commit)
+            checks["eval_comparison"] = "passed" if completed else "skipped"
+            if not completed:
+                blockers.append("basic-versus-wide eval comparison was explicitly skipped")
+        except ProofError as error:
+            checks["eval_comparison"] = "failed"
+            blockers.append(str(error))
+
+    try:
+        validate_delta_sweep()
+        checks["delta_sweep"] = "passed"
+    except ProofError as error:
+        checks["delta_sweep"] = "failed"
+        blockers.append(str(error))
+
+    source_commit = source_commits[0] if source_commits else None
+    if len(set(source_commits)) > 1:
+        blockers.append("evidence does not come from one integrated source commit")
+    repository_commit, repository_dirty = repository_state()
+    if source_commit is not None and source_commit != repository_commit:
+        blockers.append("evidence source commit does not equal the validator checkout HEAD")
+    if repository_dirty:
+        blockers.append("the validator checkout has uncommitted tracked changes")
+
+    write_result(arguments.out, checks, blockers, source_commit)
+    if blockers:
+        print(f"Incomplete proof: {arguments.out / 'proof.json'}", file=sys.stderr)
+        return 1
+    print(f"Proof passed: {arguments.out / 'proof.json'}")
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except ProofError as error:
+        print(f"Proof error: {error}", file=sys.stderr)
+        raise SystemExit(1) from error

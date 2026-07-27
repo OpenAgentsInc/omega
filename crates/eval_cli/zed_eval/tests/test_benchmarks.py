@@ -109,6 +109,12 @@ class HarnessCommandTests(unittest.TestCase):
         )
         self.assertIn("EVAL_CLI_TIMEOUT=123", command)
 
+    def test_agent_profile_is_forwarded_to_eval_cli(self) -> None:
+        command = harness_command.build_harness_command(
+            make_run_request("swe-atlas-rf", agent_profile="basic"), "/tmp/jobs"
+        )
+        self.assertIn("EVAL_CLI_PROFILE=basic", option_values(command, "--ae"))
+
     def test_extra_env_is_forwarded_to_harness_agent(self) -> None:
         command = harness_command.build_harness_command(
             make_run_request(

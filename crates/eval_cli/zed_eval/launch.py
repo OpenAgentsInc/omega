@@ -246,6 +246,7 @@ def common_run_request_fields(
         "modal_token_secret_name": args.modal_token_secret,
         "orchestration": config.orchestration_info(),
         "agent_model": agent_model,
+        "agent_profile": getattr(args, "agent_profile", "wide"),
         "judge_preset": judge_preset,
         "judge_model": getattr(args, "judge_model", None),
         "build_id": build_id,

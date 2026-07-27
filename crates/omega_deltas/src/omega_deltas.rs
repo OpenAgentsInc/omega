@@ -126,6 +126,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0135",
     "OMEGA-DELTA-0136",
     "OMEGA-DELTA-0137",
+    "OMEGA-DELTA-0138",
 ];
 
 /// OMEGA-DELTA-0125. Every entry the thread header's `…` menu offers, the
@@ -18631,6 +18632,67 @@ mod tests {
                 && agent.contains("external_subagent_thread(&session_id, cx)"),
             "OMEGA-DELTA-0137: external delegate sessions are no longer retained \
              by their parent or their returned address is no longer readable."
+        );
+    }
+
+    /// OMEGA-DELTA-0138. Slim-agent reliability claims require candidate-bound
+    /// journey evidence, a same-task basic-versus-wide comparison, and a
+    /// complete watched delta sweep.
+    #[test]
+    fn slim_agent_claims_are_bound_to_journeys_comparison_and_delta_sweep() {
+        let proof = read_repository_file("script/prove-omega-slim-agent");
+        for required in [
+            "openagents.omega.slim-agent-installed-journey.v1",
+            "openagents.omega.slim-agent-harness-journey.v1",
+            "openagents.omega.slim-agent-eval-comparison.v1",
+            "installed_external_executors",
+            "google/gemini-3.6-flash",
+            "one integrated source commit",
+            "validator checkout HEAD",
+            "A fixture or development receipt is not a signed packaged-release claim.",
+        ] {
+            assert!(
+                proof.contains(required),
+                "OMEGA-DELTA-0138: the proof protocol lost `{required}`."
+            );
+        }
+        for delta in 133..=138 {
+            let delta = format!("OMEGA-DELTA-{delta:04}");
+            assert!(
+                proof.contains(&delta),
+                "OMEGA-DELTA-0138: the integrated sweep no longer requires {delta}."
+            );
+        }
+
+        let eval = read_repository_file("crates/eval_cli/src/main.rs");
+        for required in [
+            "profile: EvalProfile",
+            "EvalProfile::Basic",
+            "EvalProfile::Wide",
+            r#""default_profile": "basic""#,
+            r#""default_profile": "write""#,
+            "cannot alter the closed basic profile",
+        ] {
+            assert!(
+                eval.contains(required),
+                "OMEGA-DELTA-0138: eval profile comparison lost `{required}`."
+            );
+        }
+
+        let harness = read_repository_file("crates/eval_cli/zed_eval/harness_command.py");
+        assert!(
+            harness.contains("EVAL_CLI_PROFILE=") && harness.contains("\"agent_profile\""),
+            "OMEGA-DELTA-0138: zed-eval no longer records or forwards the \
+             selected Omega profile."
+        );
+
+        let documentation = read_repository_file("docs/src/development/omega-slim-agent-proof.md");
+        assert!(
+            documentation.contains("Fixture evidence is not packaged evidence")
+                && documentation.contains("--agent-profile basic")
+                && documentation.contains("--agent-profile wide"),
+            "OMEGA-DELTA-0138: the operator protocol no longer states the \
+             evidence boundary or the same-task profile comparison."
         );
     }
 }

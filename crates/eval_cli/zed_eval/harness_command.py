@@ -123,6 +123,8 @@ def build_harness_command(run_request: dict[str, Any], jobs_dir: str) -> list[st
         f"EVAL_CLI_CONTAINER_PATH=/data/builds/{build_id}/eval-cli",
         "--ae",
         f"EVAL_CLI_TIMEOUT={eval_cli_timeout(run_request, benchmark)}",
+        "--ae",
+        f"EVAL_CLI_PROFILE={run_request.get('agent_profile') or 'wide'}",
     ]
     # Omit --override-cpus/--override-memory-mb unless explicitly set, so Harbor
     # applies each task's declared cpus/memory. Overriding below the declared
@@ -185,6 +187,7 @@ def run_metadata(run_request: dict[str, Any]) -> dict[str, Any]:
         "scoring": benchmark.get("scoring"),
         "build_id": run_request.get("build_id"),
         "agent_model": run_request.get("agent_model") or config.DEFAULT_MODEL,
+        "agent_profile": run_request.get("agent_profile") or "wide",
         "orchestration": run_request.get("orchestration")
         or config.orchestration_info(),
         "build_toolchain": run_request.get("build_toolchain"),

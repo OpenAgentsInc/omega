@@ -122,6 +122,7 @@ def populate_context_from_result(logs_dir: Path, context: Any, logger: Any) -> N
         "status": result_data.get("status"),
         "duration_secs": result_data.get("duration_secs"),
         "model": result_data.get("model"),
+        "profile": result_data.get("profile"),
         "tool_call_count": result_data.get("tool_call_count"),
     }
 

@@ -41,6 +41,29 @@ class LaunchPlanTests(unittest.TestCase):
         self.assertEqual(prepared[0][1]["judge_preset"], "deepseek-v4-pro")
         self.assertEqual(prepared[1][1]["judge_preset"], "kimi-k2.7-code")
         self.assertEqual(prepared[0][1]["agent_model"], config.DEFAULT_MODEL)
+        self.assertEqual(prepared[0][1]["agent_profile"], "wide")
+
+    def test_basic_profile_is_recorded_in_the_run_request(self) -> None:
+        args = self.parse(
+            [
+                "swe-atlas",
+                "--parts",
+                "rf",
+                "--build",
+                "bld-test",
+                "--plan",
+                "--allow-untracked",
+                "--agent-profile",
+                "basic",
+                "--n-tasks",
+                "1",
+                "--yes",
+            ]
+        )
+
+        prepared = prepare_suite(args)
+
+        self.assertEqual(prepared[0][1]["agent_profile"], "basic")
 
     def test_baseten_model_preset_generates_provider_json(self) -> None:
         args = self.parse(

@@ -44,6 +44,7 @@ crates/eval_cli/script/build-linux --output ~/bin/eval-cli-linux
 eval-cli \
   --workdir /testbed \
   --model anthropic/claude-sonnet-4-6 \
+  --profile wide \
   --instruction "Fix the bug described in..." \
   --timeout 600 \
   --output-dir /logs/agent
@@ -53,14 +54,18 @@ eval-cli \
 `ANTHROPIC_API_KEY` and `OPENAI_API_KEY`. It writes `result.json`, `thread.md`,
 and `thread.json` to the output directory.
 
+`--profile basic` selects the closed Omega five-tool profile.
+`--profile wide` selects the inherited write profile and is the default for
+backward-compatible benchmark runs. `result.json` records the selected profile.
+
 ### Exit codes
 
-| Code | Meaning |
-| --- | --- |
-| 0 | Agent finished |
-| 1 | Error, such as model/auth/runtime failure |
-| 2 | Timeout |
-| 3 | Interrupted by SIGTERM or SIGINT |
+| Code | Meaning                                   |
+| ---- | ----------------------------------------- |
+| 0    | Agent finished                            |
+| 1    | Error, such as model/auth/runtime failure |
+| 2    | Timeout                                   |
+| 3    | Interrupted by SIGTERM or SIGINT          |
 
 ## Running benchmarks
 

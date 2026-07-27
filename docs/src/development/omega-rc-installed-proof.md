@@ -6,6 +6,11 @@ issue [#16](https://github.com/OpenAgentsInc/omega/issues/16) /
 OMEGA-BRAND-06, and Full Auto issue
 [#26](https://github.com/OpenAgentsInc/omega/issues/26) / OMEGA-FA-07.
 
+The [Omega slim-agent proof](./omega-slim-agent-proof.md) is the companion
+protocol for the basic-agent journeys, profile comparison, and delta sweep. It
+uses the same candidate-binding and content-addressed evidence rules. Its
+fixture checks do not replace this signed-candidate protocol.
+
 Unit tests and source scans are **not** sufficient. The exact signed candidate
 must be installed beside Zed and exercised.
 
@@ -620,14 +625,14 @@ absence is expected for the exercised journey before admitting the attestation.
 the operator naming six paths. It resolves them from `crates/paths/src/paths.rs`
 instead:
 
-| surface | where it is read |
-| --- | --- |
-| logs | `paths::logs_dir()` — `~/Library/Logs/omega-rc`, less the telemetry log |
-| telemetry | `~/Library/Logs/omega-rc/telemetry.log` |
-| diagnostics | `paths::database_dir()` and `paths::hang_traces_dir()` |
-| crashes | `paths::crashes_dir()` — `~/Library/Logs/DiagnosticReports` |
-| clipboard | the general `NSPasteboard`, through PyObjC or `pbpaste` |
-| accessibility | the running candidate's `AXUIElement` tree |
+| surface       | where it is read                                                        |
+| ------------- | ----------------------------------------------------------------------- |
+| logs          | `paths::logs_dir()` — `~/Library/Logs/omega-rc`, less the telemetry log |
+| telemetry     | `~/Library/Logs/omega-rc/telemetry.log`                                 |
+| diagnostics   | `paths::database_dir()` and `paths::hang_traces_dir()`                  |
+| crashes       | `paths::crashes_dir()` — `~/Library/Logs/DiagnosticReports`             |
+| clipboard     | the general `NSPasteboard`, through PyObjC or `pbpaste`                 |
+| accessibility | the running candidate's `AXUIElement` tree                              |
 
 ```sh
 script/collect-omega-installed-tripwires \
@@ -722,7 +727,7 @@ very nearly recorded as the candidate responding to the keyboard.
 ### Waivers
 
 A check the owner has directed us not to build for may record `waived`. A
-waiver is not a pass. It is a record that an observation *did not happen*.
+waiver is not a pass. It is a record that an observation _did not happen_.
 
 A `waived` entry carries no `facts`. It carries a `waiver` with the owner's
 own words, the date of the direction, the basis, the issue, and the upstream

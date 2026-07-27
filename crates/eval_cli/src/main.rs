@@ -43,7 +43,7 @@ use acp_thread::AgentConnection as _;
 use agent::{NativeAgent, NativeAgentConnection, Templates, ThreadStore};
 use agent_client_protocol::schema::v1 as acp;
 use anyhow::{Context, Result};
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use feature_flags::FeatureFlagAppExt as _;
 
 use futures::{FutureExt, select_biased};
@@ -85,6 +85,10 @@ struct Args {
     #[arg(long, default_value = "anthropic/claude-sonnet-4-6-latest")]
     model: String,
 
+    /// Agent profile under evaluation.
+    #[arg(long, value_enum, default_value_t = EvalProfile::Wide)]
+    profile: EvalProfile,
+
     /// Maximum wall-clock time in seconds for the agent run.
     #[arg(long)]
     timeout: Option<u64>,
@@ -107,6 +111,13 @@ struct Args {
     thinking: Option<bool>,
 }
 
+#[derive(Clone, Copy, Debug, ValueEnum, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+enum EvalProfile {
+    Basic,
+    Wide,
+}
+
 enum AgentOutcome {
     Completed,
     Timeout { seconds: u64 },
@@ -122,6 +133,7 @@ struct EvalResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     timeout_secs: Option<u64>,
     model: String,
+    profile: EvalProfile,
     #[serde(skip_serializing_if = "Option::is_none")]
     input_tokens: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -222,6 +234,7 @@ fn main() {
         let anthropic_available_models_json = anthropic_available_models_override();
 
         let model_name = args.model.clone();
+        let profile = args.profile;
         let timeout = args.timeout;
         let thinking_override = args.thinking;
         let reasoning_effort = args.reasoning_effort.clone();
@@ -269,6 +282,7 @@ fn main() {
                 &workdir,
                 &instruction,
                 &model_name,
+                profile,
                 timeout,
                 thinking_override,
                 reasoning_effort.as_deref(),
@@ -304,6 +318,7 @@ fn main() {
                 duration_secs: duration.as_secs_f64(),
                 timeout_secs: timeout,
                 model: model_name.clone(),
+                profile,
                 input_tokens: token_usage.as_ref().map(|u| u.input_tokens),
                 output_tokens: token_usage.as_ref().map(|u| u.output_tokens),
                 cache_creation_input_tokens: token_usage
@@ -591,6 +606,30 @@ mod tests {
             &LanguageModelId("claude-sonnet-4-6-latest".into()),
         ));
     }
+
+    #[test]
+    fn eval_profiles_select_basic_and_wide_surfaces() -> Result<()> {
+        assert_eq!(
+            eval_profile_settings(EvalProfile::Basic, "")?,
+            r#","default_profile": "basic""#
+        );
+        assert_eq!(
+            eval_profile_settings(EvalProfile::Wide, "")?,
+            r#","default_profile": "write""#
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn the_basic_eval_surface_cannot_be_partially_disabled() {
+        let error = eval_profile_settings(EvalProfile::Basic, "delegate")
+            .expect_err("the five-tool basic surface must stay closed");
+        assert!(
+            error
+                .to_string()
+                .contains("cannot alter the closed basic profile")
+        );
+    }
 }
 
 async fn run_agent(
@@ -598,6 +637,7 @@ async fn run_agent(
     workdir: &std::path::Path,
     instruction: &str,
     model_name: &str,
+    profile: EvalProfile,
     timeout: Option<u64>,
     thinking_override: Option<bool>,
     reasoning_effort: Option<&str>,
@@ -658,61 +698,11 @@ async fn run_agent(
             ));
         }
         let language_models_settings = format!("{{{}}}", language_models_fields.join(","));
-        // Disable specific tools (e.g. `fetch`/`search_web` on air-gapped
-        // benchmarks) the canonical way: via the agent profile. The model only
-        // sees a built-in tool when the active profile enables it (see
-        // Thread::enabled_tools), so we define a dedicated "eval" profile that
-        // mirrors the built-in "write" profile minus the disabled tools, and make
-        // it the default profile. A fresh profile key is NOT deep-merged against
-        // the defaults, so it can't inherit "write"'s tools — the full set is
-        // listed explicitly here. Keep WRITE_TOOLS in sync with the "write"
-        // profile in assets/settings/default.json.
-        let profile_field = {
-            let raw = std::env::var("ZED_EVAL_DISABLE_TOOLS").unwrap_or_default();
-            let disabled = raw
-                .split(',')
-                .map(|name| name.trim().to_string())
-                .filter(|name| !name.is_empty())
-                .collect::<std::collections::HashSet<String>>();
-            if disabled.is_empty() {
-                String::new()
-            } else {
-                const WRITE_TOOLS: &[&str] = &[
-                    "copy_path",
-                    "create_directory",
-                    "create_thread",
-                    "delete_path",
-                    "diagnostics",
-                    "apply_code_action",
-                    "edit_file",
-                    "write_file",
-                    "fetch",
-                    "find_path",
-                    "find_references",
-                    "get_code_actions",
-                    "go_to_definition",
-                    "list_agents_and_models",
-                    "list_directory",
-                    "move_path",
-                    "rename_symbol",
-                    "read_file",
-                    "grep",
-                    "skill",
-                    "spawn_agent",
-                    "terminal",
-                    "search_web",
-                ];
-                let tools = WRITE_TOOLS
-                    .iter()
-                    .filter(|tool| !disabled.contains(**tool))
-                    .map(|tool| format!(r#""{tool}": true"#))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                format!(
-                    r#","default_profile": "eval", "profiles": {{"eval": {{"name": "Eval", "enable_all_context_servers": true, "tools": {{{tools}}}}}}}"#
-                )
-            }
-        };
+        // The explicit basic profile must remain the admitted five-tool
+        // surface. Wide evals use the inherited write profile, or a complete
+        // custom copy when an air-gapped benchmark disables tools.
+        let disabled_tools = std::env::var("ZED_EVAL_DISABLE_TOOLS").unwrap_or_default();
+        let profile_field = eval_profile_settings(profile, &disabled_tools)?;
         SettingsStore::update_global(cx, |store, cx| {
             let settings = format!(
                 r#"{{
@@ -958,6 +948,61 @@ async fn run_agent(
             tool_calls,
         },
     )
+}
+
+fn eval_profile_settings(profile: EvalProfile, disabled_tools: &str) -> Result<String> {
+    let disabled = disabled_tools
+        .split(',')
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .collect::<std::collections::HashSet<_>>();
+
+    if matches!(profile, EvalProfile::Basic) {
+        anyhow::ensure!(
+            disabled.is_empty(),
+            "ZED_EVAL_DISABLE_TOOLS cannot alter the closed basic profile"
+        );
+        return Ok(r#","default_profile": "basic""#.to_string());
+    }
+
+    if disabled.is_empty() {
+        return Ok(r#","default_profile": "write""#.to_string());
+    }
+
+    const WRITE_TOOLS: &[&str] = &[
+        "copy_path",
+        "create_directory",
+        "create_thread",
+        "delete_path",
+        "diagnostics",
+        "apply_code_action",
+        "edit_file",
+        "write_file",
+        "fetch",
+        "find_path",
+        "find_references",
+        "get_code_actions",
+        "go_to_definition",
+        "list_agents_and_models",
+        "list_directory",
+        "move_path",
+        "rename_symbol",
+        "read_file",
+        "grep",
+        "skill",
+        "spawn_agent",
+        "terminal",
+        "search_web",
+    ];
+    let tools = WRITE_TOOLS
+        .iter()
+        .filter(|tool| !disabled.contains(**tool))
+        .map(|tool| format!(r#""{tool}": true"#))
+        .collect::<Vec<_>>()
+        .join(", ");
+    Ok(format!(
+        r#","default_profile": "eval", "profiles": {{"eval": {{"name": "Eval", "enable_all_context_servers": true, "tools": {{{tools}}}}}}}"#
+    ))
 }
 
 fn log_acp_thread_event(

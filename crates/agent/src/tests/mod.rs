@@ -5076,7 +5076,14 @@ async fn test_basic_profile_exposes_exactly_five_named_tools(cx: &mut TestAppCon
     }));
     let events = thread.update(cx, |thread, cx| {
         thread.set_profile(AgentProfileId("basic".into()), cx);
-        thread.add_default_tools(environment, cx);
+        thread.add_default_tools(environment.clone(), cx);
+        let skills: SkillsResolver = Arc::new(|_| Arc::default());
+        let skill_bodies: SkillBodyResolver = Arc::new(|_, _| {
+            Task::ready(Err(anyhow::anyhow!(
+                "the basic-profile fixture has no installed skills"
+            )))
+        });
+        thread.add_basic_read_tool(environment, skills, skill_bodies);
         thread
             .send(ClientUserMessageId::new(), ["Use the basic tools"], cx)
             .unwrap()
@@ -5089,8 +5096,12 @@ async fn test_basic_profile_exposes_exactly_five_named_tools(cx: &mut TestAppCon
         vec!["bash", "delegate", "edit", "read", "write"]
     );
 
+    fake_model.send_last_completion_stream_text_chunk("Fixture coding turn complete.");
     fake_model.end_last_completion_stream();
-    events.collect::<Vec<_>>().await;
+    assert_eq!(
+        stop_events(events.collect::<Vec<_>>().await),
+        vec![acp::StopReason::EndTurn]
+    );
 }
 
 fn setup_context_server(

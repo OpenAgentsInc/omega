@@ -494,6 +494,10 @@ class ZedAgent(BaseInstalledAgent):
             elif enable_thinking.lower() == "false":
                 parts.append("--thinking false")
 
+        profile = self._extra_env.get("EVAL_CLI_PROFILE")
+        if profile:
+            parts.append(f"--profile {shlex.quote(profile)}")
+
         parts.append(f"--instruction {escaped_instruction}")
 
         # Exit 2 is eval-cli's timeout, not a crash; keep the trajectory judgeable.

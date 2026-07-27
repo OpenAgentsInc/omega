@@ -202,6 +202,9 @@ class ZedPierAgent(BaseInstalledAgent):
                 parts.append("--thinking true")
             elif enable_thinking.lower() == "false":
                 parts.append("--thinking false")
+        profile = self._get_env("EVAL_CLI_PROFILE")
+        if profile:
+            parts.append(f"--profile {shlex.quote(profile)}")
         parts.append(f"--instruction {shlex.quote(instruction)}")
 
         # Tolerate exit 2 (timeout): deliver whatever the agent produced.

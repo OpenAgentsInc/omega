@@ -306,6 +306,12 @@ def add_launch_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--tasks", help="File containing one full task name per line")
     parser.add_argument("--include-task-name", action="append")
     parser.add_argument("-n", "--n-tasks", type=int, help="Forward harness --n-tasks")
+    parser.add_argument(
+        "--agent-profile",
+        choices=["basic", "wide"],
+        default="wide",
+        help="Select the Omega Agent profile used for every task",
+    )
     parser.add_argument("--n-concurrent", type=int, default=config.DEFAULT_N_CONCURRENT)
     parser.add_argument(
         "--override-cpus", type=int, default=config.DEFAULT_OVERRIDE_CPUS

@@ -233,6 +233,7 @@
   - [Omega issue 31 mobile host adjunct](./development/omega-issue31-mobile-host-adjunct.md)
   - [Omega RC release](./development/omega-rc-release.md)
   - [Omega RC installed proof](./development/omega-rc-installed-proof.md)
+  - [Omega slim-agent proof](./development/omega-slim-agent-proof.md)
   - [macOS](./development/macos.md)
   - [Linux](./development/linux.md)
   - [Windows](./development/windows.md)

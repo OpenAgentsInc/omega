@@ -119,14 +119,14 @@ zed-eval run deepswe --from local --dry-run
 
 Supported benchmark selectors:
 
-| Selector | Meaning | Scoring |
-| --- | --- | --- |
-| `swe-atlas` | `qna`, `rf`, and `tw` | LLM judge |
-| `qna` / `swe-atlas-qna` | SWE-Atlas Codebase Q&A | LLM judge |
-| `rf` / `swe-atlas-rf` | SWE-Atlas Refactoring | LLM judge |
-| `tw` / `swe-atlas-tw` | SWE-Atlas Test Writing | LLM judge |
-| `terminal-bench-2.1` / `tb21` | Terminal-Bench 2.1 | tests |
-| `deepswe` | DeepSWE | tests |
+| Selector                      | Meaning                | Scoring   |
+| ----------------------------- | ---------------------- | --------- |
+| `swe-atlas`                   | `qna`, `rf`, and `tw`  | LLM judge |
+| `qna` / `swe-atlas-qna`       | SWE-Atlas Codebase Q&A | LLM judge |
+| `rf` / `swe-atlas-rf`         | SWE-Atlas Refactoring  | LLM judge |
+| `tw` / `swe-atlas-tw`         | SWE-Atlas Test Writing | LLM judge |
+| `terminal-bench-2.1` / `tb21` | Terminal-Bench 2.1     | tests     |
+| `deepswe`                     | DeepSWE                | tests     |
 
 For an interactive prompt, use:
 
@@ -180,6 +180,19 @@ zed-eval run rf --model opus-4.5 --n-tasks 2
 zed-eval run rf --model baseten:kimi-k2.7-code --n-tasks 2
 zed-eval run rf --model baseten:deepseek-v4-pro --n-tasks 2
 ```
+
+Select the Omega Agent surface with `--agent-profile basic` or
+`--agent-profile wide`. For a profile comparison, use the same explicit task
+file, source, model, and build for both runs:
+
+```sh
+zed-eval run rf --from local --tasks tasks.txt \
+  --model google/gemini-3.6-flash --agent-profile basic
+zed-eval run rf --from local --tasks tasks.txt \
+  --model google/gemini-3.6-flash --agent-profile wide
+```
+
+The run request, harness metadata, and `eval-cli` result record the profile.
 
 For SWE-Atlas judge defaults, `--judge auto` uses:
 
@@ -319,12 +332,12 @@ eval-cli \
 
 Exit codes:
 
-| Code | Meaning |
-| --- | --- |
-| 0 | Agent finished |
-| 1 | Error, such as model/auth/runtime failure |
-| 2 | Timeout |
-| 3 | Interrupted by SIGTERM or SIGINT |
+| Code | Meaning                                   |
+| ---- | ----------------------------------------- |
+| 0    | Agent finished                            |
+| 1    | Error, such as model/auth/runtime failure |
+| 2    | Timeout                                   |
+| 3    | Interrupted by SIGTERM or SIGINT          |
 
 ## Harbor/Pier installed agent
 
