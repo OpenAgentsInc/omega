@@ -1050,6 +1050,22 @@ proc-macro2 = { opt-level = 3 }
 # treat the symptom in a place that has nothing to do with ACP.
 agent-client-protocol = { opt-level = 2 }
 
+# omega#114. A second tower, in the same place, for the same reason.
+#
+# The first crash was the handler chain. This one is serde: `ToolCallUpdate`
+# and `RequestPermissionRequest` deserialize through `#[serde(flatten)]`, which
+# builds `FlatMapDeserializer` over `MapDeserializer` over the visitors — and
+# those instances are monomorphised into the crate that *instantiates* them,
+# `agent_servers`, not the crate that declares the types. So optimising
+# `agent-client-protocol` alone left this path unoptimised and it overflowed
+# the same 512K worker stack, one page below the guard, on the first tool call
+# a person actually watched.
+#
+# Optimising where the instances land is what matters, which is why
+# `agent_servers` is named here rather than only the schema crates.
+agent-client-protocol-schema = { opt-level = 2 }
+agent_servers = { opt-level = 2 }
+
 tree-sitter = { opt-level = 3 }
 taffy = { opt-level = 3 }
 resvg = { opt-level = 3 }
