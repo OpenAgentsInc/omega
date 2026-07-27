@@ -982,6 +982,54 @@ impl ConversationView {
             .request_elicitations()
     }
 
+    /// Rebuild the connection for a *different* executor.
+    ///
+    /// omega#112. `reset` is the wrong move for this and the difference is one
+    /// argument: it passes `resume_session_id`, so the freshly built connection
+    /// is immediately asked to continue the thread the previous executor owned.
+    /// Codex answered exactly that way — `no rollout found for thread id ...`,
+    /// a rollout being its session file — because the id named another agent's
+    /// conversation.
+    ///
+    /// Session ids are not portable between executors, so switching starts a
+    /// new one. Everything else about the rebuild is the same, and the rebuild
+    /// is the point: the connection is where the choice is read, so nothing
+    /// short of building a new one can attach a different executor.
+    pub fn reset_onto_new_executor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.clear_resolved_request_elicitations(cx);
+        self.loading_status = None;
+
+        // The working directory survives; the conversation does not. A person
+        // switching executors is still working in the same place.
+        let work_dirs = self
+            .root_thread_view()
+            .and_then(|thread_view| thread_view.read(cx).thread.read(cx).work_dirs().cloned());
+
+        let state = Self::initial_state(
+            self.agent.clone(),
+            self.connection_store.clone(),
+            self.connection_key.clone(),
+            None,
+            work_dirs,
+            None,
+            self.project.clone(),
+            None,
+            AgentThreadSource::AgentPanel,
+            window,
+            cx,
+        );
+        self.set_server_state(state, cx);
+
+        if let Some(view) = self.root_thread_view() {
+            view.update(cx, |this, cx| {
+                this.message_editor.update(cx, |editor, cx| {
+                    editor.set_session_capabilities(this.session_capabilities.clone(), cx);
+                });
+            });
+        }
+        cx.notify();
+    }
+
     fn reset(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let (resume_session_id, work_dirs, title) = self
             .root_thread_view()

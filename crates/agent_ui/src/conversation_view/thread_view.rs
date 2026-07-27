@@ -13210,8 +13210,9 @@ impl ThreadView {
                 // old. That is also what the control already means: it is
                 // disabled once a turn has run, so the only thread it can
                 // switch is one nothing has been said in yet.
-                let _ = server_view;
-                window.dispatch_action(NewThread.boxed_clone(), cx);
+                let _ = server_view.update(cx, |view, cx| {
+                    view.reset_onto_new_executor(window, cx);
+                });
             }),
         )
     }
