@@ -18111,11 +18111,43 @@ mod tests {
             "OMEGA-DELTA-0131: the selector no longer takes `connecting`, so it \
              cannot tell a person which of the two things the name means."
         );
+        // The label *statement*, with comments stripped, and nothing wider.
+        //
+        // The first version of this check read the whole function and asked it
+        // to contain "if connecting" and an ellipsis. It passed with the label
+        // reverted to a bare name, because the prose explaining the ellipsis
+        // contains the ellipsis, and the tooltip's own guard contains "if
+        // connecting". A check a comment can satisfy is the shape
+        // `OMEGA-DELTA-0048` held for months while testing nothing, and this
+        // one was caught the same way: by mutating the code it is about and
+        // watching it stay green.
+        let label = render
+            .split("let label = ")
+            .nth(1)
+            .and_then(|rest| rest.split("));").next())
+            .unwrap_or_else(|| {
+                panic!(
+                    "OMEGA-DELTA-0131: the `let label` binding is gone from \
+                     `render_executor_selector` in {}.",
+                    selector_path.display()
+                )
+            })
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
         assert!(
-            render.contains("if connecting") && render.contains("\\u{2026}"),
+            label.contains("connecting"),
             "OMEGA-DELTA-0131: the label no longer marks a pending choice. A \
              name with nothing to separate `is` from `will be` is what the \
-             owner read as an answer about who was listening."
+             owner read as an answer about who was listening. The label reads:\
+             \n{label}"
+        );
+        assert!(
+            label.contains("\\u{2026}"),
+            "OMEGA-DELTA-0131: the pending label is no longer distinguishable \
+             from the settled one. The label reads:\n{label}"
         );
 
         let thread_view = read_repository_file(THREAD_VIEW_PATH);
