@@ -184,13 +184,21 @@ impl From<SpawnAgentToolOutput> for LanguageModelToolResultContent {
                 output,
                 session_info: _, // Don't show this to the model
                 executor,
-            } => serde_json::to_string(
-                // The executor *is* shown to the model. Without it a mixed
-                // fan-out comes back as three anonymous answers.
-                &serde_json::json!({ "session_id": session_id, "output": output, "executor": executor }),
-            )
-            .unwrap_or_else(|e| format!("Failed to serialize spawn_agent output: {e}"))
-            .into(),
+            } => {
+                let transcript_address = format!("session:{session_id}");
+                serde_json::to_string(
+                    // The executor *is* shown to the model. Without it a mixed
+                    // fan-out comes back as three anonymous answers.
+                    &serde_json::json!({
+                        "session_id": session_id,
+                        "transcript_address": transcript_address,
+                        "output": output,
+                        "executor": executor
+                    }),
+                )
+                .unwrap_or_else(|e| format!("Failed to serialize spawn_agent output: {e}"))
+                .into()
+            }
             SpawnAgentToolOutput::Error {
                 session_id,
                 error,
@@ -504,6 +512,7 @@ mod tests {
 
         assert_eq!(value["executor"]["class"], "external_acp");
         assert_eq!(value["executor"]["agent_id"], "codex-acp");
+        assert_eq!(value["transcript_address"], "session:sub-1");
         // Absent, not empty and not invented.
         assert!(value["executor"].get("provider").is_none());
         assert!(value["executor"].get("model").is_none());

@@ -3,10 +3,11 @@ use crate::{
     CreateThreadTool, DbLanguageModel, DbThread, DeletePathTool, DiagnosticsTool, EditFileTool,
     FetchTool, FindPathTool, FindReferencesTool, GetCodeActionsTool, GoToDefinitionTool, GrepTool,
     ListAgentsAndModelsTool, ListDirectoryTool, MovePathTool, ProjectSnapshot, ReadFileTool,
-    ReadSubagentTranscriptTool, ReadToolResultArtifactTool, RenameTool, SandboxedTerminalTool,
-    SpawnAgentTool, SubagentExecutor, SubagentTranscript, SystemPromptTemplate, Template,
-    Templates, TerminalTool, ToolPermissionDecision, ToolResultArtifactRegistry, TranscriptBlock,
-    TranscriptEntry, TranscriptRole, TranscriptWindowRequest, WebSearchTool, WriteFileTool,
+    ReadSubagentTranscriptTool, ReadTool, ReadToolResultArtifactTool, RenameTool,
+    SandboxedTerminalTool, SkillBodyResolver, SkillsResolver, SpawnAgentTool, SubagentExecutor,
+    SubagentTranscript, SystemPromptTemplate, Template, Templates, TerminalTool,
+    ToolPermissionDecision, ToolResultArtifactRegistry, TranscriptBlock, TranscriptEntry,
+    TranscriptRole, TranscriptWindowRequest, WebSearchTool, WriteFileTool,
     decide_permission_from_settings, tool_result_artifact_source,
 };
 use acp_thread::{ClientUserMessageId, MentionUri, ToolResultArtifactStore};
@@ -2356,6 +2357,26 @@ impl Thread {
     /// the tool was built is still addressable.
     pub fn tool_result_artifacts(&self) -> Rc<RefCell<ToolResultArtifactRegistry>> {
         self.tool_result_artifacts.clone()
+    }
+
+    pub fn add_basic_read_tool(
+        &mut self,
+        environment: Rc<dyn ThreadEnvironment>,
+        skills: SkillsResolver,
+        skill_bodies: SkillBodyResolver,
+    ) {
+        let update_agent_location = self.parent_thread_id().is_none();
+        self.add_tool(ReadTool::new(
+            ReadFileTool::new(
+                self.project.clone(),
+                self.action_log.clone(),
+                update_agent_location,
+            ),
+            ReadToolResultArtifactTool::new(self.tool_result_artifacts.clone()),
+            ReadSubagentTranscriptTool::new(environment),
+            skills,
+            skill_bodies,
+        ));
     }
 
     pub fn add_tool<T: AgentTool>(&mut self, tool: T) {

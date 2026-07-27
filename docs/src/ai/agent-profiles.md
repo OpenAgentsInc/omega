@@ -11,9 +11,11 @@ Profiles do not decide whether a tool call is allowed automatically. Use [Tool P
 
 ## Built-in Profiles {#built-in-profiles}
 
-Zed includes three built-in profiles:
+Zed includes four built-in profiles:
 
-- `Write`: enables tools for reading, editing, and running commands.
+- `Basic`: the default five-tool coding surface: `read`, `write`, `edit`,
+  `bash`, and `delegate`. MCP/context-server tools are off.
+- `Editor`: enables the broad built-in and context-server tool surface.
 - `Ask`: focuses on read-only codebase questions.
 - `Minimal`: uses no project tools.
 

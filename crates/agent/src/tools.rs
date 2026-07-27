@@ -20,6 +20,7 @@ mod list_directory_tool;
 mod move_path_tool;
 mod read_file_tool;
 mod read_subagent_transcript_tool;
+mod read_tool;
 mod read_tool_result_artifact_tool;
 mod rename_tool;
 mod skill_tool;
@@ -84,6 +85,7 @@ pub use list_directory_tool::*;
 pub use move_path_tool::*;
 pub use read_file_tool::*;
 pub use read_subagent_transcript_tool::*;
+pub use read_tool::*;
 pub use read_tool_result_artifact_tool::*;
 pub use rename_tool::*;
 pub use skill_tool::*;
@@ -208,6 +210,7 @@ tools! {
     ListDirectoryTool,
     MovePathTool,
     ReadFileTool,
+    ReadTool,
     ReadSubagentTranscriptTool,
     ReadToolResultArtifactTool,
     RenameTool,
@@ -222,7 +225,7 @@ pub const BASIC_TOOL_NAMES: &[&str] = &["read", "write", "edit", "bash", "delega
 
 pub fn basic_tool_name(tool_name: &str) -> Option<&'static str> {
     match tool_name {
-        ReadFileTool::NAME => Some("read"),
+        ReadTool::NAME => Some("read"),
         WriteFileTool::NAME => Some("write"),
         EditFileTool::NAME => Some("edit"),
         TerminalTool::NAME | SandboxedTerminalTool::NAME => Some("bash"),

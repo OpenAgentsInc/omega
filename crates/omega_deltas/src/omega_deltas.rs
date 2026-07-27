@@ -124,6 +124,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0133",
     "OMEGA-DELTA-0134",
     "OMEGA-DELTA-0135",
+    "OMEGA-DELTA-0136",
 ];
 
 /// OMEGA-DELTA-0125. Every entry the thread header's `…` menu offers, the
@@ -18309,7 +18310,7 @@ mod tests {
         let aliases = function_body(&tool_registration, "basic_tool_name")
             .expect("OMEGA-DELTA-0133: the basic tool alias function is gone");
         for (implementation, model_name) in [
-            ("ReadFileTool::NAME", "read"),
+            ("ReadTool::NAME", "read"),
             ("WriteFileTool::NAME", "write"),
             ("EditFileTool::NAME", "edit"),
             ("TerminalTool::NAME", "bash"),
@@ -18480,6 +18481,79 @@ mod tests {
             refresh.contains("if *current_project_context != project_context"),
             "OMEGA-DELTA-0135: unchanged project context now invalidates the \
              prompt cache."
+        );
+    }
+
+    /// OMEGA-DELTA-0136. The one basic-profile read name routes every address
+    /// through the already-scoped canonical readers.
+    #[test]
+    fn the_basic_read_tool_spends_only_thread_scoped_addresses() {
+        let tools = read_repository_file("crates/agent/src/tools.rs");
+        assert!(
+            tools.contains("ReadTool::NAME => Some(\"read\")")
+                && !tools.contains("ReadFileTool::NAME => Some(\"read\")"),
+            "OMEGA-DELTA-0136: basic `read` no longer names the address \
+             dispatcher, or widened back to file-only read."
+        );
+        for canonical_reader in [
+            "ReadFileTool,",
+            "ReadSubagentTranscriptTool,",
+            "ReadToolResultArtifactTool,",
+            "SkillTool,",
+        ] {
+            assert!(
+                tools.contains(canonical_reader),
+                "OMEGA-DELTA-0136: canonical reader `{canonical_reader}` was \
+                 deleted while folding the basic surface."
+            );
+        }
+
+        let read = read_repository_file("crates/agent/src/tools/read_tool.rs");
+        let runner = function_body(&read, "run")
+            .expect("OMEGA-DELTA-0136: the basic read dispatcher is gone");
+        for required in [
+            "skill_file_path",
+            "tool:",
+            "terminal:",
+            "session:",
+            "ReadFileToolInput",
+            "ReadSubagentTranscriptToolInput",
+            "ReadToolResultArtifactToolInput",
+            "SkillToolInput",
+        ] {
+            assert!(
+                runner.contains(required),
+                "OMEGA-DELTA-0136: `{required}` is no longer routed through \
+                 the basic read dispatcher."
+            );
+        }
+
+        let file = read_repository_file("crates/agent/src/tools/read_file_tool.rs");
+        assert!(
+            file.contains("Use offset={next_offset} to continue.")
+                && file.contains("Use `bash` with `ls` to inspect directory contents.")
+                && file.matches("log.buffer_read(buffer.clone(), cx)").count() >= 2,
+            "OMEGA-DELTA-0136: file paging became silent, directory refusal \
+             points at a hidden tool, or reads stopped recording mtimes."
+        );
+
+        let transcript =
+            read_repository_file("crates/agent/src/tools/read_subagent_transcript_tool.rs");
+        let access = function_body(&transcript, "subagent_transcript_access")
+            .expect("OMEGA-DELTA-0136: transcript scope decision is gone");
+        assert!(
+            access.contains("Some(parent) if parent == caller => TranscriptAccess::Granted")
+                && access.contains("RefusedOtherParent"),
+            "OMEGA-DELTA-0136: a foreign transcript can pass without the \
+             calling thread being its direct parent."
+        );
+
+        let delegate = read_repository_file("crates/agent/src/tools/spawn_agent_tool.rs");
+        assert!(
+            delegate.contains("\"transcript_address\": transcript_address")
+                && delegate.contains("format!(\"session:{session_id}\")"),
+            "OMEGA-DELTA-0136: delegate no longer hands the parent a spendable \
+             transcript address."
         );
     }
 }

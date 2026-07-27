@@ -219,6 +219,45 @@ impl ReadToolResultArtifactTool {
     pub fn new(artifacts: Rc<RefCell<ToolResultArtifactRegistry>>) -> Self {
         Self { artifacts }
     }
+
+    pub fn read(
+        &self,
+        input: ReadToolResultArtifactToolInput,
+        event_stream: &ToolCallEventStream,
+    ) -> Result<ReadToolResultArtifactToolOutput, ReadToolResultArtifactToolOutput> {
+        let given = input.artifact.clone();
+        let address = parse_artifact_address(&given).map_err(|error| {
+            ReadToolResultArtifactToolOutput::Unavailable {
+                address: given.clone(),
+                reason: error.sentence(&given),
+            }
+        })?;
+
+        let window = ArtifactWindowRequest::clamp(input.offset, input.limit);
+        let registry = self.artifacts.borrow();
+        let found = match registry.lookup(&address) {
+            ArtifactLookup::Found(found) => found,
+            other => {
+                let reason = other
+                    .sentence(&address)
+                    .unwrap_or_else(|| format!("No tool result is recorded at `{address}`."));
+                return Err(ReadToolResultArtifactToolOutput::Unavailable {
+                    address: address.to_string(),
+                    reason,
+                });
+            }
+        };
+        let rendered = render_artifact_window(found, window, MAX_WINDOW_BYTES);
+        event_stream
+            .update_fields(acp::ToolCallUpdateFields::new().content(vec![rendered.clone().into()]));
+        Ok(ReadToolResultArtifactToolOutput::Artifact {
+            address: address.to_string(),
+            total_lines: found.line_count(),
+            total_bytes: found.byte_count(),
+            first_line: window.offset,
+            rendered,
+        })
+    }
 }
 
 impl AgentTool for ReadToolResultArtifactTool {
@@ -264,49 +303,7 @@ impl AgentTool for ReadToolResultArtifactTool {
                 }
             })?;
 
-            let given = input.artifact.clone();
-            let address = parse_artifact_address(&given).map_err(|error| {
-                ReadToolResultArtifactToolOutput::Unavailable {
-                    address: given.clone(),
-                    reason: error.sentence(&given),
-                }
-            })?;
-
-            let window = ArtifactWindowRequest::clamp(input.offset, input.limit);
-            let output = {
-                let registry = self.artifacts.borrow();
-                match registry.lookup(&address) {
-                    ArtifactLookup::Found(found) => {
-                        let rendered = render_artifact_window(found, window, MAX_WINDOW_BYTES);
-                        ReadToolResultArtifactToolOutput::Artifact {
-                            address: address.to_string(),
-                            total_lines: found.line_count(),
-                            total_bytes: found.byte_count(),
-                            first_line: window.offset,
-                            rendered,
-                        }
-                    }
-                    other => {
-                        let reason = other.sentence(&address).unwrap_or_else(|| {
-                            // Unreachable: only `Found` has no sentence, and it
-                            // is matched above. Saying so beats an empty refusal.
-                            format!("No tool result is recorded at `{address}`.")
-                        });
-                        return Err(ReadToolResultArtifactToolOutput::Unavailable {
-                            address: address.to_string(),
-                            reason,
-                        });
-                    }
-                }
-            };
-
-            let ReadToolResultArtifactToolOutput::Artifact { rendered, .. } = &output else {
-                unreachable!("the refusal branch returned above");
-            };
-            event_stream.update_fields(
-                acp::ToolCallUpdateFields::new().content(vec![rendered.clone().into()]),
-            );
-            Ok(output)
+            self.read(input, &event_stream)
         })
     }
 

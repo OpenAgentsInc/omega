@@ -504,6 +504,32 @@ impl ReadSubagentTranscriptTool {
     pub fn new(environment: Rc<dyn ThreadEnvironment>) -> Self {
         Self { environment }
     }
+
+    pub fn read(
+        &self,
+        input: ReadSubagentTranscriptToolInput,
+        event_stream: &ToolCallEventStream,
+        cx: &mut App,
+    ) -> Result<ReadSubagentTranscriptToolOutput, ReadSubagentTranscriptToolOutput> {
+        let session_id = input.session_id.clone();
+        let window = TranscriptWindowRequest::clamp(input.offset, input.limit);
+        let transcript = self
+            .environment
+            .read_subagent_transcript(session_id.clone(), window, cx)
+            .map_err(|reason| ReadSubagentTranscriptToolOutput::Refused {
+                session_id: session_id.clone(),
+                reason,
+            })?;
+        let rendered = render_transcript(&transcript, input.detail, MAX_TRANSCRIPT_BYTES);
+        event_stream
+            .update_fields(acp::ToolCallUpdateFields::new().content(vec![rendered.clone().into()]));
+        Ok(ReadSubagentTranscriptToolOutput::Transcript {
+            session_id,
+            total_messages: transcript.total_messages,
+            first_index: transcript.first_index,
+            rendered,
+        })
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -577,34 +603,7 @@ impl AgentTool for ReadSubagentTranscriptTool {
                         reason: error.to_string(),
                     })?;
 
-            let session_id = input.session_id.clone();
-            let window = TranscriptWindowRequest::clamp(input.offset, input.limit);
-            let detail = input.detail;
-
-            let outcome = cx.update(|cx| {
-                self.environment
-                    .read_subagent_transcript(session_id.clone(), window, cx)
-            });
-            let transcript = match outcome {
-                Ok(transcript) => transcript,
-                // The environment refused, and the refusal is already the
-                // sentence the model should read.
-                Err(reason) => {
-                    return Err(ReadSubagentTranscriptToolOutput::Refused { session_id, reason });
-                }
-            };
-
-            let rendered = render_transcript(&transcript, detail, MAX_TRANSCRIPT_BYTES);
-            event_stream.update_fields(
-                acp::ToolCallUpdateFields::new().content(vec![rendered.clone().into()]),
-            );
-
-            Ok(ReadSubagentTranscriptToolOutput::Transcript {
-                session_id,
-                total_messages: transcript.total_messages,
-                first_index: transcript.first_index,
-                rendered,
-            })
+            cx.update(|cx| self.read(input, &event_stream, cx))
         })
     }
 

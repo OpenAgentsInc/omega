@@ -19,6 +19,18 @@ The terminal tool can also run with additional OS-level restrictions when [Omega
 
 ## Read & Search Tools
 
+### `read`
+
+The default Basic profile uses one `read` tool for every address the thread can
+hold. It reads line-numbered project files and images, tool-result artifact
+addresses, transcripts of subagents that the current thread spawned, and skill
+locations from the prompt's skill catalog.
+
+Use `offset` and `limit` to page through a result. File offsets are 1-based;
+artifact-line and transcript-message offsets are 0-based. A partial file read
+ends with `Use offset=N to continue.` Directories are refused; use `bash` with
+`ls` to inspect them.
+
 ### `diagnostics`
 
 Gets errors and warnings for either a specific file or the entire project, useful after making edits to determine if further changes are needed.
@@ -51,7 +63,8 @@ Lists files and directories in a given path, providing an overview of filesystem
 
 ### `read_file`
 
-Reads the content of a specified file in the project, allowing access to file contents.
+Reads the content of a specified file in the project. This canonical tool
+remains available in broad profiles such as Editor.
 
 ## Web Tools
 

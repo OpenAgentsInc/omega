@@ -800,23 +800,25 @@ impl NativeAgent {
         let weak_thread = thread_handle.downgrade();
         thread_handle.update(cx, |thread, cx| {
             thread.set_summarization_model(summarization_model, cx);
-            thread.add_default_tools(
-                Rc::new(NativeThreadEnvironment {
-                    acp_thread: acp_thread.downgrade(),
-                    thread: weak_thread,
-                    agent: weak.clone(),
-                }) as _,
-                cx,
-            );
+            let environment = Rc::new(NativeThreadEnvironment {
+                acp_thread: acp_thread.downgrade(),
+                thread: weak_thread,
+                agent: weak.clone(),
+            }) as Rc<dyn ThreadEnvironment>;
+            thread.add_default_tools(environment.clone(), cx);
+            let skills: SkillsResolver =
+                Arc::new(skills_resolver_for_project(weak.clone(), project_id));
+            let skill_bodies: SkillBodyResolver = Arc::new(skill_body_resolver_for_project(
+                project.clone(),
+                self.fs.clone(),
+            ));
+            thread.add_basic_read_tool(environment, skills.clone(), skill_bodies.clone());
             // The resolver closure reads `state.skills` at invocation
             // time, so skills added or removed by the SKILL.md watcher
             // after the thread is constructed are still visible to the
             // model — without this, the catalog and tool would drift out
             // of sync until the session was reopened.
-            thread.add_tool(SkillTool::with_body_resolver(
-                skills_resolver_for_project(weak.clone(), project_id),
-                skill_body_resolver_for_project(project.clone(), self.fs.clone()),
-            ));
+            thread.add_tool(SkillTool::new(skills, skill_bodies));
         });
 
         let subscriptions = vec![

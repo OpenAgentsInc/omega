@@ -6374,9 +6374,11 @@ installation cannot silently make a sixth tool appear. `search_web` is absent;
 every provider Omega ships refuses it.
 
 The existing implementations and permission identifiers remain intact. The
-basic profile aliases `ReadFileTool`, `WriteFileTool`, `EditFileTool`,
+basic profile aliases `ReadTool`, `WriteFileTool`, `EditFileTool`,
 `TerminalTool`, and `SpawnAgentTool` only where `Thread::enabled_tools` builds
-the model request. Persisted permission rules therefore keep their meaning.
+the model request. (`OMEGA-DELTA-0136` later replaced the original file-only
+read alias with the scoped read dispatcher.) Persisted permission rules
+therefore keep their meaning.
 The former `write` surface remains available as the explicit `editor` profile,
 including its broad built-in and context-server tool sets. No tool was deleted.
 
@@ -6436,3 +6438,30 @@ continue to hit the provider prompt cache.
 - **Enforced by:** `the_basic_prompt_is_separate_short_and_measured` in
   `crates/omega_deltas` and the rendered-template tests in
   `crates/agent/src/templates.rs`.
+
+### OMEGA-DELTA-0136 — Basic `read` spends every address the thread can hold
+
+The five-tool profile no longer aliases `read_file` and then leaves artifact,
+delegation, and skill addresses stranded behind hidden canonical tools. Its
+`read` is a dispatcher over the existing readers: project files and images,
+this thread's tool-result registry, direct-child transcripts as answered by the
+calling thread's environment, and the live skill catalog. Editor and Ask retain
+the separate canonical tools; no reader was deleted.
+
+File reads use 1-based `offset` and bounded `limit`, preserve line numbers,
+large-file outlines, image content, and `ActionLog::buffer_read` mtime
+recording. A partial window prints `Use offset=N to continue.` A directory is a
+typed tool error that names the available route, `bash` with `ls`, rather than a
+hidden `list_directory` tool.
+
+Artifact lookup still holds only the calling thread's registry.
+Transcript lookup still asks `ThreadEnvironment::read_subagent_transcript`, so
+`OMEGA-DELTA-0060`'s direct-parent decision remains the authority; quoting a
+foreign session cannot widen access. Skill locations are matched exactly
+against the current catalog before the existing skill loader and permission
+path reads the body. `delegate` prints `session:<session_id>` as a transcript
+address, so the model spends an address it received rather than inventing one.
+
+- **Enforced by:** `the_basic_read_tool_spends_only_thread_scoped_addresses` in
+  `crates/omega_deltas`, plus file, artifact, transcript, and skill-tool unit
+  tests in `agent`.

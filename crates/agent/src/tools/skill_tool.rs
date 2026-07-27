@@ -123,6 +123,13 @@ pub struct SkillTool {
 }
 
 impl SkillTool {
+    pub fn new(skills: SkillsResolver, body_resolver: SkillBodyResolver) -> Self {
+        Self {
+            skills,
+            body_resolver,
+        }
+    }
+
     pub fn with_body_resolver<F, R>(skills: F, body_resolver: R) -> Self
     where
         F: Fn(&App) -> Arc<Vec<Skill>> + Send + Sync + 'static,

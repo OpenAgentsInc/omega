@@ -114,7 +114,8 @@ async fn read_global_skill_file(
             .line(start_line.map(|line| line.saturating_sub(1))),
     ]));
 
-    let (raw_text, first_line_number) = if start_line.is_some() || end_line.is_some() {
+    let mut has_more = false;
+    let (raw_text, first_line_number, next_offset) = if start_line.is_some() || end_line.is_some() {
         // `split_inclusive` keeps each line's terminator attached, so CRLF stays
         // CRLF and the trailing newline of the last returned line is preserved —
         // matching `Buffer::text_for_range` in the buffer-backed path.
@@ -122,12 +123,23 @@ async fn read_global_skill_file(
         let lines: Vec<&str> = content.split_inclusive('\n').collect();
         let start_idx = (start as usize).saturating_sub(1).min(lines.len());
         let end_idx = (end as usize).min(lines.len()).max(start_idx);
-        (lines[start_idx..end_idx].concat(), start)
+        has_more = end_idx < lines.len();
+        (
+            lines[start_idx..end_idx].concat(),
+            start,
+            end_idx.saturating_add(1),
+        )
     } else {
-        (content, 1)
+        (content, 1, 1)
     };
 
-    let result_text = format_with_line_numbers(&raw_text, first_line_number);
+    let mut result_text = format_with_line_numbers(&raw_text, first_line_number);
+    if has_more {
+        if !result_text.ends_with('\n') {
+            result_text.push('\n');
+        }
+        result_text.push_str(&format!("Use offset={next_offset} to continue."));
+    }
 
     let markdown = MarkdownCodeBlock {
         tag: requested_path,
@@ -335,7 +347,7 @@ impl AgentTool for ReadFileTool {
 
             if fs.is_dir(&abs_path).await {
                 return Err(tool_content_err(format!(
-                    "{} is a directory, not a file. Use the list_directory tool to explore directory contents.",
+                    "{} is a directory, not a file. Use `bash` with `ls` to inspect directory contents.",
                     &input.path
                 )));
             }
@@ -441,6 +453,15 @@ impl AgentTool for ReadFileTool {
                         buffer.text_for_range(start_anchor..end_anchor),
                         start,
                     );
+                    if end <= buffer.max_point().row {
+                        if !output.ends_with('\n') {
+                            output.push('\n');
+                        }
+                        output.push_str(&format!(
+                            "Use offset={} to continue.",
+                            end.saturating_add(1)
+                        ));
+                    }
                     output
                 });
 
@@ -576,7 +597,7 @@ mod test {
             .await;
         assert_eq!(
             error_text(result.unwrap_err()),
-            "root/some_dir is a directory, not a file. Use the list_directory tool to explore directory contents."
+            "root/some_dir is a directory, not a file. Use `bash` with `ls` to inspect directory contents."
         );
     }
 
@@ -921,7 +942,7 @@ mod test {
             .await;
         assert_eq!(
             result.unwrap(),
-            "     2\tLine 2\n     3\tLine 3\n     4\tLine 4\n".into()
+            "     2\tLine 2\n     3\tLine 3\n     4\tLine 4\nUse offset=5 to continue.".into()
         );
     }
 
@@ -956,7 +977,10 @@ mod test {
                 )
             })
             .await;
-        assert_eq!(result.unwrap(), "     1\tLine 1\n     2\tLine 2\n".into());
+        assert_eq!(
+            result.unwrap(),
+            "     1\tLine 1\n     2\tLine 2\nUse offset=3 to continue.".into()
+        );
 
         // end_line of 0 should result in at least 1 line
         let result = cx
@@ -973,7 +997,10 @@ mod test {
                 )
             })
             .await;
-        assert_eq!(result.unwrap(), "     1\tLine 1\n".into());
+        assert_eq!(
+            result.unwrap(),
+            "     1\tLine 1\nUse offset=2 to continue.".into()
+        );
 
         // when start_line > end_line, should still return at least 1 line
         let result = cx
@@ -990,7 +1017,10 @@ mod test {
                 )
             })
             .await;
-        assert_eq!(result.unwrap(), "     3\tLine 3\n".into());
+        assert_eq!(
+            result.unwrap(),
+            "     3\tLine 3\nUse offset=4 to continue.".into()
+        );
     }
 
     fn error_text(content: LanguageModelToolResultContent) -> String {
@@ -1820,7 +1850,10 @@ mod test {
         };
         // Mirrors the buffer-backed path: lines 2-3 inclusive, WITH trailing
         // newline of the last returned line.
-        assert_eq!(text.as_ref(), "     2\tline two\n     3\tline three\n");
+        assert_eq!(
+            text.as_ref(),
+            "     2\tline two\n     3\tline three\nUse offset=4 to continue."
+        );
     }
 
     #[gpui::test]
@@ -1865,7 +1898,10 @@ mod test {
         let LanguageModelToolResultContent::Text(text) = result.unwrap() else {
             panic!("expected text content");
         };
-        assert_eq!(text.as_ref(), "     1\tLine 1\n     2\tLine 2\n");
+        assert_eq!(
+            text.as_ref(),
+            "     1\tLine 1\n     2\tLine 2\nUse offset=3 to continue."
+        );
     }
 
     #[gpui::test]
@@ -1910,7 +1946,7 @@ mod test {
         let LanguageModelToolResultContent::Text(text) = result.unwrap() else {
             panic!("expected text content");
         };
-        assert_eq!(text.as_ref(), "     1\tLine 1\n");
+        assert_eq!(text.as_ref(), "     1\tLine 1\nUse offset=2 to continue.");
     }
 
     #[gpui::test]
@@ -1955,7 +1991,7 @@ mod test {
         let LanguageModelToolResultContent::Text(text) = result.unwrap() else {
             panic!("expected text content");
         };
-        assert_eq!(text.as_ref(), "     3\tLine 3\n");
+        assert_eq!(text.as_ref(), "     3\tLine 3\nUse offset=4 to continue.");
     }
 
     #[gpui::test]
@@ -2000,7 +2036,10 @@ mod test {
         let LanguageModelToolResultContent::Text(text) = result.unwrap() else {
             panic!("expected text content");
         };
-        assert_eq!(text.as_ref(), "     1\tline one\r\n     2\tline two\r\n");
+        assert_eq!(
+            text.as_ref(),
+            "     1\tline one\r\n     2\tline two\r\nUse offset=3 to continue."
+        );
     }
 
     #[gpui::test]

@@ -1413,6 +1413,9 @@ mod tests {
             "list_agents_and_models",
             "list_directory",
             "open",
+            // The basic-profile read facade delegates any skill location to
+            // the skill tool, which performs the configured permission check.
+            "read",
             "read_file",
             "rename_symbol",
             "thinking",
