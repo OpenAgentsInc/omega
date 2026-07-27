@@ -18204,10 +18204,19 @@ mod tests {
         let caller = function_body(&thread_view, "render_executor_selector")
             .expect("OMEGA-DELTA-0131: the thread view no longer renders the selector");
         assert!(
-            caller.contains("current != attached"),
-            "OMEGA-DELTA-0131: the thread view no longer compares the choice \
-             against what is attached, so `connecting` cannot be true and the \
-             label is a promise again."
+            caller.contains("server_view.executor_switch_pending()")
+                && caller.contains("displayed_executor(attached, selected(), switch_pending)"),
+            "OMEGA-DELTA-0131: the thread view no longer limits the selected \
+             executor to a switch this thread actually started. A standing \
+             choice from an earlier conversation would relabel a new thread."
+        );
+        assert!(
+            caller.contains("executor_switch_enabled(")
+                && caller.contains("thread.is_draft_thread()")
+                && caller.contains("thread.status() != ThreadStatus::Idle"),
+            "OMEGA-DELTA-0131: a blank new thread can be trapped by an adapter's \
+             running state again. With no transcript to preserve, the executor \
+             selector must remain an escape hatch."
         );
     }
 

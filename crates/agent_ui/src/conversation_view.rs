@@ -1195,6 +1195,10 @@ impl ConversationView {
         }));
     }
 
+    pub fn executor_switch_pending(&self) -> bool {
+        self.pending_executor_rebuild.is_some()
+    }
+
     fn rebuild_onto_new_executor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         // omega#117. Landing back where you started costs nothing.
         //

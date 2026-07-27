@@ -6284,6 +6284,19 @@ tooltip that says the thread is still on whatever was attached before. There is
 no state in which this control names an executor with nothing to separate the
 promise from the fact.
 
+That pending name is now scoped to the thread that actually started a switch.
+The selection is process-global because it is also the standing choice for the
+next connection. Reading it unconditionally let a choice from an earlier
+conversation relabel a fresh thread, producing two executor names before the
+person had done anything. The attached disclosure is the face at rest; the
+standing choice replaces it only while this thread's debounce task exists.
+
+A visibly blank new thread is always switchable. An adapter may transiently
+report a running state before it has produced a user or assistant entry. There
+is no transcript to preserve in that state, so treating it as an ongoing chat
+turns a startup detail into a trap. Once the thread has an entry, only an idle
+turn may switch.
+
 - **The nearest miss.** Three separate causes of this one symptom have now been
   fixed by hand — a session id that belonged to another adapter, a connection
   cache keyed by something that did not change, and this. Each was found by

@@ -476,6 +476,43 @@ pub fn attach_plan(choice: Option<SelectableExecutor>, detected: &[DetectedAgent
     }
 }
 
+/// The executor name the selector should show and whether that name is pending.
+///
+/// [`selected`] is a standing choice for the next connection, not proof that
+/// the current thread is changing. It may outlive the thread where it was
+/// chosen. Reading it unconditionally made a fresh Exo thread say `Omega…`
+/// when Omega happened to be the previous choice, even though no switch had
+/// been requested on that thread.
+///
+/// A choice replaces the attached executor on the face only during the
+/// debounce started by the selector itself. At every other time the thread's
+/// disclosure is the fact on screen.
+#[must_use]
+pub fn displayed_executor(
+    attached: Option<SelectableExecutor>,
+    choice: Option<SelectableExecutor>,
+    switch_pending: bool,
+) -> (Option<SelectableExecutor>, bool) {
+    let current = if switch_pending {
+        choice.or(attached)
+    } else {
+        attached
+    };
+    let connecting = switch_pending && current.is_some() && current != attached;
+    (current, connecting)
+}
+
+/// Whether changing executors can discard anything the person can see.
+///
+/// A blank thread remains escapable even if an adapter transiently reports a
+/// running turn during startup. Once the transcript has content, a running turn
+/// is the only state in which switching would make its eventual answer arrive
+/// in a conversation that no longer exists.
+#[must_use]
+pub const fn executor_switch_enabled(conversation_is_blank: bool, turn_is_running: bool) -> bool {
+    conversation_is_blank || !turn_is_running
+}
+
 /// The composer's executor selector.
 ///
 /// `current` is what this thread is **actually** running on, read from its
@@ -699,6 +736,37 @@ mod tests {
             "the native loop is compiled in, so the list is never empty — and \
              nothing else may be offered on a machine that cannot run it"
         );
+    }
+
+    #[test]
+    fn a_standing_choice_never_relabels_a_new_thread() {
+        assert_eq!(
+            displayed_executor(
+                Some(SelectableExecutor::Exo),
+                Some(SelectableExecutor::Omega),
+                false,
+            ),
+            (Some(SelectableExecutor::Exo), false),
+            "a choice from an earlier conversation is not what this thread is \
+             running on"
+        );
+        assert_eq!(
+            displayed_executor(
+                Some(SelectableExecutor::Exo),
+                Some(SelectableExecutor::Omega),
+                true,
+            ),
+            (Some(SelectableExecutor::Omega), true),
+            "the choice appears as pending only while this thread is actually \
+             switching"
+        );
+    }
+
+    #[test]
+    fn a_blank_thread_is_always_escapable() {
+        assert!(executor_switch_enabled(true, true));
+        assert!(executor_switch_enabled(false, false));
+        assert!(!executor_switch_enabled(false, true));
     }
 
     /// A name appears only when it can run.

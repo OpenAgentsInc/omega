@@ -13342,7 +13342,8 @@ impl ThreadView {
     /// control disabled on a genuinely new conversation.
     fn render_executor_selector(&self, cx: &mut Context<Self>) -> AnyElement {
         use crate::omega_executor_selector::{
-            SelectableExecutor, ready_here, render_executor_selector, select, selected,
+            SelectableExecutor, displayed_executor, executor_switch_enabled, ready_here,
+            render_executor_selector, select, selected,
         };
 
         let disclosure = self.executor_disclosure(cx);
@@ -13369,8 +13370,11 @@ impl ThreadView {
         // still moves on the keystroke, and says `Exo\u{2026}` — pending —
         // until the thread is really on it.
         let attached = SelectableExecutor::of(disclosure.class, &disclosure.agent_id);
-        let current = selected().or(attached);
-        let connecting = current.is_some() && current != attached;
+        let switch_pending = self
+            .server_view
+            .read_with(cx, |server_view, _cx| server_view.executor_switch_pending())
+            .unwrap_or(false);
+        let (current, connecting) = displayed_executor(attached, selected(), switch_pending);
         // omega#116. Switchable unless a turn is actually running.
         //
         // This used to also require `is_draft_thread()`, which is
@@ -13390,7 +13394,11 @@ impl ThreadView {
         // What remains is the one case where switching really is wrong — while
         // a turn is in flight, because the answer would arrive somewhere that
         // no longer exists.
-        let enabled = self.thread.read(cx).status() == ThreadStatus::Idle;
+        let thread = self.thread.read(cx);
+        let enabled = executor_switch_enabled(
+            thread.is_draft_thread(),
+            thread.status() != ThreadStatus::Idle,
+        );
         let server_view = self.server_view.clone();
 
         render_executor_selector(
