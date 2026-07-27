@@ -1,12 +1,13 @@
 ---
 name: omega-delta-discipline
-description: The Omega repository's own contract — how a deliberate divergence from upstream Zed is recorded and mechanically checked, what counts as green, and when work is finished. Use when changing a default, a check, or any behaviour that differs from upstream Zed, and when deciding whether a change is done.
+description: The Omega repository's own contract — how a deliberate divergence from upstream is recorded and mechanically checked, what counts as green, and when work is finished. Use when changing a default, a check, or any behaviour that differs from upstream, and when deciding whether a change is done.
 ---
 
 # Omega's delta discipline
 
-Omega is a fork of Zed. This is the rule that keeps the fork from rotting, and
-it is the one a new contributor most often misses.
+Omega maintains deliberate differences from its upstream. This is the rule
+that keeps those differences from rotting, and it is the one a new contributor
+most often misses.
 
 ## Why it exists
 
@@ -15,8 +16,8 @@ quietly reverts it, and nobody notices until an owner sees upstream behaviour
 again in a release candidate. A code comment does not survive that, because a
 merge can drop the comment and the value together.
 
-So every deliberate difference from upstream Zed is a **delta**, and every
-delta is three things at once:
+So every deliberate difference from upstream is a **delta**, and every delta is
+three things at once:
 
 1. An entry in `OMEGA_DELTAS.md`, with a heading `### OMEGA-DELTA-NNNN — …`.
 2. An ID that appears in the code it governs, so a reader who finds the code

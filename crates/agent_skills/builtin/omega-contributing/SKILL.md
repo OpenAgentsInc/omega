@@ -56,7 +56,7 @@ The parts that catch people:
   `[lib] path = "src/<crate_name>.rs"`. Never a `mod.rs`.
 - Use full words in names.
 
-If your change alters how Omega behaves differently from upstream Zed, it is a
+If your change alters how Omega behaves differently from upstream, it is a
 **delta**, and there is a second skill for that: `omega-delta-discipline`. Read
 it before you write the code, not after.
 
