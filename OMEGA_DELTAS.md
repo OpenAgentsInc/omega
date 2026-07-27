@@ -6213,3 +6213,68 @@ question rather than leaving it to whoever next reads the menu.
   section draws no number because none exists; if ACP ever grows a quota field,
   or if reading Codex's and Claude's own on-disk state is ever wanted, that is a
   new decision with its own privacy question and not a gap in this one.
+
+### OMEGA-DELTA-0131 — Zero base has one agent selection, and the label never names a choice the application is not keeping
+
+The owner selected Exo, was shown **Exo** in the composer's executor selector,
+typed `who are you`, and read back *"I'm Codex, your AI coding collaborator."*
+His question was the right one: **"IS IT FUCKING EXO AND HOW DO I KNOW"**.
+
+Every surface in that window was telling the truth except one. The thread was
+titled *New Codex Thread*. The composer said *Message Codex*. The reply said
+Codex. Only the selector said Exo, and the selector was the control he had just
+used.
+
+**There were two agent selections and they were not connected to each other.**
+
+- `omega_executor_selector::SELECTED` — Omega's, set by this control, read by
+  `OmegaRouterServer::connect` when it decides what goes in the router's one
+  external-ACP slot.
+- `AgentPanel::selected_agent` — Zed's, serialized per workspace and written
+  again to a global *last-used agent*, deciding which `AgentServer` the
+  conversation is built on in the first place.
+
+The panel had been on `Agent::Codex` since some earlier session, so the
+conversation held **Codex's own server**, and Omega's router — the only thing
+that reads the executor selection — was never in the path. Choosing an executor
+did everything it was supposed to: it debounced, it dropped the cached
+connection, it rebuilt. It rebuilt *Codex*, three times in six seconds. The log
+for that stretch is three `OMEGA-DELTA-0115: a person chose …` lines, each
+followed a second later by an ACP connection and by nothing else — no
+`OMEGA-DELTA-0095` attach, no Exo lane, because the router never ran.
+
+**So in zero base the panel is on Omega's router and nothing else.** The router
+implements all four executors; sitting directly on one of them is precisely
+what took the choice away. `omega_zero_base_agent` is the single clamp, and
+every write to `selected_agent` in the panel's shipping source goes through it —
+including the restore path, which is the one the defect actually arrived
+through.
+
+**And the label distinguishes *is* from *will be*.** `OMEGA-DELTA-0120` had just
+changed it to show the selection rather than the attachment, so that Shift-Tab
+would visibly move — right about the control, wrong about the truth, and it is
+what let "Exo" sit over a Codex thread. The label still moves on the keystroke,
+and now reads `Exo…` while the choice and the attachment disagree, with a
+tooltip that says the thread is still on whatever was attached before. There is
+no state in which this control names an executor with nothing to separate the
+promise from the fact.
+
+- **The nearest miss.** Three separate causes of this one symptom have now been
+  fixed by hand — a session id that belonged to another adapter, a connection
+  cache keyed by something that did not change, and this. Each was found by
+  reading a log after the owner hit it. So the assertion added here is not about
+  any of those mechanisms: `choosing_an_executor_rebuilds_the_thread_once_the_presses_stop`
+  chooses something other than what is attached, lets the settle window pass,
+  and requires the thread to be a new one. It would have failed for cause two,
+  and it fails today for a fourth nobody has thought of.
+
+- **Enforced by:** `zero_base_has_exactly_one_agent_selection` and
+  `the_executor_label_separates_the_choice_from_the_connection` in
+  `crates/omega_deltas`, and
+  `choosing_an_executor_rebuilds_the_thread_once_the_presses_stop` in
+  `crates/agent_ui/src/conversation_view.rs`.
+
+- **What this does not cover.** Outside zero base the two selections are still
+  two, and that is deliberate — the full editor is Zed's surface and the panel's
+  agent menu is Zed's control. The clamp is scoped to the mode where the
+  executor selector is the only agent choice on screen.

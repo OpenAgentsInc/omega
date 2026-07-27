@@ -13334,8 +13334,16 @@ impl ThreadView {
         // underneath it. The disclosure is still the fallback, and it is what a
         // thread nobody has touched this control on shows — the automatic pick,
         // named honestly.
-        let current =
-            selected().or_else(|| SelectableExecutor::of(disclosure.class, &disclosure.agent_id));
+        //
+        // omega#121 finished it. Showing the choice is only honest if the
+        // choice is one the application then keeps, and it was not: the panel
+        // held Codex's own server, Omega's router was never in the path, and
+        // "Exo" sat in this control over a thread Codex answered. So the label
+        // still moves on the keystroke, and says `Exo\u{2026}` — pending —
+        // until the thread is really on it.
+        let attached = SelectableExecutor::of(disclosure.class, &disclosure.agent_id);
+        let current = selected().or(attached);
+        let connecting = current.is_some() && current != attached;
         // omega#116. Switchable unless a turn is actually running.
         //
         // This used to also require `is_draft_thread()`, which is
@@ -13363,6 +13371,7 @@ impl ThreadView {
             SharedString::from(disclosure.agent_id),
             ready_here(),
             enabled,
+            connecting,
             Rc::new(move |choice, window, cx| {
                 select(choice);
                 // omega#112. A *new* thread, not a reset of this one.

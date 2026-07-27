@@ -1590,7 +1590,13 @@ impl AgentPanel {
                             .or(global_fallback),
                     };
                     if let Some(agent) = initial_agent {
-                        panel.selected_agent = agent;
+                        // The restored choice goes through the zero-base clamp
+                        // like every other. This is the site the owner's defect
+                        // came in through: `Agent::Codex` had been the global
+                        // last-used agent since an earlier session, so every
+                        // launch put the panel back on Codex directly and the
+                        // executor selector had nothing to switch.
+                        panel.commit_selected_agent(agent);
                     }
 
                     if let Some(metadata) = terminal_to_restore {
@@ -2145,13 +2151,58 @@ impl AgentPanel {
             return;
         }
 
-        self.selected_agent = action.agent.clone().into();
+        self.commit_selected_agent(action.agent.clone().into());
         self.activate_new_thread(true, AgentThreadSource::AgentPanel, window, cx);
+    }
+}
+
+/// The agent this panel is allowed to be on.
+///
+/// `OMEGA-DELTA-0131`, omega#121. Zero base has one agent selection and it is
+/// the executor selector in the composer. The panel had another — Zed's, kept
+/// per workspace and again globally as the last-used agent — and the two were
+/// not connected to each other.
+///
+/// The owner selected Exo, the selector said Exo, he typed `who are you`, and
+/// Codex answered. Every other surface was telling the truth: the thread was
+/// titled "New Codex Thread", the composer read "Message Codex", and the reply
+/// said "I'm Codex". The panel had been on `Agent::Codex` since some earlier
+/// session, so the conversation held Codex's own server — and Omega's router is
+/// the only thing that reads the executor selection. Choosing an executor tore
+/// down that connection and rebuilt the same one, three times in six seconds,
+/// logging nothing but the choice.
+///
+/// So in zero base the panel is on Omega's router and nothing else. The router
+/// implements all four executors; sitting directly on one of them is what took
+/// the choice away.
+fn omega_zero_base_agent(agent: Agent) -> Agent {
+    if omega_zero_base::is_active() && !matches!(agent, Agent::NativeAgent) {
+        log::info!(
+            "OMEGA-DELTA-0131: zero base holds the panel on Omega's router \
+             rather than on {} directly, so the executor selector is the only \
+             agent choice there is",
+            agent.label()
+        );
+        return Agent::NativeAgent;
+    }
+    agent
+}
+
+impl AgentPanel {
+    /// The one place the panel's agent is written.
+    ///
+    /// `OMEGA-DELTA-0131`. Not a style preference: the defect arrived through
+    /// the *restore* path, which is the write site nobody thinks about, so a
+    /// rule that depends on remembering to clamp at each site is the rule that
+    /// already failed. One writer, and the clamp is inside it.
+    fn commit_selected_agent(&mut self, agent: Agent) {
+        self.selected_agent = omega_zero_base_agent(agent);
     }
 
     fn set_selected_agent_and_persist(&mut self, agent: Agent, cx: &mut Context<Self>) {
+        let agent = omega_zero_base_agent(agent);
         if self.selected_agent != agent {
-            self.selected_agent = agent.clone();
+            self.commit_selected_agent(agent.clone());
             self.serialize(cx);
         }
 
@@ -5141,9 +5192,9 @@ impl AgentPanel {
 
         if let BaseView::AgentThread { conversation_view } = &self.base_view {
             let conversation_view = conversation_view.read(cx);
-            let thread_agent = conversation_view.agent_key().clone();
+            let thread_agent = omega_zero_base_agent(conversation_view.agent_key().clone());
             if self.selected_agent != thread_agent {
-                self.selected_agent = thread_agent;
+                self.commit_selected_agent(thread_agent);
                 self.serialize(cx);
             }
         }
@@ -6191,8 +6242,9 @@ impl AgentPanel {
         };
 
         let mut initialized = false;
-        if self.selected_agent != initialization.agent {
-            self.selected_agent = initialization.agent.clone();
+        let initialization_agent = omega_zero_base_agent(initialization.agent.clone());
+        if self.selected_agent != initialization_agent {
+            self.commit_selected_agent(initialization_agent);
             self.serialize(cx);
             initialized = true;
         }
@@ -6839,7 +6891,9 @@ impl AgentPanel {
                                                     workspace.panel::<AgentPanel>(cx)
                                                 {
                                                     panel.update(cx, |panel, cx| {
-                                                        panel.selected_agent = Agent::NativeAgent;
+                                                        panel.commit_selected_agent(
+                                                            Agent::NativeAgent,
+                                                        );
                                                         panel.activate_new_thread(
                                                             true,
                                                             AgentThreadSource::AgentPanel,

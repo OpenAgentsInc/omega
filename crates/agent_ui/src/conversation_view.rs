@@ -4303,6 +4303,80 @@ pub(crate) mod tests {
         assert!(!weak_view.is_upgradable());
     }
 
+    /// omega#121. Choosing an executor has to actually rebuild the thread.
+    ///
+    /// The owner selected Exo, saw the selector say Exo, sent `who are you`,
+    /// and Codex answered — in a thread still titled "New Codex Thread", with
+    /// "Message Codex" in the composer. Every one of those surfaces was right
+    /// except the selector, which omega#120 had just changed to show the
+    /// *choice*. The choice was never being connected.
+    ///
+    /// The log is what says so and what this test replaces: three Shift-Tabs,
+    /// four seconds apart, each one logging `OMEGA-DELTA-0115: a person chose
+    /// ...` and not one of them followed by an attach. Selecting was reaching
+    /// the selection global and stopping there.
+    ///
+    /// This is the assertion that was missing while three separate causes of
+    /// the same symptom were fixed one at a time by hand. It does not name a
+    /// mechanism — not the debounce, not the connection store, not the
+    /// disclosure — because each fix so far has been a different mechanism
+    /// producing this one outcome. It holds the outcome: choose something
+    /// other than what is attached, let the presses stop, and the thread you
+    /// end up in is a new one.
+    #[gpui::test]
+    async fn choosing_an_executor_rebuilds_the_thread_once_the_presses_stop(
+        cx: &mut TestAppContext,
+    ) {
+        use crate::omega_executor_selector::{
+            SelectableExecutor, clear_selection_for_test, select_for_test,
+        };
+
+        init_test(cx);
+
+        let (conversation_view, cx) =
+            setup_conversation_view(StubAgentServer::new(StubAgentConnection::new()), cx).await;
+
+        let before = active_thread(&conversation_view, cx)
+            .read_with(cx, |view, cx| view.thread.read(cx).session_id().clone());
+
+        // Whatever this stub reads as, choose something else. The rebuild is
+        // allowed to skip the case where the choice is already attached, so a
+        // test that happened to choose the attached executor would pass while
+        // proving nothing.
+        let attached = active_thread(&conversation_view, cx).read_with(cx, |view, cx| {
+            let disclosure = view.executor_disclosure(cx);
+            SelectableExecutor::of(disclosure.class, &disclosure.agent_id)
+        });
+        let choice = SelectableExecutor::ALL
+            .iter()
+            .copied()
+            .find(|candidate| Some(*candidate) != attached)
+            .expect("four names cannot all be the attached one");
+
+        select_for_test(choice);
+        conversation_view.update_in(cx, |view, window, cx| {
+            view.reset_onto_new_executor(window, cx);
+        });
+
+        // Past the settle window, which is the whole of what "once the presses
+        // stop" means.
+        cx.executor().advance_clock(Duration::from_millis(1_000));
+        cx.run_until_parked();
+
+        let after = active_thread(&conversation_view, cx)
+            .read_with(cx, |view, cx| view.thread.read(cx).session_id().clone());
+        clear_selection_for_test();
+
+        assert_ne!(
+            before,
+            after,
+            "choosing {} left the thread on the executor that was already \
+             attached: the selection changed and nothing reconnected, which is \
+             the owner sending a message to Exo and getting Codex",
+            choice.name()
+        );
+    }
+
     /// omega#109. The panel resolves an external subagent it cannot load.
     ///
     /// A subagent spawned with an `executor` runs as Codex or Claude Code, on

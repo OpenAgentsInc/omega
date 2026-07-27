@@ -119,6 +119,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0128",
     "OMEGA-DELTA-0129",
     "OMEGA-DELTA-0130",
+    "OMEGA-DELTA-0131",
 ];
 
 /// OMEGA-DELTA-0125. Every entry the thread header's `…` menu offers, the
@@ -18005,6 +18006,126 @@ mod tests {
             !prompt.contains("persist_tier_c_receipt"),
             "OMEGA-DELTA-0129: the turn path writes a receipt through the \
              fallible path again. It must go through `record_tier_c_receipt`."
+        );
+    }
+
+    /// OMEGA-DELTA-0131. Zero base has exactly one agent selection.
+    ///
+    /// The owner selected Exo, was shown Exo, asked `who are you`, and Codex
+    /// answered. Omega's executor selector sets its own global; the panel keeps
+    /// `selected_agent`, serialized per workspace and again as a global
+    /// last-used agent, and *that* is what decides which `AgentServer` the
+    /// conversation is built on. His panel had been on `Agent::Codex` since an
+    /// earlier session, so Omega's router — the only thing that reads the
+    /// executor selection — was never in the path at all.
+    ///
+    /// So every write to the panel's agent in the shipping source goes through
+    /// one clamp, and in zero base that clamp answers `Agent::NativeAgent`.
+    /// Listing the write sites would be the wrong check: the defect arrived
+    /// through the restore path, which is the site nobody thinks about. This
+    /// asserts the shape instead — no bare assignment survives outside the
+    /// clamp — so a new write site fails here rather than in a window.
+    #[test]
+    fn zero_base_has_exactly_one_agent_selection() {
+        let panel_path = repository_path(AGENT_PANEL_PATH);
+        let panel = read_repository_file(AGENT_PANEL_PATH);
+        let shipping = outside_the_tests(&panel);
+
+        let clamp = function_body(shipping, "omega_zero_base_agent").unwrap_or_else(|| {
+            panic!(
+                "OMEGA-DELTA-0131: `fn omega_zero_base_agent` is gone from {}. \
+                 Without it the panel can sit directly on Codex or Claude, and \
+                 the executor selector switches a router nothing is using.",
+                panel_path.display()
+            )
+        });
+        assert!(
+            clamp.contains("omega_zero_base::is_active()") && clamp.contains("Agent::NativeAgent"),
+            "OMEGA-DELTA-0131: the clamp no longer answers Omega's router in \
+             zero base, so the panel may hold an executor's own server again."
+        );
+
+        // One writer, and the clamp is inside it.
+        //
+        // Not "every write site calls the clamp": that is the rule that already
+        // failed, because it depends on whoever adds the next site remembering,
+        // and the site the defect came through was the restore path, which is
+        // the one nobody thinks about. Counting them is the check that a new
+        // site cannot pass by accident.
+        let writes: Vec<(usize, &str)> = shipping
+            .lines()
+            .enumerate()
+            .filter(|(_, line)| line.contains(".selected_agent = "))
+            .map(|(number, line)| (number + 1, line.trim()))
+            .collect();
+        assert_eq!(
+            writes.len(),
+            1,
+            "OMEGA-DELTA-0131: the panel's agent is written from {} places in \
+             {}, and it must be written from exactly one:\n{}\nIn zero base \
+             the executor selector is the only agent choice there is; a write \
+             that bypasses `omega_zero_base_agent` is how the owner ended up \
+             talking to Codex with `Exo` on screen.",
+            writes.len(),
+            panel_path.display(),
+            writes
+                .iter()
+                .map(|(number, line)| format!("    {number}: {line}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+
+        let writer = function_body(shipping, "commit_selected_agent").unwrap_or_else(|| {
+            panic!(
+                "OMEGA-DELTA-0131: `fn commit_selected_agent` is gone from {}.",
+                panel_path.display()
+            )
+        });
+        assert!(
+            writer.contains("omega_zero_base_agent("),
+            "OMEGA-DELTA-0131: the one writer no longer clamps, so every path \
+             into it can put the panel back on an executor's own server."
+        );
+    }
+
+    /// OMEGA-DELTA-0131. The executor label separates the choice from the
+    /// connection.
+    ///
+    /// `OMEGA-DELTA-0120` changed this label to show the selection rather than
+    /// the attachment, so that Shift-Tab would visibly move. That was right
+    /// about the control and wrong about the truth: it is what let `Exo` sit in
+    /// the composer over a thread Codex was answering. The label still moves on
+    /// the keystroke, and says so — `Exo…` — until the thread is really on it.
+    #[test]
+    fn the_executor_label_separates_the_choice_from_the_connection() {
+        let selector_path = repository_path(EXECUTOR_SELECTOR_PATH);
+        let selector = read_repository_file(EXECUTOR_SELECTOR_PATH);
+        let render = function_body(&selector, "render_executor_selector").unwrap_or_else(|| {
+            panic!(
+                "OMEGA-DELTA-0131: `fn render_executor_selector` is gone from {}.",
+                selector_path.display()
+            )
+        });
+        assert!(
+            selector.contains("connecting: bool"),
+            "OMEGA-DELTA-0131: the selector no longer takes `connecting`, so it \
+             cannot tell a person which of the two things the name means."
+        );
+        assert!(
+            render.contains("if connecting") && render.contains("\\u{2026}"),
+            "OMEGA-DELTA-0131: the label no longer marks a pending choice. A \
+             name with nothing to separate `is` from `will be` is what the \
+             owner read as an answer about who was listening."
+        );
+
+        let thread_view = read_repository_file(THREAD_VIEW_PATH);
+        let caller = function_body(&thread_view, "render_executor_selector")
+            .expect("OMEGA-DELTA-0131: the thread view no longer renders the selector");
+        assert!(
+            caller.contains("current != attached"),
+            "OMEGA-DELTA-0131: the thread view no longer compares the choice \
+             against what is attached, so `connecting` cannot be true and the \
+             label is a promise again."
         );
     }
 }

@@ -396,6 +396,33 @@ pub fn select(choice: SelectableExecutor) {
         .expect("the executor selection is never held across a panic") = Some(choice);
 }
 
+/// Stand a selection up for a test, without pretending to be the control.
+///
+/// Deliberately not [`select`]. `OMEGA-DELTA-0115` holds that `select` is
+/// called from the composer's own control and nowhere else — a choice made by a
+/// turn, a tool or a retry is a thread moving executor without its reader
+/// asking — and that check is worth keeping exact. A test needs the *state*,
+/// not the entry point, so it takes the state directly and the rule about who
+/// may choose stays as narrow as it was written.
+#[cfg(any(test, feature = "test-support"))]
+pub fn select_for_test(choice: SelectableExecutor) {
+    *SELECTED
+        .lock()
+        .expect("the executor selection is never held across a panic") = Some(choice);
+}
+
+/// Put the process-wide selection back to *no choice made*.
+///
+/// Test-only, and only because the selection is a process global: a test that
+/// chooses an executor would otherwise leave that choice standing for every
+/// test that runs after it in the same binary.
+#[cfg(any(test, feature = "test-support"))]
+pub fn clear_selection_for_test() {
+    *SELECTED
+        .lock()
+        .expect("the executor selection is never held across a panic") = None;
+}
+
 /// What the router should attach, given a person's standing choice.
 ///
 /// Two facts and nothing else, because those are the two doors
@@ -467,15 +494,29 @@ pub fn render_executor_selector(
     current_agent_id: SharedString,
     ready: Vec<SelectableExecutor>,
     enabled: bool,
+    connecting: bool,
     on_select: Rc<dyn Fn(SelectableExecutor, &mut Window, &mut App)>,
 ) -> AnyElement {
     // An executor that is not one of the four is named by its own id rather
     // than rounded to the nearest of them. This is an engine lane, or an
     // adapter Omega did not attach; both are facts, and neither is a fifth
     // choice, so the control reports and does not offer.
+    // `OMEGA-DELTA-0131`, omega#121. The trailing `\u{2026}` is the difference
+    // between the name of a choice and the name of what is listening. The label
+    // shows the choice, so the control moves the instant it is pressed; it
+    // shows the choice *as pending* until the thread is actually on it, because
+    // the owner selected Exo, was shown "Exo", asked "who are you", and Codex
+    // answered. There is no state in which this control names an executor with
+    // nothing to separate "is" from "will be".
     let label = SharedString::from(current.map_or_else(
         || current_agent_id.to_string(),
-        |choice| choice.name().to_owned(),
+        |choice| {
+            if connecting {
+                format!("{}\u{2026}", choice.name())
+            } else {
+                choice.name().to_owned()
+            }
+        },
     ));
     let offering = enabled && current.is_some();
 
@@ -490,6 +531,11 @@ pub fn render_executor_selector(
         );
 
     let tooltip = SharedString::from(match (offering, current) {
+        (true, Some(choice)) if connecting => format!(
+            "Connecting to {}. Until it answers, this thread is still on \
+             whatever was attached before.",
+            choice.name()
+        ),
         (true, Some(choice)) => format!("{} {CHOOSING_RECONNECTS}", choice.description()),
         (false, Some(choice)) => {
             format!("{} {ONLY_BEFORE_THE_FIRST_MESSAGE}", choice.description())
