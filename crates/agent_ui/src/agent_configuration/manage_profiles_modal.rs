@@ -690,7 +690,7 @@ impl ManageProfilesModal {
             .unwrap_or_else(|| "Unknown".into());
 
         let icon = match mode.profile_id.as_str() {
-            "write" => IconName::Pencil,
+            "basic" | "editor" => IconName::Pencil,
             "ask" => IconName::Chat,
             _ => IconName::UserRoundPen,
         };

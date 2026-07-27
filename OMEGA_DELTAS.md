@@ -6364,3 +6364,25 @@ field, which the lane already held for the pin check.
   holds the wiring rather than the choice. A lane pointed back at `basic` is a
   supported configuration and this suite will not object — what it will not
   allow again is an `exo`-harness lane that cannot find its own runner.
+
+### OMEGA-DELTA-0133 — A fresh Omega Agent has five tools, and the broad editor is explicit
+
+ProductSpec revision 2 makes the reliable no-harness agent the default. A fresh
+thread now starts on `basic`, whose entire model-visible surface is `read`,
+`write`, `edit`, `bash`, and `delegate`. Context-server tools are off, so an MCP
+installation cannot silently make a sixth tool appear. `search_web` is absent;
+every provider Omega ships refuses it.
+
+The existing implementations and permission identifiers remain intact. The
+basic profile aliases `ReadFileTool`, `WriteFileTool`, `EditFileTool`,
+`TerminalTool`, and `SpawnAgentTool` only where `Thread::enabled_tools` builds
+the model request. Persisted permission rules therefore keep their meaning.
+The former `write` surface remains available as the explicit `editor` profile,
+including its broad built-in and context-server tool sets. No tool was deleted.
+
+`OMEGA-DELTA-0013` already pins the fresh-install model to
+`google/gemini-3.6-flash`; this delta composes that provider default with the
+five-tool profile instead of duplicating the model check.
+
+- **Enforced by:** `the_basic_profile_is_the_default_five_tool_surface` in
+  `crates/omega_deltas`.

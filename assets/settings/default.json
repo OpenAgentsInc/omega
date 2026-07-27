@@ -1193,10 +1193,21 @@
     },
     // When enabled, show voting thumbs for feedback on agent edits.
     "enable_feedback": true,
-    "default_profile": "write",
+    "default_profile": "basic",
     "profiles": {
-      "write": {
-        "name": "Write",
+      "basic": {
+        "name": "Basic",
+        "enable_all_context_servers": false,
+        "tools": {
+          "read": true,
+          "write": true,
+          "edit": true,
+          "bash": true,
+          "delegate": true,
+        },
+      },
+      "editor": {
+        "name": "Editor",
         "enable_all_context_servers": true,
         "tools": {
           "copy_path": true,

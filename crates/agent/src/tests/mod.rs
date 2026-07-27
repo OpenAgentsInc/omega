@@ -5038,6 +5038,61 @@ fn tool_names_for_completion(completion: &LanguageModelRequest) -> Vec<String> {
         .collect()
 }
 
+#[gpui::test]
+async fn test_basic_profile_exposes_exactly_five_named_tools(cx: &mut TestAppContext) {
+    let ThreadTest {
+        model, thread, fs, ..
+    } = setup(cx, TestModel::Fake).await;
+    let fake_model = model.as_fake();
+
+    fs.insert_file(
+        paths::settings_file(),
+        json!({
+            "agent": {
+                "default_profile": "basic",
+                "profiles": {
+                    "basic": {
+                        "name": "Basic",
+                        "enable_all_context_servers": false,
+                        "tools": {
+                            "read": true,
+                            "write": true,
+                            "edit": true,
+                            "bash": true,
+                            "delegate": true,
+                        },
+                    },
+                },
+            },
+        })
+        .to_string()
+        .into_bytes(),
+    )
+    .await;
+    cx.run_until_parked();
+
+    let environment = Rc::new(cx.update(|cx| {
+        FakeThreadEnvironment::default().with_terminal(FakeTerminalHandle::new_never_exits(cx))
+    }));
+    let events = thread.update(cx, |thread, cx| {
+        thread.set_profile(AgentProfileId("basic".into()), cx);
+        thread.add_default_tools(environment, cx);
+        thread
+            .send(ClientUserMessageId::new(), ["Use the basic tools"], cx)
+            .unwrap()
+    });
+    cx.run_until_parked();
+
+    let completion = fake_model.pending_completions().pop().unwrap();
+    assert_eq!(
+        tool_names_for_completion(&completion),
+        vec!["bash", "delegate", "edit", "read", "write"]
+    );
+
+    fake_model.end_last_completion_stream();
+    events.collect::<Vec<_>>().await;
+}
+
 fn setup_context_server(
     name: &'static str,
     tools: Vec<context_server::types::Tool>,

@@ -2383,8 +2383,8 @@ impl Thread {
     }
 
     /// Computes the profile a thread should start with, given the user's chosen
-    /// profile. In a restricted workspace, the built-in `write`/`ask` profiles
-    /// are downgraded to `minimal` — but only when both the chosen profile and
+    /// profile. In a restricted workspace, built-in profiles with tools are
+    /// downgraded to `minimal` — but only when both the chosen profile and
     /// `minimal` are unmodified, shipped defaults, so we never override a user's
     /// custom or customized profiles.
     ///
@@ -2395,10 +2395,11 @@ impl Thread {
         project: &Entity<Project>,
         cx: &App,
     ) -> (AgentProfileId, bool) {
-        let is_write_or_ask = profile_id.as_str() == builtin_profiles::WRITE
+        let is_profile_with_tools = profile_id.as_str() == builtin_profiles::BASIC
+            || profile_id.as_str() == builtin_profiles::EDITOR
             || profile_id.as_str() == builtin_profiles::ASK;
         let minimal = AgentProfileId(builtin_profiles::MINIMAL.into());
-        if is_write_or_ask
+        if is_profile_with_tools
             && TrustedWorktrees::has_restricted_worktrees(&project.read(cx).worktree_store(), cx)
             && AgentProfileSettings::is_unmodified_default(&profile_id, cx)
             && AgentProfileSettings::is_unmodified_default(&minimal, cx)
@@ -4340,6 +4341,7 @@ impl Thread {
         let Some(profile) = AgentSettings::get_global(cx).profiles.get(&self.profile_id) else {
             return BTreeMap::new();
         };
+        let uses_basic_tool_names = self.profile_id.as_str() == builtin_profiles::BASIC;
         // Terminal variants are configured by users under the canonical
         // `terminal` name. Expose the one matching the current sandbox state
         // to the model under that name.
@@ -4360,22 +4362,28 @@ impl Thread {
                     tool_name.as_ref(),
                     TerminalTool::NAME | SandboxedTerminalTool::NAME
                 );
-                let profile_tool_name = if terminal_variant {
+                let exposed_tool_name = if uses_basic_tool_names {
+                    crate::tools::basic_tool_name(tool_name.as_ref())?
+                } else if terminal_variant {
                     TerminalTool::NAME
                 } else {
                     tool_name.as_ref()
                 };
 
                 if tool.supports_provider(&model.provider_id())
-                    && profile.is_tool_enabled(profile_tool_name)
+                    && profile.is_tool_enabled(exposed_tool_name)
+                    && crate::tools::tool_feature_flag_enabled(tool_name, cx)
                 {
                     match (tool_name.as_ref(), use_sandboxed_terminal) {
                         (TerminalTool::NAME, false) | (SandboxedTerminalTool::NAME, true) => {
-                            Some((SharedString::from(TerminalTool::NAME), tool.clone()))
+                            Some((SharedString::from(exposed_tool_name), tool.clone()))
                         }
                         (TerminalTool::NAME | SandboxedTerminalTool::NAME, _) => None,
+                        _ if uses_basic_tool_names => {
+                            Some((SharedString::from(exposed_tool_name), tool.clone()))
+                        }
                         _ => Some((
-                            provider_compatible_tool_name(tool_name.as_ref()).into(),
+                            provider_compatible_tool_name(exposed_tool_name).into(),
                             tool.clone(),
                         )),
                     }
@@ -4383,7 +4391,6 @@ impl Thread {
                     None
                 }
             })
-            .filter(|(tool_name, _)| crate::tools::tool_feature_flag_enabled(tool_name, cx))
             .collect::<BTreeMap<_, _>>();
 
         let mut context_server_tools = Vec::new();

@@ -16,12 +16,16 @@ use crate::{AgentProfileId, AgentSettings};
 pub mod builtin_profiles {
     use super::AgentProfileId;
 
-    pub const WRITE: &str = "write";
+    pub const BASIC: &str = "basic";
+    pub const EDITOR: &str = "editor";
     pub const ASK: &str = "ask";
     pub const MINIMAL: &str = "minimal";
 
     pub fn is_builtin(profile_id: &AgentProfileId) -> bool {
-        profile_id.as_str() == WRITE || profile_id.as_str() == ASK || profile_id.as_str() == MINIMAL
+        profile_id.as_str() == BASIC
+            || profile_id.as_str() == EDITOR
+            || profile_id.as_str() == ASK
+            || profile_id.as_str() == MINIMAL
     }
 }
 
@@ -283,27 +287,30 @@ mod tests {
         project::DisableAiSettings::register(cx);
         AgentSettings::register(cx);
 
-        let write = AgentProfileId(builtin_profiles::WRITE.into());
+        let basic = AgentProfileId(builtin_profiles::BASIC.into());
+        let editor = AgentProfileId(builtin_profiles::EDITOR.into());
         let minimal = AgentProfileId(builtin_profiles::MINIMAL.into());
         let custom = AgentProfileId("custom".into());
 
         // Fresh defaults: the shipped built-in profiles are unmodified.
-        assert!(AgentProfileSettings::is_unmodified_default(&write, cx));
+        assert!(AgentProfileSettings::is_unmodified_default(&basic, cx));
+        assert!(AgentProfileSettings::is_unmodified_default(&editor, cx));
         assert!(AgentProfileSettings::is_unmodified_default(&minimal, cx));
         // Custom (non-built-in) ids are never considered unmodified defaults.
         assert!(!AgentProfileSettings::is_unmodified_default(&custom, cx));
 
-        // The user customizes the `write` profile; `minimal` stays untouched.
+        // The user customizes the `editor` profile; `minimal` stays untouched.
         SettingsStore::update_global(cx, |store, cx| {
             store
                 .set_user_settings(
-                    r#"{ "agent": { "profiles": { "write": { "name": "Write", "tools": { "fetch": false } } } } }"#,
+                    r#"{ "agent": { "profiles": { "editor": { "name": "Editor", "tools": { "fetch": false } } } } }"#,
                     cx,
                 )
                 .unwrap();
         });
 
-        assert!(!AgentProfileSettings::is_unmodified_default(&write, cx));
+        assert!(!AgentProfileSettings::is_unmodified_default(&editor, cx));
+        assert!(AgentProfileSettings::is_unmodified_default(&basic, cx));
         assert!(AgentProfileSettings::is_unmodified_default(&minimal, cx));
     }
 }

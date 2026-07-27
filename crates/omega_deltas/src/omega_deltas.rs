@@ -121,6 +121,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0130",
     "OMEGA-DELTA-0131",
     "OMEGA-DELTA-0132",
+    "OMEGA-DELTA-0133",
 ];
 
 /// OMEGA-DELTA-0125. Every entry the thread header's `…` menu offers, the
@@ -10709,7 +10710,7 @@ mod tests {
             .get("agent")
             .and_then(|agent| agent.get("profiles"))
             .expect("the agent profiles must exist");
-        for profile in ["write", "ask"] {
+        for profile in ["editor", "ask"] {
             let enabled = profiles
                 .get(profile)
                 .and_then(|profile| profile.get("tools"))
@@ -18224,6 +18225,108 @@ mod tests {
             "OMEGA-DELTA-0131: the thread view no longer compares the choice \
              against what is attached, so `connecting` cannot be true and the \
              label is a promise again."
+        );
+    }
+
+    /// OMEGA-DELTA-0133. The default agent surface is the closed five-tool
+    /// basic profile.
+    #[test]
+    fn the_basic_profile_is_the_default_five_tool_surface() {
+        let settings = default_settings().expect("default settings must parse");
+        let agent = settings
+            .get("agent")
+            .expect("the shipped agent settings must exist");
+        assert_eq!(
+            agent
+                .get("default_profile")
+                .and_then(serde_json::Value::as_str),
+            Some("basic"),
+            "OMEGA-DELTA-0133: a fresh thread no longer starts on the basic \
+             profile."
+        );
+
+        let profiles = agent
+            .get("profiles")
+            .and_then(serde_json::Value::as_object)
+            .expect("the shipped agent profiles must exist");
+        let basic = profiles
+            .get("basic")
+            .and_then(serde_json::Value::as_object)
+            .expect("the shipped basic profile must exist");
+        assert_eq!(
+            basic
+                .get("enable_all_context_servers")
+                .and_then(serde_json::Value::as_bool),
+            Some(false),
+            "OMEGA-DELTA-0133: the basic profile must not load context-server \
+             tools into the model's surface."
+        );
+
+        let actual = basic
+            .get("tools")
+            .and_then(serde_json::Value::as_object)
+            .expect("the basic profile must declare its tools")
+            .iter()
+            .map(|(name, enabled)| {
+                assert_eq!(
+                    enabled.as_bool(),
+                    Some(true),
+                    "OMEGA-DELTA-0133: basic tool `{name}` is listed but disabled."
+                );
+                name.as_str()
+            })
+            .collect::<std::collections::BTreeSet<_>>();
+        let expected = ["bash", "delegate", "edit", "read", "write"]
+            .into_iter()
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            actual, expected,
+            "OMEGA-DELTA-0133: the model-visible basic surface must be exactly \
+             read, write, edit, bash, and delegate."
+        );
+        assert!(
+            !actual.contains("search_web"),
+            "OMEGA-DELTA-0133: search_web returned to the basic surface even \
+             though no shipped provider supports it."
+        );
+
+        let editor = profiles
+            .get("editor")
+            .and_then(serde_json::Value::as_object)
+            .expect("the broad editor profile must remain available");
+        assert_eq!(
+            editor
+                .get("enable_all_context_servers")
+                .and_then(serde_json::Value::as_bool),
+            Some(true),
+            "OMEGA-DELTA-0133: the explicit editor profile no longer preserves \
+             the former broad profile's context-server surface."
+        );
+
+        let tool_registration = read_repository_file("crates/agent/src/tools.rs");
+        let aliases = function_body(&tool_registration, "basic_tool_name")
+            .expect("OMEGA-DELTA-0133: the basic tool alias function is gone");
+        for (implementation, model_name) in [
+            ("ReadFileTool::NAME", "read"),
+            ("WriteFileTool::NAME", "write"),
+            ("EditFileTool::NAME", "edit"),
+            ("TerminalTool::NAME", "bash"),
+            ("SpawnAgentTool::NAME", "delegate"),
+        ] {
+            assert!(
+                aliases.contains(implementation) && aliases.contains(model_name),
+                "OMEGA-DELTA-0133: `{implementation}` is no longer registered \
+                 under the basic model name `{model_name}`."
+            );
+        }
+
+        let thread = read_repository_file("crates/agent/src/thread.rs");
+        let enabled_tools = function_body(&thread, "enabled_tools")
+            .expect("OMEGA-DELTA-0133: Thread::enabled_tools is gone");
+        assert!(
+            enabled_tools.contains("basic_tool_name"),
+            "OMEGA-DELTA-0133: the basic aliases are declared but no longer \
+             used at the model boundary."
         );
     }
 }
