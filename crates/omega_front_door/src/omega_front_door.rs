@@ -13,6 +13,8 @@
 //! Product contract: `specs/omega/omega-agent.product-spec.md` revision 1 in
 //! the openagents repository, admitted by the owner on 2026-07-25.
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
 pub mod router;
 mod send_during_turn;
 
@@ -26,6 +28,27 @@ pub use router::{
     RESERVED_RECORD_CHARACTERS, RouteDecision, RouteInputs, RouteReason, lane_ref_is_recordable,
     route, select_lane,
 };
+
+// -------------------------------------------------------------------------
+// Optional integrations
+// -------------------------------------------------------------------------
+
+static EXO_ENABLED: AtomicBool = AtomicBool::new(false);
+
+/// Enable Exo for this process from the parsed application command line.
+///
+/// There is deliberately no disable operation or settings-backed setter. Exo
+/// is absent by default, and only the person launching this process may opt in
+/// before application startup reaches integration discovery.
+pub fn enable_exo_from_command_line() {
+    EXO_ENABLED.store(true, Ordering::Release);
+}
+
+/// Whether this process was explicitly launched with Exo enabled.
+#[must_use]
+pub fn exo_enabled() -> bool {
+    EXO_ENABLED.load(Ordering::Acquire)
+}
 
 // -------------------------------------------------------------------------
 // Where a fresh launch lands
@@ -877,10 +900,7 @@ mod tests {
             provider: Some("openai".into()),
             ..disclosure
         };
-        assert_eq!(
-            half_known.label(),
-            "codex-acp · openai/model not disclosed"
-        );
+        assert_eq!(half_known.label(), "codex-acp · openai/model not disclosed");
     }
 
     /// A struct with no field to hold a rendered label cannot accidentally

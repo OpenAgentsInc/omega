@@ -3697,7 +3697,7 @@ impl AgentPanel {
             omega_sidebar::SectionId::RateLimits => {
                 let unavailable = omega_executor_selector::unavailable_here();
                 let executors: Vec<(&str, Option<&str>)> =
-                    omega_executor_selector::SelectableExecutor::ALL
+                    omega_executor_selector::runtime_choices()
                         .iter()
                         .filter(|executor| {
                             **executor != omega_executor_selector::SelectableExecutor::Omega

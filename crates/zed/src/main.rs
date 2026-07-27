@@ -271,6 +271,14 @@ fn main() {
         }
     }
 
+    // OMEGA-DELTA-0144. Exo is absent unless the person launching this exact
+    // process opts in. Read this before paths, logs, settings, or agent UI
+    // initialization so none of those surfaces can discover or start Exo on a
+    // default launch.
+    if args.enable_exo {
+        omega_front_door::enable_exo_from_command_line();
+    }
+
     // omega#99. Zero base is entered here and nowhere else: from the parsed
     // process command line, once, before anything reads a settings file. It is
     // deliberately not a setting, because a settings value is writable by a
@@ -2051,7 +2059,7 @@ struct Args {
 
     /// Opens the full Omega editor instead of zero base.
     ///
-    /// OMEGA-DELTA-0052. Omega opens zero base by default: one Exo thread, the
+    /// OMEGA-DELTA-0052. Omega opens zero base by default: one agent thread, the
     /// controls that operate it, and nothing else. The editor around the thread
     /// is not rendered and the actions outside the admitted set are refused with
     /// a sentence, and there is no way out of the mode inside a running process.
@@ -2064,6 +2072,13 @@ struct Args {
     /// options require this flag too; no other argument can select the mode.
     #[arg(long)]
     full_editor: bool,
+
+    /// Enables the optional Exo integration for this process.
+    ///
+    /// OMEGA-DELTA-0144. Exo is otherwise absent: Omega does not inspect its
+    /// configuration, offer it in the UI, or attempt to connect to it.
+    #[arg(long)]
+    enable_exo: bool,
 
     /// Sends one message on the thread Omega opens, with nobody at the keyboard.
     ///

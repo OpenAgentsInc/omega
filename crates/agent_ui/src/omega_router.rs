@@ -884,10 +884,10 @@ pub struct OmegaRouterServer {
     /// Where decisions are written down. Chosen by the caller; see
     /// [`RouteJournal::data_dir_path`].
     journal_path: PathBuf,
-    /// Where the Exo harness lane is configured, if the owner configured one.
-    /// `OMEGA-DELTA-0042`. Chosen by the caller for the same reason the journal
-    /// path is: a harness must not read the owner's real data directory.
-    exo_lane_path: PathBuf,
+    /// Where the Exo harness lane is configured when this launch opted in.
+    /// `None` means Exo is outside this process, so connect cannot inspect its
+    /// configuration or attempt to attach it. `OMEGA-DELTA-0144`.
+    exo_lane_path: Option<PathBuf>,
     /// The coding agents found on this machine, in preference order.
     /// `OMEGA-DELTA-0095`, omega#106. Passed in rather than read here, for the
     /// two reasons the paths above are: this file may not read the
@@ -902,7 +902,7 @@ impl OmegaRouterServer {
     pub fn new(
         native: agent::NativeAgentServer,
         journal_path: PathBuf,
-        exo_lane_path: PathBuf,
+        exo_lane_path: Option<PathBuf>,
         installed_agents: Vec<omega_agent_detect::DetectedAgent>,
     ) -> Self {
         Self {
@@ -963,6 +963,7 @@ impl agent_servers::AgentServer for OmegaRouterServer {
             let plan = crate::omega_executor_selector::attach_plan(
                 crate::omega_executor_selector::selected(),
                 &installed_agents,
+                exo_lane_path.is_some(),
             );
             // `OMEGA-DELTA-0117`. Everything detection found, kept whole while
             // the plan narrows to what this connect may attach: warming asks
@@ -972,7 +973,7 @@ impl agent_servers::AgentServer for OmegaRouterServer {
             let warm_project = project.clone();
             let warm_agent_server_store = agent_server_store.clone();
             let installed_agents = plan.agents;
-            let exo_lane = if plan.exo {
+            let exo_lane = if let (true, Some(exo_lane_path)) = (plan.exo, exo_lane_path) {
                 crate::omega_exo_connection::connect_configured_lane(
                     &exo_lane_path,
                     project.clone(),
@@ -982,8 +983,8 @@ impl agent_servers::AgentServer for OmegaRouterServer {
                 .await?
             } else {
                 log::info!(
-                    "OMEGA-DELTA-0115: the Exo lane is not attached because a \
-                     person chose another executor"
+                    "OMEGA-DELTA-0144: the Exo lane is outside this process or \
+                     a person chose another executor"
                 );
                 None
             };

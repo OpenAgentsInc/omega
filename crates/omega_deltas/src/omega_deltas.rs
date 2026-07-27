@@ -132,6 +132,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0141",
     "OMEGA-DELTA-0142",
     "OMEGA-DELTA-0143",
+    "OMEGA-DELTA-0144",
 ];
 
 /// OMEGA-DELTA-0125. Every entry the thread header's `…` menu offers, the
@@ -15450,6 +15451,7 @@ mod tests {
                 "crate::omega_executor_selector::attach_plan(
                     crate::omega_executor_selector::selected(),
                     &installed_agents,
+                    exo_lane_path.is_some(),
                 )"
             )),
             "OMEGA-DELTA-0115: {} no longer asks what the person chose before \
@@ -15458,7 +15460,9 @@ mod tests {
             router_path.display()
         );
         assert!(
-            router.contains(&without_whitespace("if plan.exo {")),
+            router.contains(&without_whitespace(
+                "if let (true, Some(exo_lane_path)) = (plan.exo, exo_lane_path) {"
+            )),
             "OMEGA-DELTA-0115: {} no longer lets a choice keep the Exo lane \
              out of the external slot. The lane wins that slot by default, so \
              a person who asked for Claude on a machine with Exo would never \
@@ -18995,6 +18999,68 @@ mod tests {
             "OMEGA-DELTA-0143: the Reset identity action in {} no longer starts \
              the lost-custody reset directly.",
             repository_path(identity_section_path).display()
+        );
+    }
+
+    /// OMEGA-DELTA-0144. Exo is absent unless this process was explicitly
+    /// launched with the opt-in flag.
+    #[test]
+    fn exo_is_opt_in_for_each_launch() {
+        let main = without_comments(&read_repository_file("crates/zed/src/main.rs"));
+        for required in [
+            "enable_exo: bool",
+            "if args.enable_exo",
+            "omega_front_door::enable_exo_from_command_line()",
+        ] {
+            assert!(
+                main.contains(required),
+                "OMEGA-DELTA-0144: the application command line lost \
+                 `{required}`."
+            );
+        }
+
+        let front_door = without_comments(&read_repository_file(
+            "crates/omega_front_door/src/omega_front_door.rs",
+        ));
+        for required in [
+            "static EXO_ENABLED: AtomicBool = AtomicBool::new(false)",
+            "pub fn enable_exo_from_command_line()",
+            "pub fn exo_enabled() -> bool",
+        ] {
+            assert!(
+                front_door.contains(required),
+                "OMEGA-DELTA-0144: the default-off process gate lost \
+                 `{required}`."
+            );
+        }
+
+        let factory = without_comments(&read_repository_file("crates/agent_ui/src/agent_ui.rs"));
+        assert!(
+            factory.contains("omega_front_door::exo_enabled().then(||"),
+            "OMEGA-DELTA-0144: the agent factory derives Exo configuration on \
+             a default launch."
+        );
+
+        let selector = without_comments(&read_repository_file(
+            "crates/agent_ui/src/omega_executor_selector.rs",
+        ));
+        for required in [
+            "pub fn runtime_choices()",
+            "if omega_front_door::exo_enabled()",
+            ".filter(|choice| *choice != SelectableExecutor::Exo)",
+            "exo: exo_enabled",
+        ] {
+            assert!(
+                selector.contains(required),
+                "OMEGA-DELTA-0144: runtime Exo gating lost `{required}`."
+            );
+        }
+
+        let router = without_comments(&read_repository_file("crates/agent_ui/src/omega_router.rs"));
+        assert!(
+            router.contains("exo_lane_path: Option<PathBuf>"),
+            "OMEGA-DELTA-0144: the router once again requires an Exo path on \
+             every launch."
         );
     }
 }

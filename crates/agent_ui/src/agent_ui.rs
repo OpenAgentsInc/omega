@@ -531,17 +531,18 @@ impl Agent {
                 } else {
                     crate::omega_router::RouteJournal::data_dir_path()
                 },
-                // OMEGA-DELTA-0042, omega#87. The Exo harness lane's
-                // configuration. A stateless run gets a path inside the
-                // temporary directory, which does not exist, so a rendering
-                // harness never spawns somebody's Exo — the same reasoning as
-                // the journal above, and the same reason the choice is made
-                // here rather than inside the router.
-                if std::env::var("ZED_STATELESS").is_ok() {
-                    std::env::temp_dir().join(format!("omega-exo-lane-{}.json", std::process::id()))
-                } else {
-                    crate::omega_exo_connection::ExoLaneConfig::data_dir_path()
-                },
+                // OMEGA-DELTA-0144. Do not even derive Exo's configuration
+                // path unless this process was explicitly launched with Exo.
+                // `None` keeps discovery and attachment out of the default
+                // startup path rather than merely hiding their UI.
+                omega_front_door::exo_enabled().then(|| {
+                    if std::env::var("ZED_STATELESS").is_ok() {
+                        std::env::temp_dir()
+                            .join(format!("omega-exo-lane-{}.json", std::process::id()))
+                    } else {
+                        crate::omega_exo_connection::ExoLaneConfig::data_dir_path()
+                    }
+                }),
                 // OMEGA-DELTA-0095, omega#106. The coding agents actually
                 // installed on this machine, which the router attaches one of
                 // as its external ACP executor.

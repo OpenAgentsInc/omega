@@ -6629,3 +6629,16 @@ only to the already-lost state and cannot delete an available signing key.
   `crates/omega_deltas`, plus
   `resetting_a_lost_identity_returns_to_first_run_without_a_relaunch` in
   `crates/omega_identity`.
+
+### OMEGA-DELTA-0144 — Exo is opt-in for each launch
+
+Exo is outside an ordinary Omega process. A default launch does not inspect an
+Exo lane file or installation, attempt an Exo connection, offer Exo in the
+executor selector, or show an Exo rate-limit row.
+
+The person launching Omega may opt in for that process with `--enable-exo`.
+The choice is a command-line fact read before application initialization; it
+is not persisted and cannot be enabled by settings, a thread, or a tool.
+
+- **Enforced by:** `exo_is_opt_in_for_each_launch` in `crates/omega_deltas`,
+  plus executor-selector attachment-plan tests in `agent_ui`.

@@ -10,13 +10,14 @@
 //! it replaced in the composer bar named `google/gemini-3.6-flash`, which is
 //! the answer to a question the owner was not asking.
 //!
-//! # Four names, and a name appears only when it can run
+//! # Four names, with Exo admitted only by an explicit launch
 //!
 //! [`SelectableExecutor`] is a closed enum of exactly four variants for the
 //! same reason [`omega_front_door::ExecutorClass`] is closed at three: the set
 //! is a product decision, and a string would let a later edit add a fifth
-//! without anybody noticing. [`ready`] filters that set against what is
-//! actually on this machine:
+//! without anybody noticing. [`runtime_choices`] first removes Exo unless this
+//! process was launched with `--enable-exo`; [`ready`] filters the admitted set
+//! against what is actually on this machine:
 //!
 //! - **Omega** is the native loop, which is compiled in. Always ready.
 //! - **Codex** and **Claude** are ready when `omega_agent_detect` finds their
@@ -198,6 +199,25 @@ impl SelectableExecutor {
     }
 }
 
+/// Executor names admitted by this process launch.
+///
+/// Exo remains part of the closed product vocabulary, but it is not loaded or
+/// exposed unless the command line opted in before application startup.
+#[must_use]
+pub fn runtime_choices() -> &'static [SelectableExecutor] {
+    const WITHOUT_EXO: &[SelectableExecutor] = &[
+        SelectableExecutor::Omega,
+        SelectableExecutor::Codex,
+        SelectableExecutor::Claude,
+    ];
+
+    if omega_front_door::exo_enabled() {
+        SelectableExecutor::ALL
+    } else {
+        WITHOUT_EXO
+    }
+}
+
 /// The names that can actually run a turn here, in [`SelectableExecutor::ALL`]
 /// order.
 ///
@@ -231,7 +251,15 @@ pub fn ready(detected: &[DetectedAgent], exo_lane_resolves: bool) -> Vec<Selecta
 /// [`ready`] against this machine.
 #[must_use]
 pub fn ready_here() -> Vec<SelectableExecutor> {
-    ready(omega_agent_detect::detected(), exo_lane_resolves())
+    let detected = omega_agent_detect::detected();
+    if omega_front_door::exo_enabled() {
+        ready(detected, exo_lane_resolves())
+    } else {
+        ready(detected, false)
+            .into_iter()
+            .filter(|choice| *choice != SelectableExecutor::Exo)
+            .collect()
+    }
 }
 
 /// Why each name that cannot run a turn here is not on the ready list.
@@ -294,7 +322,15 @@ pub fn unavailable(
 /// [`unavailable`] against this machine.
 #[must_use]
 pub fn unavailable_here() -> Vec<(SelectableExecutor, &'static str)> {
-    unavailable(omega_agent_detect::detected(), exo_absence_here())
+    let detected = omega_agent_detect::detected();
+    if omega_front_door::exo_enabled() {
+        unavailable(detected, exo_absence_here())
+    } else {
+        unavailable(detected, Some("disabled for this launch"))
+            .into_iter()
+            .filter(|(choice, _)| *choice != SelectableExecutor::Exo)
+            .collect()
+    }
 }
 
 /// Why no Exo lane resolves on this machine, when none does.
@@ -320,6 +356,9 @@ pub fn unavailable_here() -> Vec<(SelectableExecutor, &'static str)> {
 /// [`ExoLaneUnderivable::summary`]: omega_agent_detect::exo::ExoLaneUnderivable::summary
 #[must_use]
 pub fn exo_absence_here() -> Option<&'static str> {
+    if !omega_front_door::exo_enabled() {
+        return Some("disabled for this launch");
+    }
     static ABSENCE: OnceLock<Option<&'static str>> = OnceLock::new();
     *ABSENCE.get_or_init(|| {
         let path = ExoLaneConfig::data_dir_path();
@@ -369,14 +408,14 @@ static SELECTED: Mutex<Option<SelectableExecutor>> = Mutex::new(None);
 /// The executor a person chose, if they chose one.
 ///
 /// `None` is *no choice made*, which is not the same as choosing Omega. It
-/// means the router attaches by its own rule — the Exo lane, then the detected
-/// agent — and that rule is what a machine that has never touched this control
-/// gets.
+/// means the router attaches by its own rule — the Exo lane when this launch
+/// opted in, then the detected agent.
 #[must_use]
 pub fn selected() -> Option<SelectableExecutor> {
-    *SELECTED
+    let selected = *SELECTED
         .lock()
-        .expect("the executor selection is never held across a panic")
+        .expect("the executor selection is never held across a panic");
+    selected.filter(|choice| omega_front_door::exo_enabled() || *choice != SelectableExecutor::Exo)
 }
 
 /// Choose the executor the next connection attaches.
@@ -386,6 +425,13 @@ pub fn selected() -> Option<SelectableExecutor> {
 /// moving executors — which is the defect class `omega#77`'s disclosure exists
 /// to make impossible.
 pub fn select(choice: SelectableExecutor) {
+    if choice == SelectableExecutor::Exo && !omega_front_door::exo_enabled() {
+        log::warn!(
+            "OMEGA-DELTA-0144: ignored an Exo selection because this process \
+             was not launched with --enable-exo"
+        );
+        return;
+    }
     log::info!(
         "OMEGA-DELTA-0115: a person chose {} ({}) as this session's executor",
         choice.name(),
@@ -439,15 +485,17 @@ pub struct AttachPlan {
 
 /// Turn a choice into the plan the router's `connect` follows.
 ///
-/// `None` reproduces the behaviour that existed before this control did: the
-/// Exo lane if there is one, otherwise the detected agent. A machine whose
-/// owner never opens the menu is therefore unchanged, which is what keeps this
-/// from being a migration.
+/// `None` tries the Exo lane only when this launch explicitly enabled it,
+/// otherwise it proceeds directly to the detected agent.
 #[must_use]
-pub fn attach_plan(choice: Option<SelectableExecutor>, detected: &[DetectedAgent]) -> AttachPlan {
+pub fn attach_plan(
+    choice: Option<SelectableExecutor>,
+    detected: &[DetectedAgent],
+    exo_enabled: bool,
+) -> AttachPlan {
     let Some(choice) = choice else {
         return AttachPlan {
-            exo: true,
+            exo: exo_enabled,
             agents: detected.to_vec(),
         };
     };
@@ -462,7 +510,7 @@ pub fn attach_plan(choice: Option<SelectableExecutor>, detected: &[DetectedAgent
         // where the lane has since stopped resolving must land on the native
         // loop with a visible fallback reason, not silently on Codex.
         SelectableExecutor::Exo => AttachPlan {
-            exo: true,
+            exo: exo_enabled,
             agents: Vec::new(),
         },
         SelectableExecutor::Codex | SelectableExecutor::Claude => AttachPlan {
@@ -810,7 +858,7 @@ mod tests {
         let installed = vec![codex(), claude()];
 
         assert_eq!(
-            attach_plan(None, &installed),
+            attach_plan(None, &installed, true),
             AttachPlan {
                 exo: true,
                 agents: installed.clone(),
@@ -820,10 +868,27 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_default_launch_never_attaches_exo() {
+        let installed = vec![codex(), claude()];
+
+        assert_eq!(
+            attach_plan(None, &installed, false),
+            AttachPlan {
+                exo: false,
+                agents: installed,
+            }
+        );
+        assert!(
+            !attach_plan(Some(SelectableExecutor::Exo), &[], false).exo,
+            "a stale or synthetic Exo choice cannot bypass the launch flag"
+        );
+    }
+
     /// Choosing Omega attaches nothing external, which is what Omega is.
     #[test]
     fn choosing_omega_attaches_nothing_external() {
-        let plan = attach_plan(Some(SelectableExecutor::Omega), &[codex(), claude()]);
+        let plan = attach_plan(Some(SelectableExecutor::Omega), &[codex(), claude()], true);
 
         assert!(!plan.exo);
         assert!(
@@ -839,7 +904,7 @@ mod tests {
     fn choosing_an_agent_excludes_every_other_external_executor() {
         let installed = vec![codex(), claude()];
 
-        let plan = attach_plan(Some(SelectableExecutor::Claude), &installed);
+        let plan = attach_plan(Some(SelectableExecutor::Claude), &installed, true);
         assert!(
             !plan.exo,
             "the Exo lane fills the same single external slot and wins by \
@@ -851,7 +916,7 @@ mod tests {
             "Codex is first in candidate order and would otherwise be chosen"
         );
 
-        let plan = attach_plan(Some(SelectableExecutor::Codex), &installed);
+        let plan = attach_plan(Some(SelectableExecutor::Codex), &installed, true);
         assert_eq!(
             plan.agents.iter().map(|agent| agent.id).collect::<Vec<_>>(),
             vec![agent_servers::CODEX_ID],
@@ -862,7 +927,7 @@ mod tests {
     /// loop with a visible reason, never silently to Codex.
     #[test]
     fn choosing_exo_does_not_fall_through_to_a_detected_agent() {
-        let plan = attach_plan(Some(SelectableExecutor::Exo), &[codex(), claude()]);
+        let plan = attach_plan(Some(SelectableExecutor::Exo), &[codex(), claude()], true);
 
         assert!(plan.exo);
         assert!(plan.agents.is_empty());
@@ -872,7 +937,7 @@ mod tests {
     /// nothing rather than substituting one.
     #[test]
     fn a_choice_for_an_absent_agent_substitutes_nothing() {
-        let plan = attach_plan(Some(SelectableExecutor::Codex), &[claude()]);
+        let plan = attach_plan(Some(SelectableExecutor::Codex), &[claude()], true);
 
         assert!(
             plan.agents.is_empty(),
@@ -929,7 +994,7 @@ mod tests {
         let installed = vec![codex(), claude()];
 
         for choice in ready(&installed, true) {
-            let plan = attach_plan(Some(choice), &installed);
+            let plan = attach_plan(Some(choice), &installed, true);
             match choice {
                 SelectableExecutor::Omega => {
                     assert!(!plan.exo && plan.agents.is_empty());
