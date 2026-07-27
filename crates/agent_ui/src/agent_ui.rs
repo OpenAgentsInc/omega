@@ -27,6 +27,7 @@ pub mod omega_agent_attach;
 pub mod omega_audience_control;
 pub mod omega_community_control;
 pub mod omega_executor_disclosure;
+pub mod omega_executor_selector;
 pub mod omega_exo_connection;
 pub mod omega_host_bridge;
 pub mod omega_router;

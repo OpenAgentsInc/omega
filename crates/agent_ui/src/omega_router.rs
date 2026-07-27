@@ -933,6 +933,36 @@ impl agent_servers::AgentServer for OmegaRouterServer {
         cx.spawn(async move |cx| {
             let native = native.await?;
             let mut router = OmegaAgentConnection::new(native, RouteJournal::at(journal_path));
+            // `OMEGA-DELTA-0115`. What the person chose in the composer, if
+            // they chose anything. `None` is *no choice made* and reproduces
+            // this connect exactly as it behaved before the control existed:
+            // the Exo lane, then the detected agent.
+            //
+            // The plan is computed here rather than inside either attach
+            // because the choice is between them — the router holds one
+            // external-ACP slot, the Exo lane wins it by default, and a person
+            // who asked for Claude on a machine with an Exo lane would
+            // otherwise never reach Claude however the second attach behaved.
+            let plan = crate::omega_executor_selector::attach_plan(
+                crate::omega_executor_selector::selected(),
+                &installed_agents,
+            );
+            let installed_agents = plan.agents;
+            let exo_lane = if plan.exo {
+                crate::omega_exo_connection::connect_configured_lane(
+                    &exo_lane_path,
+                    project.clone(),
+                    agent_server_store.clone(),
+                    cx,
+                )
+                .await?
+            } else {
+                log::info!(
+                    "OMEGA-DELTA-0115: the Exo lane is not attached because a \
+                     person chose another executor"
+                );
+                None
+            };
             // `OMEGA-DELTA-0042`, omega#87. The Exo harness lane, when the owner
             // configured one. Registered as the external executor rather than
             // as its own class: see `omega_exo_lane`'s module docs for why an
@@ -940,14 +970,7 @@ impl agent_servers::AgentServer for OmegaRouterServer {
             // engine lane. A machine with no Exo registers nothing, and a pin
             // to the external executor then falls back visibly with
             // `RouteReason::ExternalAcpUnavailable`.
-            if let Some(exo) = crate::omega_exo_connection::connect_configured_lane(
-                &exo_lane_path,
-                project.clone(),
-                agent_server_store.clone(),
-                cx,
-            )
-            .await?
-            {
+            if let Some(exo) = exo_lane {
                 router = router.with_external_acp(exo);
             // `OMEGA-DELTA-0095`, omega#106. Otherwise the coding agent that is
             // actually installed — Codex first, then Claude. Second, because an

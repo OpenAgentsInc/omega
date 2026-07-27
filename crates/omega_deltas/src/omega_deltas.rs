@@ -748,6 +748,10 @@ pub const EXECUTOR_DISCLOSURE_BINDING_PATH: &str =
 /// OMEGA-DELTA-0021. The thread surface that has to render the line.
 pub const THREAD_VIEW_PATH: &str = "crates/agent_ui/src/conversation_view/thread_view.rs";
 
+/// OMEGA-DELTA-0115. The four names, what they attach, and the standing
+/// choice between them.
+pub const EXECUTOR_SELECTOR_PATH: &str = "crates/agent_ui/src/omega_executor_selector.rs";
+
 /// OMEGA-DELTA-0045. The host method the engine calls to disclose a handoff.
 pub const HOST_BRIDGE_PATH: &str = "crates/agent_ui/src/omega_host_bridge.rs";
 
@@ -14850,5 +14854,145 @@ mod tests {
                 script_path.display()
             );
         }
+    }
+
+    // ------ OMEGA-DELTA-0115
+
+    /// OMEGA-DELTA-0115. The composer's main dropdown names an executor, and
+    /// the provider's own controls are not what it replaced.
+    ///
+    /// Two halves, because the first draft of this control lost the second one
+    /// and the loss was invisible from the code that changed. The arm used to
+    /// read `match config_options_view { Some(v) => child(v), None =>
+    /// children(model_selector) }` — an either/or — so on a machine with Codex
+    /// attached, Codex's session knobs rendered *instead of* the dropdown, and
+    /// the one control that switches away from Codex disappeared exactly when
+    /// a person wanted it. The owner asked for both: "no i DO want those
+    /// controls showing IF Codex is showing".
+    ///
+    /// The model selector is checked by absence rather than by the presence of
+    /// something else, because "the dropdown names a runtime" is a claim about
+    /// what is *not* there — a bar carrying both would satisfy any check that
+    /// only looked for the selector.
+    #[test]
+    fn the_composers_main_dropdown_names_an_executor_and_keeps_provider_controls() {
+        let view_path = repository_path(THREAD_VIEW_PATH);
+        let view = read_repository_file(THREAD_VIEW_PATH);
+        let bar = body_of(&view, "render_zero_base_executor_bar");
+
+        assert!(
+            bar.contains("self.render_executor_selector(cx)"),
+            "OMEGA-DELTA-0115: zero base's composer bar in {} no longer draws \
+             the executor selector. It is the main dropdown, and without it a \
+             person cannot switch what runs their conversation at all.",
+            view_path.display()
+        );
+        assert!(
+            bar.contains(".children(self.config_options_view.clone())"),
+            "OMEGA-DELTA-0115: zero base's composer bar in {} no longer draws \
+             the attached executor's own controls. They are Codex's settings \
+             and the selector is whether it is Codex at all; the owner asked \
+             for both, and an either/or hides one of them exactly when it is \
+             wanted.",
+            view_path.display()
+        );
+        assert!(
+            !bar.contains("self.model_selector"),
+            "OMEGA-DELTA-0115: zero base's composer bar in {} names the model \
+             selector again. The owner asked for the opposite in as many \
+             words — \"No selection of model like Gemini. You select between \
+             Omega, Exo, Codex, Claude\" — and this row has one dropdown.",
+            view_path.display()
+        );
+
+        // The four names, counted where they are declared. A fifth would be a
+        // product decision, and this is where it has to be argued for.
+        let selector = read_repository_file(EXECUTOR_SELECTOR_PATH);
+        assert!(
+            without_whitespace(&selector).contains(&without_whitespace(
+                "&[Self::Omega, Self::Exo, Self::Codex, Self::Claude]"
+            )),
+            "OMEGA-DELTA-0115: the selectable executors in {} changed. \"Those \
+             are the only four choices\" is the owner's sentence, so a fifth \
+             name needs its own reason here rather than an edit to a list.",
+            repository_path(EXECUTOR_SELECTOR_PATH).display()
+        );
+    }
+
+    /// OMEGA-DELTA-0115. Choosing actually re-attaches.
+    ///
+    /// The failure this refuses is a control that sets a value nothing reads.
+    /// `OmegaAgentConnection` holds one external-ACP slot, filled once at
+    /// connect: a pin chooses among the classes the router already has and
+    /// cannot make Claude reachable on a machine where Codex filled that slot.
+    /// So the router's `connect` is the only place a choice can take effect,
+    /// and this holds it there.
+    #[test]
+    fn choosing_an_executor_changes_what_the_router_attaches() {
+        let router_path = repository_path(ROUTER_DISPATCH_PATH);
+        let router = without_whitespace(&code_of(&read_repository_file(ROUTER_DISPATCH_PATH)));
+
+        assert!(
+            router.contains(&without_whitespace(
+                "crate::omega_executor_selector::attach_plan(
+                    crate::omega_executor_selector::selected(),
+                    &installed_agents,
+                )"
+            )),
+            "OMEGA-DELTA-0115: {} no longer asks what the person chose before \
+             it attaches. The selector would then be a control that sets a \
+             value nothing reads, which is worse than no control.",
+            router_path.display()
+        );
+        assert!(
+            router.contains(&without_whitespace("if plan.exo {")),
+            "OMEGA-DELTA-0115: {} no longer lets a choice keep the Exo lane \
+             out of the external slot. The lane wins that slot by default, so \
+             a person who asked for Claude on a machine with Exo would never \
+             reach Claude.",
+            router_path.display()
+        );
+
+        // Only a person chooses. `select` is the whole switching mechanism,
+        // and called from a turn it would be a thread quietly moving
+        // executors — the defect class the disclosure surface exists to stop.
+        // Counted across the tree for the reason
+        // `only_a_person_sends_a_thread_to_omegas_own_loop` counts its own.
+        let checks = normalize_path(&repository_path("crates/omega_deltas"));
+        let mut callers = Vec::new();
+        for_each_source_file(&repository_path("crates"), &["rs"], |path, source| {
+            if normalize_path(path).starts_with(&checks) {
+                return;
+            }
+            for line in code_of(source).lines() {
+                let trimmed = line.trim();
+                if trimmed.starts_with("pub fn ") || trimmed.starts_with("fn ") {
+                    continue;
+                }
+                if trimmed.contains("executor_selector::select(") || trimmed == "select(choice);" {
+                    callers.push(
+                        path.display()
+                            .to_string()
+                            .rsplit("crates/")
+                            .next()
+                            .unwrap_or_default()
+                            .to_owned(),
+                    );
+                }
+            }
+        });
+        assert_eq!(
+            callers,
+            vec![
+                THREAD_VIEW_PATH
+                    .strip_prefix("crates/")
+                    .expect("the thread view lives under crates/")
+            ],
+            "OMEGA-DELTA-0115: the executor choice is made somewhere other \
+             than the composer's own control. A choice made by a turn, a tool, \
+             or a retry is a thread moving executors without its reader \
+             asking, which is what every disclosure surface here exists to \
+             make impossible."
+        );
     }
 }

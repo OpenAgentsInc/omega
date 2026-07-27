@@ -13081,10 +13081,21 @@ impl ThreadView {
                                 })),
                         )
                     })
-                    .map(|this| match self.config_options_view.clone() {
-                        Some(config_view) => this.child(config_view),
-                        None => this.children(self.model_selector.clone()),
-                    })
+                    // `OMEGA-DELTA-0115`. The provider's own controls, when the
+                    // attached executor advertises any, and then the executor
+                    // selector — **both**, never one or the other.
+                    //
+                    // This arm used to be an either/or, and the either/or was
+                    // the defect: a machine with Codex attached rendered
+                    // Codex's session knobs *instead of* the main dropdown, so
+                    // the one control that switches away from Codex vanished
+                    // exactly when a person wanted it. The owner asked for both
+                    // in as many words — "no i DO want those controls showing
+                    // IF Codex is showing" — and the two answer different
+                    // questions: the config options are Codex's settings, the
+                    // selector is whether it is Codex at all.
+                    .children(self.config_options_view.clone())
+                    .child(self.render_executor_selector(cx))
                     // Stop lives here too: `render_send_button` already turns
                     // into a stop control while a turn is generating, so the
                     // Exo header's separate `Stop` was a second button for the
@@ -13093,6 +13104,87 @@ impl ThreadView {
             )
             .into_any_element()
     }
+
+    /// The main dropdown: which executor runs this conversation.
+    ///
+    /// `OMEGA-DELTA-0115`. This is the control that used to read
+    /// `google/gemini-3.6-flash`. The owner asked for it to name a runtime
+    /// instead — "I need to be able to switch the executor. No selection of
+    /// model like Gemini. You select between Omega, Exo, Codex, Claude" — and
+    /// `crate::omega_executor_selector` holds the whole of that: which of the
+    /// four names this machine may offer, what choosing one attaches, and why.
+    ///
+    /// # What it answers, beyond switching
+    ///
+    /// The owner also asked "i just don't know why it's showing Codex
+    /// automatically". `omega_agent_attach::choose_executor` takes the first
+    /// present-and-drivable entry of `omega_agent_detect::CANDIDATES`, and
+    /// Codex is first, so a new thread attaches Codex with nothing on screen
+    /// saying so. The default is not changed here — it was not asked for and
+    /// it is the owner's stated preference from omega#100 — but it stops being
+    /// invisible: the face of this control reads `Codex`, from the thread's own
+    /// disclosure record, so an automatic choice reads as a choice.
+    ///
+    /// # Read from the thread, never from the selection
+    ///
+    /// The same rule `OMEGA-DELTA-0094` holds for the audience control. The
+    /// selection applies to the next connection, so a face that showed it would
+    /// repaint a running Codex thread as Claude the moment somebody picked
+    /// Claude, with nothing having moved.
+    ///
+    /// # Why no pin is set here
+    ///
+    /// `OmegaAgentConnection::pin_session` chooses among the classes the router
+    /// already holds, and it cannot make Claude reachable on a machine where
+    /// Codex filled the one external-ACP slot — so it is not the mechanism that
+    /// switches. It is also not needed for the record: `route` sends an
+    /// unpinned thread to the external agent when one is attached
+    /// (`RouteReason::DetectedExternalAcp`) and to the native loop when none is
+    /// (`RouteReason::UnpinnedDefault`), which are exactly the two outcomes
+    /// this control produces. A pin would restate the route rather than decide
+    /// it, and owner gate 8's door stays where `OMEGA-DELTA-0055` left it.
+    ///
+    /// # Live before the first message, disabled after
+    ///
+    /// The owner settled this: "that control should be disabled mid-turn, only
+    /// settable on new convos". Switching re-attaches, and re-attaching under a
+    /// transcript would leave entries above the fold that one executor produced
+    /// and entries below it that another did, under one disclosure line. The
+    /// disabled tooltip says so rather than leaving a dead control to be
+    /// discovered.
+    ///
+    /// `is_draft_thread` is `entries().is_empty()`, which is also briefly true
+    /// of a resumed thread whose entries have not finished loading. That window
+    /// costs a control that is live for a moment longer than it should be on a
+    /// slow disk, which is the cheap direction: the expensive one would be a
+    /// control disabled on a genuinely new conversation.
+    fn render_executor_selector(&self, cx: &mut Context<Self>) -> AnyElement {
+        use crate::omega_executor_selector::{
+            SelectableExecutor, ready_here, render_executor_selector, select,
+        };
+
+        let disclosure = self.executor_disclosure(cx);
+        let current = SelectableExecutor::of(disclosure.class, &disclosure.agent_id);
+        let enabled = self.thread.read(cx).is_draft_thread() && self.in_flight_prompt.is_none();
+        let server_view = self.server_view.clone();
+
+        render_executor_selector(
+            current,
+            SharedString::from(disclosure.agent_id),
+            ready_here(),
+            enabled,
+            Rc::new(move |choice, window, cx| {
+                select(choice);
+                // The same move `OMEGA-DELTA-0114`'s button makes: record the
+                // choice, then re-drive the connect. `reset` is what rebuilds
+                // the connection, and the connection is where the choice is
+                // read — nothing else in this window can attach a different
+                // executor.
+                let _ = server_view.update(cx, |view, cx| view.reset(window, cx));
+            }),
+        )
+    }
+
     /// The one line zero base says when something is genuinely missing.
     ///
     /// omega#99. `None` whenever there is nothing to say, which is the point:
