@@ -13320,7 +13320,26 @@ impl ThreadView {
 
         let disclosure = self.executor_disclosure(cx);
         let current = SelectableExecutor::of(disclosure.class, &disclosure.agent_id);
-        let enabled = self.thread.read(cx).is_draft_thread() && self.in_flight_prompt.is_none();
+        // omega#116. Switchable unless a turn is actually running.
+        //
+        // This used to also require `is_draft_thread()`, which is
+        // `entries().is_empty()`. A *refused* turn still leaves a mark — an
+        // entry, or an `in_flight_prompt` nothing ever clears — so the owner
+        // typed one word, got refused, and could no longer switch away from the
+        // executor that had just refused him. Locked into the one thing that
+        // did not work, by the control whose whole job is to get him out.
+        //
+        // The original reason for the restriction is gone. It was "session ids
+        // are not portable between executors", and that was true while
+        // switching *reset* the thread. `reset_onto_new_executor` starts a new
+        // session, so switching mid-conversation is already safe: it begins a
+        // new conversation rather than carrying an id somewhere it does not
+        // belong.
+        //
+        // What remains is the one case where switching really is wrong — while
+        // a turn is in flight, because the answer would arrive somewhere that
+        // no longer exists.
+        let enabled = self.thread.read(cx).status() == ThreadStatus::Idle;
         let server_view = self.server_view.clone();
 
         render_executor_selector(
