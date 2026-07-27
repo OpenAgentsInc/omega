@@ -9095,43 +9095,40 @@ impl Render for Workspace {
             // a tab group: region navigation lands on the first control (per
             // the ARIA toolbar pattern), Tab steps through them, and arrow keys
             // move between them once focus is inside.
-            // OMEGA-DELTA-0053. No title bar in a sealed zero base. Its
-            // controls are ordinary click listeners rather than dispatched
-            // actions, so the action gate never sees them — the sidebar toggle
-            // that exposed the editor is one of them.
-            .when_some(
-                self.titlebar_item.clone().filter(|_| !zero_base_sealed),
-                |this, item| {
-                    this.child(
-                        div()
-                            .id("titlebar-region")
-                            .track_focus(&self.titlebar_focus_handle)
-                            .tab_group()
-                            .role(gpui::Role::Toolbar)
-                            .aria_label("Title bar")
-                            .on_key_down(cx.listener(
-                                |workspace, event: &gpui::KeyDownEvent, window, cx| {
-                                    if event.keystroke.modifiers.modified() {
-                                        return;
+            // OMEGA-DELTA-0053 and 0147. The title-bar view reduces itself to
+            // the platform drag strip in sealed zero base. Its inherited
+            // controls remain absent, while the window retains the standard
+            // Zed drag and double-click behavior.
+            .when_some(self.titlebar_item.clone(), |this, item| {
+                this.child(
+                    div()
+                        .id("titlebar-region")
+                        .track_focus(&self.titlebar_focus_handle)
+                        .tab_group()
+                        .role(gpui::Role::Toolbar)
+                        .aria_label("Title bar")
+                        .on_key_down(cx.listener(
+                            |workspace, event: &gpui::KeyDownEvent, window, cx| {
+                                if event.keystroke.modifiers.modified() {
+                                    return;
+                                }
+                                match event.keystroke.key.as_str() {
+                                    "right" => {
+                                        workspace.move_titlebar_item_focus(true, window, cx);
+                                        cx.stop_propagation();
                                     }
-                                    match event.keystroke.key.as_str() {
-                                        "right" => {
-                                            workspace.move_titlebar_item_focus(true, window, cx);
-                                            cx.stop_propagation();
-                                        }
-                                        "left" => {
-                                            workspace.move_titlebar_item_focus(false, window, cx);
-                                            cx.stop_propagation();
-                                        }
-                                        _ => {}
+                                    "left" => {
+                                        workspace.move_titlebar_item_focus(false, window, cx);
+                                        cx.stop_propagation();
                                     }
-                                },
-                            ))
-                            .w_full()
-                            .child(item),
-                    )
-                },
-            )
+                                    _ => {}
+                                }
+                            },
+                        ))
+                        .w_full()
+                        .child(item),
+                )
+            })
             .on_modifiers_changed(move |_, _, cx| {
                 for &id in &notification_entities {
                     cx.notify(id);

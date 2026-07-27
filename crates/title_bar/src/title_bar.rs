@@ -221,6 +221,13 @@ impl Render for TitleBar {
             }
         }
 
+        if omega_zero_base::is_sealed() {
+            self.platform_titlebar.update(cx, |titlebar, _cx| {
+                titlebar.set_children(Vec::<AnyElement>::new());
+            });
+            return self.platform_titlebar.clone().into_any_element();
+        }
+
         let title_bar_settings = *TitleBarSettings::get_global(cx);
         let button_layout = title_bar_settings.button_layout;
         let is_git_enabled = ProjectSettings::get_global(cx).git.enabled.status;
@@ -681,7 +688,6 @@ impl TitleBar {
                 .into_any_element(),
         )
     }
-
 
     pub fn render_project_host(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         if self.project.read(cx).is_via_remote_server() {
@@ -1264,7 +1270,9 @@ impl TitleBar {
                                     .w_full()
                                     .gap_1()
                                     .justify_between()
-                                    .child(Label::new("Restart to update Omega").color(Color::Accent))
+                                    .child(
+                                        Label::new("Restart to update Omega").color(Color::Accent),
+                                    )
                                     .child(
                                         Icon::new(IconName::Download)
                                             .size(IconSize::Small)

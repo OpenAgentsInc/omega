@@ -18232,6 +18232,7 @@ dependencies = [
  "icons",
  "livekit_client",
  "notifications",
+ "omega_zero_base",
  "platform_title_bar",
  "project",
  "recent_projects",

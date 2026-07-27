@@ -135,6 +135,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0144",
     "OMEGA-DELTA-0145",
     "OMEGA-DELTA-0146",
+    "OMEGA-DELTA-0147",
 ];
 
 /// OMEGA-DELTA-0125. Every entry the thread header's `…` menu offers, the
@@ -2788,8 +2789,9 @@ pub const NOSTR_ACTIVITY_PATH: &str = "crates/agent_ui/src/omega_nostr_activity.
 /// and where the mode seals the window after the identity gate.
 pub const WORKSPACE_INITIALIZATION_PATH: &str = "crates/zed/src/zed.rs";
 
-/// OMEGA-DELTA-0053. The workspace render, which draws no editor pane, no
-/// title bar and no status bar once zero base is sealed.
+/// OMEGA-DELTA-0053. The workspace render, which draws no editor pane or
+/// status bar once zero base is sealed and retains only the platform drag
+/// titlebar.
 pub const WORKSPACE_RENDER_PATH: &str = "crates/workspace/src/workspace.rs";
 
 /// OMEGA-DELTA-0054. The plausibility test for a working directory.
@@ -9066,9 +9068,10 @@ mod tests {
     /// The action gate cannot catch that. It refuses *actions*, and the control
     /// that did it is an ordinary click listener on the title bar that calls a
     /// workspace method. So the answer is structural: once sealed, the
-    /// workspace starts with no centre pane, title bar, or status bar, and the
-    /// generic reveal path returns early instead of closing the one panel the
-    /// window has. `OMEGA-DELTA-0139` adds a separate,
+    /// workspace starts with no centre pane, inherited title-bar controls, or
+    /// status bar, and the generic reveal path returns early instead of
+    /// closing the one panel the window has. The platform titlebar itself
+    /// remains as an empty drag region. `OMEGA-DELTA-0139` adds a separate,
     /// transcript-file-only reveal path.
     ///
     /// The seal is later than the mode on purpose, and the check pins that too.
@@ -9109,9 +9112,6 @@ mod tests {
             // The centre pane group and its tab bar, which is where the welcome
             // surface the owner was shown lives.
             "if zero_base_sealed {",
-            // The title bar, whose controls are click listeners the action gate
-            // never sees.
-            ".filter(|_| !zero_base_sealed)",
             // The status bar.
             "self.status_bar_visible(cx) && !zero_base_sealed",
             // The reveal path that closed the one open dock.
@@ -9123,6 +9123,23 @@ mod tests {
                  the mode claims is absent, and a surface that is only covered \
                  is one control away from being present.",
                 workspace_path.display()
+            );
+        }
+
+        let title_bar_path = repository_path("crates/title_bar/src/title_bar.rs");
+        let title_bar = std::fs::read_to_string(&title_bar_path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", title_bar_path.display()));
+        for structural in [
+            "if omega_zero_base::is_sealed()",
+            "titlebar.set_children(Vec::<AnyElement>::new())",
+            "return self.platform_titlebar.clone().into_any_element()",
+        ] {
+            assert!(
+                title_bar.contains(structural),
+                "OMEGA-DELTA-0053: {} lost `{structural}`. Sealed zero base \
+                 must retain only the platform drag strip, not the inherited \
+                 title-bar controls.",
+                title_bar_path.display()
             );
         }
 
@@ -19193,5 +19210,53 @@ mod tests {
             "OMEGA-DELTA-0146: hiding Codex and Claude Code from direct \
              selection also stopped their adapter preload."
         );
+    }
+
+    /// OMEGA-DELTA-0147. Sealing removes titlebar controls, not the standard
+    /// platform region that makes a normal window movable.
+    #[test]
+    fn sealed_zero_base_keeps_only_zeds_platform_drag_strip() {
+        let workspace = without_comments(&read_repository_file(WORKSPACE_RENDER_PATH));
+        let compact_workspace = without_whitespace(&workspace);
+        assert!(
+            compact_workspace.contains(&without_whitespace(
+                ".when_some(self.titlebar_item.clone(),"
+            )) && !compact_workspace.contains(&without_whitespace(
+                "self.titlebar_item.clone().filter(|_| !zero_base_sealed)"
+            )),
+            "OMEGA-DELTA-0147: sealed zero base no longer renders the titlebar \
+             view, so its window has no region a person can drag."
+        );
+
+        let title_bar_path = "crates/title_bar/src/title_bar.rs";
+        let title_bar = without_comments(&read_repository_file(title_bar_path));
+        for required in [
+            "if omega_zero_base::is_sealed()",
+            "titlebar.set_children(Vec::<AnyElement>::new())",
+            "return self.platform_titlebar.clone().into_any_element()",
+        ] {
+            assert!(
+                title_bar.contains(required),
+                "OMEGA-DELTA-0147: the sealed titlebar boundary in {} lost \
+                 `{required}`.",
+                repository_path(title_bar_path).display()
+            );
+        }
+
+        let platform_path = "crates/platform_title_bar/src/platform_title_bar.rs";
+        let platform = without_comments(&read_repository_file(platform_path));
+        let render = body_of(&platform, "render");
+        for required in [
+            ".window_control_area(WindowControlArea::Drag)",
+            "window.start_window_move()",
+            "window.titlebar_double_click()",
+        ] {
+            assert!(
+                render.contains(required),
+                "OMEGA-DELTA-0147: the shared Zed titlebar in {} lost \
+                 `{required}`.",
+                repository_path(platform_path).display()
+            );
+        }
     }
 }

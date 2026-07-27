@@ -2718,11 +2718,13 @@ than it sounds, because the harness omega#81's acceptance sentence names —
   calls a workspace method, so nothing was dispatched and nothing was refused.
   A gate over actions cannot cover a surface that is merely covered.
 - **Omega now:** once zero base is **sealed**, the workspace renders no centre
-  pane group, no tab bar, no title bar and no status bar. They are not drawn at
-  all rather than drawn and hidden. `dismiss_zoomed_items_to_reveal`, the
-  function the sidebar control reached, returns early in a sealed zero base —
-  it used to close every dock that was not the one being revealed, which in this
-  mode is the one panel the window has.
+  pane group, tab bar, inherited title-bar controls, or status bar. The titlebar
+  view reduces to Zed's platform drag strip so the window remains movable and
+  retains native double-click behavior without restoring any of the controls
+  the action gate cannot see. `dismiss_zoomed_items_to_reveal`, the function the
+  sidebar control reached, returns early in a sealed zero base — it used to
+  close every dock that was not the one being revealed, which in this mode is
+  the one panel the window has.
 - **The seal is later than the mode, and that is load-bearing.**
   `OMEGA-DELTA-0040`'s identity onboarding is a centre-pane item. A window with
   no centre pane could never show it, so a mode that sealed at startup would
@@ -6674,3 +6676,17 @@ that bypasses the menu is refused rather than changing the route.
 
 - **Enforced by:** `only_omega_is_an_ordinary_selectable_executor` in
   `crates/omega_deltas`, plus selector policy tests in `agent_ui`.
+
+### OMEGA-DELTA-0147 — Sealed zero base keeps the native window drag strip
+
+Sealed zero base renders Zed's `PlatformTitleBar` as an empty platform strip.
+It keeps the standard traffic-light spacing, window drag gesture, and native
+titlebar double-click behavior. The project, branch, collaboration, account,
+sidebar, and application-menu controls remain absent.
+
+The workspace owns titlebar dragging through the same
+`Window::start_window_move` path as ordinary Zed windows. Restoring the drag
+region cannot restore the editor or create an action-gate bypass.
+
+- **Enforced by:** `sealed_zero_base_keeps_only_zeds_platform_drag_strip` in
+  `crates/omega_deltas`, plus `a_sealed_zero_base_starts_without_an_editor`.
