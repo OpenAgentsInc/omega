@@ -1,0 +1,78 @@
+#!/usr/bin/env bash
+# The checks that must pass before anything reaches `main`.
+#
+# omega#113. This exists because the checks kept being skipped. Not by one
+# agent, and not once: the delta suite guards *policy*, so it is exactly the
+# suite that a change to policy breaks — and exactly the one nobody thinks to
+# run, because the crate they edited was somewhere else. `main` went red twice
+# in a day that way, each time from someone who had run the tests for the crate
+# they touched and stopped there.
+#
+# The remembering was the bug. A rule that lives in a prompt is enforced by
+# whoever happens to read the prompt; a rule that lives in a hook is enforced by
+# the machine. This is the machine's copy.
+#
+# Wired to `pre-push` by `script/omega-install-hooks`, which every checkout and
+# every worktree shares, because hooks live in the one `.git` they all point at.
+#
+# Deliberately NOT the whole test suite. A gate slow enough to be resented is a
+# gate that gets bypassed, and `--no-verify` is one word long. This runs the
+# checks that are cheap and that catch what is actually being got wrong:
+#
+#   1. `omega_deltas` — the policy suite. Source-scanning, no build of the tree
+#      it inspects, seconds to run. This is the one that keeps being missed.
+#   2. `rustfmt` on the Rust files this push actually changes.
+#
+# Everything else stays where it is: the owning crate's tests are the author's
+# job, and CI is the backstop. This gate's whole claim is that the *policy* is
+# intact, which is the claim that kept turning out to be false.
+
+set -euo pipefail
+
+cd "$(git rev-parse --show-toplevel)"
+
+fail() {
+  printf '\n\033[31mpreflight: %s\033[0m\n\n' "$1" >&2
+  printf 'This gate exists because these checks kept being skipped.\n' >&2
+  printf 'If the policy genuinely changed, amend the delta and say why in\n' >&2
+  printf 'its prose — do not delete the check to make the push go through.\n\n' >&2
+  printf 'Bypass with --no-verify only if you are about to explain to the\n' >&2
+  printf 'owner what you knowingly pushed red.\n\n' >&2
+  exit 1
+}
+
+printf 'preflight: policy checks (omega_deltas)... '
+if ! out=$(CARGO_INCREMENTAL=0 cargo test -q -p omega_deltas 2>&1); then
+  printf 'FAILED\n'
+  printf '%s\n' "$out" | grep -E '^\s+tests::|OMEGA-DELTA-[0-9]{4}' | head -40 >&2
+  fail 'the delta suite is red'
+fi
+printf 'ok\n'
+
+printf 'preflight: rustfmt (changed files)... '
+# Only the Rust files this push actually changes.
+#
+# `cargo fmt --all --check` was the first thing tried here and it is wrong: the
+# tree carries pre-existing unformatted files nobody in this push touched
+# (`acp_thread`, `app_identity`, and others on `main` right now). A gate that
+# fails on the first run for reasons unrelated to the change is a gate people
+# learn to pass with `--no-verify`, and then it is enforcing nothing at all.
+#
+# So this holds you to your own diff. The backlog is somebody's cleanup, not a
+# toll on every unrelated push.
+base=$(git merge-base HEAD origin/main 2>/dev/null || echo HEAD)
+changed=$(git diff --name-only --diff-filter=ACMR "$base" HEAD -- '*.rs' 2>/dev/null || true)
+if [ -n "$changed" ]; then
+  present=$(printf '%s\n' "$changed" | while read -r f; do [ -f "$f" ] && printf '%s\n' "$f"; done)
+  if [ -n "$present" ]; then
+    # shellcheck disable=SC2086
+    if ! rustfmt --edition 2024 --check $present >/tmp/omega-preflight-fmt 2>&1; then
+      printf 'FAILED\n'
+      head -20 /tmp/omega-preflight-fmt >&2
+      fail 'run `cargo fmt` on the files you changed'
+    fi
+  fi
+fi
+printf 'ok\n'
+
+printf '\033[32mpreflight: passed\033[0m\n'

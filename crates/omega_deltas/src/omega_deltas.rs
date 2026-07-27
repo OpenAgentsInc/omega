@@ -2683,13 +2683,8 @@ pub const EPISODE_HARNESS_FORBIDDEN_VERBS: &[&str] = &[
 /// `std::env`, which the runner needs for its arguments, and minus
 /// `std::process`, which it needs for an exit code. Neither can revert a file.
 /// `std::fs` and a path type can, and neither is here.
-pub const EPISODE_LIVE_FORBIDDEN_REACH: &[&str] = &[
-    "std::fs",
-    "std::path",
-    "PathBuf",
-    "Command",
-    "include_str!",
-];
+pub const EPISODE_LIVE_FORBIDDEN_REACH: &[&str] =
+    &["std::fs", "std::path", "PathBuf", "Command", "include_str!"];
 
 /// OMEGA-DELTA-0090. The request families an episode may send.
 pub const EPISODE_ADMITTED_FAMILIES: &[&str] = &["Query", "Fork", "Reset"];
@@ -5542,14 +5537,19 @@ mod tests {
             .map(|(_, rest)| rest)
             .unwrap_or_default();
         let bar = bar.split_once("\n    fn ").map_or(bar, |(body, _)| body);
-        assert!(
-            bar.contains("Label::new(disclosure.label())"),
-            "OMEGA-DELTA-0021: zero base's composer bar in {} must render the \
-             line from the disclosure record, like every other surface that \
-             discloses. A bar that names a model from the selector beside it \
-             and nothing else discloses the model, not the executor.",
-            path.display()
-        );
+        // OMEGA-DELTA-0021 amended, omega#112. This used to require the
+        // composer bar to render `disclosure.label()`. The owner removed that
+        // placement while looking at the running app: the bar said
+        // "Omega Agent · google/gemini-3.6-flash" on the left while the
+        // selector on the right said "Gemini 3.6 Flash" — the same fact twice.
+        //
+        // The rule this delta exists for is unchanged and still enforced above:
+        // a surface that discloses must read the *record*, never a string
+        // assembled at the call site. What is dropped is the claim that this
+        // particular bar is one of those surfaces. Removing a duplicate is not
+        // weakening disclosure; rendering the line in two places was never what
+        // made it true.
+        let _ = &bar;
         // OMEGA-DELTA-0055 replaced the assertion that used to be here. It
         // required the bar to carry the executor pin, on the reasoning that the
         // pin was how a thread reached the Exo lane. That reasoning was correct
@@ -12420,24 +12420,17 @@ mod tests {
     /// repeatedly.
     #[test]
     fn the_composer_shows_the_audience_without_opening_a_menu() {
-        let path = repository_path(THREAD_VIEW_PATH);
-        let source = read_repository_file(THREAD_VIEW_PATH);
-
-        let bar = body_of(&source, "render_zero_base_executor_bar");
-        assert!(
-            bar.contains("omega_audience_control::render_audience_control("),
-            "OMEGA-DELTA-0094: zero base's composer bar in {} no longer draws \
-             the audience control. It is the row a person reads before typing, \
-             and without it there is no way to tell a private thread from a \
-             public one without opening something.",
-            path.display()
-        );
-        assert!(
-            bar.contains("self.root_thread_id"),
-            "OMEGA-DELTA-0094: the composer bar in {} no longer passes the \
-             thread's own identity to the audience control.",
-            path.display()
-        );
+        // OMEGA-DELTA-0094 amended, omega#112. The audience control is no
+        // longer drawn in the composer. The owner removed it while looking at
+        // the running app: its menu was clipped, and it named a *fixture* —
+        // "...ering fixture, not a place... because OMEGA_AUDIENCE_PREVIEW is
+        // set". A test lever must not be able to write a sentence on a screen a
+        // person uses.
+        //
+        // The audience law is untouched: `omega_audience::may_publish` is still
+        // the only authority, and the checks below still hold the control's own
+        // properties for whenever it is placed again. What is dropped is the
+        // claim that the composer bar is where it lives.
 
         let control = read_repository_file(AUDIENCE_CONTROL_PATH);
         let render = body_of(&control, "render_audience_control");
@@ -13208,13 +13201,14 @@ mod tests {
              narrow dock clips the one at the end, which is Send.",
             view_path.display()
         );
-        assert!(
-            bar.contains(".truncate()"),
-            "OMEGA-DELTA-0105: the executor disclosure in {} no longer \
-             truncates. It is the label that gives way when the row is tight, \
-             and `OMEGA-DELTA-0021` requires it to be rendered on every draw.",
-            view_path.display()
-        );
+        // OMEGA-DELTA-0105 amended, omega#112. This required the composer
+        // bar to truncate the executor disclosure. The disclosure is no longer
+        // drawn there — the owner removed it as a duplicate of the selector
+        // beside it — so there is nothing in this row left to truncate.
+        //
+        // The row still must wrap, which the assertion above holds, and that is
+        // the part that protects Send from being clipped in a narrow dock.
+        // Truncation returns with whatever text returns here.
     }
 
     /// OMEGA-DELTA-0105. The preview roster entry is a fixture, and the three
@@ -14500,7 +14494,8 @@ mod tests {
             .map(|step| format!("{step:?}"))
             .collect();
         assert_eq!(
-            walked, declared,
+            walked,
+            declared,
             "OMEGA-DELTA-0120: {} takes its steps in a different order from \
              `FALSIFICATION_LOOP`, or takes a different set of them. The order is the \
              whole mechanism: forking after the mutation proves nothing, and reading \
@@ -14610,5 +14605,4 @@ mod tests {
             );
         }
     }
-
 }
