@@ -128,6 +128,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0137",
     "OMEGA-DELTA-0138",
     "OMEGA-DELTA-0139",
+    "OMEGA-DELTA-0140",
 ];
 
 /// OMEGA-DELTA-0125. Every entry the thread header's `…` menu offers, the
@@ -18747,6 +18748,58 @@ mod tests {
             !namespaces.contains("\"workspace\""),
             "OMEGA-DELTA-0139: the entire workspace namespace was admitted; \
              this change authorizes only saving the file opened from chat."
+        );
+    }
+
+    /// OMEGA-DELTA-0140. The thread header always exposes its working-folder
+    /// value as the control that chooses or changes that folder.
+    #[test]
+    fn the_thread_folder_is_a_persistent_picker_control() {
+        let panel_path = repository_path(AGENT_PANEL_PATH);
+        let panel = without_comments(&read_repository_file(AGENT_PANEL_PATH));
+        let header = method_body(
+            &panel,
+            "fn render_zero_base_working_directory(",
+            &panel_path,
+            "The working-folder value and its picker belong together in this \
+             one persistent thread-header control.",
+        );
+        for required in [
+            "visible_worktrees(cx)",
+            "\"No folder attached\"",
+            "Button::new(\"omega-zero-base-working-directory\", glance)",
+            ".style(ButtonStyle::Subtle)",
+            "IconName::ChevronDown",
+            "workspace::Open {",
+            "create_new_window: Some(false)",
+        ] {
+            assert!(
+                header.contains(required),
+                "OMEGA-DELTA-0140: the persistent folder picker in {} lost \
+                 `{required}`.",
+                panel_path.display()
+            );
+        }
+        assert!(
+            !header.contains(".next()?"),
+            "OMEGA-DELTA-0140: the folder control in {} still disappears when \
+             there is no worktree. That is the moment a person most needs the \
+             control.",
+            panel_path.display()
+        );
+
+        let thread = read_repository_file(THREAD_VIEW_PATH);
+        let notice = method_body(
+            &thread,
+            "fn render_zero_base_provider_notice(",
+            &repository_path(THREAD_VIEW_PATH),
+            "The initial empty-project warning remains the prominent first-use \
+             route; the header is the persistent route.",
+        );
+        assert!(
+            notice.contains("\"Open Folder\"") && notice.contains("create_new_window: Some(false)"),
+            "OMEGA-DELTA-0140: the initial no-folder warning no longer offers \
+             the same in-window folder picker as the persistent header."
         );
     }
 }

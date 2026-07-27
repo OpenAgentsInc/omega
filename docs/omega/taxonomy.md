@@ -222,9 +222,11 @@ life of the process.
 A **path argument names the project, not the mode**. `omega <path>` opens zero
 base with `<path>` as the folder the thread reads, searches and runs in; a file
 argument names the folder that holds it. The folder is named in the panel
-header, because an agent whose directory is invisible cannot be checked. Only
-`--full-editor`, `--diff`, `--dev-container` and `--demo-workroom` open the
-editor, and all four are flags — see `OMEGA-DELTA-0116`.
+header, because an agent whose directory is invisible cannot be checked. That
+header value is always clickable: it chooses a folder when none is attached and
+changes the directory after one has been chosen. Only `--full-editor`, `--diff`,
+`--dev-container` and `--demo-workroom` open the editor, and all four are flags
+— see `OMEGA-DELTA-0116`.
 
 ### Words for evidence
 

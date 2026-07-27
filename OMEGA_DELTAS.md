@@ -6546,3 +6546,18 @@ to fall through to the ordinary transcript link handler.
 
 - **Enforced by:** `transcript_file_links_choose_editing_or_peeking` in
   `crates/omega_deltas`, plus the transcript-link parsing tests in `agent_ui`.
+
+### OMEGA-DELTA-0140 — The thread header owns a persistent folder picker
+
+Zero base always renders the thread's working-folder value in the header. With
+an attached folder it shows the bounded path; without one it shows
+`No folder attached`. The value uses a standard subtle button with a disclosure
+chevron, so its affordance is visible without competing with the thread title.
+
+Clicking either state opens the ordinary folder picker in the current window.
+The initial composer warning retains its prominent `Open Folder` action, but it
+is no longer the only route: once that warning disappears, the header remains
+available to correct or change the directory.
+
+- **Enforced by:** `the_thread_folder_is_a_persistent_picker_control` in
+  `crates/omega_deltas`.

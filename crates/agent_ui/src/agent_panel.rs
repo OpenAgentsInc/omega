@@ -7285,12 +7285,12 @@ impl AgentPanel {
     /// attempt at that corner. The header already carries what the thread *is*
     /// — its agent and its title — and where it runs belongs with those.
     ///
-    /// # Only when there is one
-    ///
-    /// When there is no folder the composer already says so, and says more than
-    /// a header can: *"No folder open — file search and terminal have nothing to
-    /// read"*, with the control that fixes it. Repeating it here would be the
-    /// same fact twice, which is the objection that emptied the bottom-left.
+    /// OMEGA-DELTA-0140. The label is also the permanent way to change the folder.
+    /// The initial composer warning can get someone out of an empty project,
+    /// but disappears as soon as they choose one. A path rendered as inert text
+    /// leaves no discoverable way to correct that first choice. The header
+    /// remains visible in both states and uses the ordinary workspace folder
+    /// picker on every click.
     fn render_zero_base_working_directory(&self, cx: &App) -> Option<AnyElement> {
         if !omega_zero_base::is_active() {
             return None;
@@ -7299,16 +7299,30 @@ impl AgentPanel {
             .project
             .read(cx)
             .visible_worktrees(cx)
-            .next()?
-            .read(cx)
-            .abs_path();
+            .next()
+            .map(|worktree| worktree.read(cx).abs_path());
         let home = std::env::var_os("HOME").map(PathBuf::from);
-        let glance = omega_workdir::short_display_for_person(&root, home.as_deref(), 3);
-        let whole = omega_workdir::display_for_person(&root, home.as_deref());
+        let (glance, whole, color) = if let Some(root) = root.as_ref() {
+            (
+                omega_workdir::short_display_for_person(&root, home.as_deref(), 3),
+                omega_workdir::display_for_person(&root, home.as_deref()),
+                Color::Muted,
+            )
+        } else {
+            (
+                "No folder attached".to_string(),
+                "No folder attached".to_string(),
+                Color::Warning,
+            )
+        };
+        let aria_description = if root.is_some() {
+            "Change the folder this thread can read, search and run in"
+        } else {
+            "Choose the folder this thread can read, search and run in"
+        };
 
         Some(
             h_flex()
-                .id("omega-zero-base-working-directory")
                 // omega#112. The folder never shrinks; the title does.
                 //
                 // Both were truncatable, so once a thread earned a title the
@@ -7325,18 +7339,29 @@ impl AgentPanel {
                 .gap_1()
                 .child(Label::new("·").color(Color::Muted).size(LabelSize::Small))
                 .child(
-                    Label::new(glance)
-                        .color(Color::Muted)
-                        .size(LabelSize::Small),
+                    Button::new("omega-zero-base-working-directory", glance)
+                        .style(ButtonStyle::Subtle)
+                        .size(ButtonSize::Compact)
+                        .label_size(LabelSize::Small)
+                        .color(color)
+                        .end_icon(
+                            Icon::new(IconName::ChevronDown)
+                                .size(IconSize::XSmall)
+                                .color(color),
+                        )
+                        .aria_description(aria_description)
+                        .tooltip(move |_, cx| {
+                            Tooltip::with_meta(whole.clone(), None, aria_description, cx)
+                        })
+                        .on_click(|_, window, cx| {
+                            window.dispatch_action(
+                                Box::new(workspace::Open {
+                                    create_new_window: Some(false),
+                                }),
+                                cx,
+                            );
+                        }),
                 )
-                .tooltip(move |_, cx| {
-                    Tooltip::with_meta(
-                        whole.clone(),
-                        None,
-                        "The folder this thread can read, search and run in",
-                        cx,
-                    )
-                })
                 .into_any_element(),
         )
     }
