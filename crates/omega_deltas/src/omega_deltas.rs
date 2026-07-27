@@ -18009,7 +18009,7 @@ mod tests {
         );
     }
 
-    /// OMEGA-DELTA-0131. Zero base has exactly one agent selection.
+    /// OMEGA-DELTA-0131. A new thread in zero base is built on Omega's router.
     ///
     /// The owner selected Exo, was shown Exo, asked `who are you`, and Codex
     /// answered. Omega's executor selector sets its own global; the panel keeps
@@ -18019,72 +18019,95 @@ mod tests {
     /// earlier session, so Omega's router — the only thing that reads the
     /// executor selection — was never in the path at all.
     ///
-    /// So every write to the panel's agent in the shipping source goes through
-    /// one clamp, and in zero base that clamp answers `Agent::NativeAgent`.
-    /// Listing the write sites would be the wrong check: the defect arrived
-    /// through the restore path, which is the site nobody thinks about. This
-    /// asserts the shape instead — no bare assignment survives outside the
-    /// clamp — so a new write site fails here rather than in a window.
+    /// The clamp is on the **accessor**, not on the stored field, and the
+    /// difference is not cosmetic. The first version of this fix clamped every
+    /// write, which rewrote a reopened thread's own agent on the way back in:
+    /// `OMEGA-DELTA-0118` restores the last thread under the executor that
+    /// recorded it, the router had no route record for a session it had never
+    /// opened, and the next launch said `Failed to Launch — no thread found
+    /// with ID`. So this check holds the accessor, and holds that the panel's
+    /// heading reads the same one — a heading naming a different agent from the
+    /// thread `+` would open is the same defect in a smaller place.
     #[test]
-    fn zero_base_has_exactly_one_agent_selection() {
+    fn a_new_thread_in_zero_base_is_built_on_omegas_router() {
         let panel_path = repository_path(AGENT_PANEL_PATH);
         let panel = read_repository_file(AGENT_PANEL_PATH);
         let shipping = outside_the_tests(&panel);
 
-        let clamp = function_body(shipping, "omega_zero_base_agent").unwrap_or_else(|| {
+        let accessor = function_body(shipping, "selected_agent").unwrap_or_else(|| {
             panic!(
-                "OMEGA-DELTA-0131: `fn omega_zero_base_agent` is gone from {}. \
-                 Without it the panel can sit directly on Codex or Claude, and \
-                 the executor selector switches a router nothing is using.",
+                "OMEGA-DELTA-0131: `fn selected_agent` is gone from {}. It is \
+                 the accessor every new thread is built from.",
                 panel_path.display()
             )
         });
-        assert!(
-            clamp.contains("omega_zero_base::is_active()") && clamp.contains("Agent::NativeAgent"),
-            "OMEGA-DELTA-0131: the clamp no longer answers Omega's router in \
-             zero base, so the panel may hold an executor's own server again."
-        );
-
-        // One writer, and the clamp is inside it.
-        //
-        // Not "every write site calls the clamp": that is the rule that already
-        // failed, because it depends on whoever adds the next site remembering,
-        // and the site the defect came through was the restore path, which is
-        // the one nobody thinks about. Counting them is the check that a new
-        // site cannot pass by accident.
-        let writes: Vec<(usize, &str)> = shipping
+        let code = accessor
             .lines()
-            .enumerate()
-            .filter(|(_, line)| line.contains(".selected_agent = "))
-            .map(|(number, line)| (number + 1, line.trim()))
-            .collect();
-        assert_eq!(
-            writes.len(),
-            1,
-            "OMEGA-DELTA-0131: the panel's agent is written from {} places in \
-             {}, and it must be written from exactly one:\n{}\nIn zero base \
-             the executor selector is the only agent choice there is; a write \
-             that bypasses `omega_zero_base_agent` is how the owner ended up \
-             talking to Codex with `Exo` on screen.",
-            writes.len(),
-            panel_path.display(),
-            writes
-                .iter()
-                .map(|(number, line)| format!("    {number}: {line}"))
-                .collect::<Vec<_>>()
-                .join("\n")
+            .map(str::trim)
+            .filter(|line| !line.starts_with("//") && !line.starts_with("///"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            code.contains("omega_zero_base::is_active()"),
+            "OMEGA-DELTA-0131: `selected_agent` no longer asks whether zero base \
+             is active, so a new thread there can be built directly on Codex or \
+             Claude and the executor selector switches a router nothing is \
+             using. The accessor reads:\n{code}"
+        );
+        assert!(
+            code.contains("Agent::NativeAgent"),
+            "OMEGA-DELTA-0131: `selected_agent` no longer answers Omega's router. \
+             The accessor reads:\n{code}"
         );
 
-        let writer = function_body(shipping, "commit_selected_agent").unwrap_or_else(|| {
+        // The heading names what `+` would open, which is the accessor's answer
+        // and not the field's. After a Codex thread is reopened the field holds
+        // Codex — correctly, that thread *is* Codex — while a new thread would
+        // be the router, and a heading reading the field would say Codex over a
+        // thread nothing had built yet.
+        let toolbar = function_body(shipping, "render_toolbar")
+            .or_else(|| function_body(shipping, "render_panel_toolbar"))
+            .unwrap_or_else(|| {
+                panic!(
+                    "OMEGA-DELTA-0131: the panel toolbar is gone from {}.",
+                    panel_path.display()
+                )
+            });
+        assert!(
+            toolbar.contains("self.selected_agent(cx)"),
+            "OMEGA-DELTA-0131: the toolbar reads the stored field rather than \
+             `selected_agent(cx)`, so `New … Thread` can name an agent that a \
+             new thread would not be built on."
+        );
+        assert!(
+            !toolbar.contains("&self.selected_agent")
+                && !toolbar.contains("self.selected_agent.label()"),
+            "OMEGA-DELTA-0131: the toolbar still reaches the stored field \
+             directly somewhere. Every read here is about the thread `+` would \
+             open, which is the accessor's answer."
+        );
+
+        // The sidebar's header and the thread's toolbar are one line across the
+        // window. The header took its height from its own padding and drew in
+        // `border_variant`, so the rule sat lower than the toolbar's and was
+        // fainter — two rules, at two heights, in two weights.
+        let sidebar_header = function_body(shipping, "render_sidebar").unwrap_or_else(|| {
             panic!(
-                "OMEGA-DELTA-0131: `fn commit_selected_agent` is gone from {}.",
+                "OMEGA-DELTA-0131: `fn render_sidebar` is gone from {}.",
                 panel_path.display()
             )
         });
         assert!(
-            writer.contains("omega_zero_base_agent("),
-            "OMEGA-DELTA-0131: the one writer no longer clamps, so every path \
-             into it can put the panel back on an executor's own server."
+            sidebar_header.contains("Tab::container_height(cx)"),
+            "OMEGA-DELTA-0131: the sidebar header no longer takes the toolbar's \
+             height, so the rule under it sits at a different place on the \
+             screen from the rule under the thread header beside it."
+        );
+        assert!(
+            !sidebar_header.contains("border_color(border_variant)"),
+            "OMEGA-DELTA-0131: the sidebar header draws its rule in \
+             `border_variant` again, which is a lighter weight than the \
+             toolbar's `border` right next to it."
         );
     }
 

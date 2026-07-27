@@ -1590,13 +1590,7 @@ impl AgentPanel {
                             .or(global_fallback),
                     };
                     if let Some(agent) = initial_agent {
-                        // The restored choice goes through the zero-base clamp
-                        // like every other. This is the site the owner's defect
-                        // came in through: `Agent::Codex` had been the global
-                        // last-used agent since an earlier session, so every
-                        // launch put the panel back on Codex directly and the
-                        // executor selector had nothing to switch.
-                        panel.commit_selected_agent(agent);
+                        panel.selected_agent = agent;
                     }
 
                     if let Some(metadata) = terminal_to_restore {
@@ -1871,8 +1865,51 @@ impl AgentPanel {
         &self.connection_store
     }
 
+    /// The agent a **new** thread here is built on.
+    ///
+    /// `OMEGA-DELTA-0131`, omega#121. Zero base has one agent selection and it
+    /// is the executor selector in the composer. The panel has another — Zed's,
+    /// kept per workspace and again globally as the last-used agent — and the
+    /// two were not connected to each other.
+    ///
+    /// The owner selected Exo, the selector said Exo, he typed `who are you`,
+    /// and Codex answered. Every other surface was telling the truth: the
+    /// thread was titled "New Codex Thread", the composer read "Message Codex",
+    /// and the reply said "I'm Codex". His panel had been on `Agent::Codex`
+    /// since an earlier session, so the conversation held Codex's *own* server
+    /// — and Omega's router is the only thing that reads the executor
+    /// selection. Choosing an executor tore that connection down and rebuilt
+    /// the same one, three times in six seconds, logging nothing but the
+    /// choice.
+    ///
+    /// So in zero base a new thread is built on Omega's router and nothing
+    /// else. The router implements all four executors; sitting directly on one
+    /// of them is what took the choice away.
+    ///
+    /// **The clamp is here, on the accessor, and not on the stored field.**
+    /// That is the correction to the first version of this fix, which clamped
+    /// every write. `OMEGA-DELTA-0118` promises a thread reopens under *the
+    /// executor that recorded it*, and the panel restores the last thread's own
+    /// agent at launch to keep that promise — so clamping the writes rewrote a
+    /// Codex thread's agent to the router on the way back in, the router had no
+    /// route record for a session it had never opened, and the owner's next
+    /// launch said `Failed to Launch — no thread found with ID`. A reopened
+    /// thread keeps the agent it was recorded under. What is pinned is what a
+    /// *new* one starts on.
+    ///
+    /// Beside the collaboration rule below for the same reason: both are cases
+    /// where the stored selection is not what a new thread may use.
     pub fn selected_agent(&self, cx: &App) -> Agent {
         if self.project.read(cx).is_via_collab() {
+            Agent::NativeAgent
+        } else if omega_zero_base::is_active() && !matches!(self.selected_agent, Agent::NativeAgent)
+        {
+            log::info!(
+                "OMEGA-DELTA-0131: a new thread in zero base is built on Omega's \
+                 router rather than on {} directly, so the executor selector is \
+                 the only agent choice there is",
+                self.selected_agent.label()
+            );
             Agent::NativeAgent
         } else {
             self.selected_agent.clone()
@@ -2151,58 +2188,13 @@ impl AgentPanel {
             return;
         }
 
-        self.commit_selected_agent(action.agent.clone().into());
+        self.selected_agent = action.agent.clone().into();
         self.activate_new_thread(true, AgentThreadSource::AgentPanel, window, cx);
-    }
-}
-
-/// The agent this panel is allowed to be on.
-///
-/// `OMEGA-DELTA-0131`, omega#121. Zero base has one agent selection and it is
-/// the executor selector in the composer. The panel had another — Zed's, kept
-/// per workspace and again globally as the last-used agent — and the two were
-/// not connected to each other.
-///
-/// The owner selected Exo, the selector said Exo, he typed `who are you`, and
-/// Codex answered. Every other surface was telling the truth: the thread was
-/// titled "New Codex Thread", the composer read "Message Codex", and the reply
-/// said "I'm Codex". The panel had been on `Agent::Codex` since some earlier
-/// session, so the conversation held Codex's own server — and Omega's router is
-/// the only thing that reads the executor selection. Choosing an executor tore
-/// down that connection and rebuilt the same one, three times in six seconds,
-/// logging nothing but the choice.
-///
-/// So in zero base the panel is on Omega's router and nothing else. The router
-/// implements all four executors; sitting directly on one of them is what took
-/// the choice away.
-fn omega_zero_base_agent(agent: Agent) -> Agent {
-    if omega_zero_base::is_active() && !matches!(agent, Agent::NativeAgent) {
-        log::info!(
-            "OMEGA-DELTA-0131: zero base holds the panel on Omega's router \
-             rather than on {} directly, so the executor selector is the only \
-             agent choice there is",
-            agent.label()
-        );
-        return Agent::NativeAgent;
-    }
-    agent
-}
-
-impl AgentPanel {
-    /// The one place the panel's agent is written.
-    ///
-    /// `OMEGA-DELTA-0131`. Not a style preference: the defect arrived through
-    /// the *restore* path, which is the write site nobody thinks about, so a
-    /// rule that depends on remembering to clamp at each site is the rule that
-    /// already failed. One writer, and the clamp is inside it.
-    fn commit_selected_agent(&mut self, agent: Agent) {
-        self.selected_agent = omega_zero_base_agent(agent);
     }
 
     fn set_selected_agent_and_persist(&mut self, agent: Agent, cx: &mut Context<Self>) {
-        let agent = omega_zero_base_agent(agent);
         if self.selected_agent != agent {
-            self.commit_selected_agent(agent.clone());
+            self.selected_agent = agent.clone();
             self.serialize(cx);
         }
 
@@ -3522,13 +3514,9 @@ impl AgentPanel {
         // docks, so there is nothing beside it to subtract. `thread_view` reads
         // the viewport the same way to decide when its Exo controls go compact.
         let layout = omega_sidebar::layout(window.viewport_size().width, self.sidebar.open);
-        let (background, border, border_variant) = {
+        let (background, border) = {
             let colors = cx.theme().colors();
-            (
-                colors.panel_background,
-                colors.border,
-                colors.border_variant,
-            )
+            (colors.panel_background, colors.border)
         };
 
         let column = v_flex()
@@ -3573,13 +3561,21 @@ impl AgentPanel {
             column
                 .id("omega-sidebar")
                 .child(
+                    // `OMEGA-DELTA-0131`. The same height, background and border
+                    // as the thread's toolbar beside it, because they are one
+                    // line across the window and were visibly not: this header
+                    // took its height from its padding, so the rule sat lower
+                    // than the toolbar's, and `border_variant` drew it fainter.
+                    // Two rules at two heights in two weights read as a seam.
                     h_flex()
                         .w_full()
+                        .h(Tab::container_height(cx))
+                        .flex_shrink_0()
                         .px_2()
-                        .py_1p5()
                         .justify_between()
+                        .bg(cx.theme().colors().tab_bar_background)
                         .border_b_1()
-                        .border_color(border_variant)
+                        .border_color(cx.theme().colors().border)
                         .child(Label::new("Omega").size(LabelSize::Small))
                         .child(
                             IconButton::new("collapse-omega-sidebar", IconName::ChevronLeft)
@@ -5192,9 +5188,9 @@ impl AgentPanel {
 
         if let BaseView::AgentThread { conversation_view } = &self.base_view {
             let conversation_view = conversation_view.read(cx);
-            let thread_agent = omega_zero_base_agent(conversation_view.agent_key().clone());
+            let thread_agent = conversation_view.agent_key().clone();
             if self.selected_agent != thread_agent {
-                self.commit_selected_agent(thread_agent);
+                self.selected_agent = thread_agent;
                 self.serialize(cx);
             }
         }
@@ -6242,9 +6238,8 @@ impl AgentPanel {
         };
 
         let mut initialized = false;
-        let initialization_agent = omega_zero_base_agent(initialization.agent.clone());
-        if self.selected_agent != initialization_agent {
-            self.commit_selected_agent(initialization_agent);
+        if self.selected_agent != initialization.agent {
+            self.selected_agent = initialization.agent.clone();
             self.serialize(cx);
             initialized = true;
         }
@@ -6841,18 +6836,24 @@ impl AgentPanel {
         let supports_terminal = self.supports_terminal(cx);
         let showing_terminal = matches!(self.visible_surface(), VisibleSurface::Terminal(_));
 
+        // `OMEGA-DELTA-0131`. The same accessor a new thread is built from, not
+        // the stored field. This heading names the thread pressing `+` would
+        // open, and in zero base that is Omega's router whatever the field
+        // holds — the field may be holding the agent of a *reopened* thread,
+        // which is a different question.
+        let agent_for_new_threads = self.selected_agent(cx);
         let (selected_agent_custom_icon, selected_agent_label) = if showing_terminal {
             (None, SharedString::from("Terminal"))
-        } else if let Agent::Custom { id, .. } = &self.selected_agent {
+        } else if let Agent::Custom { id, .. } = &agent_for_new_threads {
             let store = agent_server_store.read(cx);
             let icon = store.agent_icon(&id);
 
             let label = store
                 .agent_display_name(&id)
-                .unwrap_or_else(|| self.selected_agent.label());
+                .unwrap_or_else(|| agent_for_new_threads.label());
             (icon, label)
         } else {
-            (None, self.selected_agent.label())
+            (None, agent_for_new_threads.label())
         };
 
         let new_thread_menu_builder: Rc<
@@ -6891,9 +6892,7 @@ impl AgentPanel {
                                                     workspace.panel::<AgentPanel>(cx)
                                                 {
                                                     panel.update(cx, |panel, cx| {
-                                                        panel.commit_selected_agent(
-                                                            Agent::NativeAgent,
-                                                        );
+                                                        panel.selected_agent = Agent::NativeAgent;
                                                         panel.activate_new_thread(
                                                             true,
                                                             AgentThreadSource::AgentPanel,

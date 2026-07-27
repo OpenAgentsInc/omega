@@ -6243,12 +6243,28 @@ for that stretch is three `OMEGA-DELTA-0115: a person chose …` lines, each
 followed a second later by an ACP connection and by nothing else — no
 `OMEGA-DELTA-0095` attach, no Exo lane, because the router never ran.
 
-**So in zero base the panel is on Omega's router and nothing else.** The router
-implements all four executors; sitting directly on one of them is precisely
-what took the choice away. `omega_zero_base_agent` is the single clamp, and
-every write to `selected_agent` in the panel's shipping source goes through it —
-including the restore path, which is the one the defect actually arrived
-through.
+**So in zero base a new thread is built on Omega's router and nothing else.**
+The router implements all four executors; sitting directly on one of them is
+precisely what took the choice away. The clamp is in `AgentPanel::selected_agent`
+— the accessor every new thread is built from — beside the collaboration rule
+that was already there for the same reason.
+
+**The clamp is on the accessor and not on the stored field, and that correction
+cost a launch.** The first version of this fix clamped every *write*. That
+rewrote a reopened thread's own agent on the way back in: `OMEGA-DELTA-0118`
+restores the last thread under the executor that recorded it, so a Codex thread
+came back as the router, the router had no route record for a session it had
+never opened, and the owner's next launch said **Failed to Launch — no thread
+found with ID**. A reopened thread keeps the agent it was recorded under. What is
+pinned is what a *new* one starts on. The panel's `New … Thread` heading reads
+the same accessor, because a heading naming a different agent from the thread
+`+` would open is the same defect in a smaller place.
+
+**The sidebar's header is one line with the toolbar beside it.** It took its
+height from its own padding and drew in `border_variant`, so the rule sat lower
+than the thread toolbar's and was fainter — two rules at two heights in two
+weights, read as a seam across the top of the window. It now takes
+`Tab::container_height` and `border`, which is what the toolbar takes.
 
 **And the label distinguishes *is* from *will be*.** `OMEGA-DELTA-0120` had just
 changed it to show the selection rather than the attachment, so that Shift-Tab
@@ -6268,7 +6284,7 @@ promise from the fact.
   and requires the thread to be a new one. It would have failed for cause two,
   and it fails today for a fourth nobody has thought of.
 
-- **Enforced by:** `zero_base_has_exactly_one_agent_selection` and
+- **Enforced by:** `a_new_thread_in_zero_base_is_built_on_omegas_router` and
   `the_executor_label_separates_the_choice_from_the_connection` in
   `crates/omega_deltas`, and
   `choosing_an_executor_rebuilds_the_thread_once_the_presses_stop` in
