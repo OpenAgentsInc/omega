@@ -6566,14 +6566,25 @@ impl AgentPanel {
         Some(
             h_flex()
                 .id("omega-zero-base-working-directory")
-                .min_w_0()
+                // omega#112. The folder never shrinks; the title does.
+                //
+                // Both were truncatable, so once a thread earned a title the
+                // title took the room and the folder was cut from the *end* —
+                // "~/work/o…", which removes precisely the part that says which
+                // folder it is. The owner watched it happen the moment a chat
+                // was named.
+                //
+                // `short_display_for_person(.., 3)` already bounds this to
+                // three components, so it is short by construction and can
+                // afford to be fixed. A title is a sentence and reads fine
+                // clipped; a path clipped is a different path.
+                .flex_none()
                 .gap_1()
                 .child(Label::new("·").color(Color::Muted).size(LabelSize::Small))
                 .child(
                     Label::new(glance)
                         .color(Color::Muted)
-                        .size(LabelSize::Small)
-                        .truncate(),
+                        .size(LabelSize::Small),
                 )
                 .tooltip(move |_, cx| {
                     Tooltip::with_meta(

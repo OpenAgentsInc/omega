@@ -7635,6 +7635,66 @@ impl ThreadView {
 
         let key = (entry_ix, chunk_ix);
 
+        // omega#112. The header says the thought, not the word "Thinking".
+        //
+        // Every block was headed with the same word, and the thought's own
+        // first line sat under it in bold — so a run of five thoughts read as
+        // five identical labels with the actual content indented beneath. The
+        // owner, looking at three in a row: "rather than showing 'Thinking'
+        // each time, where it says Thinking I want it showing the actual
+        // thought".
+        //
+        // Models write these as a short title line followed by prose, so the
+        // first non-empty line is the summary they already wrote. Leading
+        // markdown emphasis is stripped because it is formatting for a heading
+        // that is no longer rendered as one. When there is no line yet — the
+        // block appears before the first token arrives — it falls back to
+        // "Thinking", so the header is never empty while a thought streams in.
+        // A block can hold more than one thought, and the owner saw it: two
+        // titles under a single lightbulb, the second reading as a subheading
+        // of the first. His call — "if theres 2 thoughts in a single 'thinking
+        // block' ... u can just show that same lightbulb line twice" — so one
+        // row per thought.
+        //
+        // Models write each thought as an emphasised title line followed by
+        // prose. The emphasis is what marks a title, so that is what is matched
+        // rather than position. A partially streamed title arrives as `**Search`
+        // with no closing marker, hence the one-sided match; trimming the
+        // markers is what makes it read as a heading once it is no longer
+        // rendered as one.
+        let headings = {
+            let source = chunk.read(cx).source();
+            let titles: Vec<SharedString> = source
+                .lines()
+                .map(str::trim)
+                .filter(|line| line.starts_with("**") || line.starts_with('#'))
+                .map(|line| line.trim_matches(['#', '*', '_', ' '].as_slice()))
+                .filter(|line| !line.is_empty())
+                .map(SharedString::from)
+                .collect();
+
+            if titles.is_empty() {
+                // No title yet — either the thought is prose without one, or
+                // nothing has streamed in. Fall back to its first line, then to
+                // the old word, so the row is never blank.
+                let first = source
+                    .lines()
+                    .map(str::trim)
+                    .find(|line| !line.is_empty())
+                    .map(|line| line.trim_matches(['#', '*', '_', ' '].as_slice()))
+                    .filter(|line| !line.is_empty())
+                    .map_or_else(|| SharedString::from("Thinking"), SharedString::from);
+                vec![first]
+            } else {
+                titles
+            }
+        };
+        let extra_headings: Vec<SharedString> = headings.iter().skip(1).cloned().collect();
+        let heading = headings
+            .first()
+            .cloned()
+            .unwrap_or_else(|| SharedString::from("Thinking"));
+
         let entry_view_state = self.entry_view_state.read(cx);
         let (is_open, is_constrained) = entry_view_state.thinking_block_state(key, cx);
         let should_auto_scroll = entry_view_state.is_auto_expanded_thinking_block(key);
@@ -7674,7 +7734,8 @@ impl ThreadView {
                                 div()
                                     .text_size(self.tool_name_font_size())
                                     .text_color(cx.theme().colors().text_muted)
-                                    .child("Thinking"),
+                                    .truncate()
+                                    .child(heading),
                             ),
                     )
                     .child(
@@ -7690,6 +7751,24 @@ impl ThreadView {
                         this.toggle_thinking_block_expansion(key, window, cx);
                     })),
             )
+            .children(extra_headings.into_iter().map(|title| {
+                h_flex()
+                    .h(window.line_height() - px(2.))
+                    .gap_1p5()
+                    .overflow_hidden()
+                    .child(
+                        Icon::new(IconName::ToolThink)
+                            .size(IconSize::Small)
+                            .color(Color::Muted),
+                    )
+                    .child(
+                        div()
+                            .text_size(self.tool_name_font_size())
+                            .text_color(cx.theme().colors().text_muted)
+                            .truncate()
+                            .child(title),
+                    )
+            }))
             .when(is_open, |this| {
                 this.child(
                     div()
