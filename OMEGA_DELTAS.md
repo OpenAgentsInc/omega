@@ -6294,3 +6294,73 @@ promise from the fact.
   two, and that is deliberate — the full editor is Zed's surface and the panel's
   agent menu is Zed's control. The clamp is scoped to the mode where the
   executor selector is the only agent choice on screen.
+
+### OMEGA-DELTA-0132 — The Exo child is told where Exo's harness lives, and the Exo lane runs Exo's own harness
+
+The owner, looking at an Exo thread whose answers were indistinguishable from
+the model's: **"what can this Exo do that raw Gemini model cannot???? how to
+test this?????"**
+
+Nothing, and the code said so. His lane ran `--harness basic`, and
+`build_tool_definitions` in Exo's `crates/executor/src/basic.rs` pushes exactly
+one tool, `shell`. The conversation's own event log — 37 events under
+`.exo/exoharness/agents/…/conversations/…/events` — held `messages`,
+`turn_started`, `turn_ended`, and **no tool call at all**. Every turn had been
+text. The two mentions of "shell" in that log are the model talking about a tool
+it had never used.
+
+Three separate things had to be true for that, and all three were.
+
+- **`basic` is the thinnest of four harnesses.** `AgentHarnessKind` is `Basic`,
+  `Rlm`, `TypeScript`, `Exo`. `Exo`'s tool runtime carries fifteen: `shell`,
+  `create_adapter` and the adapter surface, `schedule_sandbox_task` and its
+  companions, `snapshot_sandbox`, `rewind_sandbox`, `list_conversation_events`.
+  The lane was on the one that carries one.
+- **The sandbox provider could not run.** `apple_container` was configured and
+  the `container` binary is not installed on this machine; the Docker daemon was
+  down. So the one tool the lane did advertise had nowhere to execute.
+- **`instructions` was empty.** The agent had no system prompt, so it answered
+  "I am a large language model, trained by Google" — accurately. It did not know
+  it was Exo.
+
+**Exo's TypeScript harnesses only work from inside the Exo checkout.**
+`TypeScriptHarness::exo_from_root` took its workspace root from
+`std::env::current_dir()`, and the runner is loaded from
+`typescript/harness/runner.ts` beneath it. That is fine for `exo repl` in a
+terminal and wrong for every embedder: Omega spawns `exo acp` in the person's
+project, so the harness failed with `typescript harness runner does not exist:
+<their project>/typescript/harness/runner.ts` — a path naming a file that was
+never going to be there, in a directory they have no reason to connect to Exo.
+
+Exo now reads `EXO_WORKSPACE_ROOT` and falls back to the working directory, so
+nothing that ran before changes. Omega names it from the lane's own `checkout`
+field, which the lane already held for the pin check.
+
+- **What the lane runs now.** `--harness exo`, with
+  `examples/typescript/omega-harness.ts` — a module that registers the built-in
+  tools (`shell`, `install_agent_tool`, `uninstall_agent_tool`), the adapter
+  tools, and the skill tools, rather than a chosen subset. The runtime having a
+  tool and the model being told about it are two different things, and the
+  second is what this file decides. Thirteen tools are advertised where one was.
+
+- **Driven, not asserted.** `uname -a` and `sw_vers` both executed and returned
+  this machine's real output, artifact-backed — `result.json` and `stdout.txt`
+  written as conversation artifacts, which is how large tool output stays out of
+  the model's context and stays readable afterwards. That is the first tool call
+  this lane has ever made.
+
+- **The sandbox is `local_process`, and that is a real trade.** `shell` runs on
+  the host, not in a container: the `uname` above names the owner's Mac. The
+  alternative available today was a provider that cannot start, which is not
+  isolation either — it is the same host execution with an error in front of it.
+  One command switches it back (`exo agent update gemini --sandbox-provider
+  docker`) once the daemon is up.
+
+- **Enforced by:** `the_exo_child_is_told_where_exos_typescript_harness_lives`
+  in `crates/omega_deltas`.
+
+- **What this does not cover.** The harness and module are lane configuration,
+  which lives in the owner's `.exo` and not in this repository, so this delta
+  holds the wiring rather than the choice. A lane pointed back at `basic` is a
+  supported configuration and this suite will not object — what it will not
+  allow again is an `exo`-harness lane that cannot find its own runner.

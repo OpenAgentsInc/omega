@@ -120,6 +120,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0129",
     "OMEGA-DELTA-0130",
     "OMEGA-DELTA-0131",
+    "OMEGA-DELTA-0132",
 ];
 
 /// OMEGA-DELTA-0125. Every entry the thread header's `…` menu offers, the
@@ -18108,6 +18109,48 @@ mod tests {
             "OMEGA-DELTA-0131: the sidebar header draws its rule in \
              `border_variant` again, which is a lighter weight than the \
              toolbar's `border` right next to it."
+        );
+    }
+
+    /// OMEGA-DELTA-0132. The Exo child is told where Exo's harness lives.
+    ///
+    /// Exo's `exo` and `typescript` harnesses load their runner from
+    /// `typescript/harness/runner.ts` *relative to the working directory*. That
+    /// works when a person runs `exo repl` inside the checkout and fails for
+    /// every embedder: Omega spawns `exo acp` in the person's own project, so
+    /// those harnesses died with `typescript harness runner does not exist:
+    /// <their project>/typescript/harness/runner.ts`.
+    ///
+    /// The lane already holds the checkout — it keeps it for the pin check — so
+    /// the fix is to say it rather than to hope. Exo reads `EXO_WORKSPACE_ROOT`
+    /// and falls back to the working directory, so nothing that ran before
+    /// changes.
+    ///
+    /// Checked here rather than left to a turn, because the failure is one an
+    /// embedder never sees until somebody chooses a non-`basic` harness, and by
+    /// then it reads as Exo being broken.
+    #[test]
+    fn the_exo_child_is_told_where_exos_typescript_harness_lives() {
+        let connection_path = repository_path(EXO_CONNECTION_PATH);
+        let connection = read_repository_file(EXO_CONNECTION_PATH);
+        let child_env = function_body(&connection, "child_env").unwrap_or_else(|| {
+            panic!(
+                "OMEGA-DELTA-0132: `fn child_env` is gone from {}.",
+                connection_path.display()
+            )
+        });
+        assert!(
+            child_env.contains("EXO_WORKSPACE_ROOT"),
+            "OMEGA-DELTA-0132: the `exo` child is no longer told where Exo's \
+             TypeScript harness lives, so every turn on the `exo` or \
+             `typescript` harness fails naming a path inside the person's own \
+             project."
+        );
+        assert!(
+            child_env.contains("self.checkout"),
+            "OMEGA-DELTA-0132: the workspace root no longer comes from the \
+             lane's own checkout. A guessed path is how this surface breaks \
+             silently on a machine laid out differently."
         );
     }
 

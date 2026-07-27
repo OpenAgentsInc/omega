@@ -75,6 +75,15 @@ use util::path_list::PathList;
 /// Where the lane's configuration lives, under the Omega data directory.
 const EXO_LANE_FILE: &str = "omega-exo-lane.json";
 
+/// The variable that tells Exo where its TypeScript harness lives.
+///
+/// `OMEGA-DELTA-0132`, omega#122. Exo's `exo` and `typescript` harnesses
+/// resolve `typescript/harness/runner.ts` against the working directory, which
+/// is the Exo checkout when a person runs `exo repl` and is the person's own
+/// project when Omega spawns `exo acp`. Naming it is the difference between
+/// those harnesses running under Omega and not running at all.
+const EXO_WORKSPACE_ROOT: &str = "EXO_WORKSPACE_ROOT";
+
 /// The schema that file carries.
 const EXO_LANE_SCHEMA: &str = "openagents.omega.exo_lane.v1";
 
@@ -191,10 +200,30 @@ impl ExoLaneConfig {
     /// that runs on every machine rather than a branch only some take.
     #[must_use]
     pub fn child_env(&self) -> collections::HashMap<String, String> {
-        self.secret_store
-            .iter()
-            .flat_map(ExoSecretStore::env)
-            .collect()
+        let named_store = self.secret_store.iter();
+        let mut env: collections::HashMap<String, String> =
+            named_store.flat_map(ExoSecretStore::env).collect();
+
+        // `OMEGA-DELTA-0132`, omega#122. Where Exo's TypeScript harness lives.
+        //
+        // The `exo` and `typescript` harnesses load their runner from
+        // `typescript/harness/runner.ts` *relative to the process's working
+        // directory*, so they work from a terminal inside the Exo checkout and
+        // nowhere else. Omega spawns `exo acp` in the person's project, so
+        // every turn on those harnesses died with `typescript harness runner
+        // does not exist: <their project>/typescript/harness/runner.ts` — a
+        // path they have no reason to recognise, naming a file that was never
+        // going to be there.
+        //
+        // The lane already knows the checkout; it holds it for the pin check.
+        // Exo reads `EXO_WORKSPACE_ROOT` and falls back to the working
+        // directory, so naming it here changes nothing for anyone running Exo
+        // the way its own README does.
+        env.insert(
+            EXO_WORKSPACE_ROOT.to_owned(),
+            self.checkout.display().to_string(),
+        );
+        env
     }
 
     /// The lane this path stands for: the file if there is one, otherwise the
