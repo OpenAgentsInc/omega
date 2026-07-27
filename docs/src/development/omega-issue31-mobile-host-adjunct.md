@@ -47,6 +47,30 @@ Version 1 is read-only. The only accepted client frames after `hello` are
 `heartbeat` and `bye`. Any command or unknown frame receives a typed
 `protocol_error` close. Both directions enforce the 64 KiB frame limit.
 
+Discovery v3 adds one to four signed direct endpoints to the existing host
+announcement. Each endpoint is a structured MagicDNS name, nonzero port, and
+exact `openagents.omega.device_bridge.v1` protocol identifier. It is not an
+arbitrary URL: schemes, credentials, paths, uppercase labels, wildcard binds,
+and public IP substitutions are refused. The host publishes v3 through the
+same owner-identity signer and durable relay outbox used by discovery v2.
+Persisted v1 and v2 records remain decodable.
+
+A discovery is usable only from `issuedAt` through (but not including)
+`expiresAt`. A higher generation supersedes the prior endpoint set. A
+same-generation renewal must keep the endpoint set identical, advance
+`issuedAt`, and extend `expiresAt`; changing a port or hostname at the same
+generation is a conflict.
+
+The zero-base sidebar exposes **Pair phone** after the direct bridge runtime is
+ready. Its QR code contains the MagicDNS endpoint, host public key, bridge
+protocol, generation, expiry, and a random one-time secret. The secret is
+stored only as a digest, expires after five minutes, and is removed on the first
+admission attempt. The phone still signs the bridge hello with its own Nostr
+device key, including the secret digest in that proof. A successful scan drives
+the ordinary Issue 31 request/challenge/response/scoped-grant engine. It never
+exports an owner or Sarah private key and the secret never becomes a reusable
+grant.
+
 ## Coverage boundary {#coverage-boundary}
 
 The adjunct has exactly four host-owned projections:
@@ -160,6 +184,15 @@ Production configuration is read from:
   With no configured key, no LBR lifecycle record is subscribed to or admitted.
 - `OPENAGENTS_OMEGA_SARAH_CONVERSATION_DIGEST`: optional stable conversation
   digest; by default Omega derives 24 characters from the owner public key.
+- `OPENAGENTS_OMEGA_DEVICE_BRIDGE_MAGIC_DNS`: optional lowercase MagicDNS name
+  advertised in signed discovery v3. It must be configured together with the
+  port and bind address below.
+- `OPENAGENTS_OMEGA_DEVICE_BRIDGE_PORT`: nonzero TCP port advertised in
+  discovery and bound by the direct WebSocket bridge.
+- `OPENAGENTS_OMEGA_DEVICE_BRIDGE_BIND_ADDRESS`: literal loopback or Tailscale
+  address on the local machine. This value is never advertised; it exists to
+  keep listener binding separate from MagicDNS naming. Wildcard, LAN, public,
+  and hostname binds fail closed.
 
 The Omega identity must already be ready in channel-specific secure custody.
 Missing environment or custody is re-evaluated on the next Sarah host request,

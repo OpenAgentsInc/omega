@@ -45,9 +45,10 @@ use crate::{
     ISSUE31_PAIRING_SCHEMA, Issue31AuthorityDecisionProjection, Issue31CommandArguments,
     Issue31CommandEvent, Issue31CommandExecution, Issue31CommandExecutionV2,
     Issue31CommandHandlingStatus, Issue31CommandRecord, Issue31CommandRecordV2,
-    Issue31CommandStatus, Issue31GrantState, Issue31HostConfiguration, Issue31HostController,
-    Issue31HostDiscovery, Issue31HostDiscoveryV2, Issue31NostrError, Issue31OwnerProjectionBody,
-    Issue31OwnerProjectionInput, Issue31PairingEvent, Issue31PairingRecord, Issue31SourceRole,
+    Issue31CommandStatus, Issue31DirectEndpoint, Issue31GrantState, Issue31HostConfiguration,
+    Issue31HostController, Issue31HostDiscovery, Issue31HostDiscoveryV2, Issue31HostDiscoveryV3,
+    Issue31NostrError, Issue31OwnerProjectionBody, Issue31OwnerProjectionInput,
+    Issue31PairingEvent, Issue31PairingRecord, Issue31PairingScope, Issue31SourceRole,
     Issue31TargetOutcomeProjection, Issue31WithheldCause, Issue31WithheldSourceCount,
     Issue31WithheldSourcesInput, SARAH_AUTHORITY_RECEIPT_KIND, SARAH_ENGRAM_KIND,
     SARAH_READ_STATE_KIND, SARAH_REMINDER_KIND, emit_issue31_owner_projection,
@@ -905,6 +906,37 @@ impl ConversationSigner {
 }
 
 /// Configuration for the conversation client.
+#[derive(Serialize)]
+#[serde(untagged)]
+enum SignedIssue31Discovery {
+    V2(Issue31HostDiscoveryV2),
+    V3(Issue31HostDiscoveryV3),
+}
+
+impl SignedIssue31Discovery {
+    fn host_ref(&self) -> &str {
+        match self {
+            Self::V2(discovery) => &discovery.host_ref,
+            Self::V3(discovery) => &discovery.host_ref,
+        }
+    }
+
+    fn generation(&self) -> u64 {
+        match self {
+            Self::V2(discovery) => discovery.generation,
+            Self::V3(discovery) => discovery.generation,
+        }
+    }
+
+    fn expires_at(&self) -> u64 {
+        match self {
+            Self::V2(discovery) => discovery.expires_at,
+            Self::V3(discovery) => discovery.expires_at,
+        }
+    }
+}
+
+/// Configuration for the conversation client.
 #[derive(Debug, Clone)]
 pub struct SarahConversationConfig {
     pub generation: u64,
@@ -912,6 +944,7 @@ pub struct SarahConversationConfig {
     pub identity: ConversationIdentity,
     /// When set, the client treats the transport as a real relay and runs NIP-42.
     pub relay_url: Option<String>,
+    pub direct_endpoints: Vec<Issue31DirectEndpoint>,
     pub admitted_device_public_key_hexes: Vec<String>,
     pub approved_device_scopes: Vec<crate::Issue31PairingScope>,
     pub community_group_ids: Vec<String>,
@@ -930,6 +963,7 @@ impl SarahConversationConfig {
                 binding_state: BindingState::Bound,
             },
             relay_url: None,
+            direct_endpoints: Vec::new(),
             admitted_device_public_key_hexes: Vec::new(),
             approved_device_scopes: Vec::new(),
             community_group_ids: Vec::new(),
@@ -1026,6 +1060,7 @@ pub struct SarahConversationClient {
     last_gap_state: GapState,
     last_confirmed_cursor: Option<String>,
     issue31_host: Option<Issue31HostController>,
+    issue31_device_controller: Option<crate::SharedIssue31HostController>,
     issue31_discovery_generation: Option<u64>,
     issue31_discovery_expires_at: Option<u64>,
     issue31_discovery_outbox: Option<Event>,
@@ -1134,6 +1169,7 @@ impl SarahConversationClient {
             last_gap_state: GapState::None,
             last_confirmed_cursor: None,
             issue31_host: None,
+            issue31_device_controller: None,
             issue31_discovery_generation: None,
             issue31_discovery_expires_at: None,
             issue31_discovery_outbox: None,
@@ -1186,7 +1222,19 @@ impl SarahConversationClient {
         let issue31_state_path = paths::data_dir()
             .join("openagents")
             .join("issue31-nostr-host-state.json");
-        let persisted = load_issue31_host_state(&issue31_state_path, &host_configuration)?;
+        let mut persisted = load_issue31_host_state(&issue31_state_path, &host_configuration)?;
+        if let Some(persisted) = persisted.as_mut()
+            && let Some(event_json) = persisted.discovery_event_json.as_deref()
+        {
+            let event = Event::from_json(event_json)
+                .map_err(|error| SarahConversationError::Internal(error.to_string()))?;
+            if !discovery_matches_direct_endpoints(&event, &config.direct_endpoints)? {
+                persisted.discovery_generation = None;
+                persisted.discovery_expires_at = None;
+                persisted.discovery_event_json = None;
+                persisted.relay_acknowledgements.remove(&event.id.to_hex());
+            }
+        }
         let mut issue31_host = match &persisted {
             Some(persisted) => persisted.controller.clone(),
             None => Issue31HostController::new(host_configuration).map_err(issue31_error)?,
@@ -1277,6 +1325,8 @@ impl SarahConversationClient {
         for (event_id, acknowledged_relays) in &issue31_relay_acknowledgements {
             relay.restore_publication_acknowledgements(event_id, acknowledged_relays);
         }
+        let issue31_device_controller =
+            Some(Arc::new(std::sync::RwLock::new(issue31_host.clone())));
         Ok(Self {
             config,
             relay: Box::new(relay),
@@ -1289,6 +1339,7 @@ impl SarahConversationClient {
             last_gap_state: GapState::None,
             last_confirmed_cursor: None,
             issue31_host: Some(issue31_host),
+            issue31_device_controller,
             issue31_discovery_generation,
             issue31_discovery_expires_at,
             issue31_discovery_outbox,
@@ -1593,13 +1644,71 @@ impl SarahConversationClient {
 
     pub fn sync_issue31_host(&mut self) -> Result<(), SarahConversationError> {
         self.ensure_connected()?;
+        self.pull_device_pairing_events()?;
         let Some(mut controller) = self.issue31_host.take() else {
             return Ok(());
         };
         let result = self.sync_issue31_host_with(&mut controller);
         self.issue31_host = Some(controller);
+        self.push_device_pairing_events()?;
         let persistence = self.persist_issue31_host_state();
         finish_durable_operation(result, persistence)
+    }
+
+    fn pull_device_pairing_events(&mut self) -> Result<(), SarahConversationError> {
+        let (Some(controller), Some(shared)) = (
+            self.issue31_host.as_mut(),
+            self.issue31_device_controller.as_ref(),
+        ) else {
+            return Ok(());
+        };
+        let shared = shared.read().map_err(|_| {
+            SarahConversationError::Internal("device bridge state is poisoned".into())
+        })?;
+        controller
+            .merge_pairing_events_from(&shared)
+            .map_err(issue31_error)
+    }
+
+    fn push_device_pairing_events(&self) -> Result<(), SarahConversationError> {
+        let (Some(controller), Some(shared)) = (
+            self.issue31_host.as_ref(),
+            self.issue31_device_controller.as_ref(),
+        ) else {
+            return Ok(());
+        };
+        shared
+            .write()
+            .map_err(|_| {
+                SarahConversationError::Internal("device bridge state is poisoned".into())
+            })?
+            .merge_pairing_events_from(controller)
+            .map_err(issue31_error)
+    }
+
+    pub fn device_pairing_engine(&self) -> Option<crate::DevicePairingEngine> {
+        self.issue31_device_controller
+            .as_ref()
+            .map(|controller| crate::DevicePairingEngine::new(controller.clone()))
+    }
+
+    pub fn device_pairing_runtime(
+        &self,
+    ) -> Option<(
+        crate::DevicePairingEngine,
+        Issue31DirectEndpoint,
+        String,
+        u64,
+        Vec<Issue31PairingScope>,
+    )> {
+        let endpoint = self.config.direct_endpoints.first()?.clone();
+        Some((
+            self.device_pairing_engine()?,
+            endpoint,
+            self.config.identity.owner_public_key_hex.clone(),
+            ISSUE31_NOSTR_HOST_GENERATION,
+            self.config.approved_device_scopes.clone(),
+        ))
     }
 
     fn renew_issue31_grant(
@@ -1740,10 +1849,24 @@ impl SarahConversationClient {
         self.flush_issue31_outbox()?;
         self.persist_issue31_host_state_with_controller(controller)?;
         let now = unix_now();
-        let discovery = controller
-            .discovery_v2(now, now.saturating_add(24 * 60 * 60))
-            .map_err(issue31_error)?;
-        if self.issue31_discovery_generation != Some(discovery.generation)
+        let discovery = if self.config.direct_endpoints.is_empty() {
+            SignedIssue31Discovery::V2(
+                controller
+                    .discovery_v2(now, now.saturating_add(24 * 60 * 60))
+                    .map_err(issue31_error)?,
+            )
+        } else {
+            SignedIssue31Discovery::V3(
+                controller
+                    .discovery_v3(
+                        self.config.direct_endpoints.clone(),
+                        now,
+                        now.saturating_add(24 * 60 * 60),
+                    )
+                    .map_err(issue31_error)?,
+            )
+        };
+        if self.issue31_discovery_generation != Some(discovery.generation())
             || self
                 .issue31_discovery_expires_at
                 .is_none_or(|expires_at| expires_at <= now.saturating_add(60 * 60))
@@ -1757,8 +1880,8 @@ impl SarahConversationClient {
                     .remove(&event.id.to_hex())
                     .map(|acknowledgements| (event.id.to_hex(), acknowledgements))
             });
-            self.issue31_discovery_generation = Some(discovery.generation);
-            self.issue31_discovery_expires_at = Some(discovery.expires_at);
+            self.issue31_discovery_generation = Some(discovery.generation());
+            self.issue31_discovery_expires_at = Some(discovery.expires_at());
             if let Err(error) = self.persist_issue31_host_state_with_controller(controller) {
                 self.issue31_discovery_outbox = previous_outbox;
                 self.issue31_discovery_generation = previous_generation;
@@ -2055,12 +2178,12 @@ impl SarahConversationClient {
 
     fn sign_issue31_discovery(
         &self,
-        discovery: &Issue31HostDiscoveryV2,
+        discovery: &SignedIssue31Discovery,
     ) -> Result<Event, SarahConversationError> {
         let content = serde_json::to_string(discovery)
             .map_err(|error| SarahConversationError::Internal(error.to_string()))?;
         let tags = [
-            ["d", discovery.host_ref.as_str()],
+            ["d", discovery.host_ref()],
             ["k", "1059"],
             ["t", "omega-issue31-host"],
             ["alt", "Omega Issue 31 Nostr host discovery"],
@@ -4185,10 +4308,26 @@ fn load_issue31_host_state(
             .map_err(|error| SarahConversationError::Internal(error.to_string()))?;
         let value = serde_json::from_str::<Value>(&event.content)
             .map_err(|error| SarahConversationError::Internal(error.to_string()))?;
-        let is_v2 = value.get("schema").and_then(Value::as_str)
-            == Some(crate::ISSUE31_HOST_DISCOVERY_SCHEMA_V2);
+        let schema = value.get("schema").and_then(Value::as_str);
         let (generation, expires_at, host_ref, host_key, sarah_key, display_name, relay_urls) =
-            if is_v2 {
+            if schema == Some(crate::ISSUE31_HOST_DISCOVERY_SCHEMA_V3) {
+                let discovery = Issue31HostDiscoveryV3::decode(event.content.as_bytes())
+                    .map_err(issue31_error)?;
+                if discovery.conversation != expected_configuration.conversation {
+                    return Err(SarahConversationError::Internal(
+                        "durable Issue 31 discovery binds another conversation".into(),
+                    ));
+                }
+                (
+                    discovery.generation,
+                    discovery.expires_at,
+                    discovery.host_ref,
+                    discovery.host_public_key_hex,
+                    discovery.sarah_public_key_hex,
+                    discovery.display_name,
+                    discovery.relay_urls,
+                )
+            } else if schema == Some(crate::ISSUE31_HOST_DISCOVERY_SCHEMA_V2) {
                 let discovery = Issue31HostDiscoveryV2::decode(event.content.as_bytes())
                     .map_err(issue31_error)?;
                 if discovery.conversation != expected_configuration.conversation {
@@ -4234,7 +4373,9 @@ fn load_issue31_host_state(
                 "durable Issue 31 discovery outbox event is invalid".into(),
             ));
         }
-        if !is_v2 {
+        if schema != Some(crate::ISSUE31_HOST_DISCOVERY_SCHEMA_V2)
+            && schema != Some(crate::ISSUE31_HOST_DISCOVERY_SCHEMA_V3)
+        {
             state.discovery_generation = None;
             state.discovery_expires_at = None;
             state.discovery_event_json = None;
@@ -4536,6 +4677,23 @@ fn unix_now() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_secs())
         .unwrap_or(0)
+}
+
+fn discovery_matches_direct_endpoints(
+    event: &Event,
+    direct_endpoints: &[Issue31DirectEndpoint],
+) -> Result<bool, SarahConversationError> {
+    let value = serde_json::from_str::<Value>(&event.content)
+        .map_err(|error| SarahConversationError::Internal(error.to_string()))?;
+    match value.get("schema").and_then(Value::as_str) {
+        Some(crate::ISSUE31_HOST_DISCOVERY_SCHEMA_V3) => {
+            let discovery =
+                Issue31HostDiscoveryV3::decode(event.content.as_bytes()).map_err(issue31_error)?;
+            Ok(discovery.direct_endpoints == direct_endpoints)
+        }
+        Some(crate::ISSUE31_HOST_DISCOVERY_SCHEMA_V2) => Ok(direct_endpoints.is_empty()),
+        _ => Ok(false),
+    }
 }
 
 fn iso_from_unix(seconds: u64) -> String {
@@ -6200,6 +6358,12 @@ mod tests {
         let signer = SigningIdentity::generate();
         let mut config = SarahConversationConfig::mock_fixture();
         config.identity.owner_public_key_hex = signer.public_key_hex.clone();
+        config.direct_endpoints = vec![Issue31DirectEndpoint {
+            magic_dns_name: "omega-primary.tail1234.ts.net".into(),
+            port: 4317,
+            protocol: omega_device_bridge::PROTOCOL.into(),
+        }];
+        let expected_direct_endpoints = config.direct_endpoints.clone();
         let relay_urls = vec![
             "wss://healthy.example".to_string(),
             "wss://down.example".to_string(),
@@ -6230,7 +6394,18 @@ mod tests {
         let persisted: DurableIssue31HostState =
             serde_json::from_slice(&fs::read(&state_path).expect("read durable state"))
                 .expect("decode durable state");
-        assert!(persisted.discovery_event_json.is_some());
+        let discovery_event = Event::from_json(
+            persisted
+                .discovery_event_json
+                .as_deref()
+                .expect("durable discovery event"),
+        )
+        .expect("signed discovery event");
+        discovery_event.verify().expect("valid discovery signature");
+        let discovery =
+            Issue31HostDiscoveryV3::decode(discovery_event.content.as_bytes()).expect("V3 record");
+        assert_eq!(discovery.direct_endpoints, expected_direct_endpoints);
+        assert!(discovery.expires_at > discovery.issued_at);
         assert_eq!(persisted.relay_acknowledgements.len(), 1);
         assert_eq!(
             client.current_room_state().connection,

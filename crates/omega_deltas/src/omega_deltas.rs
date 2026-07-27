@@ -142,6 +142,8 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0151",
     "OMEGA-DELTA-0152",
     "OMEGA-DELTA-0153",
+    "OMEGA-DELTA-0154",
+    "OMEGA-DELTA-0155",
 ];
 
 pub const GOOGLE_PROVIDER_PATH: &str = "crates/language_models/src/provider/google.rs";
@@ -19458,5 +19460,47 @@ mod tests {
                 "OMEGA-DELTA-0154: omega-effectd no longer enforces `{required}`."
             );
         }
+    }
+
+    /// OMEGA-DELTA-0155. Mobile discovery advertises only signed structured
+    /// tailnet endpoints, and QR pairing consumes a one-time secret to enter
+    /// the existing scoped-grant engine.
+    #[test]
+    fn mobile_discovery_and_qr_pairing_keep_engine_authority() {
+        let issue31 = without_comments(&read_repository_file(
+            "crates/omega_effectd/src/issue31_nostr.rs",
+        ));
+        for required in [
+            "openagents.omega.issue31.host_discovery.v3",
+            "pub direct_endpoints: Vec<Issue31DirectEndpoint>",
+            "valid_magic_dns_name(&self.magic_dns_name)",
+            "pub fn issue_direct_pairing_grant(",
+            "handle_pairing_event(",
+        ] {
+            assert!(
+                issue31.contains(required),
+                "OMEGA-DELTA-0155: Issue 31 discovery or grant authority lost `{required}`."
+            );
+        }
+
+        let effectd = without_comments(&read_repository_file(EFFECTD_PATH));
+        for required in [
+            ".remove(&secret_digest)",
+            "issue_direct_pairing_grant(",
+            "pub fn configure_device_pairing(",
+            "pub fn issue_device_pairing_bootstrap(",
+        ] {
+            assert!(
+                effectd.contains(required),
+                "OMEGA-DELTA-0155: the pairing engine lost `{required}`."
+            );
+        }
+
+        let panel = without_comments(&read_repository_file("crates/agent_ui/src/agent_panel.rs"));
+        assert!(
+            panel.contains("ListItem::new(\"open-omega-phone-pairing\")")
+                && panel.contains("issue_device_pairing_bootstrap(cx)"),
+            "OMEGA-DELTA-0155: GPUI no longer renders the engine-owned phone pairing surface."
+        );
     }
 }

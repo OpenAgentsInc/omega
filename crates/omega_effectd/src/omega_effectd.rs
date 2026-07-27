@@ -14,12 +14,14 @@ mod sarah_conversation;
 mod supervisor;
 
 use std::{
+    collections::BTreeMap,
     rc::Rc,
-    sync::{Arc, RwLock},
+    sync::{Arc, Mutex, RwLock},
 };
 
 use anyhow::{Result, anyhow};
 use gpui::{App, Global};
+use sha2::{Digest, Sha256};
 use smol::lock::Mutex as AsyncMutex;
 
 pub use openagents_binding::{
@@ -32,12 +34,14 @@ pub use openagents_binding::{
 pub use issue31_nostr::*;
 pub use issue31_provider_handoff::*;
 pub use nostr_websocket_relay::WebSocketRelayAdapter;
+pub use omega_device_bridge::PROTOCOL as DEVICE_BRIDGE_PROTOCOL;
 pub use omega_device_bridge::{
     BindRefusal as DeviceBridgeBindRefusal, BridgeBindHost, BridgeError as DeviceBridgeError,
     ByeReason as DeviceBridgeByeReason, Cursor as DeviceBridgeCursor, ExecutorDisclosure,
     GrantAdmission as DeviceBridgeGrantAdmission, GrantRefusalReason, MessageRole, MirrorChange,
-    MirrorHealth, MirrorMessage, MirrorRun, MirrorSnapshot, MirrorThread, ProjectionJournal,
-    RunState, ServerConfig as DeviceBridgeServerConfig, ServerFrame as DeviceBridgeServerFrame,
+    MirrorHealth, MirrorMessage, MirrorRun, MirrorSnapshot, MirrorThread, PAIRING_BOOTSTRAP_SCHEMA,
+    PairingBootstrap, PairingQr, ProjectionJournal, RunState,
+    ServerConfig as DeviceBridgeServerConfig, ServerFrame as DeviceBridgeServerFrame,
     ServerHandle as DeviceBridgeServerHandle, ThreadState,
 };
 pub use openagents_session::{
@@ -72,6 +76,128 @@ pub type SharedIssue31HostController = Arc<RwLock<Issue31HostController>>;
 
 struct Issue31DeviceBridgeAuthority {
     controller: SharedIssue31HostController,
+    pairing_offers: Arc<Mutex<BTreeMap<String, DevicePairingOffer>>>,
+}
+
+#[derive(Clone)]
+struct DevicePairingOffer {
+    host_public_key_hex: String,
+    scopes: Vec<Issue31PairingScope>,
+    expires_at: u64,
+}
+
+#[derive(Clone)]
+pub struct DevicePairingEngine {
+    controller: SharedIssue31HostController,
+    pairing_offers: Arc<Mutex<BTreeMap<String, DevicePairingOffer>>>,
+}
+
+#[derive(Clone)]
+struct DevicePairingRuntime {
+    engine: DevicePairingEngine,
+    endpoint: Issue31DirectEndpoint,
+    host_public_key_hex: String,
+    generation: u64,
+    scopes: Vec<Issue31PairingScope>,
+}
+
+impl Global for DevicePairingRuntime {}
+
+impl DevicePairingEngine {
+    pub fn new(controller: SharedIssue31HostController) -> Self {
+        Self {
+            controller,
+            pairing_offers: Arc::new(Mutex::new(BTreeMap::new())),
+        }
+    }
+
+    pub fn issue(
+        &self,
+        endpoint: Issue31DirectEndpoint,
+        host_public_key_hex: String,
+        generation: u64,
+        scopes: Vec<Issue31PairingScope>,
+        now_millis: u64,
+    ) -> Result<PairingBootstrap> {
+        let expires_at = now_millis.saturating_add(5 * 60 * 1_000);
+        let secret_seed = rand::random::<[u8; 32]>();
+        let pairing_secret = format!("{:x}", Sha256::digest(secret_seed));
+        let secret_digest = format!("{:x}", Sha256::digest(pairing_secret.as_bytes()));
+        let bootstrap = PairingBootstrap {
+            schema: PAIRING_BOOTSTRAP_SCHEMA.into(),
+            magic_dns_name: endpoint.magic_dns_name,
+            port: endpoint.port,
+            protocol: endpoint.protocol,
+            host_public_key_hex: host_public_key_hex.clone(),
+            pairing_secret,
+            generation,
+            issued_at: now_millis,
+            expires_at,
+        };
+        bootstrap.validate(now_millis)?;
+        let mut offers = self
+            .pairing_offers
+            .lock()
+            .map_err(|_| anyhow!("device pairing registry is poisoned"))?;
+        offers.retain(|_, offer| offer.expires_at > now_millis);
+        if offers.len() >= 32 {
+            return Err(anyhow!("device pairing registry is full"));
+        }
+        offers.insert(
+            secret_digest,
+            DevicePairingOffer {
+                host_public_key_hex,
+                scopes,
+                expires_at,
+            },
+        );
+        Ok(bootstrap)
+    }
+
+    fn authority(&self) -> Issue31DeviceBridgeAuthority {
+        Issue31DeviceBridgeAuthority {
+            controller: self.controller.clone(),
+            pairing_offers: self.pairing_offers.clone(),
+        }
+    }
+}
+
+pub fn configure_device_pairing(
+    engine: DevicePairingEngine,
+    endpoint: Issue31DirectEndpoint,
+    host_public_key_hex: String,
+    generation: u64,
+    scopes: Vec<Issue31PairingScope>,
+    cx: &mut App,
+) {
+    cx.set_global(DevicePairingRuntime {
+        engine,
+        endpoint,
+        host_public_key_hex,
+        generation,
+        scopes,
+    });
+}
+
+pub fn issue_device_pairing_bootstrap(cx: &App) -> Result<PairingBootstrap> {
+    let runtime = cx
+        .try_global::<DevicePairingRuntime>()
+        .ok_or_else(|| anyhow!("Direct phone pairing is not available on this host."))?;
+    runtime.engine.issue(
+        runtime.endpoint.clone(),
+        runtime.host_public_key_hex.clone(),
+        runtime.generation,
+        runtime.scopes.clone(),
+        current_unix_millis(),
+    )
+}
+
+fn current_unix_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |duration| {
+            u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+        })
 }
 
 impl omega_device_bridge::GrantAuthority for Issue31DeviceBridgeAuthority {
@@ -83,8 +209,49 @@ impl omega_device_bridge::GrantAuthority for Issue31DeviceBridgeAuthority {
         pairing_secret: Option<&str>,
         now_millis: u64,
     ) -> std::result::Result<DeviceBridgeGrantAdmission, GrantRefusalReason> {
-        if pairing_secret.is_some() && grant_ref.is_none() {
-            return Err(GrantRefusalReason::PairingRefused);
+        if let Some(pairing_secret) = pairing_secret {
+            if grant_ref.is_some() {
+                return Err(GrantRefusalReason::PairingRefused);
+            }
+            let secret_digest = format!("{:x}", Sha256::digest(pairing_secret.as_bytes()));
+            let offer = self
+                .pairing_offers
+                .lock()
+                .map_err(|_| GrantRefusalReason::PairingRefused)?
+                .remove(&secret_digest)
+                .ok_or(GrantRefusalReason::PairingRefused)?;
+            if offer.host_public_key_hex != host_public_key_hex || now_millis >= offer.expires_at {
+                return Err(GrantRefusalReason::PairingExpired);
+            }
+            let mut controller = self
+                .controller
+                .write()
+                .map_err(|_| GrantRefusalReason::PairingRefused)?;
+            let grant = controller
+                .issue_direct_pairing_grant(
+                    device_public_key_hex.to_string(),
+                    offer.scopes,
+                    now_millis / 1_000,
+                )
+                .map_err(|_| GrantRefusalReason::PairingRefused)?;
+            let Issue31PairingRecord::ScopedGrant {
+                grant_ref,
+                host_public_key_hex,
+                device_public_key_hex,
+                expires_at,
+                generation,
+                ..
+            } = grant
+            else {
+                return Err(GrantRefusalReason::PairingRefused);
+            };
+            return Ok(DeviceBridgeGrantAdmission {
+                grant_ref,
+                host_public_key_hex,
+                device_public_key_hex,
+                expires_at: expires_at.saturating_mul(1_000),
+                generation,
+            });
         }
         let grant_ref = grant_ref.ok_or(GrantRefusalReason::GrantMissing)?;
         let controller = self
@@ -131,11 +298,16 @@ pub fn start_device_bridge_server(
     controller: SharedIssue31HostController,
     journal: ProjectionJournal,
 ) -> Result<DeviceBridgeServerHandle, DeviceBridgeError> {
-    DeviceBridgeServerHandle::spawn(
-        config,
-        Arc::new(Issue31DeviceBridgeAuthority { controller }),
-        journal,
-    )
+    let engine = DevicePairingEngine::new(controller);
+    DeviceBridgeServerHandle::spawn(config, Arc::new(engine.authority()), journal)
+}
+
+pub fn start_pairable_device_bridge_server(
+    config: DeviceBridgeServerConfig,
+    engine: DevicePairingEngine,
+    journal: ProjectionJournal,
+) -> Result<DeviceBridgeServerHandle, DeviceBridgeError> {
+    DeviceBridgeServerHandle::spawn(config, Arc::new(engine.authority()), journal)
 }
 
 enum OmegaEffectdRuntime {
@@ -288,6 +460,7 @@ mod tests {
             crate::issue31_nostr::paired_fixture(vec![Issue31PairingScope::ObserveIssue31]);
         let authority = Issue31DeviceBridgeAuthority {
             controller: Arc::new(RwLock::new(controller.clone())),
+            pairing_offers: Arc::new(Mutex::new(BTreeMap::new())),
         };
         let admission = omega_device_bridge::GrantAuthority::authorize(
             &authority,
@@ -312,6 +485,7 @@ mod tests {
             .expect("record revocation");
         let authority = Issue31DeviceBridgeAuthority {
             controller: Arc::new(RwLock::new(controller)),
+            pairing_offers: Arc::new(Mutex::new(BTreeMap::new())),
         };
         assert_eq!(
             omega_device_bridge::GrantAuthority::authorize(
@@ -323,6 +497,54 @@ mod tests {
                 202_000,
             ),
             Err(GrantRefusalReason::GrantRevoked)
+        );
+    }
+
+    #[test]
+    fn direct_pairing_secret_is_one_use_and_mints_a_scoped_grant() {
+        let (configuration, controller, _, _) =
+            crate::issue31_nostr::paired_fixture(vec![Issue31PairingScope::ObserveIssue31]);
+        let controller = Arc::new(RwLock::new(controller));
+        let engine = DevicePairingEngine::new(controller);
+        let bootstrap = engine
+            .issue(
+                Issue31DirectEndpoint {
+                    magic_dns_name: "omega-primary.tail1234.ts.net".into(),
+                    port: 4317,
+                    protocol: DEVICE_BRIDGE_PROTOCOL.into(),
+                },
+                configuration.host_public_key_hex.clone(),
+                configuration.generation,
+                vec![
+                    Issue31PairingScope::ObserveIssue31,
+                    Issue31PairingScope::SendMessage,
+                ],
+                1_000_000,
+            )
+            .expect("pairing bootstrap");
+        let authority = engine.authority();
+        let device_public_key_hex = "9".repeat(64);
+        let admission = omega_device_bridge::GrantAuthority::authorize(
+            &authority,
+            &device_public_key_hex,
+            &configuration.host_public_key_hex,
+            None,
+            Some(&bootstrap.pairing_secret),
+            1_001_000,
+        )
+        .expect("direct pairing admission");
+        assert_eq!(admission.device_public_key_hex, device_public_key_hex);
+        assert_eq!(admission.generation, 1);
+        assert_eq!(
+            omega_device_bridge::GrantAuthority::authorize(
+                &authority,
+                &device_public_key_hex,
+                &configuration.host_public_key_hex,
+                None,
+                Some(&bootstrap.pairing_secret),
+                1_002_000,
+            ),
+            Err(GrantRefusalReason::PairingRefused)
         );
     }
 

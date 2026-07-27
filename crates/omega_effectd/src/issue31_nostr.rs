@@ -6,6 +6,7 @@ use thiserror::Error;
 
 pub const ISSUE31_HOST_DISCOVERY_SCHEMA: &str = "openagents.omega.issue31.host_discovery.v1";
 pub const ISSUE31_HOST_DISCOVERY_SCHEMA_V2: &str = "openagents.omega.issue31.host_discovery.v2";
+pub const ISSUE31_HOST_DISCOVERY_SCHEMA_V3: &str = "openagents.omega.issue31.host_discovery.v3";
 pub const ISSUE31_PAIRING_SCHEMA: &str = "openagents.omega.issue31.pairing.v1";
 pub const ISSUE31_COMMAND_SCHEMA: &str = "openagents.omega.issue31.command.v1";
 pub const ISSUE31_COMMAND_SCHEMA_V2: &str = "openagents.omega.issue31.command.v2";
@@ -188,6 +189,131 @@ impl Issue31HostDiscoveryV2 {
             ));
         }
         Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Issue31DirectEndpoint {
+    pub magic_dns_name: String,
+    pub port: u16,
+    pub protocol: String,
+}
+
+impl Issue31DirectEndpoint {
+    fn validate(&self) -> Result<(), Issue31NostrError> {
+        if !valid_magic_dns_name(&self.magic_dns_name)
+            || self.port == 0
+            || self.protocol != omega_device_bridge::PROTOCOL
+        {
+            return Err(Issue31NostrError::Invalid(
+                "direct endpoint failed its MagicDNS, port, or protocol law".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Issue31HostDiscoveryV3 {
+    pub schema: String,
+    pub host_ref: String,
+    pub host_public_key_hex: String,
+    pub sarah_public_key_hex: String,
+    pub conversation: String,
+    pub display_name: String,
+    pub protocols: Vec<String>,
+    pub relay_urls: Vec<String>,
+    pub direct_endpoints: Vec<Issue31DirectEndpoint>,
+    pub generation: u64,
+    pub issued_at: u64,
+    pub expires_at: u64,
+}
+
+impl Issue31HostDiscoveryV3 {
+    pub fn decode(bytes: &[u8]) -> Result<Self, Issue31NostrError> {
+        if bytes.len() > 64 * 1024 {
+            return Err(Issue31NostrError::Invalid(
+                "host discovery exceeds the record budget".into(),
+            ));
+        }
+        let record: Self = serde_json::from_slice(bytes)
+            .map_err(|error| Issue31NostrError::Decode(error.to_string()))?;
+        record.validate()?;
+        Ok(record)
+    }
+
+    pub fn validate(&self) -> Result<(), Issue31NostrError> {
+        if self.schema != ISSUE31_HOST_DISCOVERY_SCHEMA_V3
+            || !valid_ref(&self.host_ref)
+            || !valid_hex64(&self.host_public_key_hex)
+            || !valid_hex64(&self.sarah_public_key_hex)
+            || self.sarah_public_key_hex == self.host_public_key_hex
+            || !valid_conversation_tag(&self.conversation)
+            || self.display_name.is_empty()
+            || self.display_name.len() > 80
+            || self.generation == 0
+            || self.expires_at <= self.issued_at
+            || self.protocols.len() != 4
+            || !all_unique(&self.protocols)
+            || !self
+                .protocols
+                .iter()
+                .any(|protocol| protocol == ISSUE31_PAIRING_SCHEMA)
+            || !self
+                .protocols
+                .iter()
+                .any(|protocol| protocol == ISSUE31_COMMAND_SCHEMA)
+            || !self
+                .protocols
+                .iter()
+                .any(|protocol| protocol == ISSUE31_COMMAND_SCHEMA_V2)
+            || !self
+                .protocols
+                .iter()
+                .any(|protocol| protocol == omega_device_bridge::PROTOCOL)
+            || self.relay_urls.is_empty()
+            || self.relay_urls.len() > 8
+            || !all_unique(&self.relay_urls)
+            || self
+                .relay_urls
+                .iter()
+                .any(|relay_url| !valid_relay_url(relay_url))
+            || self.direct_endpoints.is_empty()
+            || self.direct_endpoints.len() > 4
+            || self
+                .direct_endpoints
+                .iter()
+                .any(|endpoint| endpoint.validate().is_err())
+            || self.direct_endpoints.iter().collect::<BTreeSet<_>>().len()
+                != self.direct_endpoints.len()
+        {
+            return Err(Issue31NostrError::Invalid(
+                "v3 host discovery failed its identity, transport, endpoint, or lifetime law"
+                    .into(),
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn is_live_at(&self, now: u64) -> bool {
+        self.issued_at <= now && now < self.expires_at
+    }
+
+    pub fn supersedes(&self, prior: &Self) -> bool {
+        self.host_ref == prior.host_ref
+            && self.host_public_key_hex == prior.host_public_key_hex
+            && self.sarah_public_key_hex == prior.sarah_public_key_hex
+            && self.conversation == prior.conversation
+            && self.display_name == prior.display_name
+            && self.protocols == prior.protocols
+            && self.relay_urls == prior.relay_urls
+            && (self.generation > prior.generation
+                || (self.generation == prior.generation
+                    && self.issued_at > prior.issued_at
+                    && self.expires_at > prior.expires_at
+                    && self.direct_endpoints == prior.direct_endpoints))
     }
 }
 
@@ -2277,6 +2403,35 @@ impl Issue31HostController {
         Ok(discovery)
     }
 
+    pub fn discovery_v3(
+        &self,
+        direct_endpoints: Vec<Issue31DirectEndpoint>,
+        issued_at: u64,
+        expires_at: u64,
+    ) -> Result<Issue31HostDiscoveryV3, Issue31NostrError> {
+        let discovery = Issue31HostDiscoveryV3 {
+            schema: ISSUE31_HOST_DISCOVERY_SCHEMA_V3.into(),
+            host_ref: self.configuration.host_ref.clone(),
+            host_public_key_hex: self.configuration.host_public_key_hex.clone(),
+            sarah_public_key_hex: self.configuration.sarah_public_key_hex.clone(),
+            conversation: self.configuration.conversation.clone(),
+            display_name: self.configuration.display_name.clone(),
+            protocols: vec![
+                ISSUE31_PAIRING_SCHEMA.into(),
+                ISSUE31_COMMAND_SCHEMA.into(),
+                ISSUE31_COMMAND_SCHEMA_V2.into(),
+                omega_device_bridge::PROTOCOL.into(),
+            ],
+            relay_urls: self.configuration.relay_urls.clone(),
+            direct_endpoints,
+            generation: self.configuration.generation,
+            issued_at,
+            expires_at,
+        };
+        discovery.validate()?;
+        Ok(discovery)
+    }
+
     pub fn matches_configuration(&self, configuration: &Issue31HostConfiguration) -> bool {
         &self.configuration == configuration
     }
@@ -2632,6 +2787,20 @@ impl Issue31HostController {
         self.insert_pairing_event(Issue31PairingEvent { event_id, record })
     }
 
+    pub fn merge_pairing_events_from(&mut self, other: &Self) -> Result<(), Issue31NostrError> {
+        if self.configuration != other.configuration {
+            return Err(Issue31NostrError::Invalid(
+                "cannot merge pairing events from another host".into(),
+            ));
+        }
+        for event in &other.pairing_events {
+            if !self.processed_pairing_event_ids.contains(&event.event_id) {
+                self.insert_pairing_event(event.clone())?;
+            }
+        }
+        Ok(())
+    }
+
     pub fn handle_pairing_event(
         &mut self,
         event: Issue31PairingEvent,
@@ -2778,6 +2947,102 @@ impl Issue31HostController {
         };
         self.insert_pairing_event(event)?;
         Ok(outbound)
+    }
+
+    pub fn issue_direct_pairing_grant(
+        &mut self,
+        device_public_key_hex: String,
+        scopes: Vec<Issue31PairingScope>,
+        now: u64,
+    ) -> Result<Issue31PairingRecord, Issue31NostrError> {
+        if !valid_hex64(&device_public_key_hex) {
+            return Err(Issue31NostrError::Invalid(
+                "direct pairing device key is invalid".into(),
+            ));
+        }
+        validate_scopes(&scopes, "direct pairing scopes")?;
+        let mut candidate = self.clone();
+        candidate.admitted_device_scopes.insert(
+            device_public_key_hex.clone(),
+            scopes.iter().copied().collect(),
+        );
+
+        let seed = rand::random::<[u8; 32]>();
+        let request_event_id = format!(
+            "{:x}",
+            Sha256::digest([seed.as_slice(), b":request"].concat())
+        );
+        let request = Issue31PairingRecord::PairingRequest {
+            schema: ISSUE31_PAIRING_SCHEMA.into(),
+            host_ref: candidate.configuration.host_ref.clone(),
+            host_public_key_hex: candidate.configuration.host_public_key_hex.clone(),
+            device_public_key_hex: device_public_key_hex.clone(),
+            issued_at: now,
+            pairing_request_ref: format!(
+                "pairing_request.omega.{}",
+                digest_ref_suffix(request_event_id.as_bytes())
+            ),
+            requested_scopes: scopes,
+            expires_at: now.saturating_add(600),
+        };
+        let challenge = candidate
+            .handle_pairing_event(
+                Issue31PairingEvent {
+                    event_id: request_event_id,
+                    record: request,
+                },
+                now,
+            )?
+            .ok_or_else(|| {
+                Issue31NostrError::Invalid("direct pairing produced no challenge".into())
+            })?;
+        let challenge_event_id = format!(
+            "{:x}",
+            Sha256::digest([seed.as_slice(), b":challenge"].concat())
+        );
+        let proof = match &challenge {
+            Issue31PairingRecord::PairingChallenge { challenge, .. } => challenge.clone(),
+            _ => {
+                return Err(Issue31NostrError::Invalid(
+                    "direct pairing produced the wrong challenge record".into(),
+                ));
+            }
+        };
+        candidate.record_emitted_pairing(challenge_event_id.clone(), challenge)?;
+        let response_event_id = format!(
+            "{:x}",
+            Sha256::digest([seed.as_slice(), b":response"].concat())
+        );
+        let response = Issue31PairingRecord::PairingResponse {
+            schema: ISSUE31_PAIRING_SCHEMA.into(),
+            host_ref: candidate.configuration.host_ref.clone(),
+            host_public_key_hex: candidate.configuration.host_public_key_hex.clone(),
+            device_public_key_hex,
+            issued_at: now,
+            pairing_response_ref: format!(
+                "pairing_response.omega.{}",
+                digest_ref_suffix(response_event_id.as_bytes())
+            ),
+            pairing_challenge_event_id: challenge_event_id,
+            challenge: proof,
+            expires_at: now.saturating_add(600),
+        };
+        let grant = candidate
+            .handle_pairing_event(
+                Issue31PairingEvent {
+                    event_id: response_event_id,
+                    record: response,
+                },
+                now,
+            )?
+            .ok_or_else(|| Issue31NostrError::Invalid("direct pairing produced no grant".into()))?;
+        let grant_event_id = format!(
+            "{:x}",
+            Sha256::digest([seed.as_slice(), b":grant"].concat())
+        );
+        candidate.record_emitted_pairing(grant_event_id, grant.clone())?;
+        *self = candidate;
+        Ok(grant)
     }
 
     pub fn renew_grant(
@@ -3731,6 +3996,26 @@ fn valid_relay_url(value: &str) -> bool {
         && url.fragment().is_none()
 }
 
+fn valid_magic_dns_name(value: &str) -> bool {
+    if value.is_empty()
+        || value.len() > 253
+        || value.starts_with('.')
+        || value.ends_with('.')
+        || value.contains("://")
+    {
+        return false;
+    }
+    value.split('.').all(|label| {
+        !label.is_empty()
+            && label.len() <= 63
+            && !label.starts_with('-')
+            && !label.ends_with('-')
+            && label
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+    })
+}
+
 fn valid_conversation_tag(value: &str) -> bool {
     let Some(hex_part) = value.strip_prefix("sarah.") else {
         return false;
@@ -3847,6 +4132,46 @@ mod tests {
         assert_eq!(
             format!("{:x}", Sha256::digest(projection_bytes)),
             "2a8bec5fa23f27d20db35f3d76bd59817672431328f191bc4302dfa37e7f804d"
+        );
+    }
+
+    #[test]
+    fn v3_discovery_fixture_expires_and_generation_supersedes() {
+        let discovery = Issue31HostDiscoveryV3::decode(include_bytes!(
+            "../fixtures/openagents.omega.issue31.host_discovery.v3.canonical.json"
+        ))
+        .expect("v3 discovery");
+        assert!(discovery.is_live_at(1_784_937_601));
+        assert!(!discovery.is_live_at(discovery.expires_at));
+
+        let mut replacement = discovery.clone();
+        replacement.generation += 1;
+        replacement.issued_at += 1;
+        replacement.expires_at += 1;
+        assert!(replacement.supersedes(&discovery));
+        assert!(!discovery.supersedes(&replacement));
+
+        let mut changed_same_generation = discovery.clone();
+        changed_same_generation.issued_at += 1;
+        changed_same_generation.expires_at += 1;
+        changed_same_generation.direct_endpoints[0].port += 1;
+        assert!(!changed_same_generation.supersedes(&discovery));
+
+        let mut unsigned_public_endpoint = discovery;
+        unsigned_public_endpoint.direct_endpoints[0].magic_dns_name =
+            "https://attacker.example/path".into();
+        assert!(unsigned_public_endpoint.validate().is_err());
+        assert!(
+            Issue31HostDiscoveryV3::decode(include_bytes!(
+                "../fixtures/openagents.omega.issue31.host_discovery.v3.negative-expired.json"
+            ))
+            .is_err()
+        );
+        assert!(
+            Issue31HostDiscoveryV3::decode(include_bytes!(
+                "../fixtures/openagents.omega.issue31.host_discovery.v3.negative-public-url.json"
+            ))
+            .is_err()
         );
     }
 

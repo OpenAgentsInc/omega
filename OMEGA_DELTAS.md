@@ -6772,3 +6772,32 @@ session protocol.
 
 - **Enforced by:** `openagents_authentication_never_opens_a_browser` in
   `crates/omega_deltas`, plus the NIP-98 signer and server proof-exchange tests.
+
+### OMEGA-DELTA-0154 — The mobile bridge is direct, authenticated, and read-only
+
+Omega's mobile mirror uses a GPUI-free WebSocket transport that binds only a
+literal loopback or Tailscale address. A device proves possession of its Nostr
+key and presents the same durable scoped grant used by the relay lane. The
+bridge sends snapshots and ordered deltas, and deliberately has no command
+frame.
+
+- **Enforced by:** `device_bridge_preserves_its_authority_partition` in
+  `crates/omega_deltas`, plus transport tests in `omega_device_bridge`.
+
+### OMEGA-DELTA-0155 — Mobile discovery and QR pairing remain engine-owned
+
+Omega advertises direct mobile endpoints only in the identity-signed Issue 31
+discovery V3 record. Endpoints are structured MagicDNS name, port, and exact
+bridge protocol values; arbitrary URLs are not accepted. Records expire, and
+only a newer generation or an identical-endpoint renewal supersedes an active
+record.
+
+The desktop's **Pair phone** surface renders an engine-issued QR bootstrap. Its
+secret is short-lived and consumed on the first admission attempt. The phone
+still proves its own Nostr device key, and successful admission mints the
+ordinary request/challenge/response/scoped-grant lineage. GPUI neither creates
+grants nor receives a private identity key.
+
+- **Enforced by:** `mobile_discovery_and_qr_pairing_keep_engine_authority` in
+  `crates/omega_deltas`, plus discovery, QR, and one-use grant tests in
+  `omega_effectd` and `omega_device_bridge`.

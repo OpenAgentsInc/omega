@@ -10,18 +10,100 @@ use async_tungstenite::accept_async_with_config;
 use async_tungstenite::tungstenite::{Message, protocol::WebSocketConfig};
 use futures::{FutureExt, StreamExt, pin_mut, select};
 use nostr::Event;
+use qrcode::{QrCode, types::Color};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 pub const PROTOCOL: &str = "openagents.omega.device_bridge.v1";
 pub const MAX_FRAME_BYTES: usize = 64 * 1024;
 pub const DEVICE_PROOF_KIND: u16 = 27_272;
+pub const PAIRING_BOOTSTRAP_SCHEMA: &str = "openagents.omega.device_pairing.v1";
 const MAX_PROOF_AGE_SECONDS: u64 = 300;
 const MAX_FUTURE_PROOF_SECONDS: u64 = 30;
 const DEFAULT_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
 const DEFAULT_DELTA_CAPACITY: usize = 1_024;
 const MAX_RECENT_PROOFS: usize = 4_096;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PairingBootstrap {
+    pub schema: String,
+    pub magic_dns_name: String,
+    pub port: u16,
+    pub protocol: String,
+    pub host_public_key_hex: String,
+    pub pairing_secret: String,
+    pub generation: u64,
+    pub issued_at: u64,
+    pub expires_at: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PairingQr {
+    pub width: usize,
+    pub modules: Vec<bool>,
+}
+
+impl PairingBootstrap {
+    pub fn validate(&self, now_millis: u64) -> Result<(), BridgeError> {
+        if self.schema != PAIRING_BOOTSTRAP_SCHEMA
+            || !valid_magic_dns_name(&self.magic_dns_name)
+            || self.port == 0
+            || self.protocol != PROTOCOL
+            || self.host_public_key_hex.len() != 64
+            || !self
+                .host_public_key_hex
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            || self.pairing_secret.len() != 64
+            || !self
+                .pairing_secret
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            || self.generation == 0
+            || self.issued_at > now_millis
+            || now_millis >= self.expires_at
+        {
+            return Err(BridgeError::InvalidPairingBootstrap);
+        }
+        Ok(())
+    }
+
+    pub fn qr(&self) -> Result<PairingQr, BridgeError> {
+        let payload = serde_json::to_vec(self)?;
+        let code = QrCode::new(payload).map_err(|_| BridgeError::PairingQrTooLarge)?;
+        Ok(PairingQr {
+            width: code.width(),
+            modules: code
+                .to_colors()
+                .into_iter()
+                .map(|color| color == Color::Dark)
+                .collect(),
+        })
+    }
+}
+
+fn valid_magic_dns_name(value: &str) -> bool {
+    if value.is_empty()
+        || value.len() > 253
+        || value.starts_with('.')
+        || value.ends_with('.')
+        || value.contains("://")
+    {
+        return false;
+    }
+    value.split('.').all(|label| {
+        !label.is_empty()
+            && label.len() <= 63
+            && !label.starts_with('-')
+            && !label.ends_with('-')
+            && label
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+    })
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BridgeBindHost(IpAddr);
@@ -517,6 +599,10 @@ pub enum BridgeError {
     SequenceExhausted,
     #[error("device bridge background thread panicked")]
     ThreadPanicked,
+    #[error("device pairing bootstrap is invalid or expired")]
+    InvalidPairingBootstrap,
+    #[error("device pairing bootstrap is too large for a QR code")]
+    PairingQrTooLarge,
 }
 
 impl From<async_tungstenite::tungstenite::Error> for BridgeError {
@@ -640,6 +726,7 @@ struct ProofContent {
     protocol: String,
     host_public_key_hex: String,
     grant_ref: Option<String>,
+    pairing_secret_digest: Option<String>,
     resume_cursor: Option<Cursor>,
     nonce: String,
 }
@@ -918,6 +1005,11 @@ fn verify_hello_proof(hello: &HelloFrame, now_millis: u64) -> bool {
     if content.protocol != PROTOCOL
         || content.host_public_key_hex != hello.host_public_key_hex
         || content.grant_ref != hello.grant_ref
+        || content.pairing_secret_digest
+            != hello
+                .pairing_secret
+                .as_ref()
+                .map(|secret| format!("{:x}", Sha256::digest(secret.as_bytes())))
         || content.resume_cursor != hello.resume_cursor
         || content.nonce.is_empty()
         || content.nonce.len() > 256
@@ -1007,6 +1099,7 @@ mod tests {
             "protocol": PROTOCOL,
             "hostPublicKeyHex": host_public_key_hex,
             "grantRef": grant_ref,
+            "pairingSecretDigest": null,
             "resumeCursor": resume_cursor,
             "nonce": "nonce-1",
         })
@@ -1057,6 +1150,29 @@ mod tests {
         assert!(BridgeBindHost::new("192.168.1.10").is_err());
         assert!(BridgeBindHost::new("100.128.0.1").is_err());
         assert!(BridgeBindHost::new("localhost").is_err());
+    }
+
+    #[test]
+    fn pairing_bootstrap_is_bounded_and_renders_a_qr() {
+        let bootstrap = PairingBootstrap {
+            schema: PAIRING_BOOTSTRAP_SCHEMA.into(),
+            magic_dns_name: "omega-primary.tail1234.ts.net".into(),
+            port: 4317,
+            protocol: PROTOCOL.into(),
+            host_public_key_hex: "1".repeat(64),
+            pairing_secret: "2".repeat(64),
+            generation: 7,
+            issued_at: 1_000,
+            expires_at: 301_000,
+        };
+        bootstrap.validate(1_000).expect("valid bootstrap");
+        let qr = bootstrap.qr().expect("QR");
+        assert!(qr.width >= 21);
+        assert_eq!(qr.modules.len(), qr.width * qr.width);
+
+        let mut expired = bootstrap;
+        expired.expires_at = 1_000;
+        assert!(expired.validate(1_000).is_err());
     }
 
     #[test]

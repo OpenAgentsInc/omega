@@ -792,6 +792,7 @@ pollster = "0.4.0"
 pulldown-cmark = { version = "0.13.0", default-features = false }
 quick-xml = "0.38"
 quote = "1.0.9"
+qrcode = { version = "0.14.1", default-features = false }
 rand = "0.9"
 rayon = "1.8"
 raw-window-handle = "0.6"

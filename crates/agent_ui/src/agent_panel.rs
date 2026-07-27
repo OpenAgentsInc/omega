@@ -79,7 +79,7 @@ use full_auto_ui::FullAutoPanel;
 use futures::FutureExt as _;
 use gpui::{
     Action, Anchor, Animation, AnimationExt, AnyElement, App, AsyncWindowContext, ClipboardItem,
-    Entity, EventEmitter, ExternalPaths, FocusHandle, Focusable, KeyContext, Pixels,
+    Entity, EventEmitter, ExternalPaths, FocusHandle, Focusable, Hsla, KeyContext, Pixels,
     PlatformDisplay, Subscription, Task, TaskExt, WeakEntity, WindowHandle, prelude::*,
     pulsating_between,
 };
@@ -1239,6 +1239,14 @@ impl BaseView {
     }
 }
 
+enum DevicePairingSurface {
+    Ready {
+        bootstrap: omega_effectd::PairingBootstrap,
+        qr: omega_effectd::PairingQr,
+    },
+    Unavailable(SharedString),
+}
+
 pub struct AgentPanel {
     workspace: WeakEntity<Workspace>,
     /// Workspace id is used as a database key
@@ -1321,6 +1329,7 @@ pub struct AgentPanel {
     /// that a zero-base window is exactly where a notification is least likely
     /// to be where somebody is looking.
     threads_sidebar_refusal: Option<SharedString>,
+    device_pairing_surface: Option<DevicePairingSurface>,
     /// `OMEGA-DELTA-0035`. The poll that feeds the router the engine's framed
     /// `get_capacity` answer.
     ///
@@ -1744,6 +1753,7 @@ impl AgentPanel {
             chat_group: None,
             _chat_read: None,
             threads_sidebar_refusal: None,
+            device_pairing_surface: None,
             _engine_capacity_poll: None,
         };
 
@@ -3470,6 +3480,83 @@ impl AgentPanel {
         );
     }
 
+    fn open_device_pairing(&mut self, cx: &mut Context<Self>) {
+        self.device_pairing_surface = Some(
+            match omega_effectd::issue_device_pairing_bootstrap(cx)
+                .and_then(|bootstrap| bootstrap.qr().map(|qr| (bootstrap, qr)).map_err(Into::into))
+            {
+                Ok((bootstrap, qr)) => DevicePairingSurface::Ready { bootstrap, qr },
+                Err(error) => DevicePairingSurface::Unavailable(error.to_string().into()),
+            },
+        );
+        cx.notify();
+    }
+
+    fn render_device_pairing_surface(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let surface = self.device_pairing_surface.as_ref()?;
+        let border = cx.theme().colors().border;
+        let content = match surface {
+            DevicePairingSurface::Ready { bootstrap, qr } => {
+                let rows = qr.modules.chunks(qr.width).map(|row| {
+                    h_flex()
+                        .children(row.iter().map(|dark| {
+                            div()
+                                .size(px(3.))
+                                .bg(if *dark { Hsla::black() } else { Hsla::white() })
+                        }))
+                        .into_any_element()
+                });
+                v_flex()
+                    .items_center()
+                    .gap_2()
+                    .child(v_flex().p_2().bg(Hsla::white()).children(rows))
+                    .child(
+                        Label::new(format!("{}:{}", bootstrap.magic_dns_name, bootstrap.port))
+                            .size(LabelSize::XSmall)
+                            .color(Color::Muted),
+                    )
+                    .child(
+                        Label::new(
+                            "Scan in OpenAgents Mobile. This code works once for 5 minutes.",
+                        )
+                        .size(LabelSize::XSmall)
+                        .color(Color::Muted),
+                    )
+                    .into_any_element()
+            }
+            DevicePairingSurface::Unavailable(message) => Label::new(message.clone())
+                .size(LabelSize::XSmall)
+                .color(Color::Muted)
+                .into_any_element(),
+        };
+        Some(
+            v_flex()
+                .mx_2()
+                .mb_2()
+                .p_2()
+                .gap_2()
+                .border_1()
+                .border_color(border)
+                .rounded_md()
+                .child(
+                    h_flex()
+                        .justify_between()
+                        .child(Label::new("Pair phone").size(LabelSize::Small))
+                        .child(
+                            IconButton::new("close-device-pairing", IconName::Close)
+                                .icon_size(IconSize::Small)
+                                .tooltip(Tooltip::text("Close"))
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.device_pairing_surface = None;
+                                    cx.notify();
+                                })),
+                        ),
+                )
+                .child(content)
+                .into_any_element(),
+        )
+    }
+
     /// Draw zero base's persistent sidebar. `OMEGA-DELTA-0130`.
     ///
     /// # This is a column, not an overlay, and that is the whole decision
@@ -3563,6 +3650,7 @@ impl AgentPanel {
                 .overflow_y_scroll(),
             |sections, section| sections.child(self.render_sidebar_section(*section, cx)),
         );
+        let pairing_surface = self.render_device_pairing_surface(cx);
 
         Some(
             column
@@ -3597,12 +3685,29 @@ impl AgentPanel {
                         ),
                 )
                 .child(sections)
+                .children(pairing_surface)
                 .child(
                     div()
                         .flex_shrink_0()
                         .border_t_1()
                         .border_color(border)
                         .p_1()
+                        .child(
+                            ListItem::new("open-omega-phone-pairing")
+                                .aria_role(gpui::Role::Button)
+                                .aria_label("Pair phone")
+                                .inset(true)
+                                .spacing(ListItemSpacing::Sparse)
+                                .start_slot(
+                                    Icon::new(IconName::Link)
+                                        .size(IconSize::Small)
+                                        .color(Color::Muted),
+                                )
+                                .child(Label::new("Pair phone").size(LabelSize::Small))
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.open_device_pairing(cx);
+                                })),
+                        )
                         .child(
                             ListItem::new("open-omega-settings")
                                 .aria_role(gpui::Role::Button)

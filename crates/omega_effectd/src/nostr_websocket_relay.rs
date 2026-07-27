@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use async_io::Timer;
 use async_tungstenite::WebSocketStream;
@@ -32,8 +32,9 @@ use crate::sarah_conversation::{
 };
 use crate::{
     ISSUE31_COMMAND_SCHEMA, ISSUE31_COMMAND_SCHEMA_V2, ISSUE31_HOST_DISCOVERY_KIND,
-    ISSUE31_HOST_DISCOVERY_SCHEMA_V2, ISSUE31_OWNER_PROJECTION_SCHEMA, ISSUE31_PAIRING_SCHEMA,
-    Issue31CommandRecord, Issue31CommandRecordV2, Issue31HostDiscovery, Issue31HostDiscoveryV2,
+    ISSUE31_HOST_DISCOVERY_SCHEMA_V2, ISSUE31_HOST_DISCOVERY_SCHEMA_V3,
+    ISSUE31_OWNER_PROJECTION_SCHEMA, ISSUE31_PAIRING_SCHEMA, Issue31CommandRecord,
+    Issue31CommandRecordV2, Issue31HostDiscovery, Issue31HostDiscoveryV2, Issue31HostDiscoveryV3,
     Issue31OwnerProjectionRecord, Issue31PairingRecord,
 };
 
@@ -53,6 +54,12 @@ const MAX_CONTROL_FRAMES_PER_READ: usize = 64;
 fn network_timer(duration: Duration) -> Timer {
     // The standalone omega-effectd child has no GPUI application context to supply a timer.
     Timer::after(duration)
+}
+
+fn unix_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_secs())
 }
 
 const NIP_AE_KIND: u16 = 30174;
@@ -897,9 +904,17 @@ impl WebSocketRelayAdapter {
         if kind == ISSUE31_HOST_DISCOVERY_KIND {
             let value = serde_json::from_str::<Value>(&event.content)
                 .map_err(|error| SarahConversationError::InvalidRequest(error.to_string()))?;
-            let (host_ref, host_public_key_hex) = if value.get("schema").and_then(Value::as_str)
-                == Some(ISSUE31_HOST_DISCOVERY_SCHEMA_V2)
+            let schema = value.get("schema").and_then(Value::as_str);
+            let (host_ref, host_public_key_hex) = if schema
+                == Some(ISSUE31_HOST_DISCOVERY_SCHEMA_V3)
             {
+                let discovery = Issue31HostDiscoveryV3::decode(event.content.as_bytes())
+                    .map_err(|error| SarahConversationError::InvalidRequest(error.to_string()))?;
+                if discovery.conversation != conversation_ref || !discovery.is_live_at(unix_now()) {
+                    return Ok(None);
+                }
+                (discovery.host_ref, discovery.host_public_key_hex)
+            } else if schema == Some(ISSUE31_HOST_DISCOVERY_SCHEMA_V2) {
                 let discovery = Issue31HostDiscoveryV2::decode(event.content.as_bytes())
                     .map_err(|error| SarahConversationError::InvalidRequest(error.to_string()))?;
                 if discovery.conversation != conversation_ref {

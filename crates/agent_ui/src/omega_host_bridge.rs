@@ -125,6 +125,7 @@ pub fn persist_engine_lane_run_for_tests(
         correlation_path: correlation_journal_path(),
         load_error: None,
         sarah_conversation: None,
+        device_bridge: None,
     };
     persist_correlation_journal(&state)
 }
@@ -230,6 +231,7 @@ struct HostBridgeState {
     correlation_path: PathBuf,
     load_error: Option<String>,
     sarah_conversation: Option<Arc<Mutex<SarahConversationClient>>>,
+    device_bridge: Option<omega_effectd::DeviceBridgeServerHandle>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -332,6 +334,7 @@ pub fn omega_effectd_host_handler(cx: &App) -> OmegaEffectdHostHandler {
         correlation_path,
         load_error,
         sarah_conversation: None,
+        device_bridge: None,
     }));
     Rc::new(move |request| {
         let async_cx = async_cx.clone();
@@ -397,6 +400,24 @@ fn production_sarah_conversation() -> Result<SarahConversationClient, HostRespon
         .ok_or_else(|| unavailable("Omega identity custody is not ready."))?;
     let conversation_digest = std::env::var("OPENAGENTS_OMEGA_SARAH_CONVERSATION_DIGEST")
         .unwrap_or_else(|_| owner_public_key_hex.chars().take(24).collect());
+    let direct_endpoints = match (
+        std::env::var("OPENAGENTS_OMEGA_DEVICE_BRIDGE_MAGIC_DNS").ok(),
+        std::env::var("OPENAGENTS_OMEGA_DEVICE_BRIDGE_PORT").ok(),
+    ) {
+        (None, None) => Vec::new(),
+        (Some(magic_dns_name), Some(port)) => vec![omega_effectd::Issue31DirectEndpoint {
+            magic_dns_name,
+            port: port
+                .parse()
+                .map_err(|_| unavailable("Omega device bridge port is invalid."))?,
+            protocol: omega_effectd::DEVICE_BRIDGE_PROTOCOL.into(),
+        }],
+        _ => {
+            return Err(unavailable(
+                "Omega device bridge MagicDNS and port must be configured together.",
+            ));
+        }
+    };
     let config = SarahConversationConfig {
         generation: 1,
         conversation_digest,
@@ -407,6 +428,7 @@ fn production_sarah_conversation() -> Result<SarahConversationClient, HostRespon
             binding_state: omega_effectd::BindingState::Unbound,
         },
         relay_url: relay_urls.first().cloned(),
+        direct_endpoints,
         admitted_device_public_key_hexes,
         approved_device_scopes,
         community_group_ids,
@@ -449,9 +471,30 @@ async fn sarah_request(
         Some(conversation) => conversation,
         None => match production_sarah_conversation() {
             Ok(conversation) => {
+                let device_bridge = start_device_bridge(&conversation)?;
+                if let Some((_, engine, endpoint, host_public_key_hex, generation, scopes)) =
+                    device_bridge.as_ref()
+                {
+                    let engine = engine.clone();
+                    let endpoint = endpoint.clone();
+                    let host_public_key_hex = host_public_key_hex.clone();
+                    let scopes = scopes.clone();
+                    let generation = *generation;
+                    cx.update(|cx| {
+                        omega_effectd::configure_device_pairing(
+                            engine,
+                            endpoint,
+                            host_public_key_hex,
+                            generation,
+                            scopes,
+                            cx,
+                        );
+                    });
+                }
                 let conversation = Arc::new(Mutex::new(conversation));
                 let mut state = state.borrow_mut();
                 state.sarah_conversation = Some(conversation.clone());
+                state.device_bridge = device_bridge.map(|(handle, ..)| handle);
                 conversation
             }
             Err(error) => return Err(error),
@@ -471,6 +514,55 @@ async fn sarah_request(
             .map_err(sarah_host_error)
     })
     .await
+}
+
+type DeviceBridgeStartup = (
+    omega_effectd::DeviceBridgeServerHandle,
+    omega_effectd::DevicePairingEngine,
+    omega_effectd::Issue31DirectEndpoint,
+    String,
+    u64,
+    Vec<omega_effectd::Issue31PairingScope>,
+);
+
+fn start_device_bridge(
+    conversation: &SarahConversationClient,
+) -> Result<Option<DeviceBridgeStartup>, HostResponseError> {
+    let Some((engine, endpoint, host_public_key_hex, generation, scopes)) =
+        conversation.device_pairing_runtime()
+    else {
+        return Ok(None);
+    };
+    let bind_address =
+        std::env::var("OPENAGENTS_OMEGA_DEVICE_BRIDGE_BIND_ADDRESS").map_err(|_| {
+            unavailable("OPENAGENTS_OMEGA_DEVICE_BRIDGE_BIND_ADDRESS is not configured.")
+        })?;
+    let host = omega_effectd::BridgeBindHost::new(&bind_address)
+        .map_err(|error| unavailable(format!("Omega device bridge bind is invalid: {error}")))?;
+    let config = omega_effectd::DeviceBridgeServerConfig {
+        host,
+        port: endpoint.port,
+        heartbeat_interval: Duration::from_secs(5),
+    };
+    let projected_at = u64::try_from(Utc::now().timestamp_millis()).unwrap_or(0);
+    let journal = omega_effectd::ProjectionJournal::new(omega_effectd::MirrorSnapshot::empty(
+        "Local Omega",
+        generation,
+        projected_at,
+    ));
+    let handle =
+        omega_effectd::start_pairable_device_bridge_server(config, engine.clone(), journal)
+            .map_err(|error| {
+                unavailable(format!("Omega device bridge failed to start: {error}"))
+            })?;
+    Ok(Some((
+        handle,
+        engine,
+        endpoint,
+        host_public_key_hex,
+        generation,
+        scopes,
+    )))
 }
 
 fn sarah_host_error(error: omega_effectd::SarahConversationError) -> HostResponseError {
@@ -1708,6 +1800,7 @@ mod tests {
             correlation_path: path.clone(),
             load_error: None,
             sarah_conversation: None,
+            device_bridge: None,
         };
 
         persist_correlation_journal(&state).expect("persist correlation journal");
@@ -1753,6 +1846,7 @@ mod tests {
             correlation_path: path.clone(),
             load_error: None,
             sarah_conversation: None,
+            device_bridge: None,
         };
         persist_correlation_journal(&state).expect("persist correlation journal");
 
@@ -1844,6 +1938,7 @@ mod tests {
             correlation_path: path.clone(),
             load_error: None,
             sarah_conversation: None,
+            device_bridge: None,
         }));
 
         record_turn_completion(&state, "turn.full-auto.1", 7, HostTurnOutcome::Completed)
@@ -1898,6 +1993,7 @@ mod tests {
             correlation_path: path.clone(),
             load_error: None,
             sarah_conversation: None,
+            device_bridge: None,
         }));
 
         record_turn_completion(
