@@ -58,9 +58,9 @@ pub use protocol::{
 };
 pub use sarah_conversation::{
     BootstrapResult, ConversationIdentity, GapState, InterruptTurnResult,
-    Issue31HostProjectionDocuments, Issue31HostProjectionRequest, Issue31HostProjectionSource,
-    Issue31PendingAgentThreadCommand, Issue31ProviderRosterSource, MockRelayAdapter,
-    RelayTransport, RoomSnapshotResult, RoomStateEvent, SARAH_EVENT_ROOM_EVENT,
+    Issue31AgentThreadAdmissionState, Issue31HostProjectionDocuments, Issue31HostProjectionRequest,
+    Issue31HostProjectionSource, Issue31PendingAgentThreadCommand, Issue31ProviderRosterSource,
+    MockRelayAdapter, RelayTransport, RoomSnapshotResult, RoomStateEvent, SARAH_EVENT_ROOM_EVENT,
     SARAH_EVENT_ROOM_STATE, SARAH_FRAMED_METHODS, SARAH_METHOD_BOOTSTRAP,
     SARAH_METHOD_DEVICE_GRANTS, SARAH_METHOD_INTERRUPT_TURN, SARAH_METHOD_READMIT_DEVICE,
     SARAH_METHOD_RENEW_DEVICE_GRANT, SARAH_METHOD_REVOKE_DEVICE_GRANT, SARAH_METHOD_ROOM_SNAPSHOT,

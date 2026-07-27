@@ -28,6 +28,7 @@ pub struct GitDataLossCommand {
     pub operation: &'static str,
     pub git_directory: Option<PathBuf>,
     pub paths: Option<Vec<PathBuf>>,
+    pub ordinary_status_cannot_prove_clean: bool,
 }
 
 pub fn classify_git_data_loss(command: &str) -> GitDataLossGuard {
@@ -100,12 +101,14 @@ fn classify_git_command(tokens: &[String]) -> Option<GitDataLossCommand> {
                 operation: "checkout",
                 git_directory,
                 paths: (!paths.is_empty()).then_some(paths),
+                ordinary_status_cannot_prove_clean: false,
             })
         }
         "restore" => Some(GitDataLossCommand {
             operation: "restore",
             git_directory,
             paths: restore_paths(arguments),
+            ordinary_status_cannot_prove_clean: false,
         }),
         "stash" => {
             let operation = match arguments.first().map(String::as_str) {
@@ -118,6 +121,7 @@ fn classify_git_command(tokens: &[String]) -> Option<GitDataLossCommand> {
                 operation,
                 git_directory,
                 paths: None,
+                ordinary_status_cannot_prove_clean: false,
             })
         }
         "reset"
@@ -129,6 +133,7 @@ fn classify_git_command(tokens: &[String]) -> Option<GitDataLossCommand> {
                 operation: "reset_hard",
                 git_directory,
                 paths: None,
+                ordinary_status_cannot_prove_clean: false,
             })
         }
         "clean"
@@ -146,10 +151,23 @@ fn classify_git_command(tokens: &[String]) -> Option<GitDataLossCommand> {
                 operation: "clean",
                 git_directory,
                 paths: None,
+                ordinary_status_cannot_prove_clean: clean_includes_ignored_files(arguments),
             })
         }
         _ => None,
     }
+}
+
+fn clean_includes_ignored_files(arguments: &[String]) -> bool {
+    arguments.iter().any(|argument| {
+        matches!(argument.as_str(), "--ignored" | "--only-ignored")
+            || (argument.starts_with('-')
+                && !argument.starts_with("--")
+                && argument
+                    .chars()
+                    .skip(1)
+                    .any(|flag| matches!(flag, 'x' | 'X')))
+    })
 }
 
 fn git_command_index(tokens: &[String]) -> Option<usize> {
@@ -794,8 +812,29 @@ mod tests {
                 operation: "checkout",
                 git_directory: Some(PathBuf::from("nested")),
                 paths: Some(vec![PathBuf::from("src/main.rs")]),
+                ordinary_status_cannot_prove_clean: false,
             }])
         );
+    }
+
+    #[test]
+    fn ignored_file_clean_scopes_cannot_be_proved_clean_by_ordinary_status() {
+        for command in [
+            "git clean -fX",
+            "git clean -fx",
+            "git clean --force --ignored",
+            "git clean --force --only-ignored",
+        ] {
+            let GitDataLossGuard::Inspect(commands) = classify_git_data_loss(command) else {
+                panic!("expected inspection for {command}");
+            };
+            assert!(
+                commands
+                    .iter()
+                    .any(|command| command.ordinary_status_cannot_prove_clean),
+                "{command} can delete ignored files that ordinary status omits"
+            );
+        }
     }
 
     #[test]

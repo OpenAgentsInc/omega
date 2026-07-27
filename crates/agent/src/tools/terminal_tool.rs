@@ -47,6 +47,7 @@ struct GitStatusCheck {
     repository: Entity<Repository>,
     repository_root: PathBuf,
     path_prefixes: Vec<git::repository::RepoPath>,
+    ordinary_status_cannot_prove_clean: bool,
 }
 
 fn git_data_loss_decision(
@@ -136,6 +137,12 @@ async fn guard_git_data_loss(
     let mut dirty_files = BTreeSet::new();
     let mut unknown_scopes = BTreeSet::new();
     for check in checks {
+        if check.ordinary_status_cannot_prove_clean {
+            unknown_scopes.insert(format!(
+                "{} (the command includes ignored files, which ordinary status omits)",
+                check.repository_root.display()
+            ));
+        }
         let status = cx.update(|cx| check.repository.read(cx).fresh_status(check.path_prefixes));
         match status.await {
             Ok(status) => {
@@ -316,6 +323,7 @@ fn git_status_check(
         repository,
         repository_root,
         path_prefixes,
+        ordinary_status_cannot_prove_clean: command.ordinary_status_cannot_prove_clean,
     })
 }
 
@@ -1692,6 +1700,69 @@ mod tests {
             value.get("decision").and_then(serde_json::Value::as_str),
             Some("deny")
         );
+    }
+
+    #[gpui::test]
+    async fn ignored_file_clean_prompts_before_process_creation(cx: &mut gpui::TestAppContext) {
+        crate::tests::init_test(cx);
+        let fs = fs::FakeFs::new(cx.executor());
+        fs.insert_tree(
+            "/root",
+            serde_json::json!({
+                ".git": {},
+                ".gitignore": "ignored.txt\n",
+                "ignored.txt": "must survive without confirmation"
+            }),
+        )
+        .await;
+        let project = project::Project::test(fs, ["/root".as_ref()], cx).await;
+        let environment = std::rc::Rc::new(cx.update(|cx| {
+            crate::tests::FakeThreadEnvironment::default().with_terminal(
+                crate::tests::FakeTerminalHandle::new_with_immediate_exit(cx, 0),
+            )
+        }));
+        cx.update(|cx| {
+            let mut settings = agent_settings::AgentSettings::get_global(cx).clone();
+            settings.tool_permissions.default = settings::ToolPermissionMode::Allow;
+            settings.tool_permissions.tools.remove(TerminalTool::NAME);
+            agent_settings::AgentSettings::override_global(settings, cx);
+        });
+
+        #[allow(clippy::arc_with_non_send_sync)]
+        let tool = std::sync::Arc::new(TerminalTool::new(project, environment.clone()));
+        let (event_stream, mut receiver) = crate::ToolCallEventStream::test();
+        let task = cx.update(|cx| {
+            tool.run(
+                crate::ToolInput::resolved(TerminalToolInput {
+                    command: "git clean -fX".to_string(),
+                    cd: "root".to_string(),
+                    timeout_ms: None,
+                    ..Default::default()
+                }),
+                event_stream,
+                cx,
+            )
+        });
+
+        receiver.expect_update_fields().await;
+        let authorization = receiver.expect_authorization().await;
+        assert_eq!(
+            environment.terminal_creation_count(),
+            0,
+            "git clean -fX must not reach process creation before typed confirmation"
+        );
+        authorization
+            .response
+            .send(acp_thread::SelectedPermissionOutcome::new(
+                acp::PermissionOptionId::new("cancel_git_changes"),
+                acp::PermissionOptionKind::RejectOnce,
+            ))
+            .expect("cancellation response should send");
+        let error = task
+            .await
+            .expect_err("cancelling ignored-file deletion must stop the command");
+        assert!(error.contains("cancelled by the user"));
+        assert_eq!(environment.terminal_creation_count(), 0);
     }
 
     #[test]

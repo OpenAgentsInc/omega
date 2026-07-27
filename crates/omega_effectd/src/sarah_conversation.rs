@@ -1147,6 +1147,16 @@ pub struct Issue31PendingAgentThreadCommand {
     pub thread_ref: String,
     pub text: String,
     pub disposition: crate::Issue31AgentThreadDisposition,
+    #[serde(default)]
+    pub admission_state: Issue31AgentThreadAdmissionState,
+}
+
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Issue31AgentThreadAdmissionState {
+    #[default]
+    Pending,
+    Admitted,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -1690,6 +1700,46 @@ impl SarahConversationClient {
         if let Err(error) = self.persist_issue31_host_state() {
             self.pending_agent_thread_commands
                 .insert(idempotency_ref.to_string(), command);
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    pub fn mark_agent_thread_command_admitted(
+        &mut self,
+        idempotency_ref: &str,
+    ) -> Result<bool, SarahConversationError> {
+        let Some(command) = self.pending_agent_thread_commands.get_mut(idempotency_ref) else {
+            return Ok(false);
+        };
+        if command.admission_state == Issue31AgentThreadAdmissionState::Admitted {
+            return Ok(true);
+        }
+        command.admission_state = Issue31AgentThreadAdmissionState::Admitted;
+        if let Err(error) = self.persist_issue31_host_state() {
+            if let Some(command) = self.pending_agent_thread_commands.get_mut(idempotency_ref) {
+                command.admission_state = Issue31AgentThreadAdmissionState::Pending;
+            }
+            return Err(error);
+        }
+        Ok(true)
+    }
+
+    pub fn mark_agent_thread_command_pending(
+        &mut self,
+        idempotency_ref: &str,
+    ) -> Result<(), SarahConversationError> {
+        let Some(command) = self.pending_agent_thread_commands.get_mut(idempotency_ref) else {
+            return Ok(());
+        };
+        if command.admission_state == Issue31AgentThreadAdmissionState::Pending {
+            return Ok(());
+        }
+        command.admission_state = Issue31AgentThreadAdmissionState::Pending;
+        if let Err(error) = self.persist_issue31_host_state() {
+            if let Some(command) = self.pending_agent_thread_commands.get_mut(idempotency_ref) {
+                command.admission_state = Issue31AgentThreadAdmissionState::Admitted;
+            }
             return Err(error);
         }
         Ok(())
@@ -2692,15 +2742,15 @@ impl SarahConversationClient {
                 {
                     unavailable("reason.omega.command_capacity")
                 } else {
-                    self.pending_agent_thread_commands.insert(
-                        idempotency_ref.to_string(),
-                        Issue31PendingAgentThreadCommand {
+                    self.pending_agent_thread_commands
+                        .entry(idempotency_ref.to_string())
+                        .or_insert_with(|| Issue31PendingAgentThreadCommand {
                             idempotency_ref: idempotency_ref.to_string(),
                             thread_ref: thread_ref.clone(),
                             text: text.clone(),
                             disposition: *disposition,
-                        },
-                    );
+                            admission_state: Issue31AgentThreadAdmissionState::Pending,
+                        });
                     accepted(None)
                 }
             }
@@ -4835,7 +4885,11 @@ mod tests {
 
     #[test]
     fn accepted_agent_thread_command_waits_durably_for_the_ui() {
-        let mut client = client();
+        let temporary = tempfile::tempdir().expect("tempdir");
+        let state_path = temporary.path().join("issue31-state.json");
+        let (mut client, _, controller, _, _) = handoff_fixture();
+        client.issue31_host = Some(controller);
+        client.issue31_state_path = Some(state_path.clone());
         let execution = client.execute_issue31_action_v2(
             &Issue31CommandArguments::AgentThreadMessage {
                 action_ref: crate::ISSUE31_ACTION_AGENT_THREAD_MESSAGE.into(),
@@ -4856,7 +4910,59 @@ mod tests {
                 thread_ref: "63f9e587-cc09-4ba7-9b22-70a2ce026ead".into(),
                 text: "Steer with the mobile context".into(),
                 disposition: crate::Issue31AgentThreadDisposition::Steer,
+                admission_state: Issue31AgentThreadAdmissionState::Pending,
             }]
+        );
+        client.issue31_fail_commit_after.set(Some(0));
+        client
+            .mark_agent_thread_command_admitted("idempotency.issue31.agent_thread_message:test")
+            .expect_err("injected durable admission failure");
+        assert_eq!(
+            client.pending_agent_thread_commands()[0].admission_state,
+            Issue31AgentThreadAdmissionState::Pending,
+            "an admission that was not committed must remain retryable"
+        );
+        client
+            .mark_agent_thread_command_admitted("idempotency.issue31.agent_thread_message:test")
+            .expect("mark admitted");
+        assert_eq!(
+            client.pending_agent_thread_commands()[0].admission_state,
+            Issue31AgentThreadAdmissionState::Admitted
+        );
+        let persisted: DurableIssue31HostState =
+            serde_json::from_slice(&fs::read(&state_path).expect("read durable state"))
+                .expect("decode durable state");
+        assert_eq!(
+            persisted.pending_agent_thread_commands
+                ["idempotency.issue31.agent_thread_message:test"]
+                .admission_state,
+            Issue31AgentThreadAdmissionState::Admitted
+        );
+        client.execute_issue31_action_v2(
+            &Issue31CommandArguments::AgentThreadMessage {
+                action_ref: crate::ISSUE31_ACTION_AGENT_THREAD_MESSAGE.into(),
+                thread_ref: "63f9e587-cc09-4ba7-9b22-70a2ce026ead".into(),
+                text: "Steer with the mobile context".into(),
+                disposition: crate::Issue31AgentThreadDisposition::Steer,
+            },
+            "idempotency.issue31.agent_thread_message:test",
+            "grant.omega.device_1",
+            &"2".repeat(64),
+            1,
+        );
+        assert_eq!(
+            client.pending_agent_thread_commands()[0].admission_state,
+            Issue31AgentThreadAdmissionState::Admitted,
+            "an idempotent replay must not reset the durable admission fence"
+        );
+        client.issue31_fail_commit_after.set(Some(0));
+        client
+            .complete_agent_thread_command("idempotency.issue31.agent_thread_message:test")
+            .expect_err("injected durable completion failure");
+        assert_eq!(
+            client.pending_agent_thread_commands()[0].admission_state,
+            Issue31AgentThreadAdmissionState::Admitted,
+            "a completion retry must not make the delivered command admissible again"
         );
         client
             .complete_agent_thread_command("idempotency.issue31.agent_thread_message:test")

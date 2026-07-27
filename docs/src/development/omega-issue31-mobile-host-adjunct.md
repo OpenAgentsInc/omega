@@ -132,6 +132,13 @@ Reminder lifecycle writes publish owner-authored, NIP-44-encrypted replaceable
 kind `30300` records. Relay acknowledgement is never rewritten as target
 completion.
 
+Agent-thread message commands use a second durable boundary between effectd and
+the desktop thread. Effectd persists each command as `pending`, changes it to
+`admitted` before the UI injects it, and removes it only after delivery. A
+failed admission commit remains pending. A failed completion commit remains
+admitted, so the pump retries completion without injecting the delivered
+message a second time.
+
 For every active `observe_issue31` grant, Omega projects each admitted owner or
 Sarah source record into an `openagents.omega.issue31.owner_projection.v1`
 record encrypted to that device. The projection binds the source event ID,

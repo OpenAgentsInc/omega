@@ -201,10 +201,13 @@ fn classify_execution_failure(error: &str) -> DelegateFailureClass {
     {
         DelegateFailureClass::AccountRateLimited
     } else if error.contains("at capacity")
-        || error.contains("capacity")
-        || error.contains("quota")
-        || error.contains("credit")
-        || error.contains("billing")
+        || error.contains("capacity exhausted")
+        || error.contains("insufficient credits")
+        || error.contains("credit balance")
+        || error.contains("billing quota")
+        || error.contains("billing limit")
+        || error.contains("quota exceeded")
+        || error.contains("quota exhausted")
     {
         DelegateFailureClass::AccountExhausted
     } else {
@@ -696,9 +699,38 @@ mod tests {
             DelegateFailureClass::AccountExhausted
         );
         assert_eq!(
+            classify_execution_failure("insufficient credits for this request"),
+            DelegateFailureClass::AccountExhausted
+        );
+        assert_eq!(
+            classify_execution_failure("credit balance exhausted"),
+            DelegateFailureClass::AccountExhausted
+        );
+        assert_eq!(
+            classify_execution_failure("billing quota exceeded"),
+            DelegateFailureClass::AccountExhausted
+        );
+        assert_eq!(
             classify_execution_failure("rate_limit exceeded"),
             DelegateFailureClass::AccountRateLimited
         );
+    }
+
+    #[test]
+    fn credential_failures_are_not_exhausted_accounts() {
+        for error in [
+            "missing credentials",
+            "invalid credentials",
+            "credential helper unavailable",
+            "billing credentials missing",
+            "credit credential invalid",
+        ] {
+            assert_eq!(
+                classify_execution_failure(error),
+                DelegateFailureClass::ExecutionError,
+                "{error}"
+            );
+        }
     }
 
     #[test]

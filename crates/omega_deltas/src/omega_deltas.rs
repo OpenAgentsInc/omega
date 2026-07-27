@@ -18482,6 +18482,13 @@ mod tests {
             "OMEGA-DELTA-0134: guard decisions are no longer versioned typed \
              transcript metadata."
         );
+        assert!(
+            permissions.contains("clean_includes_ignored_files")
+                && permissions.contains("ordinary_status_cannot_prove_clean")
+                && terminal.contains("the command includes ignored files"),
+            "OMEGA-DELTA-0134: `git clean` can target ignored files without \
+             forcing confirmation even though ordinary status omits them."
+        );
 
         let repository = read_repository_file("crates/project/src/git_store.rs");
         let fresh_status = function_body(&repository, "fresh_status")
@@ -18683,6 +18690,25 @@ mod tests {
                 && tool.contains("agent_id: \"Omega Agent\".to_owned()"),
             "OMEGA-DELTA-0137: a hosted Exo result no longer names the full \
              Omega → Exo → hosted executor chain."
+        );
+        for required in [
+            "insufficient credits",
+            "credit balance",
+            "billing quota",
+            "quota exceeded",
+            "credential_failures_are_not_exhausted_accounts",
+        ] {
+            assert!(
+                tool.contains(required),
+                "OMEGA-DELTA-0137: delegate failure classification lost `{required}`."
+            );
+        }
+        assert!(
+            !function_body(&tool, "classify_execution_failure")
+                .expect("OMEGA-DELTA-0137: delegate failure classifier is gone")
+                .contains("error.contains(\"credit\")"),
+            "OMEGA-DELTA-0137: a broad credit substring can misclassify \
+             credential failures as exhausted accounts."
         );
 
         let resolver = read_repository_file("crates/agent/src/tools/subagent_executor.rs");
@@ -19627,5 +19653,44 @@ mod tests {
                 "OMEGA-DELTA-0156: the bridge projection boundary lost `{required}`."
             );
         }
+    }
+
+    /// OMEGA-DELTA-0157. A mobile Agent-thread command crosses the UI boundary
+    /// at most once even when durable completion must be retried.
+    #[test]
+    fn mobile_agent_commands_persist_admission_before_thread_delivery() {
+        let effectd = without_comments(&read_repository_file(
+            "crates/omega_effectd/src/sarah_conversation.rs",
+        ));
+        for required in [
+            "Issue31AgentThreadAdmissionState",
+            "mark_agent_thread_command_admitted",
+            "mark_agent_thread_command_pending",
+            "a completion retry must not make the delivered command admissible again",
+        ] {
+            assert!(
+                effectd.contains(required),
+                "OMEGA-DELTA-0157: durable mobile-command admission lost `{required}`."
+            );
+        }
+
+        let host_bridge = without_comments(&read_repository_file(
+            "crates/agent_ui/src/omega_host_bridge.rs",
+        ));
+        let pump = function_body(&host_bridge, "start_issue31_agent_command_pump")
+            .expect("OMEGA-DELTA-0157: the mobile Agent command pump is gone");
+        let durable_admission = pump
+            .find("mark_agent_thread_command_admitted")
+            .expect("OMEGA-DELTA-0157: the command is not durably admitted");
+        let thread_admission = pump
+            .find("admit_issue31_agent_thread_command")
+            .expect("OMEGA-DELTA-0157: the Agent-thread boundary is gone");
+        assert!(
+            durable_admission < thread_admission
+                && pump.contains("Issue31AgentThreadAdmissionState::Pending")
+                && pump.contains("complete_agent_thread_command"),
+            "OMEGA-DELTA-0157: command delivery can precede its durable \
+             admission fence or a delivered command can be re-admitted."
+        );
     }
 }

@@ -566,15 +566,66 @@ fn start_issue31_agent_command_pump(
                 }
             };
             for command in pending {
-                let admitted = cx.update(|cx| {
-                    admit_issue31_agent_thread_command(&state, &command, cx)
-                });
-                if let Err(error) = admitted {
-                    log::warn!(
-                        "Issue31 mobile command {} is waiting for its thread: {error:#}",
-                        command.idempotency_ref
-                    );
-                    continue;
+                if command.admission_state
+                    == omega_effectd::Issue31AgentThreadAdmissionState::Pending
+                {
+                    let conversation_for_admission = conversation.clone();
+                    let idempotency_ref = command.idempotency_ref.clone();
+                    let admission_persisted = cx
+                        .background_spawn(async move {
+                            let mut conversation =
+                                conversation_for_admission.lock().map_err(|_| {
+                                    anyhow::anyhow!("Sarah Nostr transport state is unavailable")
+                                })?;
+                            conversation
+                                .mark_agent_thread_command_admitted(&idempotency_ref)
+                                .map_err(anyhow::Error::from)
+                        })
+                        .await;
+                    match admission_persisted {
+                        Ok(true) => {}
+                        Ok(false) => continue,
+                        Err(error) => {
+                            log::error!(
+                                "Issue31 mobile command {} could not reserve durable admission: {error:#}",
+                                command.idempotency_ref
+                            );
+                            continue;
+                        }
+                    }
+
+                    let admitted = cx.update(|cx| {
+                        admit_issue31_agent_thread_command(&state, &command, cx)
+                    });
+                    if let Err(error) = admitted {
+                        let conversation_for_retry = conversation.clone();
+                        let idempotency_ref = command.idempotency_ref.clone();
+                        let retry_result = cx
+                            .background_spawn(async move {
+                                let mut conversation =
+                                    conversation_for_retry.lock().map_err(|_| {
+                                        anyhow::anyhow!(
+                                            "Sarah Nostr transport state is unavailable"
+                                        )
+                                    })?;
+                                conversation
+                                    .mark_agent_thread_command_pending(&idempotency_ref)?;
+                                anyhow::Ok(())
+                            })
+                            .await;
+                        if let Err(retry_error) = retry_result {
+                            log::error!(
+                                "Issue31 mobile command {} was not admitted and its durable retry could not be restored: {retry_error:#}",
+                                command.idempotency_ref
+                            );
+                        } else {
+                            log::warn!(
+                                "Issue31 mobile command {} is waiting for its thread: {error:#}",
+                                command.idempotency_ref
+                            );
+                        }
+                        continue;
+                    }
                 }
                 let conversation_for_completion = conversation.clone();
                 let idempotency_ref = command.idempotency_ref.clone();
@@ -641,7 +692,12 @@ fn admit_issue31_agent_thread_command(
                     )
                 })
                 .map_err(anyhow::Error::msg)?;
-            publish_device_thread(state, &command.thread_ref, cx)?;
+            if let Err(error) = publish_device_thread(state, &command.thread_ref, cx) {
+                log::warn!(
+                    "Issue31 mobile command {} was admitted but its mirror refresh failed: {error:#}",
+                    command.idempotency_ref
+                );
+            }
             anyhow::Ok(())
         })
         .map_err(|error| anyhow::anyhow!("the Omega workspace window is unavailable: {error}"))?
