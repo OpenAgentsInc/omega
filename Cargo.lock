@@ -11974,6 +11974,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "omega_community"
+version = "0.1.0"
+dependencies = [
+ "nostr",
+ "omega_audience",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "omega_deltas"
 version = "0.1.0"
 dependencies = [

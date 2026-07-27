@@ -1,0 +1,28 @@
+[package]
+name = "omega_community"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license = "GPL-3.0-or-later"
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/omega_community.rs"
+doctest = false
+
+# OMEGA-DELTA-0106. This list is checked, not just reviewed.
+#
+# `omega_audience` keeps its dependencies to serialisation because Local must
+# never be able to reach a network. This crate is the other side of that line:
+# it is allowed to know the Nostr record format, and it is still not allowed to
+# open a socket or read a key. Both halves are held by
+# `the_community_audience_carries_no_transport_and_no_key` in `omega_deltas`.
+[dependencies]
+nostr.workspace = true
+omega_audience.workspace = true
+serde.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
