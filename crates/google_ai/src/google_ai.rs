@@ -33,7 +33,38 @@ pub async fn stream_generate_content(
         .header("Content-Type", "application/json")
         .extra_headers(extra_headers)
         .body(AsyncBody::from(serde_json::to_string(&request)?))?;
-    let mut response = client.send(request).await?;
+    stream_generate_content_response(client.send(request).await?).await
+}
+
+pub async fn stream_generate_content_with_bearer(
+    client: &dyn HttpClient,
+    base_url: &str,
+    bearer_token: &str,
+    grant_ref: &str,
+    mut request: GenerateContentRequest,
+    extra_headers: &CustomHeaders,
+) -> Result<BoxStream<'static, Result<GenerateContentResponse>>> {
+    validate_generate_content_request(&request)?;
+    let model_id = mem::take(&mut request.model.model_id);
+    let uri = format!(
+        "{}/api/provider-accounts/google-gemini/models/{model_id}:streamGenerateContent?alt=sse",
+        base_url.trim_end_matches('/')
+    );
+    let request = HttpRequest::builder()
+        .method(Method::POST)
+        .uri(uri)
+        .header("Authorization", format!("Bearer {}", bearer_token.trim()))
+        .header("Content-Type", "application/json")
+        .header("x-openagents-session-ref", grant_ref)
+        .extra_headers(extra_headers)
+        .body(AsyncBody::from(serde_json::to_string(&request)?))?;
+
+    stream_generate_content_response(client.send(request).await?).await
+}
+
+async fn stream_generate_content_response(
+    mut response: http_client::Response<AsyncBody>,
+) -> Result<BoxStream<'static, Result<GenerateContentResponse>>> {
     if response.status().is_success() {
         let reader = BufReader::new(response.into_body());
         Ok(reader

@@ -9512,6 +9512,8 @@ dependencies = [
  "mistral",
  "oauth_callback_server",
  "ollama",
+ "omega_effectd",
+ "omega_zero_base",
  "open_ai",
  "open_router",
  "opencode",

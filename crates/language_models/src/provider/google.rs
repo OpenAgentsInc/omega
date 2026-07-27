@@ -5,7 +5,9 @@ use futures::{FutureExt, StreamExt, future::BoxFuture};
 use google_ai::GenerateContentResponse;
 pub use google_ai::completion::{GoogleEventMapper, into_google};
 use gpui::{App, AppContext, AsyncApp, Context, Entity, SharedString, Task};
-use http_client::{CustomHeaders, HttpClient};
+use http_client::{
+    AsyncBody, CustomHeaders, HttpClient, Method, Request as HttpRequest, StatusCode,
+};
 use language_model::{
     ApiKeyConfiguration, AuthenticateError, EnvVar, LanguageModelCompletionError,
     LanguageModelCompletionEvent, LanguageModelToolChoice, LanguageModelToolSchemaFormat,
@@ -20,7 +22,11 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 pub use settings::GoogleAvailableModel as AvailableModel;
 use settings::{Settings, SettingsStore};
-use std::sync::{Arc, LazyLock};
+use smol::io::AsyncReadExt as _;
+use std::{
+    sync::{Arc, LazyLock},
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 use strum::IntoEnumIterator;
 use ui::IconName;
 
@@ -28,6 +34,7 @@ use language_model::ApiKeyState;
 
 const PROVIDER_ID: LanguageModelProviderId = GOOGLE_PROVIDER_ID;
 const PROVIDER_NAME: LanguageModelProviderName = GOOGLE_PROVIDER_NAME;
+const HOSTED_GRANT_PATH: &str = "/api/provider-accounts/google-gemini/grants/builtin";
 
 #[derive(Default, Clone, Debug, PartialEq)]
 pub struct GoogleSettings {
@@ -50,6 +57,7 @@ pub enum ModelMode {
 pub struct GoogleLanguageModelProvider {
     http_client: Arc<dyn HttpClient>,
     state: Entity<State>,
+    hosted_grant: Arc<async_lock::Mutex<Option<HostedGrant>>>,
 }
 
 pub struct State {
@@ -67,7 +75,7 @@ static API_KEY_ENV_VAR: LazyLock<EnvVar> = LazyLock::new(|| {
 
 impl State {
     fn is_authenticated(&self) -> bool {
-        self.api_key_state.has_key()
+        omega_zero_base::is_active() || self.api_key_state.has_key()
     }
 
     fn set_api_key(&mut self, api_key: Option<String>, cx: &mut Context<Self>) -> Task<Result<()>> {
@@ -83,6 +91,9 @@ impl State {
     }
 
     fn authenticate(&mut self, cx: &mut Context<Self>) -> Task<Result<(), AuthenticateError>> {
+        if omega_zero_base::is_active() {
+            return Task::ready(Ok(()));
+        }
         let credentials_provider = self.credentials_provider.clone();
         let api_url = GoogleLanguageModelProvider::api_url(cx);
         self.api_key_state.load_if_needed(
@@ -119,7 +130,11 @@ impl GoogleLanguageModelProvider {
             }
         });
 
-        Self { http_client, state }
+        Self {
+            http_client,
+            state,
+            hosted_grant: Arc::default(),
+        }
     }
 
     fn create_language_model(&self, model: google_ai::Model) -> Arc<dyn LanguageModel> {
@@ -128,6 +143,7 @@ impl GoogleLanguageModelProvider {
             model,
             state: self.state.clone(),
             http_client: self.http_client.clone(),
+            hosted_grant: self.hosted_grant.clone(),
             request_limiter: RateLimiter::new(4),
         })
     }
@@ -206,6 +222,7 @@ impl LanguageModelProvider for GoogleLanguageModelProvider {
                     model,
                     state: self.state.clone(),
                     http_client: self.http_client.clone(),
+                    hosted_grant: self.hosted_grant.clone(),
                     request_limiter: RateLimiter::new(4),
                 }) as Arc<dyn LanguageModel>
             })
@@ -241,6 +258,7 @@ pub struct GoogleLanguageModel {
     model: google_ai::Model,
     state: Entity<State>,
     http_client: Arc<dyn HttpClient>,
+    hosted_grant: Arc<async_lock::Mutex<Option<HostedGrant>>>,
     request_limiter: RateLimiter,
 }
 
@@ -257,6 +275,23 @@ impl GoogleLanguageModel {
         >,
     > {
         let http_client = self.http_client.clone();
+        let hosted_grant = self.hosted_grant.clone();
+        let hosted_mode = omega_zero_base::is_active();
+        let hosted_session_task = if hosted_mode {
+            let session = cx.update(|cx| omega_effectd::openagents_session(cx));
+            Some(cx.spawn(async move |cx| {
+                if let Some(verified) = session.resolve_verified(cx).await {
+                    return Some(verified);
+                }
+                if session.connect(cx).await == omega_effectd::OpenAgentsSessionPhase::Ready {
+                    session.resolve_verified(cx).await
+                } else {
+                    None
+                }
+            }))
+        } else {
+            None
+        };
 
         let (api_key, api_url, extra_headers) = self.state.read_with(cx, |state, cx| {
             let api_url = GoogleLanguageModelProvider::api_url(cx);
@@ -267,23 +302,132 @@ impl GoogleLanguageModel {
         });
 
         async move {
-            let api_key = api_key.ok_or(LanguageModelCompletionError::NoApiKey {
-                provider: PROVIDER_NAME,
-            })?;
-            let request = google_ai::stream_generate_content(
-                http_client.as_ref(),
-                &api_url,
-                &api_key,
-                request,
-                &extra_headers,
-            );
-            request
+            if let Some(hosted_session_task) = hosted_session_task {
+                if let Some(session) = hosted_session_task.await {
+                    let grant_ref = request_hosted_grant(
+                        http_client.as_ref(),
+                        &session.base_url,
+                        &session.access_token,
+                        &hosted_grant,
+                    )
+                    .await?;
+                    return google_ai::stream_generate_content_with_bearer(
+                        http_client.as_ref(),
+                        &session.base_url,
+                        &session.access_token,
+                        &grant_ref,
+                        request,
+                        &extra_headers,
+                    )
+                    .await
+                    .context("failed to stream hosted completion")
+                    .map_err(LanguageModelCompletionError::Other);
+                }
+            }
+
+            if let Some(api_key) = api_key {
+                return google_ai::stream_generate_content(
+                    http_client.as_ref(),
+                    &api_url,
+                    &api_key,
+                    request,
+                    &extra_headers,
+                )
                 .await
                 .context("failed to stream completion")
-                .map_err(LanguageModelCompletionError::Other)
+                .map_err(LanguageModelCompletionError::Other);
+            }
+
+            if !hosted_mode {
+                return Err(LanguageModelCompletionError::NoApiKey {
+                    provider: PROVIDER_NAME,
+                });
+            }
+
+            Err(LanguageModelCompletionError::Other(anyhow::anyhow!(
+                "OpenAgents sign-in was not completed. Send the message again to connect hosted Omega."
+            )))
         }
         .boxed()
     }
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct HostedGrant {
+    grant_ref: String,
+    expires_at: u64,
+}
+
+#[derive(Deserialize)]
+struct HostedGrantResponse {
+    grant: HostedGrant,
+}
+
+async fn request_hosted_grant(
+    http_client: &dyn HttpClient,
+    base_url: &str,
+    bearer_token: &str,
+    hosted_grant: &async_lock::Mutex<Option<HostedGrant>>,
+) -> Result<String, LanguageModelCompletionError> {
+    let mut cached_grant = hosted_grant.lock().await;
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or(Duration::ZERO)
+        .as_millis() as u64;
+    if let Some(grant) = cached_grant.as_ref()
+        && grant.expires_at > now.saturating_add(30_000)
+    {
+        return Ok(grant.grant_ref.clone());
+    }
+
+    let uri = format!("{}{}", base_url.trim_end_matches('/'), HOSTED_GRANT_PATH);
+    let request = HttpRequest::builder()
+        .method(Method::POST)
+        .uri(uri)
+        .header("Authorization", format!("Bearer {}", bearer_token.trim()))
+        .header("Content-Type", "application/json")
+        .body(AsyncBody::from("{}"))
+        .context("failed to build hosted-compute grant request")
+        .map_err(LanguageModelCompletionError::Other)?;
+    let mut response = http_client
+        .send(request)
+        .await
+        .context("failed to request hosted compute")
+        .map_err(LanguageModelCompletionError::Other)?;
+    let status = response.status();
+    let mut body = String::new();
+    response
+        .body_mut()
+        .take(64 * 1024)
+        .read_to_string(&mut body)
+        .await
+        .context("failed to read hosted-compute grant response")
+        .map_err(LanguageModelCompletionError::Other)?;
+
+    if status == StatusCode::TOO_MANY_REQUESTS {
+        return Err(LanguageModelCompletionError::RateLimitExceeded {
+            provider: PROVIDER_NAME,
+            retry_after: None,
+        });
+    }
+    if !status.is_success() {
+        return Err(LanguageModelCompletionError::Other(anyhow::anyhow!(
+            "Hosted Omega is unavailable (HTTP {status})."
+        )));
+    }
+
+    let response: HostedGrantResponse = serde_json::from_str(&body)
+        .context("hosted-compute grant response was invalid")
+        .map_err(LanguageModelCompletionError::Other)?;
+    if response.grant.grant_ref.trim().is_empty() {
+        return Err(LanguageModelCompletionError::Other(anyhow::anyhow!(
+            "Hosted Omega returned an empty grant."
+        )));
+    }
+    let grant_ref = response.grant.grant_ref.clone();
+    *cached_grant = Some(response.grant);
+    Ok(grant_ref)
 }
 
 impl LanguageModel for GoogleLanguageModel {

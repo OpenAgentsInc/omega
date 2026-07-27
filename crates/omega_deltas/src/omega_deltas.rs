@@ -139,7 +139,11 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0148",
     "OMEGA-DELTA-0149",
     "OMEGA-DELTA-0150",
+    "OMEGA-DELTA-0151",
 ];
+
+pub const GOOGLE_PROVIDER_PATH: &str = "crates/language_models/src/provider/google.rs";
+pub const GOOGLE_CLIENT_PATH: &str = "crates/google_ai/src/google_ai.rs";
 
 /// OMEGA-DELTA-0125. Every entry the thread header's `…` menu offers, the
 /// action a click on it finally reaches, and whether zero base offers it.
@@ -15464,6 +15468,39 @@ mod tests {
                 && !thread_view.contains("config_options_view"),
             "OMEGA-DELTA-0150: the new-chat composer can still expose or invoke \
              an external executor."
+        );
+    }
+
+    /// OMEGA-DELTA-0151. Zero base authenticates through OpenAgents hosted
+    /// compute before considering the optional direct Google credential.
+    #[test]
+    fn zero_base_uses_hosted_google_without_a_local_key() {
+        let provider = read_repository_file(GOOGLE_PROVIDER_PATH);
+        let client = read_repository_file(GOOGLE_CLIENT_PATH);
+
+        assert!(
+            provider.contains("omega_zero_base::is_active() || self.api_key_state.has_key()")
+                && provider.contains("request_hosted_grant")
+                && provider.contains("stream_generate_content_with_bearer"),
+            "OMEGA-DELTA-0151: {} no longer makes hosted OpenAgents compute \
+             the authenticated zero-base default.",
+            repository_path(GOOGLE_PROVIDER_PATH).display()
+        );
+        assert!(
+            client.contains("/api/provider-accounts/google-gemini/models/")
+                && client.contains("x-openagents-session-ref")
+                && client.contains("Authorization"),
+            "OMEGA-DELTA-0151: {} no longer sends a short-lived hosted grant \
+             and account bearer to the OpenAgents Gemini broker.",
+            repository_path(GOOGLE_CLIENT_PATH).display()
+        );
+
+        let stream = body_of(&provider, "stream_completion");
+        assert!(
+            stream.find("request_hosted_grant") < stream.find("if let Some(api_key)"),
+            "OMEGA-DELTA-0151: {} checks the local Google key before hosted \
+             compute, making the optional fallback a prerequisite again.",
+            repository_path(GOOGLE_PROVIDER_PATH).display()
         );
     }
 

@@ -6715,3 +6715,19 @@ created by older builds, but the current routing law no longer emits it.
   `the_composer_shows_no_executor_or_external_provider_controls` in
   `crates/omega_deltas`, plus router behavior tests in `omega_front_door` and
   `agent_ui`.
+
+### OMEGA-DELTA-0151 — Omega uses hosted compute without a Google key
+
+Zero base sends Google-backed Omega requests through OpenAgents hosted compute
+by default. The desktop reuses its verified OpenAgents account session, obtains
+a short-lived quota grant, and sends the inference request to the OpenAgents
+broker. The hosted Google credential remains server-side and is never returned
+to or stored by the desktop.
+
+A locally configured Google API key remains an optional fallback when hosted
+authentication is not available. It is not required to start or use Omega, and
+zero base must not surface the inherited `NoApiKey` failure for this default
+path.
+
+- **Enforced by:** `zero_base_uses_hosted_google_without_a_local_key` in
+  `crates/omega_deltas`, plus the OpenAgents Gemini broker route tests.
