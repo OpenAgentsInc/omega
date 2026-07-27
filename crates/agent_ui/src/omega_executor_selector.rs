@@ -454,21 +454,15 @@ fn build_menu(
             );
         }
 
-        menu = menu.separator().custom_row(move |_window, _cx| {
-            v_flex()
-                .max_w_64()
-                .child(
-                    Label::new(CHOOSING_RECONNECTS)
-                        .size(LabelSize::XSmall)
-                        .color(Color::Muted),
-                )
-                .child(
-                    Label::new(ONLY_BEFORE_THE_FIRST_MESSAGE)
-                        .size(LabelSize::XSmall)
-                        .color(Color::Muted),
-                )
-                .into_any_element()
-        });
+        // omega#112. No explanatory footer in the menu.
+        //
+        // The owner: "remove the explanatory message in this box, not
+        // relevant". It was two sentences of policy under a list of four
+        // words, and a person opening a four-item menu is choosing, not
+        // reading. Both sentences still exist where they are actually needed:
+        // `CHOOSING_RECONNECTS` and `ONLY_BEFORE_THE_FIRST_MESSAGE` are the
+        // disabled control's tooltip, which is where someone who cannot click
+        // the thing is owed an explanation.
 
         menu.key_context("OmegaExecutorSelector")
     })

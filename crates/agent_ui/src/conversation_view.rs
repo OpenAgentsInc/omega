@@ -1041,6 +1041,18 @@ impl ConversationView {
                 this.message_editor.update(cx, |editor, cx| {
                     editor.set_session_capabilities(this.session_capabilities.clone(), cx);
                 });
+                // omega#112. Put the cursor back in the composer.
+                //
+                // `PopoverMenu` restores focus to whatever held it before the
+                // menu opened, which is normally right — but this rebuild
+                // replaced the whole thread view, so the handle it restores to
+                // belongs to an editor that no longer exists. The owner is left
+                // with a composer they have to click before typing, right after
+                // choosing who they are about to type to.
+                this.message_editor
+                    .read(cx)
+                    .focus_handle(cx)
+                    .focus(window, cx);
             });
         }
         cx.notify();
@@ -3543,19 +3555,34 @@ impl Render for ConversationView {
                     .loading_status
                     .clone()
                     .unwrap_or_else(|| "Loading…".into());
+                // omega#112. Bottom left, not the middle of an empty window.
+                //
+                // The owner, switching executors: "it shows me a fullscreen
+                // loading window with nothing on it except for the center
+                // message. that is unacceptable."
+                //
+                // A centred label in an otherwise blank pane reads as the
+                // application having gone somewhere, for something that is
+                // usually a second of process startup. Down here it reads as
+                // what it is — a status line — and the window still looks like
+                // the window you were just in.
                 v_flex()
                     .flex_1()
                     .size_full()
-                    .items_center()
-                    .justify_center()
+                    .items_start()
+                    .justify_end()
+                    .p_3()
                     .child(
-                        Label::new(label_text).color(Color::Muted).with_animation(
-                            "loading-agent-label",
-                            Animation::new(Duration::from_secs(2))
-                                .repeat()
-                                .with_easing(pulsating_between(0.3, 0.7)),
-                            |label, delta| label.alpha(delta),
-                        ),
+                        Label::new(label_text)
+                            .size(LabelSize::Small)
+                            .color(Color::Muted)
+                            .with_animation(
+                                "loading-agent-label",
+                                Animation::new(Duration::from_secs(2))
+                                    .repeat()
+                                    .with_easing(pulsating_between(0.3, 0.7)),
+                                |label, delta| label.alpha(delta),
+                            ),
                     )
                     .into_any()
             }
