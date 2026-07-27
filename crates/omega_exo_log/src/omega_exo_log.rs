@@ -47,13 +47,25 @@
 //! `typescript/harness/runner.ts` (the same objects written by hand by Exo's
 //! own bridge), and `docs/exoharness-http.md` (the envelope, with examples).
 //! The variant count was counted off `Request::kind` rather than quoted: it is
-//! **52**, and Omega's own `omega_exo_lane::endpoint` prose says 53.
+//! **52**.
+//!
+//! # One enumeration, two decisions
+//!
+//! `OMEGA-DELTA-0102`. That list of fifty-two now lives once, in
+//! `omega_exo_lane::ExoRequestKind`, and [`admission`] is this crate's decision
+//! over it. `omega_exo_episode::family` is the other decision over the same
+//! enumeration, and the two are deliberately not merged: that one admits
+//! `conversation_fork` because forking is the episode reset, this one refuses it
+//! because this client is read-only. See [`admission`] for the ten reads this
+//! crate also refuses and why.
 
+pub mod admission;
 pub mod client;
 pub mod history;
 pub mod query;
 pub mod record;
 
+pub use admission::{admitted_read_kinds, is_admitted_read, unadmitted_kinds};
 pub use client::{EXO_REQUEST_PATH, ExoReadClient, ExoReadError, exo_default_port};
 pub use history::{ExoArtifactSet, ExoBody, ExoHistory, ExoHistoryRow};
 pub use query::{ExoEventWindow, ExoId, ExoQuery, ExoReadDirection, NotAnExoId};
@@ -63,21 +75,20 @@ pub use record::{
     HarnessReportedUsage,
 };
 
-/// Every request kind this crate can send, in one list.
+/// Every request kind this crate can send, as wire strings.
 ///
-/// The registry `OMEGA-DELTA-0091` reads. It is derived from [`ExoQuery`] by
-/// hand and checked against it, rather than being the source: a list that were
-/// the source could grow a write kind without a variant existing to send it.
-pub const EXO_ADMITTED_READ_KINDS: &[&str] = &[
-    "get_agent",
-    "agent_list_artifacts",
-    "agent_read_artifact",
-    "get_conversation",
-    "conversation_get_events",
-    "conversation_get_event",
-    "conversation_list_artifacts",
-    "conversation_read_artifact",
-];
+/// `OMEGA-DELTA-0102`. Derived twice over — from
+/// `omega_exo_lane::ExoRequestKind::ALL` through [`is_admitted_read`], and
+/// spelled by `ExoRequestKind::wire` — so there is no hand-kept list here to
+/// drift from the decision. It was a transcription until the two Exo crates were
+/// found holding one protocol between them in two copies.
+#[must_use]
+pub fn exo_admitted_read_kinds() -> Vec<&'static str> {
+    admitted_read_kinds()
+        .into_iter()
+        .map(omega_exo_lane::ExoRequestKind::wire)
+        .collect()
+}
 
 #[cfg(test)]
 mod tests {
@@ -122,9 +133,36 @@ mod tests {
         ];
         let mut named: Vec<&str> = every.iter().map(ExoQuery::wire_kind).collect();
         named.sort_unstable();
-        let mut declared: Vec<&str> = EXO_ADMITTED_READ_KINDS.to_vec();
+        let mut declared: Vec<&str> = exo_admitted_read_kinds();
         declared.sort_unstable();
         assert_eq!(named, declared);
         assert_eq!(named.len(), 8);
+    }
+
+    /// The published wire spellings are Exo's, not a rename.
+    ///
+    /// `exo_admitted_read_kinds` is derived, so it cannot disagree with the
+    /// decision — but it could still be derived from a renamed enumeration. The
+    /// three spellings this crate exists for are stated once here against the
+    /// strings Exo actually answers to.
+    #[test]
+    fn the_published_kinds_are_the_strings_exo_answers_to() {
+        let published = exo_admitted_read_kinds();
+        for expected in [
+            "get_agent",
+            "agent_list_artifacts",
+            "agent_read_artifact",
+            "get_conversation",
+            "conversation_get_events",
+            "conversation_get_event",
+            "conversation_list_artifacts",
+            "conversation_read_artifact",
+        ] {
+            assert!(
+                published.contains(&expected),
+                "the client can no longer name `{expected}`: {published:?}"
+            );
+        }
+        assert_eq!(published.len(), 8);
     }
 }

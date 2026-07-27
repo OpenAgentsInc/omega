@@ -15,4 +15,11 @@ path = "src/omega_deltas.rs"
 serde_json.workspace = true
 sha2.workspace = true
 
+# OMEGA-DELTA-0102. The three Exo law crates, so the registry can check the two
+# decisions over Exo's protocol by *calling* them rather than by scraping their
+# source for a list it also holds. All three are leaves — no gpui, no process,
+# no filesystem — so this does not make the delta checks build the UI.
 [dev-dependencies]
+omega_exo_episode.workspace = true
+omega_exo_lane.workspace = true
+omega_exo_log.workspace = true

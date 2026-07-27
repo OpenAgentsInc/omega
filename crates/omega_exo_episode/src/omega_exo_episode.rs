@@ -72,7 +72,9 @@ pub mod reset;
 pub mod root;
 pub mod state;
 
-pub use family::{EXO_REQUEST_FAMILIES, RequestFamily, family_of, is_admitted};
+pub use family::{
+    RequestFamily, exo_request_families, family_of, family_of_wire, is_admitted, is_admitted_wire,
+};
 pub use ids::{AgentId, ConversationId, EventId, ExoIdError, SandboxId, SnapshotId};
 pub use request::{EpisodeRequest, ForkReadError, ForkSlug, ForkedConversation};
 pub use reset::{

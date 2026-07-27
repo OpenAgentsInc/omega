@@ -43,6 +43,8 @@
 //! would fail exactly the way the manual loop already failed: quietly, in the
 //! direction of a green check.
 
+use omega_exo_lane::ExoRequestKind;
+
 use crate::family::{RequestFamily, family_of};
 use crate::ids::{AgentId, ConversationId, EventId, SandboxId, SnapshotId};
 use crate::reset::FilesystemReset;
@@ -253,27 +255,32 @@ pub enum EpisodeRequest {
 }
 
 impl EpisodeRequest {
-    /// Exo's request type name for this request.
+    /// Which of Exo's request types this request is.
+    ///
+    /// `OMEGA-DELTA-0102`. Named out of the single enumeration rather than
+    /// spelled again: the wire strings live in `omega_exo_lane::protocol` and
+    /// nowhere else, so there is no way for this table to name a request type
+    /// Exo does not have.
     #[must_use]
-    pub const fn request_type(&self) -> &'static str {
+    pub const fn kind(&self) -> ExoRequestKind {
         match self {
-            Self::ForkAtEvent { .. } => "conversation_fork",
-            Self::ReadEvents { .. } => "conversation_get_events",
-            Self::ShowConversation { .. } => "get_conversation",
-            Self::RestoreSandbox { .. } => "start_sandbox",
+            Self::ForkAtEvent { .. } => ExoRequestKind::ConversationFork,
+            Self::ReadEvents { .. } => ExoRequestKind::ConversationGetEvents,
+            Self::ShowConversation { .. } => ExoRequestKind::GetConversation,
+            Self::RestoreSandbox { .. } => ExoRequestKind::StartSandbox,
         }
     }
 
-    /// The family this request belongs to.
-    ///
-    /// # Panics
-    ///
-    /// Never at runtime for a request this enum can build:
-    /// `every_episode_request_is_in_an_admitted_family` fails the build first
-    /// if a variant's type name is not in [`crate::family`]'s table.
+    /// Exo's request type name for this request, as it goes on the wire.
     #[must_use]
-    pub fn family(&self) -> RequestFamily {
-        family_of(self.request_type()).expect("every episode request type is classified")
+    pub const fn request_type(&self) -> &'static str {
+        self.kind().wire()
+    }
+
+    /// The family this request belongs to.
+    #[must_use]
+    pub const fn family(&self) -> RequestFamily {
+        family_of(self.kind())
     }
 
     /// The full JSON body of `POST /request`, ready to send.
@@ -294,7 +301,7 @@ impl EpisodeRequest {
                 up_to_inclusive,
                 slug,
             } => serde_json::json!({
-                "type": "conversation_fork",
+                "type": self.request_type(),
                 "agent_id": agent.as_str(),
                 "conversation_id": conversation.as_str(),
                 "request": {
@@ -313,7 +320,7 @@ impl EpisodeRequest {
                 limit,
                 after,
             } => serde_json::json!({
-                "type": "conversation_get_events",
+                "type": self.request_type(),
                 "agent_id": agent.as_str(),
                 "conversation_id": conversation.as_str(),
                 "query": {
@@ -333,7 +340,7 @@ impl EpisodeRequest {
                 agent,
                 conversation,
             } => serde_json::json!({
-                "type": "get_conversation",
+                "type": self.request_type(),
                 "agent_id": agent.as_str(),
                 "conversation_id": conversation.as_str(),
             }),
@@ -343,7 +350,7 @@ impl EpisodeRequest {
                 snapshot,
                 admitted,
             } => serde_json::json!({
-                "type": "start_sandbox",
+                "type": self.request_type(),
                 "scope": admitted.scope_json(fork),
                 "request": {
                     "id": sandbox.as_str(),

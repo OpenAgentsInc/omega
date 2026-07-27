@@ -91,12 +91,14 @@ pub mod capability;
 pub mod command;
 pub mod endpoint;
 pub mod pin;
+pub mod protocol;
 pub mod turn;
 
 pub use capability::{ExoAgent, ExoAgentReadError, ExoConversation, ExoMount, SelfModification};
 pub use command::{ADMITTED_LANE_ARGV, ARGUMENT_TERMINATOR, ExoArg, ExoCommand, ExoRoot};
 pub use endpoint::{EXO_SERVE_DEFAULT_BIND, LoopbackEndpoint, OffLoopback};
 pub use pin::{EXO_HARNESS_ID, EXO_PIN, ExoPin, ExoPinMismatch, ObservedExoCheckout, admits_bytes};
+pub use protocol::{EXO_REQUEST_KIND_COUNT, ExoRequestKind};
 pub use turn::{ExoToolActivity, ExoTurn, NotATurn};
 
 use omega_front_door::{ExecutorClass, ExecutorDisclosure, RouteReason};
@@ -213,6 +215,7 @@ gpt5mini  gpt-5-mini      openai  default
 
     fn driven_agent() -> ExoAgent {
         ExoAgent {
+            id: None,
             slug: "omega-lane".into(),
             harness: "basic".into(),
             model: "gpt5mini".into(),

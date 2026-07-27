@@ -94,6 +94,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0094",
     "OMEGA-DELTA-0095",
     "OMEGA-DELTA-0100",
+    "OMEGA-DELTA-0102",
 ];
 
 /// OMEGA-DELTA-0094. The audience rules, which know nothing about a window.
@@ -2455,6 +2456,7 @@ pub const SEND_LAW_EXECUTOR_TOKENS: &[&str] = &["NativeLoop", "ExternalAcp", "En
 /// would satisfy a check that only read the query type.
 pub const EXO_LOG_SOURCE_PATHS: &[&str] = &[
     "crates/omega_exo_log/src/omega_exo_log.rs",
+    EXO_LOG_ADMISSION_PATH,
     "crates/omega_exo_log/src/client.rs",
     "crates/omega_exo_log/src/history.rs",
     "crates/omega_exo_log/src/query.rs",
@@ -2463,9 +2465,9 @@ pub const EXO_LOG_SOURCE_PATHS: &[&str] = &[
 
 /// OMEGA-DELTA-0091. The closed set of request kinds the client may name.
 ///
-/// Eight of Exo's fifty-two. Counted off `Request::kind` in
-/// `crates/exoharness/src/protocol.rs` at the pin `omega_exo_lane::EXO_PIN`,
-/// not quoted from a teardown.
+/// Eight of Exo's fifty-two. `OMEGA-DELTA-0102` holds this against the crate's
+/// own decision by calling it, so this is the registry's independent statement
+/// of what the client is for rather than a copy of the crate's answer.
 pub const EXO_LOG_ADMITTED_KINDS: &[&str] = &[
     "get_agent",
     "agent_list_artifacts",
@@ -2477,66 +2479,67 @@ pub const EXO_LOG_ADMITTED_KINDS: &[&str] = &[
     "conversation_read_artifact",
 ];
 
-/// OMEGA-DELTA-0091. The other forty-four, none of which may appear.
+// ------ OMEGA-DELTA-0102
+
+/// OMEGA-DELTA-0102. The one place Exo's request protocol is transcribed.
 ///
-/// Not "the writes": *the unadmitted*. Ten of these are reads — `list_agents`,
-/// `list_conversations`, `get_sandbox_process_events`, `wait_sandbox_process`,
-/// and the six binding list-and-get variants — and they are refused anyway,
-/// because the issue scoped this client to a conversation's own record and a
-/// list of every agent on the host is not that. A denylist of writes would have
-/// admitted all ten silently.
+/// Two lanes landed on 2026-07-26 each holding its own copy of the same 52
+/// variants — `omega_exo_episode::family` for the episode reset's admitted and
+/// refused families, `omega_exo_log` for the eight reads its client may name.
+/// The copies agreed exactly, which is the good case and is still one copy too
+/// many: the next upstream variant would have to be noticed twice, by two
+/// people who each already believed their list was complete.
+pub const EXO_PROTOCOL_PATH: &str = "crates/omega_exo_lane/src/protocol.rs";
+
+/// OMEGA-DELTA-0102. The read-only client's decision over that enumeration.
+pub const EXO_LOG_ADMISSION_PATH: &str = "crates/omega_exo_log/src/admission.rs";
+
+/// OMEGA-DELTA-0102. The two decisions taken over the one enumeration, each as
+/// the file it lives in and the function that carries it.
 ///
-/// The union of this list and [`EXO_LOG_ADMITTED_KINDS`] was transcribed from
-/// `Request::kind` at the pin, and it agrees exactly with the independent
-/// transcription `omega_exo_episode::family::EXO_REQUEST_FAMILIES` made for
-/// `OMEGA-DELTA-0090`. Two copies of a 52-line list is one copy too many; the
-/// note in the registry says where it should live.
-pub const EXO_LOG_UNADMITTED_KINDS: &[&str] = &[
-    "list_agents",
-    "new_agent",
-    "delete_agent",
-    "list_bindings",
-    "put_binding",
-    "get_binding",
-    "list_secrets",
-    "put_secret",
-    "get_secret",
-    "list_conversations",
-    "new_conversation",
-    "delete_conversation",
-    "agent_write_artifact",
-    "create_sandbox",
-    "snapshot_sandbox",
-    "start_sandbox",
-    "stop_sandbox",
-    "start_sandbox_process",
-    "write_sandbox_process_input",
-    "close_sandbox_process_input",
-    "get_sandbox_process_events",
-    "wait_sandbox_process",
-    "cancel_sandbox_process",
-    "agent_list_bindings",
-    "agent_put_binding",
-    "agent_get_binding",
-    "agent_list_secrets",
-    "agent_put_secret",
-    "agent_get_secret",
-    "conversation_start_session",
-    "conversation_end_session",
-    "conversation_begin_turn",
-    "conversation_add_events",
-    "conversation_fork",
-    "conversation_write_artifact",
-    "conversation_list_bindings",
-    "conversation_put_binding",
-    "conversation_get_binding",
-    "conversation_list_secrets",
-    "conversation_put_secret",
-    "conversation_get_secret",
-    "turn_add_events",
-    "turn_write_artifact",
-    "turn_finish",
+/// Two, not one. They are deliberately not merged, because they admit different
+/// subsets: the episode law admits `conversation_fork` because forking *is* the
+/// episode reset, and the log client refuses it because that client is
+/// read-only. A merge would hand one side a capability nobody granted it, and
+/// `the_two_decisions_over_exos_protocol_are_not_merged` is what stops a later
+/// tidy-up from performing one.
+pub const EXO_PROTOCOL_DECISIONS: &[(&str, &str)] = &[
+    (EPISODE_FAMILY_PATH, "family_of"),
+    (EXO_LOG_ADMISSION_PATH, "is_admitted_read"),
 ];
+
+/// OMEGA-DELTA-0102. Every production source that decides something about Exo's
+/// protocol and must therefore hold no second copy of it.
+///
+/// The scan below asserts that none of these files contains a *string literal*
+/// equal to one of Exo's request kinds. That is the mechanical statement of
+/// "transcribed once": a file that spells `conversation_fork` for itself has
+/// started a second list, whatever it calls it.
+pub const EXO_PROTOCOL_CONSUMER_SOURCES: &[&str] = &[
+    EPISODE_LAW_PATH,
+    EPISODE_FAMILY_PATH,
+    EPISODE_REQUEST_PATH,
+    EPISODE_RESET_PATH,
+    EPISODE_ROOT_PATH,
+    EPISODE_STATE_PATH,
+    "crates/omega_exo_episode/src/ids.rs",
+    "crates/omega_exo_log/src/omega_exo_log.rs",
+    EXO_LOG_ADMISSION_PATH,
+    "crates/omega_exo_log/src/client.rs",
+    "crates/omega_exo_log/src/history.rs",
+    "crates/omega_exo_log/src/query.rs",
+    "crates/omega_exo_log/src/record.rs",
+];
+
+/// OMEGA-DELTA-0102. Wildcard arms, which turn a total decision into a default.
+///
+/// Every decision over `ExoRequestKind` is written as a `match` with no
+/// wildcard, so upstream's 53rd variant is a build failure on the person adding
+/// it. A `_ =>` arm would make the same variant compile and be silently
+/// classified — safe, in the sense that the default is refusal, and invisible,
+/// which is how one protocol stayed transcribed twice in two crates for a day
+/// without either lane being able to fix it mid-flight.
+pub const EXO_DECISION_WILDCARD_ARMS: &[&str] = &["_ =>", "_ if"];
 
 /// OMEGA-DELTA-0091. Headers and vocabulary that would assert an authentication
 /// Exo does not have.
@@ -10020,52 +10023,66 @@ mod tests {
         let path = repository_path(EPISODE_REQUEST_PATH);
         let source = std::fs::read_to_string(&path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
+        // `OMEGA-DELTA-0102`. The table names variants of the one enumeration
+        // rather than spelling Exo's wire strings for itself, so this reads
+        // identifiers and resolves them through the crate.
         let table = source
-            .split_once("pub const fn request_type(&self)")
+            .split_once("pub const fn kind(&self)")
             .and_then(|(_, rest)| rest.split_once("\n    }"))
-            .expect("OMEGA-DELTA-0090: the request_type table is present")
+            .expect("OMEGA-DELTA-0090: the request kind table is present")
             .0;
-        let emitted: Vec<&str> = table
-            .match_indices('"')
-            .map(|(offset, _)| offset)
-            .collect::<Vec<_>>()
-            .chunks_exact(2)
-            .map(|pair| &table[pair[0] + 1..pair[1]])
-            .collect();
+        let emitted: Vec<String> = kinds_named_in(table);
         assert_eq!(
             emitted.len(),
             4,
-            "OMEGA-DELTA-0090: the request_type table parsed as {emitted:?}, which is \
+            "OMEGA-DELTA-0090: the request kind table parsed as {emitted:?}, which is \
              not the closed set of four this delta describes."
         );
 
         let families = repository_path(EPISODE_FAMILY_PATH);
         let family_source = std::fs::read_to_string(&families)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", families.display()));
-        for request_type in &emitted {
-            let row = family_source
+        let classification = uncommented(&family_source);
+        for variant in &emitted {
+            let row = classification
                 .lines()
-                .find(|line| line.contains(&format!("(\"{request_type}\", RequestFamily::")))
+                .find(|line| {
+                    line.contains(&format!("ExoRequestKind::{variant} => RequestFamily::"))
+                })
                 .unwrap_or_else(|| {
                     panic!(
-                        "OMEGA-DELTA-0090: the episode client emits `{request_type}` and \
-                         the family table does not classify it, so nothing decided it \
-                         was admitted."
+                        "OMEGA-DELTA-0090: the episode client emits `{variant}` and \
+                         the family decision does not classify it, so nothing decided \
+                         it was admitted."
                     )
                 });
             assert!(
                 EPISODE_ADMITTED_FAMILIES
                     .iter()
                     .any(|family| row.contains(&format!("RequestFamily::{family}"))),
-                "OMEGA-DELTA-0090: the episode client emits `{request_type}`, which is \
+                "OMEGA-DELTA-0090: the episode client emits `{variant}`, which is \
                  classified `{}`. Admitted families are {EPISODE_ADMITTED_FAMILIES:?}.",
                 row.trim()
             );
+            let kind = kind_named(variant).unwrap_or_else(|| {
+                panic!("OMEGA-DELTA-0090: `{variant}` is not a request type Exo has")
+            });
+            assert!(
+                omega_exo_episode::is_admitted(kind),
+                "OMEGA-DELTA-0090: the episode client emits `{kind}`, which the \
+                 compiled family decision refuses."
+            );
         }
 
+        let sent: Vec<&'static str> = emitted
+            .iter()
+            .filter_map(|variant| kind_named(variant))
+            .map(omega_exo_lane::ExoRequestKind::wire)
+            .collect();
+        assert_eq!(sent.len(), 4);
         for refused in EPISODE_REFUSED_REQUEST_TYPES {
             assert!(
-                !emitted.contains(refused),
+                !sent.contains(refused),
                 "OMEGA-DELTA-0090: the episode client emits `{refused}`, which appends \
                  to, deletes from, or reads the secrets of somebody else's Exo."
             );
@@ -10234,6 +10251,311 @@ mod tests {
         );
     }
 
+    // ------ OMEGA-DELTA-0102 — One enumeration of Exo's protocol, two decisions
+
+    /// Every `Self::Variant => "wire",` pair in a `match`, as it is written.
+    ///
+    /// Used to read the single enumeration out of its source rather than to
+    /// trust a copy of it. Comments are stripped first: a commented-out arm is
+    /// exactly how a list stays "complete" across the change that shortens it.
+    fn match_arms_to_literals(body: &str) -> Vec<(String, String)> {
+        uncommented(body)
+            .lines()
+            .filter_map(|line| {
+                let (left, right) = line.trim().split_once("=>")?;
+                let variant = left.trim().strip_prefix("Self::")?.trim();
+                let literal = right.trim().strip_prefix('"')?;
+                let literal = literal.split('"').next()?;
+                Some((variant.to_owned(), literal.to_owned()))
+            })
+            .collect()
+    }
+
+    /// The `ExoRequestKind::Variant` identifiers a decision body names.
+    fn kinds_named_in(body: &str) -> Vec<String> {
+        let body = uncommented(body);
+        let mut named = Vec::new();
+        for (offset, _) in body.match_indices("ExoRequestKind::") {
+            let rest = &body[offset + "ExoRequestKind::".len()..];
+            let end = rest
+                .find(|character: char| !character.is_alphanumeric() && character != '_')
+                .unwrap_or(rest.len());
+            let variant = &rest[..end];
+            if !variant.is_empty() && !named.iter().any(|seen| seen == variant) {
+                named.push(variant.to_owned());
+            }
+        }
+        named
+    }
+
+    /// The enum value a source-level variant identifier stands for.
+    ///
+    /// Resolved through the crate rather than through a table here, so a
+    /// variant this registry can name is a variant that exists.
+    fn kind_named(variant: &str) -> Option<omega_exo_lane::ExoRequestKind> {
+        omega_exo_lane::ExoRequestKind::ALL
+            .into_iter()
+            .find(|kind| format!("{kind:?}") == variant)
+    }
+
+    fn exo_source(relative: &str) -> String {
+        let path = repository_path(relative);
+        std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()))
+    }
+
+    /// OMEGA-DELTA-0102. Exo's protocol is written down once.
+    ///
+    /// omega#103 and omega#104 each landed a full, correct, independent
+    /// transcription of the same 52 request variants — one to partition them
+    /// into families, one to pick eight reads out of them. Both lanes said the
+    /// enumeration should live in one place and neither could move it
+    /// mid-flight. It lives in `omega_exo_lane::protocol` now, and this is the
+    /// check that stops a third copy appearing: no file that *decides* about
+    /// the protocol may spell one of its request kinds as a string literal.
+    ///
+    /// Whole literals, not substrings, for the reason `OMEGA-DELTA-0091` found:
+    /// Exo's event tag `conversation_forked` contains its request kind
+    /// `conversation_fork`, and a decoder must stay free to name the event.
+    #[test]
+    fn exos_request_protocol_is_transcribed_in_exactly_one_place() {
+        let protocol = exo_source(EXO_PROTOCOL_PATH);
+        let wire = function_body(&protocol, "wire").expect(
+            "OMEGA-DELTA-0102: the enumeration no longer maps its variants to Exo's \
+             wire strings",
+        );
+        let transcribed = match_arms_to_literals(wire);
+        assert_eq!(
+            transcribed.len(),
+            omega_exo_lane::EXO_REQUEST_KIND_COUNT,
+            "OMEGA-DELTA-0102: the enumeration in {EXO_PROTOCOL_PATH} parsed as {} \
+             rows and Exo's protocol has {} request types. Either the parse is \
+             reading less than the file or the transcription is short.",
+            transcribed.len(),
+            omega_exo_lane::EXO_REQUEST_KIND_COUNT
+        );
+
+        // The parse and the compiled crate agree, so a green run here is not a
+        // green run against a file this check misread.
+        for (variant, literal) in &transcribed {
+            let kind = kind_named(variant).unwrap_or_else(|| {
+                panic!(
+                    "OMEGA-DELTA-0102: {EXO_PROTOCOL_PATH} names a variant \
+                     `{variant}` that is not in ExoRequestKind::ALL, so ALL is \
+                     shorter than the enum"
+                )
+            });
+            assert_eq!(
+                kind.wire(),
+                literal,
+                "OMEGA-DELTA-0102: {variant} is written with wire `{literal}` and \
+                 compiles to `{}`",
+                kind.wire()
+            );
+        }
+
+        let spellings: Vec<&str> = omega_exo_lane::ExoRequestKind::ALL
+            .iter()
+            .map(|kind| kind.wire())
+            .collect();
+        let mut scanned = 0usize;
+        for relative in EXO_PROTOCOL_CONSUMER_SOURCES {
+            let source = exo_source(relative);
+            scanned += 1;
+            for literal in string_literals(&source) {
+                assert!(
+                    !spellings.contains(&literal.as_str()),
+                    "OMEGA-DELTA-0102: {relative} spells Exo's `{literal}` request \
+                     kind as a string literal. Exo's protocol is enumerated once, \
+                     in {EXO_PROTOCOL_PATH}; a second spelling is a second list, \
+                     and the whole cost of the first duplication was that the next \
+                     upstream variant would have had to be noticed twice."
+                );
+            }
+        }
+        assert_eq!(
+            scanned,
+            EXO_PROTOCOL_CONSUMER_SOURCES.len(),
+            "OMEGA-DELTA-0102: the scan read {scanned} files, so it is reading less \
+             than the crates that decide about the protocol."
+        );
+        assert!(
+            scanned >= 13,
+            "OMEGA-DELTA-0102: {scanned} files is not both Exo law crates. A module \
+             added to either must be added to EXO_PROTOCOL_CONSUMER_SOURCES, or it \
+             goes unscanned and may start a second list."
+        );
+    }
+
+    /// OMEGA-DELTA-0102. A 53rd variant cannot pass unclassified, in either
+    /// decision.
+    ///
+    /// Both decisions are `match`es over `ExoRequestKind` with no wildcard arm,
+    /// so upstream's next variant is a build failure on the person adding it
+    /// rather than a runtime discovery by whoever sent it. Two things are
+    /// checked, because either alone is satisfiable while testing nothing: that
+    /// each decision *names* all 52 variants, and that neither has a wildcard
+    /// that would make naming them optional.
+    ///
+    /// Comments are stripped before the scan. A commented-out match arm reads
+    /// as a named variant to `contains`, which is the shape that produced a
+    /// false green in both prior lanes.
+    #[test]
+    fn both_decisions_are_total_over_the_one_enumeration() {
+        let every: Vec<String> = omega_exo_lane::ExoRequestKind::ALL
+            .iter()
+            .map(|kind| format!("{kind:?}"))
+            .collect();
+        assert_eq!(every.len(), omega_exo_lane::EXO_REQUEST_KIND_COUNT);
+
+        for (relative, function) in EXO_PROTOCOL_DECISIONS {
+            let source = exo_source(relative);
+            let body = function_body(&source, function).unwrap_or_else(|| {
+                panic!(
+                    "OMEGA-DELTA-0102: {relative} no longer has a `{function}` \
+                     decision over Exo's protocol"
+                )
+            });
+            let named = kinds_named_in(body);
+            for variant in &every {
+                assert!(
+                    named.iter().any(|seen| seen == variant),
+                    "OMEGA-DELTA-0102: {relative}'s `{function}` does not classify \
+                     `ExoRequestKind::{variant}`. Every decision over Exo's protocol \
+                     is total, so an unclassified variant is a request nobody \
+                     decided about."
+                );
+            }
+            for variant in &named {
+                assert!(
+                    kind_named(variant).is_some(),
+                    "OMEGA-DELTA-0102: {relative}'s `{function}` classifies \
+                     `ExoRequestKind::{variant}`, which Exo does not have at the pin."
+                );
+            }
+            let stripped = uncommented(body);
+            for wildcard in EXO_DECISION_WILDCARD_ARMS {
+                assert!(
+                    !stripped.contains(wildcard),
+                    "OMEGA-DELTA-0102: {relative}'s `{function}` has a `{wildcard}` \
+                     arm. A wildcard makes the decision a default: upstream's next \
+                     variant compiles, is classified by nobody, and the build stays \
+                     green. The totality is the whole mechanism."
+                );
+            }
+        }
+
+        // And the compiled decisions answer for every variant, which is what the
+        // source scan above is a proxy for.
+        let mut episode_admitted = 0usize;
+        let mut log_admitted = 0usize;
+        for kind in omega_exo_lane::ExoRequestKind::ALL {
+            if omega_exo_episode::is_admitted(kind) {
+                episode_admitted += 1;
+            }
+            if omega_exo_log::is_admitted_read(kind) {
+                log_admitted += 1;
+            }
+        }
+        assert_eq!(
+            episode_admitted, 20,
+            "OMEGA-DELTA-0102: the episode law admits {episode_admitted} of Exo's \
+             request types. If that moved, a family was reclassified, and the \
+             reclassification is the change worth reviewing."
+        );
+        assert_eq!(
+            log_admitted, 8,
+            "OMEGA-DELTA-0102: the read-only client admits {log_admitted} request \
+             types. Eight is the closed set omega#104 scoped it to."
+        );
+    }
+
+    /// OMEGA-DELTA-0102. The two decisions disagree, and are meant to.
+    ///
+    /// This is the check that stops the duplication being "fixed" the wrong
+    /// way. One enumeration, two decision tables — not one decision shared by
+    /// two callers. The episode law holds fork and restore authority because
+    /// forking *is* its mechanism; the log client is read-only and omega#104
+    /// says forking is omega#103's and is scoped there. A merged decision would
+    /// give one of the two something nobody granted it.
+    ///
+    /// The ten reads are the other half of the same argument, from the quieter
+    /// direction: the episode law classifies `list_agents` as a query because it
+    /// changes nothing, and the log client refuses it because omega#104 scoped
+    /// that client to one conversation's own record. Both are right.
+    #[test]
+    fn the_two_decisions_over_exos_protocol_are_not_merged() {
+        use omega_exo_lane::ExoRequestKind;
+
+        for held_only_by_the_episode_law in [
+            ExoRequestKind::ConversationFork,
+            ExoRequestKind::StartSandbox,
+        ] {
+            assert!(
+                omega_exo_episode::is_admitted(held_only_by_the_episode_law),
+                "OMEGA-DELTA-0102: the episode law refuses \
+                 `{held_only_by_the_episode_law}`, which is its own mechanism."
+            );
+            assert!(
+                !omega_exo_log::is_admitted_read(held_only_by_the_episode_law),
+                "OMEGA-DELTA-0102: the read-only log client admits \
+                 `{held_only_by_the_episode_law}`. That is a write, it is \
+                 omega#103's authority, and a read-only client holding it is \
+                 exactly what merging the two decisions would produce."
+            );
+        }
+
+        for read_but_host_wide in [
+            ExoRequestKind::ListAgents,
+            ExoRequestKind::ListConversations,
+            ExoRequestKind::ListBindings,
+            ExoRequestKind::GetBinding,
+            ExoRequestKind::AgentListBindings,
+            ExoRequestKind::AgentGetBinding,
+            ExoRequestKind::ConversationListBindings,
+            ExoRequestKind::ConversationGetBinding,
+            ExoRequestKind::GetSandboxProcessEvents,
+            ExoRequestKind::WaitSandboxProcess,
+        ] {
+            assert_eq!(
+                omega_exo_episode::family_of(read_but_host_wide),
+                omega_exo_episode::RequestFamily::Query,
+                "OMEGA-DELTA-0102: `{read_but_host_wide}` stopped being a query in \
+                 the episode law's partition."
+            );
+            assert!(
+                !omega_exo_log::is_admitted_read(read_but_host_wide),
+                "OMEGA-DELTA-0102: the log client admits `{read_but_host_wide}`. It \
+                 reads, and reading is not the boundary: omega#104 scoped that \
+                 client to a conversation's own record, and a list of every agent \
+                 on the host is not that."
+            );
+        }
+
+        let episode: Vec<ExoRequestKind> = ExoRequestKind::ALL
+            .into_iter()
+            .filter(|kind| omega_exo_episode::is_admitted(*kind))
+            .collect();
+        let log: Vec<ExoRequestKind> = ExoRequestKind::ALL
+            .into_iter()
+            .filter(|kind| omega_exo_log::is_admitted_read(*kind))
+            .collect();
+        assert_ne!(
+            episode, log,
+            "OMEGA-DELTA-0102: the two decisions over Exo's protocol now admit the \
+             same set. They are two because they answer different questions; one \
+             decision behind both callers is the merge this check exists to refuse."
+        );
+        for admitted_by_the_reader in &log {
+            assert!(
+                episode.contains(admitted_by_the_reader),
+                "OMEGA-DELTA-0102: the read-only client admits \
+                 `{admitted_by_the_reader}` and the episode law does not. The reader \
+                 is meant to be the smaller authority of the two."
+            );
+        }
+    }
+
     // ------ OMEGA-DELTA-0091
 
     /// OMEGA-DELTA-0091. Every string literal in a source file, outside
@@ -10302,27 +10624,42 @@ mod tests {
     /// the kind cannot.
     #[test]
     fn the_exo_log_client_can_name_only_the_eight_read_variants() {
+        // `OMEGA-DELTA-0102`. The unadmitted forty-four are derived from the one
+        // enumeration and the crate's own decision, not transcribed here. This
+        // registry keeps only its independent statement of the admitted eight,
+        // and holds the crate to it.
+        let admitted: Vec<&str> = omega_exo_log::exo_admitted_read_kinds();
+        let unadmitted: Vec<&'static str> = omega_exo_log::unadmitted_kinds()
+            .into_iter()
+            .map(omega_exo_lane::ExoRequestKind::wire)
+            .collect();
         assert_eq!(
-            EXO_LOG_ADMITTED_KINDS.len() + EXO_LOG_UNADMITTED_KINDS.len(),
-            52,
+            admitted.len() + unadmitted.len(),
+            omega_exo_lane::EXO_REQUEST_KIND_COUNT,
             "OMEGA-DELTA-0091: the two halves no longer partition Exo's \
-             52-variant protocol, so one of them stopped being a partition of \
-             anything."
+             protocol, so one of them stopped being a partition of anything."
         );
-        for kind in EXO_LOG_ADMITTED_KINDS {
+        let mut declared: Vec<&str> = EXO_LOG_ADMITTED_KINDS.to_vec();
+        declared.sort_unstable();
+        let mut answered: Vec<&str> = admitted.clone();
+        answered.sort_unstable();
+        assert_eq!(
+            answered, declared,
+            "OMEGA-DELTA-0091: the crate admits a different eight than the \
+             registry does. One of the two changed without the other, and the \
+             registry is where the decision is supposed to be legible."
+        );
+        for kind in &admitted {
             assert!(
-                !EXO_LOG_UNADMITTED_KINDS.contains(kind),
-                "OMEGA-DELTA-0091: `{kind}` is on both lists."
+                !unadmitted.contains(kind),
+                "OMEGA-DELTA-0091: `{kind}` is on both sides of the partition."
             );
         }
 
         for relative in EXO_LOG_SOURCE_PATHS {
             let source = exo_log_source(relative);
             for literal in string_literals(&source) {
-                if let Some(kind) = EXO_LOG_UNADMITTED_KINDS
-                    .iter()
-                    .find(|kind| ***kind == *literal)
-                {
+                if let Some(kind) = unadmitted.iter().find(|kind| **kind == literal) {
                     panic!(
                         "OMEGA-DELTA-0091: {relative} names Exo's `{kind}` \
                          request. This crate is read-only and reaches eight \
@@ -10335,45 +10672,61 @@ mod tests {
 
         // The positive half is read off the closed type and nowhere else. An
         // earlier version of this check scanned the whole crate for the eight
-        // admitted kinds, which the crate's own `EXO_ADMITTED_READ_KINDS` table
-        // satisfies on its own — so a variant could stop sending a read and the
-        // check would still pass, reading the list rather than the code. Whole
-        // literals, again: `conversation_get_event` is a prefix of
-        // `conversation_get_events`, and a `contains` test cannot tell a variant
-        // that lost its kind from one that kept it.
+        // admitted kinds, which the crate's own published table satisfied on its
+        // own — so a variant could stop sending a read and the check would still
+        // pass, reading the list rather than the code.
+        //
+        // `OMEGA-DELTA-0102`: the variant-to-kind map names enum variants now,
+        // so this reads identifiers and resolves them through the crate. Whole
+        // identifiers, for the same reason whole literals mattered before —
+        // `ConversationGetEvent` is a prefix of `ConversationGetEvents`, and
+        // `kinds_named_in` stops at the end of the identifier rather than at a
+        // substring match.
         let query = exo_log_source("crates/omega_exo_log/src/query.rs");
-        let body = function_body(&query, "wire_kind")
-            .expect("OMEGA-DELTA-0091: the query type no longer maps variants to wire kinds");
-        let mut sent: Vec<String> = string_literals(body);
-        sent.sort();
-        sent.dedup();
-        let mut admitted: Vec<String> = EXO_LOG_ADMITTED_KINDS
+        let body = function_body(&query, "kind")
+            .expect("OMEGA-DELTA-0091: the query type no longer maps variants to request kinds");
+        let mut sent: Vec<&str> = kinds_named_in(body)
             .iter()
-            .map(|kind| (*kind).to_owned())
+            .map(|variant| {
+                kind_named(variant)
+                    .unwrap_or_else(|| {
+                        panic!("OMEGA-DELTA-0091: `{variant}` is not a request type Exo has")
+                    })
+                    .wire()
+            })
             .collect();
-        admitted.sort();
+        sent.sort_unstable();
+        sent.dedup();
         assert_eq!(
-            sent, admitted,
+            sent, declared,
             "OMEGA-DELTA-0091: the request kinds the query type can produce are \
              no longer exactly the eight admitted reads. A kind that vanished is \
              a read the workspace can no longer perform; a kind that appeared is \
              a capability nobody granted."
         );
 
-        // And the table beside it agrees, in the crate that publishes it.
-        let lib = exo_log_source("crates/omega_exo_log/src/omega_exo_log.rs");
-        let table = lib
-            .split_once("pub const EXO_ADMITTED_READ_KINDS")
-            .and_then(|(_, rest)| rest.split_once("\n];"))
-            .expect("OMEGA-DELTA-0091: the crate no longer publishes its admitted set")
-            .0;
-        let mut published = string_literals(table);
-        published.sort();
+        // And the decision beside it agrees, in the crate that publishes it.
+        let admission = exo_log_source(EXO_LOG_ADMISSION_PATH);
+        let decision = function_body(&admission, "is_admitted_read")
+            .expect("OMEGA-DELTA-0091: the crate no longer decides its own admitted set");
+        let admits: Vec<&str> = decision
+            .split("=> true")
+            .next()
+            .map(|arm| {
+                kinds_named_in(arm)
+                    .iter()
+                    .filter_map(|variant| kind_named(variant))
+                    .map(omega_exo_lane::ExoRequestKind::wire)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let mut published = admits;
+        published.sort_unstable();
         published.dedup();
         assert_eq!(
-            published, admitted,
-            "OMEGA-DELTA-0091: the published admitted set and the registry \
-             disagree."
+            published, declared,
+            "OMEGA-DELTA-0091: the crate's own admission decision and the \
+             registry disagree."
         );
     }
 

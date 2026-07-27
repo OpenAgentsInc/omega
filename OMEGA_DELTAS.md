@@ -3234,8 +3234,10 @@ than it sounds, because the harness omega#81's acceptance sentence names —
   references resolves, and a non-loopback endpoint is refused with a reason.
 - **The wrong call cannot be expressed, rather than being refused.** `exo serve`
   answers **52** request variants — counted off `Request::kind` at the pin
-  `omega_exo_lane::EXO_PIN`, not quoted; Omega's own `omega_exo_lane::endpoint`
-  prose says 53 and is one out. `ExoQuery` is closed at eight of them:
+  `omega_exo_lane::EXO_PIN`, not quoted. `OMEGA-DELTA-0102` moved that
+  enumeration into `omega_exo_lane::ExoRequestKind`, where it is written once;
+  this crate's `admission::is_admitted_read` is one of the two decisions over
+  it. `ExoQuery` is closed at eight of them:
   `get_agent`, `get_conversation`, `conversation_get_events`,
   `conversation_get_event`, and the four artifact list/read variants. There is
   no `from_kind(&str)`, no public wire-string constructor, and every reader
@@ -3259,8 +3261,9 @@ than it sounds, because the harness omega#81's acceptance sentence names —
   have admitted all ten without anyone deciding to. The count is not a guess:
   `omega_exo_episode::family` (`OMEGA-DELTA-0090`, omega#103) transcribed the
   same 52 variants independently for a different purpose, and the two
-  transcriptions agree exactly — see the note below on where the shared list
-  should eventually live.
+  transcriptions agreed exactly. `OMEGA-DELTA-0102` has since merged the
+  *enumeration* into `omega_exo_lane::ExoRequestKind` and left the two
+  *decisions* separate, which is the shape both lanes asked for.
 - **Loopback is checked twice, because `localhost` is a name.** The address is
   parsed by `LoopbackEndpoint`, so a client value cannot hold a remote host.
   Then the *resolved* socket address is checked again before the connection
@@ -3315,16 +3318,15 @@ than it sounds, because the harness omega#81's acceptance sentence names —
   `std::net`, so a caller runs it off the main thread; nothing here enforces
   that. And paging is the caller's business: the client returns one page and its
   cursor, and never decides how much of somebody's history to hold.
-- **The 52 request types are now written down twice, and should not stay that
-  way.** `omega_exo_episode::family::EXO_REQUEST_FAMILIES` (`OMEGA-DELTA-0090`)
-  and the two lists behind this entry are independent transcriptions of the same
-  `Request::kind` at the same pin. They agree today, which is the argument for
-  trusting both of them and also the argument for keeping one: a 53rd variant
-  upstream has to be noticed twice. The *decisions* stay separate — the episode
-  crate's `Query` family is eighteen variants and this client admits eight, so
-  merging the decisions would widen this one — but the enumeration and the pin
-  it was read at belong in a single place, and neither lane should move it while
-  the other is in flight.
+- **The 52 request types were written down twice, and are not any more.** This
+  entry and `OMEGA-DELTA-0090` landed independent transcriptions of the same
+  `Request::kind` at the same pin. They agreed exactly, which was the argument
+  for trusting both and also the argument for keeping one: a 53rd variant
+  upstream would have had to be noticed twice. `OMEGA-DELTA-0102` resolved it in
+  the direction both lanes named — one enumeration in
+  `omega_exo_lane::ExoRequestKind`, two decisions over it, kept separate because
+  the episode law's `Query` family is eighteen variants and this client admits
+  eight, so a merge would widen this one to include the fork.
 ### OMEGA-DELTA-0061 — A subagent can be a different executor from its parent, chosen per spawn
 
 - **Upstream behaviour.** `Thread::new_subagent` copies the parent's model, so
@@ -3903,3 +3905,78 @@ than merely stated.
   to come from the visual runner, which builds its workspace in-process and
   never takes the launch path. It says nothing about the composer *outside* zero
   base, where the upstream rule stands.
+
+### OMEGA-DELTA-0102 — Exo's protocol is enumerated once, and decided about twice
+
+- **Upstream Zed:** no Exo, no exoharness, no second agent runtime whose request
+  protocol Zed has an opinion about. There is no upstream behaviour to revert
+  to; this entry records how Omega holds somebody else's protocol.
+- **Omega before this change:** two lanes landed on 2026-07-26, hours apart,
+  each carrying its own complete transcription of the same 52 request variants.
+  `omega_exo_episode::family::EXO_REQUEST_FAMILIES` (`OMEGA-DELTA-0090`,
+  omega#103) partitioned them into admitted and refused families for the episode
+  reset. `omega_exo_log` plus this registry's `EXO_LOG_ADMITTED_KINDS` and
+  `EXO_LOG_UNADMITTED_KINDS` (`OMEGA-DELTA-0091`, omega#104) split them into the
+  eight reads that client may name and the forty-four it may not. Both
+  transcriptions were read off `Request::kind` at the pin, both were correct,
+  and they agreed exactly — the second lane diffed them and said so. That is the
+  *good* case, and it was still one copy too many: the next variant upstream
+  adds would have had to be noticed twice, by two people who each already
+  believed their list was complete. Neither lane could move it while the other
+  was in flight.
+- **Omega now:** the list lives once, in `omega_exo_lane::protocol` as
+  `ExoRequestKind` — 52 variants, upstream's declaration order, upstream's wire
+  strings, and nothing else. Each crate above keeps **its own decision** as a
+  total function over that type: `omega_exo_episode::family::family_of` returns a
+  `RequestFamily`, and `omega_exo_log::admission::is_admitted_read` returns a
+  bool. No consumer spells an Exo request kind as a string literal any more, and
+  the check refuses one that starts to.
+- **Two decisions, not one shared decision.** This is the part worth reading
+  twice, because the obvious "fix" for a duplicated list is a single shared
+  answer, and that would be wrong. The two admit different subsets on purpose:
+  - `conversation_fork` and `start_sandbox` are **admitted** by the episode law
+    — forking *is* the episode reset and the restore is its filesystem half —
+    and **refused** by the log client, which omega#104 scoped to read-only in as
+    many words.
+  - Ten variants that read — `list_agents`, `list_conversations`,
+    `get_sandbox_process_events`, `wait_sandbox_process`, and the six binding
+    list-and-get variants — are **`Query`** in the episode partition, because
+    they change nothing, and **refused** by the log client, because omega#104
+    scoped it to *a conversation's own record* and a list of every agent on the
+    host is not that.
+
+  A merge would hand one of the two a capability nobody granted it, and the
+  worse direction is obvious: a read-only client that can fork.
+  `the_two_decisions_over_exos_protocol_are_not_merged` asserts the
+  disagreement in both directions and that the reader stays the smaller
+  authority of the two.
+- **A 53rd variant cannot pass unclassified.** Every decision is a `match` with
+  no wildcard arm, so upstream's next variant is a build failure on the person
+  adding it, in each crate independently, rather than a runtime discovery by
+  whoever sent it. A `_ =>` arm would make the same variant compile and be
+  classified by nobody — safe, in that the default is refusal, and invisible,
+  which is how one protocol stayed transcribed twice for a day. The wildcard is
+  refused by name.
+- **The enumeration cannot quietly shrink either.** `ExoRequestKind::ALL` is
+  `[Self; EXO_REQUEST_KIND_COUNT]` and `ordinal` is a wildcard-free `match`
+  checked against each entry's position, so an array that forgot a variant,
+  listed one twice, or grew without the count growing fails
+  `the_enumeration_lists_every_variant_exactly_once`.
+- **The registry checks by calling, not by scraping.** `omega_deltas` takes the
+  three Exo law crates as dev-dependencies — all leaves, no gpui, no process, no
+  filesystem — so `both_decisions_are_total_over_the_one_enumeration` resolves
+  every variant identifier it parses out of a source file through the compiled
+  enum, and a parse that misread the file fails instead of passing. Comments are
+  stripped before every scan: a commented-out match arm reads as a classified
+  variant to `contains`, and that exact shape produced a false green in both
+  prior lanes.
+- **Enforced by:** `exos_request_protocol_is_transcribed_in_exactly_one_place`,
+  `both_decisions_are_total_over_the_one_enumeration`, and
+  `the_two_decisions_over_exos_protocol_are_not_merged` in
+  `crates/omega_deltas/`, plus `the_enumeration_lists_every_variant_exactly_once`
+  and `every_variant_has_its_own_wire_spelling` in `crates/omega_exo_lane/`.
+- **What this does not cover.** Nothing here opens a socket. The enumeration is
+  read from `crates/exoharness/src/protocol.rs` at `omega_exo_lane::EXO_PIN`; a
+  running `exo serve` has never confirmed it. If upstream adds a variant, this
+  fails on the *next transcription*, not on the day upstream adds it — no check
+  here watches the pinned tree change.

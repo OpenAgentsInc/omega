@@ -2,8 +2,9 @@
 //!
 //! `exo serve` answers **52** request variants over one unauthenticated
 //! loopback endpoint (`Request::kind` in `crates/exoharness/src/protocol.rs` at
-//! the pinned commit — counted, not quoted; Omega's own
-//! `omega_exo_lane::endpoint` prose says 53 and is one out).
+//! the pinned commit — counted, not quoted). `OMEGA-DELTA-0102` writes that
+//! enumeration down once, as `omega_exo_lane::ExoRequestKind`, and
+//! [`crate::admission`] is this crate's decision over it.
 //!
 //! Eight of those variants read a conversation's durable record. Omega wants
 //! exactly those eight. The other forty-four create agents, write events, fork
@@ -23,6 +24,8 @@
 //! admissible because there is no other way to make one.
 //!
 //! [`ExoReadClient`]: crate::ExoReadClient
+
+use omega_exo_lane::ExoRequestKind;
 
 use crate::record::ExoResponseTag;
 
@@ -221,22 +224,31 @@ pub enum ExoQuery {
 }
 
 impl ExoQuery {
-    /// The `type` tag this query carries on the wire.
+    /// Which of Exo's request types this query is.
     ///
-    /// The whole admitted set, in one function, so `OMEGA-DELTA-0091` can read
-    /// it rather than infer it.
+    /// `OMEGA-DELTA-0102`. Named out of the single enumeration in
+    /// `omega_exo_lane::protocol` rather than spelled again here, so this crate
+    /// holds no second copy of Exo's protocol to drift from the first. The whole
+    /// admitted set is this one function, so a reviewer reads it rather than
+    /// infers it.
+    #[must_use]
+    pub const fn kind(&self) -> ExoRequestKind {
+        match self {
+            Self::AgentShow { .. } => ExoRequestKind::GetAgent,
+            Self::AgentArtifacts { .. } => ExoRequestKind::AgentListArtifacts,
+            Self::AgentArtifact { .. } => ExoRequestKind::AgentReadArtifact,
+            Self::ConversationShow { .. } => ExoRequestKind::GetConversation,
+            Self::ConversationEvents { .. } => ExoRequestKind::ConversationGetEvents,
+            Self::ConversationEvent { .. } => ExoRequestKind::ConversationGetEvent,
+            Self::ConversationArtifacts { .. } => ExoRequestKind::ConversationListArtifacts,
+            Self::ConversationArtifact { .. } => ExoRequestKind::ConversationReadArtifact,
+        }
+    }
+
+    /// The `type` tag this query carries on the wire.
     #[must_use]
     pub const fn wire_kind(&self) -> &'static str {
-        match self {
-            Self::AgentShow { .. } => "get_agent",
-            Self::AgentArtifacts { .. } => "agent_list_artifacts",
-            Self::AgentArtifact { .. } => "agent_read_artifact",
-            Self::ConversationShow { .. } => "get_conversation",
-            Self::ConversationEvents { .. } => "conversation_get_events",
-            Self::ConversationEvent { .. } => "conversation_get_event",
-            Self::ConversationArtifacts { .. } => "conversation_list_artifacts",
-            Self::ConversationArtifact { .. } => "conversation_read_artifact",
-        }
+        self.kind().wire()
     }
 
     /// The one response shape this query may be answered with.

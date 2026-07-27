@@ -49,6 +49,19 @@
 /// [`ExoAgentReadError`], not a permissive record.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ExoAgent {
+    /// The agent's durable id, when Exo printed one.
+    ///
+    /// `OMEGA-DELTA-0102`, omega#104. Exo addresses every request by *id*
+    /// (`AgentId = Uuid7` at the pin), and the lane holds only slugs — so
+    /// nothing that reads Exo's durable log could name the agent it was already
+    /// running turns on. `exo agent show` prints `id:` as its first line and
+    /// this drops it no longer.
+    ///
+    /// `Option`, not required: an older `exo` that does not print the line
+    /// still parses, and a caller that needs the id gets `None` rather than a
+    /// lane that refuses to start. A missing id means "cannot address the
+    /// durable record", which is a smaller failure than "cannot run a turn".
+    pub id: Option<String>,
     /// The agent slug, as Exo reports it.
     pub slug: String,
     /// The executor Exo will run the turn with: `basic`, `rlm`, `typescript`,
@@ -81,6 +94,9 @@ pub struct ExoMount {
 /// Capability-bearing fields from `exo conversation show`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ExoConversation {
+    /// The conversation's durable id, when Exo printed one. See
+    /// [`ExoAgent::id`] for why it is optional.
+    pub id: Option<String>,
     pub slug: String,
     pub mounts: Vec<ExoMount>,
 }
@@ -203,6 +219,7 @@ impl ExoAgent {
 
         let mounts = mounts(output, "sandbox_mounts")?;
         Ok(Self {
+            id: durable_id(output),
             slug: field("slug")?.to_owned(),
             harness: field("harness")?.to_owned(),
             model: field("model")?.to_owned(),
@@ -246,6 +263,7 @@ impl ExoConversation {
             .ok_or(ExoAgentReadError::MissingField("slug"))?
             .to_owned();
         Ok(Self {
+            id: durable_id(output),
             slug,
             mounts: mounts(output, "mounts")?,
         })
@@ -259,6 +277,21 @@ impl ExoConversation {
             Ok(())
         }
     }
+}
+
+/// The `id:` line of an `exo agent show` or `exo conversation show`.
+///
+/// `OMEGA-DELTA-0102`, omega#104. Exact prefix, and only at the start of a
+/// line: `latest_event_id:` and `sandbox_id:` are also ids and are not this
+/// one. `None` when the line is absent or empty, so a caller that needs the id
+/// decides what to do about it rather than inheriting a guess.
+fn durable_id(output: &str) -> Option<String> {
+    output
+        .lines()
+        .find_map(|line| line.strip_prefix("id:"))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
 }
 
 fn tool_module_paths(output: &str, expected: u32) -> Result<Vec<String>, ExoAgentReadError> {
@@ -431,6 +464,58 @@ braintrust: none
         )
         .expect("parses");
         assert!(agent.networking);
+        assert_eq!(agent.admits_lane_turn(), Ok(()));
+    }
+
+    /// `OMEGA-DELTA-0102`, omega#104. The id Exo addresses by, kept.
+    ///
+    /// Exo's protocol takes `AgentId = Uuid7` — never a slug — so a durable-log
+    /// reader holding only the lane's `agent: String` cannot name the agent the
+    /// lane is already running turns on. `exo agent show` prints the id as its
+    /// first line, this parser used to drop it, and the whole read path was
+    /// unreachable because of that one field.
+    #[test]
+    fn the_agent_record_keeps_the_id_exo_addresses_it_by() {
+        let agent = ExoAgent::parse(DRIVEN_AGENT).expect("real output parses");
+        assert_eq!(
+            agent.id.as_deref(),
+            Some("019f9cc4-0bf8-7fa2-8a48-eb84460661c1")
+        );
+
+        // `latest_event_id:` is also an id, and it is not this one. A prefix
+        // match rather than a line-start match would read the wrong field on a
+        // `conversation show`, and address every later request at an event.
+        let conversation = ExoConversation::parse(
+            "\
+id: 019f9cc4-1111-7fa2-8a48-eb84460661c2
+slug: omega-lane
+latest_event_id: 019f9cc4-2222-7fa2-8a48-eb84460661c3
+mounts:
+  none
+",
+        )
+        .expect("conversation parses");
+        assert_eq!(
+            conversation.id.as_deref(),
+            Some("019f9cc4-1111-7fa2-8a48-eb84460661c2")
+        );
+    }
+
+    /// An Exo that does not print an id still runs a turn.
+    ///
+    /// The id is optional on purpose: it is what a durable-log *read* needs, and
+    /// refusing to parse without it would turn "cannot show the history" into
+    /// "cannot run the agent", which is the larger failure of the two.
+    #[test]
+    fn an_output_with_no_id_line_still_parses_and_still_runs() {
+        let without = DRIVEN_AGENT
+            .lines()
+            .filter(|line| !line.starts_with("id:"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let agent = ExoAgent::parse(&without).expect("an Exo with no id line still parses");
+        assert_eq!(agent.id, None);
+        assert_eq!(agent.slug, "omega-lane");
         assert_eq!(agent.admits_lane_turn(), Ok(()));
     }
 

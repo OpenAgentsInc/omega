@@ -14,11 +14,29 @@
 //! which side is it on" — and it fails when upstream adds a 53rd variant
 //! nobody classified, which is the case an allowlist is silent about.
 //!
+//! # One enumeration, two decisions
+//!
+//! `OMEGA-DELTA-0102`. The list of request types is **not** here. It is
+//! `omega_exo_lane::ExoRequestKind`, written once, and this module is one of
+//! two decisions taken over it — the other being `omega_exo_log`'s read
+//! admission. Both crates originally transcribed the fifty-two variants for
+//! themselves; the transcriptions agreed exactly, and that was still one copy
+//! too many, because the *next* upstream variant would have to be noticed twice
+//! by two people who each already believed their list was complete.
+//!
+//! The two decisions are deliberately not merged. They admit different subsets,
+//! and `conversation_fork` is the clearest case: admitted here because forking
+//! *is* the episode reset, refused there because that client is read-only.
+//! Merging them would hand one of the two a capability nobody granted it.
+//!
+//! [`family_of`] is a `match` with no wildcard arm, so a 53rd variant added to
+//! `ExoRequestKind` does not compile until somebody classifies it here — and
+//! the same is independently true in the log crate.
+//!
 //! # The families
 //!
-//! [`RequestFamily`] has five variants and [`EXO_REQUEST_FAMILIES`] assigns one
-//! to each of the 52 request types at [`crate::EXO_PROTOCOL_PIN`]. Three are
-//! admitted:
+//! [`RequestFamily`] has five variants and [`family_of`] assigns one to each of
+//! the 52 request types at [`crate::EXO_PROTOCOL_PIN`]. Three are admitted:
 //!
 //! * [`RequestFamily::Query`] — reads. They change nothing.
 //! * [`RequestFamily::Fork`] — `conversation_fork`, the episode reset itself.
@@ -46,6 +64,8 @@
 //! records the snapshot it was restored from, and appends a sandbox lifecycle
 //! event. See [`crate::reset`] for the reason Omega cannot actually reach a
 //! useful one of these at this pin.
+
+use omega_exo_lane::ExoRequestKind;
 
 /// What a request does to Exo, coarsely enough to decide with.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -89,95 +109,103 @@ impl std::fmt::Display for RequestFamily {
     }
 }
 
-/// Every request type Exo's protocol has at [`crate::EXO_PROTOCOL_PIN`], with
-/// the family it belongs to.
+/// The episode law's decision, for every request type Exo has.
 ///
-/// Transcribed from `Request::kind` in `crates/exoharness/src/protocol.rs`, in
-/// declaration order, which is also the order the enum is written in. The count
-/// is checked against [`EXO_REQUEST_TYPE_COUNT`] so a partial transcription
-/// fails rather than quietly admitting the variants nobody copied.
-pub const EXO_REQUEST_FAMILIES: &[(&str, RequestFamily)] = &[
-    ("list_agents", RequestFamily::Query),
-    ("get_agent", RequestFamily::Query),
-    ("new_agent", RequestFamily::Write),
-    ("delete_agent", RequestFamily::Write),
-    ("list_bindings", RequestFamily::Query),
-    ("put_binding", RequestFamily::Write),
-    ("get_binding", RequestFamily::Query),
-    ("list_secrets", RequestFamily::Secret),
-    ("put_secret", RequestFamily::Secret),
-    ("get_secret", RequestFamily::Secret),
-    ("list_conversations", RequestFamily::Query),
-    ("get_conversation", RequestFamily::Query),
-    ("new_conversation", RequestFamily::Write),
-    ("delete_conversation", RequestFamily::Write),
-    ("agent_list_artifacts", RequestFamily::Query),
-    ("agent_read_artifact", RequestFamily::Query),
-    ("agent_write_artifact", RequestFamily::Write),
-    ("create_sandbox", RequestFamily::Write),
-    ("snapshot_sandbox", RequestFamily::Write),
-    ("start_sandbox", RequestFamily::Reset),
-    ("stop_sandbox", RequestFamily::Write),
-    ("start_sandbox_process", RequestFamily::Write),
-    ("write_sandbox_process_input", RequestFamily::Write),
-    ("close_sandbox_process_input", RequestFamily::Write),
-    ("get_sandbox_process_events", RequestFamily::Query),
-    ("wait_sandbox_process", RequestFamily::Query),
-    ("cancel_sandbox_process", RequestFamily::Write),
-    ("agent_list_bindings", RequestFamily::Query),
-    ("agent_put_binding", RequestFamily::Write),
-    ("agent_get_binding", RequestFamily::Query),
-    ("agent_list_secrets", RequestFamily::Secret),
-    ("agent_put_secret", RequestFamily::Secret),
-    ("agent_get_secret", RequestFamily::Secret),
-    ("conversation_start_session", RequestFamily::Write),
-    ("conversation_end_session", RequestFamily::Write),
-    ("conversation_begin_turn", RequestFamily::Write),
-    ("conversation_get_events", RequestFamily::Query),
-    ("conversation_get_event", RequestFamily::Query),
-    ("conversation_add_events", RequestFamily::Write),
-    ("conversation_fork", RequestFamily::Fork),
-    ("conversation_list_artifacts", RequestFamily::Query),
-    ("conversation_read_artifact", RequestFamily::Query),
-    ("conversation_write_artifact", RequestFamily::Write),
-    ("conversation_list_bindings", RequestFamily::Query),
-    ("conversation_put_binding", RequestFamily::Write),
-    ("conversation_get_binding", RequestFamily::Query),
-    ("conversation_list_secrets", RequestFamily::Secret),
-    ("conversation_put_secret", RequestFamily::Secret),
-    ("conversation_get_secret", RequestFamily::Secret),
-    ("turn_add_events", RequestFamily::Write),
-    ("turn_write_artifact", RequestFamily::Write),
-    ("turn_finish", RequestFamily::Write),
-];
-
-/// How many request types Exo's protocol has at the pin.
-///
-/// Counted from `Request::kind`'s match arms. The teardown says 52 and this
-/// build measured 52; `crates/omega_exo_lane/src/omega_exo_lane.rs` says 53 in
-/// prose, which is prose. If a rebase of the reference clone moves this number
-/// the transcription above is stale and [`family_of`] will start returning
-/// `None` for real request types, which is the fail-closed direction.
-pub const EXO_REQUEST_TYPE_COUNT: usize = 52;
-
-/// Which family a request type belongs to.
-///
-/// `None` for a type this build has never heard of. A caller must treat that as
-/// refused: an unclassified request is one somebody added upstream after this
-/// table was written, and the safe reading of "we do not know what this does"
-/// is not "send it".
+/// Total by construction: no wildcard arm, so upstream's 53rd variant is a
+/// build failure here rather than an unclassified request somebody sends.
 #[must_use]
-pub fn family_of(request_type: &str) -> Option<RequestFamily> {
-    EXO_REQUEST_FAMILIES
-        .iter()
-        .find(|(name, _)| *name == request_type)
-        .map(|(_, family)| *family)
+pub const fn family_of(kind: ExoRequestKind) -> RequestFamily {
+    match kind {
+        ExoRequestKind::ListAgents => RequestFamily::Query,
+        ExoRequestKind::GetAgent => RequestFamily::Query,
+        ExoRequestKind::NewAgent => RequestFamily::Write,
+        ExoRequestKind::DeleteAgent => RequestFamily::Write,
+        ExoRequestKind::ListBindings => RequestFamily::Query,
+        ExoRequestKind::PutBinding => RequestFamily::Write,
+        ExoRequestKind::GetBinding => RequestFamily::Query,
+        ExoRequestKind::ListSecrets => RequestFamily::Secret,
+        ExoRequestKind::PutSecret => RequestFamily::Secret,
+        ExoRequestKind::GetSecret => RequestFamily::Secret,
+        ExoRequestKind::ListConversations => RequestFamily::Query,
+        ExoRequestKind::GetConversation => RequestFamily::Query,
+        ExoRequestKind::NewConversation => RequestFamily::Write,
+        ExoRequestKind::DeleteConversation => RequestFamily::Write,
+        ExoRequestKind::AgentListArtifacts => RequestFamily::Query,
+        ExoRequestKind::AgentReadArtifact => RequestFamily::Query,
+        ExoRequestKind::AgentWriteArtifact => RequestFamily::Write,
+        ExoRequestKind::CreateSandbox => RequestFamily::Write,
+        ExoRequestKind::SnapshotSandbox => RequestFamily::Write,
+        ExoRequestKind::StartSandbox => RequestFamily::Reset,
+        ExoRequestKind::StopSandbox => RequestFamily::Write,
+        ExoRequestKind::StartSandboxProcess => RequestFamily::Write,
+        ExoRequestKind::WriteSandboxProcessInput => RequestFamily::Write,
+        ExoRequestKind::CloseSandboxProcessInput => RequestFamily::Write,
+        ExoRequestKind::GetSandboxProcessEvents => RequestFamily::Query,
+        ExoRequestKind::WaitSandboxProcess => RequestFamily::Query,
+        ExoRequestKind::CancelSandboxProcess => RequestFamily::Write,
+        ExoRequestKind::AgentListBindings => RequestFamily::Query,
+        ExoRequestKind::AgentPutBinding => RequestFamily::Write,
+        ExoRequestKind::AgentGetBinding => RequestFamily::Query,
+        ExoRequestKind::AgentListSecrets => RequestFamily::Secret,
+        ExoRequestKind::AgentPutSecret => RequestFamily::Secret,
+        ExoRequestKind::AgentGetSecret => RequestFamily::Secret,
+        ExoRequestKind::ConversationStartSession => RequestFamily::Write,
+        ExoRequestKind::ConversationEndSession => RequestFamily::Write,
+        ExoRequestKind::ConversationBeginTurn => RequestFamily::Write,
+        ExoRequestKind::ConversationGetEvents => RequestFamily::Query,
+        ExoRequestKind::ConversationGetEvent => RequestFamily::Query,
+        ExoRequestKind::ConversationAddEvents => RequestFamily::Write,
+        ExoRequestKind::ConversationFork => RequestFamily::Fork,
+        ExoRequestKind::ConversationListArtifacts => RequestFamily::Query,
+        ExoRequestKind::ConversationReadArtifact => RequestFamily::Query,
+        ExoRequestKind::ConversationWriteArtifact => RequestFamily::Write,
+        ExoRequestKind::ConversationListBindings => RequestFamily::Query,
+        ExoRequestKind::ConversationPutBinding => RequestFamily::Write,
+        ExoRequestKind::ConversationGetBinding => RequestFamily::Query,
+        ExoRequestKind::ConversationListSecrets => RequestFamily::Secret,
+        ExoRequestKind::ConversationPutSecret => RequestFamily::Secret,
+        ExoRequestKind::ConversationGetSecret => RequestFamily::Secret,
+        ExoRequestKind::TurnAddEvents => RequestFamily::Write,
+        ExoRequestKind::TurnWriteArtifact => RequestFamily::Write,
+        ExoRequestKind::TurnFinish => RequestFamily::Write,
+    }
 }
 
-/// Whether an episode may send this request type. Unknown types are refused.
+/// Whether an episode may send this request type.
 #[must_use]
-pub fn is_admitted(request_type: &str) -> bool {
-    family_of(request_type).is_some_and(RequestFamily::is_admitted)
+pub const fn is_admitted(kind: ExoRequestKind) -> bool {
+    family_of(kind).is_admitted()
+}
+
+/// Which family a wire request type belongs to.
+///
+/// `None` for a type this build has never heard of. A caller must treat that as
+/// refused: an unclassified request is one somebody added upstream after
+/// `omega_exo_lane::ExoRequestKind` was written, and the safe reading of "we do
+/// not know what this does" is not "send it".
+#[must_use]
+pub fn family_of_wire(request_type: &str) -> Option<RequestFamily> {
+    ExoRequestKind::from_wire(request_type).map(family_of)
+}
+
+/// Whether an episode may send this wire request type. Unknown types are
+/// refused.
+#[must_use]
+pub fn is_admitted_wire(request_type: &str) -> bool {
+    family_of_wire(request_type).is_some_and(RequestFamily::is_admitted)
+}
+
+/// Every request type Exo has at the pin, with the family it belongs to.
+///
+/// Derived from the single enumeration and this module's decision, never
+/// transcribed. Built rather than stored as a constant so there is no second
+/// list to drift: the only way to change a row is to change [`family_of`].
+#[must_use]
+pub fn exo_request_families() -> Vec<(ExoRequestKind, RequestFamily)> {
+    ExoRequestKind::ALL
+        .into_iter()
+        .map(|kind| (kind, family_of(kind)))
+        .collect()
 }
 
 #[cfg(test)]
@@ -186,14 +214,16 @@ mod tests {
 
     #[test]
     fn the_partition_covers_every_request_type_exactly_once() {
+        let classified = exo_request_families();
         assert_eq!(
-            EXO_REQUEST_FAMILIES.len(),
-            EXO_REQUEST_TYPE_COUNT,
-            "the family table has {} rows and Exo's protocol has {EXO_REQUEST_TYPE_COUNT} \
-             request types, so some variant is unclassified",
-            EXO_REQUEST_FAMILIES.len()
+            classified.len(),
+            omega_exo_lane::EXO_REQUEST_KIND_COUNT,
+            "the partition has {} rows and Exo's protocol has {} request types, \
+             so some variant is unclassified",
+            classified.len(),
+            omega_exo_lane::EXO_REQUEST_KIND_COUNT
         );
-        let mut seen: Vec<&str> = EXO_REQUEST_FAMILIES.iter().map(|(name, _)| *name).collect();
+        let mut seen: Vec<ExoRequestKind> = classified.iter().map(|(kind, _)| *kind).collect();
         seen.sort_unstable();
         let before = seen.len();
         seen.dedup();
@@ -206,17 +236,17 @@ mod tests {
 
     #[test]
     fn every_secret_bearing_request_is_in_the_secret_family() {
-        for (name, family) in EXO_REQUEST_FAMILIES {
-            if name.contains("secret") {
+        for (kind, family) in exo_request_families() {
+            if kind.wire().contains("secret") {
                 assert_eq!(
-                    *family,
+                    family,
                     RequestFamily::Secret,
-                    "{name} names secrets and is classified {family}"
+                    "{kind} names secrets and is classified {family}"
                 );
             }
         }
-        let secrets = EXO_REQUEST_FAMILIES
-            .iter()
+        let secrets = exo_request_families()
+            .into_iter()
             .filter(|(_, family)| *family == RequestFamily::Secret)
             .count();
         assert_eq!(
@@ -228,36 +258,39 @@ mod tests {
 
     #[test]
     fn exactly_two_request_types_are_admitted_beyond_reading() {
-        let forks: Vec<&str> = EXO_REQUEST_FAMILIES
-            .iter()
-            .filter(|(_, family)| *family == RequestFamily::Fork)
-            .map(|(name, _)| *name)
-            .collect();
-        assert_eq!(forks, ["conversation_fork"]);
-        let resets: Vec<&str> = EXO_REQUEST_FAMILIES
-            .iter()
-            .filter(|(_, family)| *family == RequestFamily::Reset)
-            .map(|(name, _)| *name)
-            .collect();
-        assert_eq!(resets, ["start_sandbox"]);
+        let of_family = |wanted: RequestFamily| -> Vec<ExoRequestKind> {
+            exo_request_families()
+                .into_iter()
+                .filter(|(_, family)| *family == wanted)
+                .map(|(kind, _)| kind)
+                .collect()
+        };
+        assert_eq!(
+            of_family(RequestFamily::Fork),
+            [ExoRequestKind::ConversationFork]
+        );
+        assert_eq!(
+            of_family(RequestFamily::Reset),
+            [ExoRequestKind::StartSandbox]
+        );
     }
 
     #[test]
     fn the_calls_that_would_change_somebody_elses_history_are_refused() {
         for refused in [
-            "conversation_add_events",
-            "turn_add_events",
-            "turn_finish",
-            "conversation_begin_turn",
-            "delete_conversation",
-            "delete_agent",
-            "new_agent",
-            "snapshot_sandbox",
-            "stop_sandbox",
-            "start_sandbox_process",
-            "get_secret",
-            "agent_get_secret",
-            "conversation_list_secrets",
+            ExoRequestKind::ConversationAddEvents,
+            ExoRequestKind::TurnAddEvents,
+            ExoRequestKind::TurnFinish,
+            ExoRequestKind::ConversationBeginTurn,
+            ExoRequestKind::DeleteConversation,
+            ExoRequestKind::DeleteAgent,
+            ExoRequestKind::NewAgent,
+            ExoRequestKind::SnapshotSandbox,
+            ExoRequestKind::StopSandbox,
+            ExoRequestKind::StartSandboxProcess,
+            ExoRequestKind::GetSecret,
+            ExoRequestKind::AgentGetSecret,
+            ExoRequestKind::ConversationListSecrets,
         ] {
             assert!(
                 !is_admitted(refused),
@@ -268,27 +301,51 @@ mod tests {
 
     #[test]
     fn an_unknown_request_type_is_refused_rather_than_assumed_harmless() {
-        assert_eq!(family_of("conversation_teleport"), None);
-        assert!(!is_admitted("conversation_teleport"));
-        assert!(!is_admitted(""));
+        assert_eq!(family_of_wire("conversation_teleport"), None);
+        assert!(!is_admitted_wire("conversation_teleport"));
+        assert!(!is_admitted_wire(""));
+        // Exo's event tags overlap its request kinds, and this lookup is exact.
+        assert_eq!(family_of_wire("conversation_forked"), None);
     }
 
     #[test]
     fn the_admitted_set_is_the_one_the_issue_named() {
-        let admitted: Vec<&str> = EXO_REQUEST_FAMILIES
-            .iter()
+        let admitted: Vec<ExoRequestKind> = exo_request_families()
+            .into_iter()
             .filter(|(_, family)| family.is_admitted())
-            .map(|(name, _)| *name)
+            .map(|(kind, _)| kind)
             .collect();
-        assert!(admitted.contains(&"conversation_fork"));
-        assert!(admitted.contains(&"start_sandbox"));
-        assert!(admitted.contains(&"conversation_get_events"));
+        assert!(admitted.contains(&ExoRequestKind::ConversationFork));
+        assert!(admitted.contains(&ExoRequestKind::StartSandbox));
+        assert!(admitted.contains(&ExoRequestKind::ConversationGetEvents));
         assert!(
             admitted.len() == 20,
             "the admitted set is {} types: {admitted:?}. If that number moved, \
              a family was reclassified and the reclassification is the change \
              worth reviewing.",
             admitted.len()
+        );
+    }
+
+    /// This decision keeps the two capabilities the read-only log client
+    /// refuses. `OMEGA-DELTA-0102`.
+    ///
+    /// The two decisions over one enumeration are meant to disagree; the whole
+    /// argument for keeping them separate is that merging them would hand one
+    /// side a capability nobody granted it. `omega_exo_log` is not a dependency
+    /// of this crate, so the disagreement is asserted from each side here and
+    /// checked *across* both in `OMEGA-DELTA-0102`.
+    #[test]
+    fn the_episode_law_keeps_the_two_capabilities_a_reader_must_not_have() {
+        assert_eq!(
+            family_of(ExoRequestKind::ConversationFork),
+            RequestFamily::Fork,
+            "the episode law refuses the fork that is its own mechanism"
+        );
+        assert_eq!(
+            family_of(ExoRequestKind::StartSandbox),
+            RequestFamily::Reset,
+            "the episode law refuses the restore that is the filesystem half"
         );
     }
 }
