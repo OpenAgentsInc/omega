@@ -3080,8 +3080,8 @@ impl ConversationView {
     /// The owner: "move the loading indicator to inside the input bar like
     /// bottom left". Which is also where it stops: bottom-left is empty once
     /// loaded and stays empty — `render_zero_base_executor_bar` puts the
-    /// executor selector and the provider's controls on the right, and the left
-    /// carries only the turn's own state while there is a turn.
+    /// provider's controls on the right, and the left carries only the turn's
+    /// own state while there is a turn.
     fn render_loading_composer(
         &mut self,
         window: &mut Window,

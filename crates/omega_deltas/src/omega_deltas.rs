@@ -137,6 +137,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0146",
     "OMEGA-DELTA-0147",
     "OMEGA-DELTA-0148",
+    "OMEGA-DELTA-0149",
 ];
 
 /// OMEGA-DELTA-0125. Every entry the thread header's `…` menu offers, the
@@ -15390,33 +15391,23 @@ mod tests {
 
     // ------ OMEGA-DELTA-0115
 
-    /// OMEGA-DELTA-0115. The composer's main dropdown names an executor, and
-    /// the provider's own controls are not what it replaced.
+    /// OMEGA-DELTA-0115 and OMEGA-DELTA-0149. The provider's own controls
+    /// remain, while the executor dropdown is absent.
     ///
-    /// Two halves, because the first draft of this control lost the second one
-    /// and the loss was invisible from the code that changed. The arm used to
-    /// read `match config_options_view { Some(v) => child(v), None =>
-    /// children(model_selector) }` — an either/or — so on a machine with Codex
-    /// attached, Codex's session knobs rendered *instead of* the dropdown, and
-    /// the one control that switches away from Codex disappeared exactly when
-    /// a person wanted it. The owner asked for both: "no i DO want those
-    /// controls showing IF Codex is showing".
-    ///
-    /// The model selector is checked by absence rather than by the presence of
-    /// something else, because "the dropdown names a runtime" is a claim about
-    /// what is *not* there — a bar carrying both would satisfy any check that
-    /// only looked for the selector.
+    /// The provider controls and selector used to be entangled in an either/or.
+    /// The provider controls now remain independently, while both the executor
+    /// selector and inherited model selector are checked by absence.
     #[test]
-    fn the_composers_main_dropdown_names_an_executor_and_keeps_provider_controls() {
+    fn the_composer_hides_the_executor_selector_and_keeps_provider_controls() {
         let view_path = repository_path(THREAD_VIEW_PATH);
         let view = read_repository_file(THREAD_VIEW_PATH);
         let bar = body_of(&view, "render_zero_base_executor_bar");
 
         assert!(
-            bar.contains("self.render_executor_selector(cx)"),
-            "OMEGA-DELTA-0115: zero base's composer bar in {} no longer draws \
-             the executor selector. It is the main dropdown, and without it a \
-             person cannot switch what runs their conversation at all.",
+            !bar.contains("self.render_executor_selector(cx)")
+                && !bar.contains("omega-executor-selector"),
+            "OMEGA-DELTA-0149: zero base's composer bar in {} draws the \
+             executor selector again.",
             view_path.display()
         );
         assert!(
@@ -19161,6 +19152,12 @@ mod tests {
         let thread_view = without_comments(&read_repository_file(
             "crates/agent_ui/src/conversation_view/thread_view.rs",
         ));
+        let bar = body_of(&thread_view, "render_zero_base_executor_bar");
+        assert!(
+            !bar.contains("render_executor_selector"),
+            "OMEGA-DELTA-0149: the hidden executor selector returned to the \
+             composer bar."
+        );
         let render = body_of(&thread_view, "render_executor_selector");
         for required in [
             "SelectableExecutor::Codex | SelectableExecutor::Claude",

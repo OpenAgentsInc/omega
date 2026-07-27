@@ -13188,18 +13188,12 @@ impl ThreadView {
     ///
     /// omega#99. The owner asked for the input bar to become the centre of
     /// gravity — "the options of which provider as dropdowns inside it kinda" —
-    /// and for everything else to go. This is that row, and it is deliberately
-    /// four things: what this thread is talking to, the model, the executor
-    /// pin, and send.
+    /// and for everything else to go. This row carries the provider's controls,
+    /// transient turn state, and send.
     ///
-    /// **It replaces the separate disclosure line; it does not drop the
-    /// disclosure.** The line is still rendered from
-    /// `omega_front_door::ExecutorDisclosure` by `Label::new(disclosure.label())`
-    /// on every draw, which is the binding half of `OMEGA-DELTA-0021`: a typed
-    /// record that a label renders, never a stored label string. Moving where a
-    /// person reads it does not touch that; deleting it would, and a mode whose
-    /// entire purpose is to show one executor doing work is the last place a
-    /// turn should go unattributed.
+    /// `OMEGA-DELTA-0149` removes executor-selection chrome from this row.
+    /// Routing still reads the typed `omega_front_door::ExecutorDisclosure`;
+    /// this presentation no longer offers or labels an executor choice.
     ///
     /// **Nothing here pins, and nothing here offers to.** `OMEGA-DELTA-0055`
     /// removed the pin control from this row. It read `pin: none ⌄` and opened
@@ -13273,21 +13267,11 @@ impl ThreadView {
                                 })),
                         )
                     })
-                    // `OMEGA-DELTA-0115`. The provider's own controls, when the
-                    // attached executor advertises any, and then the executor
-                    // selector — **both**, never one or the other.
-                    //
-                    // This arm used to be an either/or, and the either/or was
-                    // the defect: a machine with Codex attached rendered
-                    // Codex's session knobs *instead of* the main dropdown, so
-                    // the one control that switches away from Codex vanished
-                    // exactly when a person wanted it. The owner asked for both
-                    // in as many words — "no i DO want those controls showing
-                    // IF Codex is showing" — and the two answer different
-                    // questions: the config options are Codex's settings, the
-                    // selector is whether it is Codex at all.
+                    // `OMEGA-DELTA-0115` keeps the attached provider's own
+                    // controls. `OMEGA-DELTA-0149` removes the direct executor
+                    // selector from the composer without touching the routing
+                    // and adapter infrastructure behind Omega.
                     .children(self.config_options_view.clone())
-                    .child(self.render_executor_selector(cx))
                     // Stop lives here too: `render_send_button` already turns
                     // into a stop control while a turn is generating, so the
                     // Exo header's separate `Stop` was a second button for the

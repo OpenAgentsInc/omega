@@ -5106,8 +5106,8 @@ than merely stated.
   cannot drift into a reflow under the caret at handover.
 - **The bottom-left is still empty once loaded.** `be27475c11` emptied it at the
   owner's request and `OMEGA-DELTA-0116` keeps it empty; the indicator is there
-  *only* while connecting, and the executor selector and provider controls stay
-  on the right where `render_zero_base_executor_bar` puts them. The row carries
+  *only* while connecting, and the provider controls stay on the right where
+  `render_zero_base_executor_bar` puts them. The row carries
   `flex_wrap` for the same reason the real one does: unwrapped, a narrow window
   pushes Send off the edge, and a disabled control nobody can see is
   indistinguishable from one that was never built.
@@ -6643,18 +6643,18 @@ separate action.
 - **Enforced by:** `focused_settings_separates_provider_keys_from_legacy_settings`
   in `crates/omega_deltas`.
 
-### OMEGA-DELTA-0146 — Omega is the only ordinary selectable executor
+### OMEGA-DELTA-0146 — Direct executor selection is restricted to Omega
 
-The executor selector offers **Omega** as the only ordinary clickable choice.
-Codex and Claude Code remain visible as disabled entries labeled as coming in
-an upcoming version. They remain fully detected, attached, warmed, and
-available to Omega's internal router; removing direct selection cannot turn off
-their infrastructure.
+Before `OMEGA-DELTA-0149` removed the selector from the composer, it offered
+**Omega** as the only ordinary clickable choice. Codex and Claude Code remained
+disabled implementation lanes. They remain fully detected, attached, warmed,
+and available to Omega's internal router; removing their direct selection
+cannot turn off their infrastructure.
 
 Exo keeps its separate process-level contract. It is absent by default and may
-join Omega as a selectable executor only when the launch explicitly includes
-`--enable-exo` and a lane resolves. A direct Codex or Claude Code selection
-that bypasses the menu is refused rather than changing the route.
+join the internal selector inventory only when the launch explicitly includes
+`--enable-exo` and a lane resolves. A direct Codex or Claude Code selection is
+refused rather than changing the route.
 
 - **Enforced by:** `only_omega_is_an_ordinary_selectable_executor` in
   `crates/omega_deltas`, plus selector policy tests in `agent_ui`.
@@ -6687,3 +6687,17 @@ so removing the section cannot corrupt a person's other sidebar preferences.
 
 - **Enforced by:** `zero_bases_sidebar_is_persistent_sectioned_and_silent_when_it_fails`
   in `crates/omega_deltas`, plus sidebar state tests in `agent_ui`.
+
+### OMEGA-DELTA-0149 — The composer does not render an executor selector
+
+Zero base does not show the executor dropdown in the composer. Omega is the
+only public executor, so a selector with one usable choice is unnecessary
+chrome. The attached provider's own controls and the send/stop control remain.
+
+This is a presentation boundary only. Codex and Claude Code detection,
+attachment, warming, and Omega's internal routing remain loaded exactly as
+before. Exo retains its process-level `--enable-exo` boundary but is not exposed
+through a composer selector.
+
+- **Enforced by:** `the_composer_hides_the_executor_selector_and_keeps_provider_controls`
+  and `only_omega_is_an_ordinary_selectable_executor` in `crates/omega_deltas`.
