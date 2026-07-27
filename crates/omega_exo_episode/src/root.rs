@@ -13,6 +13,20 @@
 //! whole claim is "these two forks started from the same place". A second
 //! writer makes that claim false while every check still passes.
 //!
+//! # Measured, 2026-07-27
+//!
+//! `OMEGA-DELTA-0120`. omega#103's third falsifier reads "point two processes
+//! at one `.exo` root: this must be refused". It is not. Two `exo serve`
+//! processes were started on one root at the pin, on two ports, on a throwaway
+//! copy. Both came up. Both answered `GET /health` with `ok`. Neither said
+//! anything about the other, and no lock file appeared.
+//!
+//! So the refusal below is Omega's, kept by Omega, for Omega. Nothing in the
+//! substrate enforces it, and a second writer started by somebody else — a
+//! person at a terminal, another lane, a stale daemon — is invisible from
+//! here. That is the residual, stated rather than assumed away, and it is why
+//! `script/exo-episode-live` insists on a copy of a root rather than a root.
+//!
 //! # What this can and cannot enforce
 //!
 //! [`ExoRoots`] is a registry of the roots one Omega process has claimed. It

@@ -1,0 +1,165 @@
+#!/usr/bin/env bash
+#
+# Run one live episode against `exo serve`, and watch the disk while it runs.
+# omega#103, OMEGA-DELTA-0120.
+#
+#   script/exo-episode-live <exo-root> <agent-id> <conversation-id> [run-tag]
+#
+# The Rust half is `cargo run -p omega_exo_episode --example live_episode`. It
+# speaks the protocol and it has no filesystem and no process, deliberately —
+# the falsification loop it replaces destroyed uncommitted work once, with
+# `git checkout --`. So the third acceptance item of omega#103, "a discarded
+# fork leaves nothing behind: no sandbox, no `.exo` mutation, no stray
+# process", cannot be answered from inside it. It is answered here, by
+# comparing the root's whole file list and `exo serve`'s child processes across
+# the run.
+#
+# This script only ever *reads* the root. It has no `rm`, no `git`, and no
+# write to anything under the root. The only thing that writes there is Exo
+# itself, answering the forks the example sends.
+#
+# Point it at a COPY of an Exo root. `.exo` is single-writer storage; a fork
+# taken while another writer is running is a copy of a history that never
+# existed.
+
+set -euo pipefail
+
+if [[ $# -lt 3 || $# -gt 4 ]]; then
+  echo "usage: script/exo-episode-live <exo-root> <agent-id> <conversation-id> [run-tag]" >&2
+  exit 2
+fi
+
+root=$1
+agent=$2
+conversation=$3
+tag=${4:-$(date +%s)}
+endpoint=${EXO_EXOHARNESS_URL:-127.0.0.1:4766}
+
+if [[ ! -d $root ]]; then
+  echo "no such Exo root: $root" >&2
+  exit 2
+fi
+
+# A root inside this repository would mean the episode was writing into the
+# working tree, which is the one thing this whole mechanism exists to stop.
+repository=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+absolute_root=$(cd "$root" && pwd)
+case "$absolute_root" in
+  "$repository"/*|"$repository")
+    echo "refusing: $absolute_root is inside the working tree at $repository" >&2
+    exit 2
+    ;;
+esac
+
+workspace=$(mktemp -d)
+trap 'rm -rf "$workspace"' EXIT
+
+inventory() {
+  # Every file under the root, with its size, sorted. Sizes so a file rewritten
+  # in place is not mistaken for a file untouched.
+  find "$absolute_root" -type f -exec stat -f '%z %N' {} \; 2>/dev/null | LC_ALL=C sort
+}
+
+children_of() {
+  # How many processes `exo serve` has spawned. A sandbox that started and was
+  # not stopped shows up here and nowhere else.
+  local pid=$1 list
+  if [[ -z $pid ]]; then
+    echo 0
+    return 0
+  fi
+  list=$(pgrep -P "$pid" 2>/dev/null || true)
+  if [[ -z $list ]]; then
+    echo 0
+  else
+    printf '%s\n' "$list" | wc -l | tr -d ' '
+  fi
+}
+
+serve_pid=$(lsof -nP -iTCP:"${endpoint##*:}" -sTCP:LISTEN -Fp 2>/dev/null | sed -n 's/^p//p' | head -1 || true)
+children_before=$(children_of "$serve_pid")
+
+inventory >"$workspace/before"
+echo "root       $absolute_root"
+echo "files      $(wc -l <"$workspace/before" | tr -d ' ') before the run"
+echo "exo serve  pid ${serve_pid:-unknown}, $children_before child processes before the run"
+echo
+
+set +e
+CARGO_INCREMENTAL=0 EXO_EXOHARNESS_URL="$endpoint" \
+  cargo run --quiet -p omega_exo_episode --example live_episode -- \
+  "$absolute_root" "$agent" "$conversation" "$tag" | tee "$workspace/run"
+episode_status=${PIPESTATUS[0]}
+set -e
+
+echo
+inventory >"$workspace/after"
+
+children_after=$(children_of "$serve_pid")
+
+# What the run left behind, if anything.
+LC_ALL=C comm -13 "$workspace/before" "$workspace/after" >"$workspace/appeared" || true
+LC_ALL=C comm -23 "$workspace/before" "$workspace/after" >"$workspace/vanished" || true
+
+forks=$(sed -n 's/^FORK [a-z]* *//p' "$workspace/run" | tr -d '\r')
+echo "forks      $(echo "$forks" | tr '\n' ' ')"
+echo "appeared   $(wc -l <"$workspace/appeared" | tr -d ' ') files"
+echo "vanished   $(wc -l <"$workspace/vanished" | tr -d ' ') files"
+echo "exo serve  $children_after child processes after the run"
+
+status=0
+
+# 1. Nothing may vanish. A fork is additive; a file that disappeared under it
+#    is the failure mode that cost this lane two files by hand.
+if [[ -s $workspace/vanished ]]; then
+  echo "FAIL       the run removed files from the root:" >&2
+  sed 's/^/           /' "$workspace/vanished" >&2
+  status=1
+fi
+
+# 2. Everything that appeared must be inside a conversation the run forked.
+#    Anything else is the run reaching somewhere it was not asked to.
+while read -r _size path; do
+  [[ -z ${path:-} ]] && continue
+  inside=0
+  while read -r fork_id; do
+    [[ -z $fork_id ]] && continue
+    case "$path" in
+      *"/$fork_id/"*) inside=1 ;;
+    esac
+  done <<<"$forks"
+  if [[ $inside -eq 0 ]]; then
+    echo "FAIL       $path is outside every fork this run took" >&2
+    status=1
+  fi
+done <"$workspace/appeared"
+
+# 3. No sandbox was started, and no snapshot was written. The forks inherit the
+#    source's sandbox *records* — `fork` copies the `sandboxes` prefix — and
+#    that is exactly the finding on omega#103: they inherit the pointers and
+#    not the `snapshots` payloads those pointers name. A `snapshots` directory
+#    appearing under a fork would mean the pin changed.
+snapshot_paths=$(grep -c '/snapshots/' "$workspace/appeared" || true)
+echo "snapshots  $snapshot_paths snapshot payloads appeared (expected 0 at this pin)"
+sandbox_records=$(grep -c '/sandboxes/' "$workspace/appeared" || true)
+echo "sandboxes  $sandbox_records sandbox records copied into the forks"
+
+# 4. No stray process.
+if [[ $children_after -ne $children_before ]]; then
+  echo "FAIL       exo serve went from $children_before child processes to $children_after" >&2
+  status=1
+fi
+
+if [[ $episode_status -ne 0 ]]; then
+  echo "FAIL       the episode itself failed (exit $episode_status)" >&2
+  status=1
+fi
+
+if [[ $status -eq 0 ]]; then
+  echo
+  echo "DISCARD OK the forks were abandoned; every file that appeared is inside one of"
+  echo "           them, nothing vanished, no sandbox started, no process left running."
+  echo "           The fork records themselves remain: removing them is"
+  echo "           delete_conversation, which the episode law refuses."
+fi
+exit $status

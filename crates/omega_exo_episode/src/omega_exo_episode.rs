@@ -32,6 +32,22 @@
 //! reason the router's dispatch half is not in `omega_front_door`: a law that
 //! needs a running Exo to check is a law nobody checks.
 //!
+//! # It has now been run against a real Exo
+//!
+//! `OMEGA-DELTA-0120`. `examples/live_episode.rs` walks [`FALSIFICATION_LOOP`]
+//! against a running `exo serve`, and `script/exo-episode-live` watches the
+//! root and the process table while it does. Two forks of one event were taken
+//! and compared identical by value while their raw reads differed in every
+//! event id; a named check that passed on the control failed on the candidate;
+//! the source conversation's digest and `latest_event_id` were unchanged
+//! afterwards; every file that appeared under the root was inside a fork the
+//! run took, nothing vanished, and `exo serve` gained no child process.
+//!
+//! The live server also contradicted this crate once, which is the whole point
+//! of running it: a page's `cursor` is the id of its last event and not a
+//! promise of another page, so the reader had been refusing every complete read
+//! of every non-empty conversation. See [`PageBound`].
+//!
 //! # The honest state of the mechanism
 //!
 //! omega#103 and `docs/teardowns/2026-07-25-exoharness-exo-teardown.md` §11.5
@@ -84,7 +100,7 @@ pub use reset::{
     verdict,
 };
 pub use root::{ExoRoots, RootClaim, RootRefusal};
-pub use state::{Divergence, EpisodeState, IDENTITY_FIELDS, StateReadError};
+pub use state::{Divergence, EpisodeState, IDENTITY_FIELDS, PageBound, StateReadError};
 
 use omega_exo_lane::LoopbackEndpoint;
 

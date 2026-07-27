@@ -2643,6 +2643,54 @@ pub const EPISODE_FORBIDDEN_REACH: &[&str] = &[
     "std::env",
 ];
 
+// ------ OMEGA-DELTA-0120
+
+/// OMEGA-DELTA-0120. The runner that drives one episode against a live
+/// `exo serve`.
+///
+/// omega#103's three acceptance items are all of the form "this really
+/// happens", and none of them can be settled by a crate with no socket. This is
+/// the file that opens one. It is committed rather than run by hand for the
+/// reason `live_read.rs` is: a run nobody else can repeat is not evidence.
+pub const EPISODE_LIVE_EXAMPLE_PATH: &str = "crates/omega_exo_episode/examples/live_episode.rs";
+
+/// OMEGA-DELTA-0120. The harness that watches the disk while the runner runs.
+///
+/// "A discarded fork leaves nothing behind" is a claim about a filesystem and a
+/// process table, and the runner is forbidden from looking at either. This
+/// looks, and only ever reads.
+pub const EPISODE_LIVE_SCRIPT_PATH: &str = "script/exo-episode-live";
+
+/// OMEGA-DELTA-0120. Vocabulary that would mean the live harness can move
+/// somebody's work.
+///
+/// The manual loop this delta replaces destroyed uncommitted files with `git
+/// checkout --`, and a second lane lost four more to another worktree's `git
+/// stash pop` on 2026-07-26. The harness answers by having no verb that can do
+/// it: it reads the root, runs the runner, and reads the root again.
+pub const EPISODE_HARNESS_FORBIDDEN_VERBS: &[&str] = &[
+    "git checkout",
+    "git stash",
+    "git reset",
+    "git restore",
+    "git clean",
+];
+
+/// OMEGA-DELTA-0120. Vocabulary that would mean the live runner can reach the
+/// working tree.
+///
+/// The same list `EPISODE_FORBIDDEN_REACH` holds for the crate, minus
+/// `std::env`, which the runner needs for its arguments, and minus
+/// `std::process`, which it needs for an exit code. Neither can revert a file.
+/// `std::fs` and a path type can, and neither is here.
+pub const EPISODE_LIVE_FORBIDDEN_REACH: &[&str] = &[
+    "std::fs",
+    "std::path",
+    "PathBuf",
+    "Command",
+    "include_str!",
+];
+
 /// OMEGA-DELTA-0090. The request families an episode may send.
 pub const EPISODE_ADMITTED_FAMILIES: &[&str] = &["Query", "Fork", "Reset"];
 
@@ -2870,6 +2918,7 @@ pub const EXO_PROTOCOL_DECISIONS: &[(&str, &str)] = &[
 /// started a second list, whatever it calls it.
 pub const EXO_PROTOCOL_CONSUMER_SOURCES: &[&str] = &[
     EPISODE_LAW_PATH,
+    EPISODE_LIVE_EXAMPLE_PATH,
     EPISODE_FAMILY_PATH,
     EPISODE_REQUEST_PATH,
     EPISODE_RESET_PATH,
@@ -14344,4 +14393,222 @@ mod tests {
             card_path.display()
         );
     }
+
+    // ------ OMEGA-DELTA-0120 — The episode reset, run against a live exo serve
+
+    /// OMEGA-DELTA-0120. A page is not called short because it carried a
+    /// cursor.
+    ///
+    /// This is the live finding, held as a check rather than as a commit
+    /// message. `omega_exo_episode` was written from Exo's source and read the
+    /// `cursor` field as "there is another page". Exo returns
+    /// `cursor = events.last().map(|event| event.id)` for **every** page that
+    /// carried any events, so that reading refuses every complete read of every
+    /// non-empty conversation — 86 events out of 86, reported as truncated. It
+    /// survived review because the fixture beside it wrote `"cursor": null`
+    /// next to three events, which is a page Exo does not produce.
+    ///
+    /// Decided by *calling* the compiled reader with the page shape the live
+    /// server actually sends, not by reading the file. A check that asserted
+    /// the source said the right thing would be one more transcription.
+    #[test]
+    fn a_page_is_not_called_short_because_it_carried_a_cursor() {
+        let live_shaped = serde_json::json!({
+            "kind": "response",
+            "id": 1,
+            "ok": true,
+            "response": {
+                "type": "events",
+                "result": {
+                    "events": [
+                        {
+                            "id": "019f9eff-b688-7781-8b63-5c17d980f32b",
+                            "conversation_id": "019f9eff-b688-7781-8b63-5c0b567b080b",
+                            "session_id": serde_json::Value::Null,
+                            "turn_id": serde_json::Value::Null,
+                            "created_at": "2026-07-27T00:00:00Z",
+                            "data": {"type": "conversation_created", "slug": "zb-proof"},
+                        }
+                    ],
+                    "cursor": "019f9eff-b688-7781-8b63-5c17d980f32b",
+                },
+            },
+            "error": serde_json::Value::Null,
+        });
+
+        let read = omega_exo_episode::EpisodeState::read_events_response(
+            1,
+            &live_shaped,
+            omega_exo_episode::PageBound::WholeLog,
+        );
+        assert!(
+            read.is_ok(),
+            "OMEGA-DELTA-0120: a read with no limit came back with one event and the \
+             cursor Exo always sends, and the reader refused it as truncated: {read:?}. \
+             That refuses every complete read there is."
+        );
+
+        assert_eq!(
+            omega_exo_episode::EpisodeState::read_cursor(&live_shaped).as_deref(),
+            Some("019f9eff-b688-7781-8b63-5c17d980f32b"),
+            "OMEGA-DELTA-0120: the cursor is no longer handed back. Resuming from it is \
+             how a caller proves a page was the whole log rather than assuming it."
+        );
+
+        // The other direction. A page that filled the limit it asked for may
+        // have been cut at exactly that limit, and comparing two prefixes of
+        // two episodes is a green check that read less than it thought.
+        assert!(
+            matches!(
+                omega_exo_episode::EpisodeState::read_events_response(
+                    1,
+                    &live_shaped,
+                    omega_exo_episode::PageBound::UpTo(1)
+                ),
+                Err(omega_exo_episode::StateReadError::Truncated { .. })
+            ),
+            "OMEGA-DELTA-0120: one event under a limit of one was accepted as a whole \
+             episode."
+        );
+    }
+
+    /// OMEGA-DELTA-0120. The live runner walks the loop the crate declares.
+    ///
+    /// `FALSIFICATION_LOOP` states the order, and two of the orders it rules
+    /// out are omega#103's own falsifiers: mutate before forking and the
+    /// sibling carries the mutation, read the check before probing and a check
+    /// that ran against nothing reports green. A runner that walked its own
+    /// order would make the constant decorative — and the first live run of
+    /// this one really did skip `CompareStartingStates`, which its own
+    /// end-of-run comparison caught. This is that comparison, held at the
+    /// source so a run nobody watched cannot lose it.
+    #[test]
+    fn the_live_episode_runner_walks_the_declared_loop() {
+        let path = repository_path(EPISODE_LIVE_EXAMPLE_PATH);
+        let source = std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
+        let code = uncommented(&source);
+
+        let walked: Vec<String> = code
+            .lines()
+            .filter_map(|line| line.trim().strip_prefix("taken.push(Step::"))
+            .filter_map(|line| line.split(')').next())
+            .map(str::to_owned)
+            .collect();
+        let declared: Vec<String> = omega_exo_episode::FALSIFICATION_LOOP
+            .iter()
+            .map(|step| format!("{step:?}"))
+            .collect();
+        assert_eq!(
+            walked, declared,
+            "OMEGA-DELTA-0120: {} takes its steps in a different order from \
+             `FALSIFICATION_LOOP`, or takes a different set of them. The order is the \
+             whole mechanism: forking after the mutation proves nothing, and reading \
+             the check before the probe reports green on a mutation that never applied.",
+            path.display()
+        );
+
+        assert!(
+            code.contains("if taken != FALSIFICATION_LOOP"),
+            "OMEGA-DELTA-0120: {} no longer compares the steps it actually took against \
+             the declared loop at the end of the run. Without it a run that skipped a \
+             step still prints its verdict.",
+            path.display()
+        );
+
+        // The two comparisons that are the acceptance conditions, and the one
+        // that keeps the first honest.
+        for required in [
+            "candidate_before.diff(&control_before)",
+            "candidate_raw == control_raw",
+            "control_after.diff(&control_before)",
+        ] {
+            assert!(
+                code.contains(required),
+                "OMEGA-DELTA-0120: {} no longer evaluates `{required}`. Two forks are \
+                 judged identical by comparing state, and the raw reads must *differ* \
+                 in the same run — a fork re-mints every event id, so raw reads that \
+                 matched would mean the run compared one conversation with itself.",
+                path.display()
+            );
+        }
+    }
+
+    /// OMEGA-DELTA-0120. Neither half of the live runner can revert anything.
+    ///
+    /// The manual falsification loop this replaces reverted a mutation with
+    /// `git checkout --` and wiped uncommitted work in two files; another lane
+    /// lost four more the same day to a shared `git stash pop`. The crate's
+    /// answer is that it has no filesystem. The runner keeps that — it opens a
+    /// socket and nothing else — and the harness beside it, which does look at
+    /// a disk, has no verb that can move anything on one.
+    #[test]
+    fn the_live_episode_harness_cannot_revert_anything() {
+        let example_path = repository_path(EPISODE_LIVE_EXAMPLE_PATH);
+        let example = std::fs::read_to_string(&example_path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", example_path.display()));
+        for token in EPISODE_LIVE_FORBIDDEN_REACH {
+            assert!(
+                !named_in_code(&example, token),
+                "OMEGA-DELTA-0120: {} names `{token}` in code. The runner reaches Exo \
+                 over a socket and reaches nothing else; the reason a forked episode \
+                 cannot destroy uncommitted work is that nothing running it can open a \
+                 file.",
+                example_path.display()
+            );
+        }
+
+        let script_path = repository_path(EPISODE_LIVE_SCRIPT_PATH);
+        let script = std::fs::read_to_string(&script_path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", script_path.display()));
+        for verb in EPISODE_HARNESS_FORBIDDEN_VERBS {
+            assert!(
+                !script
+                    .lines()
+                    .filter(|line| !line.trim_start().starts_with('#'))
+                    .any(|line| line.contains(verb)),
+                "OMEGA-DELTA-0120: {} runs `{verb}`. The harness reads the Exo root, \
+                 runs the episode, and reads the root again. A revert in it is the \
+                 accident this whole delta exists to make unavailable.",
+                script_path.display()
+            );
+        }
+
+        assert!(
+            script.contains("refusing: $absolute_root is inside the working tree"),
+            "OMEGA-DELTA-0120: {} no longer refuses an Exo root inside this repository. \
+             A root in the working tree means the episode's forks are being written \
+             into the tree the episode exists to keep untouched.",
+            script_path.display()
+        );
+        // The three guards that make up "a discarded fork leaves nothing
+        // behind". Named as the lines that *decide*, not as the words that
+        // appear: a script can print the word `vanished` in four places with
+        // nothing testing it, which is how a harness reports green while
+        // measuring nothing.
+        for (guard, measures) in [
+            (
+                "if [[ -s $workspace/vanished ]]; then",
+                "whether the run removed a file from the root",
+            ),
+            (
+                "is outside every fork this run took",
+                "whether anything appeared outside the forks the run took",
+            ),
+            (
+                "if [[ $children_after -ne $children_before ]]; then",
+                "whether a sandbox process was left running",
+            ),
+        ] {
+            assert!(
+                script.contains(guard),
+                "OMEGA-DELTA-0120: {} no longer decides {measures}. \"A discarded fork \
+                 leaves nothing behind\" is a claim about a filesystem and a process \
+                 table, and this is the only half of the runner allowed to look at \
+                 either.",
+                script_path.display()
+            );
+        }
+    }
+
 }

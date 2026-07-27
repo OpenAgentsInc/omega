@@ -71,8 +71,8 @@ pub enum StateReadError {
         /// Its position in the array.
         at: usize,
     },
-    /// The read stopped at a page boundary, so this is a prefix of the episode
-    /// rather than the episode.
+    /// The read filled the page it asked for, so this is a prefix of the
+    /// episode rather than the episode.
     ///
     /// Refused rather than truncated: a comparison of two different prefixes of
     /// two episodes is a green check that read less than it thought.
@@ -80,6 +80,40 @@ pub enum StateReadError {
         /// The cursor Exo returned to resume from.
         cursor: String,
     },
+}
+
+/// What the caller asked Exo for, which is the only thing that says whether a
+/// page can be a prefix.
+///
+/// `OMEGA-DELTA-0120`, omega#103. Read against a running `exo serve` on
+/// 2026-07-27, this is the shape that had been transcribed wrong. Exo's
+/// `get_events` truncates **only** under a `limit`, and then returns
+/// `cursor = events.last().map(|event| event.id)` unconditionally
+/// (`crates/exoharness/src/basic.rs`, `get_events`). The cursor is therefore
+/// the id of the last event on the page — present for every page that carried
+/// any events at all, `null` for an empty page and for nothing else — and it
+/// says nothing whatever about whether another page exists.
+///
+/// The first version of this reader treated a present cursor as "there is
+/// more" and refused. Against the live server that refuses every complete read
+/// of every non-empty conversation: 86 events out of 86, reported as
+/// truncated. It went unnoticed because the fixture beside it wrote
+/// `"cursor": null` next to three events, which is a page Exo never produces.
+/// A fixture is a transcription, and this is what a wrong one buys.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PageBound {
+    /// The read carried no `limit`, so Exo did not truncate and the page is the
+    /// whole log.
+    ///
+    /// That is a claim about somebody else's code, so a caller should not stop
+    /// at it: [`EpisodeState::read_cursor`] hands back the cursor, and a second
+    /// read resuming from it must come back empty. The live runner does that
+    /// for every read it makes, which is why this variant is a bound rather
+    /// than a hope.
+    WholeLog,
+    /// The read carried `limit: n`. A page of exactly `n` events is a page that
+    /// may have been cut, and is refused.
+    UpTo(u32),
 }
 
 impl std::fmt::Display for StateReadError {
@@ -153,15 +187,35 @@ impl std::fmt::Display for Divergence {
 }
 
 impl EpisodeState {
+    /// The cursor Exo returned for a page, which is the id of its last event.
+    ///
+    /// `OMEGA-DELTA-0120`. Not a statement that there is another page — see
+    /// [`PageBound`] — but the value a caller resumes from to *prove* there is
+    /// not. Returns `None` for an empty page and for any envelope this reader
+    /// would refuse anyway.
+    #[must_use]
+    pub fn read_cursor(envelope: &serde_json::Value) -> Option<String> {
+        envelope
+            .get("response")?
+            .get("result")?
+            .get("cursor")?
+            .as_str()
+            .map(str::to_owned)
+    }
+
     /// Read the answer to a `conversation_get_events`.
+    ///
+    /// `bound` is what the caller asked for, and it is the only thing that can
+    /// say whether the page is a prefix; see [`PageBound`].
     ///
     /// # Errors
     ///
     /// [`StateReadError`] for a refusal, a mismatched request id, a shape this
-    /// build cannot read, or a page that does not reach the end of the episode.
+    /// build cannot read, or a page that filled the limit it asked for.
     pub fn read_events_response(
         request_id: u64,
         envelope: &serde_json::Value,
+        bound: PageBound,
     ) -> Result<Self, StateReadError> {
         let answered = envelope.get("id").and_then(serde_json::Value::as_u64);
         if answered != Some(request_id) {
@@ -187,15 +241,20 @@ impl EpisodeState {
         let result = response
             .get("result")
             .ok_or(StateReadError::NotAnEventsResponse)?;
-        if let Some(cursor) = result.get("cursor").and_then(serde_json::Value::as_str) {
-            return Err(StateReadError::Truncated {
-                cursor: cursor.to_owned(),
-            });
-        }
         let events = result
             .get("events")
             .and_then(serde_json::Value::as_array)
             .ok_or(StateReadError::NotAnEventsResponse)?;
+        if let PageBound::UpTo(limit) = bound
+            && events.len() as u64 >= u64::from(limit)
+        {
+            let cursor = result
+                .get("cursor")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_owned();
+            return Err(StateReadError::Truncated { cursor });
+        }
         Self::read_events(events)
     }
 
@@ -231,6 +290,18 @@ impl EpisodeState {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.events.is_empty()
+    }
+
+    /// The events, with [`IDENTITY_FIELDS`] already removed.
+    ///
+    /// `OMEGA-DELTA-0120`. A named check runs over *this*, not over the raw
+    /// read beside it, so the value a check judged and the value two episodes
+    /// were compared by are the same value. A check that read its own copy
+    /// could pass on an episode that was never compared, which is the same
+    /// shape of false green as a probe that was never taken.
+    #[must_use]
+    pub fn events(&self) -> &[serde_json::Value] {
+        &self.events
     }
 
     /// A comparable digest of the whole episode.
@@ -522,11 +593,12 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_truncated_read_is_refused_rather_than_compared() {
-        let envelope = serde_json::json!({
+    /// The page Exo actually produces: three events and a cursor naming the
+    /// third.
+    fn a_live_shaped_page(request_id: u64) -> serde_json::Value {
+        serde_json::json!({
             "kind": "response",
-            "id": 2,
+            "id": request_id,
             "ok": true,
             "response": {
                 "type": "events",
@@ -536,32 +608,83 @@ mod tests {
                 },
             },
             "error": null,
-        });
+        })
+    }
+
+    #[test]
+    fn a_page_that_filled_its_limit_is_refused_rather_than_compared() {
         assert_eq!(
-            EpisodeState::read_events_response(2, &envelope),
+            EpisodeState::read_events_response(2, &a_live_shaped_page(2), PageBound::UpTo(3)),
             Err(StateReadError::Truncated {
                 cursor: "019e5782-0000-7000-8000-aaa00000003".to_owned()
-            })
+            }),
+            "three events under a limit of three may have been cut at three"
+        );
+        assert!(
+            EpisodeState::read_events_response(2, &a_live_shaped_page(2), PageBound::UpTo(4))
+                .is_ok(),
+            "three events under a limit of four reached the end of the log"
+        );
+    }
+
+    /// `OMEGA-DELTA-0120`. The live finding, as a test.
+    ///
+    /// Exo returns the last event's id as the cursor on every non-empty page.
+    /// Reading that as "there is more" refuses every complete read there is.
+    #[test]
+    fn a_cursor_is_not_a_second_page() {
+        let state = EpisodeState::read_events_response(2, &a_live_shaped_page(2), PageBound::WholeLog)
+            .expect("a read with no limit is the whole log, whatever the cursor says");
+        assert_eq!(state.len(), 3);
+        assert_eq!(
+            EpisodeState::read_cursor(&a_live_shaped_page(2)).as_deref(),
+            Some("019e5782-0000-7000-8000-aaa00000003"),
+            "the cursor is still handed back, because resuming from it is how a \
+             caller proves the page was whole"
         );
     }
 
     #[test]
-    fn a_complete_read_is_accepted() {
+    fn an_empty_page_carries_no_cursor() {
         let envelope = serde_json::json!({
             "kind": "response",
             "id": 2,
             "ok": true,
             "response": {
                 "type": "events",
-                "result": {
-                    "events": a_conversation("019e5782-0000-7000-8000-0000000000c1", "aaa", 10),
-                    "cursor": null,
-                },
+                "result": { "events": [], "cursor": null },
             },
             "error": null,
         });
-        let state = EpisodeState::read_events_response(2, &envelope).expect("a complete page");
-        assert_eq!(state.len(), 3);
+        let state = EpisodeState::read_events_response(2, &envelope, PageBound::WholeLog)
+            .expect("an empty page");
+        assert!(state.is_empty());
+        assert_eq!(EpisodeState::read_cursor(&envelope), None);
+    }
+
+    #[test]
+    fn a_named_check_reads_the_events_that_were_compared() {
+        let state = EpisodeState::read_events_response(2, &a_live_shaped_page(2), PageBound::WholeLog)
+            .expect("a page");
+        assert_eq!(state.events().len(), state.len());
+        for event in state.events() {
+            // The three names are written out rather than read from
+            // `IDENTITY_FIELDS`, because a test that iterates the constant it is
+            // checking passes vacuously the moment the constant is emptied — which
+            // is exactly the mutation this test exists to catch, and is how it
+            // was caught testing nothing on 2026-07-27.
+            for field in ["id", "conversation_id", "created_at"] {
+                assert!(
+                    event.get(field).is_none(),
+                    "a check reading `{field}` would be reading identity the comparison \
+                     already threw away, and would call two correct siblings different"
+                );
+            }
+            assert!(
+                event.get("data").is_some(),
+                "a check with no payload to read cannot decide anything"
+            );
+        }
     }
 
     #[test]
@@ -569,14 +692,16 @@ mod tests {
         assert_eq!(
             EpisodeState::read_events_response(
                 1,
-                &serde_json::json!({"kind":"response","id":1,"ok":false,"error":"conversation not found","response":null})
+                &serde_json::json!({"kind":"response","id":1,"ok":false,"error":"conversation not found","response":null}),
+                PageBound::WholeLog
             ),
             Err(StateReadError::Refused("conversation not found".to_owned()))
         );
         assert_eq!(
             EpisodeState::read_events_response(
                 1,
-                &serde_json::json!({"kind":"response","id":9,"ok":true,"response":{"type":"events"},"error":null})
+                &serde_json::json!({"kind":"response","id":9,"ok":true,"response":{"type":"events"},"error":null}),
+                PageBound::WholeLog
             ),
             Err(StateReadError::WrongRequestId {
                 expected: 1,
@@ -586,7 +711,8 @@ mod tests {
         assert_eq!(
             EpisodeState::read_events_response(
                 1,
-                &serde_json::json!({"kind":"response","id":1,"ok":true,"response":{"type":"unit"},"error":null})
+                &serde_json::json!({"kind":"response","id":1,"ok":true,"response":{"type":"unit"},"error":null}),
+                PageBound::WholeLog
             ),
             Err(StateReadError::NotAnEventsResponse)
         );
