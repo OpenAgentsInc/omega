@@ -238,10 +238,9 @@ fn join(invitation: Invitation, cx: &mut App) -> String {
             forget_roster(cx);
 
             let opening = match outcome {
-                JoinOutcome::Refreshed => format!(
-                    "Your membership of {} was updated ({roles}).",
-                    report.name
-                ),
+                JoinOutcome::Refreshed => {
+                    format!("Your membership of {} was updated ({roles}).", report.name)
+                }
                 _ => format!("You joined {} ({roles}).", report.name),
             };
             format!(
@@ -357,20 +356,17 @@ fn current_room(thread_id: ThreadId, cx: &mut App) -> Option<CurrentRoom> {
 
 /// Said once, because it is the one thing every answer here has to be honest
 /// about and a second wording would eventually be a softer one.
-const NOTHING_IS_WIRED_TO_SEND: &str =
-    "Nothing in this build signs or reaches a relay yet, so a message is authorized and composed \
+const NOTHING_IS_WIRED_TO_SEND: &str = "Nothing in this build signs or reaches a relay yet, so a message is authorized and composed \
      and then goes no further. It is not queued and it is not lost — there is nowhere for it to \
      go, and Omega will not report a send that did not happen.";
 
-const WHO_NEEDS_A_ROOM: &str =
-    "This thread is not in a community workspace, so there is nobody to list. Open a thread in \
+const WHO_NEEDS_A_ROOM: &str = "This thread is not in a community workspace, so there is nobody to list. Open a thread in \
      one and ask again.";
 
 const LEAVE_NEEDS_A_ROOM: &str =
     "This thread is not in a community workspace, so there is nothing to leave.";
 
-const NO_KEY_YET: &str =
-    "Omega does not have your key yet, so it cannot say who you are in a room. Nothing about a \
+const NO_KEY_YET: &str = "Omega does not have your key yet, so it cannot say who you are in a room. Nothing about a \
      community workspace works before that, and it is not something Omega can decide for you.";
 
 #[cfg(test)]
