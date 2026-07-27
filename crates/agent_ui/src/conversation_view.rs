@@ -107,16 +107,20 @@ const STOPWATCH_THRESHOLD: Duration = Duration::from_secs(30);
 const TOKEN_THRESHOLD: u64 = 250;
 
 pub(crate) const DRAFT_PROMPT_PERSIST_DEBOUNCE: Duration = Duration::from_millis(250);
-
-/// `OMEGA-DELTA-0122`. What the composer says while the executor connects.
+/// The composer shown while an executor connects looks like the real one.
 ///
-/// Not the real composer's placeholder, which offers `@` and `/`. Neither works
-/// yet — both ask a session that does not exist — so promising them here would
-/// be a lie a person discovers by typing one. It says the one thing somebody
-/// deciding whether to start typing needs to know instead.
-pub(crate) const LOADING_COMPOSER_PLACEHOLDER: &str =
-    "Type while the executor connects — what you write is kept";
-
+/// omega#112. It used to say "Type while the executor connects — what you
+/// write is kept". The owner: "putting that idiotic 'what u write is kept'
+/// message in the input is not desired, remove it. it should already know what
+/// the activ e executor is and load it like it actually will be."
+///
+/// He is right, and the reassurance was covering for the wrong thing. The
+/// promise it made is one the field should simply keep — which it does — and
+/// saying so out loud only advertises that there was a moment where it might
+/// not have. The executor being connected is already known before the
+/// connection exists, because it is the choice that *caused* the connect, so
+/// this field can say what the real one will say and be the same field a
+/// second early.
 pub(crate) mod elicitation;
 mod message_queue;
 mod thread_search_bar;
@@ -1040,15 +1044,36 @@ impl ConversationView {
         let settings = AgentSettings::get_global(cx);
         let min_lines = settings.message_editor_min_lines;
         let max_lines = settings.set_message_editor_max_lines();
+
+        // The executor being connected is the one the person just chose, so the
+        // field can name it now rather than after the handshake. Falls back to
+        // the router's name when nothing has been chosen — a first launch,
+        // where the answer genuinely is not known yet.
+        let loading_placeholder = crate::omega_executor_selector::selected()
+            .map(|executor| placeholder_text(executor.name(), false))
+            .unwrap_or_else(|| {
+                let name = self
+                    .agent_server_store
+                    .read(cx)
+                    .agent_display_name(&self.agent.agent_id())
+                    .unwrap_or_else(|| self.agent.agent_id().0.to_string().into());
+                placeholder_text(name.as_ref(), false)
+            });
+
         let editor = cx.new(|cx| {
             let mut editor = Editor::auto_height(min_lines, max_lines, window, cx);
-            editor.set_placeholder_text(LOADING_COMPOSER_PLACEHOLDER, window, cx);
+            editor.set_placeholder_text(&loading_placeholder, window, cx);
             editor.set_show_indent_guides(false, cx);
             editor.set_soft_wrap();
             editor.disable_mouse_wheel_zoom();
             editor.set_use_modal_editing(true);
             editor
         });
+        // Focused on creation, not only when something re-focuses the view.
+        // A composer that looks ready and ignores the keyboard is worse than no
+        // composer, because a person types a sentence into nothing.
+        editor.read(cx).focus_handle(cx).focus(window, cx);
+
         self.loading_composer = Some(editor.clone());
         editor
     }
