@@ -140,10 +140,13 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0149",
     "OMEGA-DELTA-0150",
     "OMEGA-DELTA-0151",
+    "OMEGA-DELTA-0152",
 ];
 
 pub const GOOGLE_PROVIDER_PATH: &str = "crates/language_models/src/provider/google.rs";
 pub const GOOGLE_CLIENT_PATH: &str = "crates/google_ai/src/google_ai.rs";
+pub const BASIC_SYSTEM_PROMPT_PATH: &str = "crates/agent/src/templates/basic_system_prompt.hbs";
+pub const AGENT_THREAD_PATH: &str = "crates/agent/src/thread.rs";
 
 /// OMEGA-DELTA-0125. Every entry the thread header's `…` menu offers, the
 /// action a click on it finally reaches, and whether zero base offers it.
@@ -15501,6 +15504,38 @@ mod tests {
             "OMEGA-DELTA-0151: {} checks the local Google key before hosted \
              compute, making the optional fallback a prerequisite again.",
             repository_path(GOOGLE_PROVIDER_PATH).display()
+        );
+    }
+
+    /// OMEGA-DELTA-0152. The first-party prompt owns the assistant's product
+    /// identity and renders the same detected executor inventory that the
+    /// delegate tool resolves at runtime.
+    #[test]
+    fn omega_names_itself_and_the_executors_it_can_delegate_to() {
+        let prompt = read_repository_file(BASIC_SYSTEM_PROMPT_PATH);
+        assert!(
+            prompt.contains("Your identity is Omega")
+                && prompt.contains("never as Gemini")
+                && !prompt.contains("Model: {{model_name}}"),
+            "OMEGA-DELTA-0152: {} no longer keeps the hosted model provider \
+             behind Omega's product identity.",
+            repository_path(BASIC_SYSTEM_PROMPT_PATH).display()
+        );
+        assert!(
+            prompt.contains("{{#each available_executors}}")
+                && prompt.contains("`{{id}}` ({{name}})"),
+            "OMEGA-DELTA-0152: {} no longer tells Omega which installed \
+             executors are available for delegation.",
+            repository_path(BASIC_SYSTEM_PROMPT_PATH).display()
+        );
+
+        let thread = read_repository_file(AGENT_THREAD_PATH);
+        let executor = read_repository_file(SUBAGENT_EXECUTOR_PATH);
+        assert!(
+            thread.contains("available_executors: omega_agent_detect::detected()")
+                && executor.contains("omega_agent_detect::detected()"),
+            "OMEGA-DELTA-0152: prompt disclosure and runtime delegate \
+             resolution no longer share the installed executor detector."
         );
     }
 

@@ -38,6 +38,7 @@ pub struct SystemPromptTemplate<'a> {
     #[serde(flatten)]
     pub project: &'a prompt_store::ProjectContext,
     pub available_tools: Vec<SharedString>,
+    pub available_executors: Vec<crate::InstalledAgent>,
     pub model_name: Option<String>,
     pub date: String,
     /// Contents of the user-global `~/.config/zed/AGENTS.md` file (or the
@@ -104,6 +105,7 @@ mod tests {
         let template = SystemPromptTemplate {
             project: &project,
             available_tools: vec!["echo".into()],
+            available_executors: Vec::new(),
             model_name: Some("test-model".to_string()),
             date: "2026-01-01".to_string(),
             user_agents_md: None,
@@ -133,6 +135,10 @@ mod tests {
                     "edit".into(),
                     "bash".into(),
                     "delegate".into(),
+                ],
+                available_executors: vec![
+                    crate::InstalledAgent::new("codex-acp", "Codex"),
+                    crate::InstalledAgent::new("claude-acp", "Claude"),
                 ],
                 model_name: Some("google/gemini-3.6-flash".to_string()),
                 date: "2026-07-27".to_string(),
@@ -169,6 +175,10 @@ mod tests {
                 "bash".into(),
                 "delegate".into(),
             ],
+            available_executors: vec![
+                crate::InstalledAgent::new("codex-acp", "Codex"),
+                crate::InstalledAgent::new("claude-acp", "Claude"),
+            ],
             model_name: None,
             date: "2026-07-27".to_string(),
             user_agents_md: Some("personal".into()),
@@ -199,6 +209,10 @@ mod tests {
             "never use `git checkout`, `git restore`, or `git stash` as an undo mechanism"
         ));
         assert!(rendered.contains("Never delegate when no executor exists"));
+        assert!(rendered.contains("`codex-acp` (Codex)"));
+        assert!(rendered.contains("`claude-acp` (Claude)"));
+        assert!(rendered.contains("Your identity is Omega"));
+        assert!(!rendered.contains("Model:"));
     }
 
     #[test]
@@ -219,6 +233,7 @@ mod tests {
         let template = SystemPromptTemplate {
             project: &project,
             available_tools: vec!["echo".into()],
+            available_executors: Vec::new(),
             model_name: Some("test-model".to_string()),
             date: "2026-01-01".to_string(),
             user_agents_md: Some("always be concise".into()),
@@ -248,6 +263,7 @@ mod tests {
         let template = SystemPromptTemplate {
             project: &project,
             available_tools: vec!["echo".into()],
+            available_executors: Vec::new(),
             model_name: Some("test-model".to_string()),
             date: "2026-01-01".to_string(),
             user_agents_md: None,
@@ -281,6 +297,7 @@ mod tests {
         let template = SystemPromptTemplate {
             project: &project,
             available_tools: vec!["echo".into()],
+            available_executors: Vec::new(),
             model_name: Some("test-model".to_string()),
             date: "2026-01-01".to_string(),
             user_agents_md: None,
@@ -319,6 +336,7 @@ mod tests {
         let template = SystemPromptTemplate {
             project: &project,
             available_tools: vec!["echo".into()],
+            available_executors: Vec::new(),
             model_name: Some("test-model".to_string()),
             date: "2026-01-01".to_string(),
             user_agents_md: None,
@@ -349,6 +367,7 @@ mod tests {
         let template = SystemPromptTemplate {
             project: &project,
             available_tools: vec!["echo".into()],
+            available_executors: Vec::new(),
             model_name: Some("test-model".to_string()),
             date: "2026-01-01".to_string(),
             user_agents_md: None,
@@ -373,6 +392,7 @@ mod tests {
         let template = SystemPromptTemplate {
             project: &project,
             available_tools: vec!["echo".into()],
+            available_executors: Vec::new(),
             model_name: Some("test-model".to_string()),
             date: "2026-01-01".to_string(),
             user_agents_md: None,
@@ -393,6 +413,7 @@ mod tests {
         let template = SystemPromptTemplate {
             project: &project,
             available_tools: vec!["echo".into()],
+            available_executors: Vec::new(),
             model_name: Some("test-model".to_string()),
             date: "2026-01-01".to_string(),
             user_agents_md: None,
@@ -411,6 +432,7 @@ mod tests {
         let template = SystemPromptTemplate {
             project: &project,
             available_tools: vec!["echo".into()],
+            available_executors: Vec::new(),
             model_name: Some("test-model".to_string()),
             date: "2026-01-01".to_string(),
             user_agents_md: None,

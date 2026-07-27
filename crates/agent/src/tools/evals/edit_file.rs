@@ -369,6 +369,7 @@ impl EditToolTest {
             let template = crate::SystemPromptTemplate {
                 project: &project_context,
                 available_tools: tool_names,
+                available_executors: Vec::new(),
                 model_name: None,
                 date: chrono::Local::now().format("%Y-%m-%d").to_string(),
                 user_agents_md: None,

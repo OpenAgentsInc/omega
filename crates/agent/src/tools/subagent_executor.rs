@@ -19,6 +19,7 @@
 //! undisclosed provider handoff.
 
 use omega_front_door::{ExecutorClass, ExecutorDisclosure};
+use serde::Serialize;
 use std::fmt::Write as _;
 
 /// An agent Omega found on this machine.
@@ -27,7 +28,7 @@ use std::fmt::Write as _;
 /// are about ids and names, and re-stating the two fields it needs keeps the
 /// resolution testable without a `PATH`, and keeps it from breaking when the
 /// detector's own shape changes.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct InstalledAgent {
     pub id: String,
     pub name: String,

@@ -4582,6 +4582,10 @@ impl Thread {
         let system_prompt = SystemPromptTemplate {
             project: self.project_context.read(cx),
             available_tools,
+            available_executors: omega_agent_detect::detected()
+                .iter()
+                .map(|agent| crate::InstalledAgent::new(agent.id, agent.name))
+                .collect(),
             model_name: self.model().map(|m| m.name().0.to_string()),
             date: Local::now().format("%Y-%m-%d").to_string(),
             user_agents_md,

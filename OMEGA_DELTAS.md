@@ -6731,3 +6731,20 @@ path.
 
 - **Enforced by:** `zero_base_uses_hosted_google_without_a_local_key` in
   `crates/omega_deltas`, plus the OpenAgents Gemini broker route tests.
+
+### OMEGA-DELTA-0152 — Omega names itself and its delegate executors
+
+The first-party zero-base prompt identifies the product as **Omega**. Its
+hosted model provider is an implementation detail and must not become the
+assistant's name, so the prompt neither presents the backing model as system
+identity nor permits the assistant to identify as Gemini or Google.
+
+The same process-level detector used to resolve a `delegate` call supplies the
+prompt's installed executor catalog. Codex and Claude Code remain absent from
+public executor controls, but Omega can see their stable IDs and names before
+deciding whether to delegate. Detection, prompt disclosure, and runtime
+resolution therefore cannot silently become three different inventories.
+
+- **Enforced by:** `omega_names_itself_and_the_executors_it_can_delegate_to`
+  in `crates/omega_deltas`, plus basic system-prompt rendering tests in
+  `agent`.
