@@ -95,6 +95,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0095",
     "OMEGA-DELTA-0100",
     "OMEGA-DELTA-0102",
+    "OMEGA-DELTA-0105",
 ];
 
 /// OMEGA-DELTA-0094. The audience rules, which know nothing about a window.
@@ -109,6 +110,28 @@ pub const AUDIENCE_CONTROL_PATH: &str = "crates/agent_ui/src/omega_audience_cont
 /// OMEGA-DELTA-0094. Where a thread starts, and so where its audience is
 /// recorded.
 pub const CONVERSATION_VIEW_PATH: &str = "crates/agent_ui/src/conversation_view.rs";
+
+/// OMEGA-DELTA-0105. The three sentences the audience menu says.
+///
+/// Written once, in `omega_audience`, beside the rule each describes. They are
+/// the least verified thing in `OMEGA-DELTA-0094` — whether they read as a
+/// deliberate control or as a broken one needs a window and a person who has
+/// not read the source — so what is enforced is that changing them is one edit
+/// rather than a hunt through a menu builder.
+pub const AUDIENCE_MENU_SENTENCES: &[&str] = &[
+    "New threads start in",
+    "A thread keeps the audience it was started in.",
+    "This thread is not in the selected audience.",
+];
+
+/// OMEGA-DELTA-0105. Section headers a manifest may declare dependencies under.
+///
+/// `local_needs_no_network_no_relay_and_no_account` reads `[dependencies]` and
+/// stops at the next `[`, so `[dependencies.tokio]`, `[build-dependencies]`
+/// and `[target.'cfg(unix)'.dependencies]` are all invisible to it. Rather than
+/// teach it every spelling, the manifest is held to declaring dependencies in
+/// exactly the two places that check can see.
+pub const AUDIENCE_ALLOWED_MANIFEST_SECTIONS: &[&str] = &["[dependencies]", "[dev-dependencies]"];
 
 /// OMEGA-DELTA-0094. Every crate `omega_audience` is allowed to depend on.
 ///
@@ -11699,5 +11722,318 @@ mod tests {
              naming the binary there is a false claim about their machine.",
             attach_path.display()
         );
+    }
+
+    // ------------------------------------------------------ OMEGA-DELTA-0105
+
+    /// A source in which [`body_of`] can also find a free function.
+    ///
+    /// `function_body` searches for `" fn name("`, and a `fn` declared at the
+    /// top level of a module has a newline in front of it rather than a space,
+    /// so it is invisible. That is not a hypothetical: three of the functions
+    /// this delta is about — `loaded` and `preview_audience` in the control,
+    /// and `bounded` in the rules — are free functions, and every assertion
+    /// about them found nothing on the first run. `body_of` turned that into a
+    /// failure rather than a green test, which is what `OMEGA-DELTA-0090`'s
+    /// rule is for.
+    fn with_free_functions_indented(source: &str) -> String {
+        source.replace("\nfn ", "\n fn ")
+    }
+
+    /// OMEGA-DELTA-0105. Local is what a profile with nothing written *loads*
+    /// into, not only what an unrecorded thread resolves to.
+    ///
+    /// `OMEGA-DELTA-0094` pinned `AudienceBook::audience_of`'s fallback and
+    /// stopped there. The other fallback on the fresh-profile path is in
+    /// `loaded`, which hydrates the selection from the key-value store, and
+    /// nothing held it: changing `unwrap_or_else(AudienceId::local)` there to
+    /// name any other audience left all five of that delta's checks green
+    /// while making a machine that has never chosen anything start its threads
+    /// somewhere else.
+    ///
+    /// That is the same shape as the gap `OMEGA-DELTA-0094` found in its own
+    /// unit tests — every one of them bound a thread first, so the branch that
+    /// runs on every thread on a fresh machine had nothing holding it. The
+    /// fresh-profile path is the one every install is on; it needs the checks,
+    /// not the exercised one.
+    #[test]
+    fn local_is_what_a_fresh_profile_loads_into() {
+        let path = repository_path(AUDIENCE_CONTROL_PATH);
+        let source = with_free_functions_indented(&uncommented(&read_repository_file(
+            AUDIENCE_CONTROL_PATH,
+        )));
+        let hydrate = body_of(&source, "loaded");
+
+        assert!(
+            hydrate.contains("unwrap_or_else(AudienceId::local)"),
+            "OMEGA-DELTA-0105: the selection in {} no longer falls back to \
+             Local. A profile that has never chosen an audience is every \
+             profile on a fresh machine, and it must load into the one that \
+             needs no account, no relay and no network.",
+            path.display()
+        );
+        assert!(
+            hydrate.contains("unwrap_or_default()"),
+            "OMEGA-DELTA-0105: the audience book in {} no longer falls back to \
+             an empty book. A book that failed to decode must leave every \
+             thread unrecorded — and so Local — rather than carrying whatever \
+             a partial parse produced.",
+            path.display()
+        );
+        assert!(
+            hydrate.contains("roster.resolve(id).is_some()"),
+            "OMEGA-DELTA-0105: {} no longer discards a stored selection the \
+             roster cannot resolve. Leaving a community and finding the \
+             composer still offering to start threads in it is a control \
+             describing a door that is not there.",
+            path.display()
+        );
+    }
+
+    /// OMEGA-DELTA-0105. The menu's wording lives in one place.
+    ///
+    /// The lane that wrote these three sentences named them as its own biggest
+    /// guess: a person picks a different audience, the menu closes, and the
+    /// button reads exactly what it read before, because choosing applies to
+    /// the next thread. That is correct, and it is also what a broken dropdown
+    /// looks like; these sentences are the only thing between the two
+    /// readings.
+    ///
+    /// Nothing here can check whether they land. What it can do is make the
+    /// change cheap: the strings are constants in `omega_audience` beside the
+    /// rules they describe, and a literal reappearing in the control fails.
+    #[test]
+    fn the_menus_sentences_are_written_once() {
+        let rules_path = repository_path(AUDIENCE_PATH);
+        let rules = read_repository_file(AUDIENCE_PATH);
+        let control_path = repository_path(AUDIENCE_CONTROL_PATH);
+        let control = uncommented(&read_repository_file(AUDIENCE_CONTROL_PATH));
+
+        for sentence in AUDIENCE_MENU_SENTENCES {
+            assert!(
+                rules.contains(sentence),
+                "OMEGA-DELTA-0105: {} no longer declares {sentence:?}. The \
+                 menu's wording is written beside the rule it describes, with \
+                 the guess and its falsifier, so that changing it is one edit.",
+                rules_path.display()
+            );
+            assert!(
+                !control.contains(sentence),
+                "OMEGA-DELTA-0105: {} writes {sentence:?} as a literal. It is \
+                 already a constant in `omega_audience`; two copies means the \
+                 next person changes one of them.",
+                control_path.display()
+            );
+        }
+
+        for name in [
+            "SELECTION_MENU_HEADER",
+            "SWITCHING_DOES_NOT_MOVE_A_THREAD",
+            "THREAD_IS_NOT_IN_THE_SELECTION",
+        ] {
+            assert!(
+                control.contains(name),
+                "OMEGA-DELTA-0105: {} no longer renders `{name}`. A sentence \
+                 that is declared and never drawn is not the sentence a person \
+                 reads.",
+                control_path.display()
+            );
+        }
+    }
+
+    /// OMEGA-DELTA-0105. The name on the control's face is bounded, and the
+    /// row it sits in can still wrap.
+    ///
+    /// The audience button was added to a `flex_wrap` row already carrying the
+    /// executor disclosure, a turn-phase dot, a provider notice, the model
+    /// selector and Send. Nothing here renders a pixel, so none of this says
+    /// the row fits a narrow dock. What it does say is that the row's width is
+    /// a function of bounded things: the only unbounded text in it is an
+    /// audience name, which this repository does not choose — omega#108's come
+    /// from a Forge repository, and `OMEGA_AUDIENCE_PREVIEW` puts an arbitrary
+    /// environment string there today.
+    ///
+    /// The label beside it is the `OMEGA-DELTA-0021` executor disclosure,
+    /// which is `.truncate()`d, so it is the one that gives way. An unbounded
+    /// audience name does not merely look wide: it takes room from the
+    /// mandatory attribution of which executor ran the turn.
+    #[test]
+    fn the_audience_on_the_composer_is_bounded_and_the_row_can_wrap() {
+        let rules_path = repository_path(AUDIENCE_PATH);
+        let rules = read_repository_file(AUDIENCE_PATH);
+
+        let label = body_of(&rules, "label");
+        assert!(
+            label.contains("bounded(audience.name())"),
+            "OMEGA-DELTA-0105: `ThreadAudience::label` in {} no longer bounds \
+             the name it returns. It is the only function that produces the \
+             face of the composer's audience control, and an audience name is \
+             somebody else's text.",
+            rules_path.display()
+        );
+        let indented = with_free_functions_indented(&rules);
+        let bounded = body_of(&indented, "bounded");
+        assert!(
+            bounded.contains("MAX_LABEL_CHARS") && bounded.contains("chars()"),
+            "OMEGA-DELTA-0105: `bounded` in {} no longer counts characters \
+             against `MAX_LABEL_CHARS`. Counting bytes panics on a name in any \
+             script that is not ASCII.",
+            rules_path.display()
+        );
+
+        let view_path = repository_path(THREAD_VIEW_PATH);
+        let view = read_repository_file(THREAD_VIEW_PATH);
+        let bar = body_of(&view, "render_zero_base_executor_bar");
+        // The outer row's own modifiers, which are everything before its first
+        // child. Asserting on the whole body would pass on the `.flex_wrap()`
+        // of the right-hand group, and it is the outer row that decides
+        // whether a narrow dock wraps or clips.
+        let outer = bar.split(".child(").next().unwrap_or_default();
+        assert!(
+            outer.contains(".flex_wrap()"),
+            "OMEGA-DELTA-0105: the outer row of zero base's composer bar in {} \
+             no longer wraps. It carries six controls; without wrapping, a \
+             narrow dock clips the one at the end, which is Send.",
+            view_path.display()
+        );
+        assert!(
+            bar.contains(".truncate()"),
+            "OMEGA-DELTA-0105: the executor disclosure in {} no longer \
+             truncates. It is the label that gives way when the row is tight, \
+             and `OMEGA-DELTA-0021` requires it to be rendered on every draw.",
+            view_path.display()
+        );
+    }
+
+    /// OMEGA-DELTA-0105. The preview roster entry is a fixture, and the three
+    /// things `OMEGA-DELTA-0094` claimed about it are now true of the code.
+    ///
+    /// That delta recorded that the fixture "publishes nothing, its identity
+    /// is `preview:` prefixed so it cannot be mistaken for a Forge coordinate,
+    /// and it cannot become the default". Nothing held any of the three, and
+    /// the first was false at the only gate that matters. The fixture carries
+    /// `Reach::Shared` — deliberately, because it exists to make the
+    /// not-private case observable — and `may_publish`, which omega#108 is
+    /// told to ask *before* an effect, answers on reach. So it returned `Ok`.
+    /// Nothing publishes today, so nothing left any machine; the first
+    /// transport wired behind that gate would have been authorised, on any
+    /// machine with the variable set, to publish into an audience that does
+    /// not exist.
+    ///
+    /// The prefix is now reserved in both directions, exactly as `local` is,
+    /// so "cannot collide with a Forge coordinate" is a constructor's refusal
+    /// rather than a naming convention.
+    #[test]
+    fn the_preview_audience_is_a_fixture_and_not_a_place() {
+        let rules_path = repository_path(AUDIENCE_PATH);
+        let rules = read_repository_file(AUDIENCE_PATH);
+
+        let publish = body_of(&rules, "may_publish");
+        // Two arms, counted rather than merely present. A first draft of this
+        // assertion asked whether the body contained `is_preview()` at all,
+        // and it stayed green with the resolved-fixture arm deleted — the
+        // unresolved one alone satisfied it, and the unresolved one is not the
+        // arm a machine with the variable set goes through. Watching that
+        // mutation survive is what found this.
+        assert_eq!(
+            publish.matches("AudienceIsAFixture").count(),
+            2,
+            "OMEGA-DELTA-0105: `may_publish` in {} no longer refuses a fixture \
+             on both paths. A fixture the roster resolves and a record that \
+             outlived `OMEGA_AUDIENCE_PREVIEW` are both fixtures, and the \
+             first is the one a machine with the variable set reaches.",
+            rules_path.display()
+        );
+        let fixture_arm = publish
+            .find("is_preview()")
+            .expect("`may_publish` must ask whether the audience is a fixture");
+        let reach_arm = publish
+            .find("Reach::Shared")
+            .expect("`may_publish` must still admit a shared audience");
+        assert!(
+            fixture_arm < reach_arm,
+            "OMEGA-DELTA-0105: `may_publish` in {} consults reach before it \
+             asks whether the audience is a fixture. The fixture is \
+             `Reach::Shared` on purpose, so reach answers first and answers \
+             `Ok`.",
+            rules_path.display()
+        );
+
+        let joined = body_of(&rules, "joined");
+        assert!(
+            joined.contains("PREVIEW_PREFIX") && joined.contains("ReservedPreviewPrefix"),
+            "OMEGA-DELTA-0105: `AudienceId::joined` in {} no longer reserves \
+             the fixture prefix. omega#108's coordinates arrive through this \
+             constructor, and a Forge coordinate wearing `preview:` would be \
+             refused at `may_publish` as a fixture — a real membership that \
+             silently stops being able to publish.",
+            rules_path.display()
+        );
+
+        let control_path = repository_path(AUDIENCE_CONTROL_PATH);
+        let control = uncommented(&read_repository_file(AUDIENCE_CONTROL_PATH));
+        let indented = with_free_functions_indented(&control);
+        let preview = body_of(&indented, "preview_audience");
+        assert!(
+            preview.contains("omega_audience::preview_audience("),
+            "OMEGA-DELTA-0105: {} decides what the fixture variable means \
+             instead of delegating. The rule belongs where it can be tested on \
+             a machine that is not in the right state; this module's job is \
+             reading the variable.",
+            control_path.display()
+        );
+        assert!(
+            !control.contains("Audience::preview("),
+            "OMEGA-DELTA-0105: {} mints a fixture itself. A fixture is a thing \
+             `omega_audience` constructs and never a thing that arrives.",
+            control_path.display()
+        );
+        assert!(
+            preview.contains("std::env::var("),
+            "OMEGA-DELTA-0105: the fixture in {} is no longer gated on the \
+             environment. It must be absent on every machine that has not \
+             deliberately asked for it.",
+            control_path.display()
+        );
+    }
+
+    /// OMEGA-DELTA-0105. Nothing can declare a dependency where
+    /// `OMEGA-DELTA-0094`'s allowlist cannot see it.
+    ///
+    /// That check reads the manifest text from `\n[dependencies]` to the next
+    /// `\n[`, which makes `[dependencies.tokio]`, `[build-dependencies]` and
+    /// `[target.'cfg(unix)'.dependencies]` invisible to it — three ordinary
+    /// spellings, any of which would put a socket behind Local while the
+    /// allowlist stayed green. Rather than teach that parser every spelling,
+    /// the manifest is held to the two sections it can read.
+    #[test]
+    fn nothing_can_declare_a_dependency_the_local_allowlist_cannot_see() {
+        let path = repository_path(AUDIENCE_MANIFEST_PATH);
+        let manifest = read_repository_file(AUDIENCE_MANIFEST_PATH);
+
+        for line in manifest.lines().map(str::trim) {
+            if !line.starts_with('[') || !line.contains("dependencies") {
+                continue;
+            }
+            assert!(
+                AUDIENCE_ALLOWED_MANIFEST_SECTIONS.contains(&line),
+                "OMEGA-DELTA-0105: {} declares dependencies under `{line}`, \
+                 which `local_needs_no_network_no_relay_and_no_account` cannot \
+                 see — it reads `[dependencies]` and stops at the next `[`. \
+                 Local's allowlist would stay green over anything declared \
+                 there. Admitted sections: \
+                 {AUDIENCE_ALLOWED_MANIFEST_SECTIONS:?}.",
+                path.display()
+            );
+        }
+
+        for required in AUDIENCE_ALLOWED_MANIFEST_SECTIONS {
+            assert!(
+                manifest.lines().any(|line| line.trim() == *required),
+                "OMEGA-DELTA-0105: {} no longer declares `{required}`. A check \
+                 that cannot find what it is about must fail rather than pass.",
+                path.display()
+            );
+        }
     }
 }

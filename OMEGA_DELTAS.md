@@ -3980,3 +3980,87 @@ than merely stated.
   running `exo serve` has never confirmed it. If upstream adds a variant, this
   fails on the *next transcription*, not on the day upstream adds it — no check
   here watches the pinned tree change.
+
+### OMEGA-DELTA-0105 — What omega#107's acceptance can be proved without a window, is
+
+- **Upstream behaviour.** Not a divergence from Zed in its own right. This is
+  `OMEGA-DELTA-0094` closed out: that delta shipped the audience concept, the
+  record on the thread, and the composer control, and it recorded that its four
+  acceptance items were "four rendered windows" that nobody had looked at. This
+  one separates the part of that acceptance which is a structural property from
+  the part which genuinely needs an eye, proves the first, and bounds the
+  second so it can be looked at once instead of per case.
+- **Why Omega diverges.** A property that can be checked and is instead left to
+  a screenshot is a property that will be true on the day of the screenshot.
+  Three of `OMEGA-DELTA-0094`'s own recorded claims about the preview fixture
+  had nothing holding them at all, and one of them was false.
+- **The law.**
+  - **Local is what a fresh profile *loads* into, not only what an unrecorded
+    thread resolves to.** `OMEGA-DELTA-0094` pinned `AudienceBook::audience_of`'s
+    fallback. The other fallback on that path is the selection in `loaded`,
+    which hydrates from the key-value store; nothing held it, and pointing it
+    at any other audience left all five of that delta's checks green while
+    making a machine that has never chosen anything start its threads
+    elsewhere. Both fallbacks, and the filter that discards a stored selection
+    the roster cannot resolve, are now checked.
+  - **`may_publish` refuses a fixture by identity, before it consults reach.**
+    The preview entry is `Reach::Shared` on purpose — it exists to make the
+    not-private case observable — and `may_publish` answered on reach, so it
+    returned `Ok` for it. Nothing publishes today, so nothing left any machine;
+    the first transport wired behind that gate would have been authorised, on
+    any machine with `OMEGA_AUDIENCE_PREVIEW` set, to publish into an audience
+    that does not exist. `PublishRefused::AudienceIsAFixture` is the refusal,
+    and it is reached for a resolved fixture and for a record that outlived the
+    variable alike.
+  - **`preview:` is reserved in both directions, exactly as `local` is.**
+    `AudienceId::preview` produces it and `AudienceId::joined` refuses it, so
+    omega#108's Forge coordinates cannot land on the prefix and a fixture
+    cannot be minted through the door a real membership arrives at. The claim
+    that the fixture "cannot be mistaken for a Forge coordinate" was a naming
+    convention, and a convention is a thing the code that has to respect it has
+    never heard of.
+  - **The fixture describes itself as a fixture.** It used to make a joined
+    audience's sentence — "Shared with everyone in Preview audience. Needs a
+    network." — which is false in both halves. A fixture that describes itself
+    as a place is the one way this fixture can mislead somebody.
+  - **What the fixture means is a function of a value, not of the
+    environment.** `omega_audience::preview_audience` takes the variable's
+    value; `agent_ui` reads the variable and decides nothing. Absent, empty and
+    `0` produce nothing; `1` produces the default name; anything else is the
+    name, so the long-name case can be looked at on purpose.
+  - **The name on the control's face is bounded to `MAX_LABEL_CHARS`,
+    counted in characters.** An audience name is not a value this repository
+    chooses: omega#108's come from a Forge repository and the fixture's comes
+    from an environment string. The button sits in a `flex_wrap` row whose only
+    other text is the `OMEGA-DELTA-0021` executor disclosure, which is
+    `.truncate()`d — so an unbounded name does not merely look wide, it takes
+    room from the mandatory attribution of which executor ran the turn. The
+    menu entry and the tooltip stay unbounded, because they have the room and a
+    name nobody can read in full anywhere is a name nobody can check.
+  - **The menu's three sentences are written once.** They are the least
+    verified thing in this feature and the one part of it no check can reach:
+    a person picks a different audience, the menu closes, and the button reads
+    what it read before — correct, and also what a broken dropdown looks like.
+    So they are constants in `omega_audience` beside the rules they describe,
+    with the guess and its falsifier written out, and a literal reappearing in
+    the control fails.
+  - **A dependency cannot be declared where Local's allowlist cannot see it.**
+    `local_needs_no_network_no_relay_and_no_account` reads `[dependencies]` and
+    stops at the next `[`, so `[dependencies.tokio]`, `[build-dependencies]`
+    and `[target.'cfg(unix)'.dependencies]` are invisible to it. The manifest
+    is held to the two sections that check can read.
+- **Enforced by:** `local_is_what_a_fresh_profile_loads_into`,
+  `the_menus_sentences_are_written_once`,
+  `the_audience_on_the_composer_is_bounded_and_the_row_can_wrap`,
+  `the_preview_audience_is_a_fixture_and_not_a_place`, and
+  `nothing_can_declare_a_dependency_the_local_allowlist_cannot_see` in
+  `crates/omega_deltas`; plus six unit tests in
+  `crates/omega_audience/src/omega_audience.rs`, each watched failing against
+  the mutation of the rule it is about.
+- **What this does not cover.** Still no pixel. Whether the two menu sentences
+  read as a deliberate control rather than a broken one, whether the row fits a
+  narrow dock with a 24-character audience name beside the disclosure and the
+  model selector, and whether a fresh profile's button is legible where it sits
+  are all rendered facts, and all three need somebody who has not read this
+  file. The bound makes the second one answerable once rather than per name;
+  it does not answer it.

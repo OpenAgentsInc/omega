@@ -40,6 +40,61 @@
 //! to be in the right state. Everything below is a value or a function of
 //! values. `crates/agent_ui/src/omega_audience_control.rs` is the only place
 //! that knows about a key-value store or a window.
+//!
+//! # The three sentences nobody has watched anybody read
+//!
+//! [`SELECTION_MENU_HEADER`], [`SWITCHING_DOES_NOT_MOVE_A_THREAD`] and
+//! [`THREAD_IS_NOT_IN_THE_SELECTION`] are the whole of what the menu says, and
+//! they are the least verified thing in this feature. They are here, beside
+//! the rules they describe, rather than inline in the render closure, because
+//! the lane that wrote them named them as its own biggest guess and the next
+//! person should be able to change them in one edit rather than by hunting
+//! through a menu builder.
+//!
+//! **The guess.** A person picks a different audience, the menu closes, and
+//! the button still reads what it read before — because choosing applies to
+//! the next thread and this thread keeps the one it was started in. That is
+//! [`AudienceBook::bind`]'s refusal, and it is correct. But *correct* and
+//! *legible* are different properties: the same pixels are what a broken
+//! dropdown looks like. These two lines are the only thing standing between
+//! the two readings.
+//!
+//! **What would falsify them.** Somebody who has never seen this before picks
+//! the second entry, and then says the control did not work, or picks it a
+//! second time, or goes looking for a setting. Any of those means the sentence
+//! did not land and the shape has to change — a confirmation on the button, a
+//! different tense, or the choice applying visibly somewhere the eye is
+//! already on. No check in this repository can see that happen; it needs a
+//! window and a person.
+//!
+//! **What is checked.** Only that the three sentences exist in exactly one
+//! place — `the_menus_sentences_are_written_once` in `omega_deltas` fails if a
+//! literal reappears in the control — so that changing them stays one edit.
+//!
+//! # The row this control sits in
+//!
+//! `render_zero_base_executor_bar` is a `flex_wrap` row already carrying the
+//! executor disclosure, a turn-phase dot, a provider notice, the model
+//! selector and Send. The audience button was added to its left-hand group,
+//! which does *not* wrap internally and whose other text — the
+//! `OMEGA-DELTA-0021` executor disclosure — is `.truncate()`d. So an unbounded
+//! audience name does not merely look wide: it takes room from the one label
+//! in that row that is allowed to shrink, and the label it takes room from is
+//! the mandatory attribution of which executor ran the turn.
+//!
+//! An audience name is not a value this repository chooses. omega#108's names
+//! come from a Forge repository, and `OMEGA_AUDIENCE_PREVIEW` puts an
+//! arbitrary environment string on the button today. So [`ThreadAudience::label`]
+//! bounds what it returns to [`MAX_LABEL_CHARS`], and the full name stays in
+//! the menu entry and the tooltip, which have room for it.
+//!
+//! [`MAX_LABEL_CHARS`] is 24 because it has to clear the names that will
+//! really occur — `Omega development` is 17, `OpenAgentsInc/omega` is 19,
+//! `Unknown audience` is 16 — while making the worst case a fixed one somebody
+//! can look at on purpose rather than an unbounded one nobody will ever see.
+//! Whether 24 characters plus the disclosure plus the model selector actually
+//! fits a narrow dock is a rendered fact, and this bound does not decide it —
+//! it only makes the question answerable once instead of per name.
 
 #![deny(missing_docs)]
 
@@ -66,6 +121,34 @@ pub const LOCAL_NAME: &str = "Local";
 /// Kept beside the name because the name alone is a label and the promise is
 /// what a person is actually deciding on.
 pub const LOCAL_DESCRIPTION: &str = "Only this computer. No account, no relay, no network.";
+
+/// The header the selection menu opens with.
+///
+/// One of the three sentences described under "The three sentences nobody
+/// has watched anybody read" in the module comment.
+pub const SELECTION_MENU_HEADER: &str = "New threads start in";
+
+/// The line the selection menu ends on, always.
+///
+/// One of the three sentences described under "The three sentences nobody
+/// has watched anybody read" in the module comment.
+pub const SWITCHING_DOES_NOT_MOVE_A_THREAD: &str = "A thread keeps the audience it was started in.";
+
+/// The second line, shown only when the thread on screen is in a different
+/// audience from the one the next thread will start in.
+///
+/// One of the three sentences described under "The three sentences nobody
+/// has watched anybody read" in the module comment.
+pub const THREAD_IS_NOT_IN_THE_SELECTION: &str = "This thread is not in the selected audience.";
+
+/// The longest audience name the composer will write on the control's face.
+///
+/// See "The row this control sits in" in the module comment for why there is
+/// a bound at all, and why it is this number.
+pub const MAX_LABEL_CHARS: usize = 24;
+
+/// What a bounded name ends with, so a shortened one is visibly shortened.
+pub const ELLIPSIS: char = '…';
 
 /// How far a conversation in an audience travels.
 ///
@@ -97,6 +180,37 @@ impl Reach {
     }
 }
 
+/// The prefix that marks an identity as a rendering fixture and not a place.
+///
+/// Reserved in both directions, exactly as [`LOCAL_KEY`] is:
+/// [`AudienceId::preview`] produces it and [`AudienceId::joined`] refuses it,
+/// so omega#108's Forge coordinates cannot land on one and a fixture cannot be
+/// minted by the path a real membership arrives through.
+///
+/// Reservation is what turns "cannot collide" from a claim into a mechanism.
+/// `OMEGA-DELTA-0094` already asserted the fixture's identity "cannot be
+/// mistaken for a Forge coordinate" on the strength of the prefix alone, which
+/// is a naming convention — and a convention is a thing the code that has to
+/// respect it has never heard of.
+///
+/// The comparison is exact rather than case-folded, for the same reason
+/// [`LOCAL_KEY`]'s is. `Preview:x` is a *different* identity from `preview:x`,
+/// so nothing can resolve one as the other; the only reader it could mislead
+/// is a person, and a person reading identities is not the failure this
+/// prevents.
+pub const PREVIEW_PREFIX: &str = "preview:";
+
+/// The identity of the one fixture audience.
+///
+/// It names itself. A key a person might find in their key-value store, or in
+/// a thread record that outlived the environment variable, should say what it
+/// is without anybody having to look it up.
+pub const PREVIEW_KEY: &str = "preview:not-a-real-audience";
+
+/// What the fixture is called when the environment asks for it by presence
+/// rather than by name.
+pub const PREVIEW_NAME: &str = "Preview audience";
+
 /// Why an audience identifier was refused.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AudienceIdError {
@@ -109,6 +223,13 @@ pub enum AudienceIdError {
     /// the disclosure defect this crate exists to prevent, arriving through the
     /// front door.
     ReservedLocalKey,
+    /// The key began with [`PREVIEW_PREFIX`], which only
+    /// [`AudienceId::preview`] may produce.
+    ///
+    /// A joined audience wearing the fixture prefix would be refused at
+    /// [`may_publish`] as though it were a fixture, so a real membership would
+    /// silently stop being able to publish. The prefix means one thing.
+    ReservedPreviewPrefix,
 }
 
 impl fmt::Display for AudienceIdError {
@@ -118,6 +239,8 @@ impl fmt::Display for AudienceIdError {
             Self::ReservedLocalKey => {
                 formatter.write_str("`local` is reserved for the audience that is always present")
             }
+            Self::ReservedPreviewPrefix => formatter
+                .write_str("`preview:` is reserved for the rendering fixture and names no place"),
         }
     }
 }
@@ -139,13 +262,23 @@ impl AudienceId {
         Self(LOCAL_KEY.to_string())
     }
 
+    /// The identity of the rendering fixture.
+    ///
+    /// The only constructor that may produce a [`PREVIEW_PREFIX`] key, so a
+    /// fixture is a thing this crate mints and never a thing that arrives.
+    #[must_use]
+    pub fn preview() -> Self {
+        Self(PREVIEW_KEY.to_string())
+    }
+
     /// An identifier for an audience somebody joined.
     ///
     /// # Errors
     ///
-    /// [`AudienceIdError::Empty`] for a blank key, and
+    /// [`AudienceIdError::Empty`] for a blank key,
     /// [`AudienceIdError::ReservedLocalKey`] for an attempt to take the local
-    /// audience's name.
+    /// audience's name, and [`AudienceIdError::ReservedPreviewPrefix`] for an
+    /// attempt to take the fixture's prefix.
     pub fn joined(key: impl Into<String>) -> Result<Self, AudienceIdError> {
         let key = key.into();
         let trimmed = key.trim();
@@ -155,6 +288,9 @@ impl AudienceId {
         if trimmed == LOCAL_KEY {
             return Err(AudienceIdError::ReservedLocalKey);
         }
+        if trimmed.starts_with(PREVIEW_PREFIX) {
+            return Err(AudienceIdError::ReservedPreviewPrefix);
+        }
         Ok(Self(trimmed.to_string()))
     }
 
@@ -162,6 +298,16 @@ impl AudienceId {
     #[must_use]
     pub fn is_local(&self) -> bool {
         self.0 == LOCAL_KEY
+    }
+
+    /// Is this a rendering fixture rather than a place?
+    ///
+    /// Read off the prefix rather than off equality with [`PREVIEW_KEY`], so a
+    /// second fixture added later is a fixture too and does not have to be
+    /// remembered at [`may_publish`].
+    #[must_use]
+    pub fn is_preview(&self) -> bool {
+        self.0.starts_with(PREVIEW_PREFIX)
     }
 
     /// The stored form, for a key-value store or a record on disk.
@@ -230,6 +376,24 @@ impl Audience {
         })
     }
 
+    /// The rendering fixture, so more than one audience can be looked at
+    /// before omega#108 exists.
+    ///
+    /// [`Reach::Shared`] on purpose. The fixture exists to make the *not
+    /// private* case observable, and an entry that claimed to be private would
+    /// make the two rendered acceptance items it was added for meaningless.
+    /// What keeps that honest is that [`may_publish`] refuses it by identity —
+    /// see [`PublishRefused::AudienceIsAFixture`] — so "not private" here never
+    /// becomes "may be published to".
+    #[must_use]
+    pub fn preview(name: impl Into<String>) -> Self {
+        Self {
+            id: AudienceId::preview(),
+            name: name.into(),
+            reach: Reach::Shared,
+        }
+    }
+
     /// This audience's stable identity.
     #[must_use]
     pub fn id(&self) -> &AudienceId {
@@ -254,20 +418,74 @@ impl Audience {
         self.id.is_local()
     }
 
+    /// Is this a rendering fixture rather than a place?
+    #[must_use]
+    pub fn is_preview(&self) -> bool {
+        self.id.is_preview()
+    }
+
     /// The full sentence, for a tooltip or a menu line.
     ///
     /// The local one is fixed text because it is a promise this crate keeps.
     /// A joined one describes its reach rather than its membership, because
     /// membership is omega#108's to answer and a guess here would be a
     /// confident wrong answer about who can read something.
+    ///
+    /// The fixture says what it is. "Shared with everyone in Preview
+    /// audience. Needs a network." is the sentence a real audience makes, and
+    /// it is false of this one in both halves: there is nobody in it and it
+    /// reaches no network. A fixture that describes itself as a place is the
+    /// one way this fixture could mislead somebody.
     #[must_use]
     pub fn description(&self) -> String {
         if self.is_local() {
             LOCAL_DESCRIPTION.to_string()
+        } else if self.is_preview() {
+            format!(
+                "A rendering fixture, not a place. Nothing is published, joined or sent. \
+                 Present because {PREVIEW_ENV_VAR} is set."
+            )
         } else {
             format!("Shared with everyone in {}. Needs a network.", self.name)
         }
     }
+}
+
+/// The environment variable that asks for the rendering fixture.
+///
+/// Named here rather than only in `agent_ui` so the sentence the fixture makes
+/// about itself can say which switch produced it. Reading the variable is
+/// still the control's job — this crate reads no ambient state.
+pub const PREVIEW_ENV_VAR: &str = "OMEGA_AUDIENCE_PREVIEW";
+
+/// The fixture audience an environment value asks for, if it asks for one.
+///
+/// Takes the value rather than reading it, so the rule is testable on a
+/// machine that is not in the right state — the discipline the whole crate
+/// keeps. `agent_ui` supplies `std::env::var(PREVIEW_ENV_VAR).ok()`.
+///
+/// - Absent, empty, and `0` produce nothing. Absent is every machine that has
+///   not deliberately asked, and `0` is what somebody writes when they mean to
+///   turn it off.
+/// - `1` means "on, do not make me name it" and produces [`PREVIEW_NAME`].
+/// - Anything else is the name, so the long-name case in the composer row can
+///   be looked at on purpose.
+///
+/// The result is never local, never the selection, and never publishable. It
+/// is an extra roster entry and nothing else.
+#[must_use]
+pub fn preview_audience(requested: Option<&str>) -> Option<Audience> {
+    let requested = requested?;
+    let requested = requested.trim();
+    if requested.is_empty() || requested == "0" {
+        return None;
+    }
+    let name = if requested == "1" {
+        PREVIEW_NAME
+    } else {
+        requested
+    };
+    Some(Audience::preview(name))
 }
 
 /// What the selector offers.
@@ -368,12 +586,37 @@ pub enum ThreadAudience {
     Unresolved(AudienceId),
 }
 
+/// A name bounded to [`MAX_LABEL_CHARS`], counted in characters.
+///
+/// Characters rather than bytes, because a byte slice of a name in any script
+/// that is not ASCII either panics on a boundary or produces mojibake, and an
+/// audience name is somebody else's text.
+#[must_use]
+fn bounded(name: &str) -> String {
+    if name.chars().count() <= MAX_LABEL_CHARS {
+        return name.to_string();
+    }
+    let mut bounded: String = name.chars().take(MAX_LABEL_CHARS - 1).collect();
+    bounded.push(ELLIPSIS);
+    bounded
+}
+
 impl ThreadAudience {
-    /// What a person reads in the composer.
+    /// What a person reads in the composer, bounded to [`MAX_LABEL_CHARS`].
+    ///
+    /// The bound is here rather than at the call site because this is the only
+    /// function that produces the face of the control, and a length rule
+    /// applied where a string is drawn is a rule the next drawing site does not
+    /// have. See "The row this control sits in" in the module comment.
+    ///
+    /// The menu entry and the tooltip use [`Audience::name`] and
+    /// [`Audience::description`], which are unbounded on purpose: they have the
+    /// room, and a name a person cannot read in full anywhere is a name they
+    /// cannot check.
     #[must_use]
     pub fn label(&self) -> String {
         match self {
-            Self::Known(audience) => audience.name().to_string(),
+            Self::Known(audience) => bounded(audience.name()),
             Self::Unresolved(_) => "Unknown audience".to_string(),
         }
     }
@@ -420,6 +663,17 @@ pub enum PublishRefused {
     /// Refused rather than attempted: publishing into a place Omega cannot
     /// describe is publishing to an audience nobody can name.
     AudienceUnresolved(AudienceId),
+    /// The thread was started in a rendering fixture, which is not a place.
+    ///
+    /// The fixture carries [`Reach::Shared`] because it exists to make the
+    /// not-private case observable, and that made it indistinguishable here
+    /// from a real audience: `may_publish` is the one gate omega#108 is told to
+    /// perform *before* an effect, and it returned `Ok` for the fixture.
+    /// Nothing publishes today, so nothing left any machine — but the first
+    /// transport wired behind this gate would have been authorised, on any
+    /// machine with [`PREVIEW_ENV_VAR`] set, to publish into an audience that
+    /// does not exist.
+    AudienceIsAFixture(AudienceId),
 }
 
 impl fmt::Display for PublishRefused {
@@ -434,6 +688,11 @@ impl fmt::Display for PublishRefused {
                 "this thread belongs to `{}`, which this profile has not joined.",
                 id.as_key()
             ),
+            Self::AudienceIsAFixture(id) => write!(
+                formatter,
+                "`{}` is a rendering fixture, not a place. There is nobody in it to publish to.",
+                id.as_key()
+            ),
         }
     }
 }
@@ -445,13 +704,22 @@ impl fmt::Display for PublishRefused {
 /// else — in particular not of the current selection, which is why it takes a
 /// [`ThreadAudience`] and not an [`AudienceRoster`] plus a choice.
 ///
+/// The fixture is refused before its reach is consulted, because its reach is
+/// `Shared` and reach alone cannot tell a place from a stand-in for one.
+///
 /// # Errors
 ///
 /// [`PublishRefused`], which is a sentence a person can read.
 pub fn may_publish(audience: &ThreadAudience) -> Result<&Audience, PublishRefused> {
     match audience {
+        ThreadAudience::Known(audience) if audience.is_preview() => {
+            Err(PublishRefused::AudienceIsAFixture(audience.id().clone()))
+        }
         ThreadAudience::Known(audience) if audience.reach() == Reach::Shared => Ok(audience),
         ThreadAudience::Known(_) => Err(PublishRefused::ThreadIsLocal),
+        ThreadAudience::Unresolved(id) if id.is_preview() => {
+            Err(PublishRefused::AudienceIsAFixture(id.clone()))
+        }
         ThreadAudience::Unresolved(id) => Err(PublishRefused::AudienceUnresolved(id.clone())),
     }
 }
@@ -931,6 +1199,254 @@ mod tests {
         assert_eq!(
             decoded.recorded(&"thread-b".to_string()),
             Some(&AudienceId::joined("forge:omega").expect("a joined identity"))
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // OMEGA-DELTA-0105. What could be proved without a window, proved.
+    // ------------------------------------------------------------------
+
+    /// omega#107 acceptance 1, composed rather than asserted in pieces.
+    ///
+    /// A profile that has joined nothing, has recorded nothing, and has
+    /// selected nothing is the state of every machine this ships to. Every
+    /// value the composer can read in that state is checked here, so the only
+    /// thing left for a window is whether the word appears where somebody sees
+    /// it.
+    ///
+    /// Written to reach the *unbound* branch on purpose. The lane before this
+    /// one found that all fifteen of its tests bound a thread first, so the
+    /// fallback that runs on every thread on a fresh machine had nothing
+    /// holding it. This test binds nothing.
+    #[test]
+    fn a_fresh_profile_reads_local_and_nothing_else() {
+        let book: AudienceBook<&str> = AudienceBook::default();
+        let roster = AudienceRoster::default();
+
+        assert!(book.is_empty(), "a fresh profile has recorded nothing");
+        assert!(!roster.has_joined_anything());
+
+        // No selection was ever written, so the composer's selection is the
+        // constructed local one. `audience_for_opening` is what the control
+        // calls, and on a fresh profile both of its inputs are local.
+        let selected = AudienceId::local();
+        assert_eq!(
+            audience_for_opening(None, &selected, ThreadOpening::Started),
+            AudienceId::local()
+        );
+
+        // And what the control writes on its own face, for a thread it has
+        // never seen, without anything being bound.
+        let described = roster.describe(&book.audience_of(&"a-thread-nothing-recorded"));
+        assert_eq!(described.label(), LOCAL_NAME);
+        assert_eq!(described.description(), LOCAL_DESCRIPTION);
+        assert!(described.is_private_to_this_computer());
+        assert_eq!(
+            may_publish(&described),
+            Err(PublishRefused::ThreadIsLocal),
+            "the audience a fresh profile is in has nowhere to publish to"
+        );
+    }
+
+    /// The bound on the face of the control.
+    ///
+    /// An audience name is somebody else's text: omega#108's come from a Forge
+    /// repository and the fixture's comes from an environment variable. The
+    /// row it is drawn in gives its only other label — the `OMEGA-DELTA-0021`
+    /// executor disclosure — a `.truncate()`, so an unbounded name takes room
+    /// from the mandatory attribution of which executor ran the turn.
+    #[test]
+    fn the_composer_label_is_bounded_however_long_the_name_is() {
+        let long = "A community audience with a name far longer than any row";
+        let roster =
+            AudienceRoster::new([Audience::joined("forge:long", long).expect("a joined audience")]);
+        let described = roster.describe(&AudienceId::joined("forge:long").expect("an identity"));
+
+        let label = described.label();
+        assert!(
+            label.chars().count() <= MAX_LABEL_CHARS,
+            "the control's face must be bounded, got {} characters: {label:?}",
+            label.chars().count()
+        );
+        assert!(
+            label.ends_with(ELLIPSIS),
+            "a shortened name must look shortened, or a person reads a \
+             different audience's name as this one's: {label:?}"
+        );
+        assert!(
+            described.description().contains(long),
+            "the tooltip has the room, and a name nobody can read in full \
+             anywhere is a name nobody can check"
+        );
+
+        // The boundary, both sides. A name that fits is untouched.
+        let exact: String = "x".repeat(MAX_LABEL_CHARS);
+        assert_eq!(bounded(&exact), exact);
+        assert_eq!(
+            bounded(&"x".repeat(MAX_LABEL_CHARS + 1)).chars().count(),
+            MAX_LABEL_CHARS
+        );
+
+        // Somebody else's text is not ASCII. Counting bytes here panics.
+        let cyrillic = "Сообщество разработчиков Омеги".to_string();
+        assert!(cyrillic.chars().count() > MAX_LABEL_CHARS);
+        assert_eq!(bounded(&cyrillic).chars().count(), MAX_LABEL_CHARS);
+    }
+
+    /// The reserved prefix, refused at the door a real membership comes
+    /// through.
+    ///
+    /// `OMEGA-DELTA-0094` recorded that the fixture's identity "cannot be
+    /// mistaken for a Forge coordinate" because it is `preview:` prefixed.
+    /// That was a naming convention, and a convention is a thing the code that
+    /// has to respect it has never heard of. This makes it a mechanism.
+    #[test]
+    fn no_forge_coordinate_can_wear_the_fixture_prefix() {
+        assert_eq!(
+            AudienceId::joined(PREVIEW_KEY),
+            Err(AudienceIdError::ReservedPreviewPrefix)
+        );
+        assert_eq!(
+            AudienceId::joined("preview:anything-at-all"),
+            Err(AudienceIdError::ReservedPreviewPrefix)
+        );
+        assert_eq!(
+            AudienceId::joined("  preview:padded  "),
+            Err(AudienceIdError::ReservedPreviewPrefix),
+            "whitespace is not a different prefix"
+        );
+
+        // The coordinates omega#108 will actually mint are unaffected, and so
+        // is a name that merely contains the word.
+        assert!(AudienceId::joined("forge:OpenAgentsInc/omega").is_ok());
+        assert!(AudienceId::joined("naddr1preview:not-a-prefix").is_ok());
+        assert!(AudienceId::joined("a-preview:audience").is_ok());
+
+        // And the fixture is still recognisable in a record that outlived the
+        // environment variable, because reading a stored key does not
+        // validate.
+        assert!(AudienceId::from_key(PREVIEW_KEY).is_preview());
+        assert!(!AudienceId::local().is_preview());
+        assert!(
+            !AudienceId::joined("forge:omega")
+                .expect("an identity")
+                .is_preview()
+        );
+    }
+
+    /// The fixture is absent unless somebody asked for it, in as many ways as
+    /// somebody can decline.
+    #[test]
+    fn the_fixture_is_absent_unless_the_environment_asks_for_it() {
+        for declined in [None, Some(""), Some("   "), Some("0"), Some(" 0 ")] {
+            assert_eq!(
+                preview_audience(declined),
+                None,
+                "{declined:?} must not put a second audience in the roster"
+            );
+        }
+
+        let by_presence = preview_audience(Some("1")).expect("`1` asks for the fixture");
+        assert_eq!(by_presence.name(), PREVIEW_NAME);
+
+        let by_name = preview_audience(Some("Omega development")).expect("a named fixture");
+        assert_eq!(by_name.name(), "Omega development");
+        assert_eq!(
+            by_name.id(),
+            by_presence.id(),
+            "naming the fixture must not mint a second identity"
+        );
+    }
+
+    /// What the fixture is, checked on the fixture itself rather than on the
+    /// sentence `OMEGA_DELTAS.md` writes about it.
+    ///
+    /// Three claims were recorded against it and none were held by anything:
+    /// that it publishes nothing, that it cannot become the default, and that
+    /// its identity cannot collide with omega#108's.
+    #[test]
+    fn the_fixture_is_not_a_place_and_cannot_be_published_to() {
+        let fixture = preview_audience(Some("1")).expect("the fixture");
+        let roster = AudienceRoster::new([fixture.clone()]);
+
+        // Not the default. It is the second entry of a roster whose first is
+        // always the constructed local one, and it reaches nobody by being
+        // present — only by being chosen.
+        assert_eq!(roster.len(), 2);
+        assert!(
+            roster
+                .entries()
+                .next()
+                .expect("a roster always has a first entry")
+                .is_local()
+        );
+        assert_eq!(
+            audience_for_opening(None, &AudienceId::local(), ThreadOpening::Started),
+            AudienceId::local(),
+            "a fixture in the roster must not change what a fresh profile \
+             starts threads in"
+        );
+
+        // Publishes nothing, at the gate omega#108 is told to ask before an
+        // effect — not merely because no transport is wired yet. The fixture
+        // is `Reach::Shared`, so reach alone answered this wrongly.
+        let described = roster.describe(fixture.id());
+        assert!(
+            !described.is_private_to_this_computer(),
+            "the fixture exists to make the not-private case observable"
+        );
+        assert_eq!(
+            may_publish(&described),
+            Err(PublishRefused::AudienceIsAFixture(AudienceId::preview())),
+            "a fixture is not a place, and `may_publish` is the one question \
+             asked before an effect"
+        );
+
+        // Including through a record that outlived the environment variable,
+        // where the roster can no longer resolve it.
+        assert_eq!(
+            may_publish(&AudienceRoster::default().describe(&AudienceId::preview())),
+            Err(PublishRefused::AudienceIsAFixture(AudienceId::preview()))
+        );
+
+        // And it says what it is, rather than describing a membership.
+        assert!(fixture.description().contains("not a place"));
+        assert!(fixture.description().contains(PREVIEW_ENV_VAR));
+        assert!(
+            !fixture.description().contains("Shared with everyone in"),
+            "a fixture that describes itself as a place is the one way it can \
+             mislead somebody"
+        );
+    }
+
+    /// The three sentences the menu says, in one place.
+    ///
+    /// The lane that wrote them called them its own biggest guess. Nothing can
+    /// check whether they land — that needs a window and a person — so what is
+    /// checked is that changing them is one edit.
+    #[test]
+    fn the_menus_sentences_are_here_and_say_what_they_mean() {
+        assert!(SWITCHING_DOES_NOT_MOVE_A_THREAD.contains("keeps the audience it was started in"));
+        assert!(THREAD_IS_NOT_IN_THE_SELECTION.contains("not in the selected audience"));
+        assert!(SELECTION_MENU_HEADER.contains("New threads"));
+        for sentence in [
+            SELECTION_MENU_HEADER,
+            SWITCHING_DOES_NOT_MOVE_A_THREAD,
+            THREAD_IS_NOT_IN_THE_SELECTION,
+        ] {
+            assert!(!sentence.trim().is_empty());
+        }
+
+        // The rule the first sentence describes is the one `bind` enforces, so
+        // if the refusal were ever dropped the sentence would become a false
+        // statement rather than an unread one.
+        let mut book = AudienceBook::new();
+        book.bind("a", AudienceId::local()).expect("bound");
+        assert!(
+            book.bind("a", AudienceId::joined("forge:omega").expect("an identity"))
+                .is_err(),
+            "the menu says a thread keeps its audience; something has to make \
+             that true"
         );
     }
 

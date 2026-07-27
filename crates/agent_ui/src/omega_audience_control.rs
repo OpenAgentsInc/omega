@@ -40,8 +40,9 @@ use std::rc::Rc;
 use db::kvp::KeyValueStore;
 use gpui::{AnyElement, App, Global};
 use omega_audience::{
-    Audience, AudienceBook, AudienceId, AudienceRoster, Reach, ThreadAudience, ThreadOpening,
-    audience_for_opening,
+    Audience, AudienceBook, AudienceId, AudienceRoster, Reach, SELECTION_MENU_HEADER,
+    SWITCHING_DOES_NOT_MOVE_A_THREAD, THREAD_IS_NOT_IN_THE_SELECTION, ThreadAudience,
+    ThreadOpening, audience_for_opening,
 };
 use ui::{Button, ContextMenu, ContextMenuEntry, PopoverMenu, Tooltip, Window, prelude::*};
 use util::ResultExt as _;
@@ -64,16 +65,13 @@ const SELECTION_KEY: &str = "selected_audience";
 /// selection changes — cannot be looked at on a build where the only audience
 /// is Local. This environment variable adds one entry so they can be.
 ///
-/// It is a rendering fixture and it says so in the menu. Its identity is
-/// `preview:` prefixed, which [`AudienceId::joined`] accepts and omega#108's
-/// Forge coordinates will never collide with, so a thread bound to it can be
-/// recognised later rather than mistaken for a real membership. Nothing here
-/// publishes; `Reach::Shared` in this build means "not private", which is the
-/// honest thing for the control to say about it.
-pub const PREVIEW_ENV_VAR: &str = "OMEGA_AUDIENCE_PREVIEW";
-
-/// The identity of the fixture audience.
-const PREVIEW_KEY: &str = "preview:not-a-real-audience";
+/// What the fixture is, and what it is forbidden from becoming, is
+/// `omega_audience::preview_audience` and the reserved
+/// `omega_audience::PREVIEW_PREFIX`. Reading the variable is this module's job
+/// because this module is the one that touches ambient state; deciding what the
+/// value means is not, and was moved so it could be tested on a machine that is
+/// not in the right state.
+pub use omega_audience::PREVIEW_ENV_VAR;
 
 /// The selection, the roster, and every thread's recorded audience.
 #[derive(Default)]
@@ -137,18 +135,12 @@ fn loaded(cx: &mut App) -> Loaded {
 }
 
 /// The fixture audience, when the environment asks for it.
+///
+/// Reads the variable and decides nothing. What an absent, empty, `0`, `1` or
+/// named value means is `omega_audience::preview_audience`, which takes the
+/// value as a parameter and is checked there.
 fn preview_audience() -> Option<Audience> {
-    let name = std::env::var(PREVIEW_ENV_VAR).ok()?;
-    let name = name.trim();
-    if name.is_empty() || name == "0" {
-        return None;
-    }
-    let name = if name == "1" {
-        "Preview audience".to_string()
-    } else {
-        name.to_string()
-    };
-    Audience::joined(PREVIEW_KEY, name).ok()
+    omega_audience::preview_audience(std::env::var(PREVIEW_ENV_VAR).ok().as_deref())
 }
 
 fn persist_book(book: &AudienceBook<String>, cx: &App) {
@@ -338,7 +330,7 @@ fn build_menu(
     cx: &mut App,
 ) -> gpui::Entity<ContextMenu> {
     ContextMenu::build(window, cx, move |mut menu, _window, _cx| {
-        menu = menu.header("New threads start in");
+        menu = menu.header(SELECTION_MENU_HEADER);
 
         for audience in entries.clone() {
             let is_selected = audience.id() == &selected;
@@ -365,18 +357,26 @@ fn build_menu(
         // next thread, not this one, and a person who picks an audience and
         // watches the button not change is entitled to know why rather than to
         // conclude the control is broken.
+        //
+        // These two sentences are the least verified thing in this feature and
+        // they are the one part of it that cannot be checked at all — whether
+        // they land needs a window and somebody who has not read this file. So
+        // they live in `omega_audience` beside the rule they describe, with
+        // the guess and its falsifier written out, and
+        // `the_menus_sentences_are_written_once` fails if a literal reappears
+        // here. Changing the wording is one edit, in one place.
         menu = menu.separator().custom_row(move |_window, _cx| {
             v_flex()
                 .max_w_64()
                 .child(
-                    Label::new("A thread keeps the audience it was started in.")
+                    Label::new(SWITCHING_DOES_NOT_MOVE_A_THREAD)
                         .size(LabelSize::XSmall)
                         .color(Color::Muted),
                 )
                 .when(selection_differs, |this| {
                     this.child(
                         h_flex().child(
-                            Label::new("This thread is not in the selected audience.")
+                            Label::new(THREAD_IS_NOT_IN_THE_SELECTION)
                                 .size(LabelSize::XSmall)
                                 .color(Color::Muted),
                         ),
