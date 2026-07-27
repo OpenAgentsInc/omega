@@ -13334,6 +13334,10 @@ impl ThreadView {
     /// costs a control that is live for a moment longer than it should be on a
     /// slow disk, which is the cheap direction: the expensive one would be a
     /// control disabled on a genuinely new conversation.
+    #[allow(
+        dead_code,
+        reason = "OMEGA-DELTA-0149 intentionally keeps the selector out of the render tree"
+    )]
     fn render_executor_selector(&self, cx: &mut Context<Self>) -> AnyElement {
         use crate::omega_executor_selector::{
             SelectableExecutor, displayed_executor, executor_switch_enabled,
