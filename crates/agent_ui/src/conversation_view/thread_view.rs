@@ -13352,8 +13352,8 @@ impl ThreadView {
     /// control disabled on a genuinely new conversation.
     fn render_executor_selector(&self, cx: &mut Context<Self>) -> AnyElement {
         use crate::omega_executor_selector::{
-            SelectableExecutor, displayed_executor, executor_switch_enabled, ready_here,
-            render_executor_selector, select, selected,
+            SelectableExecutor, displayed_executor, executor_switch_enabled,
+            render_executor_selector, select, selectable_here, selected,
         };
 
         let disclosure = self.executor_disclosure(cx);
@@ -13379,7 +13379,14 @@ impl ThreadView {
         // "Exo" sat in this control over a thread Codex answered. So the label
         // still moves on the keystroke, and says `Exo\u{2026}` — pending —
         // until the thread is really on it.
-        let attached = SelectableExecutor::of(disclosure.class, &disclosure.agent_id);
+        let attached = SelectableExecutor::of(disclosure.class, &disclosure.agent_id).map(
+            |choice| match choice {
+                // Codex and Claude Code are implementation lanes behind Omega
+                // in this release, not public executor choices.
+                SelectableExecutor::Codex | SelectableExecutor::Claude => SelectableExecutor::Omega,
+                choice => choice,
+            },
+        );
         let switch_pending = self
             .server_view
             .read_with(cx, |server_view, _cx| server_view.executor_switch_pending())
@@ -13414,7 +13421,7 @@ impl ThreadView {
         render_executor_selector(
             current,
             SharedString::from(disclosure.agent_id),
-            ready_here(),
+            selectable_here(),
             enabled,
             connecting,
             Rc::new(move |choice, window, cx| {

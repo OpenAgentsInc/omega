@@ -6658,3 +6658,19 @@ separate action.
 
 - **Enforced by:** `focused_settings_separates_provider_keys_from_legacy_settings`
   in `crates/omega_deltas`.
+
+### OMEGA-DELTA-0146 — Omega is the only ordinary selectable executor
+
+The executor selector offers **Omega** as the only ordinary clickable choice.
+Codex and Claude Code remain visible as disabled entries labeled as coming in
+an upcoming version. They remain fully detected, attached, warmed, and
+available to Omega's internal router; removing direct selection cannot turn off
+their infrastructure.
+
+Exo keeps its separate process-level contract. It is absent by default and may
+join Omega as a selectable executor only when the launch explicitly includes
+`--enable-exo` and a lane resolves. A direct Codex or Claude Code selection
+that bypasses the menu is refused rather than changing the route.
+
+- **Enforced by:** `only_omega_is_an_ordinary_selectable_executor` in
+  `crates/omega_deltas`, plus selector policy tests in `agent_ui`.

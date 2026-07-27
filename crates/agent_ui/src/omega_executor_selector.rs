@@ -10,14 +10,18 @@
 //! it replaced in the composer bar named `google/gemini-3.6-flash`, which is
 //! the answer to a question the owner was not asking.
 //!
-//! # Four names, with Exo admitted only by an explicit launch
+//! # One public executor, with Exo admitted only by an explicit launch
 //!
-//! [`SelectableExecutor`] is a closed enum of exactly four variants for the
-//! same reason [`omega_front_door::ExecutorClass`] is closed at three: the set
-//! is a product decision, and a string would let a later edit add a fifth
-//! without anybody noticing. [`runtime_choices`] first removes Exo unless this
-//! process was launched with `--enable-exo`; [`ready`] filters the admitted set
-//! against what is actually on this machine:
+//! [`SelectableExecutor`] retains the four runtime identities because routing,
+//! disclosure, thread recovery, and adapter warming still need to distinguish
+//! them. The public selector is narrower: Omega is the only ordinary choice,
+//! and Exo joins it only when this process was launched with `--enable-exo`.
+//! Codex and Claude remain loaded as routing infrastructure behind Omega, but
+//! their disabled rows say that direct selection is coming in a future
+//! version.
+//!
+//! [`ready`] remains the capability inventory used by background warming.
+//! [`selectable`] applies the separate public-selection policy:
 //!
 //! - **Omega** is the native loop, which is compiled in. Always ready.
 //! - **Codex** and **Claude** are ready when `omega_agent_detect` finds their
@@ -32,9 +36,9 @@
 //!   when it attaches, so the list cannot offer a lane the attach then
 //!   declines.
 //!
-//! A shorter list is the point. A selector offering a name that fails when it
-//! is clicked is worse than one that never offered it, because the person then
-//! has to work out whether they broke something.
+//! Keeping these lists separate is the point. Hiding a runtime from direct
+//! selection must not stop Omega from starting it ahead of time or routing a
+//! turn to it internally.
 //!
 //! # Why choosing re-attaches instead of re-pinning
 //!
@@ -96,6 +100,9 @@ pub const CHOOSING_RECONNECTS: &str =
 pub const ONLY_BEFORE_THE_FIRST_MESSAGE: &str = "The executor is chosen before the first message. Start a new conversation \
      to run on a different one.";
 
+/// Why Codex and Claude Code are visible but not directly selectable.
+pub const DIRECT_SELECTION_COMING_SOON: &str = "Coming soon — selectable in an upcoming version";
+
 /// The four executors a person may choose between.
 ///
 /// Closed, and closed on purpose. "Those are the only four choices" is a
@@ -130,6 +137,15 @@ impl SelectableExecutor {
             Self::Exo => "Exo",
             Self::Codex => "Codex",
             Self::Claude => "Claude",
+        }
+    }
+
+    /// The name used in the public executor menu.
+    #[must_use]
+    pub const fn selector_name(self) -> &'static str {
+        match self {
+            Self::Claude => "Claude Code",
+            _ => self.name(),
         }
     }
 
@@ -262,6 +278,29 @@ pub fn ready_here() -> Vec<SelectableExecutor> {
     }
 }
 
+/// Apply the public executor-selection policy to a capability inventory.
+///
+/// Codex and Claude remain in the inventory so Omega can route to them and
+/// keep their adapters warm. They are deliberately absent from this result,
+/// which is the only list the menu makes clickable.
+#[must_use]
+pub fn selectable(ready: &[SelectableExecutor], exo_enabled: bool) -> Vec<SelectableExecutor> {
+    ready
+        .iter()
+        .copied()
+        .filter(|choice| {
+            *choice == SelectableExecutor::Omega
+                || (exo_enabled && *choice == SelectableExecutor::Exo)
+        })
+        .collect()
+}
+
+/// The executors a person may select in this process.
+#[must_use]
+pub fn selectable_here() -> Vec<SelectableExecutor> {
+    selectable(&ready_here(), omega_front_door::exo_enabled())
+}
+
 /// Why each name that cannot run a turn here is not on the ready list.
 ///
 /// `OMEGA-DELTA-0123`. The complement of [`ready`], and the correction to the
@@ -331,6 +370,40 @@ pub fn unavailable_here() -> Vec<(SelectableExecutor, &'static str)> {
             .filter(|(choice, _)| *choice != SelectableExecutor::Exo)
             .collect()
     }
+}
+
+/// Disabled rows shown by the public executor menu.
+///
+/// Exo keeps its machine-specific reason when the launch opted in but no lane
+/// resolves. Codex and Claude Code always use the product-timeline message:
+/// installation status does not make direct selection available yet.
+#[must_use]
+pub fn selector_unavailable_here() -> Vec<(SelectableExecutor, &'static str)> {
+    let selectable = selectable_here();
+    let unavailable = unavailable_here();
+
+    runtime_choices()
+        .iter()
+        .copied()
+        .filter_map(|choice| {
+            if selectable.contains(&choice) {
+                return None;
+            }
+            match choice {
+                SelectableExecutor::Omega => None,
+                SelectableExecutor::Codex | SelectableExecutor::Claude => {
+                    Some((choice, DIRECT_SELECTION_COMING_SOON))
+                }
+                SelectableExecutor::Exo => Some((
+                    choice,
+                    unavailable
+                        .iter()
+                        .find(|(candidate, _)| *candidate == choice)
+                        .map_or("Exo is unavailable for this launch", |(_, reason)| *reason),
+                )),
+            }
+        })
+        .collect()
 }
 
 /// Why no Exo lane resolves on this machine, when none does.
@@ -425,6 +498,17 @@ pub fn selected() -> Option<SelectableExecutor> {
 /// moving executors — which is the defect class `omega#77`'s disclosure exists
 /// to make impossible.
 pub fn select(choice: SelectableExecutor) {
+    if matches!(
+        choice,
+        SelectableExecutor::Codex | SelectableExecutor::Claude
+    ) {
+        log::warn!(
+            "OMEGA-DELTA-0146: ignored a direct {} selection because only \
+             Omega is selectable in this version",
+            choice.selector_name()
+        );
+        return;
+    }
     if choice == SelectableExecutor::Exo && !omega_front_door::exo_enabled() {
         log::warn!(
             "OMEGA-DELTA-0144: ignored an Exo selection because this process \
@@ -673,7 +757,7 @@ fn build_menu(
             let description = SharedString::from(choice.description());
             let on_select = on_select.clone();
             menu.push_item(
-                ContextMenuEntry::new(SharedString::from(choice.name()))
+                ContextMenuEntry::new(SharedString::from(choice.selector_name()))
                     .toggleable(IconPosition::End, is_current)
                     .documentation_aside(ui::DocumentationSide::Left, move |_| {
                         Label::new(description.clone()).into_any_element()
@@ -708,14 +792,14 @@ fn build_menu(
         // `a_disabled_menu_entry_still_cannot_be_selected` fails if that ever
         // stops being true, because then the long form becomes available and
         // this decision is worth revisiting.
-        let unavailable = unavailable_here();
+        let unavailable = selector_unavailable_here();
         if !unavailable.is_empty() {
             menu = menu.separator();
             for (choice, reason) in unavailable {
                 menu.push_item(
                     ContextMenuEntry::new(SharedString::from(format!(
                         "{} — {reason}",
-                        choice.name()
+                        choice.selector_name()
                     )))
                     .disabled(true),
                 );
@@ -784,6 +868,24 @@ mod tests {
             "the native loop is compiled in, so the list is never empty — and \
              nothing else may be offered on a machine that cannot run it"
         );
+    }
+
+    #[test]
+    fn only_omega_is_ordinary_public_selection() {
+        let ready = SelectableExecutor::ALL.to_vec();
+
+        assert_eq!(
+            selectable(&ready, false),
+            vec![SelectableExecutor::Omega],
+            "Codex and Claude stay ready for Omega's router without becoming \
+             direct choices"
+        );
+        assert_eq!(
+            selectable(&ready, true),
+            vec![SelectableExecutor::Omega, SelectableExecutor::Exo],
+            "Exo joins the public selector only for an opted-in launch"
+        );
+        assert_eq!(SelectableExecutor::Claude.selector_name(), "Claude Code");
     }
 
     #[test]

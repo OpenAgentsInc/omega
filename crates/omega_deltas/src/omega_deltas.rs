@@ -134,6 +134,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0143",
     "OMEGA-DELTA-0144",
     "OMEGA-DELTA-0145",
+    "OMEGA-DELTA-0146",
 ];
 
 /// OMEGA-DELTA-0125. Every entry the thread header's `…` menu offers, the
@@ -16104,15 +16105,15 @@ mod tests {
              failure that rule exists to prevent.",
             selector_path.display()
         );
-        // The whole composition, not `choice.name()` alone. The first version
-        // of this assertion looked for `choice.name()` and was vacuous: the
-        // *ready* loop three lines above renders `choice.name()` too, so the
+        // The whole composition, not `choice.selector_name()` alone. The first
+        // version of this assertion looked for the name and was vacuous: the
+        // *ready* loop three lines above renders the same name too, so the
         // check stayed green with the reason removed from the disabled label
         // entirely. Found by mutating it, which is the only way a check like
         // this is ever found to be about nothing.
         assert!(
             without_whitespace(menu).contains(&without_whitespace(
-                "format!(\"{} — {reason}\", choice.name())"
+                "format!(\"{} — {reason}\", choice.selector_name())"
             )),
             "OMEGA-DELTA-0123: the reason in {} no longer reaches the disabled \
              label. See `a_disabled_menu_entry_still_cannot_be_selected`: a \
@@ -19129,6 +19130,68 @@ mod tests {
         assert!(
             omega_zero_base::admits_action("omega::OpenLegacySettings"),
             "OMEGA-DELTA-0145: Legacy Settings is named but refused in zero base."
+        );
+    }
+
+    /// OMEGA-DELTA-0146. Direct selection is narrower than the runtime
+    /// inventory, while adapter warming continues to use that inventory.
+    #[test]
+    fn only_omega_is_an_ordinary_selectable_executor() {
+        let selector = without_comments(&read_repository_file(
+            "crates/agent_ui/src/omega_executor_selector.rs",
+        ));
+        for required in [
+            "pub fn selectable(",
+            "pub fn selectable_here()",
+            "DIRECT_SELECTION_COMING_SOON",
+            "Self::Claude => \"Claude Code\"",
+            "pub fn selector_unavailable_here()",
+            "matches!( choice, SelectableExecutor::Codex | SelectableExecutor::Claude )",
+        ] {
+            assert!(
+                without_whitespace(&selector).contains(&without_whitespace(required)),
+                "OMEGA-DELTA-0146: the direct-selection boundary lost \
+                 `{required}`."
+            );
+        }
+
+        let menu = body_of(&selector, "build_menu");
+        for required in [
+            "selector_unavailable_here()",
+            "choice.selector_name()",
+            ".disabled(true)",
+        ] {
+            assert!(
+                menu.contains(required),
+                "OMEGA-DELTA-0146: the executor menu lost `{required}`."
+            );
+        }
+
+        let thread_view = without_comments(&read_repository_file(
+            "crates/agent_ui/src/conversation_view/thread_view.rs",
+        ));
+        let render = body_of(&thread_view, "render_executor_selector");
+        for required in [
+            "SelectableExecutor::Codex | SelectableExecutor::Claude",
+            "SelectableExecutor::Omega",
+            "selectable_here()",
+        ] {
+            assert!(
+                render.contains(required),
+                "OMEGA-DELTA-0146: the selector face or clickable list lost \
+                 `{required}`."
+            );
+        }
+
+        let warmth = without_comments(&read_repository_file(
+            "crates/agent_ui/src/omega_executor_warmth.rs",
+        ));
+        let warm = body_of(&warmth, "warm_the_others");
+        assert!(
+            warm.contains("omega_executor_selector::ready_here()")
+                && !warm.contains("selectable_here()"),
+            "OMEGA-DELTA-0146: hiding Codex and Claude Code from direct \
+             selection also stopped their adapter preload."
         );
     }
 }
