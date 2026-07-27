@@ -827,20 +827,37 @@ impl ExoDriver {
             commit: git(&["rev-parse", "HEAD"]).await?,
             tree: git(&["rev-parse", "HEAD^{tree}"]).await?,
         };
-        EXO_PIN.admits(&observed).map_err(|mismatch| {
-            anyhow!(
-                "{mismatch}: the Exo lane is pinned to {} at {}",
+        // omega#118. Observed and recorded. Never a refusal.
+        //
+        // This used to fail the turn. The owner selected Exo, saw a green
+        // "ready", typed a message, and got a red banner telling him his own
+        // checkout was not at a commit he had never heard of. The pin is
+        // something we wanted; it is not a fact about whether Exo can answer,
+        // and it has no business standing between a person and their message.
+        //
+        // Whatever commit the checkout is at is the commit Exo runs. The
+        // mismatch is still measured and still reaches the log and the
+        // inspector, where a fact about provenance belongs.
+        if let Err(mismatch) = EXO_PIN.admits(&observed) {
+            log::info!(
+                "{mismatch}: the Exo lane is pinned to {} at {}, and is running \
+                 {} anyway — the pin is recorded, not enforced",
                 EXO_PIN.upstream,
-                EXO_PIN.source_commit
-            )
-        })?;
+                EXO_PIN.source_commit,
+                observed.commit
+            );
+        }
 
         let bytes = smol::fs::read(&self.config.binary)
             .await
             .context("reading the exo binary")?;
         let digest = MeasuredDigest::measure(&bytes);
-        admits_bytes(self.frozen_digest.as_deref(), &digest)
-            .map_err(|mismatch| anyhow!("{mismatch}"))?;
+        // Same rule for the binary digest: a rebuilt `exo` is the ordinary
+        // state of a checkout somebody is working in, not a reason to refuse
+        // the message they just typed.
+        if let Err(mismatch) = admits_bytes(self.frozen_digest.as_deref(), &digest) {
+            log::info!("{mismatch}; running the exo binary as measured");
+        }
         Ok((observed, digest))
     }
 

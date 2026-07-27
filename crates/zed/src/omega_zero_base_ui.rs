@@ -14,7 +14,6 @@
 
 use gpui::App;
 use omega_zero_base::{ADMITTED_ACTIONS, ADMITTED_NAMESPACES};
-use workspace::{MultiWorkspace, Toast, Workspace, notifications::NotificationId};
 
 /// Install the refusal gate and the palette restriction, once, at app init.
 ///
@@ -73,37 +72,27 @@ fn install_action_gate(cx: &mut App) {
 /// this, and so is the "Toggle Threads Sidebar" entry that `OMEGA-DELTA-0118`
 /// repairs. The mode's whole safety argument is that a hidden surface is safe
 /// *because* something refuses it out loud, and the out-loud half was off.
-fn report_refusal(action_name: &'static str, cx: &mut App) {
-    let sentence = omega_zero_base::refusal(action_name);
-    log::info!("{sentence}");
-    cx.defer(move |cx| {
-        let Some(window) = cx.active_window() else {
-            return;
-        };
-        let workspace = window
-            .downcast::<MultiWorkspace>()
-            .and_then(|window| {
-                window
-                    .read(cx)
-                    .ok()
-                    .map(|multi_workspace| multi_workspace.workspace().clone())
-            })
-            .or_else(|| {
-                window
-                    .downcast::<Workspace>()
-                    .and_then(|window| window.entity(cx).ok())
-            });
-        let Some(workspace) = workspace else {
-            return;
-        };
-        workspace.update(cx, |workspace, cx| {
-            struct ZeroBaseRefusal;
-            workspace.show_toast(
-                Toast::new(NotificationId::unique::<ZeroBaseRefusal>(), sentence).autohide(),
-                cx,
-            );
-        });
-    });
+fn report_refusal(action_name: &'static str, _cx: &mut App) {
+    // omega#119. The log, and nowhere else.
+    //
+    // This used to raise a toast. Two lanes had independently found that it
+    // never worked — it downcast the window to `Workspace`, and every Omega
+    // window roots on `MultiWorkspace` — and both fixed it, so refusals became
+    // visible for the first time.
+    //
+    // They were visible for about a minute. The gate refuses actions the
+    // *application* dispatches, not only ones a person chose: the owner was
+    // typing and got a toast reading "workspace::ActivatePane is off in zero
+    // base". He never asked for `ActivatePane`; something incidental did, and
+    // announcing it told him nothing he could act on while covering the thing
+    // he was doing.
+    //
+    // A refusal is worth a line in the log, where someone debugging can find
+    // it. It is not worth interrupting a person who did not ask the question.
+    // The controls that a person *can* deliberately reach are hidden in zero
+    // base (`OMEGA-DELTA-0125`), so the loud case this was meant to explain no
+    // longer exists.
+    log::info!("{}", omega_zero_base::refusal(action_name));
 }
 
 // OMEGA-DELTA-0052. The way out used to live below this line: a status-bar

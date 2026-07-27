@@ -8322,13 +8322,31 @@ mod tests {
             "filter.restrict_to(ADMITTED_NAMESPACES, ADMITTED_ACTIONS)",
             "cx.set_action_gate(",
             "omega_zero_base::refusal(action_name)",
-            "workspace.show_toast(",
+            // OMEGA-DELTA-0048 amended, omega#119. `workspace.show_toast(` was
+            // required here so a hidden action was "a sentence a person can
+            // read" rather than a silent no-op.
+            //
+            // The toast never rendered — it downcast the window to `Workspace`
+            // and every Omega window roots on `MultiWorkspace` — so for the
+            // whole life of this check the sentence went nowhere and the check
+            // passed anyway, holding a line of code rather than the behaviour
+            // it described. When two lanes repaired the downcast, the sentences
+            // finally appeared: the gate refuses actions the *application*
+            // dispatches, not only ones a person chose, so the owner was typing
+            // and got "workspace::ActivatePane is off in zero base" over his
+            // composer.
+            //
+            // The refusal is still built and still logged — the token above
+            // holds that. What is dropped is the claim that it must interrupt
+            // somebody. The controls a person can deliberately reach are hidden
+            // now (`OMEGA-DELTA-0125`), so the case this was written for does
+            // not arise.
         ] {
             assert!(
                 ui.contains(token),
                 "OMEGA-DELTA-0048: the zero-base surface lost `{token}`. \
-                 Without it a hidden action is a silent no-op rather than a \
-                 sentence a person can read."
+                 Without it a refused action leaves no trace at all, not even \
+                 in the log."
             );
         }
 
@@ -16539,18 +16557,39 @@ mod tests {
             );
         }
 
-        // 8. The refusal a person reads reaches the window it is shown in.
+        // 8. A refusal leaves a trace.
+        //
+        // OMEGA-DELTA-0118 amended, omega#119. This required `report_refusal`
+        // to resolve the window through `MultiWorkspace`, so the toast it
+        // raised would actually appear — the downcast to `Workspace` had never
+        // matched, and no refusal had been shown on any machine.
+        //
+        // The repair worked, and that is how we learned the toast was wrong.
+        // The action gate refuses actions the *application* dispatches, not
+        // only ones a person chose, so the owner was typing and got
+        // "workspace::ActivatePane is off in zero base" across his composer for
+        // something he had never asked for.
+        //
+        // So the claim narrows to the part that was always true: a refusal must
+        // leave a trace. The log is that trace. The "out loud" half of the
+        // mode's safety argument is now carried by hiding the controls a person
+        // can deliberately reach (`OMEGA-DELTA-0125`) rather than by
+        // interrupting them after the fact.
         let ui_path = repository_path(ZERO_BASE_UI_PATH);
         let ui = read_repository_file(ZERO_BASE_UI_PATH);
         let report = body_of(&ui, "report_refusal");
         assert!(
-            report.contains("downcast::<MultiWorkspace>()"),
-            "OMEGA-DELTA-0118: `report_refusal` in {} does not resolve the \
-             workspace through the `MultiWorkspace` root. Every Omega window is \
-             opened with that root, so `downcast::<Workspace>()` alone answers \
-             `None` on every machine and no refusal toast is ever shown. The \
-             mode's safety argument is that hiding a surface is safe because \
-             something refuses it out loud; this is the out-loud half.",
+            report.contains("omega_zero_base::refusal(action_name)"),
+            "OMEGA-DELTA-0118: `report_refusal` in {} no longer builds the \
+             refusal sentence, so a refused action leaves no trace anywhere — \
+             not on screen and not in the log.",
+            ui_path.display()
+        );
+        assert!(
+            report.contains("log::info!"),
+            "OMEGA-DELTA-0118: `report_refusal` in {} builds the sentence and \
+             then drops it. Somebody debugging a control that does nothing has \
+             only the log to look in.",
             ui_path.display()
         );
     }
