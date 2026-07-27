@@ -81,6 +81,7 @@ multi_buffer.workspace = true
 notifications.workspace = true
 omega_effectd.workspace = true
 omega_exo_lane.workspace = true
+omega_exo_log.workspace = true
 omega_front_door.workspace = true
 omega_harness.workspace = true
 omega_agent_detect.workspace = true

@@ -67,7 +67,9 @@ pub mod record;
 
 pub use admission::{admitted_read_kinds, is_admitted_read, unadmitted_kinds};
 pub use client::{EXO_REQUEST_PATH, ExoReadClient, ExoReadError, exo_default_port};
-pub use history::{ExoArtifactSet, ExoBody, ExoHistory, ExoHistoryRow};
+pub use history::{
+    ExoArtifactSet, ExoBody, ExoDurableHistory, ExoHistory, ExoHistoryRow, ExoHistoryUnavailable,
+};
 pub use query::{ExoEventWindow, ExoId, ExoQuery, ExoReadDirection, NotAnExoId};
 pub use record::{
     ExoAgentRecord, ExoArtifact, ExoArtifactRef, ExoArtifactVersion, ExoConversation,

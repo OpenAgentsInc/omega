@@ -28,13 +28,28 @@ use std::collections::HashMap;
 
 use crate::record::{ExoArtifact, ExoArtifactRef, ExoEvent, ExoEventBody, HarnessReportedUsage};
 
-/// Artifacts that were read, keyed by id.
+/// Artifacts that were read, keyed by the version that was read.
 ///
 /// Built by the caller from whatever artifact reads it chose to spend. An empty
 /// set is legitimate and produces a history that says what it is missing.
+///
+/// # The key is `(id, version)`, and that is the whole point
+///
+/// An Exo artifact is a *versioned* record: `artifact_written` carries a
+/// version, `ExoArtifactRef` carries the version the event named, and Exo's own
+/// scheduler rewrites the same path many times in one conversation. A set keyed
+/// by id alone loses that. Insert version 2 and every event that referenced
+/// version 1 renders version 2's bytes; hold only version 2 and a version-1
+/// reference looks resolved. Either way the row reads as complete while showing
+/// a body from a later point in the conversation, which is the durable-replay
+/// claim failing silently — the one failure mode a durable log exists to
+/// prevent.
 #[derive(Clone, Debug, Default)]
 pub struct ExoArtifactSet {
-    by_id: HashMap<String, ExoArtifact>,
+    by_version: HashMap<(String, u64), ExoArtifact>,
+    /// The highest version held for each id, which is what an unversioned
+    /// reference resolves to.
+    latest: HashMap<String, u64>,
 }
 
 impl ExoArtifactSet {
@@ -46,26 +61,44 @@ impl ExoArtifactSet {
 
     /// Add an artifact that was read.
     pub fn insert(&mut self, artifact: ExoArtifact) {
-        self.by_id
-            .insert(artifact.version.artifact_id.clone(), artifact);
+        let artifact_id = artifact.version.artifact_id.clone();
+        let version = artifact.version.version;
+        self.latest
+            .entry(artifact_id.clone())
+            .and_modify(|held| {
+                if version > *held {
+                    *held = version;
+                }
+            })
+            .or_insert(version);
+        self.by_version.insert((artifact_id, version), artifact);
     }
 
     /// Look one up.
+    ///
+    /// `Some(version)` requires **that** version and resolves to nothing
+    /// otherwise: a reference that named a version is answered with the bytes it
+    /// named or with nothing at all, never with a neighbouring version's.
+    ///
+    /// `None` is the latest version this set holds, which is the same policy
+    /// Exo applies to a read with `version: null` — so an unversioned reference
+    /// means the same thing on both sides of the wire.
     #[must_use]
-    pub fn get(&self, artifact_id: &str) -> Option<&ExoArtifact> {
-        self.by_id.get(artifact_id)
+    pub fn get(&self, artifact_id: &str, version: Option<u64>) -> Option<&ExoArtifact> {
+        let version = version.or_else(|| self.latest.get(artifact_id).copied())?;
+        self.by_version.get(&(artifact_id.to_owned(), version))
     }
 
-    /// How many artifacts were read.
+    /// How many artifact versions were read.
     #[must_use]
     pub fn len(&self) -> usize {
-        self.by_id.len()
+        self.by_version.len()
     }
 
     /// Whether nothing was read.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.by_id.is_empty()
+        self.by_version.is_empty()
     }
 }
 
@@ -96,11 +129,15 @@ pub enum ExoBody {
         version: u64,
         size_bytes: u64,
     },
-    /// The event named an artifact and nobody read it. The body is absent and
-    /// the row says so, rather than rendering as if there were nothing to show.
+    /// The event named an artifact and nobody read it — or read a different
+    /// version of it. The body is absent and the row says so, rather than
+    /// rendering as if there were nothing to show.
     NotRead {
         artifact_id: String,
         path: Option<String>,
+        /// The version the event named, when it named one. Carried so the
+        /// caller can fetch *this* body rather than whatever is latest.
+        version: Option<u64>,
     },
 }
 
@@ -121,10 +158,11 @@ impl ExoBody {
     }
 
     fn resolve(reference: &ExoArtifactRef, artifacts: &ExoArtifactSet, inline: String) -> Self {
-        let Some(artifact) = artifacts.get(&reference.artifact_id) else {
+        let Some(artifact) = artifacts.get(&reference.artifact_id, reference.version) else {
             return Self::NotRead {
                 artifact_id: reference.artifact_id.clone(),
                 path: reference.path.clone(),
+                version: reference.version,
             };
         };
         artifact.text().map_or_else(
@@ -274,15 +312,28 @@ impl ExoHistory {
     ///
     /// The caller spends the reads; this says which ones would change the
     /// rendering. A caller that spends none gets a history that admits it.
+    ///
+    /// References rather than ids, because an id is not enough to fetch with.
+    /// An event that named version 1 needs version 1 read; handed only the id,
+    /// a caller asks for the latest, gets version 3, and the row it fills in is
+    /// the wrong body under the right name. The version travels with the
+    /// request so the caller can ask for the bytes it was told were missing.
     #[must_use]
-    pub fn unresolved_artifact_ids(&self, artifacts: &ExoArtifactSet) -> Vec<String> {
-        let mut wanted: Vec<String> = Vec::new();
+    pub fn unresolved_artifacts(&self, artifacts: &ExoArtifactSet) -> Vec<ExoArtifactRef> {
+        let mut wanted: Vec<ExoArtifactRef> = Vec::new();
         for reference in &self.referenced_artifacts {
-            if artifacts.get(&reference.artifact_id).is_none()
-                && !wanted.contains(&reference.artifact_id)
+            if artifacts
+                .get(&reference.artifact_id, reference.version)
+                .is_some()
             {
-                wanted.push(reference.artifact_id.clone());
+                continue;
             }
+            if wanted.iter().any(|held| {
+                held.artifact_id == reference.artifact_id && held.version == reference.version
+            }) {
+                continue;
+            }
+            wanted.push(reference.clone());
         }
         wanted
     }
@@ -341,6 +392,117 @@ impl ExoHistory {
     }
 }
 
+/// Why no durable history was read. `OMEGA-DELTA-0107`, omega#104.
+///
+/// Every variant is an absence **with a cause**, and none of them is an empty
+/// conversation. That distinction is the whole reason this type exists rather
+/// than an `Option<ExoHistory>`: on a machine where the owner never set
+/// `EXO_EXOHARNESS_URL` — which is the ordinary machine, and the safe one — the
+/// durable log is simply not reachable, and a surface that renders that as a
+/// thread with no history has told the reader something false about their own
+/// conversation. So each variant carries a sentence, and every sentence ends
+/// with [`Self::NOT_AN_EMPTY_HISTORY`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExoHistoryUnavailable {
+    /// `EXO_EXOHARNESS_URL` is unset, so this lane reaches Exo through the CLI
+    /// and the state root on disk, and no socket exists to read.
+    ///
+    /// Omega does not start one. `serve` is in
+    /// `omega_deltas::EXO_REDIRECTING_FLAGS` and `ExoCommand` cannot express
+    /// it; a second process pointed at one `.exo` root is exactly what
+    /// `omega_exo_episode::root` refuses, and Omega cannot know whether the
+    /// owner already has one running. Reading a log the owner pointed us at is
+    /// a read. Starting a server is process authority, and it is not this
+    /// crate's to take.
+    NotConfigured,
+    /// Exo printed no id for the agent, so there is nothing to address.
+    ///
+    /// Optional on purpose upstream of here: an Exo that prints no id line
+    /// still parses and still runs a turn, because "cannot show the history" is
+    /// a smaller failure than "cannot run the agent".
+    NoAgentId,
+    /// Exo printed no id for the conversation, so there is nothing to address.
+    NoConversationId,
+}
+
+impl ExoHistoryUnavailable {
+    /// The clause every one of these sentences carries.
+    ///
+    /// Checked by `OMEGA-DELTA-0107` against each variant, because the failure
+    /// this type exists to prevent is a *rendering* that reads as emptiness,
+    /// and the only defence a leaf crate can offer is that the words it hands
+    /// the renderer say otherwise.
+    pub const NOT_AN_EMPTY_HISTORY: &'static str =
+        "this is not an empty history; Omega did not read one";
+
+    /// Every variant, so a check can drive all of them.
+    pub const ALL: &'static [Self] = &[Self::NotConfigured, Self::NoAgentId, Self::NoConversationId];
+}
+
+impl std::fmt::Display for ExoHistoryUnavailable {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let cause = match self {
+            Self::NotConfigured => {
+                "this Exo lane runs on the CLI and no reachable Exo server is configured, so \
+                 the durable log is not available"
+            }
+            Self::NoAgentId => {
+                "Exo printed no id for this agent, so the durable log has nothing to be \
+                 addressed by"
+            }
+            Self::NoConversationId => {
+                "Exo printed no id for this conversation, so the durable log has nothing to \
+                 be addressed by"
+            }
+        };
+        write!(formatter, "{cause}: {}", Self::NOT_AN_EMPTY_HISTORY)
+    }
+}
+
+impl std::error::Error for ExoHistoryUnavailable {}
+
+/// What a durable-log read produced. `OMEGA-DELTA-0107`, omega#104.
+///
+/// Deliberately without a `Default`. A default would be an empty [`ExoHistory`]
+/// — a value that says "this conversation has no durable record" and that
+/// nobody had to decide to construct.
+#[derive(Clone, Debug)]
+pub enum ExoDurableHistory {
+    /// Nothing was read, and this is why.
+    Unavailable(ExoHistoryUnavailable),
+    /// The durable record, rendered.
+    Read(ExoHistory),
+}
+
+impl ExoDurableHistory {
+    /// The history, when one was read.
+    #[must_use]
+    pub const fn history(&self) -> Option<&ExoHistory> {
+        match self {
+            Self::Read(history) => Some(history),
+            Self::Unavailable(_) => None,
+        }
+    }
+
+    /// Why nothing was read, when nothing was.
+    #[must_use]
+    pub const fn unavailable(&self) -> Option<ExoHistoryUnavailable> {
+        match self {
+            Self::Unavailable(reason) => Some(*reason),
+            Self::Read(_) => None,
+        }
+    }
+
+    /// The rendering: the history, or the sentence saying why there is none.
+    #[must_use]
+    pub fn to_text(&self) -> String {
+        match self {
+            Self::Read(history) => history.to_text(),
+            Self::Unavailable(reason) => reason.to_string(),
+        }
+    }
+}
+
 fn describe(body: &ExoBody) -> String {
     match body {
         ExoBody::Inline(text) => text.clone(),
@@ -348,8 +510,15 @@ fn describe(body: &ExoBody) -> String {
         ExoBody::ArtifactBytes {
             path, size_bytes, ..
         } => format!("({size_bytes} bytes at {path}, not text)"),
-        ExoBody::NotRead { artifact_id, path } => format!(
-            "(body not read: artifact {artifact_id}{})",
+        ExoBody::NotRead {
+            artifact_id,
+            path,
+            version,
+        } => format!(
+            "(body not read: artifact {artifact_id}{}{})",
+            version
+                .map(|version| format!(" version {version}"))
+                .unwrap_or_default(),
             path.as_ref()
                 .map(|path| format!(" at {path}"))
                 .unwrap_or_default()
@@ -495,7 +664,7 @@ mod tests {
         assert!(text.contains("tool call bash"), "{text}");
         assert!(text.contains("snapshot snap-1"), "{text}");
         assert_eq!(history.unread_artifact_rows, 0);
-        assert!(history.unresolved_artifact_ids(&artifacts).is_empty());
+        assert!(history.unresolved_artifacts(&artifacts).is_empty());
     }
 
     /// The falsifier, run. Remove the artifact read and the history keeps every
@@ -509,10 +678,22 @@ mod tests {
 
         assert!(!without.to_text().contains("every line of the output"));
         assert_eq!(without.unread_artifact_rows, 2);
-        assert_eq!(
-            without.unresolved_artifact_ids(&empty),
-            vec![ARTIFACT.to_owned()]
+        // Two reads for one artifact id, because the two events reference it
+        // differently: the tool result named no version and `artifact_written`
+        // named version 1. They are different requests and Exo answers them
+        // differently, so collapsing them to one id is how a caller ends up
+        // fetching the latest for a row that asked for a specific version.
+        let wanted = without.unresolved_artifacts(&empty);
+        assert_eq!(wanted.len(), 2, "{wanted:?}");
+        assert!(
+            wanted
+                .iter()
+                .all(|reference| reference.artifact_id == ARTIFACT)
         );
+        let mut versions: Vec<Option<u64>> =
+            wanted.iter().map(|reference| reference.version).collect();
+        versions.sort_unstable();
+        assert_eq!(versions, vec![None, Some(1)]);
         assert!(
             without.to_text().contains("body not read"),
             "{}",
@@ -537,12 +718,17 @@ mod tests {
 
     /// An artifact whose bytes are not text renders as bytes, not as an empty
     /// tool result.
+    ///
+    /// Version 1 because that is the version `a_turn`'s `artifact_written`
+    /// names. It read as version 4 until `OMEGA-DELTA-0107` keyed the set by
+    /// version, at which point the mismatch stopped resolving — correctly, and
+    /// this test is about bytes rather than about versions.
     #[test]
     fn a_binary_artifact_renders_as_bytes() {
         let artifact: ExoArtifact = serde_json::from_value(serde_json::json!({
             "artifact_id": ARTIFACT,
             "path": "snapshot.bin",
-            "version": 4,
+            "version": 1,
             "created_at": "2026-07-26T09:15:00Z",
             "size_bytes": 2,
             "contents": [0xff, 0xfe],
@@ -555,6 +741,122 @@ mod tests {
             history.to_text()
         );
         assert_eq!(history.unread_artifact_rows, 0);
+    }
+
+    /// `OMEGA-DELTA-0107`. Two versions of one artifact, and each row renders
+    /// its own bytes.
+    ///
+    /// The reviewer's falsifier on `b074ac3986`, run. Keyed by id alone, the
+    /// second insert overwrote the first and every version-1 reference rendered
+    /// version 2's bytes — a row that looks complete and artifact-backed while
+    /// showing a body from a later point in the conversation. That is the
+    /// durable-replay claim failing in the one direction nobody would notice.
+    #[test]
+    fn each_versioned_reference_renders_its_own_version() {
+        let write = |version: u64, text: &str| -> ExoArtifact {
+            serde_json::from_value(serde_json::json!({
+                "artifact_id": ARTIFACT,
+                "path": "notes.md",
+                "version": version,
+                "created_at": "2026-07-26T09:15:00Z",
+                "size_bytes": text.len(),
+                "contents": text.as_bytes(),
+            }))
+            .expect("an artifact")
+        };
+        let events = vec![
+            event(serde_json::json!({
+                "type": "artifact_written",
+                "artifact_id": ARTIFACT, "path": "notes.md", "version": 1,
+            })),
+            event(serde_json::json!({
+                "type": "artifact_written",
+                "artifact_id": ARTIFACT, "path": "notes.md", "version": 2,
+            })),
+        ];
+
+        let both: ExoArtifactSet = [write(1, "first"), write(2, "second")].into_iter().collect();
+        let history = ExoHistory::read(&events, &both);
+        let bodies: Vec<&ExoBody> = history
+            .rows
+            .iter()
+            .filter_map(|row| match row {
+                ExoHistoryRow::Artifact { body, .. } => Some(body),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(bodies.len(), 2);
+        assert_eq!(bodies[0].text(), Some("first"), "{bodies:?}");
+        assert_eq!(bodies[1].text(), Some("second"), "{bodies:?}");
+        assert_eq!(history.unread_artifact_rows, 0);
+        assert_eq!(both.len(), 2, "two versions are two entries, not one");
+
+        // Only version 2 read. The version-1 row must stay unread and ask for
+        // version 1, rather than borrowing the bytes it can reach.
+        let later: ExoArtifactSet = [write(2, "second")].into_iter().collect();
+        let partial = ExoHistory::read(&events, &later);
+        assert_eq!(partial.unread_artifact_rows, 1);
+        assert_eq!(
+            partial.rows[0],
+            ExoHistoryRow::Artifact {
+                path: "notes.md".into(),
+                version: 1,
+                body: ExoBody::NotRead {
+                    artifact_id: ARTIFACT.into(),
+                    path: Some("notes.md".into()),
+                    version: Some(1),
+                },
+            }
+        );
+        let wanted = partial.unresolved_artifacts(&later);
+        assert_eq!(wanted.len(), 1, "{wanted:?}");
+        assert_eq!(
+            wanted[0].version,
+            Some(1),
+            "the caller is told which version is missing, so it can fetch that one"
+        );
+
+        // The version-2 row still renders "second" — it referenced version 2
+        // and version 2 was read. The claim is about the *version-1* row, which
+        // must not borrow the bytes it can reach.
+        let first_row = partial
+            .to_text()
+            .lines()
+            .next()
+            .expect("the version-1 row")
+            .to_owned();
+        assert!(!first_row.contains("second"), "{first_row}");
+        assert!(!first_row.contains("first"), "{first_row}");
+        assert!(first_row.contains("body not read"), "{first_row}");
+    }
+
+    /// `OMEGA-DELTA-0107`. An unread durable log says why, and never says the
+    /// thread has no history.
+    #[test]
+    fn an_unavailable_durable_history_names_its_cause() {
+        for reason in ExoHistoryUnavailable::ALL {
+            let sentence = reason.to_string();
+            assert!(
+                sentence.contains(ExoHistoryUnavailable::NOT_AN_EMPTY_HISTORY),
+                "{reason:?} renders as {sentence:?}, which a surface can show as \
+                 an empty conversation"
+            );
+            let unread = ExoDurableHistory::Unavailable(*reason);
+            assert!(unread.history().is_none());
+            assert_eq!(unread.unavailable(), Some(*reason));
+            assert_eq!(unread.to_text(), sentence);
+        }
+        assert_eq!(ExoHistoryUnavailable::ALL.len(), 3);
+
+        let read = ExoDurableHistory::Read(ExoHistory::read(
+            &a_turn(),
+            &[full_run_output()].into_iter().collect(),
+        ));
+        assert!(read.unavailable().is_none());
+        assert!(
+            read.history()
+                .is_some_and(|history| !history.rows.is_empty())
+        );
     }
 
     /// An event this build does not know still occupies a row.

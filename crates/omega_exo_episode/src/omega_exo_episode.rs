@@ -79,7 +79,8 @@ pub use ids::{AgentId, ConversationId, EventId, ExoIdError, SandboxId, SnapshotI
 pub use request::{EpisodeRequest, ForkReadError, ForkSlug, ForkedConversation};
 pub use reset::{
     CheckOutcome, EpisodeShape, FALSIFICATION_LOOP, FilesystemReset, ProbeOutcome, ResetRefusal,
-    SandboxScopeKind, SnapshotReach, Step, Verdict, admit_filesystem_reset, snapshot_reach,
+    SandboxScopeKind, SnapshotEvidence, SnapshotReach, Step, Verdict, admit_filesystem_reset,
+    snapshot_reach,
     verdict,
 };
 pub use root::{ExoRoots, RootClaim, RootRefusal};

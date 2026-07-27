@@ -99,6 +99,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0103",
     "OMEGA-DELTA-0105",
     "OMEGA-DELTA-0106",
+    "OMEGA-DELTA-0107",
 ];
 
 /// OMEGA-DELTA-0106. The community audience: a Forge repository, its members,
@@ -2734,6 +2735,42 @@ pub const EXO_LOG_USAGE_TYPE: &str = "HarnessReportedUsage";
 
 /// OMEGA-DELTA-0091. What every rendering of those numbers must say.
 pub const EXO_LOG_USAGE_PROVENANCE: &str = "harness-reported";
+
+// ------ OMEGA-DELTA-0107
+
+/// OMEGA-DELTA-0107. The one call that reads Exo's durable log.
+///
+/// `crates/omega_exo_log` landed compiled, unit-tested, and with **nothing
+/// calling it** — two dependents in the whole workspace, both dev-dependencies
+/// of this crate. This is the attach, and it lives in the connection rather
+/// than in a view so that a machine with no window can still check it.
+pub const EXO_DURABLE_READ_FN: &str = "read_durable_history";
+
+/// OMEGA-DELTA-0107. The two-pass read in the crate that owns both halves.
+pub const EXO_DURABLE_TWO_PASS_FN: &str = "conversation_history";
+
+/// OMEGA-DELTA-0107. Where that two-pass read lives.
+pub const EXO_LOG_CLIENT_PATH: &str = "crates/omega_exo_log/src/client.rs";
+
+/// OMEGA-DELTA-0107. Where the rendering and its absences live.
+pub const EXO_LOG_HISTORY_PATH: &str = "crates/omega_exo_log/src/history.rs";
+
+/// OMEGA-DELTA-0107. Route B, spelled out, so choosing it is a diff rather than
+/// a convenience.
+///
+/// omega#104 offered two routes and the owner took **A**: Omega reads
+/// `exo serve` only when the owner has already pointed the lane at one, and
+/// never starts one. Route B — Omega spawning the server — is new process
+/// authority, and it puts a *second writer* on one `.exo` root, which is
+/// exactly what `omega_exo_episode::root::ExoRoots` exists to refuse and the
+/// interleaving that makes a fork a copy of a history that never existed. Omega
+/// also cannot know whether the owner already has one running.
+///
+/// These are the spellings the attach would need in order to start one. Held
+/// against the connection's *string literals* rather than as substrings,
+/// because `observe` contains `serve` and the lane's own preflight is named
+/// `observe`.
+pub const EXO_SERVER_START_LITERALS: &[&str] = &["serve", "exo serve", "--bind", "serve --bind"];
 
 #[cfg(test)]
 mod tests {
@@ -11041,8 +11078,8 @@ mod tests {
     /// that returned nothing.
     #[test]
     fn an_exo_history_without_its_artifacts_says_what_is_missing() {
-        let history = exo_log_source("crates/omega_exo_log/src/history.rs");
-        for required in ["NotRead", "unread_artifact_rows", "unresolved_artifact_ids"] {
+        let history = exo_log_source(EXO_LOG_HISTORY_PATH);
+        for required in ["NotRead", "unread_artifact_rows", "unresolved_artifacts"] {
             assert!(
                 history.contains(required),
                 "OMEGA-DELTA-0091: the history no longer declares `{required}`. \
@@ -11061,6 +11098,315 @@ mod tests {
             history.contains("fn without_the_artifact_read_the_history_loses_its_tool_results"),
             "OMEGA-DELTA-0091: the falsifier — remove the artifact read, and the \
              tool results must go with it — is no longer run as a test."
+        );
+    }
+
+    // ------ OMEGA-DELTA-0107
+
+    /// OMEGA-DELTA-0107. Something calls the durable read.
+    ///
+    /// `omega_exo_log` landed compiled, unit-tested, and unreached: its only
+    /// dependents in the workspace were this crate's dev-dependencies, added so
+    /// the registry could check a decision nobody was using. A law with no
+    /// caller is a law about nothing, and the shape of that failure is
+    /// mechanical rather than remembered — so this reads the manifest as well as
+    /// the call, because a call that survives while the dependency is dropped
+    /// does not compile, and a dependency that survives while the call is
+    /// dropped does.
+    #[test]
+    fn the_exo_durable_log_is_read_by_the_lane_that_runs_the_turns() {
+        let manifest_path = repository_path("crates/agent_ui/Cargo.toml");
+        let manifest = std::fs::read_to_string(&manifest_path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", manifest_path.display()));
+        assert!(
+            manifest.contains("omega_exo_log.workspace = true"),
+            "OMEGA-DELTA-0107: {} no longer depends on the durable-log client, \
+             so nothing in the product can read Exo's record.",
+            manifest_path.display()
+        );
+
+        let connection_path = repository_path(EXO_CONNECTION_PATH);
+        let connection = std::fs::read_to_string(&connection_path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", connection_path.display()));
+        let read = function_body(&connection, EXO_DURABLE_READ_FN).unwrap_or_else(|| {
+            panic!(
+                "OMEGA-DELTA-0107: {} no longer has `{EXO_DURABLE_READ_FN}`. \
+                 The log client is unreached again.",
+                connection_path.display()
+            )
+        });
+        assert!(
+            read.contains(&format!("client.{EXO_DURABLE_TWO_PASS_FN}(")),
+            "OMEGA-DELTA-0107: the attach no longer calls the two-pass read."
+        );
+        assert!(
+            read.contains("ExoReadClient::open(&url)"),
+            "OMEGA-DELTA-0107: the attach no longer opens its client from the \
+             address it was configured with. A constructor handed a hardcoded \
+             loopback string parses nothing the owner set."
+        );
+        assert!(
+            read.contains("smol::unblock"),
+            "OMEGA-DELTA-0107: the durable read is blocking `std::net`, and it \
+             is no longer moved off the thread that draws the window."
+        );
+    }
+
+    /// OMEGA-DELTA-0107. Omega reads a server; Omega starts none.
+    ///
+    /// Route A, held. Route B — Omega spawning `exo serve` — is new process
+    /// authority and a second writer on one `.exo` root, which is the
+    /// interleaving `omega_exo_episode::root` exists to refuse. Taking it should
+    /// be a diff a reviewer reads, so this fails on the spellings that would
+    /// start one.
+    #[test]
+    fn omega_reads_exos_server_and_never_starts_one() {
+        let connection_path = repository_path(EXO_CONNECTION_PATH);
+        let connection = std::fs::read_to_string(&connection_path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", connection_path.display()));
+
+        let literals = string_literals(&connection);
+        for spelling in EXO_SERVER_START_LITERALS {
+            assert!(
+                !literals.iter().any(|literal| literal == spelling),
+                "OMEGA-DELTA-0107: {} names `{spelling}`. Omega reads an \
+                 `exo serve` the owner already runs and starts none: a second \
+                 process pointed at one `.exo` root is the write interleaving \
+                 that makes a fork a copy of a history that never existed.",
+                connection_path.display()
+            );
+        }
+
+        // And the read is gated on the owner having pointed the lane somewhere,
+        // by the same variable the preflight refuses an off-machine one with.
+        let read = function_body(&connection, EXO_DURABLE_READ_FN)
+            .expect("OMEGA-DELTA-0107: the attach is gone");
+        assert!(
+            read.contains("std::env::var(\"EXO_EXOHARNESS_URL\")"),
+            "OMEGA-DELTA-0107: the durable read no longer asks whether the owner \
+             configured a server. Reading one that was never named is Omega \
+             deciding where Exo lives."
+        );
+    }
+
+    /// OMEGA-DELTA-0107. An unread durable log says why, and never reads as an
+    /// empty conversation.
+    ///
+    /// The consequence of Route A, made legible rather than hidden: with
+    /// `EXO_EXOHARNESS_URL` unset — the ordinary machine, and the safe one —
+    /// the durable log is simply unavailable. A surface that rendered that as a
+    /// thread with no history would be telling the reader something false about
+    /// their own conversation, so every unavailability carries a sentence and
+    /// there is no empty history to construct.
+    ///
+    /// Checked by *calling* the crate rather than by scraping it: this registry
+    /// takes the three Exo law crates as dev-dependencies precisely so a
+    /// decision can be exercised instead of read.
+    #[test]
+    fn an_unreadable_exo_log_never_renders_as_a_thread_with_no_history() {
+        assert_eq!(
+            omega_exo_log::ExoHistoryUnavailable::ALL.len(),
+            3,
+            "OMEGA-DELTA-0107: a reason was added or removed without this check \
+             being re-argued."
+        );
+        for reason in omega_exo_log::ExoHistoryUnavailable::ALL {
+            let sentence = reason.to_string();
+            assert!(
+                sentence.contains(omega_exo_log::ExoHistoryUnavailable::NOT_AN_EMPTY_HISTORY),
+                "OMEGA-DELTA-0107: `{reason:?}` renders as {sentence:?}, which a \
+                 surface can show as an empty conversation."
+            );
+            let unread = omega_exo_log::ExoDurableHistory::Unavailable(*reason);
+            assert!(
+                unread.history().is_none(),
+                "OMEGA-DELTA-0107: an unavailable durable log produced a history."
+            );
+            assert_eq!(unread.to_text(), sentence);
+        }
+
+        // `NotConfigured` is the one a person will actually hit, so it says what
+        // was not configured rather than only that something was not.
+        assert!(
+            omega_exo_log::ExoHistoryUnavailable::NotConfigured
+                .to_string()
+                .contains("no reachable Exo server is configured"),
+            "OMEGA-DELTA-0107: the ordinary case stopped naming its cause."
+        );
+
+        // And there is no way to make one that claims a read nobody performed.
+        let history = exo_log_source(EXO_LOG_HISTORY_PATH);
+        assert!(
+            !production_source(&history).contains("Default for ExoDurableHistory")
+                && !production_source(&history).contains("derive(Clone, Debug, Default)\npub enum"),
+            "OMEGA-DELTA-0107: `ExoDurableHistory` gained a default, which is an \
+             empty history nobody decided to construct."
+        );
+    }
+
+    /// OMEGA-DELTA-0107. The read is two passes, and each artifact is fetched at
+    /// the version its event named.
+    ///
+    /// Exo's event log *names* artifacts and never contains them, so the first
+    /// render is the question and the second is the answer. And an artifact is a
+    /// versioned record: keyed by id alone, a set holding version 2 answers a
+    /// version-1 reference, and the row reads as complete while showing a body
+    /// from a later point in the conversation. That is the durable-replay claim
+    /// failing in the one direction nobody would notice.
+    #[test]
+    fn the_durable_read_is_two_passes_and_respects_artifact_versions() {
+        let client = exo_log_source(EXO_LOG_CLIENT_PATH);
+        let two_pass = function_body(&client, EXO_DURABLE_TWO_PASS_FN).unwrap_or_else(|| {
+            panic!(
+                "OMEGA-DELTA-0107: {EXO_LOG_CLIENT_PATH} no longer has \
+                 `{EXO_DURABLE_TWO_PASS_FN}`."
+            )
+        });
+        assert_eq!(
+            two_pass.match_indices("ExoHistory::read(").count(),
+            2,
+            "OMEGA-DELTA-0107: the durable read is not two passes. One render \
+             against no artifacts is a history with every tool result missing \
+             its body; one render is either that or a second read nobody made."
+        );
+        let first = two_pass
+            .find("ExoHistory::read(")
+            .expect("the first render");
+        let fetch = two_pass
+            .find("self.artifact(")
+            .expect("OMEGA-DELTA-0107: the read no longer fetches any artifact body");
+        let second = two_pass
+            .rfind("ExoHistory::read(")
+            .expect("the second render");
+        assert!(
+            first < fetch && fetch < second,
+            "OMEGA-DELTA-0107: the passes are out of order. The first render is \
+             what says which bodies to fetch; the second is the one with the \
+             tool results in it."
+        );
+        assert!(
+            two_pass.contains("version: reference.version"),
+            "OMEGA-DELTA-0107: the second pass no longer asks for the version the \
+             event named. Asking for the latest fills the row with a body from a \
+             later point in the conversation, under the right name."
+        );
+
+        // Exercised, not only read.
+        let artifact = |version: u64, text: &str| -> omega_exo_log::ExoArtifact {
+            serde_json::from_value(serde_json::json!({
+                "artifact_id": "0198f3ec-3d9c-7e53-b120-8f4c6dae3f77",
+                "path": "notes.md",
+                "version": version,
+                "created_at": "2026-07-26T09:15:00Z",
+                "size_bytes": text.len(),
+                "contents": text.as_bytes(),
+            }))
+            .expect("an artifact")
+        };
+        let mut held = omega_exo_log::ExoArtifactSet::new();
+        held.insert(artifact(1, "first"));
+        held.insert(artifact(2, "second"));
+        assert_eq!(
+            held.len(),
+            2,
+            "OMEGA-DELTA-0107: two versions of one artifact collapsed to one \
+             entry, so one of them now answers for the other."
+        );
+        assert_eq!(
+            held.get("0198f3ec-3d9c-7e53-b120-8f4c6dae3f77", Some(1))
+                .and_then(omega_exo_log::ExoArtifact::text),
+            Some("first")
+        );
+        assert_eq!(
+            held.get("0198f3ec-3d9c-7e53-b120-8f4c6dae3f77", None)
+                .and_then(omega_exo_log::ExoArtifact::text),
+            Some("second"),
+            "OMEGA-DELTA-0107: an unversioned reference must mean the latest \
+             held, which is what Exo answers a null-version read with."
+        );
+        assert!(
+            held.get("0198f3ec-3d9c-7e53-b120-8f4c6dae3f77", Some(3))
+                .is_none(),
+            "OMEGA-DELTA-0107: a version that was never read resolved to a \
+             neighbouring one."
+        );
+    }
+
+    /// OMEGA-DELTA-0107, omega#103. A fork with no filesystem state is refused
+    /// for having none.
+    ///
+    /// `conversation_fork` does not copy the `snapshots` prefix, so a
+    /// conversation-scoped snapshot does not survive into a fork — and
+    /// separately, a sandbox that was never snapshotted has nothing to restore
+    /// at all. **Exo reports both with the same sentence**, its own *"loading
+    /// snapshot manifest for `<id>` (have you taken a snapshot?)"*, which sends
+    /// a reader hunting the fork bug when the real answer is that nobody ever
+    /// took a snapshot. The upstream patch for the first is written out on
+    /// omega#103 and is owner-gated; this is the half Omega can own, and it
+    /// separates the two before a request exists.
+    #[test]
+    fn a_reset_with_no_snapshot_is_refused_by_name_and_not_by_exos_confusion() {
+        use omega_exo_episode::{EpisodeShape, ResetRefusal, SandboxScopeKind, SnapshotEvidence};
+
+        let missing = omega_exo_episode::admit_filesystem_reset(
+            SandboxScopeKind::Agent,
+            EpisodeShape::SingleEpisode,
+            SnapshotEvidence::NoneObserved,
+        )
+        .expect_err(
+            "OMEGA-DELTA-0107: a restore was admitted with nothing to restore \
+             from, so Exo answers it with a manifest failure that reads like the \
+             fork finding",
+        );
+        assert_eq!(missing, ResetRefusal::NoSnapshotObserved);
+        assert_ne!(
+            missing.to_string(),
+            ResetRefusal::SnapshotLostByFork.to_string(),
+            "OMEGA-DELTA-0107: the two situations Exo reports identically now \
+             read identically here too, which is the whole failure."
+        );
+
+        // The shape refusals still come first: they hold whatever Omega read,
+        // and a caller that fixes its evidence must still be told the truth.
+        for evidence in [SnapshotEvidence::Observed, SnapshotEvidence::NoneObserved] {
+            assert_eq!(
+                omega_exo_episode::admit_filesystem_reset(
+                    SandboxScopeKind::Conversation,
+                    EpisodeShape::SingleEpisode,
+                    evidence,
+                ),
+                Err(ResetRefusal::SnapshotLostByFork),
+                "OMEGA-DELTA-0107: {evidence:?}"
+            );
+            assert_eq!(
+                omega_exo_episode::admit_filesystem_reset(
+                    SandboxScopeKind::Agent,
+                    EpisodeShape::Siblings,
+                    evidence,
+                ),
+                Err(ResetRefusal::SiblingsShareOneSandbox),
+                "OMEGA-DELTA-0107: {evidence:?}"
+            );
+        }
+
+        // And the one combination that works still works, so this delta did not
+        // quietly close the primitive.
+        assert!(
+            omega_exo_episode::admit_filesystem_reset(
+                SandboxScopeKind::Agent,
+                EpisodeShape::SingleEpisode,
+                SnapshotEvidence::Observed,
+            )
+            .is_ok(),
+            "OMEGA-DELTA-0107: agent scope, one episode, a snapshot Omega saw — \
+             the one shape that can work — is no longer admitted."
+        );
+        assert_eq!(
+            EPISODE_FORK_COPIES_PREFIXES,
+            omega_exo_episode::reset::FORK_COPIES_PREFIXES,
+            "OMEGA-DELTA-0107: the four prefixes a fork copies changed. If \
+             `snapshots` was added here to make a refusal go away, the reset did \
+             not start working — the failure became silent."
         );
     }
 

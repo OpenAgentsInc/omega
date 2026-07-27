@@ -64,6 +64,7 @@ use omega_exo_lane::{
     ObservedExoCapabilityState, ObservedExoCheckout, ObservedReadWriteMount, ObservedToolModule,
     admits_bytes,
 };
+use omega_exo_log::{ExoDurableHistory, ExoHistoryUnavailable, ExoId, ExoReadClient};
 use omega_harness::MeasuredDigest;
 use project::{
     AgentId, Project,
@@ -78,6 +79,14 @@ const EXO_LANE_FILE: &str = "omega-exo-lane.json";
 const EXO_LANE_SCHEMA: &str = "openagents.omega.exo_lane.v1";
 
 static NEXT_EXO_CONNECTION_GENERATION: AtomicU64 = AtomicU64::new(1);
+
+/// `OMEGA-DELTA-0107`. How many durable events one history read asks for.
+///
+/// A bound rather than `None`. Exo's own default at this pin is "all of them",
+/// and the reply is a JSON array whose size is decided by whatever Exo's agent
+/// wrote — so an unbounded read of a long-lived conversation is a request whose
+/// cost nobody chose.
+const EXO_HISTORY_EVENT_LIMIT: u32 = 200;
 
 /// Everything Omega needs to reach one Exo install.
 ///
@@ -241,6 +250,20 @@ pub struct ExoInspectionSnapshot {
     pub networking: Option<bool>,
     pub refreshed_at_ms: Option<u64>,
     pub error: Option<String>,
+    /// The agent's durable id, as Exo printed it. `OMEGA-DELTA-0107`.
+    ///
+    /// The lane's configuration holds *slugs*, and Exo's protocol addresses
+    /// everything by `Uuid7`. `list_agents` is the call that resolves a slug
+    /// and `omega_exo_log` refuses it, being a host-wide read — so without this
+    /// there is no admitted way to name the agent the lane is already running
+    /// turns on. `exo agent show` prints the id as its first line and
+    /// `ExoAgent::parse` keeps it.
+    ///
+    /// `None` on an Exo that printed no id line. Optional on purpose: "cannot
+    /// show the history" is a smaller failure than "cannot run the agent".
+    pub exo_agent_id: Option<String>,
+    /// The conversation's durable id, on the same terms.
+    pub exo_conversation_id: Option<String>,
 }
 
 impl Default for ExoInspectionSnapshot {
@@ -252,6 +275,8 @@ impl Default for ExoInspectionSnapshot {
             networking: None,
             refreshed_at_ms: None,
             error: None,
+            exo_agent_id: None,
+            exo_conversation_id: None,
         }
     }
 }
@@ -424,14 +449,7 @@ impl ExoHarnessConnection {
         let inspection = self.inspection.clone();
         cx.spawn(async move |_| match driver.observe().await {
             Ok(observed) => {
-                *inspection.borrow_mut() = ExoInspectionSnapshot {
-                    phase: ExoInspectionPhase::Ready,
-                    observed: Some(observed.observed),
-                    identity: Some(observed.identity),
-                    networking: Some(observed.networking),
-                    refreshed_at_ms: Some(now_ms()),
-                    error: None,
-                };
+                *inspection.borrow_mut() = ready_inspection(&observed);
                 Ok(())
             }
             Err(error) => {
@@ -442,6 +460,102 @@ impl ExoHarnessConnection {
                 snapshot.error = Some(message.clone());
                 Err(anyhow!(message))
             }
+        })
+    }
+
+    /// This thread's durable record, read from an `exo serve` the owner already
+    /// runs. `OMEGA-DELTA-0107`, omega#104.
+    ///
+    /// ACP carries the live turn. Beside it sits Exo's actual record — every
+    /// message, every tool call, every tool result in full, every artifact,
+    /// after the turn ended and for as long as Exo keeps the log. This is the
+    /// one call that reads it. `omega_exo_log` owns the eight admitted reads,
+    /// the loopback refusal, and the rendering; this owns nothing but the ids
+    /// and the thread it runs on.
+    ///
+    /// # Omega reads a server; Omega never starts one
+    ///
+    /// Route A of omega#104, and the decision behind it is worth keeping beside
+    /// the code. Omega spawning `exo serve` itself would be new process
+    /// authority, a port, and a lifetime to own — and, worse, a **second writer
+    /// on one `.exo` root**, which is exactly what `omega_exo_episode::root`
+    /// exists to refuse and the interleaving that makes a fork a copy of a
+    /// history that never existed. Omega also cannot know whether the owner
+    /// already has one running. So the durable log is read when
+    /// `EXO_EXOHARNESS_URL` names a loopback server, and not otherwise.
+    ///
+    /// # Unset is "not configured", and never "no history"
+    ///
+    /// On an ordinary machine the variable is unset — [`ExoDriver::check_endpoint`]
+    /// treats that as the ordinary, safe case, because the CLI reads the state
+    /// root on disk and no socket exists at all. That produces
+    /// [`ExoHistoryUnavailable::NotConfigured`], which carries a sentence, and
+    /// not an empty [`ExoDurableHistory`], which there is deliberately no way to
+    /// construct. A surface that showed this thread as having no durable record
+    /// would be telling the reader something false about their own conversation.
+    ///
+    /// # Two reads, and the second is the one with the history in it
+    ///
+    /// `ExoReadClient::conversation_history` does both passes: Exo's event log
+    /// *names* artifacts and never contains them, so the first render says which
+    /// bodies are missing and the second is the one with the tool results in it.
+    /// Off the foreground thread, because the transport is blocking `std::net`
+    /// and the thread that would block is the one drawing the window.
+    ///
+    /// # Errors
+    ///
+    /// A refused or unreachable endpoint, an id Exo printed that is not a UUID,
+    /// or a failed event read. A *missing artifact body* is none of those: it
+    /// leaves its row saying so, and `ExoHistory::unread_artifact_rows` counts
+    /// it.
+    pub fn read_durable_history(&self, cx: &mut App) -> Task<Result<ExoDurableHistory>> {
+        let driver = Rc::clone(&self.driver);
+        let inspection = self.inspection.clone();
+        let known = {
+            let snapshot = inspection.borrow();
+            (
+                snapshot.exo_agent_id.clone(),
+                snapshot.exo_conversation_id.clone(),
+            )
+        };
+        cx.spawn(async move |_| {
+            let Ok(url) = std::env::var("EXO_EXOHARNESS_URL") else {
+                return Ok(ExoDurableHistory::Unavailable(
+                    ExoHistoryUnavailable::NotConfigured,
+                ));
+            };
+            let (agent, conversation) = match known {
+                (Some(agent), Some(conversation)) => (Some(agent), Some(conversation)),
+                // Nothing has asked Exo who it is yet. The same observation a
+                // turn runs, so the ids are the ones the next turn would use.
+                _ => {
+                    let observed = driver.observe().await?;
+                    *inspection.borrow_mut() = ready_inspection(&observed);
+                    (observed.exo_agent_id, observed.exo_conversation_id)
+                }
+            };
+            let Some(agent) = agent else {
+                return Ok(ExoDurableHistory::Unavailable(
+                    ExoHistoryUnavailable::NoAgentId,
+                ));
+            };
+            let Some(conversation) = conversation else {
+                return Ok(ExoDurableHistory::Unavailable(
+                    ExoHistoryUnavailable::NoConversationId,
+                ));
+            };
+            let agent = ExoId::parse(&agent)
+                .map_err(|refusal| anyhow!("{refusal}: Exo named this agent `{agent}`"))?;
+            let conversation = ExoId::parse(&conversation).map_err(|refusal| {
+                anyhow!("{refusal}: Exo named this conversation `{conversation}`")
+            })?;
+            let client = ExoReadClient::open(&url).map_err(|refusal| anyhow!("{refusal}"))?;
+            let history = smol::unblock(move || {
+                client.conversation_history(&agent, &conversation, Some(EXO_HISTORY_EVENT_LIMIT))
+            })
+            .await
+            .map_err(|refusal| anyhow!("{refusal}"))?;
+            Ok(ExoDurableHistory::Read(history))
         })
     }
 
@@ -486,6 +600,28 @@ struct ObservedTurn {
     observed: ObservedExoCapabilityState,
     identity: ExoLaneIdentity,
     networking: bool,
+    /// `OMEGA-DELTA-0107`. The ids Exo printed, carried off the observation
+    /// rather than thrown away — see [`ExoInspectionSnapshot::exo_agent_id`].
+    exo_agent_id: Option<String>,
+    exo_conversation_id: Option<String>,
+}
+
+/// The inspector state one successful observation produces.
+///
+/// One constructor for the three places that built this by hand, so a field
+/// added to the snapshot cannot be populated on the refresh path and left null
+/// on the turn path.
+fn ready_inspection(observed: &ObservedTurn) -> ExoInspectionSnapshot {
+    ExoInspectionSnapshot {
+        phase: ExoInspectionPhase::Ready,
+        observed: Some(observed.observed.clone()),
+        identity: Some(observed.identity.clone()),
+        networking: Some(observed.networking),
+        refreshed_at_ms: Some(now_ms()),
+        error: None,
+        exo_agent_id: observed.exo_agent_id.clone(),
+        exo_conversation_id: observed.exo_conversation_id.clone(),
+    }
 }
 
 fn now_ms() -> u64 {
@@ -709,7 +845,11 @@ impl ExoDriver {
         tool_modules.sort();
         let mut read_write_mounts = read_write_mounts;
         read_write_mounts.sort();
+        let exo_agent_id = agent.id.clone();
+        let exo_conversation_id = conversation.id.clone();
         Ok(ObservedTurn {
+            exo_agent_id,
+            exo_conversation_id,
             observed: ObservedExoCapabilityState {
                 source_commit: checkout.commit,
                 source_tree: checkout.tree,
@@ -962,14 +1102,7 @@ impl AgentConnection for ExoHarnessConnection {
                     return Err(error);
                 }
             };
-            *inspection_cell.borrow_mut() = ExoInspectionSnapshot {
-                phase: ExoInspectionPhase::Ready,
-                observed: Some(observed.observed.clone()),
-                identity: Some(observed.identity.clone()),
-                networking: Some(observed.networking),
-                refreshed_at_ms: Some(now_ms()),
-                error: None,
-            };
+            *inspection_cell.borrow_mut() = ready_inspection(&observed);
             let capabilities = observed.observed.requested_capabilities();
             let authority_receipt = if capabilities.is_empty() {
                 None
@@ -1173,6 +1306,19 @@ mod tests {
         .to_string()
     }
 
+    /// A disclosure record, for the tests that need one and are not about it.
+    ///
+    /// Built rather than resolved: `ExoAgent` deliberately has no `Default` —
+    /// it is a record read out of Exo's own output, and a permissive default is
+    /// exactly what its documentation refuses.
+    fn an_identity() -> ExoLaneIdentity {
+        ExoLaneIdentity {
+            executor: "basic".into(),
+            model: None,
+            provider: None,
+        }
+    }
+
     fn write(contents: &str) -> (tempfile::TempDir, PathBuf) {
         let dir = tempfile::tempdir().expect("a temp dir");
         let path = dir.path().join(EXO_LANE_FILE);
@@ -1235,6 +1381,106 @@ mod tests {
         assert_eq!(inspection.networking, None);
         assert_eq!(inspection.refreshed_at_ms, None);
         assert_eq!(inspection.error, None);
+        assert_eq!(inspection.exo_agent_id, None);
+        assert_eq!(inspection.exo_conversation_id, None);
+    }
+
+    /// `OMEGA-DELTA-0107`. The ids an observation carries reach the inspector.
+    ///
+    /// The lane held only slugs, and Exo addresses everything by `Uuid7`, so
+    /// this is the whole difference between a durable read that can name its
+    /// conversation and one that cannot. Checked through `ready_inspection`
+    /// because that is the one constructor the refresh path and the turn path
+    /// now share — the failure this replaces is a field populated on one of
+    /// them and left null on the other.
+    #[test]
+    fn an_observed_turn_carries_the_ids_the_durable_read_addresses_by() {
+        let observed = ObservedExoCapabilityState {
+            source_commit: "commit".into(),
+            source_tree: "tree".into(),
+            binary_digest: "sha256:binary".into(),
+            agent: "omega-lane".into(),
+            conversation: "tier-a".into(),
+            generation: 3,
+            agent_authored_tools: false,
+            tool_modules: Vec::new(),
+            read_write_mounts: Vec::new(),
+        };
+        let turn = ObservedTurn {
+            observed,
+            identity: an_identity(),
+            networking: false,
+            exo_agent_id: Some("019e5782-0000-7000-8000-000000000001".into()),
+            exo_conversation_id: Some("019e5782-0000-7000-8000-000000000002".into()),
+        };
+
+        let inspection = ready_inspection(&turn);
+        assert_eq!(inspection.phase, ExoInspectionPhase::Ready);
+        assert_eq!(
+            inspection.exo_agent_id.as_deref(),
+            Some("019e5782-0000-7000-8000-000000000001")
+        );
+        assert_eq!(
+            inspection.exo_conversation_id.as_deref(),
+            Some("019e5782-0000-7000-8000-000000000002")
+        );
+        for id in [
+            inspection.exo_agent_id.as_deref().expect("an agent id"),
+            inspection
+                .exo_conversation_id
+                .as_deref()
+                .expect("a conversation id"),
+        ] {
+            assert!(
+                ExoId::parse(id).is_ok(),
+                "the durable read refuses anything that is not UUID-shaped, so an \
+                 id that reaches the inspector has to be one: {id}"
+            );
+        }
+    }
+
+    /// `OMEGA-DELTA-0107`. An Exo that printed no id still runs turns, and says
+    /// what it cannot show.
+    ///
+    /// The reason both fields are `Option`: refusing to attach because the
+    /// history is unreadable would trade a small failure for a large one.
+    #[test]
+    fn an_exo_that_printed_no_id_loses_its_history_and_not_its_lane() {
+        let turn = ObservedTurn {
+            observed: ObservedExoCapabilityState {
+                source_commit: "commit".into(),
+                source_tree: "tree".into(),
+                binary_digest: "sha256:binary".into(),
+                agent: "omega-lane".into(),
+                conversation: "tier-a".into(),
+                generation: 3,
+                agent_authored_tools: false,
+                tool_modules: Vec::new(),
+                read_write_mounts: Vec::new(),
+            },
+            identity: an_identity(),
+            networking: false,
+            exo_agent_id: None,
+            exo_conversation_id: None,
+        };
+        let inspection = ready_inspection(&turn);
+        assert_eq!(
+            inspection.phase,
+            ExoInspectionPhase::Ready,
+            "the lane observed the runtime; only the durable read is out of reach"
+        );
+        assert_eq!(inspection.exo_agent_id, None);
+        assert_eq!(inspection.error, None);
+
+        // And what the read would say about it names the cause.
+        for reason in ExoHistoryUnavailable::ALL {
+            assert!(
+                reason
+                    .to_string()
+                    .contains(ExoHistoryUnavailable::NOT_AN_EMPTY_HISTORY),
+                "{reason:?}"
+            );
+        }
     }
 
     #[test]

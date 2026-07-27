@@ -51,14 +51,34 @@
 //! sandbox: one warm container, one `latest_snapshot_id`, whichever wrote last.
 //! Two siblings that share a filesystem are not two episodes.
 //!
-//! So [`admit_filesystem_reset`] is total over (scope, shape) and issues its
-//! witness for exactly one combination — agent scope, one episode at a time —
-//! and names the reason for each refusal. The table is the honest summary of
-//! what this primitive can do today:
+//! # And a fork with no filesystem state at all
+//!
+//! `OMEGA-DELTA-0107`, omega#103. Even in the one combination that reaches its
+//! snapshot, there has to *be* one. A sandbox that was never snapshotted is the
+//! ordinary case for a fresh agent, and `start_sandbox` against it fails in
+//! `start_sandbox_side_effect` with the same sentence a fork's dangling
+//! reference produces: *"loading snapshot manifest for `<id>` (have you taken a
+//! snapshot?)"*.
+//!
+//! Those are two different situations that Exo reports identically, and the
+//! confusing one is the second: the operator reads a snapshot-manifest failure
+//! and goes looking for the fork bug that is not there. So
+//! [`admit_filesystem_reset`] takes [`SnapshotEvidence`] — whether anything
+//! Omega actually read names a snapshot for this sandbox — and refuses without
+//! it by name ([`ResetRefusal::NoSnapshotObserved`]), before a request is built.
+//! The evidence is a value the caller supplies from the durable record, because
+//! this crate has no filesystem and reads nothing itself.
+//!
+//! So [`admit_filesystem_reset`] is total over (scope, shape, evidence) and
+//! issues its witness for exactly one combination — agent scope, one episode at
+//! a time, with a snapshot Omega has seen — and names the reason for each
+//! refusal. The table is the honest summary of what this primitive can do
+//! today:
 //!
 //! | | one episode | two siblings |
 //! | --- | --- | --- |
-//! | agent scope | admitted | refused: they share one sandbox |
+//! | agent scope, snapshot observed | admitted | refused: they share one sandbox |
+//! | agent scope, no snapshot observed | refused: nothing to restore | refused: they share one sandbox |
 //! | conversation scope | refused: snapshot lost by fork | refused: snapshot lost by fork |
 //! | turn scope | refused: snapshot lost by fork | refused: snapshot lost by fork |
 //!
@@ -143,6 +163,22 @@ pub const fn snapshot_reach(scope: SandboxScopeKind) -> SnapshotReach {
     }
 }
 
+/// Whether Omega has actually seen a snapshot to restore from.
+///
+/// `OMEGA-DELTA-0107`, omega#103. A value the caller supplies, read off the
+/// durable record — a `sandbox_snapshotted` event, or a sandbox record whose
+/// `latest_snapshot_id` is set. This crate has no filesystem and no socket, so
+/// it cannot look; what it can do is refuse to build a request that has nothing
+/// to restore.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SnapshotEvidence {
+    /// Omega read something that names a snapshot for this sandbox.
+    Observed,
+    /// Nothing Omega read names one. The sandbox may never have been
+    /// snapshotted, which is the ordinary state of a fresh agent.
+    NoneObserved,
+}
+
 /// Why a filesystem reset is not available for this shape.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ResetRefusal {
@@ -153,6 +189,13 @@ pub enum ResetRefusal {
     /// shared by every conversation of the agent. Two siblings restoring it
     /// are one sandbox, not two episodes.
     SiblingsShareOneSandbox,
+    /// Nothing Omega read names a snapshot for this sandbox, so there is no
+    /// filesystem state to reset to.
+    ///
+    /// `OMEGA-DELTA-0107`. Exo reports this and [`Self::SnapshotLostByFork`]
+    /// with the same sentence, which sends a reader looking for a fork bug that
+    /// is not there. Refusing here separates them before a request exists.
+    NoSnapshotObserved,
 }
 
 impl std::fmt::Display for ResetRefusal {
@@ -165,6 +208,12 @@ impl std::fmt::Display for ResetRefusal {
             Self::SiblingsShareOneSandbox => {
                 "an agent-scoped sandbox is one record for the whole agent, so two forks \
                  restoring it share a filesystem and are not two episodes"
+            }
+            Self::NoSnapshotObserved => {
+                "nothing Omega read names a snapshot for this sandbox, so there is no \
+                 filesystem state to restore — this fork has no environment to reset to, \
+                 which is not the same failure as a snapshot a fork left behind, though \
+                 Exo reports both by asking whether a snapshot was ever taken"
             }
         })
     }
@@ -214,22 +263,30 @@ impl FilesystemReset {
 
 /// Decide whether a filesystem reset of this shape can work.
 ///
+/// Structure first, then evidence: the two shape refusals are properties of the
+/// primitive and hold whatever Omega read, so they are decided before the
+/// question of whether a snapshot exists is even asked. A caller that fixed its
+/// evidence and still gets `SnapshotLostByFork` is being told the right thing.
+///
 /// # Errors
 ///
-/// [`ResetRefusal`] for every shape but agent scope on a single episode. See
-/// the module documentation for the table and the reasons.
+/// [`ResetRefusal`] for every shape but agent scope on a single episode with a
+/// snapshot Omega has seen. See the module documentation for the table and the
+/// reasons.
 pub const fn admit_filesystem_reset(
     scope: SandboxScopeKind,
     shape: EpisodeShape,
+    evidence: SnapshotEvidence,
 ) -> Result<FilesystemReset, ResetRefusal> {
     match (snapshot_reach(scope), shape) {
         (SnapshotReach::LostByFork, _) => Err(ResetRefusal::SnapshotLostByFork),
         (SnapshotReach::ReachableFromFork, EpisodeShape::Siblings) => {
             Err(ResetRefusal::SiblingsShareOneSandbox)
         }
-        (SnapshotReach::ReachableFromFork, EpisodeShape::SingleEpisode) => {
-            Ok(FilesystemReset { scope })
-        }
+        (SnapshotReach::ReachableFromFork, EpisodeShape::SingleEpisode) => match evidence {
+            SnapshotEvidence::NoneObserved => Err(ResetRefusal::NoSnapshotObserved),
+            SnapshotEvidence::Observed => Ok(FilesystemReset { scope }),
+        },
     }
 }
 
@@ -387,28 +444,71 @@ mod tests {
     fn the_admission_table_is_the_one_the_module_documents() {
         use EpisodeShape::{Siblings, SingleEpisode};
         use SandboxScopeKind::{Agent, Conversation, Turn};
+        use SnapshotEvidence::{NoneObserved, Observed};
 
-        assert!(admit_filesystem_reset(Agent, SingleEpisode).is_ok());
+        assert!(admit_filesystem_reset(Agent, SingleEpisode, Observed).is_ok());
         assert_eq!(
-            admit_filesystem_reset(Agent, Siblings),
-            Err(ResetRefusal::SiblingsShareOneSandbox)
+            admit_filesystem_reset(Agent, SingleEpisode, NoneObserved),
+            Err(ResetRefusal::NoSnapshotObserved)
         );
-        for scope in [Conversation, Turn] {
-            for shape in [SingleEpisode, Siblings] {
-                assert_eq!(
-                    admit_filesystem_reset(scope, shape),
-                    Err(ResetRefusal::SnapshotLostByFork),
-                    "{scope:?} / {shape:?} was admitted, and start_sandbox would fail \
-                     loading the manifest"
-                );
+        for evidence in [Observed, NoneObserved] {
+            assert_eq!(
+                admit_filesystem_reset(Agent, Siblings, evidence),
+                Err(ResetRefusal::SiblingsShareOneSandbox),
+                "the shape refusal holds whatever Omega read"
+            );
+            for scope in [Conversation, Turn] {
+                for shape in [SingleEpisode, Siblings] {
+                    assert_eq!(
+                        admit_filesystem_reset(scope, shape, evidence),
+                        Err(ResetRefusal::SnapshotLostByFork),
+                        "{scope:?} / {shape:?} / {evidence:?} was admitted, and the \
+                         restore would fail loading the manifest"
+                    );
+                }
             }
         }
     }
 
+    /// `OMEGA-DELTA-0107`, omega#103. A fork with no filesystem state to reset
+    /// to is refused by name, rather than confusingly.
+    ///
+    /// Exo answers a missing snapshot and a snapshot the fork left behind with
+    /// the same sentence — *"have you taken a snapshot?"* — so an operator who
+    /// hits the first goes looking for the second. Omega separates them here,
+    /// before a request exists, and each refusal says which one it is.
+    #[test]
+    fn a_fork_with_no_snapshot_is_refused_for_having_none() {
+        let refusal = admit_filesystem_reset(
+            SandboxScopeKind::Agent,
+            EpisodeShape::SingleEpisode,
+            SnapshotEvidence::NoneObserved,
+        )
+        .expect_err("there is nothing to restore");
+        assert_eq!(refusal, ResetRefusal::NoSnapshotObserved);
+
+        let said = refusal.to_string();
+        assert!(said.contains("no filesystem state to restore"), "{said}");
+        assert!(
+            said.contains("not the same failure"),
+            "the refusal must separate itself from the fork finding, which is \
+             the whole reason it exists: {said}"
+        );
+        assert_ne!(
+            said,
+            ResetRefusal::SnapshotLostByFork.to_string(),
+            "two situations Exo reports identically must not read identically here"
+        );
+    }
+
     #[test]
     fn the_admitted_witness_carries_the_scope_it_was_admitted_for() {
-        let admitted = admit_filesystem_reset(SandboxScopeKind::Agent, EpisodeShape::SingleEpisode)
-            .expect("agent scope, one episode");
+        let admitted = admit_filesystem_reset(
+            SandboxScopeKind::Agent,
+            EpisodeShape::SingleEpisode,
+            SnapshotEvidence::Observed,
+        )
+        .expect("agent scope, one episode, a snapshot Omega saw");
         assert_eq!(admitted.scope(), SandboxScopeKind::Agent);
         assert_eq!(admitted.scope().token(), "agent");
     }

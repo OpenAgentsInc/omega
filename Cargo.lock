@@ -551,6 +551,7 @@ dependencies = [
  "omega_audience",
  "omega_effectd",
  "omega_exo_lane",
+ "omega_exo_log",
  "omega_front_door",
  "omega_harness",
  "omega_identity",

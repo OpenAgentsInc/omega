@@ -366,7 +366,7 @@ impl EpisodeRequest {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::reset::{EpisodeShape, SandboxScopeKind, admit_filesystem_reset};
+    use crate::reset::{EpisodeShape, SandboxScopeKind, SnapshotEvidence, admit_filesystem_reset};
 
     const AGENT: &str = "019e5782-0000-7000-8000-000000000001";
     const CONVERSATION: &str = "019e5782-0000-7000-8000-000000000002";
@@ -406,8 +406,12 @@ mod tests {
     #[test]
     fn every_episode_request_is_in_an_admitted_family() {
         let fork = ForkedConversation::read_fork_response(1, &fork_response(1)).expect("a fork");
-        let admitted = admit_filesystem_reset(SandboxScopeKind::Agent, EpisodeShape::SingleEpisode)
-            .expect("the one shape that can work");
+        let admitted = admit_filesystem_reset(
+            SandboxScopeKind::Agent,
+            EpisodeShape::SingleEpisode,
+            SnapshotEvidence::Observed,
+        )
+        .expect("the one shape that can work");
         let requests = [
             EpisodeRequest::ForkAtEvent {
                 agent: agent(),
@@ -503,8 +507,12 @@ mod tests {
             CONVERSATION,
             "the fork is not the conversation it came from"
         );
-        let admitted = admit_filesystem_reset(SandboxScopeKind::Agent, EpisodeShape::SingleEpisode)
-            .expect("the one shape that can work");
+        let admitted = admit_filesystem_reset(
+            SandboxScopeKind::Agent,
+            EpisodeShape::SingleEpisode,
+            SnapshotEvidence::Observed,
+        )
+        .expect("the one shape that can work");
         let request = EpisodeRequest::RestoreSandbox {
             fork,
             sandbox: SandboxId::parse("sandbox-019e5782-2a46-7970-a5bf-62900a2233e8")

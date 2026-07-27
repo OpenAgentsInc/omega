@@ -4302,3 +4302,86 @@ than merely stated.
   control and the label a person sees are unverified. The artifact lives in
   memory for the life of the thread; it does not survive a restart, and no check
   asserts that it does.
+### OMEGA-DELTA-0107 — Omega reads Exo's durable log from a server the owner runs, and starts none
+
+- **Upstream Zed:** no Exo, no exoharness, no second agent runtime whose durable
+  record to read. There is nothing upstream to revert to here; this entry
+  records a decision and its consequence.
+- **Omega before this change:** `OMEGA-DELTA-0091` landed
+  `crates/omega_exo_log` — compiled, unit-tested, and with **nothing calling
+  it.** Its only two dependents in the workspace were dev-dependencies of
+  `crates/omega_deltas`, added by `OMEGA-DELTA-0102` so the registry could check
+  a decision nobody was using. A law with no caller is a law about nothing.
+- **Omega now:** `ExoHarnessConnection::read_durable_history` is the call.
+  `ExoDriver::observe` already reads the ids Exo prints and now keeps them on
+  the inspector, so the lane can name the agent and conversation it is running
+  turns on — the lane's configuration holds *slugs*, and Exo addresses
+  everything by `Uuid7`.
+- **Route A, and the reason for it.** omega#104 named two routes and did not
+  pick. This takes **A**: Omega reads `exo serve` when `EXO_EXOHARNESS_URL`
+  names a loopback one, and never starts one.
+  - Route B — Omega spawning the server — is new process authority, a port, and
+    a lifetime to own. Worse, it puts a **second writer on one `.exo` root**,
+    which is exactly what `omega_exo_episode::root::ExoRoots` exists to refuse
+    and the interleaving that makes a fork a copy of a history that never
+    existed. And Omega cannot know whether the owner already has one running.
+  - `serve` is already in `EXO_REDIRECTING_FLAGS` and `ExoCommand` cannot
+    express it. This delta adds the other half: the attach itself may not spell
+    a way to start one, held against the connection's *string literals* rather
+    than as substrings, because `observe` contains `serve`.
+- **The consequence, made legible rather than hidden.** With the variable unset
+  — the ordinary machine, and the safe one, because the CLI reads the state root
+  on disk and no socket exists at all — the durable log is simply unavailable.
+  That must read as **not configured**, never as *this thread has no history*.
+  So `ExoDurableHistory` has no `Default`, an unavailability is a value carrying
+  a sentence, and every one of the three sentences ends with
+  `ExoHistoryUnavailable::NOT_AN_EMPTY_HISTORY`. A surface that showed the
+  absence as an empty conversation would be telling the reader something false
+  about their own thread.
+- **Two passes, and the second is the one with the history in it.** Exo's event
+  log *names* artifacts and never contains them, so the first render is the
+  question — which bodies would change the rendering — and the second is the
+  answer. `ExoReadClient::conversation_history` does both, in the crate that
+  owns both halves, so the sequence is falsifiable against a scripted loopback
+  server rather than only against a machine somebody has to have.
+- **An artifact is a versioned record.** `ExoArtifactSet` is keyed by
+  `(artifact_id, version)`. Keyed by id alone — as it landed in `b074ac3986`,
+  and as a reviewer caught — inserting version 2 made every version-1 reference
+  render version 2's bytes, and a set holding only version 2 made a version-1
+  reference *look resolved*. The row read as complete and artifact-backed while
+  showing a body from a later point in the conversation: the durable-replay
+  claim failing in the one direction nobody would notice. The unresolved list
+  now carries references rather than ids, so the second pass asks for the
+  version the event named instead of for whatever is latest.
+- **omega#103's half that Omega can own.** `conversation_fork` does not copy the
+  `snapshots` prefix, and separately a sandbox that was never snapshotted has
+  nothing to restore. **Exo reports both with the same sentence** — its own
+  *"loading snapshot manifest for `<id>` (have you taken a snapshot?)"* — which
+  sends a reader hunting a fork bug when nobody ever took a snapshot.
+  `admit_filesystem_reset` now takes `SnapshotEvidence` and refuses without it
+  as `ResetRefusal::NoSnapshotObserved`, separately worded, before a request
+  exists. The upstream patch for the *other* case is written out on omega#103,
+  is cross-repo and owner-gated, and is **not made here**.
+- **Enforced by:** `the_exo_durable_log_is_read_by_the_lane_that_runs_the_turns`,
+  `omega_reads_exos_server_and_never_starts_one`,
+  `an_unreadable_exo_log_never_renders_as_a_thread_with_no_history`,
+  `the_durable_read_is_two_passes_and_respects_artifact_versions`, and
+  `a_reset_with_no_snapshot_is_refused_by_name_and_not_by_exos_confusion` in
+  `crates/omega_deltas`; plus unit tests in `crates/omega_exo_log`
+  (`each_versioned_reference_renders_its_own_version`,
+  `an_unavailable_durable_history_names_its_cause`,
+  `the_second_pass_carries_the_tool_results_the_first_only_named`,
+  `an_artifact_read_that_fails_costs_one_body_and_no_rows`),
+  `crates/omega_exo_episode` (`a_fork_with_no_snapshot_is_refused_for_having_none`),
+  and `crates/agent_ui`
+  (`an_observed_turn_carries_the_ids_the_durable_read_addresses_by`,
+  `an_exo_that_printed_no_id_loses_its_history_and_not_its_lane`).
+- **What this does not cover.** **Nobody has run this against a live
+  `exo serve`.** The framing, the envelope, the request shapes and the ordering
+  are exercised against a loopback HTTP server this repo writes; the answers are
+  the tests'. omega#104's two live acceptance items — an Exo thread's events
+  read after the turn ends, and an artifact an event references resolving — are
+  agreement with the source at the pin, not with a running Exo, and they stay
+  open on a machine with one. There is also **no call site in a view**: the
+  method exists and is checked, and what draws it is a separate change in
+  `thread_view.rs`.

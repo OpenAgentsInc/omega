@@ -35,7 +35,8 @@ use std::time::Duration;
 
 use omega_exo_lane::{EXO_SERVE_DEFAULT_BIND, LoopbackEndpoint, OffLoopback};
 
-use crate::query::ExoQuery;
+use crate::history::{ExoArtifactSet, ExoHistory};
+use crate::query::{ExoEventWindow, ExoId, ExoQuery};
 use crate::record::{
     ExoAgentRecord, ExoArtifact, ExoArtifactVersion, ExoConversation, ExoEvent, ExoEventPage,
     ExoResponseTag,
@@ -242,6 +243,69 @@ impl ExoReadClient {
     pub fn artifact(&self, query: &ExoQuery) -> Result<Option<ExoArtifact>, ExoReadError> {
         let payload = self.payload(query, ExoResponseTag::Artifact)?;
         decode_optional(&payload, "artifact")
+    }
+
+    /// One conversation's durable record, with the bodies its tool results
+    /// went to. `OMEGA-DELTA-0107`, omega#104.
+    ///
+    /// # Two passes, and the second is the one with the history in it
+    ///
+    /// Exo's event log **names** artifacts and never contains them. So the
+    /// first `ExoHistory::read` is not the answer — it is the question: it says
+    /// which artifact versions would change the rendering. Then those are read,
+    /// and the same events are rendered again against them. Skip the second
+    /// pass and every artifact-backed tool result renders as [`ExoBody::NotRead`]
+    /// — which is the crate saying so honestly, and is still not a history.
+    ///
+    /// Each unresolved reference is fetched at **the version it named**, not at
+    /// `null`. An event that referenced version 1 asked for version 1's bytes;
+    /// fetching the latest would fill that row with a body from a later point in
+    /// the conversation, under the right name.
+    ///
+    /// # A read that fails leaves its row unread, and the row says so
+    ///
+    /// An artifact Exo has since dropped, or an id in the log that is not
+    /// UUID-shaped, does not fail the whole history: forty rows are not lost
+    /// because one body is. That row stays [`ExoBody::NotRead`] and
+    /// [`ExoHistory::unread_artifact_rows`] counts it, which is exactly the
+    /// state a partial read is in and exactly what the caller should surface.
+    ///
+    /// [`ExoBody::NotRead`]: crate::ExoBody::NotRead
+    ///
+    /// # Errors
+    ///
+    /// [`ExoReadError`] if the *event* read fails. That one is the history.
+    pub fn conversation_history(
+        &self,
+        agent: &ExoId,
+        conversation: &ExoId,
+        limit: Option<u32>,
+    ) -> Result<ExoHistory, ExoReadError> {
+        let page = self.events(&ExoQuery::ConversationEvents {
+            agent: agent.clone(),
+            conversation: conversation.clone(),
+            window: ExoEventWindow {
+                limit,
+                ..ExoEventWindow::default()
+            },
+        })?;
+        let mut artifacts = ExoArtifactSet::new();
+        let named = ExoHistory::read(&page.events, &artifacts);
+        for reference in named.unresolved_artifacts(&artifacts) {
+            let Ok(artifact) = ExoId::parse(&reference.artifact_id) else {
+                continue;
+            };
+            let read = self.artifact(&ExoQuery::ConversationArtifact {
+                agent: agent.clone(),
+                conversation: conversation.clone(),
+                artifact,
+                version: reference.version,
+            });
+            if let Ok(Some(artifact)) = read {
+                artifacts.insert(artifact);
+            }
+        }
+        Ok(ExoHistory::read(&page.events, &artifacts))
     }
 
     /// Send one query and return the `response` object Exo replied with.
@@ -498,31 +562,47 @@ mod tests {
     /// The thread ends when the connection does, so the test owns its whole
     /// lifetime and nothing outlives it.
     fn one_shot(reply: String) -> (ExoReadClient, std::thread::JoinHandle<String>) {
+        let (client, server) = serving(vec![reply]);
+        let handle = std::thread::spawn(move || server.join().expect("the server thread").remove(0));
+        (client, handle)
+    }
+
+    /// A loopback server that answers `replies.len()` requests in order and
+    /// returns what it was sent, in order.
+    ///
+    /// One request per connection — the client sends `connection: close` — so a
+    /// two-pass read is two accepts. The thread ends when the scripted replies
+    /// run out, so the test owns its whole lifetime and nothing outlives it.
+    fn serving(replies: Vec<String>) -> (ExoReadClient, std::thread::JoinHandle<Vec<String>>) {
         let listener = TcpListener::bind("127.0.0.1:0").expect("a loopback port");
         let address = listener.local_addr().expect("a bound address");
         let handle = std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().expect("one connection");
-            let mut reader = std::io::BufReader::new(stream.try_clone().expect("clone"));
-            let mut request = String::new();
-            let mut length = 0usize;
-            loop {
-                let mut line = String::new();
-                reader.read_line(&mut line).expect("a header line");
-                if line == "\r\n" || line.is_empty() {
-                    break;
+            let mut seen = Vec::new();
+            for reply in replies {
+                let (mut stream, _) = listener.accept().expect("one connection");
+                let mut reader = std::io::BufReader::new(stream.try_clone().expect("clone"));
+                let mut request = String::new();
+                let mut length = 0usize;
+                loop {
+                    let mut line = String::new();
+                    reader.read_line(&mut line).expect("a header line");
+                    if line == "\r\n" || line.is_empty() {
+                        break;
+                    }
+                    let lowered = line.to_ascii_lowercase();
+                    if let Some(value) = lowered.strip_prefix("content-length:") {
+                        length = value.trim().parse().expect("a length");
+                    }
+                    request.push_str(&line);
                 }
-                let lowered = line.to_ascii_lowercase();
-                if let Some(value) = lowered.strip_prefix("content-length:") {
-                    length = value.trim().parse().expect("a length");
-                }
-                request.push_str(&line);
+                let mut body = vec![0u8; length];
+                std::io::Read::read_exact(&mut reader, &mut body).expect("the body");
+                stream.write_all(reply.as_bytes()).expect("the reply");
+                stream.flush().expect("flush");
+                drop(stream);
+                seen.push(format!("{request}\r\n{}", String::from_utf8_lossy(&body)));
             }
-            let mut body = vec![0u8; length];
-            std::io::Read::read_exact(&mut reader, &mut body).expect("the body");
-            stream.write_all(reply.as_bytes()).expect("the reply");
-            stream.flush().expect("flush");
-            drop(stream);
-            format!("{request}\r\n{}", String::from_utf8_lossy(&body))
+            seen
         });
         let client = ExoReadClient::open(&address.to_string()).expect("loopback");
         (client, handle)
@@ -673,6 +753,132 @@ mod tests {
                 received: "events".into(),
             }
         );
+    }
+
+    const ARTIFACT: &str = "0198f3ec-3d9c-7e53-b120-8f4c6dae3f77";
+
+    /// A turn as Exo records it: a tool call whose whole result went to
+    /// version 1 of an artifact, with a preview left in the event.
+    fn a_turn_with_an_artifact_backed_result() -> serde_json::Value {
+        serde_json::json!({
+            "type": "events",
+            "result": {
+                "events": [
+                    {
+                        "id": "0198f3ec-4eaf-7f64-c231-9a5d7ebf4088",
+                        "conversation_id": CONVERSATION,
+                        "session_id": null, "turn_id": null,
+                        "created_at": "2026-07-26T09:15:00Z",
+                        "data": {
+                            "type": "tool_requested",
+                            "tool_call_id": "call-1",
+                            "request": { "function_name": "bash", "arguments": {} },
+                        },
+                    },
+                    {
+                        "id": "0198f3ec-4eaf-7f64-c231-9a5d7ebf4089",
+                        "conversation_id": CONVERSATION,
+                        "session_id": null, "turn_id": null,
+                        "created_at": "2026-07-26T09:15:01Z",
+                        "data": {
+                            "type": "tool_result",
+                            "tool_call_id": "call-1",
+                            "result": { "artifact_id": ARTIFACT, "version": 1, "preview": "…" },
+                        },
+                    },
+                ],
+                "cursor": null,
+            },
+        })
+    }
+
+    /// `OMEGA-DELTA-0107`. The read is two passes, and the second one is what
+    /// carries the tool results.
+    ///
+    /// Against a scripted loopback server rather than a live `exo serve`: the
+    /// framing, the envelope, the request shapes and the ordering are real, and
+    /// the answers are this test's. See omega#104 for what that does and does
+    /// not prove.
+    #[test]
+    fn the_second_pass_carries_the_tool_results_the_first_only_named() {
+        let (client, server) = serving(vec![
+            measured(a_turn_with_an_artifact_backed_result()),
+            measured(serde_json::json!({
+                "type": "artifact",
+                "artifact": {
+                    "artifact_id": ARTIFACT,
+                    "path": "scheduled-tasks/nightly/run-1.json",
+                    "version": 1,
+                    "created_at": "2026-07-26T09:15:01Z",
+                    "size_bytes": 24,
+                    "contents": "every line of the output".as_bytes(),
+                },
+            })),
+        ]);
+
+        let history = client
+            .conversation_history(&id(AGENT), &id(CONVERSATION), Some(200))
+            .expect("a durable history");
+        assert_eq!(history.rows.len(), 2);
+        assert_eq!(history.unread_artifact_rows, 0);
+        assert!(
+            history.to_text().contains("every line of the output"),
+            "{}",
+            history.to_text()
+        );
+
+        let seen = server.join().expect("the server thread");
+        assert_eq!(seen.len(), 2, "the read is two requests, in order");
+        assert!(
+            seen[0].contains("\"type\":\"conversation_get_events\""),
+            "{}",
+            seen[0]
+        );
+        assert!(
+            seen[1].contains("\"type\":\"conversation_read_artifact\""),
+            "{}",
+            seen[1]
+        );
+        assert!(
+            seen[1].contains("\"version\":1"),
+            "the second pass must ask for the version the event named, not the \
+             latest Exo happens to hold: {}",
+            seen[1]
+        );
+    }
+
+    /// `OMEGA-DELTA-0107`. A body that could not be read costs its row's body
+    /// and nothing else.
+    ///
+    /// The other half of the falsifier: the same events, with the artifact read
+    /// refused. Every row survives, the tool result says its body was not read,
+    /// and the count of unread rows is what a caller surfaces.
+    #[test]
+    fn an_artifact_read_that_fails_costs_one_body_and_no_rows() {
+        let refusal = serde_json::json!({
+            "kind": "response", "id": 1, "ok": false, "response": null,
+            "error": "artifact not found",
+        })
+        .to_string();
+        let (client, server) = serving(vec![
+            measured(a_turn_with_an_artifact_backed_result()),
+            format!(
+                "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{refusal}",
+                refusal.len()
+            ),
+        ]);
+
+        let history = client
+            .conversation_history(&id(AGENT), &id(CONVERSATION), None)
+            .expect("the events read is the history; one missing body is not");
+        assert_eq!(history.rows.len(), 2, "no row was dropped");
+        assert_eq!(history.unread_artifact_rows, 1);
+        assert!(
+            history.to_text().contains("body not read"),
+            "{}",
+            history.to_text()
+        );
+        assert_eq!(server.join().expect("the server thread").len(), 2);
     }
 
     #[test]
