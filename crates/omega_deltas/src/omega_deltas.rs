@@ -125,6 +125,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0134",
     "OMEGA-DELTA-0135",
     "OMEGA-DELTA-0136",
+    "OMEGA-DELTA-0137",
 ];
 
 /// OMEGA-DELTA-0125. Every entry the thread header's `…` menu offers, the
@@ -12180,9 +12181,8 @@ mod tests {
         // branch runs: a fallback added above them leaves every string in place
         // and the file still reads correctly. What cannot be faked is the
         // number of ways the function can answer "inherit". There are exactly
-        // two legitimate ones — the field was omitted, and the field was blank
-        // — and a third is a request for a named executor being answered with
-        // something else.
+        // three legitimate ones — the field was omitted, the field was blank,
+        // or the caller explicitly named `native`.
         let production = source
             .split("#[cfg(test)]")
             .next()
@@ -12192,12 +12192,11 @@ mod tests {
             .count();
         assert_eq!(
             inherit_paths,
-            2,
+            3,
             "OMEGA-DELTA-0061: {} has {inherit_paths} paths that inherit the \
-             parent, not 2. Inheriting is only ever correct when nothing was \
-             asked for (omitted or blank). A third path means a request for a \
-             named executor is being answered with the parent's own model, \
-             which is the substitution this delta forbids.",
+             parent, not 3. Inheriting is only correct when nothing was asked \
+             for (omitted or blank) or the caller explicitly named `native`. \
+             Any other path is the substitution this delta forbids.",
             path.display()
         );
 
@@ -12219,11 +12218,12 @@ mod tests {
         let tool = std::fs::read_to_string(&tool_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", tool_path.display()));
         assert!(
-            tool.contains("Cannot set `executor` when continuing an existing"),
-            "OMEGA-DELTA-0061: {} accepts `executor` alongside `session_id` \
-             without refusing. A resumed session runs on whatever created it, \
-             so honouring the request is impossible and accepting it silently \
-             drops it.",
+            tool.contains("Session belongs to `{}`, not the requested executor")
+                && tool.contains("Omega did not substitute executors"),
+            "OMEGA-DELTA-0061: {} no longer compares a follow-up's requested \
+             executor with the live session disclosure. A resumed session runs \
+             on whatever created it, so a mismatch must be refused rather than \
+             silently dropped.",
             tool_path.display()
         );
     }
@@ -12337,7 +12337,7 @@ mod tests {
         // And it reaches the model, which is the only reader that can act on it.
         // Both arms. A success that is attributed and a failure that is not
         // leaves the parent unable to tell which of three subagents died.
-        let attributed = tool.matches(r#""executor": executor"#).count();
+        let attributed = tool.matches(r#""disclosure": executor"#).count();
         assert_eq!(
             attributed,
             2,
@@ -12361,9 +12361,10 @@ mod tests {
         // behaviour.
         let compact_handle = without_whitespace(&handle);
         assert!(
-            compact_handle.contains(&without_whitespace(
-                "crate::external_acp_disclosure(&self.agent_id)"
-            )),
+            compact_handle.contains(&without_whitespace("self.disclosure.clone()"))
+                && compact_handle.contains(&without_whitespace(
+                    "crate::external_acp_disclosure(&agent_id)"
+                )),
             "OMEGA-DELTA-0061: {} no longer discloses the external agent from \
              the id its own handle holds. Two subagents given different \
              executors must not report the same thing.",
@@ -15070,8 +15071,9 @@ mod tests {
         //    exists to prevent.
         assert!(
             without_whitespace(&agent).contains(&without_whitespace(
-                "SubagentExecutor::ExternalAcp { id, name } => {
-                self.create_external_acp_subagent(id, name, cx)"
+                "SubagentExecutor::ExternalAcp { id, name } =>"
+            )) && without_whitespace(&agent).contains(&without_whitespace(
+                "let create = self.create_external_acp_subagent(id, name, cx)"
             )),
             "OMEGA-DELTA-0112: {} no longer routes `SubagentExecutor::ExternalAcp` \
              into `create_external_acp_subagent`. Naming an executor would then \
@@ -18550,10 +18552,85 @@ mod tests {
 
         let delegate = read_repository_file("crates/agent/src/tools/spawn_agent_tool.rs");
         assert!(
-            delegate.contains("\"transcript_address\": transcript_address")
+            delegate.contains("\"session_address\": session_address")
                 && delegate.contains("format!(\"session:{session_id}\")"),
             "OMEGA-DELTA-0136: delegate no longer hands the parent a spendable \
              transcript address."
+        );
+    }
+
+    /// OMEGA-DELTA-0137. The basic delegation name keeps the established
+    /// session machinery while making executor choice and attribution typed.
+    #[test]
+    fn delegate_names_never_substitutes_and_discloses_what_ran() {
+        let tools = read_repository_file("crates/agent/src/tools.rs");
+        assert!(
+            tools.contains("SpawnAgentTool::NAME => Some(\"delegate\")"),
+            "OMEGA-DELTA-0137: the basic profile no longer exposes delegation \
+             under the model-facing `delegate` name."
+        );
+
+        let tool = read_repository_file("crates/agent/src/tools/spawn_agent_tool.rs");
+        for required in [
+            "rename = \"task\", alias = \"message\"",
+            "rename = \"session\"",
+            "\"required\": [\"executor\", \"task\", \"label\"]",
+            "\"final_message\": output",
+            "\"disclosure\": executor",
+            "\"executor_chain\": executor_chain",
+            "\"session_address\": session_address",
+            "disclosure_matches_requested_executor",
+            "NoExecutor",
+            "AccountExhausted",
+            "AccountRateLimited",
+            "EngineUnavailable",
+        ] {
+            assert!(
+                tool.contains(required),
+                "OMEGA-DELTA-0137: the delegate contract lost `{required}`."
+            );
+        }
+        assert!(
+            tool.contains("report.agent_id.starts_with(\"exo/\")")
+                && tool.contains("agent_id: \"exo\".to_owned()")
+                && tool.contains("agent_id: \"Omega Agent\".to_owned()"),
+            "OMEGA-DELTA-0137: a hosted Exo result no longer names the full \
+             Omega → Exo → hosted executor chain."
+        );
+
+        let resolver = read_repository_file("crates/agent/src/tools/subagent_executor.rs");
+        for required in [
+            "requested == \"native\"",
+            "requested == \"auto\"",
+            "requested.strip_prefix(\"engine:\")",
+            "requested.trim() == \"exo\"",
+            "substitute a different executor",
+        ] {
+            assert!(
+                resolver.contains(required),
+                "OMEGA-DELTA-0137: executor resolution lost `{required}`."
+            );
+        }
+        assert!(
+            !resolver.contains("\"khala\""),
+            "OMEGA-DELTA-0137: Khala was admitted before its K1–K3 contract."
+        );
+
+        let servers = read_repository_file("crates/agent_servers/src/custom.rs");
+        assert!(
+            servers.contains("pub struct CommandAgentServer")
+                && servers.contains("crate::acp::connect("),
+            "OMEGA-DELTA-0137: installed lanes can no longer reuse the ordinary \
+             ACP transport without synthetic settings or a second home."
+        );
+
+        let agent = read_repository_file("crates/agent/src/agent.rs");
+        assert!(
+            agent.contains("external_subagents: Rc<RefCell<HashMap<")
+                && agent.contains("self.external_subagents.borrow().contains_key(&session_id)")
+                && agent.contains("external_subagent_thread(&session_id, cx)"),
+            "OMEGA-DELTA-0137: external delegate sessions are no longer retained \
+             by their parent or their returned address is no longer readable."
         );
     }
 }

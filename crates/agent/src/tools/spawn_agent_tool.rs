@@ -5,6 +5,7 @@ use gpui::{App, SharedString, Task};
 use language_model::LanguageModelToolResultContent;
 use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize};
+use std::borrow::Cow;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -36,9 +37,9 @@ use crate::{
 /// - Reuse the returned session_id when you want to follow up on the same delegated subproblem instead of creating a duplicate session.
 ///
 /// ### Choosing what runs the agent
-/// - By default a sub-agent runs on the same model you are running on. Omit `executor` for that; it is the right choice for most delegation.
+/// - Use `native` (or omit `executor` for stored-call compatibility) to run on Omega's own loop.
 /// - Set `executor` to run the sub-agent as a *different* agent entirely — Codex or Claude Code, each with its own login, its own tools and its own loop. Use this when the task suits another agent better, or when you want a second opinion from a genuinely independent one.
-/// - Accepted values are agent ids: `codex-acp` (Codex) and `claude-acp` (Claude Code). Only agents actually installed on this machine can be used; asking for one that is not installed fails and tells you which agents are available, so you can retry with one of those.
+/// - Accepted values are installed agent ids such as `codex-acp` and `claude-acp`, `exo`, and `engine:<lane>`. `auto` is not accepted.
 /// - `executor` names an agent, not a language model. A model name such as `gpt-5` is not accepted and will fail rather than silently running on your own model.
 /// - You may give different sub-agents different executors in the same turn, and they run concurrently.
 ///
@@ -47,19 +48,56 @@ use crate::{
 /// - The result also carries an `executor` record naming what actually produced it — its `class` (`native_loop` or `external_acp`) and its `agent_id` — so you can tell which agent gave you which answer. An external agent does not report its model, and `provider`/`model` are absent rather than guessed when it does not.
 /// - Successful calls return a session_id that you can use for follow-up messages.
 /// - Error results may also include a session_id if a session was already created.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct SpawnAgentToolInput {
     /// Short label displayed in the UI while the agent runs (e.g., "Researching alternatives")
     pub label: String,
-    /// The prompt for the agent. For new sessions, include full context needed for the task. For follow-ups (with session_id), you can rely on the agent already having the previous message.
-    pub message: String,
-    /// Session ID of an existing agent session to continue instead of creating a new one. Omit to create a new agent.
-    #[serde(default, deserialize_with = "deserialize_session_id")]
-    pub session_id: Option<acp::SessionId>,
-    /// Which agent should run this sub-agent: `codex-acp` or `claude-acp`. Omit to run it on your own model, which is the default. This names an agent, not a language model.
+    /// The task for the executor. For new sessions, include all context it needs. For follow-ups, rely on the existing session.
+    #[serde(rename = "task", alias = "message")]
+    pub task: String,
+    /// Existing delegated session to continue. Omit to create a new session.
+    #[serde(
+        rename = "session",
+        alias = "session_id",
+        default,
+        deserialize_with = "deserialize_session_id"
+    )]
+    pub session: Option<acp::SessionId>,
+    /// Named target: `native`, an installed agent id, `exo`, or `engine:<lane>`.
     #[serde(default)]
     pub executor: Option<String>,
+}
+
+impl JsonSchema for SpawnAgentToolInput {
+    fn schema_name() -> Cow<'static, str> {
+        "DelegateToolInput".into()
+    }
+
+    fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "type": "object",
+            "properties": {
+                "executor": {
+                    "type": "string",
+                    "description": "Named target: native, an installed ACP agent id, exo, or engine:<lane>."
+                },
+                "task": {
+                    "type": "string",
+                    "description": "The complete task for the delegated executor."
+                },
+                "label": {
+                    "type": "string",
+                    "description": "Short progress label shown while the delegate runs."
+                },
+                "session": {
+                    "type": "string",
+                    "description": "Existing delegated session for a follow-up turn."
+                }
+            },
+            "required": ["executor", "task", "label"]
+        })
+    }
 }
 
 fn deserialize_session_id<'de, D>(deserializer: D) -> Result<Option<acp::SessionId>, D::Error>
@@ -117,6 +155,74 @@ pub struct SubagentExecutorReport {
     pub model: Option<String>,
 }
 
+fn executor_chain(report: &SubagentExecutorReport) -> Vec<SubagentExecutorReport> {
+    if report.agent_id.starts_with("exo/") {
+        let omega = ExecutorDisclosure {
+            class: omega_front_door::ExecutorClass::NativeLoop,
+            agent_id: "Omega Agent".to_owned(),
+            provider: None,
+            model: None,
+            run_ref: None,
+            route: None,
+        };
+        let exo = ExecutorDisclosure {
+            class: omega_front_door::ExecutorClass::ExternalAcp,
+            agent_id: "exo".to_owned(),
+            provider: None,
+            model: None,
+            run_ref: None,
+            route: None,
+        };
+        return vec![
+            SubagentExecutorReport::from(&omega),
+            SubagentExecutorReport::from(&exo),
+            report.clone(),
+        ];
+    }
+    vec![report.clone()]
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DelegateFailureClass {
+    NoExecutor,
+    AccountExhausted,
+    AccountRateLimited,
+    EngineUnavailable,
+    #[default]
+    ExecutionError,
+}
+
+fn classify_execution_failure(error: &str) -> DelegateFailureClass {
+    let error = error.to_ascii_lowercase();
+    if error.contains("rate limit")
+        || error.contains("rate_limit")
+        || error.contains("too many requests")
+    {
+        DelegateFailureClass::AccountRateLimited
+    } else if error.contains("at capacity")
+        || error.contains("capacity")
+        || error.contains("quota")
+        || error.contains("credit")
+        || error.contains("billing")
+    {
+        DelegateFailureClass::AccountExhausted
+    } else {
+        DelegateFailureClass::ExecutionError
+    }
+}
+
+fn disclosure_matches_requested_executor(requested: &str, disclosure: &ExecutorDisclosure) -> bool {
+    match requested.trim() {
+        "native" => disclosure.class == omega_front_door::ExecutorClass::NativeLoop,
+        "exo" => disclosure.agent_id.starts_with("exo/"),
+        requested => {
+            disclosure.class == omega_front_door::ExecutorClass::ExternalAcp
+                && disclosure.agent_id == requested
+        }
+    }
+}
+
 impl From<&ExecutorDisclosure> for SubagentExecutorReport {
     fn from(disclosure: &ExecutorDisclosure) -> Self {
         Self {
@@ -146,6 +252,8 @@ pub enum SpawnAgentToolOutput {
         #[serde(default)]
         session_id: Option<acp::SessionId>,
         error: String,
+        #[serde(default)]
+        class: DelegateFailureClass,
         session_info: Option<SubagentSessionInfo>,
         #[serde(default, deserialize_with = "deserialize_executor_report")]
         executor: Option<SubagentExecutorReport>,
@@ -185,15 +293,16 @@ impl From<SpawnAgentToolOutput> for LanguageModelToolResultContent {
                 session_info: _, // Don't show this to the model
                 executor,
             } => {
-                let transcript_address = format!("session:{session_id}");
+                let session_address = format!("session:{session_id}");
+                let executor_chain = executor.as_ref().map(executor_chain);
                 serde_json::to_string(
                     // The executor *is* shown to the model. Without it a mixed
                     // fan-out comes back as three anonymous answers.
                     &serde_json::json!({
-                        "session_id": session_id,
-                        "transcript_address": transcript_address,
-                        "output": output,
-                        "executor": executor
+                        "final_message": output,
+                        "disclosure": executor,
+                        "executor_chain": executor_chain,
+                        "session_address": session_address
                     }),
                 )
                 .unwrap_or_else(|e| format!("Failed to serialize spawn_agent output: {e}"))
@@ -202,11 +311,16 @@ impl From<SpawnAgentToolOutput> for LanguageModelToolResultContent {
             SpawnAgentToolOutput::Error {
                 session_id,
                 error,
+                class,
                 session_info: _, // Don't show this to the model
                 executor,
-            } => serde_json::to_string(
-                &serde_json::json!({ "session_id": session_id, "error": error, "executor": executor }),
-            )
+            } => serde_json::to_string(&serde_json::json!({
+                "status": "unavailable",
+                "class": class,
+                "session_address": session_id.map(|id| format!("session:{id}")),
+                "error": error,
+                "disclosure": executor
+            }))
             .unwrap_or_else(|e| format!("Failed to serialize spawn_agent output: {e}"))
             .into(),
         }
@@ -262,52 +376,67 @@ impl AgentTool for SpawnAgentTool {
                 .map_err(|e| SpawnAgentToolOutput::Error {
                     session_id: None,
                     error: e.to_string(),
+                    class: DelegateFailureClass::ExecutionError,
                     session_info: None,
                     executor: None,
                 })?;
 
-            // Decide what runs this before creating anything. A named agent
-            // that is not installed must fail here, naming itself, rather than
-            // reaching a fallback further down.
-            let executor = match resolve_requested_executor(input.executor.as_deref()) {
-                ExecutorResolution::Resolved(executor) => executor,
-                ExecutorResolution::Refused(reason) => {
+            let subagent = if let Some(session_id) = input.session {
+                let subagent = cx
+                    .update(|cx| self.environment.resume_subagent(session_id.clone(), cx))
+                    .map_err(|err| SpawnAgentToolOutput::Error {
+                        session_id: Some(session_id.clone()),
+                        error: err.to_string(),
+                        class: classify_execution_failure(&err.to_string()),
+                        session_info: None,
+                        executor: None,
+                    })?;
+                if let Some(requested) = input.executor.as_deref() {
+                    let disclosure = cx.update(|cx| subagent.executor_disclosure(cx));
+                    if !disclosure_matches_requested_executor(requested, &disclosure) {
+                        return Err(SpawnAgentToolOutput::Error {
+                            session_id: Some(session_id),
+                            error: format!(
+                                "Session belongs to `{}`, not the requested executor \
+                                 `{requested}`. Omega did not substitute executors.",
+                                disclosure.agent_id
+                            ),
+                            class: DelegateFailureClass::NoExecutor,
+                            session_info: None,
+                            executor: Some(SubagentExecutorReport::from(&disclosure)),
+                        });
+                    }
+                }
+                subagent
+            } else {
+                // Decide what runs this before creating anything. A named
+                // executor that is unavailable must fail by name rather than
+                // reaching a fallback further down.
+                let executor = match resolve_requested_executor(input.executor.as_deref()) {
+                    ExecutorResolution::Resolved(executor) => executor,
+                    ExecutorResolution::Refused(reason) => {
+                        return Err(SpawnAgentToolOutput::Error {
+                            session_id: None,
+                            error: reason,
+                            class: DelegateFailureClass::NoExecutor,
+                            session_info: None,
+                            executor: None,
+                        });
+                    }
+                };
+                if let Some(lane) = executor.engine_lane() {
                     return Err(SpawnAgentToolOutput::Error {
                         session_id: None,
-                        error: reason,
+                        error: format!(
+                            "Engine lane `{lane}` is unavailable from this thread. \
+                             Engine delegation is accepted only through the framed \
+                             omega-effectd run authority; Omega did not run it locally."
+                        ),
+                        class: DelegateFailureClass::EngineUnavailable,
                         session_info: None,
                         executor: None,
                     });
                 }
-            };
-
-            // Resuming runs on whatever already created that session. Honouring
-            // `executor` here is impossible, so accepting it silently would drop
-            // the request — the same silent-fallback defect, arriving by a
-            // different door.
-            if input.session_id.is_some() && executor.is_external() {
-                return Err(SpawnAgentToolOutput::Error {
-                    session_id: input.session_id.clone(),
-                    error: "Cannot set `executor` when continuing an existing \
-                            session: the session already belongs to the agent \
-                            that created it. Omit `executor` to follow up on \
-                            this session, or omit `session_id` to start a new \
-                            subagent on the executor you named."
-                        .to_owned(),
-                    session_info: None,
-                    executor: None,
-                });
-            }
-
-            let subagent = if let Some(session_id) = input.session_id {
-                cx.update(|cx| self.environment.resume_subagent(session_id, cx))
-                    .map_err(|err| SpawnAgentToolOutput::Error {
-                        session_id: None,
-                        error: err.to_string(),
-                        session_info: None,
-                        executor: None,
-                    })?
-            } else {
                 cx.update(|cx| {
                     self.environment
                         .create_subagent(input.label, executor.clone(), cx)
@@ -316,6 +445,7 @@ impl AgentTool for SpawnAgentTool {
                 .map_err(|err| SpawnAgentToolOutput::Error {
                     session_id: None,
                     error: err.to_string(),
+                    class: classify_execution_failure(&err.to_string()),
                     session_info: None,
                     executor: None,
                 })?
@@ -353,7 +483,7 @@ impl AgentTool for SpawnAgentTool {
                 session_info
             });
 
-            let send_result = subagent.send(input.message, cx).await;
+            let send_result = subagent.send(input.task, cx).await;
 
             let status = if send_result.is_ok() {
                 "completed"
@@ -388,11 +518,13 @@ impl AgentTool for SpawnAgentTool {
                 ),
                 Err(e) => {
                     let error = e.to_string();
+                    let class = classify_execution_failure(&error);
                     (
                         error.clone(),
                         Err(SpawnAgentToolOutput::Error {
                             session_id: Some(session_info.session_id.clone()),
                             error,
+                            class,
                             session_info: Some(session_info),
                             executor: Some(executor_report),
                         }),
@@ -457,7 +589,7 @@ mod tests {
             }))
             .unwrap();
 
-            assert!(input.session_id.is_none());
+            assert!(input.session.is_none());
         }
 
         let input: SpawnAgentToolInput = serde_json::from_value(json!({
@@ -465,7 +597,7 @@ mod tests {
             "message": "message",
         }))
         .unwrap();
-        assert!(input.session_id.is_none());
+        assert!(input.session.is_none());
 
         let input: SpawnAgentToolInput = serde_json::from_value(json!({
             "label": "label",
@@ -473,7 +605,25 @@ mod tests {
             "session_id": "existing-session",
         }))
         .unwrap();
-        assert_eq!(input.session_id.unwrap().to_string(), "existing-session");
+        assert_eq!(input.session.unwrap().to_string(), "existing-session");
+    }
+
+    #[test]
+    fn model_schema_uses_the_delegate_contract() {
+        let schema = serde_json::to_value(schemars::schema_for!(SpawnAgentToolInput))
+            .expect("delegate input schema must serialize");
+        let properties = schema["properties"]
+            .as_object()
+            .expect("delegate input must be an object");
+        let mut names = properties.keys().map(String::as_str).collect::<Vec<_>>();
+        names.sort_unstable();
+        assert_eq!(names, ["executor", "label", "session", "task"]);
+        assert!(
+            schema["required"]
+                .as_array()
+                .is_some_and(|required| required.iter().any(|name| name == "executor")),
+            "{schema}"
+        );
     }
 
     fn session() -> acp::SessionId {
@@ -510,12 +660,12 @@ mod tests {
             executor: Some(report),
         });
 
-        assert_eq!(value["executor"]["class"], "external_acp");
-        assert_eq!(value["executor"]["agent_id"], "codex-acp");
-        assert_eq!(value["transcript_address"], "session:sub-1");
+        assert_eq!(value["disclosure"]["class"], "external_acp");
+        assert_eq!(value["disclosure"]["agent_id"], "codex-acp");
+        assert_eq!(value["session_address"], "session:sub-1");
         // Absent, not empty and not invented.
-        assert!(value["executor"].get("provider").is_none());
-        assert!(value["executor"].get("model").is_none());
+        assert!(value["disclosure"].get("provider").is_none());
+        assert!(value["disclosure"].get("model").is_none());
     }
 
     /// The failure arm is attributed too.
@@ -529,13 +679,66 @@ mod tests {
         let value = model_reads(SpawnAgentToolOutput::Error {
             session_id: Some(session()),
             error: "the Claude subagent failed".into(),
+            class: DelegateFailureClass::ExecutionError,
             session_info: Some(session_info()),
             executor: Some(report),
         });
 
-        assert_eq!(value["executor"]["class"], "external_acp");
-        assert_eq!(value["executor"]["agent_id"], "claude-acp");
+        assert_eq!(value["disclosure"]["class"], "external_acp");
+        assert_eq!(value["disclosure"]["agent_id"], "claude-acp");
         assert!(value["error"].is_string());
+    }
+
+    #[test]
+    fn capacity_failures_are_not_flattened() {
+        assert_eq!(
+            classify_execution_failure("account is at capacity"),
+            DelegateFailureClass::AccountExhausted
+        );
+        assert_eq!(
+            classify_execution_failure("rate_limit exceeded"),
+            DelegateFailureClass::AccountRateLimited
+        );
+    }
+
+    #[test]
+    fn a_follow_up_executor_must_match_the_live_disclosure() {
+        let native = crate::native_loop_disclosure("Omega Agent", None, None);
+        let codex = crate::external_acp_disclosure("codex-acp");
+        let exo = omega_exo_lane::ExoLaneIdentity {
+            executor: "claude-code".to_owned(),
+            provider: None,
+            model: None,
+        }
+        .disclosure(None);
+
+        assert!(disclosure_matches_requested_executor("native", &native));
+        assert!(disclosure_matches_requested_executor("codex-acp", &codex));
+        assert!(disclosure_matches_requested_executor("exo", &exo));
+        assert!(!disclosure_matches_requested_executor("native", &codex));
+        assert!(!disclosure_matches_requested_executor("claude-acp", &codex));
+    }
+
+    #[test]
+    fn an_exo_result_names_the_hosted_chain() {
+        let report = SubagentExecutorReport::from(
+            &omega_exo_lane::ExoLaneIdentity {
+                executor: "claude-code".to_owned(),
+                provider: Some("https://api.anthropic.com".to_owned()),
+                model: Some("claude-opus-4".to_owned()),
+            }
+            .disclosure(None),
+        );
+        let value = model_reads(SpawnAgentToolOutput::Success {
+            session_id: session(),
+            output: "done".to_owned(),
+            session_info: session_info(),
+            executor: Some(report),
+        });
+        assert_eq!(value["executor_chain"][0]["agent_id"], "Omega Agent");
+        assert_eq!(value["executor_chain"][1]["agent_id"], "exo");
+        assert_eq!(value["executor_chain"][2]["agent_id"], "exo/claude-code");
+        assert_eq!(value["executor_chain"][2]["model"], "claude-opus-4");
     }
 
     /// Two results from one turn are told apart by what the model receives.
@@ -562,9 +765,9 @@ mod tests {
             )),
         });
 
-        assert_ne!(codex["executor"], inherited["executor"]);
-        assert_eq!(inherited["executor"]["class"], "native_loop");
-        assert_eq!(inherited["executor"]["model"], "claude-opus-4");
+        assert_ne!(codex["disclosure"], inherited["disclosure"]);
+        assert_eq!(inherited["disclosure"]["class"], "native_loop");
+        assert_eq!(inherited["disclosure"]["model"], "claude-opus-4");
     }
 
     /// The record holds no rendered sentence.

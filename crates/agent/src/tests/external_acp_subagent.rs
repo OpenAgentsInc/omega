@@ -288,6 +288,7 @@ async fn parent_thread(cx: &mut TestAppContext, cwd: &Path) -> ParentThread {
         agent: agent.downgrade(),
         thread: thread.downgrade(),
         acp_thread: acp_thread.downgrade(),
+        external_subagents: Rc::default(),
     });
 
     ParentThread {
@@ -321,13 +322,13 @@ struct ParentThread {
 fn spawn_through_the_tool(
     environment: &Rc<NativeThreadEnvironment>,
     executor: &str,
-    message: &str,
+    task: &str,
     cx: &mut TestAppContext,
 ) -> gpui::Task<Result<SpawnAgentToolOutput, SpawnAgentToolOutput>> {
     let input = SpawnAgentToolInput {
         label: format!("{executor} subagent"),
-        message: message.to_owned(),
-        session_id: None,
+        task: task.to_owned(),
+        session: None,
         executor: Some(executor.to_owned()),
     };
     // One event stream per tool call, which is what a real turn builds.

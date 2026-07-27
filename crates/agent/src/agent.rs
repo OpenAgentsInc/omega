@@ -68,6 +68,7 @@ use prompt_store::{ProjectContext, RULES_FILE_NAMES, RulesFileContext, WorktreeC
 use serde::{Deserialize, Serialize};
 use settings::{LanguageModelSelection, Settings as _, update_settings_file};
 use std::any::Any;
+use std::cell::RefCell;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::{Arc, LazyLock};
@@ -804,6 +805,7 @@ impl NativeAgent {
                 acp_thread: acp_thread.downgrade(),
                 thread: weak_thread,
                 agent: weak.clone(),
+                external_subagents: Rc::default(),
             }) as Rc<dyn ThreadEnvironment>;
             thread.add_default_tools(environment.clone(), cx);
             let skills: SkillsResolver =
@@ -3036,6 +3038,7 @@ pub struct NativeThreadEnvironment {
     agent: WeakEntity<NativeAgent>,
     thread: WeakEntity<Thread>,
     acp_thread: WeakEntity<AcpThread>,
+    external_subagents: Rc<RefCell<HashMap<acp::SessionId, Rc<dyn SubagentHandle>>>>,
 }
 
 impl NativeThreadEnvironment {
@@ -3088,6 +3091,131 @@ impl NativeThreadEnvironment {
         );
 
         self.prompt_subagent(session_id, subagent_thread, acp_thread)
+    }
+
+    fn create_exo_subagent(
+        &self,
+        lane: omega_agent_detect::exo::DerivedExoLane,
+        cx: &mut App,
+    ) -> Task<Result<Rc<dyn SubagentHandle>>> {
+        let Some(parent_thread_entity) = self.thread.upgrade() else {
+            return Task::ready(Err(anyhow!("Parent thread no longer exists")));
+        };
+        if parent_thread_entity.read(cx).depth() >= MAX_SUBAGENT_DEPTH {
+            return Task::ready(Err(anyhow!(
+                "Maximum subagent depth ({MAX_SUBAGENT_DEPTH}) reached"
+            )));
+        }
+
+        if let Ok(url) = std::env::var("EXO_EXOHARNESS_URL")
+            && let Err(refusal) = omega_exo_lane::LoopbackEndpoint::parse(&url)
+        {
+            return Task::ready(Err(anyhow!(
+                "{refusal}: delegated Exo will not talk to {url}"
+            )));
+        }
+
+        let project = parent_thread_entity.read(cx).project().clone();
+        let work_dirs = self
+            .acp_thread
+            .upgrade()
+            .and_then(|acp_thread| acp_thread.read(cx).work_dirs().cloned())
+            .unwrap_or_else(|| project.read(cx).default_path_list(cx));
+        let root = omega_exo_lane::ExoRoot::at(lane.root.to_string_lossy().into_owned());
+        let mut child_env: HashMap<String, String> = lane
+            .secret_store
+            .iter()
+            .flat_map(omega_exo_lane::ExoSecretStore::env)
+            .collect();
+        child_env.insert(
+            "EXO_WORKSPACE_ROOT".to_owned(),
+            lane.checkout.to_string_lossy().into_owned(),
+        );
+        let command = project::agent_server_store::AgentServerCommand {
+            path: lane.binary.clone(),
+            args: vec![
+                "--root".to_owned(),
+                root.as_str().to_owned(),
+                "acp".to_owned(),
+                lane.agent.clone(),
+                lane.conversation.clone(),
+            ],
+            env: Some(child_env.clone()),
+        };
+        let server: Rc<dyn agent_servers::AgentServer> =
+            Rc::new(agent_servers::CommandAgentServer::new(
+                project::agent_server_store::AgentId::new(omega_exo_lane::EXO_HARNESS_ID),
+                command,
+            ));
+        let delegate = agent_servers::AgentServerDelegate::new(
+            project.read(cx).agent_server_store().clone(),
+            None,
+            None,
+        );
+        let connect = server.connect(delegate, project.clone(), cx);
+
+        cx.spawn(async move |cx| {
+            let run = |command: omega_exo_lane::ExoCommand| {
+                let binary = lane.binary.clone();
+                let arguments = command.argv(&root);
+                let child_env = child_env.clone();
+                async move {
+                    let output = smol::process::Command::new(&binary)
+                        .args(&arguments)
+                        .envs(child_env)
+                        .stdin(std::process::Stdio::null())
+                        .output()
+                        .await
+                        .with_context(|| format!("running Exo {}", command.shape()))?;
+                    if !output.status.success() {
+                        anyhow::bail!(
+                            "Exo {} exited {}: {}",
+                            command.shape(),
+                            output.status,
+                            String::from_utf8_lossy(&output.stderr).trim()
+                        );
+                    }
+                    Ok::<_, anyhow::Error>(String::from_utf8_lossy(&output.stdout).into_owned())
+                }
+            };
+            let shown_agent = run(omega_exo_lane::ExoCommand::ShowAgent {
+                agent: lane.agent.clone(),
+            })
+            .await?;
+            let agent = omega_exo_lane::ExoAgent::parse(&shown_agent)
+                .map_err(|error| anyhow!("Exo did not disclose its hosted executor: {error}"))?;
+            let shown_models = run(omega_exo_lane::ExoCommand::ListModels).await?;
+            let bindings = omega_exo_lane::ExoModelBinding::read_table(&shown_models);
+            let disclosure =
+                omega_exo_lane::ExoLaneIdentity::resolve(&agent, &bindings).disclosure(None);
+            if !disclosure.is_coherent() {
+                anyhow::bail!("Exo produced an incoherent executor disclosure");
+            }
+
+            let connection = connect
+                .await
+                .context("Could not start Exo ACP for this delegate")?;
+            let new_session = cx.update(|cx| {
+                connection
+                    .clone()
+                    .new_session(project.clone(), work_dirs, cx)
+            });
+            let acp_thread = new_session
+                .await
+                .context("Could not open an Exo ACP session for this delegate")?;
+            let session_id = cx.update(|cx| {
+                let session_id = acp_thread.read(cx).session_id().clone();
+                crate::register_external_subagent_session(session_id.clone(), &acp_thread, cx);
+                session_id
+            });
+            Ok(Rc::new(ExternalAcpSubagentHandle::new_with_disclosure(
+                session_id,
+                acp_thread,
+                disclosure,
+                "Exo".to_owned(),
+                connection,
+            )) as Rc<dyn SubagentHandle>)
+        })
     }
 
     /// Open a subagent that runs as an external ACP agent.
@@ -3354,8 +3482,30 @@ impl ThreadEnvironment for NativeThreadEnvironment {
         match executor {
             SubagentExecutor::InheritParent => Task::ready(self.create_subagent_thread(label, cx)),
             SubagentExecutor::ExternalAcp { id, name } => {
-                self.create_external_acp_subagent(id, name, cx)
+                let create = self.create_external_acp_subagent(id, name, cx);
+                let sessions = self.external_subagents.clone();
+                cx.spawn(async move |_| {
+                    let handle = create.await?;
+                    sessions
+                        .borrow_mut()
+                        .insert(handle.id(), Rc::clone(&handle));
+                    Ok(handle)
+                })
             }
+            SubagentExecutor::Exo(lane) => {
+                let create = self.create_exo_subagent(lane, cx);
+                let sessions = self.external_subagents.clone();
+                cx.spawn(async move |_| {
+                    let handle = create.await?;
+                    sessions
+                        .borrow_mut()
+                        .insert(handle.id(), Rc::clone(&handle));
+                    Ok(handle)
+                })
+            }
+            SubagentExecutor::EngineLane { lane } => Task::ready(Err(anyhow!(
+                "Engine lane `{lane}` must be commanded by omega-effectd"
+            ))),
         }
     }
 
@@ -3364,6 +3514,9 @@ impl ThreadEnvironment for NativeThreadEnvironment {
         session_id: acp::SessionId,
         cx: &mut App,
     ) -> Result<Rc<dyn SubagentHandle>> {
+        if let Some(handle) = self.external_subagents.borrow().get(&session_id) {
+            return Ok(Rc::clone(handle));
+        }
         self.resume_subagent_thread(session_id, cx)
     }
 
@@ -3381,6 +3534,99 @@ impl ThreadEnvironment for NativeThreadEnvironment {
         window: TranscriptWindowRequest,
         cx: &mut App,
     ) -> Result<SubagentTranscript, String> {
+        if self.external_subagents.borrow().contains_key(&session_id) {
+            let thread = crate::external_subagent_thread(&session_id, cx)
+                .ok_or_else(|| crate::no_transcript_available(&session_id))?;
+            let thread = thread.read(cx);
+            let entries = thread
+                .entries()
+                .iter()
+                .enumerate()
+                .filter_map(|(index, entry)| {
+                    let (role, blocks) = match entry {
+                        acp_thread::AgentThreadEntry::UserMessage(message) => (
+                            TranscriptRole::User,
+                            vec![TranscriptBlock::Text(
+                                message.content.to_markdown(cx).to_string(),
+                            )],
+                        ),
+                        acp_thread::AgentThreadEntry::AssistantMessage(message) => (
+                            TranscriptRole::Assistant,
+                            message
+                                .chunks
+                                .iter()
+                                .map(|chunk| match chunk {
+                                    acp_thread::AssistantMessageChunk::Message {
+                                        block, ..
+                                    } => TranscriptBlock::Text(block.to_markdown(cx).to_string()),
+                                    acp_thread::AssistantMessageChunk::Thought {
+                                        block, ..
+                                    } => {
+                                        TranscriptBlock::Thinking(block.to_markdown(cx).to_string())
+                                    }
+                                })
+                                .collect(),
+                        ),
+                        acp_thread::AgentThreadEntry::ToolCall(tool_call) => {
+                            let name = tool_call.tool_name.as_ref().map_or_else(
+                                || tool_call.label.read(cx).source().to_string(),
+                                ToString::to_string,
+                            );
+                            let id = tool_call.id.to_string();
+                            let input = tool_call.raw_input.as_ref().map_or_else(
+                                || "{}".to_owned(),
+                                |input| {
+                                    serde_json::to_string(input).unwrap_or_else(|error| {
+                                        format!("{{\"serialization_error\":\"{error}\"}}")
+                                    })
+                                },
+                            );
+                            let mut blocks = vec![TranscriptBlock::ToolUse {
+                                name: name.clone(),
+                                id: id.clone(),
+                                input,
+                            }];
+                            if let Some(output) = &tool_call.raw_output {
+                                blocks.push(TranscriptBlock::ToolResult {
+                                    name,
+                                    id,
+                                    is_error: matches!(
+                                        tool_call.status,
+                                        acp_thread::ToolCallStatus::Failed
+                                            | acp_thread::ToolCallStatus::Rejected
+                                            | acp_thread::ToolCallStatus::Canceled
+                                    ),
+                                    text: serde_json::to_string(output).unwrap_or_else(|error| {
+                                        format!("{{\"serialization_error\":\"{error}\"}}")
+                                    }),
+                                });
+                            }
+                            (TranscriptRole::Assistant, blocks)
+                        }
+                        _ => return None,
+                    };
+                    Some(TranscriptEntry {
+                        index,
+                        role,
+                        blocks,
+                    })
+                })
+                .collect::<Vec<_>>();
+            let total_messages = entries.len();
+            let entries = entries
+                .into_iter()
+                .skip(window.offset)
+                .take(window.limit)
+                .collect();
+            return Ok(SubagentTranscript {
+                session_id,
+                title: "external delegate".to_owned(),
+                total_messages,
+                first_index: window.offset,
+                entries,
+            });
+        }
+
         let caller = self
             .thread
             .upgrade()
@@ -3502,7 +3748,7 @@ impl NativeSubagentHandle {
 pub struct ExternalAcpSubagentHandle {
     session_id: acp::SessionId,
     acp_thread: Entity<AcpThread>,
-    agent_id: String,
+    disclosure: ExecutorDisclosure,
     agent_name: String,
     /// Kept alive for the life of the subagent. Dropping the connection drops
     /// the child process, which would end the session mid-turn.
@@ -3523,10 +3769,26 @@ impl ExternalAcpSubagentHandle {
         agent_name: String,
         connection: Rc<dyn acp_thread::AgentConnection>,
     ) -> Self {
+        Self::new_with_disclosure(
+            session_id,
+            acp_thread,
+            crate::external_acp_disclosure(&agent_id),
+            agent_name,
+            connection,
+        )
+    }
+
+    pub fn new_with_disclosure(
+        session_id: acp::SessionId,
+        acp_thread: Entity<AcpThread>,
+        disclosure: ExecutorDisclosure,
+        agent_name: String,
+        connection: Rc<dyn acp_thread::AgentConnection>,
+    ) -> Self {
         Self {
             session_id,
             acp_thread,
-            agent_id,
+            disclosure,
             agent_name,
             _connection: connection,
         }
@@ -3592,7 +3854,7 @@ impl SubagentHandle for ExternalAcpSubagentHandle {
     /// handle already knows, and asking a second source for an answer it holds
     /// is how two answers to one question get to disagree.
     fn executor_disclosure(&self, _cx: &App) -> ExecutorDisclosure {
-        crate::external_acp_disclosure(&self.agent_id)
+        self.disclosure.clone()
     }
 
     fn num_entries(&self, cx: &App) -> usize {

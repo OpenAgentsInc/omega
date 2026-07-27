@@ -52,6 +52,11 @@ pub enum SubagentExecutor {
     /// An external ACP agent, run as its own session against its own agent
     /// server.
     ExternalAcp { id: String, name: String },
+    /// The installed Exo lane, reached through its ACP stdin transport.
+    Exo(omega_agent_detect::exo::DerivedExoLane),
+    /// A named `omega-effectd` lane. The tool layer hands this to the engine
+    /// authority; it must never be interpreted as a local subagent.
+    EngineLane { lane: String },
 }
 
 impl SubagentExecutor {
@@ -63,13 +68,22 @@ impl SubagentExecutor {
     pub const fn class(&self) -> ExecutorClass {
         match self {
             Self::InheritParent => ExecutorClass::NativeLoop,
-            Self::ExternalAcp { .. } => ExecutorClass::ExternalAcp,
+            Self::ExternalAcp { .. } | Self::Exo(_) => ExecutorClass::ExternalAcp,
+            Self::EngineLane { .. } => ExecutorClass::EngineLane,
         }
     }
 
     #[must_use]
     pub fn is_external(&self) -> bool {
-        matches!(self, Self::ExternalAcp { .. })
+        matches!(self, Self::ExternalAcp { .. } | Self::Exo(_))
+    }
+
+    #[must_use]
+    pub fn engine_lane(&self) -> Option<&str> {
+        match self {
+            Self::EngineLane { lane } => Some(lane),
+            _ => None,
+        }
     }
 }
 
@@ -158,6 +172,30 @@ pub fn resolve_subagent_executor(
         // An empty string is not a request for anything. Treating it as one
         // would refuse a spawn over whitespace.
         return ExecutorResolution::Resolved(SubagentExecutor::InheritParent);
+    }
+
+    if requested == "native" {
+        return ExecutorResolution::Resolved(SubagentExecutor::InheritParent);
+    }
+
+    if requested == "auto" {
+        return ExecutorResolution::Refused(
+            "`auto` is not a delegate executor. Name `native`, an installed \
+             external agent, `exo`, or an `engine:<lane>` explicitly."
+                .to_owned(),
+        );
+    }
+
+    if let Some(lane) = requested.strip_prefix("engine:") {
+        let lane = lane.trim();
+        if lane.is_empty() {
+            return ExecutorResolution::Refused(
+                "An engine executor must name its lane as `engine:<lane>`.".to_owned(),
+            );
+        }
+        return ExecutorResolution::Resolved(SubagentExecutor::EngineLane {
+            lane: lane.to_owned(),
+        });
     }
 
     if let Some(agent) = installed.iter().find(|agent| agent.id == requested) {
@@ -267,6 +305,16 @@ pub fn native_loop_disclosure(
 /// nothing on exactly the machine a new person is using.
 #[must_use]
 pub fn resolve_requested_executor(requested: Option<&str>) -> ExecutorResolution {
+    if requested.is_some_and(|requested| requested.trim() == "exo") {
+        return match omega_agent_detect::exo::derive_lane_from_env() {
+            Ok(lane) => ExecutorResolution::Resolved(SubagentExecutor::Exo(lane)),
+            Err(error) => ExecutorResolution::Refused(format!(
+                "Cannot delegate to `exo`: {} ({error}). Omega will not \
+                 substitute a different executor.",
+                error.summary()
+            )),
+        };
+    }
     let known: Vec<InstalledAgent> = omega_agent_detect::CANDIDATES
         .iter()
         .map(|candidate| InstalledAgent::new(candidate.id, candidate.name))
@@ -324,6 +372,35 @@ mod tests {
         assert_eq!(
             resolution.resolved().map(SubagentExecutor::class),
             Some(ExecutorClass::ExternalAcp)
+        );
+    }
+
+    #[test]
+    fn native_is_explicit_and_auto_is_not_an_executor() {
+        assert_eq!(
+            resolve_subagent_executor(Some("native"), &known(), &[codex()]),
+            ExecutorResolution::Resolved(SubagentExecutor::InheritParent)
+        );
+        let auto = resolve_subagent_executor(Some("auto"), &known(), &[codex()]);
+        assert!(
+            auto.refusal()
+                .is_some_and(|reason| reason.contains("not a delegate executor")),
+            "{auto:?}"
+        );
+    }
+
+    #[test]
+    fn an_engine_lane_keeps_its_exact_name() {
+        assert_eq!(
+            resolve_subagent_executor(Some("engine:claude-local"), &known(), &[]),
+            ExecutorResolution::Resolved(SubagentExecutor::EngineLane {
+                lane: "claude-local".to_owned()
+            })
+        );
+        assert!(
+            resolve_subagent_executor(Some("engine: "), &known(), &[])
+                .refusal()
+                .is_some()
         );
     }
 

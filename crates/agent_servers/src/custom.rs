@@ -8,7 +8,7 @@ use gpui::{App, AppContext as _, Entity, Task};
 use language_model::{ApiKey, EnvVar};
 use project::{
     Project,
-    agent_server_store::{AgentId, AllAgentServersSettings},
+    agent_server_store::{AgentId, AgentServerCommand, AllAgentServersSettings},
 };
 use settings::{AgentConfigOptionValue, SettingsStore, update_settings_file};
 use std::{rc::Rc, sync::Arc};
@@ -18,6 +18,62 @@ pub const GEMINI_ID: &str = "gemini";
 pub const CLAUDE_AGENT_ID: &str = "claude-acp";
 pub const CODEX_ID: &str = "codex-acp";
 pub const CURSOR_ID: &str = "cursor";
+
+/// An ACP server whose exact command was resolved by another admitted lane.
+///
+/// Unlike [`CustomAgentServer`], this does not consult settings or the registry.
+/// The caller already resolved both presence and command provenance, as the Exo
+/// lane does from its installed checkout and existing state root. Keeping this
+/// primitive in `agent_servers` lets those lanes reuse the ordinary ACP
+/// connection without creating a second home or registering synthetic settings.
+pub struct CommandAgentServer {
+    agent_id: AgentId,
+    command: AgentServerCommand,
+}
+
+impl CommandAgentServer {
+    pub fn new(agent_id: AgentId, command: AgentServerCommand) -> Self {
+        Self { agent_id, command }
+    }
+}
+
+impl AgentServer for CommandAgentServer {
+    fn agent_id(&self) -> AgentId {
+        self.agent_id.clone()
+    }
+
+    fn logo(&self) -> IconName {
+        IconName::Terminal
+    }
+
+    fn connect(
+        &self,
+        delegate: AgentServerDelegate,
+        project: Entity<Project>,
+        cx: &mut App,
+    ) -> Task<Result<Rc<dyn AgentConnection>>> {
+        let agent_id = self.agent_id.clone();
+        let command = self.command.clone();
+        let store = delegate.store.downgrade();
+        cx.spawn(async move |cx| {
+            let connection = crate::acp::connect(
+                agent_id,
+                project,
+                command,
+                store,
+                None,
+                Default::default(),
+                cx,
+            )
+            .await?;
+            Ok(connection)
+        })
+    }
+
+    fn into_any(self: Rc<Self>) -> Rc<dyn std::any::Any> {
+        self
+    }
+}
 
 /// A generic agent server implementation for custom user-defined agents
 pub struct CustomAgentServer {

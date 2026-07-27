@@ -5627,8 +5627,8 @@ async fn test_subagent_tool_call_end_to_end(cx: &mut TestAppContext) {
     let subagent_tool_input = SpawnAgentToolInput {
         executor: None,
         label: "label".to_string(),
-        message: "subagent task prompt".to_string(),
-        session_id: None,
+        task: "subagent task prompt".to_string(),
+        session: None,
     };
     let subagent_tool_use = LanguageModelToolUse {
         id: "subagent_1".into(),
@@ -5764,8 +5764,8 @@ async fn test_subagent_tool_output_does_not_include_thinking(cx: &mut TestAppCon
     let subagent_tool_input = SpawnAgentToolInput {
         executor: None,
         label: "label".to_string(),
-        message: "subagent task prompt".to_string(),
-        session_id: None,
+        task: "subagent task prompt".to_string(),
+        session: None,
     };
     let subagent_tool_use = LanguageModelToolUse {
         id: "subagent_1".into(),
@@ -5914,8 +5914,8 @@ async fn test_subagent_tool_call_cancellation_during_task_prompt(cx: &mut TestAp
     let subagent_tool_input = SpawnAgentToolInput {
         executor: None,
         label: "label".to_string(),
-        message: "subagent task prompt".to_string(),
-        session_id: None,
+        task: "subagent task prompt".to_string(),
+        session: None,
     };
     let subagent_tool_use = LanguageModelToolUse {
         id: "subagent_1".into(),
@@ -6046,8 +6046,8 @@ async fn test_subagent_tool_resume_session(cx: &mut TestAppContext) {
     let subagent_tool_input = SpawnAgentToolInput {
         executor: None,
         label: "initial task".to_string(),
-        message: "do the first task".to_string(),
-        session_id: None,
+        task: "do the first task".to_string(),
+        session: None,
     };
     let subagent_tool_use = LanguageModelToolUse {
         id: "subagent_1".into(),
@@ -6110,8 +6110,8 @@ async fn test_subagent_tool_resume_session(cx: &mut TestAppContext) {
     let resume_tool_input = SpawnAgentToolInput {
         executor: None,
         label: "follow-up task".to_string(),
-        message: "do the follow-up task".to_string(),
-        session_id: Some(subagent_session_id.clone()),
+        task: "do the follow-up task".to_string(),
+        session: Some(subagent_session_id.clone()),
     };
     let resume_tool_use = LanguageModelToolUse {
         id: "subagent_2".into(),
@@ -6699,8 +6699,8 @@ async fn test_subagent_context_window_warning(cx: &mut TestAppContext) {
     let subagent_tool_input = SpawnAgentToolInput {
         executor: None,
         label: "label".to_string(),
-        message: "subagent task prompt".to_string(),
-        session_id: None,
+        task: "subagent task prompt".to_string(),
+        session: None,
     };
     let subagent_tool_use = LanguageModelToolUse {
         id: "subagent_1".into(),
@@ -6827,8 +6827,8 @@ async fn test_subagent_no_context_window_warning_when_already_at_warning(cx: &mu
     let subagent_tool_input = SpawnAgentToolInput {
         executor: None,
         label: "initial task".to_string(),
-        message: "do the first task".to_string(),
-        session_id: None,
+        task: "do the first task".to_string(),
+        session: None,
     };
     let subagent_tool_use = LanguageModelToolUse {
         id: "subagent_1".into(),
@@ -6896,8 +6896,8 @@ async fn test_subagent_no_context_window_warning_when_already_at_warning(cx: &mu
     let resume_tool_input = SpawnAgentToolInput {
         executor: None,
         label: "follow-up task".to_string(),
-        message: "do the follow-up task".to_string(),
-        session_id: Some(subagent_session_id.clone()),
+        task: "do the follow-up task".to_string(),
+        session: Some(subagent_session_id.clone()),
     };
     let resume_tool_use = LanguageModelToolUse {
         id: "subagent_2".into(),
@@ -7006,8 +7006,8 @@ async fn test_subagent_error_propagation(cx: &mut TestAppContext) {
     let subagent_tool_input = SpawnAgentToolInput {
         executor: None,
         label: "label".to_string(),
-        message: "subagent task prompt".to_string(),
-        session_id: None,
+        task: "subagent task prompt".to_string(),
+        session: None,
     };
     let subagent_tool_use = LanguageModelToolUse {
         id: "subagent_1".into(),

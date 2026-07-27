@@ -118,8 +118,22 @@ Loads instructions from an available [Skill](./skills.md) so the agent can follo
 
 **Example:** When a repository has a skill for release-note writing, the agent can load that skill before drafting release notes so it follows the local format.
 
-### `spawn_agent`
+### `delegate`
 
-Spawns a subagent with its own context window to perform a delegated task. Useful for running parallel investigations, completing self-contained tasks, or performing research where only the outcome matters. Each subagent has access to the same tools as the parent agent.
+Hands a task to a named executor and returns its final message, a typed
+executor-disclosure record, and a `session:<id>` address that `read` can open.
+Use `native` for Omega's own loop, an installed ACP agent such as `codex-acp`
+or `claude-acp`, or `exo` for an installed Exo lane. Engine targets use
+`engine:<lane>` and run only through the supervised `omega-effectd` authority.
+`auto` is not accepted, and an unavailable named executor is never replaced
+with another one.
 
-**Example:** While refactoring the authentication module, spawn a subagent to investigate how session tokens are validated elsewhere in the codebase. The parent agent continues its work and reviews the subagent's findings when it completes — keeping both context windows focused on a single task.
+The input fields are `executor`, `task`, `label`, and optional `session` for a
+follow-up. When no named executor is available, the result says
+`no_executor`; the Omega Agent should complete the work itself instead of
+retrying delegation. Capacity failures distinguish `account_exhausted` from
+`account_rate_limited`.
+
+**Example:** While refactoring authentication, delegate an independent review
+to `codex-acp`, then use the returned session address with `read` if the full
+transcript is needed.

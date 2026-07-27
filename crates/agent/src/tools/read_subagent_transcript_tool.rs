@@ -235,11 +235,10 @@ pub fn subagent_transcript_access(
 
 /// The sentence for a session Omega holds no transcript for.
 ///
-/// This tool reads native threads. `OMEGA-DELTA-0061` added subagents that are
-/// *not* native threads: an external ACP subagent's session belongs to the
-/// agent server's own process, so there is no transcript here to window, and
-/// there is no scope decision to make either — the caller is refused content
-/// that Omega never had rather than content it is not allowed to see.
+/// Live external ACP sessions spawned by this parent are retained by its
+/// `ThreadEnvironment` and are readable. After that parent or process is gone,
+/// however, the external agent owns the transcript and Omega has no durable
+/// native thread to restore.
 ///
 /// **It says both possibilities and asserts neither, and that is deliberate.**
 /// A definite answer — "session X ran on Codex" — would need Omega to remember
@@ -257,11 +256,14 @@ pub fn subagent_transcript_access(
 #[must_use]
 pub fn no_transcript_available(session_id: &acp::SessionId) -> String {
     format!(
-        "No transcript is available for session {session_id}. If this was a \
-         subagent you ran on an external executor such as `codex-acp`, its \
-         transcript belongs to that agent and Omega cannot read it; you have \
-         its final message only. Otherwise, check the ID — session IDs come \
-         from `spawn_agent`."
+        concat!(
+            "No transcript is available for session {session_id}. If this was an ",
+            "external executor such as `codex-acp` from an earlier Omega process, ",
+            "its live session is no longer retained here; you have its ",
+            "final message",
+            " only. Otherwise, check the ID — session IDs come from `delegate`."
+        ),
+        session_id = session_id
     )
 }
 

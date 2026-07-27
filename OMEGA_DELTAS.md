@@ -6465,3 +6465,36 @@ address, so the model spends an address it received rather than inventing one.
 - **Enforced by:** `the_basic_read_tool_spends_only_thread_scoped_addresses` in
   `crates/omega_deltas`, plus file, artifact, transcript, and skill-tool unit
   tests in `agent`.
+
+### OMEGA-DELTA-0137 — Basic delegation names its executor and discloses the chain
+
+The basic profile's model-facing `delegate` name continues to use the existing
+subagent sessions, depth cap, transcript scope, cancellation, and panel
+registry. Its compact input is `executor`, `task`, `label`, and optional
+`session`; the stored canonical tool remains compatible with the former
+`message` and `session_id` fields.
+
+Executor choice is explicit. `native`, installed ACP agent IDs, `exo`, and
+`engine:<lane>` are admitted spellings; `auto` and Khala are not. An unavailable
+name returns `no_executor`, and an engine lane that cannot be reached through
+the framed `omega-effectd` authority returns `engine_unavailable`. Neither path
+runs a different executor. Provider capacity failures are classified as
+`account_exhausted` or `account_rate_limited` instead of being flattened into a
+generic execution error.
+
+Successful results give the final message, the typed disclosure record reported
+by the live handle, and a spendable `session:<id>` address. Exo is resolved from
+the installed checkout and existing state root, then connected through the
+ordinary ACP transport with no synthetic settings, copied credentials, or
+second home. Before the turn, Exo's own agent and model records produce the
+hosted identity. The result carries the typed chain Omega Agent → Exo → hosted
+runtime/model, so a vendor-backed Exo answer cannot be attributed only to Exo.
+The spawning parent retains each live external handle for follow-up turns and
+projects its ACP entries through the bounded transcript reader. That map belongs
+to the parent's environment and dies with it, so quoting another thread's
+session ID cannot widen access and no process-global durable session store is
+created.
+
+- **Enforced by:** `delegate_names_never_substitutes_and_discloses_what_ran` in
+  `crates/omega_deltas`, resolver and result unit tests in `agent`, and
+  `CommandAgentServer` tests in `agent_servers`.
