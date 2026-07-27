@@ -141,6 +141,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0150",
     "OMEGA-DELTA-0151",
     "OMEGA-DELTA-0152",
+    "OMEGA-DELTA-0153",
 ];
 
 pub const GOOGLE_PROVIDER_PATH: &str = "crates/language_models/src/provider/google.rs";
@@ -19278,6 +19279,56 @@ mod tests {
                 "OMEGA-DELTA-0147: the shared Zed titlebar in {} lost \
                  `{required}`.",
                 repository_path(platform_path).display()
+            );
+        }
+    }
+
+    /// OMEGA-DELTA-0153. OpenAgents authentication uses the built-in identity
+    /// directly and has no browser or loopback callback surface.
+    #[test]
+    fn openagents_authentication_never_opens_a_browser() {
+        for path in [
+            "crates/omega_effectd/src/openagents_session.rs",
+            "crates/omega_effectd/src/openagents_binding.rs",
+        ] {
+            let source = without_comments(&read_repository_file(path));
+            for forbidden in [
+                "open_url",
+                "TcpListener",
+                "TcpStream",
+                "/auth/callback",
+                "code_verifier",
+                "OPENAGENTS_AUTHORIZE_URL",
+            ] {
+                assert!(
+                    !source.contains(forbidden),
+                    "OMEGA-DELTA-0153: {} restored browser auth surface \
+                     `{forbidden}`.",
+                    repository_path(path).display()
+                );
+            }
+            assert!(
+                source.contains("mint_openagents_nostr_session"),
+                "OMEGA-DELTA-0153: {} no longer uses the shared background \
+                 identity proof.",
+                repository_path(path).display()
+            );
+        }
+
+        let proof = without_comments(&read_repository_file(
+            "crates/omega_effectd/src/openagents_nostr_auth.rs",
+        ));
+        for required in [
+            "IdentityService::system(*app_identity::CHANNEL)",
+            "SigningPurpose::NostrEvent",
+            "kind: NIP98_KIND",
+            "\"method\".to_string(), \"POST\".to_string()",
+            "\"payload\".to_string(), empty_payload_hash",
+            "format!(\"Nostr {authorization}\")",
+        ] {
+            assert!(
+                without_whitespace(&proof).contains(&without_whitespace(required)),
+                "OMEGA-DELTA-0153: the background proof lost `{required}`."
             );
         }
     }

@@ -20,24 +20,30 @@ owner-local objective. Durable mutation stays in supervised omega-effectd.
 ## Native OpenAgents session
 
 Omega's Full Auto panel exposes an **OpenAgents Sync** account row with
-Connect, Reconnect, and Disconnect actions. Connect uses the system browser,
-the public `openagents-desktop` client, GitHub authorization code, PKCE S256,
-and only an RFC 8252 loopback redirect at
-`http://127.0.0.1:{ephemeral-port}/auth/callback`.
+Connect, Reconnect, and Disconnect actions. Connect stays inside Omega. It
+signs a fresh NIP-98 HTTP-auth event with the built-in Omega Nostr identity and
+exchanges that proof directly with the OpenAgents session endpoint. The proof
+is bound to the exact HTTPS URL, POST method, empty request payload, configured
+owner public key, and a 60-second freshness window. It is single-use.
 
-Access and refresh tokens remain in Omega's release-namespaced sovereign
-system-keychain provider. They are never written to settings, the Full Auto
-registry, host correlation journal, logs, UI state, transcripts, or child
+The server returns a short-lived opaque access token for the already configured
+OpenAgents owner account. That token remains in Omega's release-namespaced
+sovereign system-keychain provider. It is never written to settings, the Full
+Auto registry, host correlation journal, logs, UI state, transcripts, or child
 process environment. Every `resolve_sync_session` reverse-host request
 re-verifies the credential through the existing OpenAgents native auth-session
-API and writes any server rotation back to Keychain before returning the one
-runtime-only `{ baseUrl, accessToken }` response to omega-effectd. Missing,
-denied, malformed, or transiently unverifiable credentials resolve as
-`{ available: false }`.
+API before returning the one runtime-only `{ baseUrl, accessToken }` response
+to omega-effectd. Missing, denied, malformed, expired, or transiently
+unverifiable credentials resolve as `{ available: false }`.
 
-Disconnect requires server proof that both access and refresh credentials were
-revoked before Omega deletes the local Keychain record. An incomplete or
-unavailable revoke retains local custody and presents a typed retryable state.
+Legacy OAuth credentials remain readable during migration and can still rotate
+through their refresh token. New background sessions carry no refresh token.
+Disconnect requires server proof that every credential present in the stored
+session was revoked before Omega deletes the local Keychain record.
+
+NIP-42 remains the relay-authentication protocol for Nostr WebSocket relays. It
+does not mint an OpenAgents HTTP session; NIP-98 provides that separate,
+request-bound proof.
 
 ## Verification
 

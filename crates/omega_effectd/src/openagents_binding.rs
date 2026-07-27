@@ -12,33 +12,24 @@
 //! keychain custody and never enters a log, crash record, or UI projection.
 
 use std::{
-    fmt,
-    fs,
-    io::{ErrorKind, Read, Write},
-    net::{Ipv4Addr, TcpListener, TcpStream},
+    fmt, fs,
+    io::ErrorKind,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Context as _, Result, anyhow};
-use base64::Engine as _;
 use credentials_provider::CredentialsProvider;
 use gpui::{App, AsyncApp, Global};
 use http_client::{AsyncBody, HttpClient, Method, Request, StatusCode};
-use rand::RngCore as _;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest as _, Sha256};
 use smol::io::AsyncReadExt as _;
-use url::{Url, form_urlencoded};
 
 /// Distinct Omega OpenAuth client identity. Never reuse the Electron client.
 pub const OPENAGENTS_OMEGA_CLIENT_ID: &str = "openagents-omega";
-pub const OPENAGENTS_AUTHORIZE_URL: &str = "https://auth.openagents.com/authorize";
-pub const OPENAGENTS_TOKEN_URL: &str = "https://auth.openagents.com/token";
 pub const OPENAGENTS_AUTH_SESSION_URL: &str = "https://openagents.com/api/mobile/auth/session";
 pub const OPENAGENTS_SARAH_OWNER_URL: &str = "https://openagents.com/api/mobile/sarah";
-pub const OPENAGENTS_CALLBACK_PATH: &str = "/auth/callback";
 /// Keychain url for binding credentials. Omega-namespaced by the provider.
 pub const OPENAGENTS_BINDING_CREDENTIAL_KEY: &str = "omega://openagents/account-binding/v1";
 /// On-disk public relation schema (no secrets).
@@ -50,7 +41,6 @@ pub const BINDING_RECORD_SUBDIR: &str = "openagents";
 pub const OWNER_SCOPE_REFUSED_MESSAGE: &str = "The Sarah workroom is owner-scoped today. This OpenAgents account is not admitted for the MVP owner gate. This is not a network fault.";
 
 const OPENAGENTS_REFRESH_HEADER: &str = "x-openagents-refresh-token";
-const CALLBACK_TIMEOUT: Duration = Duration::from_secs(120);
 const MAX_HTTP_BODY_BYTES: u64 = 64 * 1024;
 const MAX_ACCESS_TOKEN_BYTES: usize = 16 * 1024;
 
@@ -191,7 +181,8 @@ struct BindingCredential {
     schema_version: u8,
     openagents_account_id: String,
     access_token: String,
-    refresh_token: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    refresh_token: Option<String>,
 }
 
 impl fmt::Debug for BindingCredential {
@@ -203,13 +194,6 @@ impl fmt::Debug for BindingCredential {
             .field("refresh_token", &"<redacted>")
             .finish()
     }
-}
-
-#[derive(Deserialize)]
-struct TokenResponse {
-    access_token: String,
-    refresh_token: String,
-    expires_in: Option<f64>,
 }
 
 #[derive(Deserialize)]
@@ -231,12 +215,6 @@ struct RotatedTokens {
     access: String,
     refresh: String,
     expires_in: f64,
-}
-
-enum CallbackResult {
-    Code(String),
-    Cancelled,
-    Unavailable,
 }
 
 /// Result of the owner-scope gate check after a verified OpenAgents account.
@@ -350,12 +328,8 @@ impl OpenAgentsBinding {
         Some(record.openagents_account_id)
     }
 
-    /// Run the one-time OpenAuth PKCE loopback flow and record the relation.
-    pub async fn bind(
-        &self,
-        omega_public_key_hex: &str,
-        cx: &mut AsyncApp,
-    ) -> BindingProjection {
+    /// Prove the built-in Omega identity in the background and record the relation.
+    pub async fn bind(&self, omega_public_key_hex: &str, cx: &mut AsyncApp) -> BindingProjection {
         let pubkey = omega_public_key_hex.trim();
         if pubkey.is_empty() {
             let projection = BindingProjection::unbound();
@@ -392,47 +366,14 @@ impl OpenAgentsBinding {
         omega_public_key_hex: &str,
         cx: &mut AsyncApp,
     ) -> Result<BindingProjection> {
-        let state = random_base64_url();
-        let verifier = random_base64_url();
-        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
-            .context("OpenAgents binding callback listener unavailable")?;
-        listener.set_nonblocking(true)?;
-        let port = listener.local_addr()?.port();
-        if port < 1024 {
-            return Err(anyhow!("OpenAgents binding callback listener unavailable"));
-        }
-        let redirect_uri = format!("http://127.0.0.1:{port}{OPENAGENTS_CALLBACK_PATH}");
-        let authorize_url = build_authorize_url(&redirect_uri, &state, &verifier)?;
-        cx.update(|cx| cx.open_url(authorize_url.as_str()));
-        let background_executor = cx.background_executor().clone();
-        let code =
-            match wait_for_callback(&listener, &state, CALLBACK_TIMEOUT, &background_executor)
-                .await?
-            {
-                CallbackResult::Code(code) => code,
-                CallbackResult::Cancelled => {
-                    return Ok(self.load_projection());
-                }
-                CallbackResult::Unavailable => {
-                    return Err(anyhow!("OpenAgents binding authorization timed out"));
-                }
-            };
-        let tokens = self.exchange_code(&code, &verifier, &redirect_uri).await?;
+        let session =
+            super::openagents_nostr_auth::mint_openagents_nostr_session(&self.http_client).await?;
         let mut credential = BindingCredential {
             schema_version: 1,
-            openagents_account_id: String::new(),
-            access_token: tokens.access_token.trim().to_string(),
-            refresh_token: tokens.refresh_token.trim().to_string(),
+            openagents_account_id: session.user.user_id,
+            access_token: session.access_token.trim().to_string(),
+            refresh_token: None,
         };
-        if credential.access_token.is_empty()
-            || credential.refresh_token.is_empty()
-            || credential.access_token.len() > MAX_ACCESS_TOKEN_BYTES
-            || tokens
-                .expires_in
-                .is_some_and(|expires| !expires.is_finite() || expires <= 0.0)
-        {
-            return Err(anyhow!("OpenAgents binding token exchange was invalid"));
-        }
 
         let verified = self
             .verify_credential(&credential)
@@ -487,31 +428,6 @@ impl OpenAgentsBinding {
         Ok(projection)
     }
 
-    async fn exchange_code(
-        &self,
-        code: &str,
-        verifier: &str,
-        redirect_uri: &str,
-    ) -> Result<TokenResponse> {
-        let body = form_urlencoded::Serializer::new(String::new())
-            .append_pair("client_id", OPENAGENTS_OMEGA_CLIENT_ID)
-            .append_pair("code", code)
-            .append_pair("code_verifier", verifier)
-            .append_pair("grant_type", "authorization_code")
-            .append_pair("redirect_uri", redirect_uri)
-            .finish();
-        let request = Request::builder()
-            .method(Method::POST)
-            .uri(OPENAGENTS_TOKEN_URL)
-            .header("content-type", "application/x-www-form-urlencoded")
-            .body(AsyncBody::from(body))?;
-        let (status, body) = send_json(&self.http_client, request).await?;
-        if !status.is_success() {
-            return Err(anyhow!("OpenAgents binding token exchange failed ({status})"));
-        }
-        serde_json::from_slice(&body).context("OpenAgents binding token response was invalid")
-    }
-
     async fn verify_credential(&self, credential: &BindingCredential) -> Result<BindingCredential> {
         let request = authenticated_request(Method::GET, OPENAGENTS_AUTH_SESSION_URL, credential)?;
         let (status, body) = send_json(&self.http_client, request).await?;
@@ -543,7 +459,7 @@ impl OpenAgentsBinding {
                 return Err(anyhow!("OpenAgents binding token rotation was invalid"));
             }
             verified.access_token = tokens.access.trim().to_string();
-            verified.refresh_token = tokens.refresh.trim().to_string();
+            verified.refresh_token = Some(tokens.refresh.trim().to_string());
         }
         Ok(verified)
     }
@@ -587,8 +503,7 @@ impl OpenAgentsBinding {
         record.validate()?;
         let path = self.record_path();
         if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)
-                .with_context(|| format!("create {}", parent.display()))?;
+            fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
         }
         let bytes = serde_json::to_vec_pretty(record)?;
         if bytes_look_secret_shaped(&bytes) {
@@ -621,14 +536,13 @@ impl OpenAgentsBinding {
         }
     }
 
-    async fn save_credential(
-        &self,
-        credential: &BindingCredential,
-        cx: &AsyncApp,
-    ) -> Result<()> {
+    async fn save_credential(&self, credential: &BindingCredential, cx: &AsyncApp) -> Result<()> {
         if credential.openagents_account_id.trim().is_empty()
             || credential.access_token.trim().is_empty()
-            || credential.refresh_token.trim().is_empty()
+            || credential
+                .refresh_token
+                .as_ref()
+                .is_some_and(|token| token.trim().is_empty())
         {
             return Err(anyhow!("binding credential incomplete"));
         }
@@ -657,12 +571,14 @@ pub fn apply_binding_transition(
 ) -> (BindingState, Option<&'static str>) {
     match (current, event) {
         (_, BindingEvent::Clear) => (BindingState::Unbound, None),
-        (BindingState::Unbound | BindingState::Bound | BindingState::Refused, BindingEvent::BindAdmitted) => {
-            (BindingState::Bound, None)
-        }
-        (BindingState::Unbound | BindingState::Bound | BindingState::Refused, BindingEvent::BindRefused) => {
-            (BindingState::Refused, Some(OWNER_SCOPE_REFUSED_MESSAGE))
-        }
+        (
+            BindingState::Unbound | BindingState::Bound | BindingState::Refused,
+            BindingEvent::BindAdmitted,
+        ) => (BindingState::Bound, None),
+        (
+            BindingState::Unbound | BindingState::Bound | BindingState::Refused,
+            BindingEvent::BindRefused,
+        ) => (BindingState::Refused, Some(OWNER_SCOPE_REFUSED_MESSAGE)),
         (_, BindingEvent::BindCancelled | BindingEvent::BindUnavailable) => (current, None),
     }
 }
@@ -681,15 +597,14 @@ fn authenticated_request(
     uri: &str,
     credential: &BindingCredential,
 ) -> Result<http_client::Request<AsyncBody>> {
-    Ok(Request::builder()
-        .method(method)
-        .uri(uri)
-        .header(
-            "authorization",
-            format!("Bearer {}", credential.access_token),
-        )
-        .header(OPENAGENTS_REFRESH_HEADER, &credential.refresh_token)
-        .body(AsyncBody::empty())?)
+    let mut builder = Request::builder().method(method).uri(uri).header(
+        "authorization",
+        format!("Bearer {}", credential.access_token),
+    );
+    if let Some(refresh_token) = credential.refresh_token.as_deref() {
+        builder = builder.header(OPENAGENTS_REFRESH_HEADER, refresh_token);
+    }
+    Ok(builder.body(AsyncBody::empty())?)
 }
 
 async fn send_json(
@@ -705,111 +620,6 @@ async fn send_json(
         .read_to_end(&mut body)
         .await?;
     Ok((status, body))
-}
-
-fn random_base64_url() -> String {
-    let mut bytes = [0_u8; 32];
-    rand::rng().fill_bytes(&mut bytes);
-    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
-}
-
-fn pkce_challenge(verifier: &str) -> String {
-    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()))
-}
-
-fn build_authorize_url(redirect_uri: &str, state: &str, verifier: &str) -> Result<Url> {
-    let mut authorize = Url::parse(OPENAGENTS_AUTHORIZE_URL)?;
-    authorize
-        .query_pairs_mut()
-        .append_pair("client_id", OPENAGENTS_OMEGA_CLIENT_ID)
-        .append_pair("code_challenge", &pkce_challenge(verifier))
-        .append_pair("code_challenge_method", "S256")
-        .append_pair("provider", "github")
-        .append_pair("redirect_uri", redirect_uri)
-        .append_pair("response_type", "code")
-        .append_pair("state", state);
-    Ok(authorize)
-}
-
-async fn wait_for_callback(
-    listener: &TcpListener,
-    expected_state: &str,
-    timeout: Duration,
-    background_executor: &gpui::BackgroundExecutor,
-) -> Result<CallbackResult> {
-    let deadline = Instant::now() + timeout;
-    loop {
-        match listener.accept() {
-            Ok((mut stream, _)) => {
-                if let Some(result) = read_callback(&mut stream, expected_state)? {
-                    return Ok(result);
-                }
-            }
-            Err(error) if error.kind() == ErrorKind::WouldBlock => {}
-            Err(error) => return Err(error.into()),
-        }
-        if Instant::now() >= deadline {
-            return Ok(CallbackResult::Unavailable);
-        }
-        background_executor.timer(Duration::from_millis(50)).await;
-    }
-}
-
-fn read_callback(stream: &mut TcpStream, expected_state: &str) -> Result<Option<CallbackResult>> {
-    stream.set_read_timeout(Some(Duration::from_secs(2)))?;
-    let mut buffer = [0_u8; 8192];
-    let size = stream.read(&mut buffer)?;
-    let request = std::str::from_utf8(&buffer[..size])?;
-    let Some(request_line) = request.lines().next() else {
-        write_callback_response(stream, 400)?;
-        return Ok(None);
-    };
-    let mut parts = request_line.split_whitespace();
-    if parts.next().unwrap_or_default() != "GET" {
-        write_callback_response(stream, 400)?;
-        return Ok(None);
-    }
-    let target = parts.next().unwrap_or_default();
-    let url = Url::parse(&format!("http://127.0.0.1{target}"))?;
-    if url.path() != OPENAGENTS_CALLBACK_PATH {
-        write_callback_response(stream, 404)?;
-        return Ok(None);
-    }
-    let parameter = |name: &str| {
-        url.query_pairs()
-            .find_map(|(key, value)| (key == name).then(|| value.into_owned()))
-    };
-    if parameter("state").as_deref() != Some(expected_state) {
-        write_callback_response(stream, 400)?;
-        return Ok(None);
-    }
-    if parameter("error").is_some_and(|error| !error.trim().is_empty()) {
-        write_callback_response(stream, 200)?;
-        return Ok(Some(CallbackResult::Cancelled));
-    }
-    let code = parameter("code").unwrap_or_default();
-    if code.trim().is_empty() {
-        write_callback_response(stream, 400)?;
-        return Ok(None);
-    }
-    write_callback_response(stream, 200)?;
-    Ok(Some(CallbackResult::Code(code)))
-}
-
-fn write_callback_response(stream: &mut TcpStream, status: u16) -> Result<()> {
-    let reason = match status {
-        200 => "OK",
-        404 => "Not Found",
-        _ => "Bad Request",
-    };
-    let body = "<!doctype html><meta charset=utf-8><meta name=referrer content=no-referrer><title>Omega</title><p>You can return to Omega.</p>";
-    write!(
-        stream,
-        "HTTP/1.1 {status} {reason}\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nCache-Control: no-store\r\nContent-Security-Policy: default-src 'none'\r\nReferrer-Policy: no-referrer\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n{body}",
-        body.len()
-    )?;
-    stream.flush()?;
-    Ok(())
 }
 
 fn now_iso8601() -> String {
@@ -947,42 +757,9 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
-    fn authorize_url_uses_omega_client_not_desktop() {
-        let url = build_authorize_url(
-            "http://127.0.0.1:49152/auth/callback",
-            "state-fixture",
-            "verifier-fixture-with-enough-entropy-for-the-test",
-        )
-        .expect("authorize URL");
-        assert_eq!(
-            url.as_str().split('?').next(),
-            Some(OPENAGENTS_AUTHORIZE_URL)
-        );
-        let values = url
-            .query_pairs()
-            .collect::<std::collections::HashMap<_, _>>();
-        assert_eq!(
-            values.get("client_id").map(|value| value.as_ref()),
-            Some("openagents-omega")
-        );
-        assert_ne!(
-            values.get("client_id").map(|value| value.as_ref()),
-            Some("openagents-desktop")
-        );
-        assert_eq!(
-            values.get("provider").map(|value| value.as_ref()),
-            Some("github")
-        );
-        assert_eq!(
-            values
-                .get("code_challenge_method")
-                .map(|value| value.as_ref()),
-            Some("S256")
-        );
-        assert_eq!(
-            values.get("redirect_uri").map(|value| value.as_ref()),
-            Some("http://127.0.0.1:49152/auth/callback")
-        );
+    fn binding_record_retains_the_omega_client_identity() {
+        assert_eq!(OPENAGENTS_OMEGA_CLIENT_ID, "openagents-omega");
+        assert_ne!(OPENAGENTS_OMEGA_CLIENT_ID, "openagents-desktop");
     }
 
     #[test]
@@ -1122,7 +899,7 @@ mod tests {
             schema_version: 1,
             openagents_account_id: "owner.fixture".to_string(),
             access_token: "secret-access-token-value".to_string(),
-            refresh_token: "secret-refresh-token-value".to_string(),
+            refresh_token: Some("secret-refresh-token-value".to_string()),
         };
         let debug = format!("{credential:?}");
         assert!(debug.contains("<redacted>"));
@@ -1144,30 +921,6 @@ mod tests {
         assert!(!json.contains("token"));
         assert!(!json.contains("secret"));
         assert!(json.contains("\"state\":\"bound\""));
-    }
-
-    #[test]
-    fn callback_requires_exact_path_state_and_hides_code_from_response() {
-        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("listener");
-        let address = listener.local_addr().expect("address");
-        let client = std::thread::spawn(move || {
-            let mut stream = TcpStream::connect(address).expect("connect");
-            write!(
-                stream,
-                "GET /auth/callback?state=exact&code=private-code HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n"
-            )
-            .expect("write");
-            let mut response = String::new();
-            stream.read_to_string(&mut response).expect("response");
-            response
-        });
-        let (mut stream, _) = listener.accept().expect("accept");
-        let result = read_callback(&mut stream, "exact").expect("callback");
-        assert!(matches!(result, Some(CallbackResult::Code(code)) if code == "private-code"));
-        drop(stream);
-        let response = client.join().expect("client");
-        assert!(!response.contains("private-code"));
-        assert!(response.contains("return to Omega"));
     }
 
     #[test]

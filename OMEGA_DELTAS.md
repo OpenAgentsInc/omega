@@ -6754,3 +6754,21 @@ resolution therefore cannot silently become three different inventories.
 - **Enforced by:** `omega_names_itself_and_the_executors_it_can_delegate_to`
   in `crates/omega_deltas`, plus basic system-prompt rendering tests in
   `agent`.
+
+### OMEGA-DELTA-0153 — OpenAgents authentication stays in the background
+
+Connecting Omega to its owner-scoped OpenAgents services no longer opens a web
+browser or starts a loopback callback server. Omega signs a fresh NIP-98 event
+with its built-in Nostr identity and sends the proof directly to the exact
+OpenAgents session endpoint. The proof binds the HTTPS URL, POST method, empty
+payload, and current timestamp; the server admits only its configured owner
+public key and consumes each proof once.
+
+The resulting access token is short-lived and remains in Omega's isolated
+credential store. Existing OAuth credentials remain readable for migration,
+but new sessions do not carry a refresh token. NIP-42 remains in use where it
+belongs: authenticating Omega to Nostr relays. It is not treated as an HTTP
+session protocol.
+
+- **Enforced by:** `openagents_authentication_never_opens_a_browser` in
+  `crates/omega_deltas`, plus the NIP-98 signer and server proof-exchange tests.

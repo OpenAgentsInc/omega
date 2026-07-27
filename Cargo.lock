@@ -12021,6 +12021,7 @@ name = "omega_effectd"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "app_identity",
  "async-io",
  "async-tungstenite",
  "base64 0.22.1",

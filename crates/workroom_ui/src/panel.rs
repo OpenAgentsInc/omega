@@ -265,7 +265,7 @@ impl SarahWorkroomPanel {
             }
         };
         self.binding_busy = true;
-        self.status = "Binding OpenAgents account in your browser…".into();
+        self.status = "Binding OpenAgents account securely…".into();
         cx.notify();
         cx.spawn(async move |this, cx| {
             let projection = binding.bind(&omega_pubkey, cx).await;

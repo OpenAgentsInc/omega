@@ -7,6 +7,7 @@ mod issue31_nostr;
 mod issue31_provider_handoff;
 mod nostr_websocket_relay;
 mod openagents_binding;
+mod openagents_nostr_auth;
 mod openagents_session;
 mod protocol;
 mod sarah_conversation;
