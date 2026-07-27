@@ -55,11 +55,15 @@
 //! machine the person believes is running Codex, and the whole point of
 //! omega#77's disclosure is that this cannot happen quietly.
 //!
-//! `Ok(None)` has exactly one meaning, and this module returns it in exactly
-//! one place: **nothing drivable is installed**. That is the ordinary case for
-//! a new person, and it is the case omega#106 requires to keep working — the
-//! router registers no external executor, the native loop runs, and the
-//! composer shows the existing visible fallback reason.
+//! `Ok(None)` means **no external executor is to be attached**, and this module
+//! returns it from exactly one place. `OMEGA-DELTA-0095` admitted one way to
+//! reach it — nothing drivable is installed, the ordinary case for a new person
+//! and the case omega#106 requires to keep working — and `OMEGA-DELTA-0114`
+//! admits a second, a person choosing Omega's own loop. The single return is
+//! kept, because the rule being counted is not "one reason" but **no failure
+//! reaches it**. Either way the router registers no external executor, the
+//! native loop runs, and the composer shows the existing visible fallback
+//! reason.
 //!
 //! # Why the failure was kept, when degrading looked kinder
 //!
@@ -100,19 +104,63 @@
 //!
 //! What was wrong was the sentence, not the rule; see [`await_registration`].
 //!
-//! The cost is stated rather than argued away: `Agent::NativeAgent` *is* the
-//! router, so while a chosen agent stays unreachable there is no picker entry
-//! that reaches the native loop, and a persistently unreachable adapter leaves
-//! the panel with no first-party path. The fix for that is an explicit "run on
-//! Omega's own loop" action on the error — a choice the reader makes, not a
-//! substitution made for them — and it belongs to the panel, not here.
+//! # The first-party path back, and why it is a button
+//!
+//! `OMEGA-DELTA-0114`, omega#106. The cost above was stated rather than argued
+//! away, and then paid: `Agent::NativeAgent` *is* the router, so while a chosen
+//! agent stays unreachable there is no picker entry that reaches the native
+//! loop, and a persistently unreachable adapter left the panel with no
+//! first-party path at all.
+//!
+//! The fix is [`run_on_omegas_own_loop`], and the whole of its design is that a
+//! **person** calls it. A degrade decided here would be the substitution this
+//! module refuses; the same destination reached by someone reading a sentence
+//! and pressing a button is a choice, and a thread that runs on the native loop
+//! because its reader asked for the native loop discloses exactly what happened.
+//! That is the distinction the hard failure was kept to protect, so the escape
+//! hatch must not quietly become the policy: the choice is per-process, it is
+//! offered only once an attach has actually failed, and a restart returns to
+//! the adapter.
+//!
+//! # A wait a person can tell from a hang
+//!
+//! `OMEGA-DELTA-0114`. What the attach spends its time on is not the `codex`
+//! binary. It is `npm exec --yes` resolving an npx package — plus Zed's Node
+//! runtime, if this machine has never fetched one — and that had no overall
+//! bound anywhere: not in the resolve, not in the ACP handshake (which races
+//! only against the child process exiting), only whatever the underlying HTTP
+//! connect timeout happened to be. It also said nothing.
+//! `LocalRegistryNpxAgent` does not implement `set_loading_status_tx`, so the
+//! whole download rendered as the generic pulsing `Loading…` the panel shows
+//! for any unfinished connect.
+//!
+//! A silent unbounded wait is indistinguishable from a hang, and this one sits
+//! between a new person and their first composer. Both halves are fixed here
+//! rather than in the npx agent, because what the reader needs named is not
+//! "an npm package" but *which adapter, for which agent, and how long so far*
+//! — and this is the only place that knows all three:
+//!
+//! - **Bounded** by [`ADAPTER_START_TIMEOUT`], so a wedged resolve becomes a
+//!   sentence instead of a spinner that never ends.
+//! - **Named**, through the loading-status channel the router takes off its
+//!   delegate ([`agent_servers::AgentServerDelegate::take_loading_status`]).
+//! - **Ticking**, once a second. The elapsed count is the part that does the
+//!   work: a label that changes is a wait, a label that does not is a hang, and
+//!   a person can tell those apart without knowing what npx is.
+//!
+//! It recurs, too — `npm exec --yes` runs on every connect, not once — so this
+//! is not a first-launch-only sentence and is not written as one.
 
+use std::path::PathBuf;
 use std::rc::Rc;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use acp_thread::AgentConnection;
 use agent_servers::{AgentServer as _, AgentServerDelegate, CustomAgentServer};
 use anyhow::{Context as _, Result, anyhow};
+use futures::FutureExt as _;
 use gpui::{AsyncApp, Entity, WeakEntity};
 use omega_agent_detect::DetectedAgent;
 use project::{AgentId, Project, agent_server_store::AgentServerStore};
@@ -148,6 +196,133 @@ pub const REGISTRATION_ATTEMPTS: usize = 50;
 /// The interval between the attempts [`REGISTRATION_ATTEMPTS`] bounds.
 pub const REGISTRATION_INTERVAL: Duration = Duration::from_millis(100);
 
+/// How long the chosen agent's ACP adapter is given to start.
+///
+/// `OMEGA-DELTA-0114`. This covers `npm exec --yes` resolving the adapter
+/// package, Zed's Node runtime being fetched if this machine has none, the
+/// process launching, and the ACP `initialize` handshake completing. None of
+/// those had any overall bound: the handshake races only against the child
+/// exiting, so an adapter that starts and then never answers held the panel
+/// open with a pulsing label for as long as the machine stayed on.
+///
+/// Three minutes is deliberately generous, and the generosity is the point.
+/// A cold resolve is tens of megabytes over whatever link the reader has, and
+/// a bound tight enough to catch a hang quickly would cut a working first
+/// launch on a slow connection — turning "this is slow" into "this is broken",
+/// which is the worse of the two errors. What makes the wait tolerable is
+/// [`starting_adapter`]'s ticking elapsed count, not a short deadline. The
+/// bound exists so that a resolve which is *not* progressing ends in a sentence
+/// rather than in a spinner nobody can outlast.
+pub const ADAPTER_START_TIMEOUT: Duration = Duration::from_secs(180);
+
+/// How often the adapter's start is re-announced while it is still running.
+///
+/// One second, because the number in the label is the only evidence a reader
+/// has that anything is still happening. Slower and a live wait starts to look
+/// frozen; faster and the label flickers without saying anything new.
+pub const PROGRESS_TICK: Duration = Duration::from_secs(1);
+
+/// The ACP adapter a chosen agent could not be run through, if one failed.
+///
+/// Carried rather than discarded so a surface can offer the reader a way
+/// forward that names the thing that failed. The agent's own binary is here
+/// too, and is here to be *exonerated*: a surface that mentions it must say it
+/// is fine, never imply it is the cause.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UnreachableAdapter {
+    /// The ACP adapter id, e.g. `codex-acp`. This is the npm package Omega
+    /// resolves, and it is what actually failed.
+    pub adapter_id: &'static str,
+    /// The agent that adapter would have driven, e.g. `Codex`.
+    pub agent_name: &'static str,
+    /// The binary detection found on `PATH`. Present and working.
+    pub binary: PathBuf,
+}
+
+/// The last adapter failure, or `None` if the last attach reached its agent.
+///
+/// Process-global because the reader it is for is looking at a panel that has
+/// no other way to learn why its connect failed: the error crosses that seam as
+/// a `LoadError::Other(String)`, and re-deriving the cause by reading that
+/// string back would be a parser over prose.
+static UNREACHABLE_ADAPTER: Mutex<Option<UnreachableAdapter>> = Mutex::new(None);
+
+/// A person's standing choice to run on Omega's own loop.
+///
+/// See the module docs. Per-process and not persisted: the adapter is the
+/// intended executor, this is a way past a failure, and a restart is the
+/// cheapest honest expiry for a decision made about a network that was down a
+/// minute ago.
+static OMEGAS_OWN_LOOP_CHOSEN: AtomicBool = AtomicBool::new(false);
+
+/// The adapter the last attach could not reach, if it could not reach one.
+#[must_use]
+pub fn unreachable_adapter() -> Option<UnreachableAdapter> {
+    UNREACHABLE_ADAPTER
+        .lock()
+        .expect("the unreachable-adapter record is never held across a panic")
+        .clone()
+}
+
+/// Record that this attach could not reach `agent`'s adapter.
+fn record_unreachable(agent: &DetectedAgent) {
+    *UNREACHABLE_ADAPTER
+        .lock()
+        .expect("the unreachable-adapter record is never held across a panic") =
+        Some(UnreachableAdapter {
+            adapter_id: agent.id,
+            agent_name: agent.name,
+            binary: agent.binary.clone(),
+        });
+}
+
+/// Forget any recorded failure, because an attach reached its agent.
+fn clear_unreachable() {
+    *UNREACHABLE_ADAPTER
+        .lock()
+        .expect("the unreachable-adapter record is never held across a panic") = None;
+}
+
+/// Run subsequent threads on Omega's own loop instead of the detected agent.
+///
+/// `OMEGA-DELTA-0114`. **Only a person may call this.** It is the one thing in
+/// this module that reaches the native loop with a drivable agent installed,
+/// and everything above about silent fallbacks applies to it in full: called
+/// from a timeout, a retry limit, or any other piece of code deciding on the
+/// reader's behalf, it becomes precisely the substitution the hard failure
+/// exists to refuse. Called from a button the reader pressed after reading what
+/// failed, it is a choice, and the disclosure line then reports the native loop
+/// because the native loop is what they asked for.
+pub fn run_on_omegas_own_loop() {
+    log::info!(
+        "OMEGA-DELTA-0114: a person chose Omega's own loop over the ACP \
+         adapter for the rest of this session"
+    );
+    OMEGAS_OWN_LOOP_CHOSEN.store(true, Ordering::SeqCst);
+}
+
+/// Whether a person has chosen Omega's own loop for this session.
+#[must_use]
+pub fn omegas_own_loop_chosen() -> bool {
+    OMEGAS_OWN_LOOP_CHOSEN.load(Ordering::SeqCst)
+}
+
+/// What the panel says while the chosen agent's ACP adapter is starting.
+///
+/// The elapsed seconds are not decoration. The failure this replaces was a
+/// pulsing `Loading…` over an unbounded npm resolve, and a reader's whole
+/// problem there was that a slow install and a wedged process render
+/// identically. A number that goes up is the difference.
+///
+/// Kept short on purpose: this draws as a single centered `Label` in a panel
+/// that is often a narrow sidebar, so a sentence explaining npx would be a
+/// sentence nobody can read. The explanation belongs in the failure callout,
+/// which wraps.
+#[must_use]
+pub fn starting_adapter(agent: &DetectedAgent, elapsed: Duration) -> String {
+    format!("Starting {} (npm) — {}s", agent.id, elapsed.as_secs())
+}
+
 /// Which detected agent will run the turn, and which were passed over.
 ///
 /// The passed-over set is carried rather than dropped so the log line can name
@@ -182,6 +357,23 @@ pub fn choose_executor(detected: &[DetectedAgent]) -> Option<ExecutorChoice<'_>>
     })
 }
 
+/// The agent an attach should reach, given what is installed and whether a
+/// person has asked for Omega's own loop instead.
+///
+/// `OMEGA-DELTA-0114`. Split out from [`connect_detected_executor`] so the one
+/// rule that can send a machine with Codex installed to the native loop is a
+/// function with arguments rather than a branch over process-global state. The
+/// flag is a parameter here for the same reason `PATH` is a parameter to
+/// `omega_agent_detect::detect_on_path`: a rule that can only be exercised by
+/// mutating a global is a rule whose test order matters.
+#[must_use]
+pub fn executor_to_attach(
+    detected: &[DetectedAgent],
+    omegas_own_loop_chosen: bool,
+) -> Option<ExecutorChoice<'_>> {
+    choose_executor(detected).filter(|_| !omegas_own_loop_chosen)
+}
+
 /// Name a set of agents for a log line.
 fn named(agents: &[&DetectedAgent]) -> String {
     if agents.is_empty() {
@@ -194,28 +386,80 @@ fn named(agents: &[&DetectedAgent]) -> String {
         .join(", ")
 }
 
+/// Say something on the panel's loading-status channel, if there is one.
+///
+/// There is not one on every path — the Exo lane and the tests both connect
+/// without a panel behind them — so this is an `Option` rather than a required
+/// argument, and a missing channel is silence rather than a failure.
+struct Progress(Option<watch::Sender<Option<String>>>);
+
+impl Progress {
+    /// Put `message` under the pulsing label where the composer will be.
+    fn say(&mut self, message: String) {
+        if let Some(channel) = self.0.as_mut() {
+            // `Err` here is only "nobody is listening", which is the ordinary
+            // state of a connect whose view has gone away.
+            let _ = channel.send(Some(message));
+        }
+    }
+
+    /// Hand the label back to whatever the panel says by default.
+    fn clear(&mut self) {
+        if let Some(channel) = self.0.as_mut() {
+            let _ = channel.send(None);
+        }
+    }
+}
+
 /// Connect the installed coding agent as the router's external ACP executor.
 ///
-/// Returns `Ok(None)` only when nothing drivable is installed. Every other
-/// outcome is either the connection or an error that names the agent.
+/// `loading_status` is the panel's channel, taken off the router's delegate;
+/// see [`agent_servers::AgentServerDelegate::take_loading_status`]. Passing
+/// `None` connects silently, which is right for a caller with no panel behind
+/// it and wrong for the one a person is waiting on.
+///
+/// Returns `Ok(None)` when no external executor is to be attached. There are
+/// exactly two ways to reach it and neither is a fallback from a failure:
+/// nothing drivable is installed, or a person chose Omega's own loop
+/// ([`run_on_omegas_own_loop`]). Every other outcome is either the connection
+/// or an error that names the adapter.
 ///
 /// # Errors
 ///
-/// Returns an error when an agent was chosen and could not be reached: the
-/// store is gone, the agent never registers an ACP server, or the ACP server
-/// fails to start.
+/// Returns an error when an agent was chosen and its adapter could not be
+/// reached: the store is gone, the adapter never registers, it does not start
+/// within [`ADAPTER_START_TIMEOUT`], or it fails outright.
 pub async fn connect_detected_executor(
     detected: &[DetectedAgent],
     project: Entity<Project>,
     agent_server_store: WeakEntity<AgentServerStore>,
+    loading_status: Option<watch::Sender<Option<String>>>,
     cx: &mut AsyncApp,
 ) -> Result<Option<Rc<dyn AgentConnection>>> {
-    let Some(choice) = choose_executor(detected) else {
-        log::info!(
-            "OMEGA-DELTA-0095: no coding agent Omega can drive is installed \
-             (detected: {}); threads stay on the native loop",
-            named(&detected.iter().collect::<Vec<_>>())
-        );
+    let attaching = executor_to_attach(detected, omegas_own_loop_chosen());
+    if attaching.is_none() {
+        match choose_executor(detected) {
+            None => log::info!(
+                "OMEGA-DELTA-0095: no coding agent Omega can drive is installed \
+                 (detected: {}); threads stay on the native loop",
+                named(&detected.iter().collect::<Vec<_>>())
+            ),
+            // OMEGA-DELTA-0114. Not a degrade: a person read what failed and
+            // asked for this. Logged with the agent it passes over, so a
+            // machine with Codex installed running the native loop is never a
+            // mystery to whoever reads the log next.
+            Some(choice) => log::info!(
+                "OMEGA-DELTA-0114: a person chose Omega's own loop, so {} ({}) \
+                 at {} is not attached",
+                choice.chosen.name,
+                choice.chosen.id,
+                choice.chosen.binary.display()
+            ),
+        }
+    }
+    // One `Ok(None)`, two admitted reasons to reach it, and no path from a
+    // failure to either. See the module docs.
+    let Some(choice) = attaching else {
         return Ok(None);
     };
     let agent = choice.chosen;
@@ -228,33 +472,124 @@ pub async fn connect_detected_executor(
         named(&choice.passed_over)
     );
 
+    let mut progress = Progress(loading_status);
+    let attached = attach(agent, project, agent_server_store, &mut progress, cx).await;
+    progress.clear();
+    match attached {
+        Ok(connection) => {
+            clear_unreachable();
+            Ok(Some(connection))
+        }
+        Err(error) => {
+            // Recorded before the error leaves, because it crosses into the
+            // panel as a `LoadError::Other(String)` and a surface that wants to
+            // offer a way forward must not have to read the prose back.
+            record_unreachable(agent);
+            Err(error)
+        }
+    }
+}
+
+/// Reach `agent`'s ACP adapter, saying what is happening while it happens.
+///
+/// # Errors
+///
+/// Every way of not reaching the adapter, each naming the adapter rather than
+/// the agent's own installation.
+async fn attach(
+    agent: &DetectedAgent,
+    project: Entity<Project>,
+    agent_server_store: WeakEntity<AgentServerStore>,
+    progress: &mut Progress,
+    cx: &mut AsyncApp,
+) -> Result<Rc<dyn AgentConnection>> {
     let store = agent_server_store.upgrade().with_context(|| {
         format!(
-            "Omega's agent-server store is gone, so `{}` cannot be attached to \
-             run {} (found at {})",
-            agent.id,
-            agent.name,
-            agent.binary.display()
+            "Omega's agent-server store is gone, so `{}`, the ACP adapter it \
+             runs {} through, cannot be attached",
+            agent.id, agent.name
         )
     })?;
 
+    progress.say(format!("Finding {} in the ACP registry", agent.id));
     await_registration(agent, &store, cx).await?;
 
     let server = CustomAgentServer::new(AgentId::new(agent.id));
-    let delegate = AgentServerDelegate::new(store, None, None);
+    // The adapter gets a channel of its own rather than the panel's, because
+    // `watch::Sender` is not `Clone` and closes on drop, so the panel's channel
+    // has exactly one holder. Handing it to the adapter would mean an npx
+    // adapter that says nothing renders as silence again; keeping it here and
+    // giving the adapter nothing would throw away the archive path's
+    // `Installing {version}…`. Forwarding gets both: whatever the adapter says
+    // wins, and Omega only fills the silence.
+    let (adapter_status, adapter_said) = watch::channel::<Option<String>>(None);
+    let delegate = AgentServerDelegate::new(store, None, Some(adapter_status));
     let connect = cx.update(|cx| server.connect(delegate, project, cx));
-    let connection = connect.await.with_context(|| {
-        format!(
-            "`{}`, the ACP adapter Omega runs {} through, did not start. That \
-             adapter is resolved from the ACP registry and is not the {} at \
-             {} detection found",
-            agent.id,
-            agent.name,
-            agent.name,
-            agent.binary.display()
-        )
-    })?;
-    Ok(Some(connection))
+    start_adapter(agent, connect, adapter_said, progress, cx).await
+}
+
+/// Await the adapter's start, bounded, announcing how long it has taken.
+///
+/// `OMEGA-DELTA-0114`. `adapter_said` carries whatever the adapter reported for
+/// itself, and it wins: the archive path emits `Installing {version}…`, which
+/// is more specific than anything this loop knows. The two npx adapters
+/// omega#106 attaches report nothing at all (`LocalRegistryNpxAgent` does not
+/// implement `set_loading_status_tx`), and they are why this exists — without
+/// it their entire download renders as one unchanging word.
+///
+/// # Errors
+///
+/// The adapter's own failure, or [`ADAPTER_START_TIMEOUT`] elapsing with the
+/// adapter neither started nor failed. The two are worded separately and
+/// neither is wrapped in the other: the panel receives this as
+/// `LoadError::Other(err.to_string())`, and `anyhow`'s `to_string` renders only
+/// the outermost context — so a timeout carrying a generic outer sentence would
+/// arrive at the reader as the generic sentence with the timeout invisible.
+async fn start_adapter(
+    agent: &DetectedAgent,
+    connect: gpui::Task<Result<Rc<dyn AgentConnection>>>,
+    mut adapter_said: watch::Receiver<Option<String>>,
+    progress: &mut Progress,
+    cx: &mut AsyncApp,
+) -> Result<Rc<dyn AgentConnection>> {
+    let mut connect = Box::pin(connect).fuse();
+    let mut waited = Duration::ZERO;
+    loop {
+        let mut tick = cx.background_executor().timer(PROGRESS_TICK).fuse();
+        futures::select_biased! {
+            started = connect => return started.with_context(|| format!(
+                "`{}`, the ACP adapter Omega runs {} through, did not start. \
+                 That adapter is resolved from the ACP registry and is not the \
+                 {} at {} detection found",
+                agent.id,
+                agent.name,
+                agent.name,
+                agent.binary.display()
+            )),
+            () = tick => {
+                waited += PROGRESS_TICK;
+                if waited >= ADAPTER_START_TIMEOUT {
+                    return Err(anyhow!(
+                        "`{}`, the ACP adapter Omega runs {} through, did not \
+                         start within {} seconds. It is an npm package Omega \
+                         resolves from the ACP registry every time it connects, \
+                         and it is a separate download from the {} at {}, which \
+                         is fine. A network that cannot reach the npm registry \
+                         is the usual cause. Omega retries when the registry \
+                         reloads, and you can run this thread on Omega's own \
+                         loop instead.",
+                        agent.id,
+                        agent.name,
+                        ADAPTER_START_TIMEOUT.as_secs(),
+                        agent.name,
+                        agent.binary.display()
+                    ));
+                }
+                let said = adapter_said.borrow().clone();
+                progress.say(said.unwrap_or_else(|| starting_adapter(agent, waited)));
+            }
+        }
+    }
 }
 
 /// Wait, boundedly, for the chosen agent's ACP server to register.
@@ -441,6 +776,106 @@ mod tests {
                 agent.id
             );
         }
+    }
+
+    /// OMEGA-DELTA-0114. A person's choice of Omega's own loop is honoured,
+    /// and it is the only thing that reaches the native loop with a drivable
+    /// agent installed.
+    #[test]
+    fn a_person_who_chose_omegas_own_loop_gets_it() {
+        let installed = vec![codex(), claude()];
+
+        assert_eq!(
+            executor_to_attach(&installed, false).map(|choice| choice.chosen.id),
+            Some("codex-acp"),
+            "the default is unchanged: the installed agent runs the turn"
+        );
+        assert!(
+            executor_to_attach(&installed, true).is_none(),
+            "a person who read the failure and asked for Omega's own loop is \
+             given it, and nothing else in this module can produce this answer \
+             with a drivable agent present"
+        );
+    }
+
+    /// OMEGA-DELTA-0114. The choice is a request, not a state a failure can
+    /// enter on the reader's behalf.
+    ///
+    /// Nothing here can stop a future caller reaching for
+    /// `run_on_omegas_own_loop` from inside a timeout handler. What it can do
+    /// is keep the fact checkable: the flag starts false, and the only thing
+    /// in this crate that sets it is the button in `conversation_view`.
+    #[test]
+    fn omegas_own_loop_is_not_chosen_by_default() {
+        assert!(
+            !omegas_own_loop_chosen(),
+            "a fresh process attaches the installed agent; the native loop is \
+             somewhere a person asks to go"
+        );
+        assert!(
+            unreachable_adapter().is_none(),
+            "nothing has failed, so nothing offers a way out of a failure"
+        );
+    }
+
+    /// OMEGA-DELTA-0114. The label a person watches while npm resolves names
+    /// the adapter and counts, and blames nobody.
+    #[test]
+    fn the_starting_label_counts_and_names_the_adapter() {
+        let agent = codex();
+
+        let first = starting_adapter(&agent, Duration::from_secs(1));
+        let later = starting_adapter(&agent, Duration::from_secs(47));
+
+        assert!(
+            first.contains("codex-acp"),
+            "the reader must be able to tell which download this is: {first}"
+        );
+        assert!(
+            first.contains("npm"),
+            "an unexplained wait is what this replaces: {first}"
+        );
+        assert_ne!(
+            first, later,
+            "the elapsed count is the whole mechanism. A label that does not \
+             change is exactly what a hang looks like, which is the defect \
+             this replaces"
+        );
+        assert!(later.contains("47"), "{later}");
+        assert!(
+            !first.contains(&agent.binary.display().to_string()),
+            "nothing is wrong with the reader's Codex, so the wait must not \
+             put its path in front of them: {first}"
+        );
+    }
+
+    /// OMEGA-DELTA-0114. The bound is a bound, and it is far enough out that a
+    /// slow link is not mistaken for a broken one.
+    #[test]
+    fn the_adapter_start_is_bounded_well_past_a_slow_download() {
+        assert!(
+            ADAPTER_START_TIMEOUT > Duration::from_secs(60),
+            "a cold npx resolve also fetches Zed's Node runtime. A bound tight \
+             enough to catch a hang quickly turns a working first launch on a \
+             slow connection into a failure, which is the worse error"
+        );
+        assert!(
+            ADAPTER_START_TIMEOUT < Duration::from_secs(600),
+            "unbounded is what this replaces; a bound nobody outlasts is the \
+             same defect with a number attached"
+        );
+        assert!(
+            PROGRESS_TICK <= Duration::from_secs(1),
+            "the tick is the reader's only evidence that anything is still \
+             happening"
+        );
+        assert!(
+            ADAPTER_START_TIMEOUT
+                .as_secs()
+                .is_multiple_of(PROGRESS_TICK.as_secs()),
+            "the bound is counted in ticks, so a tick that does not divide it \
+             would expire late by up to one tick without saying so"
+        );
     }
 
     /// Every id this module will attach is one `agent_servers` can host.

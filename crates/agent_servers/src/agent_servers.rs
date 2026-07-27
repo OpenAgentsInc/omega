@@ -51,6 +51,26 @@ impl AgentServerDelegate {
     pub fn store(&self) -> &Entity<AgentServerStore> {
         &self.store
     }
+
+    /// Take the loading-status channel out of this delegate.
+    ///
+    /// `OMEGA-DELTA-0114`, omega#106. A delegate carries the one channel whose
+    /// messages reach the panel while it is still `Loading` — the pulsing label
+    /// where the composer will be. `watch::Sender` is deliberately not `Clone`
+    /// and closes its channel on drop, so there is no way to *observe* that
+    /// channel; the only way to speak on it is to hold it.
+    ///
+    /// `OmegaRouterServer` connects two things under one delegate: the native
+    /// loop, which downloads nothing and ignores the delegate entirely
+    /// (`NativeAgentServer::connect` binds it as `_delegate`), and the detected
+    /// coding agent's ACP adapter, which is an npm package resolved at connect
+    /// time and is the only part of that sequence a person can be left waiting
+    /// on. So the router takes the channel here and hands it to the attach.
+    /// Nothing is lost by the taking, and without it the wait a person actually
+    /// sits through is the one part of the router with no voice.
+    pub fn take_loading_status(&mut self) -> Option<watch::Sender<Option<String>>> {
+        self.loading_status.take()
+    }
 }
 
 pub trait AgentServer: Send {

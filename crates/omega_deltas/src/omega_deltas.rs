@@ -102,6 +102,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0107",
     "OMEGA-DELTA-0110",
     "OMEGA-DELTA-0113",
+    "OMEGA-DELTA-0114",
 ];
 
 /// OMEGA-DELTA-0106. The community audience: a Forge repository, its members,
@@ -293,9 +294,17 @@ pub const DETECTED_EXECUTOR_ATTACH_PATH: &str = "crates/agent_ui/src/omega_agent
 /// `connect` can take, and `CustomAgentServer` is the `AgentServer` that
 /// resolves that borrow inside its own `connect`. Building a command here
 /// instead would be a second, divergent copy of that resolution.
+///
+/// **Amended by `OMEGA-DELTA-0114`.** The delegate's third argument was `None`,
+/// which threw away the adapter's own loading status — the archive path's
+/// `Installing {version}…`. It now carries a channel the attach forwards from,
+/// so an adapter that reports progress keeps reporting it and Omega only fills
+/// the silence the two npx adapters leave. This is a policy change and not a
+/// rename: the old spelling said "this connect reports nothing", and that is
+/// no longer what it must do.
 pub const DETECTED_EXECUTOR_CONNECT_STEPS: &[&str] = &[
     "CustomAgentServer::new(AgentId::new(agent.id))",
-    "AgentServerDelegate::new(store, None, None)",
+    "AgentServerDelegate::new(store, None, Some(adapter_status))",
     "server.connect(delegate, project, cx)",
 ];
 
@@ -329,6 +338,59 @@ pub const DETECTED_EXECUTOR_REGISTRATION_FAILURE_PHRASES: &[&str] =
 /// The reason the attach is allowed to fail hard at all. See
 /// `a_failed_attach_is_retried_when_the_adapter_registers`.
 pub const CONNECTION_RETRY_PATH: &str = CONVERSATION_VIEW_PATH;
+
+// ------------------------------------------------------------ OMEGA-DELTA-0114
+
+/// OMEGA-DELTA-0114. Where the delegate's loading-status channel is exposed.
+pub const LOADING_STATUS_HANDOFF_PATH: &str = "crates/agent_servers/src/agent_servers.rs";
+
+/// OMEGA-DELTA-0114. What must be present for the adapter's start to be bounded
+/// and to keep saying how long it has taken.
+///
+/// The attach spends its time on `npm exec --yes` resolving an npx package, and
+/// nothing bounded that: not the resolve, not the ACP `initialize` handshake,
+/// which races only against the child process exiting. It also said nothing —
+/// `LocalRegistryNpxAgent` does not implement `set_loading_status_tx`, so the
+/// whole download rendered as the generic pulsing `Loading…`.
+///
+/// A silent unbounded wait is indistinguishable from a hang, and this one sits
+/// between a first-run person and their first composer. Each token here is one
+/// half of telling those apart: a deadline that ends the wait in a sentence,
+/// and a tick that proves the wait is alive.
+pub const ADAPTER_START_BOUND_TOKENS: &[&str] = &[
+    "ADAPTER_START_TIMEOUT",
+    "PROGRESS_TICK",
+    "futures::select_biased!",
+    "starting_adapter(agent, waited)",
+];
+
+/// OMEGA-DELTA-0114. The connect that must never be awaited without the bound
+/// beside it.
+///
+/// Spelled as the whole expression rather than as `.await`, because `.await`
+/// appears all over that file legitimately. This is the one await that used to
+/// be able to run forever.
+pub const UNBOUNDED_ADAPTER_AWAIT: &str = "cx.update(|cx| server.connect(delegate, project, cx))
+    .await";
+
+/// OMEGA-DELTA-0114. The function only a person may call, and the sole site
+/// that may call it.
+///
+/// `run_on_omegas_own_loop` is the one thing in the attach that reaches the
+/// native loop with a drivable agent installed. Reached from a button a reader
+/// pressed after reading what failed, it is a choice, and the disclosure then
+/// reports the native loop truthfully. Reached from a timeout handler, a retry
+/// limit, or any other piece of code deciding on the reader's behalf, it is
+/// exactly the silent substitution `OMEGA-DELTA-0095` refused — a thread that
+/// reports one executor and runs another — arrived at through the escape hatch
+/// instead of through the policy.
+///
+/// Nothing about the function's body can tell those apart. The call sites can,
+/// so they are counted.
+pub const OWN_LOOP_CHOICE_FN: &str = "run_on_omegas_own_loop()";
+
+/// OMEGA-DELTA-0114. The only file besides the attach that may call it.
+pub const OWN_LOOP_CHOICE_CALLER_PATH: &str = CONVERSATION_VIEW_PATH;
 
 /// OMEGA-DELTA-0080. Where the agent panel declares its result-body ceiling and
 /// applies it to every terminal it creates.
@@ -12461,14 +12523,23 @@ mod tests {
             attach_path.display()
         );
 
+        // Amended by OMEGA-DELTA-0114. There are now two admitted reasons to
+        // attach nothing — nothing drivable is installed, and a person chose
+        // Omega's own loop — and the count stays at one on purpose. Both funnel
+        // through the same return, so the rule this counts is unchanged and is
+        // if anything harder to break: no *failure* may reach it. A second
+        // `Ok(None)` would be a new way of attaching nothing, and the only ways
+        // left to invent are the ones this refuses.
         assert_eq!(
             production.matches("Ok(None)").count(),
             1,
             "OMEGA-DELTA-0095: {} returns `Ok(None)` from somewhere other than \
-             the one place that means \"nothing drivable is installed\". Every \
-             other way of not reaching a chosen agent must be an error naming \
-             it: a second `Ok(None)` is a silent fallback to the native loop on \
-             a machine whose owner believes Codex is running.",
+             the one place that means \"no external executor is to be \
+             attached\". Every way of not *reaching* a chosen agent must be an \
+             error naming it: a second `Ok(None)` is a silent fallback to the \
+             native loop on a machine whose owner believes Codex is running. \
+             The reader's own choice of Omega's own loop is not one — it goes \
+             through `executor_to_attach`, before anything has been attempted.",
             attach_path.display()
         );
 
@@ -12633,6 +12704,218 @@ mod tests {
              failed is the ACP registry resolution of a separate adapter; \
              naming the binary there is a false claim about their machine.",
             attach_path.display()
+        );
+    }
+
+    // ------------------------------------------------------ OMEGA-DELTA-0114
+
+    /// OMEGA-DELTA-0114. The npx install a person waits on is bounded, and says
+    /// how long it has been.
+    ///
+    /// What the attach spends its time on is not the `codex` binary detection
+    /// found. It is `npm exec --yes` resolving an npx package, plus Zed's Node
+    /// runtime if this machine has none — and none of it was bounded. The
+    /// resolve has no deadline, and `agent_servers::acp`'s `initialize`
+    /// handshake races only against the child process exiting, so an adapter
+    /// that starts and then never answers held the panel open for as long as
+    /// the machine stayed on.
+    ///
+    /// It also said nothing. `LocalRegistryNpxAgent` does not implement
+    /// `set_loading_status_tx`, so the download rendered as the pulsing
+    /// `Loading…` the panel shows for any unfinished connect — and it recurs,
+    /// because `npm exec --yes` runs on every connect rather than once.
+    ///
+    /// A first-run person waiting on a silent spinner cannot tell an install
+    /// from a hang. Both halves are checked because either alone leaves them
+    /// unable to: a bound with no tick is a wait nobody can read, and a tick
+    /// with no bound is a wait nobody can outlast.
+    #[test]
+    fn the_adapters_npm_start_is_bounded_and_says_how_long_it_has_taken() {
+        let path = repository_path(DETECTED_EXECUTOR_ATTACH_PATH);
+        let attach = read_repository_file(DETECTED_EXECUTOR_ATTACH_PATH);
+        let production = code_of(
+            attach
+                .split("#[cfg(test)]")
+                .next()
+                .expect("splitting always yields a first part"),
+        );
+        let compact = without_whitespace(&production);
+
+        for token in ADAPTER_START_BOUND_TOKENS {
+            assert!(
+                compact.contains(&without_whitespace(token)),
+                "OMEGA-DELTA-0114: {} lost `{token}`. The adapter's start is an \
+                 `npm exec --yes` with no deadline of its own and a handshake \
+                 that races only against the process exiting; without both the \
+                 bound and the tick, a first-run person sits in front of a \
+                 pulsing `Loading…` with no way to tell an install from a hang.",
+                path.display()
+            );
+        }
+
+        assert!(
+            !compact.contains(&without_whitespace(UNBOUNDED_ADAPTER_AWAIT)),
+            "OMEGA-DELTA-0114: {} awaits the adapter's connect directly again. \
+             That await is the unbounded one — the npx resolve and the ACP \
+             handshake both sit inside it — so it must go through the select \
+             that owns the deadline and the tick.",
+            path.display()
+        );
+
+        let handoff_path = repository_path(LOADING_STATUS_HANDOFF_PATH);
+        let handoff = read_repository_file(LOADING_STATUS_HANDOFF_PATH);
+        assert!(
+            handoff.contains("pub fn take_loading_status"),
+            "OMEGA-DELTA-0114: {} no longer lets a caller take the delegate's \
+             loading-status channel. `watch::Sender` is not `Clone` and closes \
+             on drop, so that channel has exactly one holder — and the router \
+             hands the whole delegate to the native server, which downloads \
+             nothing and ignores it. Without the take, the one part of the \
+             connect a person can be left waiting on is the one part with no \
+             way to say so.",
+            handoff_path.display()
+        );
+
+        let router_path = repository_path(ROUTER_DISPATCH_PATH);
+        let router = without_whitespace(&code_of(&read_repository_file(ROUTER_DISPATCH_PATH)));
+        assert!(
+            router.contains(&without_whitespace("delegate.take_loading_status()")),
+            "OMEGA-DELTA-0114: {} no longer takes the panel's loading-status \
+             channel off its delegate before handing it to the native server, \
+             so the attach connects silently again.",
+            router_path.display()
+        );
+        assert!(
+            router.contains(&without_whitespace(
+                "crate::omega_agent_attach::connect_detected_executor(
+                    &installed_agents,
+                    project,
+                    agent_server_store,
+                    loading_status,
+                    cx,
+                )"
+            )),
+            "OMEGA-DELTA-0114: {} takes the loading-status channel and does not \
+             give it to the attach. A channel taken and dropped is worse than \
+             one never taken: the adapter loses its own voice too.",
+            router_path.display()
+        );
+    }
+
+    /// OMEGA-DELTA-0114. The way out of an unreachable adapter is a person's
+    /// choice, and nothing but a person may make it.
+    ///
+    /// `OMEGA-DELTA-0095` kept the hard failure and wrote down what it cost:
+    /// `Agent::NativeAgent` *is* the router, so while a chosen agent stays
+    /// unreachable there is no picker entry that reaches the native loop, and
+    /// the panel has no first-party path at all. `run_on_omegas_own_loop` pays
+    /// that, and the whole of its design is *who calls it*.
+    ///
+    /// From a button, after a reader has read what failed, it is a choice: the
+    /// thread runs where they asked and the disclosure line says `native_loop`
+    /// truthfully. From a timeout handler or a retry limit, it is the silent
+    /// substitution that delta refused — a thread reporting one executor and
+    /// running another — reached through the escape hatch instead of through
+    /// the policy, which is the failure mode an escape hatch always has.
+    ///
+    /// Nothing in the function's body distinguishes those. The call sites do,
+    /// so this counts them across the whole tree rather than reading one file.
+    #[test]
+    fn only_a_person_sends_a_thread_to_omegas_own_loop() {
+        let attach_path = repository_path(DETECTED_EXECUTOR_ATTACH_PATH);
+        let attach = read_repository_file(DETECTED_EXECUTOR_ATTACH_PATH);
+        let production = code_of(
+            attach
+                .split("#[cfg(test)]")
+                .next()
+                .expect("splitting always yields a first part"),
+        );
+
+        assert!(
+            without_whitespace(&production).contains(&without_whitespace(
+                "executor_to_attach(detected, omegas_own_loop_chosen())"
+            )),
+            "OMEGA-DELTA-0114: {} no longer consults the reader's choice, so \
+             the button that offers Omega's own loop leads nowhere and the \
+             panel is back to having no first-party path out of an unreachable \
+             adapter.",
+            attach_path.display()
+        );
+
+        let callers: Vec<String> = {
+            let mut found = Vec::new();
+            let checks = normalize_path(&repository_path("crates/omega_deltas"));
+            for_each_source_file(&repository_path("crates"), &["rs"], |path, source| {
+                // This crate names the token in order to count it. A check
+                // spelling its own subject is not a call site, and treating it
+                // as one would make the check fail on itself forever.
+                if normalize_path(path).starts_with(&checks) {
+                    return;
+                }
+                let calls = code_of(source).matches(OWN_LOOP_CHOICE_FN).count();
+                // The definition names itself once; a caller names it as well.
+                let calls = if normalize_path(path) == normalize_path(&attach_path) {
+                    calls.saturating_sub(
+                        code_of(source)
+                            .matches(&format!("pub fn {OWN_LOOP_CHOICE_FN}"))
+                            .count(),
+                    )
+                } else {
+                    calls
+                };
+                for _ in 0..calls {
+                    found.push(
+                        normalize_path(path)
+                            .strip_prefix(normalize_path(&repository_path(".")))
+                            .map(|relative| relative.display().to_string())
+                            .unwrap_or_else(|_| path.display().to_string()),
+                    );
+                }
+            });
+            found.sort();
+            found
+        };
+
+        assert_eq!(
+            callers,
+            vec![OWN_LOOP_CHOICE_CALLER_PATH.to_owned()],
+            "OMEGA-DELTA-0114: `{OWN_LOOP_CHOICE_FN}` is called from somewhere \
+             other than the button in {OWN_LOOP_CHOICE_CALLER_PATH}. It is the \
+             one thing that reaches the native loop with a drivable agent \
+             installed. A person pressing it is a choice; anything else calling \
+             it is Omega deciding to run somewhere other than where it says it \
+             runs, which is the defect `OMEGA-DELTA-0095` kept a hard failure \
+             to prevent."
+        );
+
+        let caller = read_repository_file(OWN_LOOP_CHOICE_CALLER_PATH);
+        let caller_path = repository_path(OWN_LOOP_CHOICE_CALLER_PATH);
+        let button = body_of(&caller, "render_run_on_omegas_own_loop");
+        let button = without_whitespace(&code_of(button));
+        assert!(
+            button.contains(&without_whitespace(
+                "crate::omega_agent_attach::unreachable_adapter()?"
+            )),
+            "OMEGA-DELTA-0114: the button in {} no longer requires an attach to \
+             have actually failed. Offered beside an unrelated error it reads \
+             as a general \"give up on Codex\" control, which is an invitation \
+             to leave the installed agent rather than a way past a download \
+             that did not arrive.",
+            caller_path.display()
+        );
+        assert!(
+            button.contains(&without_whitespace("on_click(move |_, window, cx|")),
+            "OMEGA-DELTA-0114: the choice in {} is no longer made by a click. \
+             That gesture is the entire difference between a person choosing \
+             the native loop and Omega substituting it.",
+            caller_path.display()
+        );
+        assert!(
+            button.contains(&without_whitespace("this.reset(window, cx)")),
+            "OMEGA-DELTA-0114: the button in {} records the choice and never \
+             reconnects, so the reader presses it and the same failure stays on \
+             screen.",
+            caller_path.display()
         );
     }
 

@@ -2737,8 +2737,56 @@ impl ConversationView {
             .icon(IconName::XCircleFilled)
             .title(title)
             .description(message)
-            .actions_slot(div().children(action_slot))
+            .actions_slot(
+                h_flex()
+                    .gap_1()
+                    .children(self.render_run_on_omegas_own_loop(cx))
+                    .children(action_slot),
+            )
             .into_any_element()
+    }
+
+    /// The first-party path out of an ACP adapter Omega could not reach.
+    ///
+    /// `OMEGA-DELTA-0114`, omega#106. `Agent::NativeAgent` *is* the router, so
+    /// there is no picker entry that reaches the native loop: while a detected
+    /// agent's adapter stays unreachable, this callout is the whole panel and
+    /// the reader has nowhere to go. That was the residual cost
+    /// `OMEGA-DELTA-0095` recorded when it kept the hard failure, and this is
+    /// the payment.
+    ///
+    /// It is a **button and not a fallback**, and the difference is the entire
+    /// argument of that delta. Omega deciding to run somewhere else produces a
+    /// thread that reports one executor and runs another; a person reading what
+    /// failed and choosing the native loop produces a thread that runs where
+    /// they asked, and the disclosure line then says `native_loop` truthfully.
+    ///
+    /// Offered only when an attach actually failed, so it cannot appear beside
+    /// an unrelated error and read as a general "give up on Codex" control.
+    /// `omega_agent_attach::unreachable_adapter` is typed state rather than a
+    /// read of the message, because the cause reaches this file as a
+    /// `LoadError::Other(String)` and recovering it from prose would be a
+    /// parser over a sentence written for a human.
+    fn render_run_on_omegas_own_loop(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if !matches!(self.connection_key, Agent::NativeAgent) {
+            return None;
+        }
+        let adapter = crate::omega_agent_attach::unreachable_adapter()?;
+        let view = cx.entity();
+        Some(
+            Button::new("omega-run-on-own-loop", "Run on Omega's Own Loop")
+                .tooltip(Tooltip::text(format!(
+                    "Run this thread on Omega's own agent loop instead of {}. \
+                     Your {} is fine; {} is a separate npm download Omega could \
+                     not resolve. Restarting Omega goes back to {}.",
+                    adapter.adapter_id, adapter.agent_name, adapter.adapter_id, adapter.agent_name,
+                )))
+                .on_click(move |_, window, cx| {
+                    crate::omega_agent_attach::run_on_omegas_own_loop();
+                    view.update(cx, |this, cx| this.reset(window, cx));
+                })
+                .into_any_element(),
+        )
     }
 
     fn render_unsupported(

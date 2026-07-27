@@ -914,11 +914,18 @@ impl agent_servers::AgentServer for OmegaRouterServer {
 
     fn connect(
         &self,
-        delegate: agent_servers::AgentServerDelegate,
+        mut delegate: agent_servers::AgentServerDelegate,
         project: Entity<Project>,
         cx: &mut App,
     ) -> Task<Result<Rc<dyn AgentConnection>>> {
         let agent_server_store = delegate.store().downgrade();
+        // `OMEGA-DELTA-0114`, omega#106. The panel's loading-status channel,
+        // taken before the delegate goes to the native server. The native loop
+        // downloads nothing and ignores the delegate entirely, while the
+        // detected agent's ACP adapter is an npm package resolved on every
+        // connect — so the only part of this sequence a person can be left
+        // waiting on was also the only part with no way to say so.
+        let loading_status = delegate.take_loading_status();
         let native = self.native.connect(delegate, project.clone(), cx);
         let journal_path = self.journal_path.clone();
         let exo_lane_path = self.exo_lane_path.clone();
@@ -950,11 +957,14 @@ impl agent_servers::AgentServer for OmegaRouterServer {
             // every thread stays on the native loop with its visible fallback
             // reason. A machine where the chosen agent cannot be reached fails
             // here naming it, rather than producing a thread that reports one
-            // executor and runs another.
+            // executor and runs another — unless a person has read that failure
+            // and chosen Omega's own loop, which `connect_detected_executor`
+            // honours by attaching nothing. `OMEGA-DELTA-0114`.
             } else if let Some(installed) = crate::omega_agent_attach::connect_detected_executor(
                 &installed_agents,
                 project,
                 agent_server_store,
+                loading_status,
                 cx,
             )
             .await?

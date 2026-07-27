@@ -4545,3 +4545,97 @@ than merely stated.
   the custodied one still goes through recovery or reset; there is no one-click
   "give this profile its own identity", and adding one would be a decision
   about what a profile is, not a bug fix.
+### OMEGA-DELTA-0114 — The install a person waits on is bounded and named, and the way past it is theirs to take
+
+- **Upstream Zed:** an external ACP agent is started only after a person picks
+  it from the agent panel, so its npx resolve happens somewhere the reader
+  already knows they asked for a download, and the panel they were using is
+  still there while it runs. `LocalRegistryNpxAgent` reports no progress
+  (`set_loading_status_tx` is the trait's empty default for it) and nothing
+  bounds the resolve or the ACP `initialize` handshake, which upstream can
+  afford because neither sits in front of a first composer.
+- **Omega:** `OMEGA-DELTA-0095` moved that same resolve onto the path between a
+  new person and their first message. This delta makes it bounded
+  (`ADAPTER_START_TIMEOUT`), named, and *visibly alive* — the label counts
+  seconds — and gives a reader whose adapter never arrives an explicit **Run on
+  Omega's Own Loop** button rather than no way forward at all.
+- **Why:** omega#106's close-out. The attach put an unbounded silent download
+  between the composer and the first turn, where it had not been before. A
+  first-run person waiting on a pulsing `Loading…` cannot tell an install from a
+  hang, and had no way to end either.
+- **What the wait actually is, which is not what it said.** Not a release
+  archive: `npm exec --yes` resolving an npx package
+  (`@agentclientprotocol/codex-acp`, `claude-agent-acp`), plus Zed's Node
+  runtime if this machine has none. It **recurs** — `npm exec --yes` runs on
+  every connect, not once — so it is not written as a first-launch sentence.
+  Nothing bounded it: the resolve has no deadline, and
+  `agent_servers::acp`'s `initialize` races only against the child process
+  exiting, so an adapter that started and never answered held the panel open
+  for as long as the machine stayed on.
+- **The elapsed count is the mechanism, not decoration.** A bound alone leaves a
+  wait nobody can read; a label alone leaves a wait nobody can outlast. A number
+  that goes up is what separates a slow link from a wedged process, and a person
+  can read it without knowing what npx is. `ADAPTER_START_TIMEOUT` is
+  deliberately generous at three minutes for the same reason: a cold resolve is
+  tens of megabytes, and a deadline tight enough to catch a hang quickly would
+  turn a working first launch on a slow connection into a failure, which is the
+  worse of the two errors.
+- **The channel has exactly one holder, so it is taken and then forwarded.**
+  `watch::Sender` is not `Clone` and closes on drop. The router hands its whole
+  delegate to `NativeAgentServer::connect`, which binds it as `_delegate` and
+  drops it — so on `origin/main` the panel's loading-status channel was **dead
+  before the attach began**, and the attach then built its own delegate with
+  `None` in that slot. `AgentServerDelegate::take_loading_status` moves it to
+  the one part of the sequence that downloads anything. The adapter still gets a
+  channel of its own and whatever it says wins, so the archive path's
+  `Installing {version}…` survives and Omega only fills the silence the two npx
+  adapters leave.
+- **`Agent::NativeAgent` is the router, so a failed attach had no exit.**
+  `OMEGA-DELTA-0095` recorded that cost when it kept the hard failure. There is
+  no picker entry that reaches the native loop, so a persistently unreachable
+  adapter left the panel as a callout and nothing else.
+  `run_on_omegas_own_loop` is the payment, and **who calls it is the whole
+  design**. From a button, after a reader has read what failed, it is a choice:
+  the thread runs where they asked and the disclosure says `native_loop`
+  truthfully. From a timeout handler or a retry limit it is precisely the silent
+  substitution that delta refused, reached through the escape hatch instead of
+  through the policy — so the call sites are counted across the tree rather than
+  trusted.
+- **The escape hatch must not become the policy.** The choice is per-process and
+  is not persisted, it is offered only once an attach has actually failed
+  (`unreachable_adapter` is typed state, not a read of the error prose), and a
+  restart goes back to the adapter. A decision made about a network that was
+  down a minute ago should not outlive the process that made it.
+- **`OMEGA-DELTA-0095` is amended in two places, and neither is to make a check
+  pass.** `DETECTED_EXECUTOR_CONNECT_STEPS` said
+  `AgentServerDelegate::new(store, None, None)`, which spelled "this connect
+  reports nothing"; that is no longer what it must do. And `Ok(None)` now has
+  two admitted reasons rather than one — nothing drivable is installed, or a
+  person chose Omega's own loop — while the *count* stays at one, because both
+  funnel through the same return and the rule being counted is unchanged: no
+  **failure** may reach it.
+- **Attribution, finished.** `14c519b0ec` fixed the registration sentence; the
+  store-gone sentence still opened with the reader's binary and its path. It now
+  names the adapter alone. Every remaining mention of the binary in this path is
+  there to exonerate it.
+- **Enforced by:**
+  `the_adapters_npm_start_is_bounded_and_says_how_long_it_has_taken` and
+  `only_a_person_sends_a_thread_to_omegas_own_loop` in `crates/omega_deltas`,
+  plus `a_person_who_chose_omegas_own_loop_gets_it`,
+  `omegas_own_loop_is_not_chosen_by_default`,
+  `the_starting_label_counts_and_names_the_adapter` and
+  `the_adapter_start_is_bounded_well_past_a_slow_download` in `crates/agent_ui`.
+  Each was watched failing first: the amended 0095 step against the new source,
+  and the two new checks against a timeout that calls
+  `run_on_omegas_own_loop`, a deleted `take_loading_status`, a router that drops
+  the channel, a restored direct `.await` on the connect, a button offered with
+  no failure behind it, and an attach that stops consulting the choice.
+- **What this does not cover.** No check starts a process, so nothing here
+  proves what a person sees. **The three windows this owes are listed on
+  omega#106 and none of them exist yet**: the ticking label during a real npx
+  resolve, the callout carrying the button, and a thread that ran on the native
+  loop after the button was pressed disclosing `native_loop`. A fresh
+  `--user-data-dir` cannot currently reach a composer at all (omega#110), so
+  none of them can be produced from here. The bound itself is also untested
+  against a real hang — the test asserts the constant's shape, not that a wedged
+  npx resolve ends in a sentence.
