@@ -5623,3 +5623,136 @@ than merely stated.
   exactly that. What has not been proved is the drawing: two lightbulb rows
   under one disclosure, a title truncating at the window's edge, and the row
   that shows while a title is still arriving have not been rendered in a window.
+
+### OMEGA-DELTA-0125 — The thread header's `…` menu does what it says, or is not there
+
+- **Owner, on a live build:** *"literally nothing in this top right menu does
+  anything when i click on it. if its easy to reenable those things to actually
+  work, do it, otherwise hide the menu."* Eight entries: Open Thread as Markdown,
+  Add Server…, Install New Servers…, Skills, Open Project Rules (AGENTS.md),
+  Profiles, Settings, Toggle Threads Sidebar.
+- **One symptom, three causes, and one entry that was never broken.** Every entry
+  was read on its own, because treating them as one bug is how six of them get
+  "fixed" by a change that repairs two.
+
+**Cause one: the refusal never reached a screen — and this delta does not own
+it.** `report_refusal` in `crates/zed/src/omega_zero_base_ui.rs` asked the active
+window for `downcast::<Workspace>()`. **A `Workspace` is never a window root.**
+Every Omega window's root view is `MultiWorkspace`, so the `let ... else`
+returned on every window that has ever existed, the toast was never built, and
+each refusal reached `zed.log` and nowhere else. `OMEGA-DELTA-0048` makes zero
+base safe by *refusing at dispatch* what it does not render, and the refusal's
+whole visible half was a no-op: a refused menu entry, key press or palette
+command was indistinguishable from a broken button.
+
+This lane found it independently and repaired it, and so did the threads-sidebar
+lane; theirs landed first as `OMEGA-DELTA-0118`, handles a `Workspace` root as a
+fallback as well, and is enforced by
+`zero_bases_threads_sidebar_is_its_own`. **This delta's version was discarded on
+the rebase** rather than merged beside it. Two repairs of one line is how one of
+them silently stops being the one that runs, and two checks over it is how one
+ends up guarding a spelling nobody kept. It is recorded here because it is half
+of *why the owner saw nothing*, and a reader of this entry who did not know that
+would conclude the menu entries below were the whole story.
+
+**Cause two: an invisible success.** `Open Thread as Markdown` and both AGENTS.md
+entries dispatched nothing at all. They called a handler that opened an item in
+the centre pane — `add_item_to_active_pane` for the thread, `open_abs_path` for
+the rules files — and `OMEGA-DELTA-0053` draws no centre pane once zero base is
+sealed. The buffer opened, took the composer's focus with it, and landed
+somewhere with no pixels. This is `OMEGA-DELTA-0119` exactly, three entries it
+did not reach.
+
+- **Omega now:** all three open the reader `OMEGA-DELTA-0119` built —
+  `crates/agent_ui/src/omega_file_peek.rs`, a read-only sheet in the workspace's
+  modal layer, which `MultiWorkspace` renders outside the seal. Two new entry
+  points into the *same* sheet, `open_file` for a path this window already
+  resolved and `open_text` for a thread rendered to markdown, which is on no
+  disk. A second reader for the same job would be two surfaces to keep
+  read-only, two to keep out of the composer's layout, and two to repair the
+  next time one silently stops drawing.
+- **`OMEGA-DELTA-0052` and `0053` are not weakened.** No dock, no pane, no tab,
+  no way out. The sheet is absolutely positioned, takes part in no layout, and
+  cannot clip or push the composer; its height is bounded so it covers the
+  transcript and not the composer. Dismissing it leaves the window zero base
+  already had.
+- **The reader's failure state is reachable by an ordinary click.** The menu
+  offers Open Project Rules only when AGENTS.md exists, and `open_project_rules`
+  resolves the path again *without* that check, so a file deleted in between
+  lands in "No file at …" rather than in silence. A small gap, and the one worth
+  drawing for: a repair whose own failure mode is a dead click is the same bug
+  wearing a different cause.
+
+**Cause three: refused, and rightly.** `Add Server…` → `omega::OpenSettingsAt`.
+`Install New Servers…` → `omega::Extensions`. `Skills` → `agent::ManageSkills`,
+admitted, which then dispatches `omega::OpenSettingsAt`. `Settings` →
+`agent::OpenSettings`, admitted, which then dispatches
+`omega::OpenSettingsPage`. Zero base refuses the whole `omega` namespace.
+
+- **Hidden, not admitted, and the second hop is why the question was close.**
+  The settings surface opens its own OS window, so it does not need the centre
+  pane and admitting it looked cheap. It was refused for two reasons. That
+  window carries controls — *Open Current Settings File*, *Open Keymap* — that
+  close themselves and open a buffer in **this** workspace, which is the sealed
+  centre; admitting it would import the identical dead click one level down,
+  behind a surface a person had to travel to. And `omega_zero_base`'s admitted
+  set already records the decision in as many words: admitting the `omega`
+  namespace "would admit the extensions and settings surfaces with it, and
+  section 4 of the design note records that those reach nothing in Omega today".
+- **Omega now:** those four are not built in a sealed zero base. The `Context`
+  header moves to the AGENTS.md entries so nothing is left with a heading over
+  it and nothing loses one.
+
+**`Profiles` was never broken.** It is `agent::ManageProfiles`, which the gate
+admits, and it opens a modal — and the modal layer is rendered by
+`MultiWorkspace` outside the seal, which is the same reason the command palette
+still works in the mode. It stays, and the check below fails if a later change
+hides it.
+
+**`Toggle Threads Sidebar` was cause three too, and its own lane fixed it.** It
+dispatched `multi_workspace::ToggleWorkspaceSidebar`, refused, dead —
+the same shape as the four above. `OMEGA-DELTA-0118` landed while this lane was
+open and gave it `agent::ToggleThreadsSidebar` in zero base and a sidebar of its
+own to toggle. This delta touched none of it and simply classifies the result:
+the entry now reaches an admitted action, so the invariant below says it is
+offered, and it is. That is the outcome the table is *for* — an entry whose
+surface became reachable stops being hidden, and the check is what asks the
+question rather than leaving it to whoever next reads the menu.
+
+- **Enforced by:** `a_thread_menu_entry_lands_somewhere_a_person_can_see` and
+  `a_menu_entry_that_opens_a_buffer_opens_the_reader_instead` in
+  `crates/omega_deltas`. Cause one's check is `OMEGA-DELTA-0118`'s, not a second
+  copy here.
+- **The defect class, not the eight instances.** The first check holds one
+  invariant: **an entry is offered in a sealed zero base exactly when the action
+  gate admits what its click finally reaches.** It asks
+  `omega_zero_base::admits_action` rather than keeping a second copy of the
+  admitted set — `omega_zero_base` is a dev-dependency of the delta crate for
+  that reason — and it fails in *both* directions, so an entry hidden for a
+  reason that has since expired is caught as loudly as an entry shown while
+  refused. "Finally reaches" is load-bearing: a check that read the action the
+  menu names would have passed `Skills` and `Settings`, which are two of the four
+  the owner was complaining about, so the second hop is asserted in the source of
+  `manage_skills` and `open_configuration` too — if either stops landing in the
+  `omega` namespace, the hiding is no longer justified and the test says so.
+  A census of every `.action("…"` and `.entry("…"` label in the menu fails on an
+  entry nobody classified, which is what stops the next one arriving unexamined.
+- **Watched failing.** Each assertion was run against a mutation of the thing it
+  guards: the guard reverted to `is_active`, the guard removed entirely, each of
+  the four entries moved back outside it, `Profiles` moved inside it, the reader
+  call moved after the pane opener in all three funnels, the seal check dropped
+  from `open_file` and `open_text`, an unclassified entry added to the menu, an
+  entry deleted from it, `omega::Extensions` added to the admitted set, and
+  `manage_skills` stopped from dispatching into the `omega` namespace. Two more
+  were watched failing before this delta's own copy of the refusal repair was
+  discarded in favour of `OMEGA-DELTA-0118`'s: the downcast put back to
+  `Workspace`, and the toast removed.
+- **What this does not cover.** **No window has been opened.** Nothing here
+  proves the rendered result: that the sheet draws over the transcript and not
+  the composer for a thread the length of the owner's, that the refusal toast is
+  legible above a zoomed panel, or that the shortened menu still reads as a menu.
+  The `alt-cmd-L`, `alt-cmd-C` and `alt-cmd-P` **key bindings for the hidden
+  entries still exist** — zero base deletes no keymap binding, by
+  `OMEGA-DELTA-0052`'s reasoning — so those keys still refuse, and after this
+  change they refuse *audibly*. That is the intended end state and not a
+  leftover.

@@ -747,6 +747,32 @@ pub fn open_markdown_in_workspace(
     window: &mut Window,
     cx: &mut App,
 ) -> Task<Result<()>> {
+    // OMEGA-DELTA-0125. Every "Open Thread as Markdown" in the product funnels
+    // through here — the thread header's `…` menu, the message context menu,
+    // the panel action and the threads sidebar — so the sealed case is decided
+    // once, here, rather than four times at four call sites where the fifth
+    // would be forgotten.
+    //
+    // Below, `add_item_to_active_pane` puts the rendered thread in the centre
+    // pane. `OMEGA-DELTA-0053` draws no centre pane once zero base is sealed,
+    // so the owner clicked the entry, the markdown was built, an editor was
+    // created, focus left the composer, and nothing appeared. The reader is
+    // gated on the seal rather than on the mode, because before the seal the
+    // ordinary workspace still renders and a real pane beats a sheet.
+    if omega_zero_base::is_sealed()
+        && workspace.update(cx, |workspace, cx| {
+            crate::omega_file_peek::open_text(
+                workspace,
+                title.clone(),
+                markdown.clone(),
+                window,
+                cx,
+            )
+        })
+    {
+        return Task::ready(Ok(()));
+    }
+
     let markdown_language_task = workspace
         .read(cx)
         .app_state()

@@ -1,4 +1,4 @@
-//! Reading a file the transcript names, in a mode that draws no editor.
+//! Reading a file — or a rendered thread — in a mode that draws no editor.
 //!
 //! `OMEGA-DELTA-0119`. The agent writes `crates/agent/src/templates/system_prompt.hbs`
 //! into a message. The code-span resolver in [`crate::conversation_view`]
@@ -36,6 +36,22 @@
 //! is not running in. When nothing resolves, the sheet still opens and says the
 //! path as written and every directory it looked in. Refusing to draw would
 //! reproduce the bug this delta exists to remove.
+//!
+//! # What `OMEGA-DELTA-0125` added
+//!
+//! The thread header's `…` menu had the same defect in three more places, and
+//! the owner reported it the same way: *"literally nothing in this top right
+//! menu does anything when i click on it."* **Open Thread as Markdown**,
+//! **Open Project Rules (AGENTS.md)** and **Open Global Rules (AGENTS.md)** all
+//! ended in the centre pane — the first through `add_item_to_active_pane`, the
+//! other two through `open_abs_path`. So this module grew two more entry
+//! points, [`open_file`] for a path the window already knows and [`open_text`]
+//! for a thread rendered to markdown, which exists nowhere on disk.
+//!
+//! They are entry points into the *same* sheet rather than a second mechanism.
+//! A menu that opened one kind of reader and a link that opened another would
+//! be two surfaces to keep read-only, two to keep out of the composer's layout,
+//! and two to fix the next time one of them silently stops drawing.
 
 use std::path::{Path, PathBuf};
 
@@ -115,12 +131,81 @@ pub fn open_from_transcript_link(
     };
 
     workspace.update(cx, |workspace, cx| {
-        let project = workspace.project().clone();
-        workspace.toggle_modal(window, cx, |window, cx| {
-            FilePeek::new(request, project, window, cx)
-        });
+        open_request(workspace, request, window, cx);
     });
     true
+}
+
+/// Open the reader on a file this window already knows the path of.
+///
+/// `OMEGA-DELTA-0125`. The two AGENTS.md entries in the thread header's `…`
+/// menu called `open_abs_path`, which opens an item in the centre pane — the
+/// same invisible success `OMEGA-DELTA-0119` found behind a transcript link.
+/// Returns `true` when this took the click, so a caller in a full editor falls
+/// through to the editor, where a real pane is strictly better than a sheet.
+///
+/// No candidate search: the caller resolved the path already. The failure
+/// states still apply, because a rules file the menu offers can be deleted
+/// between the menu being built and the entry being clicked, and a sheet that
+/// declined to draw for that would be the dead click again.
+pub fn open_file(
+    workspace: &mut Workspace,
+    path: PathBuf,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) -> bool {
+    if !omega_zero_base::is_sealed() {
+        return false;
+    }
+    let request = PeekRequest {
+        written: path.to_string_lossy().into_owned().into(),
+        candidates: vec![path],
+        roots: Vec::new(),
+        anchor: None,
+    };
+    open_request(workspace, request, window, cx);
+    true
+}
+
+/// Open the reader on text this window produced, which is on no disk.
+///
+/// `OMEGA-DELTA-0125`. **Open Thread as Markdown** renders the thread to a
+/// string and put it in a scratch buffer in the centre pane. The string is the
+/// whole point and it needs no file, so the sheet takes it directly.
+///
+/// Read-only for the reason [`FilePeek`] is read-only everywhere else: zero
+/// base refuses `workspace::Save`, and a scratch buffer a person can type into
+/// and never keep is a worse lie than the one being repaired. Copying out still
+/// works — `markdown` is an admitted namespace.
+pub fn open_text(
+    workspace: &mut Workspace,
+    title: impl Into<SharedString>,
+    text: String,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) -> bool {
+    if !omega_zero_base::is_sealed() {
+        return false;
+    }
+    let project = workspace.project().clone();
+    let title = title.into();
+    workspace.toggle_modal(window, cx, |window, cx| {
+        FilePeek::for_text(title, text, project, window, cx)
+    });
+    true
+}
+
+/// Put the sheet on the screen, from a request that is already resolved.
+fn open_request(
+    workspace: &mut Workspace,
+    request: PeekRequest,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    let project = workspace.project().clone();
+    workspace.toggle_modal(window, cx, |window, cx| {
+        FilePeek::new(request, project, window, cx)
+    });
 }
 
 /// Turn a link into the set of files it could mean, or `None` when it names no
@@ -277,10 +362,15 @@ fn candidates_under_roots(path: &Path, roots: &[PathBuf]) -> Vec<PathBuf> {
 enum PeekState {
     /// Looking for the file and opening its buffer.
     Loading,
-    /// A file was found and can be read.
+    /// Something was found and can be read.
+    ///
+    /// `OMEGA-DELTA-0125`. `abs_path` is `None` for text that came from the
+    /// window rather than the disk. The header prints the subject's own name
+    /// then, because printing a path for something that has none is how a
+    /// read-only sheet gets mistaken for a file a person can go and edit.
     Ready {
         editor: Entity<Editor>,
-        abs_path: PathBuf,
+        abs_path: Option<PathBuf>,
     },
     /// Nothing exists at any candidate path. The sheet says where it looked.
     Unresolved,
@@ -288,10 +378,36 @@ enum PeekState {
     Failed { reason: SharedString },
 }
 
-/// The read-only sheet a transcript file link opens.
+/// What the sheet was asked to show.
+///
+/// `OMEGA-DELTA-0125`. Only a path can fail to resolve, and only a path has
+/// roots to name when it does. Keeping the two apart in the type is what stops
+/// the generated case borrowing the file case's failure prose and telling a
+/// person it looked in directories it never had.
+enum PeekSubject {
+    /// A path something named: a transcript link, or a menu entry that would
+    /// otherwise have opened a pane.
+    Path(PeekRequest),
+    /// Text this window rendered. It exists nowhere on disk, so it can be
+    /// neither unresolved nor stale.
+    Text { title: SharedString },
+}
+
+impl PeekSubject {
+    /// The name the sheet prints for this subject before anything is opened.
+    fn written(&self) -> SharedString {
+        match self {
+            Self::Path(request) => request.written.clone(),
+            Self::Text { title } => title.clone(),
+        }
+    }
+}
+
+/// The read-only sheet a transcript file link — or a thread-header menu
+/// entry — opens.
 pub struct FilePeek {
     focus_handle: FocusHandle,
-    request: PeekRequest,
+    subject: PeekSubject,
     state: PeekState,
     _open: Task<()>,
 }
@@ -350,7 +466,10 @@ impl FilePeek {
                                 );
                             });
                         }
-                        this.state = PeekState::Ready { editor, abs_path };
+                        this.state = PeekState::Ready {
+                            editor,
+                            abs_path: Some(abs_path),
+                        };
                         cx.notify();
                     })
                     .log_err();
@@ -369,7 +488,74 @@ impl FilePeek {
 
         Self {
             focus_handle: cx.focus_handle(),
-            request,
+            subject: PeekSubject::Path(request),
+            state: PeekState::Loading,
+            _open: open,
+        }
+    }
+
+    /// The same sheet, over text that was never a file.
+    ///
+    /// `OMEGA-DELTA-0125`. A scratch buffer rather than an opened one, so
+    /// nothing on disk is touched and there is nothing to save. The markdown
+    /// language is asked for by name and its absence is not fatal: a thread
+    /// with no syntax highlighting is readable, and refusing to draw over a
+    /// missing grammar would be the silent click again.
+    fn for_text(
+        title: SharedString,
+        text: String,
+        project: Entity<Project>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let markdown = project.read(cx).languages().language_for_name("Markdown");
+        let open = cx.spawn_in(window, async move |this, cx| {
+            let language = markdown.await.log_err();
+            let buffer = project
+                .update(cx, |project, cx| project.create_buffer(language, false, cx))
+                .await;
+
+            match buffer {
+                Ok(buffer) => {
+                    this.update_in(cx, |this, window, cx| {
+                        buffer.update(cx, |buffer, cx| buffer.set_text(text, cx));
+                        let editor = cx.new(|cx| {
+                            let mut editor =
+                                Editor::for_buffer(buffer, Some(project.clone()), window, cx);
+                            // The read-only contract is the same one
+                            // `OMEGA-DELTA-0119` set, and it matters more here:
+                            // this buffer has no file behind it at all, so
+                            // typing into it could not be kept even if zero
+                            // base admitted `workspace::Save`.
+                            editor.set_read_only(true);
+                            editor.set_show_breakpoints(false, cx);
+                            editor.set_show_code_actions(false, cx);
+                            editor.set_show_runnables(false, cx);
+                            editor
+                        });
+                        this.state = PeekState::Ready {
+                            editor,
+                            abs_path: None,
+                        };
+                        cx.notify();
+                    })
+                    .log_err();
+                }
+                Err(error) => {
+                    this.update(cx, |this, cx| {
+                        this.state = PeekState::Failed {
+                            reason: error.to_string().into(),
+                        };
+                        cx.notify();
+                    })
+                    .log_err();
+                }
+            }
+        });
+
+        Self {
+            focus_handle: cx.focus_handle(),
+            subject: PeekSubject::Text { title },
             state: PeekState::Loading,
             _open: open,
         }
@@ -403,7 +589,10 @@ impl FilePeek {
 
     /// The line the header prints beside the path, or nothing.
     fn anchor_label(&self) -> Option<SharedString> {
-        let anchor = self.request.anchor?;
+        let PeekSubject::Path(request) = &self.subject else {
+            return None;
+        };
+        let anchor = request.anchor?;
         Some(
             match (anchor.end_line, anchor.column) {
                 (Some(end), _) if end != anchor.line => format!("Lines {}–{}", anchor.line, end),
@@ -421,13 +610,17 @@ impl FilePeek {
     /// the agent is running somewhere else — are told apart by reading the
     /// root list, so the list is never elided.
     fn render_unresolved(&self, cx: &App) -> AnyElement {
-        let roots = self.request.roots.clone();
+        let (written, roots) = match &self.subject {
+            PeekSubject::Path(request) => (request.written.clone(), request.roots.clone()),
+            // Unreachable: text is never looked for, so it is never missing.
+            // Drawing the same shape rather than panicking keeps a future
+            // fourth entry point from crashing the window it was meant to fix.
+            PeekSubject::Text { title } => (title.clone(), Vec::new()),
+        };
         v_flex()
             .p_4()
             .gap_2()
-            .child(
-                Label::new(format!("No file at “{}”.", self.request.written)).color(Color::Error),
-            )
+            .child(Label::new(format!("No file at “{written}”.")).color(Color::Error))
             .child(
                 Label::new(if roots.is_empty() {
                     "This thread has no working directory, so a relative path \
@@ -479,9 +672,13 @@ impl Render for FilePeek {
         let height = (viewport.height * 0.62).max(px(220.));
         let width = (viewport.width - px(96.)).min(px(1100.)).max(px(320.));
 
+        let written = self.subject.written();
         let path_label = match &self.state {
-            PeekState::Ready { abs_path, .. } => abs_path.to_string_lossy().into_owned(),
-            _ => self.request.written.to_string(),
+            PeekState::Ready {
+                abs_path: Some(abs_path),
+                ..
+            } => abs_path.to_string_lossy().into_owned(),
+            _ => written.to_string(),
         };
 
         v_flex()
@@ -560,10 +757,7 @@ impl Render for FilePeek {
                     .flex_1()
                     .p_4()
                     .gap_2()
-                    .child(
-                        Label::new(format!("Could not open “{}”.", self.request.written))
-                            .color(Color::Error),
-                    )
+                    .child(Label::new(format!("Could not open “{written}”.")).color(Color::Error))
                     .child(
                         Label::new(reason.clone())
                             .color(Color::Muted)
@@ -580,10 +774,23 @@ impl Render for FilePeek {
                     .border_t_1()
                     .border_color(cx.theme().colors().border)
                     .child(
-                        Label::new(format!("As written: {}", self.request.written))
-                            .color(Color::Muted)
-                            .size(LabelSize::XSmall)
-                            .truncate(),
+                        Label::new(match &self.subject {
+                            // The path exactly as it arrived, so a person can
+                            // compare the sheet to the message above it.
+                            PeekSubject::Path(request) => {
+                                format!("As written: {}", request.written)
+                            }
+                            // OMEGA-DELTA-0125. There is no "as written" for a
+                            // thread: nothing wrote it down. Saying where it
+                            // came from is what stops the sheet reading like a
+                            // file that has gone missing from the header.
+                            PeekSubject::Text { .. } => {
+                                "Rendered from this thread. Not a file on disk.".to_string()
+                            }
+                        })
+                        .color(Color::Muted)
+                        .size(LabelSize::XSmall)
+                        .truncate(),
                     ),
             )
     }

@@ -23,3 +23,10 @@ sha2.workspace = true
 omega_exo_episode.workspace = true
 omega_exo_lane.workspace = true
 omega_exo_log.workspace = true
+
+# OMEGA-DELTA-0125. The zero-base admitted set, so the check on the thread
+# header's menu asks the gate whether an entry's action is refused rather than
+# keeping a second copy of the answer. A list restated in a test is a list that
+# goes stale silently, which is the failure mode this whole crate exists for.
+# Another leaf: no gpui, no process, no filesystem.
+omega_zero_base.workspace = true

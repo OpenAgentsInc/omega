@@ -113,7 +113,67 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0122",
     "OMEGA-DELTA-0123",
     "OMEGA-DELTA-0124",
+    "OMEGA-DELTA-0125",
 ];
+
+/// OMEGA-DELTA-0125. Every entry the thread header's `…` menu offers, the
+/// action a click on it finally reaches, and whether zero base offers it.
+///
+/// The third column is not a preference. It is `admits_action` of the second,
+/// and `a_thread_menu_entry_lands_somewhere_a_person_can_see` asserts exactly
+/// that — an entry is offered in a sealed zero base if and only if the gate
+/// admits what it dispatches. Writing the expected answer down beside the
+/// action is what makes the assertion able to fail in both directions: an entry
+/// shown while dispatching into a refused surface, and an entry hidden for a
+/// reason that has since stopped being true.
+///
+/// "Finally reaches" matters. `Skills` dispatches `agent::ManageSkills`, which
+/// the gate admits, and `manage_skills` then dispatches
+/// `omega::OpenSettingsAt`, which it does not. `Settings` is the same shape
+/// through `open_configuration` and `omega::OpenSettingsPage`. An entry is only
+/// as reachable as the last hop, and a check that read the first hop would have
+/// passed both of the two entries the owner was actually complaining about.
+pub const THREAD_MENU_ENTRIES: &[(&str, &str, bool)] = &[
+    ("Add Server…", "omega::OpenSettingsAt", false),
+    ("Install New Servers…", "omega::Extensions", false),
+    ("Skills", "omega::OpenSettingsAt", false),
+    ("Settings", "omega::OpenSettingsPage", false),
+    ("Profiles", "agent::ManageProfiles", true),
+    // `OMEGA-DELTA-0118`. This entry names one action per mode — the workspace
+    // sidebar in the editor, this panel's own in zero base — so the action
+    // below is the one a *sealed* click reaches, which is the case this
+    // invariant is about.
+    (
+        "Toggle Threads Sidebar",
+        "agent::ToggleThreadsSidebar",
+        true,
+    ),
+];
+
+/// OMEGA-DELTA-0125. Entries in the same menu that reach no action at all.
+///
+/// These call a handler directly rather than dispatching, so the action gate
+/// never sees them and `THREAD_MENU_ENTRIES` cannot describe them. Each one
+/// used to end in the centre pane — the exact `OMEGA-DELTA-0119` failure — and
+/// each is now routed to the reader first. They are listed so that the label
+/// census below can account for every entry in the menu.
+pub const THREAD_MENU_READER_ENTRIES: &[&str] = &["Open Thread as Markdown"];
+
+/// OMEGA-DELTA-0125. Entries this delta deliberately does not decide.
+///
+/// `Regenerate Thread Title`, `Reauthenticate` and `Log Out` are agent-namespace
+/// work that never leaves the panel: nothing about them turns on whether a
+/// centre pane is drawn. They are listed rather than omitted so the census
+/// below accounts for every entry in the menu and a new one cannot arrive by
+/// resembling these.
+pub const THREAD_MENU_ENTRIES_NOT_DECIDED_HERE: &[&str] =
+    &["Regenerate Thread Title", "Reauthenticate", "Log Out"];
+
+/// OMEGA-DELTA-0125. The name of the boolean that hides an entry in zero base.
+///
+/// One name, checked, so the guard cannot be spelled three ways in one menu and
+/// leave a reader unsure which entries it covers.
+pub const THREAD_MENU_GUARD: &str = "offers_editor_surfaces";
 
 /// OMEGA-DELTA-0119. The read-only sheet a transcript file link opens in a
 /// mode that draws no editor.
@@ -16610,4 +16670,426 @@ mod tests {
             search_path.display()
         );
     }
+
+    // ---------------------------------------------------------------------
+    // OMEGA-DELTA-0125 — the thread header's `…` menu, in a mode that draws
+    // no editor
+    // ---------------------------------------------------------------------
+
+    /// The body of a module-level function, up to its closing brace.
+    ///
+    /// OMEGA-DELTA-0125. `method_body` stops at an `impl` member's indent and
+    /// runs straight past the end of a free function, which would let every
+    /// negative check below assert something about the next function down.
+    fn free_fn_body<'source>(
+        source: &'source str,
+        signature: &str,
+        path: &std::path::Path,
+        note: &str,
+    ) -> &'source str {
+        let after = source
+            .split_once(signature)
+            .map(|(_, rest)| rest)
+            .unwrap_or_else(|| {
+                panic!(
+                    "OMEGA-DELTA-0125: {} no longer has `{signature}`. {note}",
+                    path.display()
+                )
+            });
+        after.split_once("\n}\n").map_or(after, |(body, _)| body)
+    }
+
+    /// Every `.action("…"` and `.entry("…"` label in a menu builder, once each.
+    ///
+    /// OMEGA-DELTA-0125. The census that makes the table below able to fail on
+    /// an entry nobody classified. A check that only looked up the labels it
+    /// already knew would stay green forever while a new entry dispatched
+    /// straight into the sealed centre — which is the defect this delta exists
+    /// to stop recurring, not merely to fix once.
+    fn menu_entry_labels(body: &str) -> Vec<String> {
+        let mut labels = Vec::new();
+        for opener in [".action(", ".entry("] {
+            let mut rest = body;
+            while let Some(at) = rest.find(opener) {
+                rest = &rest[at + opener.len()..];
+                let Some(quote) = rest.find('"') else { break };
+                // Only a literal that *starts* the argument list is a label, so
+                // a string deeper inside the call — a settings path, a URL —
+                // cannot be mistaken for one.
+                if rest[..quote].chars().any(|ch| !ch.is_whitespace()) {
+                    continue;
+                }
+                let after = &rest[quote + 1..];
+                let Some(end) = after.find('"') else { break };
+                labels.push(after[..end].to_string());
+            }
+        }
+        labels.sort();
+        labels.dedup();
+        labels
+    }
+
+    /// The `if <guard> {` blocks in `body`, as byte ranges.
+    ///
+    /// OMEGA-DELTA-0125. Brace-matched rather than line-counted, because the
+    /// entries this guards are multi-line calls and a line heuristic would
+    /// place an entry inside a block it merely follows.
+    fn guarded_spans(body: &str, guard: &str) -> Vec<(usize, usize)> {
+        let opener = format!("if {guard} {{");
+        let mut spans = Vec::new();
+        let mut from = 0;
+        while let Some(at) = body[from..].find(&opener) {
+            let start = from + at;
+            let mut depth = 0usize;
+            let mut end = body.len();
+            for (offset, ch) in body[start..].char_indices() {
+                match ch {
+                    '{' => depth += 1,
+                    '}' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            end = start + offset;
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            spans.push((start, end));
+            from = start + opener.len();
+        }
+        spans
+    }
+
+    /// The same source with every whole-line comment dropped.
+    ///
+    /// OMEGA-DELTA-0125. The repairs below explain themselves by naming the
+    /// call that produced the bug — "`add_item_to_active_pane` puts the
+    /// rendered thread in the centre pane" sits directly above the line that
+    /// stops it happening. A check that could not tell prose apart from code
+    /// would read that comment as the pane opener, conclude the reader runs
+    /// second, and force the repair to stop explaining itself to stay green.
+    /// This was not hypothetical: the ordering check failed on its own comment
+    /// the first time it was run.
+    fn without_comments(source: &str) -> String {
+        source
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// Every byte offset at which `needle` occurs in `haystack`.
+    fn occurrences(haystack: &str, needle: &str) -> Vec<usize> {
+        let mut found = Vec::new();
+        let mut from = 0;
+        while let Some(at) = haystack[from..].find(needle) {
+            found.push(from + at);
+            from += at + needle.len();
+        }
+        found
+    }
+
+    /// OMEGA-DELTA-0125. An entry the thread header offers in a sealed zero
+    /// base ends somewhere a person can see it.
+    ///
+    /// The owner, on a live build: *"literally nothing in this top right menu
+    /// does anything when i click on it. if its easy to reenable those things
+    /// to actually work, do it, otherwise hide the menu."*
+    ///
+    /// Two different causes wore that one symptom, and separating them is the
+    /// whole of the repair:
+    ///
+    /// - **Refused.** `Add Server…`, `Install New Servers…`, `Skills` and
+    ///   `Settings` all reach the `omega` namespace, which the action gate
+    ///   refuses. Two of them reach it on the *second* hop —
+    ///   `agent::ManageSkills` and `agent::OpenSettings` are admitted, and
+    ///   `manage_skills` and `open_configuration` then dispatch
+    ///   `omega::OpenSettingsAt` and `omega::OpenSettingsPage`. A check that
+    ///   read only the action the menu names would have passed both.
+    /// - **Invisible.** `Open Thread as Markdown` and the two AGENTS.md entries
+    ///   dispatched nothing at all; they called a handler that opened an item
+    ///   in the centre pane, which `OMEGA-DELTA-0053` does not draw. That half
+    ///   is `a_menu_entry_that_opens_a_buffer_opens_the_reader_instead`.
+    ///
+    /// The invariant here is one sentence: **an entry is offered in a sealed
+    /// zero base exactly when the gate admits what its click finally reaches.**
+    /// It fails in both directions on purpose — a hidden entry whose surface
+    /// has since become reachable is a subtraction nobody re-examined, and it
+    /// should be re-examined rather than left as folklore.
+    #[test]
+    fn a_thread_menu_entry_lands_somewhere_a_person_can_see() {
+        let panel_path = repository_path(AGENT_PANEL_PATH);
+        // Comments first, for `without_comments`' reason: the guard's own
+        // comment names the settings-window controls that decided the
+        // question, and a label census that read prose would count them.
+        let panel = without_comments(&read_repository_file(AGENT_PANEL_PATH));
+        let menu = method_body(
+            &panel,
+            "fn render_panel_options_menu(",
+            &panel_path,
+            "That is the thread header's `…` menu, and every check below is \
+             about what it offers.",
+        );
+
+        assert!(
+            panel.contains(&format!(
+                "let {THREAD_MENU_GUARD} = !omega_zero_base::is_sealed();"
+            )),
+            "OMEGA-DELTA-0125: {} no longer decides the menu on the seal. \
+             `is_sealed` is the exact moment the centre pane and the editor's \
+             own surfaces stop being drawn; `is_active` is earlier, and \
+             hiding on it would subtract these entries from the identity gate \
+             too, where they still work.",
+            panel_path.display()
+        );
+
+        let spans = guarded_spans(menu, THREAD_MENU_GUARD);
+        assert!(
+            !spans.is_empty(),
+            "OMEGA-DELTA-0125: {} has no `if {THREAD_MENU_GUARD} {{` block in \
+             the menu, so nothing is hidden from a sealed zero base and every \
+             settings entry is a dead click again.",
+            panel_path.display()
+        );
+        let guarded = |at: usize| spans.iter().any(|(start, end)| at > *start && at < *end);
+
+        for (label, action, offered_in_zero_base) in THREAD_MENU_ENTRIES {
+            assert_eq!(
+                omega_zero_base::admits_action(action),
+                *offered_in_zero_base,
+                "OMEGA-DELTA-0125: `{label}` reaches `{action}`, which zero \
+                 base now {}. The menu and the gate have to agree: an entry \
+                 shown while its action is refused is the dead click the owner \
+                 reported, and an entry hidden while its action is admitted is \
+                 a capability withheld for a reason that has expired. Change \
+                 `THREAD_MENU_ENTRIES` and the guard in {} together, \
+                 deliberately.",
+                if omega_zero_base::admits_action(action) {
+                    "admits"
+                } else {
+                    "refuses"
+                },
+                panel_path.display()
+            );
+
+            let quoted = format!("\"{label}\"");
+            let sites = occurrences(menu, &quoted);
+            assert!(
+                !sites.is_empty(),
+                "OMEGA-DELTA-0125: the menu in {} no longer offers `{label}`. \
+                 If it was removed on purpose, remove it from \
+                 `THREAD_MENU_ENTRIES` too; a table that describes entries \
+                 that no longer exist stops describing the ones that do.",
+                panel_path.display()
+            );
+            for site in sites {
+                assert_eq!(
+                    guarded(site),
+                    !*offered_in_zero_base,
+                    "OMEGA-DELTA-0125: `{label}` in {} is {} `if \
+                     {THREAD_MENU_GUARD} {{`, and it reaches `{action}`, which \
+                     the gate {}. {}",
+                    panel_path.display(),
+                    if guarded(site) { "inside" } else { "outside" },
+                    if *offered_in_zero_base {
+                        "admits"
+                    } else {
+                        "refuses"
+                    },
+                    if *offered_in_zero_base {
+                        "Hiding it takes away something that works."
+                    } else {
+                        "Showing it puts a control in front of a person that \
+                         cannot do anything when pressed."
+                    }
+                );
+            }
+        }
+
+        // The census. Every entry in the menu is classified somewhere, so a new
+        // one cannot arrive unexamined.
+        let mut expected = Vec::new();
+        expected.extend(THREAD_MENU_ENTRIES.iter().map(|(label, _, _)| *label));
+        expected.extend(THREAD_MENU_READER_ENTRIES.iter().copied());
+        expected.extend(THREAD_MENU_ENTRIES_NOT_DECIDED_HERE.iter().copied());
+        expected.sort_unstable();
+        let found = menu_entry_labels(menu);
+        let mut expected: Vec<String> = expected.into_iter().map(str::to_string).collect();
+        expected.dedup();
+        assert_eq!(
+            found,
+            expected,
+            "OMEGA-DELTA-0125: the entries in {}'s `…` menu are not the ones \
+             this delta classified. Add the new or renamed entry to \
+             `THREAD_MENU_ENTRIES` with the action a click on it finally \
+             reaches — the *last* hop, not the one the menu names — or to \
+             `THREAD_MENU_READER_ENTRIES` if it opens a reader, or to \
+             `THREAD_MENU_ENTRIES_NOT_DECIDED_HERE` with a sentence saying \
+             who owns it. An entry nobody classified is how a dead click gets \
+             back into this menu.",
+            panel_path.display()
+        );
+
+        // The second hop, grounded in the source rather than in this comment.
+        // If either of these stops dispatching into the `omega` namespace, the
+        // hiding above is no longer justified and somebody should re-open it.
+        for (method, dispatched) in [
+            ("fn manage_skills(", "zed_actions::OpenSettingsAt {"),
+            ("fn open_configuration(", "zed_actions::OpenSettingsPage {"),
+        ] {
+            let body = method_body(
+                &panel,
+                method,
+                &panel_path,
+                "It is the second hop behind a menu entry, and the reason that \
+                 entry is hidden in zero base.",
+            );
+            assert!(
+                body.contains(dispatched),
+                "OMEGA-DELTA-0125: `{method}` in {} no longer dispatches \
+                 `{dispatched}`. `Skills` and `Settings` are hidden in a \
+                 sealed zero base *because* they land in the `omega` \
+                 namespace one hop later. If that changed, re-decide whether \
+                 they can be offered again rather than leaving them hidden \
+                 for a reason that is no longer true.",
+                panel_path.display()
+            );
+        }
+    }
+
+    /// OMEGA-DELTA-0125. A menu entry whose content is a buffer opens the
+    /// reader, not a pane nobody draws.
+    ///
+    /// `OMEGA-DELTA-0119` built that reader for a transcript link and left
+    /// three menu entries going the old way. `Open Thread as Markdown` called
+    /// `add_item_to_active_pane`; the two AGENTS.md entries called
+    /// `open_abs_path`. Both put an editor in the centre pane, took the
+    /// composer's focus with them, and drew nothing — the identical invisible
+    /// success, reported the identical way.
+    ///
+    /// Order is the substance of this check. The reader has to be offered the
+    /// click *before* the pane opener, because the first handler to take it
+    /// wins; a repair that ran second would be a repair that never runs.
+    #[test]
+    fn a_menu_entry_that_opens_a_buffer_opens_the_reader_instead() {
+        let panel_path = repository_path(AGENT_PANEL_PATH);
+        let panel = without_comments(&read_repository_file(AGENT_PANEL_PATH));
+
+        for opener in ["fn open_project_rules(", "fn open_global_rules("] {
+            let body = free_fn_body(
+                &panel,
+                opener,
+                &panel_path,
+                "It is what the AGENTS.md entries in the thread header's menu \
+                 call.",
+            );
+            let reader = body
+                .find("crate::omega_file_peek::open_file(")
+                .unwrap_or_else(|| {
+                    panic!(
+                        "OMEGA-DELTA-0125: `{opener}` in {} no longer offers \
+                         the file to the reader, so the AGENTS.md entry opens \
+                         into a centre pane that a sealed zero base does not \
+                         draw, and the owner sees nothing again.",
+                        panel_path.display()
+                    )
+                });
+            let pane = body.find("open_abs_path(").unwrap_or_else(|| {
+                panic!(
+                    "OMEGA-DELTA-0125: `{opener}` in {} no longer opens the \
+                     file in a pane at all. The full editor must keep that: a \
+                     read-only sheet is the right answer only where there is \
+                     no pane to draw.",
+                    panel_path.display()
+                )
+            });
+            assert!(
+                reader < pane,
+                "OMEGA-DELTA-0125: `{opener}` in {} opens the pane before \
+                 offering the reader. The first one to take the click wins, so \
+                 a reader that runs second never runs.",
+                panel_path.display()
+            );
+        }
+
+        let thread_path = repository_path(THREAD_VIEW_PATH);
+        let thread = without_comments(&read_repository_file(THREAD_VIEW_PATH));
+        let body = free_fn_body(
+            &thread,
+            "pub fn open_markdown_in_workspace(",
+            &thread_path,
+            "Every \"Open Thread as Markdown\" in the product funnels through \
+             it — the header menu, the message context menu, the panel action \
+             and the threads sidebar — which is why the sealed case is decided \
+             there once.",
+        );
+        let reader = body
+            .find("crate::omega_file_peek::open_text(")
+            .unwrap_or_else(|| {
+                panic!(
+                    "OMEGA-DELTA-0125: {} no longer offers the rendered thread \
+                     to the reader. `Open Thread as Markdown` then builds the \
+                     markdown, creates an editor, moves focus out of the \
+                     composer, and draws nothing.",
+                    thread_path.display()
+                )
+            });
+        let pane = body.find("add_item_to_active_pane").unwrap_or_else(|| {
+            panic!(
+                "OMEGA-DELTA-0125: {} no longer opens the thread in a pane at \
+                 all. A full editor must keep the pane.",
+                thread_path.display()
+            )
+        });
+        assert!(
+            reader < pane,
+            "OMEGA-DELTA-0125: {} adds the item to the pane before offering \
+             the reader, so the reader never runs.",
+            thread_path.display()
+        );
+        assert!(
+            body.contains("omega_zero_base::is_sealed()"),
+            "OMEGA-DELTA-0125: {} no longer gates on the seal. Before the \
+             seal the ordinary workspace still renders `OMEGA-DELTA-0040`'s \
+             identity gate, and a real pane there is strictly better than a \
+             read-only sheet.",
+            thread_path.display()
+        );
+
+        // Both new entry points into the reader gate on the same moment the
+        // transcript link does, and neither reaches for a pane on the way.
+        let peek_path = repository_path(FILE_PEEK_PATH);
+        let peek = without_comments(&read_repository_file(FILE_PEEK_PATH));
+        for entry_point in ["pub fn open_file(", "pub fn open_text("] {
+            let body = peek
+                .split_once(entry_point)
+                .map(|(_, rest)| rest)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "OMEGA-DELTA-0125: {} no longer has `{entry_point}`, so \
+                     the menu entries have nowhere to send a click that is not \
+                     a pane.",
+                        peek_path.display()
+                    )
+                });
+            let body = body.split_once("\n}\n").map_or(body, |(body, _)| body);
+            assert!(
+                body.contains("if !omega_zero_base::is_sealed() {"),
+                "OMEGA-DELTA-0125: `{entry_point}` in {} no longer declines \
+                 outside the seal. A reader that took the click in a full \
+                 editor would replace a real, editable, savable pane with a \
+                 read-only sheet — a regression dressed as a fix.",
+                peek_path.display()
+            );
+        }
+    }
+
+    // OMEGA-DELTA-0125 note. Cause one of the three — that `report_refusal`
+    // downcast the active window to `Workspace`, which is never a window root,
+    // so every refusal this gate has ever made was silent — was found
+    // independently by the threads-sidebar lane and is repaired and enforced by
+    // `OMEGA-DELTA-0118`'s `zero_bases_threads_sidebar_is_its_own`. There is no
+    // second check for it here on purpose: two checks over one line is how one
+    // of them ends up guarding a spelling nobody kept.
 }

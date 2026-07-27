@@ -12006,6 +12006,7 @@ dependencies = [
  "omega_exo_episode",
  "omega_exo_lane",
  "omega_exo_log",
+ "omega_zero_base",
  "serde_json",
  "sha2",
 ]

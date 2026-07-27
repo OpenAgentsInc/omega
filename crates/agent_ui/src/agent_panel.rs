@@ -262,6 +262,14 @@ fn project_agents_md_path(
 }
 
 fn open_global_rules(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
+    // OMEGA-DELTA-0125. `open_abs_path` opens an item in the centre pane, which
+    // `OMEGA-DELTA-0053` does not draw once zero base is sealed. The owner
+    // clicked this entry and reported that nothing happened; the file opened,
+    // took the composer's focus, and landed somewhere with no pixels. The
+    // reader declines outside the seal, so a full editor keeps the pane.
+    if crate::omega_file_peek::open_file(workspace, paths::agents_file().clone(), window, cx) {
+        return;
+    }
     workspace
         .open_abs_path(
             paths::agents_file().clone(),
@@ -277,6 +285,19 @@ fn open_global_rules(workspace: &mut Workspace, window: &mut Window, cx: &mut Co
 
 fn open_project_rules(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
     if let Some(path) = project_agents_md_path(workspace.project(), false, cx) {
+        // OMEGA-DELTA-0125. As above. This is the entry the owner named —
+        // "Open Project Rules (AGENTS.md)".
+        //
+        // The menu offers it only when the file exists (`project_agents_md_path`
+        // with `require_existing_file`), and this resolves without that check,
+        // so a file deleted between the menu being built and the entry being
+        // clicked lands in the reader's "No file at …" state rather than in
+        // silence. That gap is small and it is the one worth drawing for: a
+        // repair whose own failure mode is a dead click has not repaired
+        // anything.
+        if crate::omega_file_peek::open_file(workspace, path.clone(), window, cx) {
+            return;
+        }
         workspace
             .open_abs_path(
                 path,
@@ -6132,6 +6153,27 @@ impl AgentPanel {
             .and_then(|md| md.content())
             .is_some();
 
+        // OMEGA-DELTA-0125. Does this window have the editor's own settings and
+        // extension surfaces to send a click to?
+        //
+        // The owner, on a live build: *"literally nothing in this top right
+        // menu does anything when i click on it. if its easy to reenable those
+        // things to actually work, do it, otherwise hide the menu."* Four
+        // entries here reach `omega::OpenSettingsAt`, `omega::Extensions` or
+        // `omega::OpenSettingsPage` — directly, or one hop later through
+        // `manage_skills` and `open_configuration` — and zero base refuses the
+        // whole `omega` namespace at the action gate. They are hidden rather
+        // than admitted, for two reasons that are not squeamishness: the
+        // settings window carries controls ("Open Current Settings File", "Open
+        // Keymap") that close themselves and open a buffer in *this* workspace,
+        // which is the sealed centre, so admitting it would import the same
+        // dead click one level down; and `OMEGA-DELTA-0048` already recorded
+        // that the settings and extension surfaces reach nothing in Omega.
+        //
+        // The seal, not the mode: before it the ordinary workspace still
+        // renders, and these entries work there exactly as upstream.
+        let offers_editor_surfaces = !omega_zero_base::is_sealed();
+
         let workspace = self.workspace.clone();
 
         PopoverMenu::new("agent-options-menu")
@@ -6196,27 +6238,42 @@ impl AgentPanel {
                         }
 
                         if !showing_terminal {
-                            menu = menu
-                                .header("MCP Servers")
-                                .action(
-                                    "Add Server…",
-                                    Box::new(zed_actions::OpenSettingsAt {
-                                        path: "context_servers".to_string(),
-                                        target: None,
-                                    }),
-                                )
-                                .action(
-                                    "Install New Servers…",
-                                    Box::new(zed_actions::Extensions {
-                                        category_filter: Some(
-                                            zed_actions::ExtensionCategoryFilter::ContextServers,
-                                        ),
-                                        id: None,
-                                    }),
-                                )
-                                .separator()
-                                .header("Context")
-                                .action("Skills", Box::new(ManageSkills));
+                            if offers_editor_surfaces {
+                                menu = menu
+                                    .header("MCP Servers")
+                                    .action(
+                                        "Add Server…",
+                                        Box::new(zed_actions::OpenSettingsAt {
+                                            path: "context_servers".to_string(),
+                                            target: None,
+                                        }),
+                                    )
+                                    .action(
+                                        "Install New Servers…",
+                                        Box::new(zed_actions::Extensions {
+                                            category_filter: Some(
+                                                zed_actions::ExtensionCategoryFilter::ContextServers,
+                                            ),
+                                            id: None,
+                                        }),
+                                    )
+                                    .separator();
+                            }
+
+                            // The header still belongs to the AGENTS.md entries
+                            // when Skills is hidden; a "Context" heading over
+                            // nothing, or rules with no heading, are both worse
+                            // than reordering one line.
+                            let has_context_section = offers_editor_surfaces
+                                || project_agents_md_path.is_some()
+                                || global_agents_md_loaded;
+                            if has_context_section {
+                                menu = menu.header("Context");
+                            }
+
+                            if offers_editor_surfaces {
+                                menu = menu.action("Skills", Box::new(ManageSkills));
+                            }
 
                             if project_agents_md_path.is_some() || global_agents_md_loaded {
                                 if global_agents_md_loaded {
@@ -6271,9 +6328,26 @@ impl AgentPanel {
                                 }
                             }
 
-                            menu = menu
-                                .separator()
-                                .action("Profiles", Box::new(ManageProfiles::default()));
+                            // A separator only where there is something above
+                            // it to separate. In a sealed zero base with no
+                            // folder open there is no MCP section, no Skills
+                            // and no rules file, and an unconditional one would
+                            // draw a rule across the top of the menu.
+                            if has_context_section {
+                                menu = menu.separator();
+                            }
+
+                            // Profiles stays. It is `agent::ManageProfiles`,
+                            // which the gate admits, and it opens a modal —
+                            // and the modal layer is rendered by
+                            // `MultiWorkspace` outside the seal, which is why
+                            // the command palette still works. It is the one
+                            // entry in this menu that was never broken.
+                            menu = menu.action("Profiles", Box::new(ManageProfiles::default()));
+                        }
+
+                        if offers_editor_surfaces {
+                            menu = menu.action("Settings", Box::new(OpenSettings));
                         }
 
                         // OMEGA-DELTA-0118. The entry names the action that
@@ -6288,7 +6362,6 @@ impl AgentPanel {
                         // zero base has no `MultiWorkspace` surface and gets
                         // this panel's own.
                         menu = menu
-                            .action("Settings", Box::new(OpenSettings))
                             .separator()
                             .action(
                                 "Toggle Threads Sidebar",
