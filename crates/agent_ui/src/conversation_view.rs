@@ -1187,19 +1187,24 @@ impl ConversationView {
                 this.message_editor.update(cx, |editor, cx| {
                     editor.set_session_capabilities(this.session_capabilities.clone(), cx);
                 });
-                // omega#112. Put the cursor back in the composer.
-                //
-                // `PopoverMenu` restores focus to whatever held it before the
-                // menu opened, which is normally right — but this rebuild
-                // replaced the whole thread view, so the handle it restores to
-                // belongs to an editor that no longer exists. The owner is left
-                // with a composer they have to click before typing, right after
-                // choosing who they are about to type to.
-                this.message_editor
-                    .read(cx)
-                    .focus_handle(cx)
-                    .focus(window, cx);
             });
+
+            // omega#112. Put the cursor back in the composer — and omega#116:
+            // *outside* the update above, which is not a style preference.
+            //
+            // `PopoverMenu` restores focus to whatever held it before the menu
+            // opened, which is normally right; this rebuild replaced the whole
+            // thread view, so the handle it restores to belongs to an editor
+            // that no longer exists.
+            //
+            // Focusing dispatches focus handlers synchronously, and those read
+            // the `ThreadView`. Done inside `view.update`, that is a second
+            // lease on an entity already mutably borrowed, and GPUI panics —
+            // `cannot read ThreadView while it is already being updated`, at
+            // launch, before any window appears. Reading the handle out first
+            // and focusing after the borrow has ended is what makes it safe.
+            let composer = view.read(cx).message_editor.read(cx).focus_handle(cx);
+            composer.focus(window, cx);
         } else {
             // `OMEGA-DELTA-0122`. Which is the ordinary case here, not the
             // fallback: the rebuild has just put this view back into `Loading`,
