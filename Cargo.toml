@@ -1037,6 +1037,18 @@ syn = { opt-level = 3 }
 proc-macro2 = { opt-level = 3 }
 # proc-macros end
 
+# omega#111. The ACP handler tower is eleven nested `ChainedHandler` generics,
+# each wrapping the last. Unoptimized, every layer keeps a full stack frame, and
+# polling the connection future overflows the 512K stack of the libdispatch
+# worker thread GPUI's background executor runs it on — a stack-guard SIGILL
+# inside `handle_incoming_dispatch`, not a logic fault.
+#
+# Optimizing just these two crates collapses the intermediate frames. It is the
+# narrowest fix that keeps the rest of the tree debuggable: a full release build
+# would hide the frames of every crate, and raising the thread's stack would
+# treat the symptom in a place that has nothing to do with ACP.
+agent-client-protocol = { opt-level = 2 }
+
 tree-sitter = { opt-level = 3 }
 taffy = { opt-level = 3 }
 resvg = { opt-level = 3 }
