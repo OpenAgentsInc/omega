@@ -133,6 +133,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0142",
     "OMEGA-DELTA-0143",
     "OMEGA-DELTA-0144",
+    "OMEGA-DELTA-0145",
 ];
 
 /// OMEGA-DELTA-0125. Every entry the thread header's `…` menu offers, the
@@ -148,15 +149,13 @@ pub const ENFORCED_DELTAS: &[&str] = &[
 ///
 /// "Finally reaches" matters. `Skills` dispatches `agent::ManageSkills`, which
 /// the gate admits, and `manage_skills` then dispatches
-/// `omega::OpenSettingsAt`, which is now admitted. `Settings` is the same shape
-/// through `open_configuration` and `omega::OpenSettingsPage`. An entry is only
-/// as reachable as the last hop, and a check that read the first hop would have
-/// passed both of the two entries the owner was actually complaining about.
+/// `omega::OpenSettingsAt`, which is now admitted. `Settings` directly
+/// dispatches `omega::OpenSettings`.
 pub const THREAD_MENU_ENTRIES: &[(&str, &str, bool)] = &[
     ("Add Server…", "omega::OpenSettingsAt", true),
     ("Install New Servers…", "omega::Extensions", false),
     ("Skills", "omega::OpenSettingsAt", true),
-    ("Settings", "omega::OpenSettingsPage", true),
+    ("Settings", "omega::OpenSettings", true),
     ("Profiles", "agent::ManageProfiles", true),
     // `OMEGA-DELTA-0118`. This entry names one action per mode — the workspace
     // sidebar in the editor, this panel's own in zero base — so the action
@@ -17322,27 +17321,20 @@ mod tests {
             panel_path.display()
         );
 
-        // The second hop, grounded in the source rather than in this comment.
-        // Both final actions must stay admitted because their menu entries are
-        // now visible in zero base.
-        for (method, dispatched) in [
-            ("fn manage_skills(", "zed_actions::OpenSettingsAt {"),
-            ("fn open_configuration(", "zed_actions::OpenSettingsPage {"),
-        ] {
-            let body = method_body(
-                &panel,
-                method,
-                &panel_path,
-                "It is the second hop behind a visible settings entry.",
-            );
-            assert!(
-                body.contains(dispatched),
-                "OMEGA-DELTA-0125: `{method}` in {} no longer dispatches \
-                 `{dispatched}`. `Skills` and `Settings` are visible in zero \
-                 base because these final actions open the settings window.",
-                panel_path.display()
-            );
-        }
+        // The second hop behind Skills, grounded in the source rather than in
+        // this comment.
+        let manage_skills = method_body(
+            &panel,
+            "fn manage_skills(",
+            &panel_path,
+            "It is the second hop behind a visible settings entry.",
+        );
+        assert!(
+            manage_skills.contains("zed_actions::OpenSettingsAt {"),
+            "OMEGA-DELTA-0125: `manage_skills` in {} no longer opens the \
+             settings window.",
+            panel_path.display()
+        );
     }
 
     /// OMEGA-DELTA-0125. A menu entry whose content is a buffer opens the
@@ -19061,6 +19053,82 @@ mod tests {
             router.contains("exo_lane_path: Option<PathBuf>"),
             "OMEGA-DELTA-0144: the router once again requires an Exo path on \
              every launch."
+        );
+    }
+
+    /// OMEGA-DELTA-0145. Settings is Omega's focused credential surface; the
+    /// inherited settings editor is explicitly Legacy Settings.
+    #[test]
+    fn focused_settings_separates_provider_keys_from_legacy_settings() {
+        let actions = without_comments(&read_repository_file("crates/zed_actions/src/lib.rs"));
+        assert!(
+            actions.contains("OpenLegacySettings"),
+            "OMEGA-DELTA-0145: the full inherited editor no longer has a \
+             separately named Legacy Settings action."
+        );
+
+        let menus = without_comments(&read_repository_file("crates/zed/src/zed/app_menus.rs"));
+        for required in [
+            "\"Open Settings\", zed_actions::OpenSettings",
+            "\"Open Legacy Settings\", zed_actions::OpenLegacySettings",
+        ] {
+            assert!(
+                menus.contains(required),
+                "OMEGA-DELTA-0145: the application menu lost `{required}`."
+            );
+        }
+
+        let settings = without_comments(&read_repository_file(
+            "crates/settings_ui/src/settings_ui.rs",
+        ));
+        for required in [
+            "enum SettingsWindowKind",
+            "Self::Omega => \"Omega — Settings\"",
+            "Self::Legacy => \"Omega — Legacy Settings\"",
+            "open_omega_settings_editor(None, cx)",
+            "SettingsWindowKind::Omega => page_data::omega_settings_data(cx)",
+            "SettingsWindowKind::Legacy => page_data::settings_data(cx)",
+            "navigate_to_sub_page(\"llm_providers\", window, cx)",
+            "if path == Some(\"llm_providers\")",
+        ] {
+            assert!(
+                settings.contains(required),
+                "OMEGA-DELTA-0145: the focused/legacy settings split lost \
+                 `{required}`."
+            );
+        }
+
+        let page_data =
+            without_comments(&read_repository_file("crates/settings_ui/src/page_data.rs"));
+        let focused = method_body(
+            &page_data,
+            "pub(crate) fn omega_settings_data(",
+            &repository_path("crates/settings_ui/src/page_data.rs"),
+            "Focused Settings contains only Omega-owned provider credentials.",
+        );
+        for required in [
+            "title: \"API Keys\"",
+            "link.json_path == Some(\"llm_providers\")",
+        ] {
+            assert!(
+                focused.contains(required),
+                "OMEGA-DELTA-0145: focused Settings lost `{required}`."
+            );
+        }
+
+        let providers = without_comments(&read_repository_file(
+            "crates/settings_ui/src/pages/llm_providers_page.rs",
+        ));
+        assert!(
+            providers.contains("settings_window.is_focused_settings()")
+                && providers.contains("Some(ProviderSettingsView::ApiKey(_))"),
+            "OMEGA-DELTA-0145: focused Settings is no longer limited to \
+             provider API-key controls."
+        );
+
+        assert!(
+            omega_zero_base::admits_action("omega::OpenLegacySettings"),
+            "OMEGA-DELTA-0145: Legacy Settings is named but refused in zero base."
         );
     }
 }

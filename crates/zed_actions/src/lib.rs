@@ -42,6 +42,8 @@ actions!(
         /// Opens the settings editor.
         #[action(deprecated_aliases = ["zed::OpenSettings", "zed_actions::OpenSettingsEditor"])]
         OpenSettings,
+        /// Opens the full inherited settings editor.
+        OpenLegacySettings,
         /// Opens the settings JSON file.
         #[action(deprecated_aliases = ["zed::OpenSettingsFile", "zed_actions::OpenSettings"])]
         OpenSettingsFile,

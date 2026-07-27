@@ -82,6 +82,28 @@ pub(crate) fn settings_data(cx: &App) -> Vec<SettingsPage> {
     ]
 }
 
+/// The focused Omega settings surface.
+///
+/// The inherited editor remains available as Legacy Settings. This surface
+/// intentionally starts with the one category Omega currently owns: provider
+/// credentials.
+pub(crate) fn omega_settings_data(cx: &App) -> Vec<SettingsPage> {
+    let provider_items = ai_page(cx).items.into_vec().into_iter().filter(|item| {
+        matches!(
+            item,
+            SettingsPageItem::SubPageLink(link)
+                if link.json_path == Some("llm_providers")
+        )
+    });
+
+    let mut items = vec![SettingsPageItem::SectionHeader("Providers")];
+    items.extend(provider_items);
+    vec![SettingsPage {
+        title: "API Keys",
+        items: items.into_boxed_slice(),
+    }]
+}
+
 fn developer_page(cx: &App) -> SettingsPage {
     use feature_flags::FeatureFlagAppExt as _;
 

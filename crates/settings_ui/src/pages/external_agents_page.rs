@@ -8,6 +8,7 @@ use gpui::{
     WeakEntity, WindowHandle, prelude::*,
 };
 use itertools::Itertools as _;
+use omega_harness::{HarnessDistribution, HarnessFrontDoorState, PinControl, ProvenanceVerdict};
 use project::agent_server_store::{AgentId, AgentServerStore, ExternalAgentSource};
 use settings::{
     AgentConfigOptionValue, CustomAgentServerSettings, SettingsStore, update_settings_file,
@@ -16,7 +17,6 @@ use ui::{
     AiSettingItem, AiSettingItemSource, AiSettingItemStatus, ContextMenu, ContextMenuEntry,
     Divider, PopoverMenu, Tooltip, prelude::*,
 };
-use omega_harness::{HarnessDistribution, HarnessFrontDoorState, PinControl, ProvenanceVerdict};
 use util::ResultExt as _;
 use workspace::{MultiWorkspace, Workspace, create_and_open_local_file};
 
@@ -346,9 +346,7 @@ fn render_pin_control(
                 .icon_size(IconSize::Small)
                 .size(ButtonSize::Medium)
                 .disabled(true)
-                .tooltip(move |_, cx| {
-                    Tooltip::with_meta("Cannot Pin", None, reason.clone(), cx)
-                })
+                .tooltip(move |_, cx| Tooltip::with_meta("Cannot Pin", None, reason.clone(), cx))
                 .into_any_element()
         }
     }
@@ -413,10 +411,9 @@ fn render_maintenance_details(
             )),
             Color::Success,
         )),
-        ProvenanceVerdict::Refused(gap) => lines.push((
-            SharedString::from(gap.reason().to_string()),
-            Color::Warning,
-        )),
+        ProvenanceVerdict::Refused(gap) => {
+            lines.push((SharedString::from(gap.reason().to_string()), Color::Warning))
+        }
     }
     if let Some(error) = error {
         lines.push((error, Color::Error));
@@ -951,15 +948,14 @@ fn save_custom_agent_form(
 
     // Reject names that would collide with a *different* existing agent. This
     // covers both adding a new agent and renaming an existing one.
-    let collides_with_other_agent =
-        agent_server_store(settings_window, cx).is_some_and(|store| {
-            let existing_ids = store
-                .read(cx)
-                .external_agents()
-                .cloned()
-                .collect::<Vec<_>>();
-            name_collides_with_other_agent(&id, original_id.as_ref(), &existing_ids)
-        });
+    let collides_with_other_agent = agent_server_store(settings_window, cx).is_some_and(|store| {
+        let existing_ids = store
+            .read(cx)
+            .external_agents()
+            .cloned()
+            .collect::<Vec<_>>();
+        name_collides_with_other_agent(&id, original_id.as_ref(), &existing_ids)
+    });
     if collides_with_other_agent {
         if let Some(form) = settings_window.custom_agent_form.as_mut() {
             form.error = Some(format!("An agent named \"{}\" already exists.", id.0).into());

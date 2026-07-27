@@ -28,6 +28,17 @@ pub(crate) fn render_llm_providers_page(
     cx: &mut Context<SettingsWindow>,
 ) -> AnyElement {
     let providers = LanguageModelRegistry::read_global(cx).visible_providers();
+    let providers: Vec<_> = providers
+        .iter()
+        .filter(|provider| {
+            !settings_window.is_focused_settings()
+                || matches!(
+                    provider.settings_view(cx),
+                    Some(ProviderSettingsView::ApiKey(_))
+                )
+        })
+        .cloned()
+        .collect();
 
     v_flex()
         .id("llm-providers-page")

@@ -504,12 +504,6 @@ pub fn init(cx: &mut App) {
                         panel.update(cx, |panel, cx| panel.expand_message_editor(window, cx));
                     }
                 })
-                .register_action(|workspace, _: &OpenSettings, window, cx| {
-                    if let Some(panel) = workspace.panel::<AgentPanel>(cx) {
-                        workspace.focus_panel::<AgentPanel>(window, cx);
-                        panel.update(cx, |panel, cx| panel.open_configuration(window, cx));
-                    }
-                })
                 .register_action(|workspace, action: &NewExternalAgentThread, window, cx| {
                     if let Some(panel) = workspace.panel::<AgentPanel>(cx) {
                         workspace.focus_panel::<AgentPanel>(window, cx);
@@ -4669,16 +4663,6 @@ impl AgentPanel {
         }
     }
 
-    pub(crate) fn open_configuration(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        window.dispatch_action(
-            Box::new(zed_actions::OpenSettingsPage {
-                page: "AI".to_string(),
-                target: None,
-            }),
-            cx,
-        );
-    }
-
     pub(crate) fn open_active_thread_as_markdown(
         &mut self,
         _: &OpenActiveThreadAsMarkdown,
@@ -7632,9 +7616,6 @@ impl Render for AgentPanel {
             .on_action(cx.listener(|this, _: &NewTerminalThread, window, cx| {
                 cx.stop_propagation();
                 this.new_terminal(None, AgentThreadSource::AgentPanel, window, cx);
-            }))
-            .on_action(cx.listener(|this, _: &OpenSettings, window, cx| {
-                this.open_configuration(window, cx);
             }))
             .on_action(cx.listener(|this, _: &ToggleThreadsSidebar, _window, cx| {
                 this.toggle_threads_sidebar(cx);

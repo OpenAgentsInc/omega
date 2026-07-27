@@ -147,6 +147,7 @@ pub const ADMITTED_ACTIONS: &[&str] = &[
     "omega::IncreaseUiFontSize",
     "omega::Minimize",
     "omega::OpenSettings",
+    "omega::OpenLegacySettings",
     "omega::OpenSettingsAt",
     "omega::OpenSettingsPage",
     "omega::Quit",
@@ -312,6 +313,7 @@ mod tests {
             "command_palette::Toggle",
             "omega::Quit",
             "omega::OpenSettings",
+            "omega::OpenLegacySettings",
             "omega::OpenSettingsAt",
             "omega::OpenSettingsPage",
             // omega#99. The action that releases `await_identity_ready`.

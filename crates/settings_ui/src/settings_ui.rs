@@ -48,8 +48,8 @@ use workspace::{
     client_side_decorations,
 };
 use zed_actions::{
-    AGENT_SKILLS_SETTINGS_PATH, OpenProjectSettings, OpenSettings, OpenSettingsAt,
-    OpenSettingsAtTarget, OpenSettingsPage,
+    AGENT_SKILLS_SETTINGS_PATH, OpenLegacySettings, OpenProjectSettings, OpenSettings,
+    OpenSettingsAt, OpenSettingsAtTarget, OpenSettingsPage,
 };
 
 use crate::components::{
@@ -434,6 +434,9 @@ pub fn init(cx: &mut App) {
     cx.set_global(queue);
 
     cx.on_action(|_: &OpenSettings, cx| {
+        open_omega_settings_editor(None, cx);
+    });
+    cx.on_action(|_: &OpenLegacySettings, cx| {
         open_settings_editor(None, None, None, cx);
     });
     cx.on_action(|_: &zed_actions::assistant::OpenSkillCreator, cx| {
@@ -465,6 +468,10 @@ pub fn init(cx: &mut App) {
                 );
             })
             .register_action(|_, _: &OpenSettings, window, cx| {
+                let window_handle = window.window_handle().downcast::<MultiWorkspace>();
+                open_omega_settings_editor(window_handle, cx);
+            })
+            .register_action(|_, _: &OpenLegacySettings, window, cx| {
                 let window_handle = window.window_handle().downcast::<MultiWorkspace>();
                 open_settings_editor(None, None, window_handle, cx);
             })
@@ -660,6 +667,21 @@ enum SettingsFileTarget {
     Project(WorktreeId),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SettingsWindowKind {
+    Omega,
+    Legacy,
+}
+
+impl SettingsWindowKind {
+    fn window_title(self) -> &'static str {
+        match self {
+            Self::Omega => "Omega — Settings",
+            Self::Legacy => "Omega — Legacy Settings",
+        }
+    }
+}
+
 impl From<&OpenSettingsAtTarget> for SettingsFileTarget {
     fn from(target: &OpenSettingsAtTarget) -> Self {
         match target {
@@ -682,6 +704,20 @@ pub fn open_settings_editor(
         target_worktree_id.map(SettingsFileTarget::Project),
         workspace_handle,
         cx,
+    );
+}
+
+fn open_omega_settings_editor(
+    workspace_handle: Option<WindowHandle<MultiWorkspace>>,
+    cx: &mut App,
+) {
+    open_settings_editor_with(
+        SettingsWindowKind::Omega,
+        workspace_handle,
+        cx,
+        |settings_window, window, cx| {
+            settings_window.navigate_to_sub_page("llm_providers", window, cx);
+        },
     );
 }
 
@@ -709,39 +745,49 @@ fn open_settings_editor_to_page(
     workspace_handle: Option<WindowHandle<MultiWorkspace>>,
     cx: &mut App,
 ) {
+    if page.eq_ignore_ascii_case("AI") || page.eq_ignore_ascii_case("LLM Providers") {
+        open_omega_settings_editor(workspace_handle, cx);
+        return;
+    }
+
     let page = page.to_string();
-    open_settings_editor_with(workspace_handle, cx, move |settings_window, window, cx| {
-        if let Some(target_file) = target_file {
-            select_settings_file_target(target_file, settings_window, window, cx);
-        }
+    open_settings_editor_with(
+        SettingsWindowKind::Legacy,
+        workspace_handle,
+        cx,
+        move |settings_window, window, cx| {
+            if let Some(target_file) = target_file {
+                select_settings_file_target(target_file, settings_window, window, cx);
+            }
 
-        settings_window.opening_link = false;
-        settings_window.search_bar.update(cx, |editor, cx| {
-            editor.set_text(String::new(), window, cx);
-        });
-        for page_filter in &mut settings_window.filter_table {
-            page_filter.fill(true);
-        }
-        settings_window.has_query = false;
-        settings_window.filter_matches_to_file();
+            settings_window.opening_link = false;
+            settings_window.search_bar.update(cx, |editor, cx| {
+                editor.set_text(String::new(), window, cx);
+            });
+            for page_filter in &mut settings_window.filter_table {
+                page_filter.fill(true);
+            }
+            settings_window.has_query = false;
+            settings_window.filter_matches_to_file();
 
-        let Some(navbar_entry_index) = settings_window
-            .navbar_entries
-            .iter()
-            .position(|entry| entry.is_root && entry.title.eq_ignore_ascii_case(&page))
-        else {
-            log::error!("settings page not found: {page}");
-            return;
-        };
+            let Some(navbar_entry_index) = settings_window
+                .navbar_entries
+                .iter()
+                .position(|entry| entry.is_root && entry.title.eq_ignore_ascii_case(&page))
+            else {
+                log::error!("settings page not found: {page}");
+                return;
+            };
 
-        settings_window.open_and_scroll_to_navbar_entry(
-            navbar_entry_index,
-            None,
-            false,
-            window,
-            cx,
-        );
-    });
+            settings_window.open_and_scroll_to_navbar_entry(
+                navbar_entry_index,
+                None,
+                false,
+                window,
+                cx,
+            );
+        },
+    );
 }
 
 fn open_settings_editor_at_target(
@@ -750,6 +796,11 @@ fn open_settings_editor_at_target(
     workspace_handle: Option<WindowHandle<MultiWorkspace>>,
     cx: &mut App,
 ) {
+    if path == Some("llm_providers") {
+        open_omega_settings_editor(workspace_handle, cx);
+        return;
+    }
+
     /// Assumes a settings GUI window is already open
     fn open_path(
         path: &str,
@@ -795,16 +846,21 @@ fn open_settings_editor_at_target(
     }
 
     let path = path.map(ToOwned::to_owned);
-    open_settings_editor_with(workspace_handle, cx, move |settings_window, window, cx| {
-        if let Some(target_file) = target_file {
-            select_settings_file_target(target_file, settings_window, window, cx);
-        }
-        if let Some(path) = path {
-            open_path(&path, settings_window, window, cx);
-        } else if target_file.is_some() {
-            cx.notify();
-        }
-    });
+    open_settings_editor_with(
+        SettingsWindowKind::Legacy,
+        workspace_handle,
+        cx,
+        move |settings_window, window, cx| {
+            if let Some(target_file) = target_file {
+                select_settings_file_target(target_file, settings_window, window, cx);
+            }
+            if let Some(path) = path {
+                open_path(&path, settings_window, window, cx);
+            } else if target_file.is_some() {
+                cx.notify();
+            }
+        },
+    );
 }
 
 pub fn open_skill_creator(
@@ -812,12 +868,18 @@ pub fn open_skill_creator(
     workspace_handle: Option<WindowHandle<MultiWorkspace>>,
     cx: &mut App,
 ) {
-    open_settings_editor_with(workspace_handle, cx, |settings_window, window, cx| {
-        settings_window.navigate_to_skill_creator(open_mode, window, cx);
-    });
+    open_settings_editor_with(
+        SettingsWindowKind::Legacy,
+        workspace_handle,
+        cx,
+        |settings_window, window, cx| {
+            settings_window.navigate_to_skill_creator(open_mode, window, cx);
+        },
+    );
 }
 
 fn open_settings_editor_with(
+    kind: SettingsWindowKind,
     workspace_handle: Option<WindowHandle<MultiWorkspace>>,
     cx: &mut App,
     callback: impl FnOnce(&mut SettingsWindow, &mut Window, &mut Context<SettingsWindow>) + 'static,
@@ -827,7 +889,12 @@ fn open_settings_editor_with(
     let existing_window = cx
         .windows()
         .into_iter()
-        .find_map(|window| window.downcast::<SettingsWindow>());
+        .filter_map(|window| window.downcast::<SettingsWindow>())
+        .find(|window| {
+            window
+                .read(cx)
+                .is_ok_and(|settings_window| settings_window.kind == kind)
+        });
 
     if let Some(existing_window) = existing_window {
         existing_window
@@ -865,7 +932,7 @@ fn open_settings_editor_with(
         cx.open_window(
             WindowOptions {
                 titlebar: Some(TitlebarOptions {
-                    title: Some("Omega — Settings".into()),
+                    title: Some(kind.window_title().into()),
                     appears_transparent: true,
                     traffic_light_position: Some(point(px(12.0), px(12.0))),
                 }),
@@ -889,7 +956,7 @@ fn open_settings_editor_with(
             },
             |window, cx| {
                 let settings_window =
-                    cx.new(|cx| SettingsWindow::new(workspace_handle, window, cx));
+                    cx.new(|cx| SettingsWindow::new_with_kind(kind, workspace_handle, window, cx));
                 settings_window.update(cx, |settings_window, cx| {
                     callback(settings_window, window, cx);
                 });
@@ -922,6 +989,7 @@ fn active_language_mut() -> Option<std::sync::RwLockWriteGuard<'static, Option<S
 }
 
 pub struct SettingsWindow {
+    kind: SettingsWindowKind,
     title_bar: Option<Entity<PlatformTitleBar>>,
     original_window: Option<WindowHandle<MultiWorkspace>>,
     files: Vec<(SettingsUiFile, FocusHandle)>,
@@ -1765,7 +1833,21 @@ impl SettingsUiFile {
 }
 
 impl SettingsWindow {
+    pub(crate) fn is_focused_settings(&self) -> bool {
+        self.kind == SettingsWindowKind::Omega
+    }
+
+    #[cfg(test)]
     fn new(
+        original_window: Option<WindowHandle<MultiWorkspace>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        Self::new_with_kind(SettingsWindowKind::Legacy, original_window, window, cx)
+    }
+
+    fn new_with_kind(
+        kind: SettingsWindowKind,
         original_window: Option<WindowHandle<MultiWorkspace>>,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -1970,6 +2052,7 @@ impl SettingsWindow {
         list_state.set_scroll_handler(|_, _, _| {});
 
         let mut this = Self {
+            kind,
             title_bar,
             original_window,
 
@@ -2695,7 +2778,10 @@ impl SettingsWindow {
 
     fn build_ui(&mut self, window: &mut Window, cx: &mut Context<SettingsWindow>) {
         if self.pages.is_empty() {
-            self.pages = page_data::settings_data(cx);
+            self.pages = match self.kind {
+                SettingsWindowKind::Omega => page_data::omega_settings_data(cx),
+                SettingsWindowKind::Legacy => page_data::settings_data(cx),
+            };
             self.build_navbar(cx);
             self.setup_navbar_focus_subscriptions(window, cx);
             self.build_content_handles(window, cx);
@@ -3962,9 +4048,12 @@ impl SettingsWindow {
                                     })),
                             )
                         })
-                        .when(is_llm_providers_page, |this| {
-                            this.child(pages::render_add_llm_provider_popover(self, window, cx))
-                        })
+                        .when(
+                            is_llm_providers_page && !self.is_focused_settings(),
+                            |this| {
+                                this.child(pages::render_add_llm_provider_popover(self, window, cx))
+                            },
+                        )
                         .when(is_skills_page, |this| {
                             this.child(
                                 Button::new("open-skill-creator", "Create Skill")
@@ -4169,7 +4258,7 @@ impl SettingsWindow {
                     .px_8()
                     .gap_2()
                     .child(page_header)
-                    .child(warning_banner)
+                    .child(warning_banner),
             )
             .child(
                 div()
@@ -5544,6 +5633,7 @@ pub mod test {
             .collect();
 
         let mut settings_window = SettingsWindow {
+            kind: SettingsWindowKind::Legacy,
             title_bar: None,
             original_window: None,
             worktree_root_dirs: HashMap::default(),

@@ -6642,3 +6642,19 @@ is not persisted and cannot be enabled by settings, a thread, or a tool.
 
 - **Enforced by:** `exo_is_opt_in_for_each_launch` in `crates/omega_deltas`,
   plus executor-selector attachment-plan tests in `agent_ui`.
+
+### OMEGA-DELTA-0145 — Settings starts with Omega-owned provider credentials
+
+**Settings** opens a focused Omega surface containing only provider API-key
+configuration. It reuses the providers' existing secure credential storage and
+status controls, so Google AI and the other native providers can be configured
+without exposing unrelated inherited editor preferences.
+
+The previous full settings editor remains available as **Legacy Settings**.
+The application menu and command palette name that distinction explicitly.
+Provider-credential recovery actions and the persistent zero-base Settings
+button open the focused surface, while Legacy Settings remains an admitted,
+separate action.
+
+- **Enforced by:** `focused_settings_separates_provider_keys_from_legacy_settings`
+  in `crates/omega_deltas`.
