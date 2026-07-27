@@ -6108,7 +6108,7 @@ question rather than leaving it to whoever next reads the menu.
   `agent::ToggleThreadsSidebar`, which was `OMEGA-DELTA-0118`'s entire
   load-bearing repair, because `agent` is the namespace zero base admits and
   `multi_workspace` is not. What changed is what appears: the threads are the
-  first of three sections, and pressing the binding collapses the sidebar to a
+  first of the sidebar's sections, and pressing the binding collapses it to a
   rail rather than removing it. Keeping both surfaces would have been two lists
   of the same threads, which `OMEGA-DELTA-0118`'s own notes call one window
   giving two answers to one question.
@@ -6142,21 +6142,6 @@ question rather than leaving it to whoever next reads the menu.
     under the executor that recorded it, and a row whose executor cannot run
     here still refuses in the composer's own words rather than dispatching a
     load that fails in somebody else's error text.
-  - *Rate limits* is **honest and empty, on purpose**. The ACP schema Omega
-    speaks carries exactly one usage type — `UsageUpdate`, `used` and `size`
-    tokens for the current *context window*, plus an optional cost. There is no
-    remaining-quota field, no reset time, no window and no plan tier in either
-    schema version; and a rate limit an external agent hits does not even arrive
-    as a rate-limit error, because only `AuthRequired` is mapped and everything
-    else falls through to generic error text. Zed's cloud usage types exist but
-    require a sign-in zero base does not do, are host-blocked by
-    `app_identity::service_isolation`, and measure edit predictions rather than
-    Codex or Claude. Nothing in the tree reads `~/.codex` or `~/.claude`, and
-    several tests exist specifically to keep it that way. So the section names
-    each executor, says "not reported" — or, for one that cannot run here, gives
-    `OMEGA-DELTA-0123`'s reason verbatim — and states the finding once. **No
-    gauge, no percentage, no countdown**: those would be pictures of numbers
-    nobody has.
   - *Public chat* is **real, and is the first socket Omega opens to a relay from
     the UI**. It reads the manifest at `openagents.com`, then the NIP-29 group
     that manifest names, and draws the five most recent kind-9 messages —
@@ -6204,10 +6189,7 @@ question rather than leaving it to whoever next reads the menu.
   this first version: the public-chat section shows truncated pubkeys rather
   than kind-0 display names, it reads once when the panel is built rather than
   holding a live subscription, and it reads no moderation state — a message
-  deleted after the fetch stays drawn until the next one. The rate-limits
-  section draws no number because none exists; if ACP ever grows a quota field,
-  or if reading Codex's and Claude's own on-disk state is ever wanted, that is a
-  new decision with its own privacy question and not a gap in this one.
+  deleted after the fetch stays drawn until the next one.
 
 ### OMEGA-DELTA-0131 — Zero base has one agent selection, and the label never names a choice the application is not keeping
 
@@ -6690,3 +6672,18 @@ region cannot restore the editor or create an action-gate bypass.
 
 - **Enforced by:** `sealed_zero_base_keeps_only_zeds_platform_drag_strip` in
   `crates/omega_deltas`, plus `a_sealed_zero_base_starts_without_an_editor`.
+
+### OMEGA-DELTA-0148 — The sidebar contains no empty rate-limits section
+
+Zero base's left sidebar contains **Recent threads** and **Public chat**. It
+does not contain a rate-limits heading, executor rows saying “not reported,” or
+an explanation of why quota data is unavailable. That surface offered neither
+data nor an action, so it consumed persistent navigation space without helping
+the person using the application.
+
+Older stored sidebar state may still contain the retired `rate-limits` collapse
+key. The forgiving state decoder continues to accept and preserve unknown keys,
+so removing the section cannot corrupt a person's other sidebar preferences.
+
+- **Enforced by:** `zero_bases_sidebar_is_persistent_sectioned_and_silent_when_it_fails`
+  in `crates/omega_deltas`, plus sidebar state tests in `agent_ui`.

@@ -3641,10 +3641,10 @@ impl AgentPanel {
     ///
     /// # No arm may refuse
     ///
-    /// Every arm returns something drawable. `rate_limits` and `nostr_activity`
-    /// return an [`omega_sidebar::SectionBody`], which has no error case: a
-    /// section that could not load has a note where its rows would be, and the
-    /// sections above and below it never find out.
+    /// Every arm returns something drawable. `nostr_activity` returns an
+    /// [`omega_sidebar::SectionBody`], which has no error case: a section that
+    /// could not load has a note where its rows would be, and the sections
+    /// above and below it never find out.
     fn render_sidebar_section(
         &self,
         section: omega_sidebar::SectionId,
@@ -3687,26 +3687,6 @@ impl AgentPanel {
         column = match section {
             omega_sidebar::SectionId::RecentThreads => {
                 column.child(self.render_recent_threads_section(cx))
-            }
-            omega_sidebar::SectionId::RateLimits => {
-                let unavailable = omega_executor_selector::unavailable_here();
-                let executors: Vec<(&str, Option<&str>)> =
-                    omega_executor_selector::runtime_choices()
-                        .iter()
-                        .filter(|executor| {
-                            **executor != omega_executor_selector::SelectableExecutor::Omega
-                        })
-                        .map(|executor| {
-                            (
-                                executor.name(),
-                                unavailable
-                                    .iter()
-                                    .find(|(candidate, _)| candidate == executor)
-                                    .map(|(_, reason)| *reason),
-                            )
-                        })
-                        .collect();
-                column.child(self.render_section_body(&omega_sidebar::rate_limits(&executors)))
             }
             omega_sidebar::SectionId::NostrActivity => column.child(self.render_section_body(
                 &omega_sidebar::nostr_activity(&self.chat_read, self.chat_group.as_deref()),

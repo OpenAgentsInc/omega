@@ -158,8 +158,6 @@ pub fn layout(available: Pixels, wants_open: bool) -> Layout {
 pub enum SectionId {
     /// The last [`RECENT_THREADS`] conversations. `OMEGA-DELTA-0118`'s rows.
     RecentThreads,
-    /// What is known about Codex's and Claude's rate limits, which is nothing.
-    RateLimits,
     /// The last few messages in the public NIP-29 group.
     NostrActivity,
 }
@@ -168,12 +166,7 @@ impl SectionId {
     /// Draw order, top to bottom.
     ///
     /// Threads first because that is the section with something to do in it.
-    /// The two below it are information, and information that changes slowly.
-    pub const ALL: &'static [SectionId] = &[
-        SectionId::RecentThreads,
-        SectionId::RateLimits,
-        SectionId::NostrActivity,
-    ];
+    pub const ALL: &'static [SectionId] = &[SectionId::RecentThreads, SectionId::NostrActivity];
 
     /// The stable name this section is remembered under.
     ///
@@ -184,7 +177,6 @@ impl SectionId {
     pub fn key(self) -> &'static str {
         match self {
             SectionId::RecentThreads => "recent-threads",
-            SectionId::RateLimits => "rate-limits",
             SectionId::NostrActivity => "nostr-activity",
         }
     }
@@ -193,7 +185,6 @@ impl SectionId {
     pub fn title(self) -> &'static str {
         match self {
             SectionId::RecentThreads => "Recent threads",
-            SectionId::RateLimits => "Rate limits",
             SectionId::NostrActivity => "Public chat",
         }
     }
@@ -336,43 +327,6 @@ impl SectionBody {
     }
 }
 
-/// The sentence the rate-limits section always says.
-///
-/// It is the whole finding, and it is worth stating once as a constant so no
-/// second, softer version of it can appear somewhere else. The Agent Client
-/// Protocol schema Omega speaks carries exactly one usage type,
-/// `UsageUpdate` — `used` and `size` tokens for the *current context window*,
-/// plus an optional cost. There is no remaining-quota field, no reset time, no
-/// window, and no plan tier, in either schema version. And a rate limit that is
-/// hit by an external agent does not even arrive as a rate-limit error: it
-/// comes back as a generic `acp::Error` and renders as ordinary error text.
-///
-/// So there is no number to draw, and a gauge would be a picture of a number
-/// nobody has.
-pub const RATE_LIMITS_ARE_NOT_REPORTED: &str =
-    "Rate limits are not reported over ACP. Omega learns one only when a request fails.";
-
-/// The rate-limits section.
-///
-/// Each executor gets a row, and the row says the one true thing available
-/// about it. That is either "this cannot run here", with the reason the
-/// composer's selector already gives — `unavailable` is `OMEGA-DELTA-0123`'s
-/// list, passed in rather than recomputed, for the same reason
-/// `omega_threads_sidebar` takes it: two surfaces must not give two answers to
-/// "why can I not use Codex" — or "not reported", which is the truth for an
-/// executor that runs fine and tells us nothing about its quota.
-#[must_use]
-pub fn rate_limits(executors: &[(&str, Option<&str>)]) -> SectionBody {
-    let rows = executors
-        .iter()
-        .map(|(name, unavailable)| match unavailable {
-            Some(reason) => SectionRow::new(*name).secondary(*reason).muted(),
-            None => SectionRow::new(*name).secondary("not reported").muted(),
-        })
-        .collect();
-    SectionBody::rows(rows).with_note(RATE_LIMITS_ARE_NOT_REPORTED)
-}
-
 /// How far the public-chat read has got.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ChatRead {
@@ -480,12 +434,12 @@ mod tests {
     #[test]
     fn a_collapsed_section_survives_a_round_trip() {
         let mut state = SidebarState::default_open();
-        state.toggle_section(SectionId::RateLimits);
+        state.toggle_section(SectionId::NostrActivity);
         let json = serde_json::to_string(&state).expect("serialises");
         let restored = SidebarState::from_stored(Some(&json));
 
         assert!(
-            restored.is_collapsed(SectionId::RateLimits),
+            restored.is_collapsed(SectionId::NostrActivity),
             "'persistent' covers the vertical menus too — a section collapsed \
              before a restart must come back collapsed."
         );
@@ -513,7 +467,12 @@ mod tests {
             r#"{"open":true,"collapsed":["rate-limits","a-section-from-the-future"]}"#,
         ));
         assert!(state.open);
-        assert!(state.is_collapsed(SectionId::RateLimits));
+        assert_eq!(
+            state.collapsed,
+            ["rate-limits", "a-section-from-the-future"],
+            "unknown keys stay readable so removing a section does not corrupt \
+             state written by an older build"
+        );
     }
 
     #[test]
@@ -532,31 +491,6 @@ mod tests {
             assert!(!section.title().is_empty());
             assert!(!section.key().is_empty());
         }
-    }
-
-    #[test]
-    fn the_rate_limits_section_says_what_it_does_not_know() {
-        let body = rate_limits(&[("Codex", None), ("Claude", Some("not installed"))]);
-
-        assert_eq!(body.rows.len(), 2);
-        assert_eq!(body.rows[0].primary.as_ref(), "Codex");
-        assert_eq!(
-            body.rows[0].secondary.as_deref(),
-            Some("not reported"),
-            "an executor that runs fine still reports no quota. Saying so is \
-             the honest row; a gauge would be a picture of a number nobody has."
-        );
-        assert_eq!(
-            body.rows[1].secondary.as_deref(),
-            Some("not installed"),
-            "the reason must be the one the composer's selector already gives, \
-             not a second one written here"
-        );
-        let note = body
-            .note
-            .as_deref()
-            .expect("the section states the finding");
-        assert!(note.contains("ACP") && note.contains("fails"), "{note}");
     }
 
     #[test]

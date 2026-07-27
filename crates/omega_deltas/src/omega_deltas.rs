@@ -136,6 +136,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0145",
     "OMEGA-DELTA-0146",
     "OMEGA-DELTA-0147",
+    "OMEGA-DELTA-0148",
 ];
 
 /// OMEGA-DELTA-0125. Every entry the thread header's `…` menu offers, the
@@ -16656,10 +16657,9 @@ mod tests {
     /// incapable of interrupting.
     ///
     /// The owner: *"i want a persistent sidebar, collapsible, kinda like the
-    /// thread sidebar but also with some vertical collapsible menus. i want the
-    /// last 10 chat threads as one thing, and codex etc ratelimits showing, and
-    /// nostr nip 29 activity too etc … default open on the zerobase chat
-    /// page."*
+    /// thread sidebar but also with some vertical collapsible menus … default
+    /// open on the zerobase chat page."* `OMEGA-DELTA-0148` later removed the
+    /// rate-limits section because it had no data or action.
     ///
     /// What a person sees is asserted in `agent_ui`'s own tests, which run the
     /// pure functions: the layout yields to a rail before the composer loses
@@ -16699,10 +16699,11 @@ mod tests {
                     && name.chars().all(char::is_alphanumeric)
             })
             .collect();
-        assert!(
-            variants.len() >= 3,
-            "OMEGA-DELTA-0130: fewer than the three sections the owner named \
-             were found in `SectionId` in {}: {variants:?}",
+        assert_eq!(
+            variants,
+            ["RecentThreads", "NostrActivity"],
+            "OMEGA-DELTA-0148: the sidebar must contain only useful sections \
+             with real content. Found {variants:?} in {}.",
             sidebar_path.display()
         );
         let render = body_of(&panel, "render_sidebar_section");
@@ -16742,9 +16743,8 @@ mod tests {
                 assert!(
                     !source.contains(interruption),
                     "OMEGA-DELTA-0130: {region} in {} reaches for `{interruption}`. \
-                     No section may block, refuse or interrupt: a sidebar that \
-                     cannot draw its rate limits must still draw the threads, \
-                     and a relay that did not answer is a line in a section, not \
+                     No section may block, refuse or interrupt: a relay that \
+                     did not answer is a line in its section, not \
                      a notification over the composer. omega#119 records what \
                      happened the last time a zero-base surface toasted.",
                     path.display()
@@ -16790,39 +16790,13 @@ mod tests {
              than the key the sidebar reads at startup.",
             panel_path.display()
         );
-
-        // 4. The rate-limits section draws no number, because there is none.
-        //
-        // The Agent Client Protocol schema Omega speaks carries one usage type,
-        // `UsageUpdate`, and it is the current context window — `used` and
-        // `size` tokens — not a quota. There is no remaining-quota field, no
-        // reset time, no window and no plan tier in either schema version, and
-        // a rate limit an external agent hits does not even arrive as a
-        // rate-limit error. So a percentage or a countdown here would be a
-        // picture of a number nobody has.
-        let rate_limits = body_of(&sidebar, "rate_limits");
-        for invention in [
-            "used_tokens",
-            "max_tokens",
-            "UsageUpdate",
-            "percent",
-            "reset",
-        ] {
-            assert!(
-                !rate_limits.contains(invention),
-                "OMEGA-DELTA-0130: `rate_limits` in {} reaches for `{invention}`. \
-                 Nothing in this process knows a Codex or Claude rate limit. The \
-                 honest section says what it does not know; a gauge would be a \
-                 drawing of a number that does not exist.",
-                sidebar_path.display()
-            );
-        }
         assert!(
-            sidebar.contains("Rate limits are not reported over ACP"),
-            "OMEGA-DELTA-0130: {} no longer states what it does not know about \
-             rate limits. Saying nothing there is worse than saying so: an empty \
-             section reads as a section that has not loaded yet.",
-            sidebar_path.display()
+            !sidebar.contains("RateLimits")
+                && !sidebar.contains("\"Rate limits\"")
+                && !panel.contains("omega_sidebar::rate_limits"),
+            "OMEGA-DELTA-0148: the empty rate-limits surface returned in {} or {}.",
+            sidebar_path.display(),
+            panel_path.display()
         );
     }
 
