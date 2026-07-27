@@ -4064,3 +4064,77 @@ than merely stated.
   are all rendered facts, and all three need somebody who has not read this
   file. The bound makes the second one answerable once rather than per name;
   it does not answer it.
+
+### OMEGA-DELTA-0106 — A shared audience is a Forge repository, and every install already knows how to contribute
+
+- **Upstream Zed:** a conversation with the agent is a local thing. There is no
+  concept of a room a person is invited into, no signed record of what was said,
+  and no shipped procedure for contributing to the editor itself — a
+  contributor reads the repository's documentation if they find it, and their
+  agent invents the rest. The only skill compiled into the binary upstream is
+  `create-skill`.
+- **Omega:** `crates/omega_community` says what a shared audience actually
+  stands on. `OMEGA-DELTA-0094` gave a thread an audience and left the shared
+  case abstract on purpose; this fills it in with an OpenAgents Forge
+  repository, the people the Forge already admitted, and NIP-22 messages bound
+  to the repository's NIP-34 coordinate. Two more skills are compiled into every
+  install: `omega-contributing` and `omega-delta-discipline`.
+- **No new membership system, deliberately.** `FORGE-04` (openagents#9246)
+  already binds one npub per tenant to an OpenAgents account and grants
+  `forge:admin`, `forge:member`, or `forge:viewer`. `ForgeMembership` is that
+  authority's own response decoded. Omega cannot admit anybody; it can only read
+  what the Forge decided and refuse to exceed it — a `forge:viewer` cannot post,
+  because the Forge would not issue that person a push credential either. A role
+  this build has not heard of grants nothing and locks nobody out.
+- **The audience rule is carried, not restated.** `may_post` calls
+  `omega_audience::may_publish` and then adds only the fact the audience crate
+  cannot know. Two implementations of "a local thread may not publish" agree
+  until the day one of them is edited, and the wrong one is the one nobody is
+  looking at.
+- **A revoked member is refused by the audience, before membership.** Losing a
+  membership removes the room from the roster, so a thread recorded in it stops
+  resolving and reads as `Unknown audience` rather than as private. That is the
+  true sentence — "you cannot see this room" — where "sending failed" would be
+  an invitation to retry.
+- **Omega composes bytes and never signs them.** A signed record is *accepted*,
+  never produced: the crate names no key type outside its tests, so a person's
+  identity stays theirs and Omega has no key to lose. A signature over anything
+  other than the exact authorized bytes is refused, which is the one place a
+  signer could substitute something.
+- **The binding has no default.** An outbound event with its room tag removed
+  fails rather than falling back to whichever room is selected. There is nothing
+  to fall back to.
+- **Pending work is visible and stops.** The outbox is a record rather than a
+  set of in-flight futures, so it survives a restart; a relay refusal that will
+  not change fails on the first answer; everything else stops at five attempts
+  in a state a person is shown. Retrying forever is the failure omega#108 names,
+  because a person watching "sending…" for an hour has been told nothing.
+- **The skills are the migration seam, and they describe today.** GitHub is
+  authoritative for this repository. The Forge epic (openagents#9242) describes
+  demoting it as a *target*, and the owner directed that the conversion be
+  figured out through these workrooms rather than before them. So
+  `omega-contributing` describes the GitHub path, and a check refuses the
+  epic's target phrasing for as long as `.github/workflows/run_tests.yml` still
+  runs the checks. When that changes, the skill changes, and every contributor's
+  agent learns the new path at once instead of a hundred people finding out
+  separately.
+- **The precedence is unchanged, and this is the point.** `SkillSource::BuiltIn`
+  stays at precedence `0`, so a contributor's own `omega-contributing` shadows
+  the shipped one. A default somebody cannot replace is a removal of their
+  control.
+- **Enforced by:** `the_community_audience_carries_no_transport_and_no_key`,
+  `the_room_carries_the_audience_rule_rather_than_restating_it`,
+  `the_contribution_skills_ship_in_the_binary`, and
+  `the_contribution_skills_describe_the_path_this_repository_uses` in
+  `crates/omega_deltas/`, plus the crate's own thirty-two checks in
+  `crates/omega_community/`. The last of the four is the one that matters most:
+  it asserts the skills against the tree — the files they cite must exist, the
+  delta ID shape they teach must be the one `ENFORCED_DELTAS` uses — rather than
+  against a copy of their own sentences.
+- **What this does not cover.** It is the first rung of one row of the parity
+  ledger: a room, membership, and messages. Threads, reactions, pins, presence,
+  and read state are later packets. It ships no transport, no composer control,
+  and no pane — nothing in this delta connects to a relay, and the audience
+  selector, the invitation flow, and the conversation actions omega#108 asks for
+  are still owed. Nothing becomes public by default; public read stays
+  per-repository and behind the Forge epic's own promise gates.

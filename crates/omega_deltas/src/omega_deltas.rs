@@ -96,6 +96,99 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0100",
     "OMEGA-DELTA-0102",
     "OMEGA-DELTA-0105",
+    "OMEGA-DELTA-0106",
+];
+
+/// OMEGA-DELTA-0106. The community audience: a Forge repository, its members,
+/// and the signed records they send.
+pub const COMMUNITY_PATH: &str = "crates/omega_community/src/omega_community.rs";
+
+/// OMEGA-DELTA-0106. Where a message is authorized, composed, and verified.
+pub const COMMUNITY_RECORD_PATH: &str = "crates/omega_community/src/record.rs";
+
+/// OMEGA-DELTA-0106. Where what has not reached the relay stays visible.
+pub const COMMUNITY_OUTBOX_PATH: &str = "crates/omega_community/src/outbox.rs";
+
+/// OMEGA-DELTA-0106. The manifest that keeps the room out of the transport
+/// business.
+pub const COMMUNITY_MANIFEST_PATH: &str = "crates/omega_community/Cargo.toml";
+
+/// OMEGA-DELTA-0106. Every crate `omega_community` is allowed to depend on.
+///
+/// A closed list, for the reason `AUDIENCE_ALLOWED_DEPENDENCIES` gives. This
+/// crate is allowed to know the Nostr record format — that is what `nostr` is
+/// for — and it is not allowed to open a socket, so a relay client or an HTTP
+/// crate arriving here has to fail by existing rather than pass by not being on
+/// a list of the ones somebody already thought of.
+pub const COMMUNITY_ALLOWED_DEPENDENCIES: &[&str] = &["nostr", "omega_audience", "serde"];
+
+/// OMEGA-DELTA-0106. Names that must not appear outside this crate's tests.
+///
+/// The crate composes bytes for somebody else to sign. A key type in the
+/// shipped half would mean Omega had a key to lose.
+pub const COMMUNITY_FORBIDDEN_IN_PRODUCTION: &[&str] = &[
+    "SecretKey",
+    "sign_schnorr",
+    "Keys::new",
+    "reqwest",
+    "TcpStream",
+];
+
+/// OMEGA-DELTA-0106. The contribution skills, as `(name, path)`.
+///
+/// The name is the `BUILTIN_SKILL_ENTRIES` key *and* the `name:` in the file's
+/// own frontmatter; the loader keys the embedded body by a synthetic path built
+/// from the first and takes the catalog entry's name from the second, so the
+/// two disagreeing gives a skill whose body cannot be fetched.
+pub const CONTRIBUTION_SKILLS: &[(&str, &str)] = &[
+    (
+        "omega-contributing",
+        "crates/agent_skills/builtin/omega-contributing/SKILL.md",
+    ),
+    (
+        "omega-delta-discipline",
+        "crates/agent_skills/builtin/omega-delta-discipline/SKILL.md",
+    ),
+];
+
+/// OMEGA-DELTA-0106. Paths the contribution skills tell a contributor to read
+/// or run.
+///
+/// This is the check that ties the skill text to the repository rather than to
+/// prose. A skill describing a path this repository does not use is the failure
+/// the deliverable exists to prevent, and it fails quietly: the text still
+/// reads well, and the contributor following it is the one who finds out.
+pub const CONTRIBUTION_SKILL_CITED_PATHS: &[&str] = &[
+    ".rules",
+    "AGENTS.md",
+    "CLAUDE.md",
+    "OMEGA_DELTAS.md",
+    "script/clippy",
+    "crates/omega_deltas/Cargo.toml",
+];
+
+/// OMEGA-DELTA-0106. The repository a change has to reach to have landed.
+pub const CONTRIBUTION_AUTHORITY: &str = "OpenAgentsInc/omega";
+
+/// OMEGA-DELTA-0106. The mechanical fact that GitHub still runs the checks.
+///
+/// Cited rather than assumed: "GitHub is authoritative" is allowed to become
+/// false, and when it does, this constant is what stops the skills from being
+/// silently left behind.
+pub const GITHUB_TEST_WORKFLOW_PATH: &str = ".github/workflows/run_tests.yml";
+
+/// OMEGA-DELTA-0106. Claims the contribution skills must not make while
+/// [`GITHUB_TEST_WORKFLOW_PATH`] still exists.
+///
+/// Each is a phrase from the Forge epic's *target* state. The epic describes
+/// GitHub as demoted to a read-only mirror; that is not true today, and a skill
+/// that said it would send every joining contributor's agent to a forge that
+/// will not take their commit.
+pub const PREMATURE_MIGRATION_CLAIMS: &[&str] = &[
+    "read-only mirror",
+    "GitHub is a mirror",
+    "GitHub has been demoted",
+    "replaces GitHub",
 ];
 
 /// OMEGA-DELTA-0094. The audience rules, which know nothing about a window.
@@ -12035,5 +12128,352 @@ mod tests {
                 path.display()
             );
         }
+    }
+
+    /// OMEGA-DELTA-0106. A shared audience stands on a Forge repository, and
+    /// the crate that says so cannot reach one.
+    ///
+    /// omega#108. `omega_audience` holds "Local needs nothing" by having no
+    /// dependency that could reach a network. This is the same argument on the
+    /// other side of the line: the room is allowed to know the Nostr record
+    /// format and is not allowed to open a socket or hold a key, because the
+    /// signing is the person's own. A crate that could sign is a crate with a
+    /// key to lose.
+    #[test]
+    fn the_community_audience_carries_no_transport_and_no_key() {
+        let manifest_path = repository_path(COMMUNITY_MANIFEST_PATH);
+        let manifest = read_repository_file(COMMUNITY_MANIFEST_PATH);
+
+        let dependencies = manifest
+            .split_once("\n[dependencies]")
+            .map(|(_, rest)| rest.split("\n[").next().unwrap_or_default())
+            .unwrap_or_else(|| {
+                panic!(
+                    "OMEGA-DELTA-0106: {} declares no `[dependencies]` section, \
+                     so this check cannot see what the room depends on.",
+                    manifest_path.display()
+                )
+            });
+
+        for line in dependencies
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        {
+            let dependency = line
+                .split(['=', '.'])
+                .next()
+                .unwrap_or_default()
+                .trim()
+                .to_string();
+            assert!(
+                COMMUNITY_ALLOWED_DEPENDENCIES.contains(&dependency.as_str()),
+                "OMEGA-DELTA-0106: `omega_community` now depends on \
+                 `{dependency}`. The room composes values and verifies \
+                 signatures; a relay client, an HTTP crate, or a key store \
+                 belongs at the edge that calls it, where a test can see the \
+                 socket. Admitted: {COMMUNITY_ALLOWED_DEPENDENCIES:?}."
+            );
+        }
+
+        for relative in [COMMUNITY_PATH, COMMUNITY_RECORD_PATH, COMMUNITY_OUTBOX_PATH] {
+            let source = read_repository_file(relative);
+            let production = source
+                .split("#[cfg(test)]")
+                .next()
+                .expect("splitting always yields a first part");
+            for forbidden in COMMUNITY_FORBIDDEN_IN_PRODUCTION {
+                assert!(
+                    !production.contains(forbidden),
+                    "OMEGA-DELTA-0106: {} names `{forbidden}` outside its \
+                     tests. Omega composes the bytes and accepts a signature \
+                     over exactly those bytes; a person's key stays theirs, \
+                     and a crate that can produce one is a crate that has to \
+                     hold one.",
+                    repository_path(relative).display()
+                );
+            }
+        }
+    }
+
+    /// OMEGA-DELTA-0106. The publish rule is stated once, in the audience
+    /// crate, and carried here.
+    ///
+    /// omega#107 put `may_publish` in `omega_audience` so that "a local thread
+    /// may not publish" would have exactly one implementation. The way that
+    /// guarantee is lost is not by deleting it — it is by a second caller
+    /// writing a `match` on `ThreadAudience` that looks equivalent, and then
+    /// one of the two being edited.
+    #[test]
+    fn the_room_carries_the_audience_rule_rather_than_restating_it() {
+        let record_path = repository_path(COMMUNITY_RECORD_PATH);
+        let record = read_repository_file(COMMUNITY_RECORD_PATH);
+        let production = record
+            .split("#[cfg(test)]")
+            .next()
+            .expect("splitting always yields a first part");
+
+        // Not `function_body`: it looks for `fn <name>(`, and `may_post` is
+        // generic over the lifetime it returns, so its declaration is
+        // `fn may_post<'a>(`.
+        let rule = production
+            .split_once("pub fn may_post")
+            .and_then(|(_, rest)| rest.split_once("\n}"))
+            .map(|(body, _)| body)
+            .unwrap_or_else(|| {
+                panic!(
+                    "OMEGA-DELTA-0106: cannot find `may_post` in {}. It is the \
+                     authorization omega#108 has to perform before an effect.",
+                    record_path.display()
+                )
+            });
+
+        assert!(
+            rule.contains("may_publish(audience)"),
+            "OMEGA-DELTA-0106: `may_post` in {} no longer calls \
+             `omega_audience::may_publish`. Two implementations of \"a local \
+             thread may not publish\" agree until the day one of them is \
+             edited, and the one that is wrong is the one nobody is looking at.",
+            record_path.display()
+        );
+        assert!(
+            !rule.contains("ThreadAudience::Known"),
+            "OMEGA-DELTA-0106: `may_post` in {} matches on `ThreadAudience` \
+             itself. That is the second copy of the rule, written out.",
+            record_path.display()
+        );
+    }
+
+    /// OMEGA-DELTA-0106. A contributor's agent knows how to contribute before
+    /// they install anything.
+    ///
+    /// The falsifier omega#108 names, executed: remove a skill from
+    /// `BUILTIN_SKILL_ENTRIES` and it disappears from a fresh install's
+    /// catalog, and this check fails naming it.
+    #[test]
+    fn the_contribution_skills_ship_in_the_binary() {
+        let loader_path = repository_path(BUILTIN_SKILLS_PATH);
+        let loader = read_repository_file(BUILTIN_SKILLS_PATH);
+        let table = loader
+            .split_once("const BUILTIN_SKILL_ENTRIES")
+            .and_then(|(_, rest)| rest.split_once("];"))
+            .map(|(entries, _)| entries)
+            .unwrap_or_else(|| {
+                panic!(
+                    "OMEGA-DELTA-0106: cannot find the registration table in {}",
+                    loader_path.display()
+                )
+            });
+
+        for (name, relative) in CONTRIBUTION_SKILLS {
+            let skill_path = repository_path(relative);
+            let skill = std::fs::read_to_string(&skill_path).unwrap_or_else(|error| {
+                panic!(
+                    "OMEGA-DELTA-0106: cannot read {}: {error}. The skill is \
+                     `include_str!`d, so Omega does not build without it — but \
+                     a later change could point the include elsewhere and \
+                     leave this file behind.",
+                    skill_path.display()
+                )
+            });
+
+            let (frontmatter, _body) = skill
+                .strip_prefix("---\n")
+                .and_then(|rest| rest.split_once("\n---"))
+                .unwrap_or_else(|| {
+                    panic!(
+                        "OMEGA-DELTA-0106: {} has no YAML frontmatter block, so \
+                         the loader cannot parse it and the skill would be \
+                         silently absent from every install.",
+                        skill_path.display()
+                    )
+                });
+
+            let field = |key: &str| -> String {
+                frontmatter
+                    .lines()
+                    .find_map(|line| line.strip_prefix(key))
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "OMEGA-DELTA-0106: {} declares no `{key}` in its \
+                             frontmatter. The loader rejects a skill without one.",
+                            skill_path.display()
+                        )
+                    })
+                    .trim()
+                    .to_owned()
+            };
+
+            assert_eq!(
+                &field("name:"),
+                name,
+                "OMEGA-DELTA-0106: {} names itself something other than the \
+                 name it is registered under. The catalog entry takes its name \
+                 from the frontmatter and the embedded body is keyed by the \
+                 table name, so the two disagreeing gives a skill whose body \
+                 cannot be fetched.",
+                skill_path.display()
+            );
+
+            let description = field("description:");
+            assert!(
+                !description.is_empty() && description.len() <= MAX_SKILL_DESCRIPTION_LEN,
+                "OMEGA-DELTA-0106: the description in {} is {} bytes. \
+                 `validate_description` refuses an empty one and refuses more \
+                 than {MAX_SKILL_DESCRIPTION_LEN}, and a built-in that fails \
+                 validation never reaches the catalog.",
+                skill_path.display(),
+                description.len()
+            );
+
+            assert!(
+                loader.contains(&format!("include_str!(\"builtin/{name}/SKILL.md\")")),
+                "OMEGA-DELTA-0106: {} no longer embeds `{name}` at compile \
+                 time. Reading it from a directory would make it a file an \
+                 install may not have, which is the whole of \"the workspace \
+                 preloads the skills a contributor needs\".",
+                loader_path.display()
+            );
+            assert!(
+                table.contains(&format!("(\"{name}\"")),
+                "OMEGA-DELTA-0106: `{name}` is not in BUILTIN_SKILL_ENTRIES in \
+                 {}. It is compiled into the binary and reachable by nothing, \
+                 so a contributor who joins the workspace has no procedure and \
+                 their agent invents one.",
+                loader_path.display()
+            );
+        }
+
+        let precedence = function_body(&loader, "precedence").unwrap_or_else(|| {
+            panic!(
+                "OMEGA-DELTA-0106: cannot find SkillSource::precedence in {}",
+                loader_path.display()
+            )
+        });
+        assert!(
+            precedence.contains("Self::BuiltIn => 0,"),
+            "OMEGA-DELTA-0106: a built-in skill no longer has the lowest \
+             precedence in {}. Shipping a contribution procedure a person \
+             cannot replace with their own takes their control away instead of \
+             giving them a capability.",
+            loader_path.display()
+        );
+    }
+
+    /// OMEGA-DELTA-0106. The skills describe the path this repository actually
+    /// uses.
+    ///
+    /// omega#108: "Ship a skill that describes a path the repository does not
+    /// use: that is the failure this deliverable exists to prevent, so the
+    /// skill text needs a check tying it to the real contribution path rather
+    /// than to prose."
+    ///
+    /// So this check reads the skills and asserts against the tree, not
+    /// against a copy of the sentences. Every file they send a contributor to
+    /// has to exist; the delta ID shape they teach has to be the shape
+    /// `ENFORCED_DELTAS` uses; the repository they say a change lands in has
+    /// to be the one whose workflows run the checks; and none of the Forge
+    /// epic's *target* claims may appear while that is still true.
+    #[test]
+    fn the_contribution_skills_describe_the_path_this_repository_uses() {
+        let workflow = repository_path(GITHUB_TEST_WORKFLOW_PATH);
+        assert!(
+            workflow.exists(),
+            "OMEGA-DELTA-0106: {} is gone. If the checks no longer run on \
+             GitHub, then the contribution skills are describing a path this \
+             repository has left, and they — not this check — are what has to \
+             change.",
+            workflow.display()
+        );
+
+        for (name, relative) in CONTRIBUTION_SKILLS {
+            let skill_path = repository_path(relative);
+            let skill = read_repository_file(relative);
+
+            for claim in PREMATURE_MIGRATION_CLAIMS {
+                assert!(
+                    !skill.contains(claim),
+                    "OMEGA-DELTA-0106: `{name}` in {} says `{claim}` while {} \
+                     still runs this repository's checks. The Forge epic \
+                     describes that as its target, not as today; a skill that \
+                     states it sends every joining contributor's agent to a \
+                     forge that will not take their commit.",
+                    skill_path.display(),
+                    workflow.display()
+                );
+            }
+        }
+
+        let contributing_path = repository_path(CONTRIBUTION_SKILLS[0].1);
+        let contributing = read_repository_file(CONTRIBUTION_SKILLS[0].1);
+        assert!(
+            contributing.contains(CONTRIBUTION_AUTHORITY),
+            "OMEGA-DELTA-0106: {} no longer names `{CONTRIBUTION_AUTHORITY}`. \
+             A contributor has to be told where a change actually lands, and \
+             today that is the only answer.",
+            contributing_path.display()
+        );
+
+        let combined: String = CONTRIBUTION_SKILLS
+            .iter()
+            .map(|(_, relative)| read_repository_file(relative))
+            .collect();
+
+        for cited in CONTRIBUTION_SKILL_CITED_PATHS {
+            let cited_path = repository_path(cited);
+            if !combined.contains(cited) {
+                continue;
+            }
+            assert!(
+                cited_path.exists(),
+                "OMEGA-DELTA-0106: a contribution skill sends a contributor to \
+                 `{cited}`, which is not in this tree. A procedure naming a \
+                 file that does not exist fails quietly: it still reads well, \
+                 and the contributor following it is the one who finds out.",
+            );
+        }
+
+        for required in [".rules", "OMEGA_DELTAS.md", "script/clippy"] {
+            assert!(
+                combined.contains(required),
+                "OMEGA-DELTA-0106: the contribution skills no longer mention \
+                 `{required}`. It is one of the three things a contributor to \
+                 this repository has to know about, and an agent that has not \
+                 been told reads none of them.",
+            );
+        }
+
+        let discipline_path = repository_path(CONTRIBUTION_SKILLS[1].1);
+        let discipline = read_repository_file(CONTRIBUTION_SKILLS[1].1);
+        let enforced = ENFORCED_DELTAS
+            .first()
+            .expect("at least one delta is enforced");
+        let prefix = enforced
+            .rsplit_once('-')
+            .map(|(prefix, _)| prefix)
+            .expect("a delta ID is a prefix and a number");
+        assert!(
+            discipline.contains(prefix),
+            "OMEGA-DELTA-0106: {} teaches a delta ID shape that is not \
+             `{prefix}-NNNN`, which is what {} enforces. A contributor \
+             following it would allocate an ID no check can find.",
+            discipline_path.display(),
+            repository_path(DELTA_REGISTRY_PATH).display()
+        );
+        assert!(
+            discipline.contains("cargo test -p omega_deltas"),
+            "OMEGA-DELTA-0106: {} no longer tells a contributor how to run the \
+             delta checks. `{}` is the crate that holds them.",
+            discipline_path.display(),
+            "crates/omega_deltas"
+        );
+        assert!(
+            discipline.contains("ENFORCED_DELTAS"),
+            "OMEGA-DELTA-0106: {} no longer names the list a new delta has to \
+             be added to. A registry entry with no ID in that list is an entry \
+             `the_registry_and_the_checks_agree` fails on, and the contributor \
+             is left reading a failure about a list they were never told about.",
+            discipline_path.display()
+        );
     }
 }

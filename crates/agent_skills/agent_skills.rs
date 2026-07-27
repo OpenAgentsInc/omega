@@ -702,6 +702,13 @@ const CREATE_SKILL_CONTENT: &str = include_str!("builtin/create-skill/SKILL.md")
 /// embedded at compile time.
 const PUBLIC_NOSTR_CHAT_CONTENT: &str = include_str!("builtin/public-nostr-chat/SKILL.md");
 
+/// OMEGA-DELTA-0106. How a change to this repository is made and sent.
+const OMEGA_CONTRIBUTING_CONTENT: &str = include_str!("builtin/omega-contributing/SKILL.md");
+
+/// OMEGA-DELTA-0106. This repository's own contract: deltas, green, and done.
+const OMEGA_DELTA_DISCIPLINE_CONTENT: &str =
+    include_str!("builtin/omega-delta-discipline/SKILL.md");
+
 /// Returns the set of skills that are compiled into the Zed binary.
 ///
 /// Reads [`BUILTIN_SKILL_ENTRIES`], which is also what `builtin_skill_content`
@@ -754,9 +761,17 @@ fn parse_builtin_skill(name: &str, content: &'static str) -> Result<Skill> {
 /// `name` in that file's frontmatter, because the synthetic
 /// `<built-in>/{name}/SKILL.md` path built from this column is the key
 /// `builtin_skill_content` looks the body up by.
+///
+/// OMEGA-DELTA-0106 added the two contribution skills. They are here rather
+/// than in the repository's own `.agents/skills/` because a person joining the
+/// Omega development workspace has to know how to contribute *before* they have
+/// a checkout — a skill that only exists inside the tree is one they cannot
+/// read until after the step it describes.
 const BUILTIN_SKILL_ENTRIES: &[(&str, &str)] = &[
     ("create-skill", CREATE_SKILL_CONTENT),
     ("public-nostr-chat", PUBLIC_NOSTR_CHAT_CONTENT),
+    ("omega-contributing", OMEGA_CONTRIBUTING_CONTENT),
+    ("omega-delta-discipline", OMEGA_DELTA_DISCIPLINE_CONTENT),
 ];
 
 /// Look up the full embedded content of a built-in skill by its
