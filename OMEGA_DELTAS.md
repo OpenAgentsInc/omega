@@ -6604,7 +6604,8 @@ settings hierarchy independently.
 Thread errors render as contained cards in the same centered, maximum-width
 column as conversation messages and the composer. They use the message
 surface's full border and corner treatment rather than drawing an edge-to-edge
-status strip across the window.
+status strip across the window. Error cards use the semantic error color for
+their full outline, so their state does not read as an ordinary focused field.
 
 Google AI reports a missing key through the typed, non-retryable
 `NoApiKey` completion error. Missing and invalid credentials from every native

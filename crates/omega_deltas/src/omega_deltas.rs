@@ -18911,6 +18911,22 @@ mod tests {
             );
         }
 
+        let callout_path = "crates/ui/src/components/callout.rs";
+        let callout = without_comments(&read_repository_file(callout_path));
+        for required in [
+            "self.border_position == CalloutBorderPosition::Contained",
+            "self.severity == Severity::Error",
+            "cx.theme().status().error",
+        ] {
+            assert!(
+                callout.contains(required),
+                "OMEGA-DELTA-0142: the contained error card in {} lost \
+                 `{required}`, so its outline no longer communicates the \
+                 error state.",
+                repository_path(callout_path).display()
+            );
+        }
+
         for settings_action in [
             "omega::OpenSettings",
             "omega::OpenSettingsAt",

@@ -140,6 +140,13 @@ impl RenderOnce for Callout {
                 cx.theme().status().error.opacity(0.08),
             ),
         };
+        let border_color = if self.border_position == CalloutBorderPosition::Contained
+            && self.severity == Severity::Error
+        {
+            cx.theme().status().error
+        } else {
+            cx.theme().colors().border
+        };
 
         h_flex()
             .min_w_0()
@@ -152,7 +159,7 @@ impl RenderOnce for Callout {
                 CalloutBorderPosition::Bottom => this.border_b_1(),
                 CalloutBorderPosition::Contained => this.border_1().rounded_md(),
             })
-            .border_color(cx.theme().colors().border)
+            .border_color(border_color)
             .bg(bg_color)
             .overflow_x_hidden()
             .when(self.icon.is_some(), |this| {
