@@ -1128,6 +1128,35 @@ impl AcpConnection {
         }
     }
 
+    /// Whether the agent server process this connection speaks to is gone.
+    ///
+    /// `OMEGA-DELTA-0117`. Nothing on `AgentConnection` could answer this, and
+    /// nothing needed to: a connection was built immediately in front of the
+    /// person who was going to use it, so the only way to learn it was dead was
+    /// to send it something and read the error. `_wait_task` does observe the
+    /// exit, but it fans the `LoadError::Exited` out to this connection's
+    /// *sessions*, and a connection held in reserve has none — so its death is
+    /// observed by nothing at all.
+    ///
+    /// A connection kept warm is exactly that connection. Handing a person a
+    /// handle to a process that exited ten minutes ago is worse than handing
+    /// them a slow fresh one: the failure arrives after they have typed, from
+    /// somewhere they cannot see, rather than as the bounded named start
+    /// `OMEGA-DELTA-0114` gives them.
+    ///
+    /// Non-blocking. `true` means the process has exited *and been reaped*, and
+    /// is therefore only ever a reason to throw the connection away — never a
+    /// reason to keep one, since a process can die between this answer and its
+    /// use. Answers `true` for a connection whose child has already been taken
+    /// by [`end_agent_server_process`](Self::end_agent_server_process), because
+    /// a connection with no process is not one anybody should be given.
+    pub fn agent_server_process_has_exited(&self) -> bool {
+        match self.child.borrow_mut().as_mut() {
+            Some(child) => child.try_status().log_err().flatten().is_some(),
+            None => true,
+        }
+    }
+
     #[cfg(any(test, feature = "test-support"))]
     fn new_for_test(
         connection: ConnectionTo<Agent>,

@@ -947,6 +947,13 @@ impl agent_servers::AgentServer for OmegaRouterServer {
                 crate::omega_executor_selector::selected(),
                 &installed_agents,
             );
+            // `OMEGA-DELTA-0117`. Everything detection found, kept whole while
+            // the plan narrows to what this connect may attach: warming asks
+            // what the *selector* offers, which is not what this one choice
+            // reaches for.
+            let detected_agents = installed_agents;
+            let warm_project = project.clone();
+            let warm_agent_server_store = agent_server_store.clone();
             let installed_agents = plan.agents;
             let exo_lane = if plan.exo {
                 crate::omega_exo_connection::connect_configured_lane(
@@ -970,7 +977,12 @@ impl agent_servers::AgentServer for OmegaRouterServer {
             // engine lane. A machine with no Exo registers nothing, and a pin
             // to the external executor then falls back visibly with
             // `RouteReason::ExternalAcpUnavailable`.
+            // `OMEGA-DELTA-0117`. Which agent id ends up in the one external
+            // slot, so the warming below does not start a second copy of the
+            // adapter that is already running.
+            let mut attached_adapter: Option<&'static str> = None;
             if let Some(exo) = exo_lane {
+                attached_adapter = Some(omega_exo_lane::EXO_HARNESS_ID);
                 router = router.with_external_acp(exo);
             // `OMEGA-DELTA-0095`, omega#106. Otherwise the coding agent that is
             // actually installed — Codex first, then Claude. Second, because an
@@ -992,10 +1004,24 @@ impl agent_servers::AgentServer for OmegaRouterServer {
             )
             .await?
             {
+                attached_adapter = crate::omega_agent_attach::choose_executor(&installed_agents)
+                    .map(|choice| choice.chosen.id);
                 router = router.with_external_acp(installed);
             }
             let router = Rc::new(router);
             publish_active_router(&router);
+            // `OMEGA-DELTA-0117`, omega#112. The earliest moment a preload is
+            // allowed to start: this connect has returned, so a window is up
+            // and the wait a person was actually in has ended. Starting the
+            // other offerable executors any earlier would move that wait rather
+            // than remove it.
+            crate::omega_executor_warmth::warm_the_others(
+                &detected_agents,
+                attached_adapter,
+                warm_project,
+                warm_agent_server_store,
+                cx,
+            );
             Ok(router as Rc<dyn AgentConnection>)
         })
     }

@@ -106,6 +106,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0113",
     "OMEGA-DELTA-0114",
     "OMEGA-DELTA-0116",
+    "OMEGA-DELTA-0117",
     "OMEGA-DELTA-0119",
     "OMEGA-DELTA-0121",
     "OMEGA-DELTA-0122",
@@ -409,6 +410,90 @@ pub const OWN_LOOP_CHOICE_FN: &str = "run_on_omegas_own_loop()";
 
 /// OMEGA-DELTA-0114. The only file besides the attach that may call it.
 pub const OWN_LOOP_CHOICE_CALLER_PATH: &str = CONVERSATION_VIEW_PATH;
+
+// ------------------------------------------------------------ OMEGA-DELTA-0117
+
+/// OMEGA-DELTA-0117. Where adapters are kept started so a switch is a lookup.
+pub const EXECUTOR_WARMTH_PATH: &str = "crates/agent_ui/src/omega_executor_warmth.rs";
+
+/// OMEGA-DELTA-0117. The one door a preload may start an adapter through.
+///
+/// `OMEGA-DELTA-0114` put the deadline and the ticking count around exactly one
+/// `server.connect`, in `omega_agent_attach::attach`. A preload that spawned its
+/// own adapter would be a second start, and the second one would be the
+/// unbounded silent one — the state that delta exists to have ended, reintroduced
+/// somewhere nobody is looking because nobody is waiting on it.
+pub const SILENT_ADAPTER_START_FN: &str = "start_adapter_silently";
+
+/// OMEGA-DELTA-0117. What a preload may not name, and why each one matters.
+///
+/// - `CustomAgentServer` / `AgentServerDelegate` / `server.connect(`: starting an
+///   adapter anywhere but through [`SILENT_ADAPTER_START_FN`], which is the only
+///   start `ADAPTER_START_TIMEOUT` and the tick are wrapped around.
+/// - `loading_status`: the panel's channel has exactly one holder and
+///   `CustomAgentServer::connect` installs it into a per-agent-id slot on the
+///   store. A preload carrying one could take the channel a person's own connect
+///   is ticking on, leaving them at the silent `Loading…` `OMEGA-DELTA-0114`
+///   removed.
+/// - `record_unreachable`: that record is what puts the **Run on Omega's Own
+///   Loop** button on screen. Written by a preload, it offers a person a way past
+///   a failure they never saw, for an executor they did not ask for.
+///
+/// `run_on_omegas_own_loop` is deliberately **not** in this list. It is counted
+/// across the whole tree by
+/// `only_a_person_sends_a_thread_to_omegas_own_loop`, which already fails if
+/// this file calls it; naming it here as well would be a second, weaker copy of
+/// a rule that is already exact.
+pub const PRELOAD_MAY_NOT_NAME: &[&str] = &[
+    "CustomAgentServer",
+    "AgentServerDelegate",
+    "server.connect(",
+    "loading_status",
+    "record_unreachable",
+];
+
+/// OMEGA-DELTA-0117. The two grounds on which a warm connection is refused.
+///
+/// A connection held in reserve is the one connection nothing observes the death
+/// of: `AcpConnection`'s wait task fans `LoadError::Exited` out to that
+/// connection's *sessions*, and a warm one has none. Age is the only clock on
+/// it and the process check is the only observer of its exit.
+///
+/// Spelled as whole conditions rather than as the names inside them, and that
+/// is not fussiness: the first draft of this check listed `WARM_LIFETIME`, and
+/// replacing the expiry test with `if false` left it green, because the
+/// constant was still named by the log line *inside* the block it had just
+/// disabled. A check for a mention is not a check for a rule.
+pub const WARM_HANDOVER_REFUSALS: &[&str] = &[
+    "warmed_at.elapsed() >= WARM_LIFETIME",
+    "has_exited(&connection)",
+];
+
+/// OMEGA-DELTA-0117. What a refusal must do besides refusing.
+///
+/// Dropping the last `Rc` is not reclaiming: `Drop` runs when every owner has
+/// been released, and a warm connection's owners are whatever the handover did
+/// not manage to give away. Counted rather than merely found, once per entry in
+/// [`WARM_HANDOVER_REFUSALS`] — deleting one of two identical calls leaves the
+/// other one to satisfy a `contains`, which is exactly what the first draft of
+/// this check did.
+pub const WARM_REFUSAL_RECLAIM: &str = "end(&connection)";
+
+/// OMEGA-DELTA-0117. The call that starts the preloading.
+pub const WARM_TRIGGER_FN: &str = "omega_executor_warmth::warm_the_others(";
+
+/// OMEGA-DELTA-0117. The only file that may make it.
+pub const WARM_TRIGGER_CALLER_PATH: &str = ROUTER_DISPATCH_PATH;
+
+/// OMEGA-DELTA-0117. What must already have happened where the trigger fires.
+///
+/// The owner's first condition on this feature was *when*: a preload that runs
+/// before the window is usable has moved the wait rather than removed it. This
+/// is the mechanical form of "after". The router publishes the router it just
+/// finished building; everything past that line is a moment at which a
+/// connection exists, which means a panel asked for one, which means there is a
+/// window and the wait a person was actually in has ended.
+pub const WARM_TRIGGER_FOLLOWS: &str = "publish_active_router(&router);";
 
 /// OMEGA-DELTA-0080. Where the agent panel declares its result-body ceiling and
 /// applies it to every terminal it creates.
@@ -13106,6 +13191,241 @@ mod tests {
              reconnects, so the reader presses it and the same failure stays on \
              screen.",
             caller_path.display()
+        );
+    }
+
+    // ------------------------------------------------------ OMEGA-DELTA-0117
+
+    /// OMEGA-DELTA-0117. A preload starts adapters, and never an Exo server.
+    ///
+    /// `OMEGA-DELTA-0107` took route A on omega#104: Omega reads an `exo serve`
+    /// the owner already runs and starts none, because a second process pointed
+    /// at one `.exo` root is the write interleaving that makes a fork a copy of
+    /// a history that never existed.
+    ///
+    /// Preloading is the exact shape of change that reverses that decision by
+    /// accident rather than by argument. "Warm everything the selector offers"
+    /// is a sentence with Exo in it, and the convenience is real: a lane that is
+    /// already up is the fastest of the four. This fails on the spellings that
+    /// would start one, held against the module's string literals for the same
+    /// reason 0107 holds them that way — `observe` contains `serve`.
+    #[test]
+    fn a_preload_never_starts_an_exo_server() {
+        let path = repository_path(EXECUTOR_WARMTH_PATH);
+        let warmth = read_repository_file(EXECUTOR_WARMTH_PATH);
+
+        let literals = string_literals(&warmth);
+        for spelling in EXO_SERVER_START_LITERALS {
+            assert!(
+                !literals.iter().any(|literal| literal == spelling),
+                "OMEGA-DELTA-0117: {} names `{spelling}`. A preload is no less a \
+                 second process for being a convenience: `OMEGA-DELTA-0107` \
+                 refused Omega starting `exo serve` because two writers on one \
+                 `.exo` root is a history that never happened, and warming the \
+                 lane would start one nobody even chose.",
+                path.display()
+            );
+        }
+
+        let production = code_of(
+            warmth
+                .split("#[cfg(test)]")
+                .next()
+                .expect("splitting always yields a first part"),
+        );
+        assert!(
+            !production.contains("omega_exo_connection"),
+            "OMEGA-DELTA-0117: {} reaches for the Exo lane's connection. What \
+             this module may start is an ACP adapter for a detected agent. The \
+             Exo lane is read, not started, and it is filtered out of \
+             `warmable` by having no adapter of its own — a call here would go \
+             around that filter.",
+            path.display()
+        );
+    }
+
+    /// OMEGA-DELTA-0117. A preload is bounded by the same deadline a person's
+    /// own start is, because it goes through the same door.
+    ///
+    /// `OMEGA-DELTA-0114` wrapped `ADAPTER_START_TIMEOUT` and the ticking count
+    /// around exactly one `server.connect`, because a silent unbounded npx
+    /// resolve is indistinguishable from a hang. A preload that spawned its own
+    /// adapter would be a second start — and the second one would be the
+    /// unbounded silent one, reintroduced in the one place nobody is watching
+    /// precisely because nobody is waiting on it.
+    ///
+    /// So the rule is not "the preload is also bounded". It is that there is
+    /// still exactly one start, and the preload calls it.
+    #[test]
+    fn a_preload_starts_an_adapter_only_through_the_bounded_door() {
+        let warmth_path = repository_path(EXECUTOR_WARMTH_PATH);
+        let warmth = read_repository_file(EXECUTOR_WARMTH_PATH);
+        let warmth_production = code_of(
+            warmth
+                .split("#[cfg(test)]")
+                .next()
+                .expect("splitting always yields a first part"),
+        );
+
+        assert!(
+            warmth_production.contains(SILENT_ADAPTER_START_FN),
+            "OMEGA-DELTA-0117: {} no longer starts adapters through \
+             `{SILENT_ADAPTER_START_FN}`, so whatever it starts them with is a \
+             second start that `ADAPTER_START_TIMEOUT` and the ticking count are \
+             not wrapped around.",
+            warmth_path.display()
+        );
+
+        for token in PRELOAD_MAY_NOT_NAME {
+            assert!(
+                !without_whitespace(&warmth_production).contains(&without_whitespace(token)),
+                "OMEGA-DELTA-0117: {} names `{token}`. A preload must start \
+                 adapters only through `{SILENT_ADAPTER_START_FN}`, must carry no \
+                 loading-status channel — that channel has one holder and a \
+                 preload taking it leaves a person's own start silent — and must \
+                 record no failure, because a failure nobody saw must not put the \
+                 way past it on their screen.",
+                warmth_path.display()
+            );
+        }
+
+        let attach_path = repository_path(DETECTED_EXECUTOR_ATTACH_PATH);
+        let attach = read_repository_file(DETECTED_EXECUTOR_ATTACH_PATH);
+        let silent = without_whitespace(&code_of(body_of(&attach, SILENT_ADAPTER_START_FN)));
+        assert!(
+            silent.contains(&without_whitespace("Progress(None)")),
+            "OMEGA-DELTA-0117: `{SILENT_ADAPTER_START_FN}` in {} carries a \
+             loading-status channel. `watch::Sender` has one holder and \
+             `CustomAgentServer::connect` installs it into a slot keyed by agent \
+             id, so a preload with a channel can silence the start a person is \
+             actually watching.",
+            attach_path.display()
+        );
+        assert!(
+            silent.contains(&without_whitespace("attach(")),
+            "OMEGA-DELTA-0117: `{SILENT_ADAPTER_START_FN}` in {} no longer goes \
+             through `attach`, which is where the deadline and the tick are.",
+            attach_path.display()
+        );
+    }
+
+    /// OMEGA-DELTA-0117. A warm connection is checked on the way out, and a
+    /// refused one has its process ended rather than left to a reference graph.
+    ///
+    /// This is the one connection in the system whose death nothing observes.
+    /// `AcpConnection`'s wait task fans `LoadError::Exited` out to that
+    /// connection's *sessions*; a connection held in reserve has none, so its
+    /// adapter can exit into complete silence. Handed over afterwards, the
+    /// failure reaches the person after they have typed, from a place the
+    /// composer cannot explain — which is strictly worse than the bounded,
+    /// labelled start they would have had with no preload at all.
+    #[test]
+    fn a_warm_connection_is_refused_rather_than_handed_over_stale() {
+        let path = repository_path(EXECUTOR_WARMTH_PATH);
+        let warmth = read_repository_file(EXECUTOR_WARMTH_PATH);
+        let handover = without_whitespace(&code_of(body_of(&warmth, "take_warm")));
+
+        for token in WARM_HANDOVER_REFUSALS {
+            assert!(
+                handover.contains(&without_whitespace(token)),
+                "OMEGA-DELTA-0117: `take_warm` in {} lost `{token}`. A warm \
+                 connection can be old or dead and nothing else will notice \
+                 either: expiry is the only clock on it, and the process check \
+                 is the only observer of its exit.",
+                path.display()
+            );
+        }
+
+        assert_eq!(
+            handover
+                .matches(&without_whitespace(WARM_REFUSAL_RECLAIM))
+                .count(),
+            WARM_HANDOVER_REFUSALS.len(),
+            "OMEGA-DELTA-0117: `take_warm` in {} has {} refusals and does not \
+             reclaim after each of them. A refused connection that is merely \
+             dropped is ~200 MB of Node still running: `Drop` fires when every \
+             owner is released, and the owners of a connection nobody was given \
+             are whatever this function was holding.",
+            path.display(),
+            WARM_HANDOVER_REFUSALS.len(),
+        );
+    }
+
+    /// OMEGA-DELTA-0117. The preload starts after a connection exists, and
+    /// nowhere else.
+    ///
+    /// The owner's first condition on this feature was *when*: "after the window
+    /// is usable, not before — a preload that delays first paint has moved the
+    /// wait rather than removed it". There is no mechanical test for "the window
+    /// is usable", but there is one for the fact that stands in for it. A router
+    /// connection exists because a panel asked for one, which means a window is
+    /// up; and the trigger sits after the connect has returned, which means the
+    /// wait a person was actually in has already ended.
+    ///
+    /// The call sites are counted rather than trusted, for the same reason
+    /// `run_on_omegas_own_loop`'s are: nothing in the function's body
+    /// distinguishes a preload that runs after a connection from one wired into
+    /// startup, and the second one is the version that costs a person their
+    /// first paint.
+    #[test]
+    fn a_preload_begins_only_once_a_connection_exists() {
+        let callers: Vec<String> = {
+            let mut found = Vec::new();
+            let checks = normalize_path(&repository_path("crates/omega_deltas"));
+            for_each_source_file(&repository_path("crates"), &["rs"], |path, source| {
+                // This crate names the token in order to count it.
+                if normalize_path(path).starts_with(&checks) {
+                    return;
+                }
+                for _ in 0..code_of(source).matches(WARM_TRIGGER_FN).count() {
+                    found.push(
+                        normalize_path(path)
+                            .strip_prefix(normalize_path(&repository_path(".")))
+                            .map(|relative| relative.display().to_string())
+                            .unwrap_or_else(|_| path.display().to_string()),
+                    );
+                }
+            });
+            found.sort();
+            found
+        };
+
+        assert_eq!(
+            callers,
+            vec![WARM_TRIGGER_CALLER_PATH.to_owned()],
+            "OMEGA-DELTA-0117: `{WARM_TRIGGER_FN}` is called from somewhere other \
+             than the router's connect in {WARM_TRIGGER_CALLER_PATH}. Every other \
+             site runs before a connection exists — startup, panel construction, \
+             a first render — and a preload there spends a person's first paint \
+             on adapters they have not asked for, which moves the wait rather \
+             than removing it."
+        );
+
+        let router_path = repository_path(WARM_TRIGGER_CALLER_PATH);
+        let router = read_repository_file(WARM_TRIGGER_CALLER_PATH);
+        let connect = code_of(body_of(&router, "connect"));
+        let published = connect.find(WARM_TRIGGER_FOLLOWS).unwrap_or_else(|| {
+            panic!(
+                "OMEGA-DELTA-0117: `{WARM_TRIGGER_FOLLOWS}` is gone from \
+                 `connect` in {}, so there is nothing left to say the preload \
+                 starts after the connection was finished.",
+                router_path.display()
+            )
+        });
+        let triggered = connect.find(WARM_TRIGGER_FN).unwrap_or_else(|| {
+            panic!(
+                "OMEGA-DELTA-0117: `connect` in {} no longer warms anything, so \
+                 every switch pays a full adapter start again.",
+                router_path.display()
+            )
+        });
+        assert!(
+            triggered > published,
+            "OMEGA-DELTA-0117: the preload in {} starts before the connection it \
+             follows is published. Ahead of that line it is racing the connect a \
+             person is waiting on for the same npm, the same registry, and the \
+             same CPU.",
+            router_path.display()
         );
     }
 

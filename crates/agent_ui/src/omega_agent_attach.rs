@@ -472,6 +472,15 @@ pub async fn connect_detected_executor(
         named(&choice.passed_over)
     );
 
+    // `OMEGA-DELTA-0117`. The adapter may already be started, because the last
+    // connection warmed the executors it was not. Nothing about the rest of
+    // this changes: a miss here is the ordinary attach below, with its channel,
+    // its bound, and its failure.
+    if let Some(warm) = crate::omega_executor_warmth::take_warm(agent.id, &project, cx) {
+        clear_unreachable();
+        return Ok(Some(warm));
+    }
+
     let mut progress = Progress(loading_status);
     let attached = attach(agent, project, agent_server_store, &mut progress, cx).await;
     progress.clear();
@@ -488,6 +497,28 @@ pub async fn connect_detected_executor(
             Err(error)
         }
     }
+}
+
+/// Start `agent`'s adapter with nothing said and nothing recorded.
+///
+/// `OMEGA-DELTA-0117`. The one door a preload may start an adapter through, so
+/// that there is still exactly one place an adapter is started and it is the
+/// place [`ADAPTER_START_TIMEOUT`] and the tick live. What differs from a
+/// person's own attach is only what is *not* here: no loading-status channel,
+/// because that channel has one holder and stealing it would leave a person's
+/// own start silent again; and no [`record_unreachable`], because nobody asked
+/// for this adapter and a failure nobody saw must not offer them a way past it.
+///
+/// # Errors
+///
+/// Exactly what [`attach`] returns. The caller is expected to discard them.
+pub(crate) async fn start_adapter_silently(
+    agent: &DetectedAgent,
+    project: Entity<Project>,
+    agent_server_store: WeakEntity<AgentServerStore>,
+    cx: &mut AsyncApp,
+) -> Result<Rc<dyn AgentConnection>> {
+    attach(agent, project, agent_server_store, &mut Progress(None), cx).await
 }
 
 /// Reach `agent`'s ACP adapter, saying what is happening while it happens.

@@ -5248,3 +5248,155 @@ than merely stated.
   a Dock or Finder launch is neither `EXO_SECRET_BACKEND` nor
   `EXO_MASTER_KEY_PATH`. That gap is measured and written down and is not
   repaired here.
+
+### OMEGA-DELTA-0117 — The adapters a person can switch to are already started, and one of them is never started at all
+
+- **Upstream Zed:** an external ACP agent is started when a person picks it from
+  the agent panel, once, and stays picked. There is no control that re-attaches a
+  live conversation somewhere else, so there is no repeated start to preload
+  against, and `LocalRegistryNpxAgent`'s `npm exec --yes` sits where the reader
+  already knows they asked for something.
+- **Omega, before this:** `OMEGA-DELTA-0115` gave the composer a control that
+  switches between Omega, Exo, Codex and Claude, and switching works by
+  rebuilding the connection — `reset_onto_new_executor` drops the cached entry so
+  `connect` runs again. So every switch paid a full adapter start: `npm exec
+  --yes` resolving an npx package, Node booting it, and the ACP `initialize`
+  handshake, in front of somebody who had just clicked a menu item.
+  `OMEGA-DELTA-0114` had already bounded and named that wait. Naming a wait does
+  not shorten it.
+- **Omega now:** once a connection has been established, the adapters for the
+  *other* offerable executors are started in the background and held. A switch to
+  one of them takes the started adapter instead of starting one.
+- **Why:** the owner, switching executors in a running build: *"that acp shit is
+  ideally preloaded in the background so user doesnt have to sit there waiting
+  for that bullshit"*.
+- **What is warm is a process, and the reason is measured rather than assumed.**
+  The obvious thing to preload is the npx *package*, and it is what
+  `OMEGA-DELTA-0114`'s prose points at — a cold resolve is tens of megabytes. It
+  is also already warm on any machine that has connected once: npm keeps the
+  resolved package under `<cache>/_npx`, that cache is Omega's own directory, and
+  it survives launches. Measured on the owner's machine against his real caches
+  and the exact command `LocalRegistryNpxAgent` builds, timed to the `initialize`
+  reply — which is precisely where `CustomAgentServer::connect` returns, since
+  `agent_servers::acp` does `initialize` and nothing else: a **cold** resolve of
+  `codex-acp` costs **4.60s**, and every resolve after it costs **0.55–0.67s**
+  (median 0.63s over five runs; `claude-acp` 0.55–0.60s, median 0.59s, after a
+  cold 4.25s). Preloading the package therefore buys a first launch several
+  seconds and buys the owner's actual complaint — the second switch, and the
+  third — nothing. What remains in that 0.6s is npm's startup, Node's boot and
+  the handshake: work, not bytes, and uncacheable. The only way not to pay it at
+  switch time is to have paid it already, so what is held is the whole
+  `Rc<dyn AgentConnection>`.
+- **What it costs when nobody uses it, stated rather than elided.** A warmed
+  adapter is two live processes, the `npm exec` wrapper and the Node child.
+  Measured idle, immediately after `initialize`: **~100 MB RSS each, ~200 MB the
+  pair**, per warmed executor. With both agents installed one is already
+  attached, so the standing cost is one warm adapter, ~200 MB, for the one menu
+  entry the person has not chosen; on Omega's own loop or an Exo lane both are
+  warm and it is ~400 MB. Somebody who never opens the menu pays that for
+  nothing. `WARM_LIFETIME` is what stops them paying it forever.
+- **Exo is never warmed, and that is the whole of the interaction with
+  `OMEGA-DELTA-0107`.** That delta took route A on omega#104: Omega reads an
+  `exo serve` the owner already runs and starts none, because a second process
+  pointed at one `.exo` root is the write interleaving that makes a fork a copy
+  of a history that never existed. "Warm everything the selector offers" is a
+  sentence with Exo in it and the convenience is real, which is exactly how a
+  decision gets reversed by accident instead of by argument. `warmable` filters
+  on having an ACP adapter of one's own, which excludes Exo and Omega for the
+  two different right reasons — a lane that must not be started, and a loop
+  compiled in with nothing to start — and the check holds the `serve` spellings
+  against the module's literals the way 0107 does.
+- **A preload cannot be seen unless it worked.** It carries no loading-status
+  channel: `watch::Sender` has exactly one holder and `CustomAgentServer::
+  connect` installs it into a slot on the store keyed by agent id, so a preload
+  carrying one could take the channel a person's own connect is ticking on and
+  leave them at the silent unbounded `Loading…` that `OMEGA-DELTA-0114` exists to
+  have removed. Passing `None` means `connect` never touches that slot. A failed
+  preload records nothing — not `record_unreachable`, which is what puts **Run on
+  Omega's Own Loop** on screen and would be offering a person a way past a
+  failure they never saw; and not `run_on_omegas_own_loop` itself, which only a
+  person may call and whose sites 0114 already counts across the tree. The person
+  who then picks that executor gets the ordinary attach: the ticking label,
+  `ADAPTER_START_TIMEOUT`, and the same failure they would have had if none of
+  this existed.
+- **There is still exactly one place an adapter is started.** `start_adapter_
+  silently` is a wrapper over the same `attach` a person's own connect uses, not
+  a second path beside it, because a second start would be the *unbounded* one —
+  reintroduced in the one place nobody is watching, precisely because nobody is
+  waiting on it.
+- **A warm connection expires and is checked, because nothing else will notice.**
+  A held connection is the one connection whose death is observed by nobody:
+  `AcpConnection`'s wait task fans `LoadError::Exited` out to that connection's
+  *sessions*, and one in reserve has none. So `take_warm` refuses on two grounds
+  — older than `WARM_LIFETIME`, or `agent_server_process_has_exited` — and both
+  refusals **end the process by name** rather than dropping the last `Rc` and
+  hoping, since `Drop` runs only when every owner is released and 200 MB of Node
+  with no owner is the failure this is supposed to avoid. Handing over a stale
+  handle is worse than being slow: a slow start is a bounded wait with a label,
+  a dead handle is a failure that arrives after the person has typed, from
+  somewhere the composer cannot explain.
+- **A warm attempt still running is left alone.** Not awaited, because that would
+  put a person behind a start with no channel and no tick; not cancelled, because
+  dropping the task drops a `Child` that nothing else kills — `util::process::
+  Child` has no `Drop` on Unix — and a cancelled preload would leak the very
+  process it exists to save. The person's own attach runs beside it, and the warm
+  one is taken by the next switch or expires.
+- **When it starts is a decision, not a default.** The trigger is the router's
+  `connect`, after `publish_active_router`. A connection exists because a panel
+  asked for one, so a window is up; and the connect the person was actually
+  waiting on has returned, so the preload is not racing it for the same npm, the
+  same registry and the same CPU. `WARM_START_DELAY` adds two seconds on top,
+  because a connect returning is not the window being finished with it — the
+  session opens next and the transcript draws. The call sites are counted rather
+  than trusted, for the same reason `run_on_omegas_own_loop`'s are: nothing in
+  the function distinguishes a preload that follows a connection from one wired
+  into startup, and the startup version spends a person's first paint on adapters
+  they never asked for, which moves the wait instead of removing it.
+- **Enforced by:** `a_preload_never_starts_an_exo_server`,
+  `a_preload_starts_an_adapter_only_through_the_bounded_door`,
+  `a_warm_connection_is_refused_rather_than_handed_over_stale` and
+  `a_preload_begins_only_once_a_connection_exists` in `crates/omega_deltas`,
+  plus `the_exo_lane_is_never_warmed`, `omegas_own_loop_is_never_warmed`,
+  `the_two_adapters_are_what_gets_warmed`,
+  `the_attached_executor_is_not_warmed_again`,
+  `an_exo_lane_leaves_both_adapters_worth_warming`, `a_bare_machine_warms_nothing`
+  and `nothing_is_warmed_that_the_selector_does_not_offer` in `crates/agent_ui`.
+  Each was watched failing first, against fifteen mutations: a `warmable` that
+  stopped filtering on the adapter id and so offered Exo and Omega, one that
+  stopped excluding the attached executor, one that warmed names the selector
+  never offered; a module that named `exo serve`, one that reached for the Exo
+  lane's connection, one that started adapters outside `start_adapter_silently`,
+  one that built its own `CustomAgentServer`, one that carried a loading-status
+  channel, one that called `record_unreachable`, a `start_adapter_silently` given
+  a channel; a `take_warm` with its expiry test disabled, its liveness test
+  disabled, and one of its two reclaims deleted; and a trigger moved above
+  `publish_active_router` or added to the attach.
+- **Two of these checks were themselves falsified before they were kept, and both
+  had passed.** Disabling the expiry test left the check green, because it looked
+  for the token `WARM_LIFETIME` and the constant was still named by the log line
+  *inside* the block that had just been switched off — a check for a mention is
+  not a check for a rule, so it now holds the whole condition. Deleting one of
+  the two `end(&connection)` reclaims also left it green, because `contains`
+  was satisfied by the other one; it is now counted, once per refusal. This is
+  the whole argument for watching a check fail rather than watching it pass.
+- **What this does not cover.** **No window has been opened, and no check starts
+  a process**, so nothing here proves what a person sees. The measurements above
+  are of the adapter start in isolation, driven through the exact command
+  `LocalRegistryNpxAgent` builds against the owner's own caches — not of a switch
+  in a running Omega. What a switch pays *besides* the adapter is untouched and
+  unmeasured here: the native connect, the ACP registry's own load, and
+  `session/new`, which is a further 0.15–0.60s warm on this machine and cannot be
+  preloaded at all, because a warm session would be a conversation nobody asked
+  for. The expiry is asserted as a rule, not exercised against a connection that
+  actually went stale; the liveness answer is `try_status` on a reaped child and
+  therefore says nothing about an adapter that is alive and wedged.
+- **Adapter processes can already outlive Omega, and this adds one more of
+  them.** `util::process::Child` has no `Drop` on Unix and children are started
+  in their own session, so an adapter is reclaimed by `AcpConnection::drop`,
+  by `end_agent_server_process`, or not at all. That is the existing situation
+  for the attached adapter; warming does not create the class, it adds a member
+  to it. `sweep_expired` bounds the in-process half — an expired connection is
+  ended at the next connect rather than waiting for somebody to ask for the
+  executor nobody chose — but a warm adapter belonging to a closed window still
+  lives until then, and one belonging to a crashed Omega is not reclaimed at
+  all.
