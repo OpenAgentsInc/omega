@@ -11680,6 +11680,9 @@ impl ThreadView {
             style,
             &self.workspace,
             &self.code_span_resolver,
+            // OMEGA-DELTA-0119. Where this thread's agent actually runs, which
+            // is the root a relative path in its own transcript is relative to.
+            self.thread.read(cx).work_dirs(),
             cx,
         )
     }

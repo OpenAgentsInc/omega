@@ -4987,3 +4987,84 @@ than merely stated.
   agent answering with the directory that was typed. Those three are omega#111's
   acceptance and they stay open. The header's label is also unproved against a
   narrow panel — `truncate()` is asserted, a rendered width is not.
+
+### OMEGA-DELTA-0119 — A file link in the transcript opens a reader, and a link that resolves to nothing says so
+
+- **Upstream Zed:** a file link in an agent message opens the file in the centre
+  pane. The editor is always drawn, so this always works.
+- **Omega, before this:** the same handler ran and the same file opened. The
+  owner clicked
+  `crates/agent/src/templates/system_prompt.hbs` in a live build and *"nothing
+  happened."*
+- **The click was never a no-op, which is why it took reading to find.** The
+  code-span resolver in `conversation_view.rs` recognises the path, resolves it
+  against the project, and hands the markdown renderer a `file://` URI — that
+  resolution is the reason the text is blue and underlined at all, and an
+  unresolved code span is styled as plain inline code. So the handler existed,
+  the path resolved, and `open_abs_path_at_point` opened the buffer, moved focus
+  into it, and put it in the centre pane. `OMEGA-DELTA-0053` does not draw a
+  centre pane once zero base is sealed. The file opened somewhere with no
+  pixels, and it took the composer's focus with it.
+- **An invisible success is indistinguishable from an unimplemented handler.** A
+  person reports the second. Any repair that leaves a click with no visible
+  consequence — including a repair that fails to find the file — reproduces the
+  bug under a different cause, so the reader draws in every case, including
+  failure.
+- **Omega now:** in a sealed zero base, a transcript link to a local file opens
+  `crates/agent_ui/src/omega_file_peek.rs` — a read-only sheet in the workspace's
+  modal layer, carrying the file, its path, and the line the link named.
+- **Read-only, and not as a simplification.** Zero base refuses `workspace::Save`
+  at the action gate. An editable sheet would take typing and then have nowhere
+  to put it, which is a larger version of the lie being repaired. The header says
+  *Read only* so the surface is not mistaken for the editor returning.
+- **`OMEGA-DELTA-0052` is not weakened.** No dock, no pane, no tab, and no way
+  out. The modal layer is rendered by `MultiWorkspace` outside the seal — which
+  is why the command palette still opens in zero base — and it is absolutely
+  positioned with no height of its own. It therefore takes part in no layout and
+  **cannot clip or push the composer**, which is the property the composer's
+  wrapping exists to protect. Its height is bounded so it covers the transcript
+  and not the composer. Dismissing it leaves the window zero base already had.
+- **A link that resolves to nothing still opens the sheet.** It prints the path
+  exactly as the agent wrote it, and every directory that was searched. The two
+  failures a person actually hits — the agent invented the path, and the agent is
+  running somewhere this window is not — are told apart only by reading that
+  list, so the list is never elided. With no roots at all, it says the thread has
+  no working directory and names the control that fixes it, which is the state
+  `OMEGA-DELTA-0054` already put a folder picker beside the composer for.
+- **The thread's own working directories are the first roots, ahead of the
+  project's worktrees.** An external executor's session carries its own `cwd`,
+  and `AcpThread::work_dirs` is where that reaches the panel. Resolving a
+  relative path against the process working directory, or against a worktree the
+  agent is not running in, is how a link ends up naming a file that is not
+  there. Both root sets are searched, in that order, and both spellings are tried
+  under each root: `crates/foo.rs`, and `omega/crates/foo.rs` where the agent has
+  repeated the root's own folder name because that is what its `cwd` shows it.
+  The literal join is tried first, so a real `omega/` subdirectory still wins.
+- **Anchors are supported in the link and nowhere else.** `foo.rs:42`,
+  `foo.rs:42:7`, `#L42`, `#L42:7` and `#L1-L150` all move the cursor, tolerating
+  a missing or lower-case `L`. An anchor that will not parse is dropped and the
+  file opens at the top, because refusing the link over an unreadable anchor
+  would turn a cosmetic problem back into a dead click. Prose ranges such as
+  *"(lines 1-150)"* written **beside** a link are not part of its target and are
+  not read; only the link's own text is.
+- **A full editor keeps its editor.** The reader takes the click only when
+  `omega_zero_base::is_sealed()`, which is the exact moment the centre pane stops
+  being drawn — not `is_active`, because `OMEGA-DELTA-0053` still renders the
+  ordinary workspace for the identity gate before the seal. Links that are not
+  local files — `https`, threads, fetches, rules, directories — are declined and
+  keep the handling they have.
+- **Enforced by:** `a_transcript_file_link_opens_a_reader_in_zero_base` in
+  `crates/omega_deltas`, plus the nine parser tests in
+  `crates/agent_ui/src/omega_file_peek.rs`. Each assertion in the delta check was
+  watched failing against the source before the repair and against the repair
+  reverted one piece at a time: the reader deleted, the seal gate removed, the
+  read-only call removed, a pane-opening call reintroduced into the reader, the
+  unresolved arm removed, the reader called after `open_link` instead of before
+  it, and the thread's work dirs replaced with `None`.
+- **What this does not cover.** **No window has been opened.** No check here
+  starts the binary, so nothing proves what a person sees: the sheet's rendered
+  size against a narrow window, the composer staying uncovered, Escape reaching
+  the sheet rather than the read-only editor inside it, or the cursor landing on
+  the named line. Those stay open. The reader is also not offered in a full
+  editor, so a regression there would show up as the editor opening — which is
+  the correct behaviour, and therefore not a check.

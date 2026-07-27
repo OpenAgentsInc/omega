@@ -29,6 +29,7 @@ pub mod omega_community_control;
 pub mod omega_executor_disclosure;
 pub mod omega_executor_selector;
 pub mod omega_exo_connection;
+pub mod omega_file_peek;
 pub mod omega_host_bridge;
 pub mod omega_router;
 pub mod omega_send_queue;

@@ -106,8 +106,13 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0113",
     "OMEGA-DELTA-0114",
     "OMEGA-DELTA-0116",
+    "OMEGA-DELTA-0119",
     "OMEGA-DELTA-0121",
 ];
+
+/// OMEGA-DELTA-0119. The read-only sheet a transcript file link opens in a
+/// mode that draws no editor.
+pub const FILE_PEEK_PATH: &str = "crates/agent_ui/src/omega_file_peek.rs";
 
 /// OMEGA-DELTA-0106. The community audience: a Forge repository, its members,
 /// and the signed records they send.
@@ -15209,6 +15214,148 @@ mod tests {
              undoing a decision the owner made while looking at the running \
              app.",
             composer_path.display()
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // OMEGA-DELTA-0119 — a transcript file link opens a reader, not a pane
+    // nobody draws
+    // ---------------------------------------------------------------------
+
+    /// OMEGA-DELTA-0119. Clicking a file path in the transcript shows the file.
+    ///
+    /// The owner clicked `crates/agent/src/templates/system_prompt.hbs` in a
+    /// live zero base and nothing happened. The handler was not missing: the
+    /// code-span resolver had already resolved the path — which is why it was
+    /// blue — and `open_abs_path_at_point` opened the buffer into the centre
+    /// pane, which `OMEGA-DELTA-0053` does not draw once the mode is sealed. An
+    /// invisible success reads exactly like an unimplemented handler, and a
+    /// person reports the second.
+    ///
+    /// So the reader must exist, must take the click *before* the handler that
+    /// opens a pane, must be read-only, must open no pane itself, and must draw
+    /// something when the path resolves to nothing — because a repair whose
+    /// failure mode is a silent click is the same bug wearing a different
+    /// cause.
+    #[test]
+    fn a_transcript_file_link_opens_a_reader_in_zero_base() {
+        let peek_path = repository_path(FILE_PEEK_PATH);
+        let peek_source = std::fs::read_to_string(&peek_path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", peek_path.display()));
+        // Comments are dropped before anything is looked for. The prose in this
+        // file names the call that produced the bug, on purpose, and a check
+        // that could not tell that apart from making the call would force the
+        // repair to stop explaining itself.
+        let peek = peek_source
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(
+            peek.contains("if !omega_zero_base::is_sealed() {"),
+            "OMEGA-DELTA-0119: {} no longer gates on the seal. `is_sealed` is \
+             the exact moment the centre pane stops being drawn; gating on \
+             anything else either steals clicks from a working editor or hands \
+             them back to a pane nobody renders.",
+            peek_path.display()
+        );
+        assert!(
+            peek.contains("editor.set_read_only(true);"),
+            "OMEGA-DELTA-0119: the reader in {} is no longer read-only. Zero \
+             base refuses `workspace::Save`, so a sheet that accepts typing has \
+             nowhere to put it — a larger version of the lie this delta \
+             repairs.",
+            peek_path.display()
+        );
+        assert!(
+            peek.contains("impl ModalView for FilePeek"),
+            "OMEGA-DELTA-0119: the reader in {} is no longer a modal view. The \
+             modal layer is what draws outside the seal and takes part in no \
+             layout, which is the only reason this surface cannot clip or push \
+             the composer.",
+            peek_path.display()
+        );
+        for pane_opener in [
+            "open_abs_path_at_point",
+            "workspace.open_path",
+            "open_abs_path(",
+            "add_item_to_active_pane",
+        ] {
+            assert!(
+                !peek.contains(pane_opener),
+                "OMEGA-DELTA-0119: the reader in {} calls `{pane_opener}`. That \
+                 is the call whose result nobody can see in a sealed zero base, \
+                 and routing back to it would restore the dead click with an \
+                 extra step.",
+                peek_path.display()
+            );
+        }
+        assert!(
+            peek.contains("PeekState::Unresolved"),
+            "OMEGA-DELTA-0119: {} lost the state a link that resolves to \
+             nothing lands in. Without it the reader declines to draw, which is \
+             the silent click this delta exists to remove.",
+            peek_path.display()
+        );
+        assert!(
+            peek.contains("Looked under"),
+            "OMEGA-DELTA-0119: the failure in {} no longer names the \
+             directories it searched. \"The agent invented the path\" and \"the \
+             agent is running somewhere else\" are told apart only by reading \
+             that list.",
+            peek_path.display()
+        );
+
+        let caller_path = repository_path(CONVERSATION_VIEW_PATH);
+        let caller = std::fs::read_to_string(&caller_path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", caller_path.display()));
+        let reader_call = caller
+            .find("crate::omega_file_peek::open_from_transcript_link(")
+            .unwrap_or_else(|| {
+                panic!(
+                    "OMEGA-DELTA-0119: {} no longer offers the transcript link \
+                     to the reader, so every file link in a sealed zero base \
+                     opens into a pane that is not drawn.",
+                    caller_path.display()
+                )
+            });
+        let fallback_call = caller
+            .find("thread_view::open_link(text, &workspace, window, cx);")
+            .unwrap_or_else(|| {
+                panic!(
+                    "OMEGA-DELTA-0119: {} no longer falls back to the ordinary \
+                     link handler. Threads, fetches and `https` links are not \
+                     files and must keep the handling they have.",
+                    caller_path.display()
+                )
+            });
+        assert!(
+            reader_call < fallback_call,
+            "OMEGA-DELTA-0119: {} calls the ordinary link handler before the \
+             reader. The first handler to take the click wins, and the ordinary \
+             one opens the file into a pane a sealed zero base does not draw.",
+            caller_path.display()
+        );
+        assert!(
+            caller.contains(".flat_map(PathList::ordered_paths)"),
+            "OMEGA-DELTA-0119: {} no longer puts the thread's working \
+             directories among the roots. An external executor's session \
+             carries its own `cwd`, and resolving a relative path against the \
+             wrong root is how a link names a file that is not there.",
+            caller_path.display()
+        );
+
+        let thread_path = repository_path(THREAD_VIEW_PATH);
+        let thread = std::fs::read_to_string(&thread_path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", thread_path.display()));
+        assert!(
+            thread.contains("self.thread.read(cx).work_dirs(),"),
+            "OMEGA-DELTA-0119: {} no longer passes the thread's working \
+             directories to the markdown renderer, so the reader falls back to \
+             this window's worktrees — which is not necessarily where the agent \
+             is running.",
+            thread_path.display()
         );
     }
 }

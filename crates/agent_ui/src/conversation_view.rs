@@ -2997,6 +2997,7 @@ impl ConversationView {
             style,
             &self.workspace,
             &self.code_span_resolver,
+            None,
             cx,
         )
     }
@@ -3644,10 +3645,27 @@ fn render_agent_markdown(
     style: MarkdownStyle,
     workspace: &WeakEntity<Workspace>,
     code_span_resolver: &AgentCodeSpanResolver,
+    work_dirs: Option<&PathList>,
     cx: &App,
 ) -> MarkdownElement {
     let workspace = workspace.clone();
     let worktree_roots = code_span_resolver.worktree_roots(cx);
+    // `OMEGA-DELTA-0119`. The thread's own working directories come first. They
+    // are where the agent actually runs, which is not always where this window
+    // has worktrees: an external executor's session carries its own `cwd`, and
+    // resolving a relative path against the wrong root is how a link ends up
+    // naming a file that is not there.
+    let peek_roots = work_dirs
+        .into_iter()
+        .flat_map(PathList::ordered_paths)
+        .cloned()
+        .chain(worktree_roots.iter().cloned())
+        .fold(Vec::new(), |mut roots: Vec<PathBuf>, root| {
+            if !roots.contains(&root) {
+                roots.push(root);
+            }
+            roots
+        });
     let resolver = code_span_resolver.clone();
     MarkdownElement::new(markdown, style)
         .code_block_renderer(markdown::CodeBlockRenderer::Default {
@@ -3657,6 +3675,19 @@ fn render_agent_markdown(
         })
         .image_resolver(move |dest_url| resolve_agent_image(dest_url, &worktree_roots))
         .on_url_click(move |text, window, cx| {
+            // `OMEGA-DELTA-0119`. In a sealed zero base the ordinary handler
+            // opens the file into a centre pane `OMEGA-DELTA-0053` does not
+            // draw, so the click succeeds where nobody can see it. The reader
+            // takes the click only there; a full editor keeps its editor.
+            if crate::omega_file_peek::open_from_transcript_link(
+                &text,
+                &peek_roots,
+                &workspace,
+                window,
+                cx,
+            ) {
+                return;
+            }
             thread_view::open_link(text, &workspace, window, cx);
         })
         .on_code_span_link(move |text, cx| resolver.try_resolve(text, cx))
