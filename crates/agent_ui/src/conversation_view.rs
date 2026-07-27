@@ -999,6 +999,22 @@ impl ConversationView {
         self.clear_resolved_request_elicitations(cx);
         self.loading_status = None;
 
+        // Drop the cached connection first, or nothing reconnects.
+        //
+        // omega#112. `AgentConnectionStore` keys connections by `Agent`, and
+        // the key does not change when the executor does — Omega's router is
+        // the agent either way. So `request_connection` handed back the *same*
+        // live connection, with Codex still in its external-ACP slot, and the
+        // rebuild that was supposed to read the new choice never called
+        // `connect` at all. The window said "Loading" and came back to Codex.
+        //
+        // `restart_connection` removes the entry before requesting, which is
+        // exactly the difference. It is already the move used when a
+        // connection has to be genuinely re-established rather than reused.
+        cx.update_entity(&self.connection_store.clone(), |store, cx| {
+            store.restart_connection(self.connection_key.clone(), self.agent.clone(), cx);
+        });
+
         // The working directory survives; the conversation does not. A person
         // switching executors is still working in the same place.
         let work_dirs = self

@@ -4519,7 +4519,15 @@ impl ThreadView {
                             // because it is the one that states the task.
                             .min_h(rems_from_px(96.))
                             .when(fills_container, |this| this.flex_1())
-                            .pt_1()
+                            // omega#112. A little more room above and below the
+                            // text than `pt_1` alone gave it — the first line
+                            // sat against the top edge of the field. `pt_1p5`
+                            // is the next step the scale offers; there is no
+                            // literal 1px here because these are rem-derived
+                            // and would drift from every other spacing in the
+                            // composer.
+                            .pt_1p5()
+                            .pb_0p5()
                             .pr_2p5()
                             .child(self.message_editor.clone())
                             // omega#100. The expand control is not conditional
