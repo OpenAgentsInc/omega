@@ -3547,6 +3547,20 @@ impl AgentPanel {
                                 this.toggle_threads_sidebar(cx);
                             })),
                     )
+                    .child(div().flex_1())
+                    .child(
+                        div().pb_1().child(
+                            IconButton::new("open-omega-settings-rail", IconName::Settings)
+                                .icon_size(IconSize::Small)
+                                .tooltip(Tooltip::text("Settings"))
+                                .on_click(|_, window, cx| {
+                                    window.dispatch_action(
+                                        zed_actions::OpenSettings.boxed_clone(),
+                                        cx,
+                                    );
+                                }),
+                        ),
+                    )
                     .into_any_element(),
             );
         }
@@ -3592,6 +3606,32 @@ impl AgentPanel {
                         ),
                 )
                 .child(sections)
+                .child(
+                    div()
+                        .flex_shrink_0()
+                        .border_t_1()
+                        .border_color(border)
+                        .p_1()
+                        .child(
+                            ListItem::new("open-omega-settings")
+                                .aria_role(gpui::Role::Button)
+                                .aria_label("Open Settings")
+                                .inset(true)
+                                .spacing(ListItemSpacing::Sparse)
+                                .start_slot(
+                                    Icon::new(IconName::Settings)
+                                        .size(IconSize::Small)
+                                        .color(Color::Muted),
+                                )
+                                .child(Label::new("Settings").size(LabelSize::Small))
+                                .on_click(|_, window, cx| {
+                                    window.dispatch_action(
+                                        zed_actions::OpenSettings.boxed_clone(),
+                                        cx,
+                                    );
+                                }),
+                        ),
+                )
                 .into_any_element(),
         )
     }
@@ -6575,22 +6615,16 @@ impl AgentPanel {
             .and_then(|md| md.content())
             .is_some();
 
-        // OMEGA-DELTA-0125. Does this window have the editor's own settings and
-        // extension surfaces to send a click to?
+        // OMEGA-DELTA-0125. Does this window have the editor's extension
+        // surface to send a click to?
         //
         // The owner, on a live build: *"literally nothing in this top right
         // menu does anything when i click on it. if its easy to reenable those
         // things to actually work, do it, otherwise hide the menu."* Four
-        // entries here reach `omega::OpenSettingsAt`, `omega::Extensions` or
-        // `omega::OpenSettingsPage` — directly, or one hop later through
-        // `manage_skills` and `open_configuration` — and zero base refuses the
-        // whole `omega` namespace at the action gate. They are hidden rather
-        // than admitted, for two reasons that are not squeamishness: the
-        // settings window carries controls ("Open Current Settings File", "Open
-        // Keymap") that close themselves and open a buffer in *this* workspace,
-        // which is the sealed centre, so admitting it would import the same
-        // dead click one level down; and `OMEGA-DELTA-0048` already recorded
-        // that the settings and extension surfaces reach nothing in Omega.
+        // entries used to reach the refused `omega` namespace. Settings now
+        // opens its own visible window and its three navigation actions are
+        // admitted individually. Extensions still belongs to the full editor,
+        // so that is the only entry this seal guard hides.
         //
         // The seal, not the mode: before it the ordinary workspace still
         // renders, and these entries work there exactly as upstream.
@@ -6660,42 +6694,29 @@ impl AgentPanel {
                         }
 
                         if !showing_terminal {
+                            menu = menu.header("MCP Servers").action(
+                                "Add Server…",
+                                Box::new(zed_actions::OpenSettingsAt {
+                                    path: "context_servers".to_string(),
+                                    target: None,
+                                }),
+                            );
                             if offers_editor_surfaces {
-                                menu = menu
-                                    .header("MCP Servers")
-                                    .action(
-                                        "Add Server…",
-                                        Box::new(zed_actions::OpenSettingsAt {
-                                            path: "context_servers".to_string(),
-                                            target: None,
-                                        }),
-                                    )
-                                    .action(
-                                        "Install New Servers…",
-                                        Box::new(zed_actions::Extensions {
-                                            category_filter: Some(
-                                                zed_actions::ExtensionCategoryFilter::ContextServers,
-                                            ),
-                                            id: None,
-                                        }),
-                                    )
-                                    .separator();
+                                menu = menu.action(
+                                    "Install New Servers…",
+                                    Box::new(zed_actions::Extensions {
+                                        category_filter: Some(
+                                            zed_actions::ExtensionCategoryFilter::ContextServers,
+                                        ),
+                                        id: None,
+                                    }),
+                                );
                             }
+                            menu = menu.separator();
 
-                            // The header still belongs to the AGENTS.md entries
-                            // when Skills is hidden; a "Context" heading over
-                            // nothing, or rules with no heading, are both worse
-                            // than reordering one line.
-                            let has_context_section = offers_editor_surfaces
-                                || project_agents_md_path.is_some()
-                                || global_agents_md_loaded;
-                            if has_context_section {
-                                menu = menu.header("Context");
-                            }
-
-                            if offers_editor_surfaces {
-                                menu = menu.action("Skills", Box::new(ManageSkills));
-                            }
+                            menu = menu
+                                .header("Context")
+                                .action("Skills", Box::new(ManageSkills));
 
                             if project_agents_md_path.is_some() || global_agents_md_loaded {
                                 if global_agents_md_loaded {
@@ -6750,14 +6771,7 @@ impl AgentPanel {
                                 }
                             }
 
-                            // A separator only where there is something above
-                            // it to separate. In a sealed zero base with no
-                            // folder open there is no MCP section, no Skills
-                            // and no rules file, and an unconditional one would
-                            // draw a rule across the top of the menu.
-                            if has_context_section {
-                                menu = menu.separator();
-                            }
+                            menu = menu.separator();
 
                             // Profiles stays. It is `agent::ManageProfiles`,
                             // which the gate admits, and it opens a modal —
@@ -6768,9 +6782,7 @@ impl AgentPanel {
                             menu = menu.action("Profiles", Box::new(ManageProfiles::default()));
                         }
 
-                        if offers_editor_surfaces {
-                            menu = menu.action("Settings", Box::new(OpenSettings));
-                        }
+                        menu = menu.action("Settings", Box::new(OpenSettings));
 
                         // OMEGA-DELTA-0118. The entry names the action that
                         // works in the mode this window is in.
@@ -6783,16 +6795,14 @@ impl AgentPanel {
                         // project switcher and is the right answer there;
                         // zero base has no `MultiWorkspace` surface and gets
                         // this panel's own.
-                        menu = menu
-                            .separator()
-                            .action(
-                                "Toggle Threads Sidebar",
-                                if omega_zero_base::is_active() {
-                                    Box::new(ToggleThreadsSidebar) as Box<dyn Action>
-                                } else {
-                                    Box::new(ToggleWorkspaceSidebar) as Box<dyn Action>
-                                },
-                            );
+                        menu = menu.separator().action(
+                            "Toggle Threads Sidebar",
+                            if omega_zero_base::is_active() {
+                                Box::new(ToggleThreadsSidebar) as Box<dyn Action>
+                            } else {
+                                Box::new(ToggleWorkspaceSidebar) as Box<dyn Action>
+                            },
+                        );
 
                         if has_auth_methods || supports_logout {
                             menu = menu.separator()

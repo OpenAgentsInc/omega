@@ -147,15 +147,15 @@ pub const ENFORCED_DELTAS: &[&str] = &[
 ///
 /// "Finally reaches" matters. `Skills` dispatches `agent::ManageSkills`, which
 /// the gate admits, and `manage_skills` then dispatches
-/// `omega::OpenSettingsAt`, which it does not. `Settings` is the same shape
+/// `omega::OpenSettingsAt`, which is now admitted. `Settings` is the same shape
 /// through `open_configuration` and `omega::OpenSettingsPage`. An entry is only
 /// as reachable as the last hop, and a check that read the first hop would have
 /// passed both of the two entries the owner was actually complaining about.
 pub const THREAD_MENU_ENTRIES: &[(&str, &str, bool)] = &[
-    ("Add Server…", "omega::OpenSettingsAt", false),
+    ("Add Server…", "omega::OpenSettingsAt", true),
     ("Install New Servers…", "omega::Extensions", false),
-    ("Skills", "omega::OpenSettingsAt", false),
-    ("Settings", "omega::OpenSettingsPage", false),
+    ("Skills", "omega::OpenSettingsAt", true),
+    ("Settings", "omega::OpenSettingsPage", true),
     ("Profiles", "agent::ManageProfiles", true),
     // `OMEGA-DELTA-0118`. This entry names one action per mode — the workspace
     // sidebar in the editor, this panel's own in zero base — so the action
@@ -17191,13 +17191,9 @@ mod tests {
     /// Two different causes wore that one symptom, and separating them is the
     /// whole of the repair:
     ///
-    /// - **Refused.** `Add Server…`, `Install New Servers…`, `Skills` and
-    ///   `Settings` all reach the `omega` namespace, which the action gate
-    ///   refuses. Two of them reach it on the *second* hop —
-    ///   `agent::ManageSkills` and `agent::OpenSettings` are admitted, and
-    ///   `manage_skills` and `open_configuration` then dispatch
-    ///   `omega::OpenSettingsAt` and `omega::OpenSettingsPage`. A check that
-    ///   read only the action the menu names would have passed both.
+    /// - **Refused.** `Install New Servers…` reaches the extensions surface,
+    ///   which zero base still refuses. Settings navigation is admitted
+    ///   individually because it opens a separate visible window.
     /// - **Invisible.** `Open Thread as Markdown` and the two AGENTS.md entries
     ///   dispatched nothing at all; they called a handler that opened an item
     ///   in the centre pane, which `OMEGA-DELTA-0053` does not draw. That half
@@ -17239,8 +17235,8 @@ mod tests {
         assert!(
             !spans.is_empty(),
             "OMEGA-DELTA-0125: {} has no `if {THREAD_MENU_GUARD} {{` block in \
-             the menu, so nothing is hidden from a sealed zero base and every \
-             settings entry is a dead click again.",
+             the menu, so the full-editor extensions entry is visible in a \
+             sealed zero base again.",
             panel_path.display()
         );
         let guarded = |at: usize| spans.iter().any(|(start, end)| at > *start && at < *end);
@@ -17323,8 +17319,8 @@ mod tests {
         );
 
         // The second hop, grounded in the source rather than in this comment.
-        // If either of these stops dispatching into the `omega` namespace, the
-        // hiding above is no longer justified and somebody should re-open it.
+        // Both final actions must stay admitted because their menu entries are
+        // now visible in zero base.
         for (method, dispatched) in [
             ("fn manage_skills(", "zed_actions::OpenSettingsAt {"),
             ("fn open_configuration(", "zed_actions::OpenSettingsPage {"),
@@ -17333,17 +17329,13 @@ mod tests {
                 &panel,
                 method,
                 &panel_path,
-                "It is the second hop behind a menu entry, and the reason that \
-                 entry is hidden in zero base.",
+                "It is the second hop behind a visible settings entry.",
             );
             assert!(
                 body.contains(dispatched),
                 "OMEGA-DELTA-0125: `{method}` in {} no longer dispatches \
-                 `{dispatched}`. `Skills` and `Settings` are hidden in a \
-                 sealed zero base *because* they land in the `omega` \
-                 namespace one hop later. If that changed, re-decide whether \
-                 they can be offered again rather than leaving them hidden \
-                 for a reason that is no longer true.",
+                 `{dispatched}`. `Skills` and `Settings` are visible in zero \
+                 base because these final actions open the settings window.",
                 panel_path.display()
             );
         }
@@ -18895,6 +18887,39 @@ mod tests {
                 "OMEGA-DELTA-0142: provider credential recovery in {} lost \
                  `{required}`.",
                 thread_path.display()
+            );
+        }
+
+        for settings_action in [
+            "omega::OpenSettings",
+            "omega::OpenSettingsAt",
+            "omega::OpenSettingsPage",
+        ] {
+            assert!(
+                omega_zero_base::admits_action(settings_action),
+                "OMEGA-DELTA-0142: zero base refuses `{settings_action}`, so \
+                 provider recovery still looks like a dead button."
+            );
+        }
+
+        let panel_path = repository_path(AGENT_PANEL_PATH);
+        let panel = without_comments(&read_repository_file(AGENT_PANEL_PATH));
+        let sidebar = method_body(
+            &panel,
+            "fn render_sidebar(",
+            &panel_path,
+            "The zero-base sidebar owns persistent Settings navigation.",
+        );
+        for required in [
+            "\"open-omega-settings\"",
+            "IconName::Settings",
+            "zed_actions::OpenSettings.boxed_clone()",
+        ] {
+            assert!(
+                sidebar.contains(required),
+                "OMEGA-DELTA-0142: the zero-base sidebar in {} lost \
+                 `{required}`, so Settings is no longer persistent navigation.",
+                panel_path.display()
             );
         }
     }

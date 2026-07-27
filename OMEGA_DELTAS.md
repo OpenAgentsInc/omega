@@ -6175,6 +6175,14 @@ question rather than leaving it to whoever next reads the menu.
   variant is named in that match, so a section added and forgotten fails the
   suite rather than drawing a heading over blank space.
 
+- **Settings is persistent navigation, not editor escape.** The sidebar footer
+  opens Omega's real Settings window, and the collapsed rail keeps the same
+  control as an icon at its bottom. Zero base admits only `OpenSettings`,
+  `OpenSettingsAt`, and `OpenSettingsPage`; this makes provider-recovery buttons,
+  Skills, Add Server, and Settings work without admitting Extensions or the
+  rest of the editor-facing `omega` namespace. The Settings window is a separate
+  visible window, so the sealed centre pane cannot hide it.
+
 - **Enforced by:** `zero_bases_sidebar_is_persistent_sectioned_and_silent_when_it_fails`
   and `the_public_chat_section_reads_and_cannot_write` in `crates/omega_deltas`,
   for the wiring; `zero_bases_threads_sidebar_is_its_own_and_reopens_by_executor`

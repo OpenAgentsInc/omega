@@ -117,10 +117,10 @@ pub const ADMITTED_NAMESPACES: &[&str] = &[
 
 /// The individually admitted actions, by full name.
 ///
-/// Window management, font size, and the one control that finishes identity
-/// onboarding. Admitting the whole `omega` namespace would admit the extensions
-/// and settings surfaces with it, and section 4 of the design note records that
-/// those reach nothing in Omega today.
+/// Window management, font size, settings navigation, and the one control that
+/// finishes identity onboarding. The settings actions are admitted
+/// individually so provider errors can open the real settings window without
+/// admitting the extensions surface or the rest of the `omega` namespace.
 ///
 /// # Why `onboarding::Finish` is here
 ///
@@ -146,6 +146,9 @@ pub const ADMITTED_ACTIONS: &[&str] = &[
     "omega::IncreaseBufferFontSize",
     "omega::IncreaseUiFontSize",
     "omega::Minimize",
+    "omega::OpenSettings",
+    "omega::OpenSettingsAt",
+    "omega::OpenSettingsPage",
     "omega::Quit",
     "omega::ResetBufferFontSize",
     "omega::ResetUiFontSize",
@@ -308,6 +311,9 @@ mod tests {
             "menu::Confirm",
             "command_palette::Toggle",
             "omega::Quit",
+            "omega::OpenSettings",
+            "omega::OpenSettingsAt",
+            "omega::OpenSettingsPage",
             // omega#99. The action that releases `await_identity_ready`.
             // Without it a fresh profile can reach identity onboarding and
             // never leave it, which is a dead end rather than a subtraction.
@@ -326,7 +332,6 @@ mod tests {
             "debugger::Start",
             "workroom::Toggle",
             "omega::Extensions",
-            "omega::OpenSettings",
             "workspace::ToggleLeftDock",
             // The hosted-account path OMEGA-DELTA-0010 and OMEGA-DELTA-0011
             // removed. Admitting `onboarding::Finish` must not drag the rest of
