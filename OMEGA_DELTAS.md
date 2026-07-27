@@ -2672,19 +2672,22 @@ than it sounds, because the harness omega#81's acceptance sentence names —
 - **`--zero-base` is accepted and does nothing.** It asks for what it already
   gets. Keeping it means commands, scripts and muscle memory that carry it keep
   working instead of failing on an unknown argument.
-- **A command line that names an editor surface implies the editor.** A diff
-  pair, `--dev-container` and `--demo-workroom` each open the editor with no
-  flag, because zero base draws none of the three surfaces they ask for.
-- **Amended by `OMEGA-DELTA-0116`: a path argument used to be on that list, and
-  is not.** The reasoning was that `omega src/main.rs` opening a single chat
+- **Editor-only options do not imply the editor.** A diff pair,
+  `--dev-container`, and `--demo-workroom` each require `--full-editor`.
+  Without it clap refuses the command and names the missing prerequisite.
+  Zero base does not silently accept a surface it cannot draw, and those
+  options do not silently choose a different mode.
+- **Amended by `OMEGA-DELTA-0116`: a path argument used to imply the editor, and
+  does not.** The reasoning was that `omega src/main.rs` opening a single chat
   thread with no way to reach that file would be a regression rather than a
   subtraction. The owner overruled it, and the reason he was right is in this
   entry's own sentence: *"booting the full editor must require a separate
   flag."* A positional path is not a flag. It was the one term on the list
   nobody types on purpose, and it made `omega <directory>` — the most ordinary
   command there is — the command-line twin of the way out this delta had just
-  removed from inside the app. The check that required it here now requires its
-  absence, in `OMEGA-DELTA-0116`.
+  removed from inside the app. The mode decision now reads only
+  `--full-editor`; `OMEGA-DELTA-0116` checks that path and editor-only arguments
+  cannot become alternate selectors.
 - **Absent, not unrendered — and this is the part that needed the check.** The
   cheap version of this change is one `when(false)` that hides the button, and
   it leaves `omega_zero_base::leave` on the crate, the `Leave` action in the
@@ -4912,15 +4915,11 @@ than merely stated.
   inside the app and left its twin on the command line — and left it reachable
   **by accident**, because opening a project is the most ordinary thing a person
   types. The owner found it in about ten seconds.
-- **Three flags stay on the list, and the distinction is the whole rule.**
-  `--diff`, `--dev-container` and `--demo-workroom` still imply the editor.
-  Every one of them is a flag somebody typed on purpose, and every one asks for
-  a surface zero base does not draw at all — so opening them in zero base would
-  be a command that silently shows nothing, which is a worse answer than
-  `--full-editor`. The term that was removed is the only one that was not a
-  flag, and it is the one the owner hit. If the owner wants those three to
-  require `--full-editor` as well, that is a one-line change to a predicate that
-  now exists to be read.
+- **The dedicated mode flag is the only selector.** `--diff`,
+  `--dev-container`, and `--demo-workroom` ask for surfaces zero base does not
+  draw, so each declares `--full-editor` as a clap prerequisite. Omitting it is
+  a visible command-line error. Intentional use of an editor-only option does
+  not turn that option into the editor's own mode flag.
 - **A path that no longer changes the mode has to do something.** Otherwise the
   repair turns `omega <path>` from "opens the wrong product" into "does nothing
   visible", which is not obviously better. `resolve_zero_base_project_arguments`

@@ -12,6 +12,7 @@ echo "Omega public demo fixture: ${fixture_root}"
 
 if [[ -n "${OMEGA_DEMO_BINARY:-}" ]]; then
     exec "${OMEGA_DEMO_BINARY}" \
+        --full-editor \
         --demo-workroom \
         --user-data-dir "${profile_root}" \
         "${fixture_root}" \
@@ -20,6 +21,7 @@ fi
 
 cd "${repository_root}"
 exec cargo run --profile release-fast -- \
+    --full-editor \
     --demo-workroom \
     --user-data-dir "${profile_root}" \
     "${fixture_root}" \

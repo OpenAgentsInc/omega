@@ -26,17 +26,20 @@ The underlying application invocation is:
 
 ```sh
 omega \
+  --full-editor \
   --demo-workroom \
   --user-data-dir /a/fresh/dedicated/profile \
   /path/to/omega/assets/demo-workroom \
   /path/to/omega/assets/demo-workroom/src/commandPalette.ts
 ```
 
-`--demo-workroom` is rejected unless `--user-data-dir` is also present. In demo
-mode the workroom uses a fixed in-memory projection, does not initialize its
-live supervisor or account binding, and cannot send messages. The fixture
-contains no credentials, real accounts, private paths, or real customer data.
-Normal launches never enable the projection.
+`--demo-workroom` is rejected unless both `--full-editor` and
+`--user-data-dir` are present. The dedicated editor flag makes the mode choice
+explicit; the demo flag cannot silently leave zero base. In demo mode the
+workroom uses a fixed in-memory projection, does not initialize its live
+supervisor or account binding, and cannot send messages. The fixture contains
+no credentials, real accounts, private paths, or real customer data. Normal
+launches never enable the projection.
 
 For a homepage capture, use a clean 1600×1000 window (or the requested matching
 16:10 export size), keep the left project dock and right Sarah dock open, and

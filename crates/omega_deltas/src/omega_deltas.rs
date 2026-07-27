@@ -8903,32 +8903,27 @@ mod tests {
             startup_path.display()
         );
         assert!(
-            startup.contains("if !args.full_editor && !names_an_editor_surface {"),
-            "OMEGA-DELTA-0052: {} no longer defaults to zero base. `omega` with \
-             no arguments must open one Exo thread; the editor is what the flag \
-             asks for, not the other way round.",
+            startup.contains("if !args.full_editor {")
+                && !startup.contains("names_an_editor_surface"),
+            "OMEGA-DELTA-0052: {} no longer makes `--full-editor` the one and \
+             only mode selector. `omega` with any other arguments must remain \
+             in zero base or be refused by clap.",
             startup_path.display()
         );
-        // Amended by `OMEGA-DELTA-0116`. This loop used to require
-        // `!args.paths_or_urls.is_empty()` here too, on the reasoning that
-        // `omega src/main.rs` opening a chat thread with no way to reach that
-        // file would be a regression rather than a subtraction. The owner
-        // overruled it: a path argument is not a flag, it is the most ordinary
-        // thing a person types, and it was reaching the editor *by accident* —
-        // the same way out this delta had just removed from inside the app.
-        // `OMEGA-DELTA-0116` owns the new rule and checks the removal; what is
-        // left here is the half that still holds. Each remaining term is a
-        // flag, and each names a surface zero base does not draw.
-        for implied in [
-            "!args.diff.is_empty()",
-            "args.dev_container",
-            "args.demo_workroom",
+        // Amended by `OMEGA-DELTA-0116`. Editor-only requests cannot be
+        // accepted in zero base, but that does not authorize them to choose the
+        // editor. Each declares the dedicated mode flag as a clap prerequisite,
+        // producing a visible command-line error when it is omitted.
+        for required in [
+            "requires_all = [\"user_data_dir\", \"full_editor\"]",
+            "requires = \"full_editor\",\n        action = clap::ArgAction::Append",
+            "#[arg(long, requires = \"full_editor\")]\n    dev_container: bool",
         ] {
             assert!(
-                startup.contains(implied),
-                "OMEGA-DELTA-0052: {} no longer treats `{implied}` as naming \
-                 something to edit, so that command line would open a single \
-                 chat thread with no editor and nothing to point it at.",
+                startup.contains(required),
+                "OMEGA-DELTA-0052: an editor-only option in {} lost the clap \
+                 prerequisite `{required}` and can again select or enter an \
+                 unauthorized surface.",
                 startup_path.display()
             );
         }
@@ -15553,43 +15548,20 @@ mod tests {
         let startup = std::fs::read_to_string(&startup_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", startup_path.display()));
 
-        // The predicate that decides the mode, read as a declaration rather
-        // than searched for across the file: `paths_or_urls` appears elsewhere
-        // in this file for entirely legitimate reasons, and a whole-file
-        // `contains` would either never fail or fail for the wrong reason.
-        //
-        // Read to the first `;` rather than through `declaration_body`, which
-        // stops at a closing brace and would therefore swallow the whole of
-        // `main` — and pass, because `paths_or_urls` legitimately appears
-        // further down it. Watched failing that way first.
-        let deciding = startup
-            .split_once("let names_an_editor_surface =")
-            .and_then(|(_, rest)| rest.split_once(';'))
-            .map(|(body, _)| body)
-            .unwrap_or_else(|| {
-                panic!(
-                    "OMEGA-DELTA-0116: {} no longer decides the mode in one \
-                     named predicate. The rule being enforced is a property of \
-                     that list — every term is a flag — and a rule about a list \
-                     needs the list to be somewhere it can be read.",
-                    startup_path.display()
-                )
-            });
         assert!(
-            !uncommented(deciding).contains("paths_or_urls"),
-            "OMEGA-DELTA-0116: the mode predicate in {} reads the path \
-             arguments again. A path argument names the **project**; it must \
-             not name the **mode**. This is the way out of zero base that \
-             `OMEGA-DELTA-0052` removed from inside the app, reachable from the \
-             command line and reachable by accident — the owner typed the most \
-             ordinary command there is and got the full editor.",
+            startup.contains("if !args.full_editor {")
+                && !startup.contains("names_an_editor_surface"),
+            "OMEGA-DELTA-0116: the mode decision in {} reads something besides \
+             the dedicated full-editor flag. Paths name the project, and every \
+             editor-only option must be refused unless that flag is also \
+             present; no other argument may name the mode.",
             startup_path.display()
         );
         // The half of `OMEGA-DELTA-0052` this must not have quietly bought its
         // repair with: the default still points at zero base, and the flag is
         // still what asks for the editor.
         assert!(
-            startup.contains("if !args.full_editor && !names_an_editor_surface {")
+            startup.contains("if !args.full_editor {")
                 && startup.contains("omega_zero_base::enter_from_command_line();"),
             "OMEGA-DELTA-0116: {} no longer defaults to zero base. Fixing which \
              arguments change the mode must not change which way the mode \

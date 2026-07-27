@@ -224,9 +224,10 @@ base with `<path>` as the folder the thread reads, searches and runs in; a file
 argument names the folder that holds it. The folder is named in the panel
 header, because an agent whose directory is invisible cannot be checked. That
 header value is always clickable: it chooses a folder when none is attached and
-changes the directory after one has been chosen. Only `--full-editor`, `--diff`,
-`--dev-container` and `--demo-workroom` open the editor, and all four are flags
-— see `OMEGA-DELTA-0116`.
+changes the directory after one has been chosen. Only `--full-editor` opens the
+editor. `--diff`, `--dev-container`, and `--demo-workroom` describe editor-only
+work and are refused unless `--full-editor` is also present — see
+`OMEGA-DELTA-0116`.
 
 ### Words for evidence
 

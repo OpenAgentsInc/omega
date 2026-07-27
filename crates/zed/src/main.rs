@@ -288,24 +288,15 @@ fn main() {
     // still the parsed command line, still once, still never a settings key.
     // Only the direction of the default changed.
     //
-    // OMEGA-DELTA-0116, omega#111. A path argument used to be in this list, and
-    // that made `omega <directory>` a way out of the mode the owner asked to
-    // have no way out of — reachable *by accident*, because opening a project
-    // is the most ordinary thing a person types. It is gone. A path argument
-    // names the **project**; it does not name the **mode**.
-    //
-    // What is left is three flags, and each is a flag: a person types
-    // `--diff`, `--dev-container` or `--demo-workroom` on purpose, and each
-    // asks for a surface zero base does not draw at all, so opening them here
-    // would be a command that silently shows nothing. The owner's sentence is
-    // "booting the full editor must require a separate flag", and every term
-    // below is one. A positional path is the one term that was not, and it is
-    // the one the owner hit.
+    // OMEGA-DELTA-0116, omega#111. The mode depends on this one flag and no
+    // other argument. Paths select the zero-base project. Editor-only options
+    // declare `requires = "full_editor"` below, so clap refuses them with a
+    // visible command-line error instead of silently changing the mode or
+    // accepting a request zero base cannot draw.
     //
     // `--zero-base` is accepted and does nothing, because it now asks for what
     // it already gets.
-    let names_an_editor_surface = !args.diff.is_empty() || args.dev_container || args.demo_workroom;
-    if !args.full_editor && !names_an_editor_surface {
+    if !args.full_editor {
         omega_zero_base::enter_from_command_line();
         // OMEGA-DELTA-0116. Now that the path no longer changes the mode, it
         // has to do the thing it was actually typed for. Zero base draws no
@@ -2048,7 +2039,7 @@ struct Args {
     ///
     /// A custom user data directory is required so the demo cannot read or
     /// modify the normal Omega profile.
-    #[arg(long, requires = "user_data_dir")]
+    #[arg(long, requires_all = ["user_data_dir", "full_editor"])]
     demo_workroom: bool,
 
     /// Accepted and ignored: zero base is what Omega does by default.
@@ -2069,9 +2060,8 @@ struct Args {
     /// process leaves nothing to repair.
     ///
     /// OMEGA-DELTA-0116. A path argument does *not* imply the editor. It names
-    /// the folder the thread works in and leaves the mode alone. A diff pair, a
-    /// dev container and the demo workroom still imply it, because each is a
-    /// flag asking for a surface zero base does not draw.
+    /// the folder the thread works in and leaves the mode alone. Editor-only
+    /// options require this flag too; no other argument can select the mode.
     #[arg(long)]
     full_editor: bool,
 
@@ -2113,7 +2103,13 @@ struct Args {
 
     /// Pairs of file paths to diff. Can be specified multiple times.
     /// When directories are provided, recurses into them and shows all changed files in a single multi-diff view.
-    #[arg(long, action = clap::ArgAction::Append, num_args = 2, value_names = ["OLD_PATH", "NEW_PATH"])]
+    #[arg(
+        long,
+        requires = "full_editor",
+        action = clap::ArgAction::Append,
+        num_args = 2,
+        value_names = ["OLD_PATH", "NEW_PATH"]
+    )]
     diff: Vec<String>,
 
     /// Sets a custom directory for all user data (e.g., database, extensions, logs).
@@ -2142,7 +2138,7 @@ struct Args {
     ///
     /// Automatically triggers "Reopen in Dev Container" if a `.devcontainer/`
     /// configuration is found in the project directory.
-    #[arg(long)]
+    #[arg(long, requires = "full_editor")]
     dev_container: bool,
 
     /// Instructs Omega to run as a dev server on this machine. (not implemented)
