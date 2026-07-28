@@ -19,6 +19,8 @@ fn make_settings_with_read_only(patterns: &[&str]) -> WorktreeSettings {
         )
         .unwrap(),
         scan_symlinks: Default::default(),
+        skip_tagged_cache_dirs: true,
+        max_scan_entries: 150_000,
     }
 }
 

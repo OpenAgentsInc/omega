@@ -7270,3 +7270,80 @@ current image build does not decode it inline.
   gated fetch, redirect, digest, MIME, image-bound, native-open, and failure
   tests in `omega_public_channel_media`; and channel isolation tests in
   `omega_public_channels` and `omega_public_channel_view`.
+### OMEGA-DELTA-0164 — A symlink with no target is not an error
+
+- **Upstream Zed:** `BackgroundScanner::scan_dir` logs
+  `error reading target of symlink ...` at `ERROR` for every symlink it cannot
+  canonicalize.
+- **Omega:** the same case logs at `DEBUG`, and the message says what actually
+  happened — the symlink has no target and is being skipped.
+- **Why:** `pnpm` installs one symlink per platform for every optional native
+  dependency, and all but one of them are broken by design on any given
+  machine. Opening a folder holding a few `node_modules` trees produced
+  thousands of `ERROR` lines in `~/Library/Logs/omega-rc/omega-rc.log` during
+  the 2026-07-27 `0.2.0-rc21` incident, and 278 survived in the retained tail.
+  A condition that is expected, unactionable, and produced in bulk is not an
+  error: at `ERROR` it hides the faults an operator opens the log to find, and
+  it charges formatting and I/O for the privilege.
+- **Enforced by:** `dangling_symlinks_are_not_logged_as_errors` in
+  `crates/omega_deltas`.
+
+### OMEGA-DELTA-0165 — A directory its creator tagged as cache is not walked
+
+- **Upstream Zed:** the worktree scanner descends into every directory that no
+  `.gitignore`, and no `file_scan_exclusions` glob, excludes.
+- **Omega:** a directory holding a `CACHEDIR.TAG` file with the standard
+  signature is treated exactly as a gitignored directory is — its contents are
+  not scanned, the directory stays visible in the project panel, and expanding
+  it scans it. Controlled by `project.worktree.skip_tagged_cache_dirs`,
+  default `true`.
+- **Why:** on 2026-07-27 the owner opened `~/work` in `0.2.0-rc21`. Nested
+  `.gitignore` files were being honoured correctly — 5,835,451 entries on disk
+  reduced to roughly 856,000 scanned — but a large part of what remained was
+  Cargo `target` directories placed *beside* their checkouts
+  (`omega-worktrees/cwd-fix-target`, `.cargo-target-slim`, and others), so no
+  repository's `.gitignore` covered them and no name-based exclusion would have
+  matched them either. What does identify them is the tag Cargo itself writes.
+  The [Cache Directory Tagging Specification](https://bford.info/cachedir/) is
+  already honoured by `rsync`, `borg`, `restic` and `tar`; a directory whose own
+  creator declared it regenerable is not worth a worktree entry each.
+- **The signature is checked, not just the name.** A file merely called
+  `CACHEDIR.TAG` cannot hide a directory the operator meant to open.
+- **The tag is remembered, not re-derived.** A tagged directory is still
+  watched, and a build writes into it constantly. Answering those filesystem
+  events from `.gitignore` alone would let the first `cargo build` re-expand
+  exactly what the tag said to skip, so the tagged paths are recorded on the
+  snapshot and `ignore_stack_for_abs_path` consults them.
+- **Enforced by:** `tagged_cache_dirs_are_skipped_by_default` in
+  `crates/omega_deltas`, plus `test_tagged_cache_dirs_are_not_descended` and
+  `test_a_write_inside_a_tagged_cache_dir_does_not_expand_it` in
+  `crates/worktree`.
+
+### OMEGA-DELTA-0166 — A folder too large to index says so
+
+- **Upstream Zed:** a worktree scan is unbounded. It walks until it runs out of
+  directories, whatever that costs.
+- **Omega:** the scan stops at `project.worktree.max_scan_entries` entries
+  (default 150,000), records the bound on the snapshot, logs it, and shows a
+  notification naming the folder, the bound, and the setting that changes it.
+  `0` restores unbounded scanning.
+- **Why:** `~/work` cost the owner 852 MiB of resident memory 30 seconds after
+  he selected it, 1,466 MiB within six minutes, and repeated hang-detector
+  reports from `fs.rs`, `git/repository.rs` and `project/git_store.rs` — all of
+  them downstream consumers walking the entry set the scan produced. No
+  exclusion list can be complete, because the next machine has a differently
+  shaped pile of files on it. A bound can be complete.
+- **Bounded, not refused, and never silent.** The owner's instruction was
+  explicit: *"I don't care if they are big"* and *do not* cap "without telling
+  the person". So the folder opens, the parts that were indexed work normally,
+  and the notification states what was left out and how to index all of it.
+- **A bounded folder is still a working folder.** The bound stops the scan
+  spreading on its own; it does not refuse a path someone asked for. Expanding
+  a directory in the project panel, or opening a file under it, still scans it,
+  and a worktree that later drops below the bound resumes scanning without a
+  restart. The bound is re-checked when a queued directory is picked up rather
+  than only when it was enqueued, so the work already in flight when the bound
+  was crossed cannot overshoot it.
+- **Enforced by:** `worktree_scans_are_bounded_by_default` in
+  `crates/omega_deltas`, plus `test_scan_stops_at_max_entries_and_says_so` and
+  `test_scan_below_max_entries_is_not_truncated` in `crates/worktree`.

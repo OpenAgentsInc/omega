@@ -162,6 +162,21 @@ pub struct WorktreeSettingsContent {
     /// external dependencies that should not be modified directly.
     /// Default: []
     pub read_only_files: Option<Vec<String>>,
+
+    /// Skip directories that their own creator marked as regenerable cache by
+    /// writing a `CACHEDIR.TAG` file into them, as Cargo does for `target`.
+    /// Such a directory is treated the same way a gitignored directory is: it
+    /// stays visible in the project panel and is scanned as soon as it is
+    /// expanded.
+    ///
+    /// Default: true
+    pub skip_tagged_cache_dirs: Option<bool>,
+
+    /// Stop scanning a worktree once it holds this many entries, and say so in
+    /// a notification naming the folder. Set to `0` to scan without a bound.
+    ///
+    /// Default: 150000
+    pub max_scan_entries: Option<usize>,
 }
 
 #[with_fallible_options]

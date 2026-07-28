@@ -1126,6 +1126,8 @@ impl VsCodeSettings {
                         .collect::<Vec<_>>()
                 })
                 .filter(|r| !r.is_empty()),
+            skip_tagged_cache_dirs: None,
+            max_scan_entries: None,
         }
     }
 }

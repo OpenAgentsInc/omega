@@ -21,6 +21,10 @@ pub struct WorktreeSettings {
     pub private_files: PathMatcher,
     pub hidden_files: PathMatcher,
     pub read_only_files: PathMatcher,
+    /// OMEGA-DELTA-0165.
+    pub skip_tagged_cache_dirs: bool,
+    /// OMEGA-DELTA-0166. Zero means unbounded.
+    pub max_scan_entries: usize,
 }
 
 impl WorktreeSettings {
@@ -98,6 +102,8 @@ impl Settings for WorktreeSettings {
                 .log_err()
                 .unwrap_or_default(),
             scan_symlinks,
+            skip_tagged_cache_dirs: worktree.skip_tagged_cache_dirs.unwrap_or(true),
+            max_scan_entries: worktree.max_scan_entries.unwrap_or(150_000),
         }
     }
 }

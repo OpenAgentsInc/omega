@@ -1,3 +1,4 @@
+mod scan_measurement;
 mod worktree_settings_tests;
 
 use anyhow::Result;
@@ -5225,6 +5226,215 @@ async fn expect_git_repo_update(
         cx.background_executor.timer(poll_interval).await;
         elapsed += poll_interval;
     }
+}
+
+/// OMEGA-DELTA-0165. A Cargo target directory is routinely a sibling of its
+/// checkout, under a name of the operator's choosing and under no `.gitignore`,
+/// so only the tag its creator wrote identifies it.
+#[gpui::test]
+async fn test_tagged_cache_dirs_are_not_descended(cx: &mut TestAppContext) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.background_executor.clone());
+    fs.insert_tree(
+        path!("/root"),
+        json!({
+            "src": { "main.rs": "" },
+            "some-build-output": {
+                "CACHEDIR.TAG": "Signature: 8a477f597d28d172789f06886806bc55\n",
+                "debug": { "huge.o": "" },
+            },
+            "not-a-cache": {
+                "CACHEDIR.TAG": "this file is not the tag it is named after",
+                "kept": { "wanted.rs": "" },
+            },
+        }),
+    )
+    .await;
+
+    let tree = Worktree::local(
+        Path::new(path!("/root")),
+        true,
+        fs,
+        Default::default(),
+        true,
+        WorktreeId::from_proto(0),
+        &mut cx.to_async(),
+    )
+    .await
+    .unwrap();
+    cx.read(|cx| tree.read(cx).as_local().unwrap().scan_complete())
+        .await;
+
+    tree.read_with(cx, |tree, _| {
+        assert_eq!(
+            tree.entries(false, 0)
+                .map(|entry| entry.path.as_unix_str().to_string())
+                .collect::<Vec<_>>(),
+            vec![
+                "",
+                "not-a-cache",
+                "not-a-cache/CACHEDIR.TAG",
+                "not-a-cache/kept",
+                "not-a-cache/kept/wanted.rs",
+                "some-build-output",
+                "src",
+                "src/main.rs",
+            ],
+            "the tagged directory's contents are excluded and the impostor's are not"
+        );
+        let tagged = tree
+            .entry_for_path(rel_path("some-build-output/debug"))
+            .unwrap();
+        assert!(
+            tagged.is_ignored,
+            "a tagged cache directory reads as ignored"
+        );
+        assert_eq!(
+            tagged.kind,
+            EntryKind::UnloadedDir,
+            "it is left unloaded so expanding it still works"
+        );
+    });
+}
+
+/// OMEGA-DELTA-0165. A build writes into its own cache directory constantly,
+/// and the directory is watched even though its contents were not scanned. If
+/// those events were answered from gitignore alone they would re-expand exactly
+/// what the tag said to skip.
+#[gpui::test]
+async fn test_a_write_inside_a_tagged_cache_dir_does_not_expand_it(cx: &mut TestAppContext) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.background_executor.clone());
+    fs.insert_tree(
+        path!("/root"),
+        json!({
+            "some-build-output": {
+                "CACHEDIR.TAG": "Signature: 8a477f597d28d172789f06886806bc55\n",
+            },
+        }),
+    )
+    .await;
+
+    let tree = Worktree::local(
+        Path::new(path!("/root")),
+        true,
+        fs.clone(),
+        Default::default(),
+        true,
+        WorktreeId::from_proto(0),
+        &mut cx.to_async(),
+    )
+    .await
+    .unwrap();
+    cx.read(|cx| tree.read(cx).as_local().unwrap().scan_complete())
+        .await;
+
+    fs.create_dir(path!("/root/some-build-output/debug").as_ref())
+        .await
+        .unwrap();
+    fs.insert_file(path!("/root/some-build-output/debug/huge.o"), Vec::new())
+        .await;
+    cx.executor().run_until_parked();
+    cx.read(|cx| tree.read(cx).as_local().unwrap().scan_complete())
+        .await;
+
+    tree.read_with(cx, |tree, _| {
+        let created = tree
+            .entry_for_path(rel_path("some-build-output/debug"))
+            .expect("the directory itself is still recorded");
+        assert!(
+            created.is_ignored,
+            "a directory a build created inside a tagged cache directory must not \
+             become scannable just because no .gitignore covers it"
+        );
+        assert_eq!(
+            tree.entry_for_path(rel_path("some-build-output/debug/huge.o")),
+            None,
+            "and its contents must not be indexed"
+        );
+    });
+}
+
+/// OMEGA-DELTA-0166.
+#[gpui::test]
+async fn test_scan_stops_at_max_entries_and_says_so(cx: &mut TestAppContext) {
+    init_test(cx);
+    cx.update(|cx| {
+        cx.update_global::<SettingsStore, _>(|store, cx| {
+            store.update_user_settings(cx, |settings| {
+                settings.project.worktree.max_scan_entries = Some(4);
+            });
+        });
+    });
+
+    let fs = FakeFs::new(cx.background_executor.clone());
+    let mut tree_json = serde_json::Map::new();
+    for dir in 0..20 {
+        let mut files = serde_json::Map::new();
+        for file in 0..20 {
+            files.insert(format!("f{file}.txt"), json!(""));
+        }
+        tree_json.insert(format!("d{dir}"), serde_json::Value::Object(files));
+    }
+    fs.insert_tree(path!("/root"), serde_json::Value::Object(tree_json))
+        .await;
+
+    let tree = Worktree::local(
+        Path::new(path!("/root")),
+        true,
+        fs,
+        Default::default(),
+        true,
+        WorktreeId::from_proto(0),
+        &mut cx.to_async(),
+    )
+    .await
+    .unwrap();
+    cx.read(|cx| tree.read(cx).as_local().unwrap().scan_complete())
+        .await;
+
+    tree.read_with(cx, |tree, _| {
+        assert_eq!(
+            tree.scan_truncated_at(),
+            Some(4),
+            "the worktree records the bound it stopped at, so the UI can report it"
+        );
+        assert_eq!(
+            tree.entry_count(),
+            21,
+            "the root and its 20 subdirectories are recorded, and not one of the \
+             400 files below them: a job already queued when the bound was crossed \
+             must not be allowed to overshoot it"
+        );
+    });
+}
+
+/// OMEGA-DELTA-0166. The bound must never apply to a folder that fits.
+#[gpui::test]
+async fn test_scan_below_max_entries_is_not_truncated(cx: &mut TestAppContext) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.background_executor.clone());
+    fs.insert_tree(path!("/root"), json!({ "a": { "b": "", "c": "" } }))
+        .await;
+
+    let tree = Worktree::local(
+        Path::new(path!("/root")),
+        true,
+        fs,
+        Default::default(),
+        true,
+        WorktreeId::from_proto(0),
+        &mut cx.to_async(),
+    )
+    .await
+    .unwrap();
+    cx.read(|cx| tree.read(cx).as_local().unwrap().scan_complete())
+        .await;
+
+    tree.read_with(cx, |tree, _| {
+        assert_eq!(tree.scan_truncated_at(), None);
+        assert_eq!(tree.entry_count(), 4);
+    });
 }
 
 fn drain_git_repo_updates(events: &mut futures::channel::mpsc::UnboundedReceiver<Event>) -> bool {

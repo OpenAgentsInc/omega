@@ -1394,6 +1394,8 @@ pub struct Workspace {
     window_edited: bool,
     last_window_title: Option<String>,
     dirty_items: HashMap<EntityId, Subscription>,
+    /// OMEGA-DELTA-0166.
+    reported_truncated_worktrees: HashSet<WorktreeId>,
     active_call: Option<(GlobalAnyActiveCall, Vec<Subscription>)>,
     leader_updates_tx: mpsc::UnboundedSender<(PeerId, proto::UpdateFollowers)>,
     database_id: Option<WorkspaceId>,
@@ -1556,6 +1558,7 @@ impl Workspace {
                 project::Event::WorktreeUpdatedEntries(..) => {
                     this.update_window_title(window, cx);
                     this.serialize_workspace(window, cx);
+                    this.notify_of_truncated_worktree_scans(cx);
                 }
 
                 project::Event::DisconnectedFromHost => {
@@ -1853,6 +1856,7 @@ impl Workspace {
             window_edited: false,
             last_window_title: None,
             dirty_items: Default::default(),
+            reported_truncated_worktrees: Default::default(),
             active_call,
             database_id: workspace_id,
             app_state,
@@ -6232,6 +6236,45 @@ impl Workspace {
         match &self.active_workspace_id {
             Some(active_workspace_id) => active_workspace_id.get() == self.weak_self.entity_id(),
             None => true,
+        }
+    }
+
+    /// OMEGA-DELTA-0166. A folder that was too large to finish scanning still
+    /// opens, and says so. Bounding the scan without telling anyone would leave
+    /// the person with a folder that silently cannot find its own files.
+    fn notify_of_truncated_worktree_scans(&mut self, cx: &mut Context<Self>) {
+        struct TruncatedWorktreeScan;
+
+        let truncated = self
+            .project
+            .read(cx)
+            .visible_worktrees(cx)
+            .filter_map(|worktree| {
+                let worktree = worktree.read(cx);
+                let limit = worktree.scan_truncated_at()?;
+                Some((
+                    worktree.id(),
+                    worktree.abs_path().to_string_lossy().into_owned(),
+                    limit,
+                ))
+            })
+            .collect::<Vec<_>>();
+
+        for (worktree_id, path, limit) in truncated {
+            if !self.reported_truncated_worktrees.insert(worktree_id) {
+                continue;
+            }
+            let message = format!(
+                "{path} holds more than {limit} files and folders, so Omega stopped indexing \
+                 it there. Search and file tools will not see the rest. Expanding a folder \
+                 still indexes it. Raise or clear `max_scan_entries` in settings to index \
+                 all of it."
+            );
+            self.show_notification(
+                NotificationId::composite::<TruncatedWorktreeScan>(worktree_id.to_usize()),
+                cx,
+                |cx| cx.new(|cx| MessageNotification::new(message, cx)),
+            );
         }
     }
 

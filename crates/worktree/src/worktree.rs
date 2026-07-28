@@ -81,6 +81,12 @@ use crate::ignore::IgnoreKind;
 
 pub const FS_WATCH_LATENCY: Duration = Duration::from_millis(100);
 
+/// OMEGA-DELTA-0165. The Cache Directory Tagging Specification
+/// (<https://bford.info/cachedir/>), which Cargo writes into every target
+/// directory and which `rsync`, `borg`, `restic` and `tar` already honour.
+pub const CACHEDIR_TAG: &str = "CACHEDIR.TAG";
+const CACHEDIR_TAG_SIGNATURE: &str = "Signature: 8a477f597d28d172789f06886806bc55";
+
 /// A set of local or remote files that are being opened as part of a project.
 /// Responsible for tracking related FS (for local)/collab (for remote) events and corresponding updates.
 /// Stores git repositories data and the diagnostics for the file(s).
@@ -197,6 +203,13 @@ pub struct Snapshot {
     /// greater than the `completed_scan_id` if operations are performed
     /// on the worktree while it is processing a file-system event.
     completed_scan_id: usize,
+
+    /// OMEGA-DELTA-0166. `Some(limit)` once the scan stopped early because the
+    /// worktree reached `max_scan_entries`. Carried on the snapshot rather than
+    /// kept in the scanner so that it reaches the UI with the entries it
+    /// explains, and so that the reason a folder looks incomplete is never
+    /// invisible to the person who opened it.
+    scan_truncated_at: Option<usize>,
 }
 
 /// This path corresponds to the 'content path' of a repository in relation
@@ -265,6 +278,11 @@ pub struct LocalSnapshot {
     /// to their relative paths within the worktree, used to translate FSEvents
     /// canonical-path events back to worktree-relative paths.
     external_canonical_to_relative: BTreeMap<Arc<Path>, Arc<RelPath>>,
+    /// OMEGA-DELTA-0165. Absolute paths of the directories found to carry a
+    /// `CACHEDIR.TAG`. Remembered rather than re-read, so that the filesystem
+    /// events a build produces inside a tagged directory answer the same way
+    /// the scan did, instead of quietly re-expanding what the scan skipped.
+    tagged_cache_dir_abs_paths: HashSet<Arc<Path>>,
 }
 
 struct BackgroundScannerState {
@@ -493,6 +511,7 @@ impl Worktree {
                 repo_exclude_by_work_dir_abs_path: Default::default(),
                 git_repositories: Default::default(),
                 external_canonical_to_relative: Default::default(),
+                tagged_cache_dir_abs_paths: Default::default(),
                 snapshot: Snapshot::new(
                     worktree_id,
                     abs_path
@@ -2541,11 +2560,17 @@ impl Snapshot {
             root_repo_is_linked_worktree: false,
             scan_id: 1,
             completed_scan_id: 0,
+            scan_truncated_at: None,
         }
     }
 
     pub fn id(&self) -> WorktreeId {
         self.id
+    }
+
+    /// OMEGA-DELTA-0166.
+    pub fn scan_truncated_at(&self) -> Option<usize> {
+        self.scan_truncated_at
     }
 
     // TODO:
@@ -3091,6 +3116,12 @@ impl LocalSnapshot {
                     repo_root = Some(Arc::from(ancestor));
                 }
             }
+
+            // OMEGA-DELTA-0165. Anything below a tagged cache directory is
+            // ignored outright, whichever route asks.
+            if index > 0 && self.tagged_cache_dir_abs_paths.contains(ancestor) {
+                return IgnoreStack::all();
+            }
         }
 
         let mut ignore_stack = if let Some(global_gitignore) = self.global_gitignore.clone() {
@@ -3224,6 +3255,50 @@ impl LocalSnapshot {
 }
 
 impl BackgroundScannerState {
+    /// OMEGA-DELTA-0166. Whether the worktree already holds as many entries as
+    /// the operator allowed.
+    ///
+    /// Read live rather than from the recorded flag below, so that a worktree
+    /// which later shrinks below the bound resumes scanning on its own instead
+    /// of staying frozen for the rest of the session.
+    fn scan_entry_limit_reached(&self, max_scan_entries: usize) -> bool {
+        max_scan_entries != 0 && self.snapshot.entry_count() >= max_scan_entries
+    }
+
+    /// OMEGA-DELTA-0166. A path someone asked for by name — by expanding it, by
+    /// opening a file under it, or by searching it — is scanned whether or not
+    /// the worktree is over its bound. The bound stops the scan spreading by
+    /// itself; it does not refuse work a person asked for.
+    fn scan_was_requested_for(&self, path: &RelPath) -> bool {
+        self.paths_to_scan
+            .iter()
+            .any(|requested| requested.starts_with(path))
+            || self
+                .path_prefixes_to_scan
+                .iter()
+                .any(|prefix| path.starts_with(prefix) || prefix.starts_with(path))
+    }
+
+    /// OMEGA-DELTA-0166. Records, once, that the bound was reached, so the
+    /// person who opened the folder is told what was left out. A folder is
+    /// bounded rather than refused: what was indexed keeps working.
+    fn record_scan_limit_if_reached(&mut self, max_scan_entries: usize) {
+        if !self.scan_entry_limit_reached(max_scan_entries) {
+            return;
+        }
+        if self.snapshot.scan_truncated_at.is_none() {
+            self.snapshot.scan_truncated_at = Some(max_scan_entries);
+            log::warn!(
+                "stopped scanning {} at {} entries: it holds more than the {} allowed by \
+                 `project.worktree.max_scan_entries`. Files past that point are not indexed. \
+                 Raise or disable the limit in settings, or open a smaller folder.",
+                self.snapshot.abs_path().display(),
+                self.snapshot.entry_count(),
+                max_scan_entries,
+            );
+        }
+    }
+
     async fn enqueue_scan_dir(
         &self,
         abs_path: Arc<Path>,
@@ -5282,11 +5357,22 @@ impl BackgroundScanner {
         let root_abs_path;
         let root_char_bag;
         {
-            let snapshot = &self.state.lock().await.snapshot;
+            let mut state = self.state.lock().await;
             if self.settings.is_path_excluded(&job.path) {
                 log::error!("skipping excluded directory {:?}", job.path);
                 return Ok(());
             }
+            // OMEGA-DELTA-0166. Checked here, and not only where the job was
+            // enqueued, because a job sits in the queue while other jobs fill
+            // the worktree: without this the bound would be overshot by
+            // everything already in flight when it was crossed.
+            if state.scan_entry_limit_reached(self.settings.max_scan_entries) {
+                state.record_scan_limit_if_reached(self.settings.max_scan_entries);
+                if !state.scan_was_requested_for(&job.path) {
+                    return Ok(());
+                }
+            }
+            let snapshot = &state.snapshot;
             log::trace!("scanning directory {:?}", job.path);
             root_abs_path = snapshot.abs_path().clone();
             root_char_bag = snapshot.root_char_bag;
@@ -5322,6 +5408,28 @@ impl BackgroundScanner {
             && path.ends_with(DOT_GIT)
         {
             ignore_stack.repo_root = Some(job.abs_path.clone());
+        }
+
+        // OMEGA-DELTA-0165. A directory whose creator tagged it as a
+        // regenerable cache is not worth walking. This is decided by the tag,
+        // not by the directory's name, because a Cargo target directory is
+        // routinely placed beside its checkout under a name of the operator's
+        // choosing and under no `.gitignore` at all, and a name list would miss
+        // every one of them.
+        let is_tagged_cache_dir = self.settings.skip_tagged_cache_dirs
+            && !job.path.is_empty()
+            && child_paths
+                .iter()
+                .any(|path| path.file_name() == Some(OsStr::new(CACHEDIR_TAG)))
+            && self.is_cachedir_tag(&job.abs_path.join(CACHEDIR_TAG)).await;
+        if is_tagged_cache_dir {
+            log::debug!("not descending into tagged cache directory {:?}", job.path);
+            self.state
+                .lock()
+                .await
+                .snapshot
+                .tagged_cache_dir_abs_paths
+                .insert(job.abs_path.clone());
         }
 
         for child_abs_path in child_paths {
@@ -5403,7 +5511,13 @@ impl BackgroundScanner {
                 let canonical_path = match self.fs.canonicalize(&child_abs_path).await {
                     Ok(path) => path,
                     Err(err) => {
-                        log::error!("error reading target of symlink {child_abs_path:?}: {err:#}",);
+                        // OMEGA-DELTA-0164. A symlink with no target is a normal
+                        // thing to find on disk, not a fault: pnpm installs a
+                        // symlink for every platform of an optional dependency
+                        // and only one of them can resolve. Reporting each one
+                        // at ERROR buries real faults under thousands of lines
+                        // and costs the formatting work to produce them.
+                        log::debug!("skipping symlink with no target {child_abs_path:?}: {err:#}");
                         continue;
                     }
                 };
@@ -5440,7 +5554,8 @@ impl BackgroundScanner {
             }
 
             if child_entry.is_dir() {
-                child_entry.is_ignored = ignore_stack.is_abs_path_ignored(&child_abs_path, true);
+                child_entry.is_ignored =
+                    is_tagged_cache_dir || ignore_stack.is_abs_path_ignored(&child_abs_path, true);
                 child_entry.is_always_included =
                     self.settings.is_path_always_included(&child_path, true);
 
@@ -5465,7 +5580,8 @@ impl BackgroundScanner {
                     }));
                 }
             } else {
-                child_entry.is_ignored = ignore_stack.is_abs_path_ignored(&child_abs_path, false);
+                child_entry.is_ignored =
+                    is_tagged_cache_dir || ignore_stack.is_abs_path_ignored(&child_abs_path, false);
                 child_entry.is_always_included =
                     self.settings.is_path_always_included(&child_path, false);
             }
@@ -6137,8 +6253,23 @@ impl BackgroundScanner {
         !self.share_private_files && self.settings.is_path_private(path)
     }
 
+    /// OMEGA-DELTA-0165. The tag is only honoured with its standard signature,
+    /// so an unrelated file that happens to carry the name cannot hide a
+    /// directory the operator meant to open.
+    async fn is_cachedir_tag(&self, abs_path: &Path) -> bool {
+        self.fs
+            .load(abs_path)
+            .await
+            .is_ok_and(|contents| contents.starts_with(CACHEDIR_TAG_SIGNATURE))
+    }
+
     fn should_scan_directory(&self, state: &BackgroundScannerState, entry: &Entry) -> bool {
+        // OMEGA-DELTA-0166. The bound stops the scan spreading on its own. It
+        // deliberately does not gate the clauses below it: a directory the
+        // person expanded, or one already scanned, is still scanned and still
+        // tracks its own changes, so a bounded folder stays a working folder.
         let scannable = state.scanning_enabled
+            && !state.scan_entry_limit_reached(self.settings.max_scan_entries)
             && (!entry.is_external
                 || self.settings.scan_symlinks == settings::ScanSymlinksSetting::Always)
             && (!entry.is_ignored || entry.is_always_included);

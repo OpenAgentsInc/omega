@@ -152,6 +152,9 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0161",
     "OMEGA-DELTA-0162",
     "OMEGA-DELTA-0163",
+    "OMEGA-DELTA-0164",
+    "OMEGA-DELTA-0165",
+    "OMEGA-DELTA-0166",
 ];
 
 pub const GOOGLE_PROVIDER_PATH: &str = "crates/language_models/src/provider/google.rs";
@@ -20499,5 +20502,74 @@ mod tests {
                  lifecycle wiring `{required}`."
             );
         }
+    }
+    /// OMEGA-DELTA-0164. Upstream Zed reports a symlink it cannot canonicalize
+    /// at ERROR. pnpm produces those by the thousand, by design.
+    #[test]
+    fn dangling_symlinks_are_not_logged_as_errors() {
+        let source = read_repository_file("crates/worktree/src/worktree.rs");
+        let scan_dir =
+            function_body(&source, "scan_dir").expect("OMEGA-DELTA-0164: scan_dir is gone");
+        assert!(
+            !scan_dir.contains("log::error!(\"error reading target of symlink"),
+            "OMEGA-DELTA-0164: a symlink with no target is logged at ERROR again. \
+             pnpm installs one broken symlink per foreign platform for every \
+             optional native dependency, so this floods the log and buries real \
+             faults. Log it at DEBUG."
+        );
+        assert!(
+            scan_dir.contains("log::debug!(\"skipping symlink with no target"),
+            "OMEGA-DELTA-0164: the DEBUG line that replaced the ERROR one is gone. \
+             Restore it rather than editing this test."
+        );
+    }
+
+    /// OMEGA-DELTA-0165. A Cargo target directory beside its checkout is under
+    /// no `.gitignore`, so only the tag its creator wrote identifies it.
+    #[test]
+    fn tagged_cache_dirs_are_skipped_by_default() {
+        let settings = default_settings().expect("default settings parse");
+        let value = default_setting(&settings, "skip_tagged_cache_dirs")
+            .expect("OMEGA-DELTA-0165: skip_tagged_cache_dirs is missing from default settings");
+        assert_eq!(
+            value.as_bool(),
+            Some(true),
+            "OMEGA-DELTA-0165: Omega must default skip_tagged_cache_dirs to true. \
+             Upstream Zed has no such setting and walks every directory no \
+             .gitignore covers, which is how ~/work cost 852 MiB in 30 seconds."
+        );
+
+        let source = read_repository_file("crates/worktree/src/worktree.rs");
+        assert!(
+            source.contains("Signature: 8a477f597d28d172789f06886806bc55"),
+            "OMEGA-DELTA-0165: the CACHEDIR.TAG signature check is gone. Matching \
+             the file name alone would let an unrelated file hide a directory \
+             the operator meant to open."
+        );
+    }
+
+    /// OMEGA-DELTA-0166. Bounded, reported, and adjustable — never silent.
+    #[test]
+    fn worktree_scans_are_bounded_by_default() {
+        let settings = default_settings().expect("default settings parse");
+        let value = default_setting(&settings, "max_scan_entries")
+            .expect("OMEGA-DELTA-0166: max_scan_entries is missing from default settings");
+        let limit = value
+            .as_u64()
+            .expect("OMEGA-DELTA-0166: max_scan_entries must be a number");
+        assert!(
+            limit > 0,
+            "OMEGA-DELTA-0166: max_scan_entries defaults to {limit}, which restores \
+             upstream Zed's unbounded scan. A folder with no bound is what \
+             produced 1,466 MiB and repeated hang reports on 2026-07-27."
+        );
+
+        let workspace = read_repository_file("crates/workspace/src/workspace.rs");
+        assert!(
+            workspace.contains("scan_truncated_at()") && workspace.contains("max_scan_entries"),
+            "OMEGA-DELTA-0166: the bound is no longer reported to the person who \
+             opened the folder. A silent cap leaves them with a folder that \
+             cannot find its own files and no way to know why."
+        );
     }
 }
