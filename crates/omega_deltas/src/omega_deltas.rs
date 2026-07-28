@@ -16610,22 +16610,27 @@ mod tests {
         // promise — so it makes a stronger one, and this is where the
         // assertion moved rather than where it was dropped.
         //
-        // The promise now is `omega_sidebar::layout`: the sidebar is drawn at
-        // full width only while the content column keeps `MIN_CONTENT_WIDTH`,
-        // and yields to a rail otherwise. `the_sidebar_yields_before_the_composer_does`
-        // in `OMEGA-DELTA-0130` proves the function; this proves the panel
-        // asks it rather than picking a width itself.
+        // The promise now belongs to the workbench's one horizontal allocator:
+        // the sidebar is drawn at full width only while the content column
+        // keeps `MIN_CONTENT_WIDTH`, and yields to a rail otherwise.
+        // `the_sidebar_yields_before_the_composer_does` in `OMEGA-DELTA-0130`
+        // proves the sidebar rule; this proves the panel passes the shared
+        // allocator's result into the sidebar rather than picking a width
+        // inside either render path.
         let sidebar_render = body_of(&panel, "render_sidebar");
+        let panel_render = body_of(&panel, "render");
         assert!(
-            sidebar_render.contains("omega_sidebar::layout(")
-                && sidebar_render.contains("layout.width()"),
+            panel_render.contains("workbench_shell::WorkbenchLayout::allocate(")
+                && panel_render.contains("render_sidebar(layout.sidebar")
+                && sidebar_render.contains(".w(layout.width())"),
             "OMEGA-DELTA-0118, as `OMEGA-DELTA-0130` carries it: `render_sidebar` \
-             in {} no longer takes its width from `omega_sidebar::layout`. \
-             `OMEGA-DELTA-0105` records that the composer row has to wrap so a \
-             narrow dock does not clip Send. A sidebar that hard-codes its width \
-             takes that width in every window, including the one too narrow to \
-             spare it, which makes the clip it protects against more likely \
-             rather than less.",
+             in {} no longer takes its width from the shared \
+             `workbench_shell::WorkbenchLayout`, or `render` no longer passes \
+             that allocation into the sidebar. `OMEGA-DELTA-0105` records that \
+             the composer row has to wrap so a narrow dock does not clip Send. \
+             A sidebar that hard-codes its width takes that width in every \
+             window, including the one too narrow to spare it, which makes the \
+             clip it protects against more likely rather than less.",
             panel_path.display()
         );
         assert!(
