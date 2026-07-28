@@ -20381,6 +20381,13 @@ mod tests {
                 relay_path.display()
             );
         }
+        assert!(
+            relay_source.contains(
+                "production_driver_repairs_a_forced_disconnect_without_losing_or_duplicating_rows"
+            ),
+            "OMEGA-DELTA-0163: the production relay driver lost its scripted \
+             loopback WebSocket proof."
+        );
 
         let timeline_path = repository_path(PUBLIC_CHANNEL_TIMELINE_PATH);
         let timeline_source = read_repository_file(PUBLIC_CHANNEL_TIMELINE_PATH);
@@ -20424,9 +20431,11 @@ mod tests {
         assert!(
             !media.contains("header::AUTHORIZATION")
                 && !media.contains("header::COOKIE")
-                && !media.contains("header::REFERER"),
+                && !media.contains("header::REFERER")
+                && !media.contains("expect(\"an image format\")"),
             "OMEGA-DELTA-0163: the public media loader in {} can send a \
-             credential or referrer header.",
+             credential or referrer header, or can panic while it selects a \
+             presentation.",
             media_path.display()
         );
 
@@ -20438,6 +20447,7 @@ mod tests {
             "this.generation == generation",
             "this.generation != generation",
             "pub fn pause",
+            "merge_retained_snapshot",
             "ListState::new",
             "FollowMode::Tail",
             "Load older",
@@ -20445,11 +20455,25 @@ mod tests {
             "Show content",
             "Load media",
             "Event facts",
+            "omega-public-channel-lifecycle-banner",
+            "omega-public-channel-metadata-banner",
+            "omega-public-channel-media-facts-",
         ] {
             assert!(
                 view.contains(required),
                 "OMEGA-DELTA-0163: {} lost `{required}`.",
                 view_path.display()
+            );
+        }
+        for required_test in [
+            "rendered_empty_and_error_states_keep_lifecycle_and_metadata_visible",
+            "rendered_timeline_interactions_keep_rows_bounded_and_media_gated",
+            "a_resumed_session_keeps_cached_verified_rows_and_last_current_time",
+        ] {
+            assert!(
+                view_source.contains(required_test),
+                "OMEGA-DELTA-0163: the selected-channel view lost interaction \
+                 proof `{required_test}`."
             );
         }
         for forbidden in ["Message::Text", "SecretKey", "sign_event", "Composer"] {

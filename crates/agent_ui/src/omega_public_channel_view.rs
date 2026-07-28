@@ -30,12 +30,12 @@ use crate::{
         PublicChannelMediaUnavailableReason, fetch_public_channel_media,
     },
     omega_public_channel_relay::{
-        RelayAdmissionLimits, RelayGapReason, RelayIntent, RelayLifecycle, RelaySessionConfig,
-        RelaySnapshot, run_relay_session,
+        RelayAdmissionLimits, RelayCursor, RelayGapReason, RelayIntent, RelayLifecycle,
+        RelaySessionConfig, RelaySnapshot, run_relay_session,
     },
     omega_public_channel_timeline::{
         ContentPart, DeletionKind, EventFacts, MediaFact, SignatureState, TimelineProjection,
-        event_facts, project_timeline,
+        event_facts, project_timeline, stable_verified_events,
     },
     omega_public_channels::{ChannelCursor, ChannelDescriptor, ChannelLifecycle, ChannelSnapshot},
 };
@@ -101,6 +101,10 @@ pub struct PublicChannelView {
     selected_event_id: Option<String>,
     media_states: BTreeMap<PublicChannelMediaKey, PublicChannelMediaState>,
     media_tasks: BTreeMap<PublicChannelMediaKey, Task<()>>,
+    #[cfg(test)]
+    media_fetch_result: Option<PublicChannelMediaState>,
+    #[cfg(test)]
+    media_fetch_pending: bool,
     generation: u64,
     session_running: bool,
     relay_intent_sender: Option<async_channel::Sender<RelayIntent>>,
@@ -128,6 +132,10 @@ impl PublicChannelView {
             selected_event_id: None,
             media_states: BTreeMap::new(),
             media_tasks: BTreeMap::new(),
+            #[cfg(test)]
+            media_fetch_result: None,
+            #[cfg(test)]
+            media_fetch_pending: false,
             generation: 0,
             session_running: false,
             relay_intent_sender: None,
@@ -162,9 +170,14 @@ impl PublicChannelView {
         self.relay_intent_sender = Some(intent_sender);
         self.session_running = true;
         let config = self.relay_config();
+        let timer_executor = cx.background_executor().clone();
         self.relay_session_task = Some(cx.spawn(async move |this, cx| {
-            let driver =
-                cx.background_spawn(run_relay_session(config, intent_receiver, snapshot_sender));
+            let driver = cx.background_spawn(run_relay_session(
+                config,
+                intent_receiver,
+                snapshot_sender,
+                timer_executor,
+            ));
             while let Ok(snapshot) = snapshot_receiver.recv().await {
                 if this
                     .update(cx, |this, cx| {
@@ -192,7 +205,9 @@ impl PublicChannelView {
                     this.apply_relay_snapshot(snapshot, cx);
                 }
             })
-            .ok();
+            .unwrap_or_else(|error| {
+                log::debug!("public channel view disappeared while its session stopped: {error:#}");
+            });
         }));
     }
 
@@ -200,7 +215,9 @@ impl PublicChannelView {
         self.generation = self.generation.saturating_add(1);
         self.session_running = false;
         if let Some(sender) = self.relay_intent_sender.take() {
-            sender.try_send(RelayIntent::Close).ok();
+            if let Err(error) = sender.try_send(RelayIntent::Close) {
+                log::debug!("public channel close intent was not delivered: {error}");
+            }
         }
         self.media_tasks.clear();
         for state in self.media_states.values_mut() {
@@ -214,7 +231,9 @@ impl PublicChannelView {
 
     pub fn load_older(&mut self) {
         if let Some(sender) = &self.relay_intent_sender {
-            sender.try_send(RelayIntent::LoadOlder).ok();
+            if let Err(error) = sender.try_send(RelayIntent::LoadOlder) {
+                log::debug!("public channel pagination intent was not delivered: {error}");
+            }
         }
     }
 
@@ -260,7 +279,8 @@ impl PublicChannelView {
         }
     }
 
-    fn apply_relay_snapshot(&mut self, snapshot: RelaySnapshot, cx: &mut Context<Self>) {
+    fn apply_relay_snapshot(&mut self, mut snapshot: RelaySnapshot, cx: &mut Context<Self>) {
+        merge_retained_snapshot(&self.relay_snapshot, &mut snapshot);
         let old_event_ids = self
             .projection
             .rows
@@ -424,11 +444,30 @@ impl PublicChannelView {
         let generation = self.generation;
         let max_bytes = self.descriptor.limits.attachment_bytes;
         let http_client = self.http_client.clone();
-        let fetch = cx.background_spawn(fetch_public_channel_media(
-            http_client,
-            attachment,
-            max_bytes,
-        ));
+        let fetch = {
+            #[cfg(test)]
+            {
+                if self.media_fetch_pending {
+                    cx.background_spawn(std::future::pending())
+                } else if let Some(state) = self.media_fetch_result.clone() {
+                    cx.background_spawn(async move { state })
+                } else {
+                    cx.background_spawn(fetch_public_channel_media(
+                        http_client,
+                        attachment,
+                        max_bytes,
+                    ))
+                }
+            }
+            #[cfg(not(test))]
+            {
+                cx.background_spawn(fetch_public_channel_media(
+                    http_client,
+                    attachment,
+                    max_bytes,
+                ))
+            }
+        };
         let key_for_task = key.clone();
         let task = cx.spawn(async move |this, cx| {
             let state = fetch.await;
@@ -452,7 +491,9 @@ impl PublicChannelView {
                     cx.notify();
                 }
             })
-            .ok();
+            .unwrap_or_else(|error| {
+                log::debug!("public channel view disappeared while media loaded: {error:#}");
+            });
         });
         self.media_tasks.insert(key, task);
     }
@@ -481,43 +522,51 @@ impl PublicChannelView {
         }
     }
 
-    fn render_status_banner(&self) -> Option<Banner> {
-        let (severity, text): (Severity, SharedString) = if !self.relay_snapshot.metadata_trusted {
-            (
-                Severity::Warning,
-                "Messages are verified. Group metadata is not authenticated.".into(),
-            )
-        } else if let Some(reason) = self.relay_snapshot.gap_reason {
-            (Severity::Warning, reason.gap_label().into())
-        } else {
-            match self.relay_snapshot.lifecycle {
-                RelayLifecycle::Disconnected => {
-                    (Severity::Info, "This channel is not connected.".into())
+    fn render_lifecycle_banner(&self) -> Option<Banner> {
+        let (severity, text): (Severity, SharedString) =
+            if let Some(reason) = self.relay_snapshot.gap_reason {
+                (Severity::Warning, reason.gap_label().into())
+            } else {
+                match self.relay_snapshot.lifecycle {
+                    RelayLifecycle::Disconnected => {
+                        (Severity::Info, "This channel is not connected.".into())
+                    }
+                    RelayLifecycle::Connecting => {
+                        (Severity::Info, "Connecting to signed relay history.".into())
+                    }
+                    RelayLifecycle::Replaying => (
+                        Severity::Info,
+                        "Repairing history until all required EOSE frames arrive.".into(),
+                    ),
+                    RelayLifecycle::Current => return None,
+                    RelayLifecycle::Reconnecting => (
+                        Severity::Warning,
+                        "Reconnecting and repairing history.".into(),
+                    ),
+                    RelayLifecycle::Stale => (
+                        Severity::Warning,
+                        "Verified messages remain visible, but history can be stale.".into(),
+                    ),
                 }
-                RelayLifecycle::Connecting => {
-                    (Severity::Info, "Connecting to signed relay history.".into())
-                }
-                RelayLifecycle::Replaying => (
-                    Severity::Info,
-                    "Repairing history until all required EOSE frames arrive.".into(),
-                ),
-                RelayLifecycle::Current => return None,
-                RelayLifecycle::Reconnecting => (
-                    Severity::Warning,
-                    "Reconnecting and repairing history.".into(),
-                ),
-                RelayLifecycle::Stale => (
-                    Severity::Warning,
-                    "Verified messages remain visible, but history can be stale.".into(),
-                ),
-            }
-        };
+            };
         Some(
             Banner::new()
                 .severity(severity)
                 .wrap_content(true)
                 .child(Label::new(text).size(LabelSize::Small)),
         )
+    }
+
+    fn render_metadata_banner(&self) -> Option<Banner> {
+        (!self.relay_snapshot.metadata_trusted).then(|| {
+            Banner::new()
+                .severity(Severity::Warning)
+                .wrap_content(true)
+                .child(
+                    Label::new("Messages are verified. Group metadata is not authenticated.")
+                        .size(LabelSize::Small),
+                )
+        })
     }
 
     fn render_timeline_row(
@@ -531,6 +580,7 @@ impl PublicChannelView {
         };
         let event_id = row.event_id.clone();
         let inspect_event_id = event_id.clone();
+        let inspect_selector = format!("inspect-{event_id}");
         let author = row
             .profile
             .as_ref()
@@ -574,16 +624,20 @@ impl PublicChannelView {
                             }),
                     )
                     .child(
-                        Button::new(
-                            SharedString::from(format!("inspect-{}", row.event_id)),
-                            "Inspect",
-                        )
-                        .style(ButtonStyle::Subtle)
-                        .size(ButtonSize::Compact)
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            cx.stop_propagation();
-                            this.inspect_event(&inspect_event_id, cx);
-                        })),
+                        h_flex().debug_selector(move || inspect_selector).child(
+                            Button::new(
+                                SharedString::from(format!("inspect-{}", row.event_id)),
+                                "Inspect",
+                            )
+                            .style(ButtonStyle::Subtle)
+                            .size(ButtonSize::Compact)
+                            .on_click(cx.listener(
+                                move |this, _, _, cx| {
+                                    cx.stop_propagation();
+                                    this.inspect_event(&inspect_event_id, cx);
+                                },
+                            )),
+                        ),
                     ),
             );
 
@@ -599,6 +653,7 @@ impl PublicChannelView {
 
         if row.content_warning && !self.revealed_content_warnings.contains(&row.event_id) {
             let reveal_event_id = event_id.clone();
+            let reveal_selector = format!("reveal-{event_id}");
             return card
                 .child(
                     Label::new("Content warning")
@@ -606,16 +661,18 @@ impl PublicChannelView {
                         .color(Color::Warning),
                 )
                 .child(
-                    Button::new(
-                        SharedString::from(format!("reveal-{}", row.event_id)),
-                        "Show content",
-                    )
-                    .style(ButtonStyle::Subtle)
-                    .size(ButtonSize::Compact)
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        cx.stop_propagation();
-                        this.reveal_content(&reveal_event_id, row_index, cx);
-                    })),
+                    h_flex().debug_selector(move || reveal_selector).child(
+                        Button::new(
+                            SharedString::from(format!("reveal-{}", row.event_id)),
+                            "Show content",
+                        )
+                        .style(ButtonStyle::Subtle)
+                        .size(ButtonSize::Compact)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            cx.stop_propagation();
+                            this.reveal_content(&reveal_event_id, row_index, cx);
+                        })),
+                    ),
                 )
                 .into_any_element();
         }
@@ -688,11 +745,22 @@ impl PublicChannelView {
         let lifecycle = state
             .map(PublicChannelMediaState::lifecycle)
             .unwrap_or(PublicChannelMediaLifecycle::Unavailable);
+        let lifecycle_selector = format!(
+            "omega-public-channel-media-state-{}",
+            match lifecycle {
+                PublicChannelMediaLifecycle::Gated => "gated",
+                PublicChannelMediaLifecycle::Loading => "loading",
+                PublicChannelMediaLifecycle::Verified => "verified",
+                PublicChannelMediaLifecycle::Mismatch => "mismatch",
+                PublicChannelMediaLifecycle::Unavailable => "unavailable",
+            }
+        );
         let mut card = v_flex()
             .id(SharedString::from(format!(
                 "media-{}-{}",
                 key.event_id, key.attachment_index
             )))
+            .debug_selector(move || lifecycle_selector)
             .p_2()
             .gap_1()
             .rounded_sm()
@@ -759,21 +827,30 @@ impl PublicChannelView {
             Some(PublicChannelMediaState::Loading) => {}
             Some(PublicChannelMediaState::Gated) => {
                 let key = key.clone();
-                card = card.child(
-                    Button::new(
-                        SharedString::from(format!(
-                            "load-media-{}-{}",
-                            key.event_id, key.attachment_index
-                        )),
-                        "Load media",
-                    )
-                    .style(ButtonStyle::Subtle)
-                    .size(ButtonSize::Compact)
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        cx.stop_propagation();
-                        this.begin_media_load(key.clone(), row_index, cx);
-                    })),
+                let load_selector = format!(
+                    "load-media-{}-{}",
+                    key.event_id, key.attachment_index
                 );
+                card = card.child(
+                    h_flex()
+                        .debug_selector(move || load_selector)
+                        .child(
+                            Button::new(
+                                SharedString::from(format!(
+                                    "load-media-{}-{}",
+                                    key.event_id, key.attachment_index
+                                )),
+                                "Load media",
+                            )
+                            .style(ButtonStyle::Subtle)
+                            .size(ButtonSize::Compact)
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                cx.stop_propagation();
+                                this.begin_media_load(key.clone(), row_index, cx);
+                            })),
+                        ),
+                    )
+                ;
             }
             None => {
                 card = card.child(
@@ -787,6 +864,8 @@ impl PublicChannelView {
     }
 
     fn render_event_facts(&self, facts: EventFacts, cx: &mut Context<Self>) -> AnyElement {
+        let event_id = facts.event_id.clone();
+        let media = facts.media;
         let deletion = facts
             .deletion
             .map(|deletion| match deletion {
@@ -810,10 +889,11 @@ impl PublicChannelView {
                 if facts.pinned { "Yes" } else { "No" }.to_string(),
             ),
             ("Deletion", deletion.to_string()),
-            ("Media", facts.media.len().to_string()),
+            ("Media", media.len().to_string()),
         ];
-        v_flex()
+        let mut pane = v_flex()
             .id("omega-public-channel-event-facts")
+            .debug_selector(|| "omega-public-channel-event-facts".to_string())
             .size_full()
             .p_3()
             .gap_2()
@@ -851,21 +931,93 @@ impl PublicChannelView {
                                 value,
                             )),
                     )
-            }))
-            .into_any_element()
+            }));
+        for (media_index, fact) in media.into_iter().enumerate() {
+            let key = PublicChannelMediaKey::new(
+                self.descriptor.channel_id.clone(),
+                event_id.clone(),
+                media_index,
+            );
+            let status = self
+                .media_states
+                .get(&key)
+                .map(PublicChannelMediaState::lifecycle)
+                .map(PublicChannelMediaLifecycle::label)
+                .unwrap_or("Media unavailable");
+            let media_rows = [
+                ("URL", fact.url),
+                ("MIME", fact.mime_type),
+                (
+                    "Digest",
+                    fact.digest.unwrap_or_else(|| "Not supplied".to_string()),
+                ),
+                (
+                    "Size",
+                    fact.size
+                        .map(|size| size.to_string())
+                        .unwrap_or_else(|| "Not supplied".to_string()),
+                ),
+                ("Status", status.to_string()),
+            ];
+            pane = pane.child(
+                v_flex()
+                    .id(SharedString::from(format!(
+                        "omega-public-channel-media-facts-{media_index}"
+                    )))
+                    .debug_selector(move || {
+                        format!("omega-public-channel-media-facts-{media_index}")
+                    })
+                    .mt_2()
+                    .gap_1()
+                    .child(Label::new(format!("Media {}", media_index + 1)).size(LabelSize::Small))
+                    .children(media_rows.into_iter().enumerate().map(
+                        |(field_index, (label, value))| {
+                            v_flex()
+                                .gap_0p5()
+                                .child(
+                                    Label::new(label)
+                                        .size(LabelSize::XSmall)
+                                        .color(Color::Muted),
+                                )
+                                .child(
+                                    h_flex()
+                                        .min_w_0()
+                                        .justify_between()
+                                        .gap_1()
+                                        .child(Label::new(value.clone()).size(LabelSize::Small))
+                                        .child(CopyButton::new(
+                                            SharedString::from(format!(
+                                                "copy-media-fact-{media_index}-{field_index}"
+                                            )),
+                                            value,
+                                        )),
+                                )
+                        },
+                    )),
+            );
+        }
+        pane.into_any_element()
     }
 
     fn render_empty_or_list(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         if self.projection.rows.is_empty() {
-            if matches!(self.relay_snapshot.lifecycle, RelayLifecycle::Connecting) {
-                return v_flex()
+            return match self.relay_snapshot.lifecycle {
+                RelayLifecycle::Connecting | RelayLifecycle::Replaying => v_flex()
+                    .id("omega-public-channel-history-loading")
+                    .debug_selector(|| "omega-public-channel-history-loading".to_string())
                     .size_full()
                     .p_4()
                     .gap_3()
                     .child(
-                        Label::new("Loading signed history…")
-                            .size(LabelSize::Small)
-                            .color(Color::Muted),
+                        Label::new(
+                            if matches!(self.relay_snapshot.lifecycle, RelayLifecycle::Connecting) {
+                                "Loading signed history…"
+                            } else {
+                                "Repairing signed history…"
+                            },
+                        )
+                        .size(LabelSize::Small)
+                        .color(Color::Muted),
                     )
                     .children((0..3).map(|index| {
                         div()
@@ -877,18 +1029,56 @@ impl PublicChannelView {
                             .rounded_md()
                             .bg(cx.theme().colors().border.opacity(0.24))
                     }))
-                    .into_any_element();
-            }
-            return v_flex()
-                .size_full()
-                .items_center()
-                .justify_center()
-                .child(
-                    Label::new("This channel is quiet.")
-                        .size(LabelSize::Small)
-                        .color(Color::Muted),
-                )
-                .into_any_element();
+                    .into_any_element(),
+                RelayLifecycle::Current => v_flex()
+                    .id("omega-public-channel-quiet")
+                    .debug_selector(|| "omega-public-channel-quiet".to_string())
+                    .size_full()
+                    .items_center()
+                    .justify_center()
+                    .child(
+                        Label::new("This channel is quiet.")
+                            .size(LabelSize::Small)
+                            .color(Color::Muted),
+                    )
+                    .into_any_element(),
+                RelayLifecycle::Reconnecting => v_flex()
+                    .id("omega-public-channel-reconnecting-empty")
+                    .debug_selector(|| "omega-public-channel-reconnecting-empty".to_string())
+                    .size_full()
+                    .items_center()
+                    .justify_center()
+                    .child(
+                        Label::new("Reconnecting to repair signed history…")
+                            .size(LabelSize::Small)
+                            .color(Color::Muted),
+                    )
+                    .into_any_element(),
+                RelayLifecycle::Stale => v_flex()
+                    .id("omega-public-channel-stale-empty")
+                    .debug_selector(|| "omega-public-channel-stale-empty".to_string())
+                    .size_full()
+                    .items_center()
+                    .justify_center()
+                    .child(
+                        Label::new("No verified messages are cached.")
+                            .size(LabelSize::Small)
+                            .color(Color::Muted),
+                    )
+                    .into_any_element(),
+                RelayLifecycle::Disconnected => v_flex()
+                    .id("omega-public-channel-disconnected-empty")
+                    .debug_selector(|| "omega-public-channel-disconnected-empty".to_string())
+                    .size_full()
+                    .items_center()
+                    .justify_center()
+                    .child(
+                        Label::new("Select this channel to read its signed history.")
+                            .size(LabelSize::Small)
+                            .color(Color::Muted),
+                    )
+                    .into_any_element(),
+            };
         }
         let list_state = self.list_state.clone();
         v_flex()
@@ -901,10 +1091,14 @@ impl PublicChannelView {
                     .px_4()
                     .py_1()
                     .child(
-                        Button::new("omega-public-channel-load-older", "Load older")
-                            .style(ButtonStyle::Subtle)
-                            .size(ButtonSize::Compact)
-                            .on_click(cx.listener(|this, _, _, _| this.load_older())),
+                        h_flex()
+                            .debug_selector(|| "omega-public-channel-load-older".to_string())
+                            .child(
+                                Button::new("omega-public-channel-load-older", "Load older")
+                                    .style(ButtonStyle::Subtle)
+                                    .size(ButtonSize::Compact)
+                                    .on_click(cx.listener(|this, _, _, _| this.load_older())),
+                            ),
                     )
                     .when(!self.list_state.is_following_tail(), |this| {
                         this.child(
@@ -941,8 +1135,25 @@ impl Render for PublicChannelView {
         let facts = self.selected_facts();
         let compact = window.viewport_size().width < COMPACT_FACTS_THRESHOLD;
         let mut view = v_flex().size_full().min_h_0().overflow_hidden();
-        if let Some(banner) = self.render_status_banner() {
-            view = view.child(div().px_3().pt_2().child(banner));
+        if let Some(banner) = self.render_lifecycle_banner() {
+            view = view.child(
+                div()
+                    .id("omega-public-channel-lifecycle-banner")
+                    .debug_selector(|| "omega-public-channel-lifecycle-banner".to_string())
+                    .px_3()
+                    .pt_2()
+                    .child(banner),
+            );
+        }
+        if let Some(banner) = self.render_metadata_banner() {
+            view = view.child(
+                div()
+                    .id("omega-public-channel-metadata-banner")
+                    .debug_selector(|| "omega-public-channel-metadata-banner".to_string())
+                    .px_3()
+                    .pt_2()
+                    .child(banner),
+            );
         }
         if compact && let Some(facts) = facts {
             return view.child(self.render_event_facts(facts, cx));
@@ -970,7 +1181,9 @@ impl Render for PublicChannelView {
 impl Drop for PublicChannelView {
     fn drop(&mut self) {
         if let Some(sender) = self.relay_intent_sender.take() {
-            sender.try_send(RelayIntent::Close).ok();
+            if let Err(error) = sender.try_send(RelayIntent::Close) {
+                log::debug!("public channel close intent was not delivered during drop: {error}");
+            }
         }
     }
 }
@@ -986,9 +1199,29 @@ fn channel_lifecycle(lifecycle: RelayLifecycle) -> ChannelLifecycle {
     }
 }
 
+fn merge_retained_snapshot(previous: &RelaySnapshot, next: &mut RelaySnapshot) {
+    if next.last_current_at.is_none() {
+        next.last_current_at = previous.last_current_at;
+    }
+    let mut events = previous.events.clone();
+    events.extend(next.events.clone());
+    next.events = stable_verified_events(&events);
+    next.cursor = next.events.last().map(|latest| RelayCursor {
+        created_at: latest.created_at,
+        event_ids_at_created_at: next
+            .events
+            .iter()
+            .filter(|event| event.created_at == latest.created_at)
+            .map(|event| event.id.clone())
+            .collect(),
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gpui::{Modifiers, TestAppContext, VisualTestContext, point, size};
+    use http_client::FakeHttpClient;
 
     fn descriptor(channel_id: &str, relay_url: &str) -> ChannelDescriptor {
         ChannelDescriptor {
@@ -1015,6 +1248,25 @@ mod tests {
             profile_version: "test".into(),
             rich_content_profile_version: "test".into(),
         }
+    }
+
+    fn init_test(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            let settings_store = settings::SettingsStore::test(cx);
+            cx.set_global(settings_store);
+            theme_settings::init(theme::LoadThemes::JustBase, cx);
+        });
+    }
+
+    fn fixture_events() -> Vec<crate::omega_public_channel_timeline::NostrEventRecord> {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../fixtures/agent-chat-parity.v1.json"))
+                .expect("the pinned parity fixture");
+        serde_json::from_value(fixture["projection"]["events"].clone()).expect("fixture events")
+    }
+
+    fn static_selector(selector: String) -> &'static str {
+        Box::leak(selector.into_boxed_str())
     }
 
     #[test]
@@ -1048,6 +1300,364 @@ mod tests {
         assert_ne!(
             descriptor("agent-chat", "wss://relay.example").channel_id,
             descriptor("agent-lab", "wss://relay.example/lab").channel_id
+        );
+    }
+
+    #[test]
+    fn a_resumed_session_keeps_cached_verified_rows_and_last_current_time() {
+        let events = fixture_events();
+        let previous = RelaySnapshot {
+            lifecycle: RelayLifecycle::Current,
+            last_current_at: Some(42),
+            events: events[..2].to_vec(),
+            ..Default::default()
+        };
+        let mut resumed = RelaySnapshot {
+            lifecycle: RelayLifecycle::Connecting,
+            events: vec![events[1].clone(), events[2].clone()],
+            ..Default::default()
+        };
+        merge_retained_snapshot(&previous, &mut resumed);
+        assert_eq!(resumed.events.len(), 3);
+        assert_eq!(resumed.last_current_at, Some(42));
+        assert_eq!(
+            resumed.cursor.as_ref().map(|cursor| cursor.created_at),
+            resumed.events.last().map(|event| event.created_at)
+        );
+    }
+
+    #[gpui::test]
+    fn rendered_empty_and_error_states_keep_lifecycle_and_metadata_visible(
+        cx: &mut TestAppContext,
+    ) {
+        init_test(cx);
+        let window_handle = cx.add_window(|_, cx| {
+            let http_client: Arc<dyn HttpClient> = FakeHttpClient::with_404_response();
+            PublicChannelView::new(
+                descriptor("agent-chat", "wss://relay.example"),
+                http_client,
+                cx,
+            )
+        });
+        cx.run_until_parked();
+        let mut cx = VisualTestContext::from_window(window_handle.into(), cx);
+        cx.simulate_resize(size(px(1200.), px(800.)));
+
+        for (lifecycle, empty_selector) in [
+            (
+                RelayLifecycle::Disconnected,
+                "omega-public-channel-disconnected-empty",
+            ),
+            (
+                RelayLifecycle::Connecting,
+                "omega-public-channel-history-loading",
+            ),
+            (
+                RelayLifecycle::Replaying,
+                "omega-public-channel-history-loading",
+            ),
+            (RelayLifecycle::Current, "omega-public-channel-quiet"),
+            (
+                RelayLifecycle::Reconnecting,
+                "omega-public-channel-reconnecting-empty",
+            ),
+            (RelayLifecycle::Stale, "omega-public-channel-stale-empty"),
+        ] {
+            window_handle
+                .update(&mut cx, |view, _, cx| {
+                    view.apply_relay_snapshot(
+                        RelaySnapshot {
+                            lifecycle,
+                            metadata_trusted: false,
+                            ..Default::default()
+                        },
+                        cx,
+                    );
+                })
+                .expect("update public channel view");
+            cx.run_until_parked();
+            assert!(
+                cx.debug_bounds(empty_selector).is_some(),
+                "{lifecycle:?} must have a distinct empty state"
+            );
+            assert!(
+                cx.debug_bounds("omega-public-channel-metadata-banner")
+                    .is_some(),
+                "untrusted metadata must stay visible for {lifecycle:?}"
+            );
+            assert_eq!(
+                cx.debug_bounds("omega-public-channel-lifecycle-banner")
+                    .is_some(),
+                lifecycle != RelayLifecycle::Current,
+                "the lifecycle banner must match {lifecycle:?}"
+            );
+        }
+
+        window_handle
+            .update(&mut cx, |view, _, cx| {
+                view.apply_relay_snapshot(
+                    RelaySnapshot {
+                        lifecycle: RelayLifecycle::Current,
+                        gap_reason: Some(RelayGapReason::InvalidRelayFrame),
+                        metadata_trusted: false,
+                        ..Default::default()
+                    },
+                    cx,
+                );
+            })
+            .expect("update public channel gap");
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("omega-public-channel-lifecycle-banner")
+                .is_some(),
+            "a gap reason must not be hidden by the metadata warning"
+        );
+        assert!(
+            cx.debug_bounds("omega-public-channel-metadata-banner")
+                .is_some()
+        );
+    }
+
+    #[gpui::test]
+    fn rendered_timeline_interactions_keep_rows_bounded_and_media_gated(cx: &mut TestAppContext) {
+        init_test(cx);
+        let window_handle = cx.add_window(|_, cx| {
+            let http_client: Arc<dyn HttpClient> = FakeHttpClient::with_404_response();
+            PublicChannelView::new(
+                descriptor("agent-chat", "wss://relay.example"),
+                http_client,
+                cx,
+            )
+        });
+        cx.run_until_parked();
+        let mut cx = VisualTestContext::from_window(window_handle.into(), cx);
+        cx.simulate_resize(size(px(1200.), px(800.)));
+
+        let messages = stable_verified_events(&fixture_events())
+            .into_iter()
+            .filter(|event| matches!(event.kind, 9 | 1337))
+            .collect::<Vec<_>>();
+        assert_eq!(messages.len(), 3);
+        window_handle
+            .update(&mut cx, |view, _, cx| {
+                view.apply_relay_snapshot(
+                    RelaySnapshot {
+                        lifecycle: RelayLifecycle::Current,
+                        events: messages[1..].to_vec(),
+                        metadata_trusted: false,
+                        ..Default::default()
+                    },
+                    cx,
+                );
+                assert_eq!(view.list_state.item_count(), 2);
+                view.apply_relay_snapshot(
+                    RelaySnapshot {
+                        lifecycle: RelayLifecycle::Current,
+                        events: messages.clone(),
+                        metadata_trusted: false,
+                        ..Default::default()
+                    },
+                    cx,
+                );
+                assert_eq!(view.list_state.item_count(), 3);
+            })
+            .expect("apply paginated snapshots");
+        cx.run_until_parked();
+
+        let content_warning_event = messages
+            .iter()
+            .find(|event| event.tag_values("content-warning").next().is_some())
+            .expect("content-warning fixture")
+            .id
+            .clone();
+        let reveal = cx
+            .debug_bounds(static_selector(format!("reveal-{content_warning_event}")))
+            .expect("content-warning action");
+        cx.simulate_click(reveal.center(), Modifiers::default());
+        window_handle
+            .update(&mut cx, |view, _, _| {
+                assert!(
+                    view.revealed_content_warnings
+                        .contains(&content_warning_event)
+                );
+            })
+            .expect("read content-warning state");
+
+        let media_event = messages
+            .iter()
+            .find(|event| event.tag_values("imeta").next().is_some())
+            .expect("media fixture")
+            .id
+            .clone();
+        let inspect = cx
+            .debug_bounds(static_selector(format!("inspect-{media_event}")))
+            .expect("inspect action");
+        cx.simulate_click(inspect.center(), Modifiers::default());
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("omega-public-channel-event-facts")
+                .is_some()
+        );
+        assert!(
+            cx.debug_bounds("omega-public-channel-media-facts-0")
+                .is_some()
+        );
+
+        assert!(
+            cx.debug_bounds("omega-public-channel-media-state-gated")
+                .is_some()
+        );
+        let media_key = PublicChannelMediaKey::new("agent-chat", media_event.clone(), 0);
+        window_handle
+            .update(&mut cx, |view, _, _| {
+                view.media_fetch_pending = true;
+            })
+            .expect("inject pending media result");
+        let load_media = cx
+            .debug_bounds(static_selector(format!("load-media-{media_event}-0")))
+            .expect("gated media action");
+        cx.simulate_click(
+            point(load_media.origin.x + px(4.), load_media.center().y),
+            Modifiers::default(),
+        );
+        cx.run_until_parked();
+        window_handle
+            .update(&mut cx, |view, _, _| {
+                assert!(matches!(
+                    view.media_states.get(&media_key),
+                    Some(PublicChannelMediaState::Loading)
+                ));
+            })
+            .expect("read loading media state");
+        assert!(
+            cx.debug_bounds("omega-public-channel-media-state-loading")
+                .is_some()
+        );
+
+        window_handle
+            .update(&mut cx, |view, _, cx| {
+                view.media_tasks.remove(&media_key);
+                view.media_fetch_pending = false;
+                view.media_fetch_result = Some(PublicChannelMediaState::Unavailable {
+                    reason: PublicChannelMediaUnavailableReason::Network,
+                });
+                view.media_states
+                    .insert(media_key.clone(), PublicChannelMediaState::Gated);
+                view.list_state
+                    .remeasure_items(0..view.projection.rows.len());
+                cx.notify();
+            })
+            .expect("prepare unavailable media result");
+        cx.run_until_parked();
+        let load_media = cx
+            .debug_bounds(static_selector(format!("load-media-{media_event}-0")))
+            .expect("unavailable media action");
+        cx.simulate_click(
+            point(load_media.origin.x + px(4.), load_media.center().y),
+            Modifiers::default(),
+        );
+        cx.run_until_parked();
+        window_handle
+            .update(&mut cx, |view, _, _| {
+                assert!(matches!(
+                    view.media_states.get(&media_key),
+                    Some(PublicChannelMediaState::Unavailable {
+                        reason: PublicChannelMediaUnavailableReason::Network
+                    })
+                ));
+                assert_eq!(view.projection.rows.len(), 3);
+            })
+            .expect("read media failure state");
+        assert!(
+            cx.debug_bounds("omega-public-channel-media-state-unavailable")
+                .is_some()
+        );
+
+        window_handle
+            .update(&mut cx, |view, _, cx| {
+                view.media_fetch_result = Some(PublicChannelMediaState::Mismatch {
+                    expected: "00".repeat(32),
+                    actual: "11".repeat(32),
+                });
+                view.media_states
+                    .insert(media_key.clone(), PublicChannelMediaState::Gated);
+                view.list_state
+                    .remeasure_items(0..view.projection.rows.len());
+                cx.notify();
+            })
+            .expect("prepare mismatched media result");
+        cx.run_until_parked();
+        let load_media = cx
+            .debug_bounds(static_selector(format!("load-media-{media_event}-0")))
+            .expect("mismatched media action");
+        cx.simulate_click(
+            point(load_media.origin.x + px(4.), load_media.center().y),
+            Modifiers::default(),
+        );
+        cx.run_until_parked();
+        window_handle
+            .update(&mut cx, |view, _, _| {
+                assert!(matches!(
+                    view.media_states.get(&media_key),
+                    Some(PublicChannelMediaState::Mismatch { .. })
+                ));
+                assert_eq!(view.projection.rows.len(), 3);
+            })
+            .expect("read media mismatch state");
+        assert!(
+            cx.debug_bounds("omega-public-channel-media-state-mismatch")
+                .is_some()
+        );
+
+        window_handle
+            .update(&mut cx, |view, _, cx| {
+                view.media_fetch_result =
+                    Some(crate::omega_public_channel_media::verified_media_state_for_test());
+                view.media_states
+                    .insert(media_key.clone(), PublicChannelMediaState::Gated);
+                view.list_state
+                    .remeasure_items(0..view.projection.rows.len());
+                cx.notify();
+            })
+            .expect("prepare verified media result");
+        cx.run_until_parked();
+        let load_media = cx
+            .debug_bounds(static_selector(format!("load-media-{media_event}-0")))
+            .expect("verified media action");
+        cx.simulate_click(
+            point(load_media.origin.x + px(4.), load_media.center().y),
+            Modifiers::default(),
+        );
+        cx.run_until_parked();
+        window_handle
+            .update(&mut cx, |view, _, _| {
+                assert!(matches!(
+                    view.media_states.get(&media_key),
+                    Some(PublicChannelMediaState::Verified(_))
+                ));
+                assert_eq!(view.projection.rows.len(), 3);
+            })
+            .expect("read verified media state");
+        assert!(
+            cx.debug_bounds("omega-public-channel-media-state-verified")
+                .is_some()
+        );
+
+        let (intent_sender, intent_receiver) = async_channel::bounded(1);
+        window_handle
+            .update(&mut cx, |view, _, cx| {
+                view.relay_intent_sender = Some(intent_sender);
+                view.close_event_facts(cx);
+            })
+            .expect("prepare pagination interaction");
+        cx.run_until_parked();
+        let load_older = cx
+            .debug_bounds("omega-public-channel-load-older")
+            .expect("load older action");
+        cx.simulate_click(load_older.center(), Modifiers::default());
+        assert_eq!(
+            intent_receiver.try_recv().expect("pagination intent"),
+            RelayIntent::LoadOlder
         );
     }
 }

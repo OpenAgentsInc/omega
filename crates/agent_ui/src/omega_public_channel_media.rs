@@ -385,6 +385,18 @@ impl VerifiedTempArtifact {
     }
 }
 
+#[cfg(test)]
+pub(crate) fn verified_media_state_for_test() -> PublicChannelMediaState {
+    let artifact = tempfile::NamedTempFile::new().expect("test media artifact");
+    PublicChannelMediaState::Verified(Arc::new(VerifiedPublicChannelMedia {
+        actual_digest: "00".repeat(32),
+        byte_len: 0,
+        mime_type: "text/plain".to_string(),
+        presentation: PublicChannelMediaPresentation::SaveOnly,
+        artifact: Arc::new(VerifiedTempArtifact { file: artifact }),
+    }))
+}
+
 /// Parse the safe inline `imeta` records in a signed event.
 ///
 /// An attachment URL must also occur in the event content. This prevents a tag
@@ -717,17 +729,17 @@ async fn presentation_for(
     bytes: Vec<u8>,
 ) -> Result<PublicChannelMediaPresentation, PublicChannelMediaUnavailableReason> {
     let format = match mime_type {
-        "image/gif" => Some(image::ImageFormat::Gif),
-        "image/jpeg" => Some(image::ImageFormat::Jpeg),
-        "image/png" => Some(image::ImageFormat::Png),
-        "image/webp" => Some(image::ImageFormat::WebP),
+        "image/gif" => image::ImageFormat::Gif,
+        "image/jpeg" => image::ImageFormat::Jpeg,
+        "image/png" => image::ImageFormat::Png,
+        "image/webp" => image::ImageFormat::WebP,
         "image/avif" => return Ok(PublicChannelMediaPresentation::OpenWithSystem),
         value if value.starts_with("audio/") || value.starts_with("video/") => {
             return Ok(PublicChannelMediaPresentation::OpenWithSystem);
         }
         _ => return Ok(PublicChannelMediaPresentation::SaveOnly),
     };
-    smol::unblock(move || decode_static_image(bytes, format.expect("an image format")))
+    smol::unblock(move || decode_static_image(bytes, format))
         .await
         .map(PublicChannelMediaPresentation::InlineImage)
 }

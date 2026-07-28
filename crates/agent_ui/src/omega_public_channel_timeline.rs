@@ -691,10 +691,7 @@ mod tests {
             projection.administrators,
             BTreeSet::from([current_administrator_key])
         );
-        assert_eq!(
-            projection.pinned_event_ids,
-            BTreeSet::from([second_id.clone()])
-        );
+        assert_eq!(projection.pinned_event_ids, BTreeSet::from([second_id]));
         assert_eq!(projection.rows[0].deletion, None);
         assert!(!projection.rows[0].pinned);
         assert_eq!(projection.rows[1].deletion, Some(DeletionKind::Moderator));

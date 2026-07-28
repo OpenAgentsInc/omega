@@ -1,6 +1,9 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt,
+    future::Future,
+    pin::Pin,
+    sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -13,6 +16,21 @@ use crate::omega_public_channel_timeline::{NostrEventRecord, stable_verified_eve
 
 const RECONNECT_DELAY_MS: u64 = 1_000;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(8);
+
+type RelayTimerFuture = Pin<Box<dyn Future<Output = ()> + Send>>;
+
+#[derive(Clone)]
+struct RelayTimer(Arc<dyn Fn(Duration) -> RelayTimerFuture + Send + Sync>);
+
+impl RelayTimer {
+    fn from_executor(executor: gpui::BackgroundExecutor) -> Self {
+        Self(Arc::new(move |duration| Box::pin(executor.timer(duration))))
+    }
+
+    fn after(&self, duration: Duration) -> RelayTimerFuture {
+        (self.0)(duration)
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RelayAdmissionLimits {
@@ -631,13 +649,30 @@ pub async fn run_relay_session(
     config: RelaySessionConfig,
     intent_receiver: async_channel::Receiver<RelayIntent>,
     snapshot_sender: async_channel::Sender<RelaySnapshot>,
+    timer_executor: gpui::BackgroundExecutor,
+) -> Result<()> {
+    run_relay_session_with_timer(
+        config,
+        intent_receiver,
+        snapshot_sender,
+        RelayTimer::from_executor(timer_executor),
+    )
+    .await
+}
+
+async fn run_relay_session_with_timer(
+    config: RelaySessionConfig,
+    intent_receiver: async_channel::Receiver<RelayIntent>,
+    snapshot_sender: async_channel::Sender<RelaySnapshot>,
+    timer: RelayTimer,
 ) -> Result<()> {
     let mut session = RelaySession::new(config);
     emit_snapshot(&session, &snapshot_sender).await?;
     let mut reconnect = false;
     loop {
         if reconnect {
-            if wait_for_reconnect_or_close(&mut session, &intent_receiver, &snapshot_sender).await?
+            if wait_for_reconnect_or_close(&mut session, &intent_receiver, &snapshot_sender, &timer)
+                .await?
             {
                 return Ok(());
             }
@@ -655,8 +690,14 @@ pub async fn run_relay_session(
             return Ok(());
         };
 
-        let Some(mut socket) =
-            connect_or_close(&relay_url, &intent_receiver, &mut session, &snapshot_sender).await?
+        let Some(mut socket) = connect_or_close(
+            &relay_url,
+            &intent_receiver,
+            &mut session,
+            &snapshot_sender,
+            &timer,
+        )
+        .await?
         else {
             if session.snapshot().lifecycle == RelayLifecycle::Disconnected {
                 return Ok(());
@@ -711,10 +752,11 @@ async fn connect_or_close(
     intent_receiver: &async_channel::Receiver<RelayIntent>,
     session: &mut RelaySession,
     snapshot_sender: &async_channel::Sender<RelaySnapshot>,
+    timer: &RelayTimer,
 ) -> Result<Option<async_tungstenite::WebSocketStream<async_tungstenite::async_std::ConnectStream>>>
 {
     let connect = async_tungstenite::async_std::connect_async(relay_url).fuse();
-    let timeout = futures::FutureExt::fuse(smol::Timer::after(CONNECT_TIMEOUT));
+    let timeout = futures::FutureExt::fuse(timer.after(CONNECT_TIMEOUT));
     pin_mut!(connect, timeout);
     loop {
         let intent = intent_receiver.recv().fuse();
@@ -746,16 +788,15 @@ async fn wait_for_reconnect_or_close(
     session: &mut RelaySession,
     intent_receiver: &async_channel::Receiver<RelayIntent>,
     snapshot_sender: &async_channel::Sender<RelaySnapshot>,
+    timer: &RelayTimer,
 ) -> Result<bool> {
-    let timer = futures::FutureExt::fuse(smol::Timer::after(Duration::from_millis(
-        RECONNECT_DELAY_MS,
-    )));
-    pin_mut!(timer);
+    let delay = futures::FutureExt::fuse(timer.after(Duration::from_millis(RECONNECT_DELAY_MS)));
+    pin_mut!(delay);
     loop {
         let intent = intent_receiver.recv().fuse();
         pin_mut!(intent);
         select! {
-            _ = timer => {
+            _ = delay => {
                 session.apply(RelayInput::ReconnectTimerFired { now_ms: unix_time_ms() });
                 emit_snapshot(session, snapshot_sender).await?;
                 return Ok(false);
@@ -985,6 +1026,51 @@ mod tests {
         json!(["EVENT", subscription_id, event]).to_string()
     }
 
+    async fn accept_scripted_relay_subscriptions(
+        listener: &smol::net::TcpListener,
+    ) -> (
+        async_tungstenite::WebSocketStream<smol::net::TcpStream>,
+        String,
+        String,
+        Value,
+    ) {
+        let (stream, _) = listener.accept().await.expect("relay client");
+        let mut socket = async_tungstenite::accept_async(stream)
+            .await
+            .expect("websocket handshake");
+        let mut history_subscription = None;
+        let mut state_subscription = None;
+        let mut history_filter = None;
+        while history_subscription.is_none() || state_subscription.is_none() {
+            let frame = socket
+                .next()
+                .await
+                .expect("subscription frame")
+                .expect("valid subscription frame")
+                .into_text()
+                .expect("text subscription");
+            let frame: Value = serde_json::from_str(&frame).expect("subscription JSON frame");
+            let subscription = frame
+                .get(1)
+                .and_then(Value::as_str)
+                .expect("subscription id")
+                .to_string();
+            let filter = frame.get(2).expect("subscription filter");
+            if filter.get("#h").is_some() {
+                history_subscription = Some(subscription);
+                history_filter = Some(filter.clone());
+            } else if filter.get("#d").is_some() {
+                state_subscription = Some(subscription);
+            }
+        }
+        (
+            socket,
+            history_subscription.expect("history subscription"),
+            state_subscription.expect("state subscription"),
+            history_filter.expect("history filter"),
+        )
+    }
+
     fn signed_message(
         keys: &Keys,
         group: &str,
@@ -1152,6 +1238,192 @@ mod tests {
             session.snapshot().gap_reason,
             Some(RelayGapReason::InvalidRelayFrame)
         );
+    }
+
+    #[test]
+    fn production_driver_repairs_a_forced_disconnect_without_losing_or_duplicating_rows() {
+        smol::block_on(async {
+            let fixture = fixture();
+            let listener = smol::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("loopback relay listener");
+            let address = listener.local_addr().expect("loopback relay address");
+            let message = fixture
+                .projection
+                .events
+                .iter()
+                .find(|event| event.kind == 9)
+                .expect("fixture message")
+                .clone();
+            let state = fixture
+                .projection
+                .events
+                .iter()
+                .find(|event| event.kind == 39001)
+                .expect("fixture relay state")
+                .clone();
+            let repaired_message = signed_message(
+                &Keys::generate(),
+                &fixture.source.group_id,
+                u64::try_from(message.created_at)
+                    .expect("fixture message time")
+                    .saturating_add(1),
+                "arrived during reconnect",
+            );
+            let server_message = message.clone();
+            let server_state = state.clone();
+            let server_repaired_message = repaired_message.clone();
+            let relay = smol::spawn(async move {
+                let (mut first_socket, first_history_subscription, first_state_subscription, _) =
+                    accept_scripted_relay_subscriptions(&listener).await;
+                first_socket
+                    .send(Message::Text(
+                        event_frame(&first_history_subscription, &server_message).into(),
+                    ))
+                    .await
+                    .expect("fixture message frame");
+                first_socket
+                    .send(Message::Text(
+                        event_frame(&first_state_subscription, &server_state).into(),
+                    ))
+                    .await
+                    .expect("fixture state frame");
+                first_socket
+                    .send(Message::Text(
+                        json!(["EOSE", first_history_subscription, ["extra"]])
+                            .to_string()
+                            .into(),
+                    ))
+                    .await
+                    .expect("history EOSE");
+                first_socket
+                    .send(Message::Text(
+                        json!(["EOSE", first_state_subscription]).to_string().into(),
+                    ))
+                    .await
+                    .expect("state EOSE");
+                drop(first_socket);
+
+                let (
+                    mut repaired_socket,
+                    repaired_history_subscription,
+                    repaired_state_subscription,
+                    repaired_history_filter,
+                ) = accept_scripted_relay_subscriptions(&listener).await;
+                assert_eq!(
+                    repaired_history_filter["since"],
+                    server_message.created_at.saturating_sub(1)
+                );
+                for event in [&server_message, &server_message, &server_repaired_message] {
+                    repaired_socket
+                        .send(Message::Text(
+                            event_frame(&repaired_history_subscription, event).into(),
+                        ))
+                        .await
+                        .expect("repaired history event");
+                }
+                repaired_socket
+                    .send(Message::Text(
+                        event_frame(&repaired_state_subscription, &server_state).into(),
+                    ))
+                    .await
+                    .expect("repaired state event");
+                repaired_socket
+                    .send(Message::Text(
+                        json!(["EOSE", repaired_history_subscription])
+                            .to_string()
+                            .into(),
+                    ))
+                    .await
+                    .expect("repaired history EOSE");
+                repaired_socket
+                    .send(Message::Text(
+                        json!(["EOSE", repaired_state_subscription])
+                            .to_string()
+                            .into(),
+                    ))
+                    .await
+                    .expect("repaired state EOSE");
+                while let Some(frame) = repaired_socket.next().await {
+                    match frame.expect("client close frame") {
+                        Message::Close(_) => break,
+                        Message::Text(_)
+                        | Message::Binary(_)
+                        | Message::Ping(_)
+                        | Message::Pong(_) => {}
+                        Message::Frame(_) => {}
+                    }
+                }
+            });
+
+            let mut config = config(&fixture, true);
+            config.relay_url = format!("ws://{address}");
+            config.limits.max_age_seconds = u64::MAX;
+            let (intent_sender, intent_receiver) = async_channel::bounded(4);
+            let (snapshot_sender, snapshot_receiver) = async_channel::bounded(32);
+            let (timer_sender, timer_receiver) = async_channel::bounded(1);
+            let timer = RelayTimer(Arc::new(move |_duration| {
+                let timer_receiver = timer_receiver.clone();
+                Box::pin(async move {
+                    let _ = timer_receiver.recv().await;
+                })
+            }));
+            let driver = smol::spawn(run_relay_session_with_timer(
+                config,
+                intent_receiver,
+                snapshot_sender,
+                timer,
+            ));
+            let current = loop {
+                let snapshot = snapshot_receiver.recv().await.expect("driver snapshot");
+                if snapshot.lifecycle == RelayLifecycle::Current {
+                    break snapshot;
+                }
+            };
+            assert_eq!(current.events.len(), 2);
+            assert!(current.events.contains(&message));
+            assert!(current.events.contains(&state));
+            assert!(current.metadata_trusted);
+            let mut saw_stale = false;
+            while !saw_stale {
+                let snapshot = snapshot_receiver.recv().await.expect("repair snapshot");
+                saw_stale |= snapshot.lifecycle == RelayLifecycle::Stale;
+            }
+            timer_sender
+                .send(())
+                .await
+                .expect("release reconnect timer");
+            let mut saw_reconnecting = false;
+            let repaired = loop {
+                let snapshot = snapshot_receiver.recv().await.expect("repair snapshot");
+                saw_reconnecting |= snapshot.lifecycle == RelayLifecycle::Reconnecting;
+                if snapshot.lifecycle == RelayLifecycle::Current
+                    && snapshot
+                        .events
+                        .iter()
+                        .any(|event| event.id == repaired_message.id)
+                {
+                    break snapshot;
+                }
+            };
+            assert!(saw_reconnecting);
+            assert_eq!(
+                repaired
+                    .events
+                    .iter()
+                    .filter(|event| event.id == message.id)
+                    .count(),
+                1
+            );
+            assert!(repaired.events.contains(&state));
+            assert!(repaired.events.contains(&repaired_message));
+            intent_sender
+                .send(RelayIntent::Close)
+                .await
+                .expect("close driver");
+            driver.await.expect("relay driver");
+            relay.await;
+        });
     }
 
     #[test]

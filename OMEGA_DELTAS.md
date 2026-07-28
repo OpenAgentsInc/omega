@@ -7204,7 +7204,9 @@ subscriptions and starts or resumes the new channel. Each retained view keeps
 its verified rows, cursor, lifecycle, unread calculation, event-detail state,
 and media state separate from all other relay-qualified channel coordinates.
 A generation and coordinate fence refuses a relay or media completion from a
-channel that is no longer selected.
+channel that is no longer selected. The first snapshot from a resumed session
+merges with the retained verified rows and last current time. It does not
+replace them with an empty connecting snapshot.
 
 The relay lane follows the OpenAgents
 `openagents.agent_chat_parity_fixture.v1` contract at revision
@@ -7225,7 +7227,10 @@ kind 39001 administrator set replaces older sets; it is not a historical
 union. A malformed frame, rejected event, profile failure, or media failure
 sets a bounded visible gap and leaves valid signed messages in place. When no
 relay-self key is pinned, messages remain readable and group metadata is
-explicitly untrusted.
+explicitly untrusted. The trust warning and the lifecycle or gap warning are
+separate. One warning cannot hide the other. Only a current channel with no
+messages uses the quiet state. Connecting and replaying use history states.
+Disconnected, reconnecting, and stale channels use distinct empty states.
 
 The main view uses a virtual tail-follow list. A reader who scrolls away from
 the tail is not pulled back; **Jump to latest** restores follow mode. **Load
@@ -7234,6 +7239,8 @@ Content warnings hide content and media controls until the reader reveals the
 message. Tombstones always win and never expose deleted content. Only projected
 HTTP(S) links open. Nostr references stay inert pending a reviewed desktop
 handler. **Inspect** opens bounded event facts instead of raw relay JSON.
+Media facts include the signed URL, MIME type, digest, size, and current media
+state.
 
 Remote media never loads because an event arrived or because a row rendered.
 The reader must select **Load media**. The loader sends no credentials or
@@ -7254,7 +7261,12 @@ current image build does not decode it inline.
 - **Enforced by:** `public_channel_timeline_is_live_verified_and_read_only` in
   `crates/omega_deltas`; the exact fixture projection, lifecycle, reconnect,
   pagination, invalid-input, AUTH-inert, and close tests in
-  `omega_public_channel_relay` and `omega_public_channel_timeline`; the gated
-  fetch, redirect, digest, MIME, image-bound, native-open, and failure tests in
-  `omega_public_channel_media`; and channel isolation tests in
+  `omega_public_channel_relay` and `omega_public_channel_timeline`; a loopback
+  WebSocket test that runs the production relay driver through both required
+  `EOSE` frames, forces a disconnect, accepts the replacement connection, and
+  proves retained duplicate-free repair; rendered GPUI tests for lifecycle,
+  empty, gap, trust, pagination, content-warning, event-detail, and all five
+  media states; the
+  gated fetch, redirect, digest, MIME, image-bound, native-open, and failure
+  tests in `omega_public_channel_media`; and channel isolation tests in
   `omega_public_channels` and `omega_public_channel_view`.
