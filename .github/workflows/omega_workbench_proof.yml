@@ -26,6 +26,44 @@ env:
   RUST_BACKTRACE: "1"
 
 jobs:
+  model_conformance:
+    name: Projection model and conformance
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - name: Check out Omega
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+        with:
+          clean: false
+
+      - name: Install pinned Java
+        uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9
+        with:
+          distribution: temurin
+          java-version: 21.0.8+9
+
+      - name: Configure Cargo for CI
+        run: |
+          mkdir -p ../.cargo
+          cp .cargo/ci-config.toml ../.cargo/config.toml
+
+      - name: Exhaust bounded model, probes, and mutations
+        env:
+          TLC_WORKERS: "4"
+        run: script/omega-workbench-model
+
+      - name: Check independent traces and production reducer conformance
+        run: >-
+          cargo test
+          -p omega_workbench_state
+          -p omega_workbench_conformance
+          -p omega_workbench_harness
+          -- --nocapture
+
+      - name: Remove CI Cargo configuration
+        if: always()
+        run: rm -rf ../.cargo
+
   portable_semantics:
     name: Portable semantics
     runs-on: ubuntu-22.04
@@ -124,6 +162,7 @@ jobs:
     name: Required
     if: always()
     needs:
+      - model_conformance
       - portable_semantics
       - metal_pixels
     runs-on: ubuntu-24.04
@@ -132,8 +171,13 @@ jobs:
       - name: Require every workbench proof lane
         env:
           METAL_PIXELS_RESULT: ${{ needs.metal_pixels.result }}
+          MODEL_CONFORMANCE_RESULT: ${{ needs.model_conformance.result }}
           PORTABLE_SEMANTICS_RESULT: ${{ needs.portable_semantics.result }}
         run: |
+          if [[ "$MODEL_CONFORMANCE_RESULT" != "success" ]]; then
+            echo "Projection model and conformance: $MODEL_CONFORMANCE_RESULT" >&2
+            exit 1
+          fi
           if [[ "$PORTABLE_SEMANTICS_RESULT" != "success" ]]; then
             echo "Portable semantics: $PORTABLE_SEMANTICS_RESULT" >&2
             exit 1

@@ -4,6 +4,8 @@ use gpui::{
     AnyWindowHandle, Bounds, DebugRenderSnapshot, Pixels, VisualTestAppContext, VisualTestContext,
 };
 use image::{Rgba, RgbaImage};
+use omega_workbench_conformance as conformance;
+use omega_workbench_state as projection;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 #[cfg(feature = "gpui-support")]
@@ -1507,6 +1509,675 @@ pub fn normalized_accessibility_nodes(
     Ok(normalized)
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkbenchConsistencyScenario {
+    ThreadSwitch,
+    WorktreeChange,
+    StaleCompletion,
+    Reconnect,
+    ValidRestore,
+    InvalidRestoreFallback,
+}
+
+impl WorkbenchConsistencyScenario {
+    pub const ALL: [Self; 6] = [
+        Self::ThreadSwitch,
+        Self::WorktreeChange,
+        Self::StaleCompletion,
+        Self::Reconnect,
+        Self::ValidRestore,
+        Self::InvalidRestoreFallback,
+    ];
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ThreadSwitch => "thread_switch",
+            Self::WorktreeChange => "worktree_change",
+            Self::StaleCompletion => "stale_completion",
+            Self::Reconnect => "reconnect",
+            Self::ValidRestore => "valid_restore",
+            Self::InvalidRestoreFallback => "invalid_restore_fallback",
+        }
+    }
+}
+
+pub fn workbench_consistency_trace(
+    scenario: WorkbenchConsistencyScenario,
+) -> Result<conformance::ConformanceTrace> {
+    let mut recorder = WorkbenchTransitionRecorder::new();
+    let repository_surfaces = projection::WorkSurface::FALLBACK_ORDER.to_vec();
+
+    match scenario {
+        WorkbenchConsistencyScenario::ThreadSwitch => {
+            recorder.require([
+                conformance::ActionKind::OpenThread,
+                conformance::ActionKind::RequestSurface,
+                conformance::ActionKind::SwitchThread,
+            ]);
+            recorder.apply(open_bound_thread(
+                "thread-a",
+                "worktree-a",
+                &repository_surfaces,
+            ));
+            recorder.apply(projection::ProjectionTransition::RequestSurface {
+                thread_id: "thread-a".into(),
+                surface: projection::WorkSurface::Git,
+            });
+            recorder.apply(open_bound_thread(
+                "thread-b",
+                "worktree-b",
+                &repository_surfaces,
+            ));
+            recorder.apply(projection::ProjectionTransition::SwitchThread {
+                thread_id: "thread-b".into(),
+            });
+            recorder.apply(projection::ProjectionTransition::RequestSurface {
+                thread_id: "thread-b".into(),
+                surface: projection::WorkSurface::Terminal,
+            });
+        }
+        WorkbenchConsistencyScenario::WorktreeChange => {
+            recorder.require([
+                conformance::ActionKind::OpenThread,
+                conformance::ActionKind::RequestSurface,
+                conformance::ActionKind::ChangeWorktree,
+            ]);
+            recorder.apply(open_bound_thread(
+                "thread-a",
+                "worktree-a",
+                &repository_surfaces,
+            ));
+            recorder.apply(projection::ProjectionTransition::RequestSurface {
+                thread_id: "thread-a".into(),
+                surface: projection::WorkSurface::Git,
+            });
+            recorder.apply(projection::ProjectionTransition::ChangeWorktree {
+                thread_id: "thread-a".into(),
+                generation: 0,
+                worktree_id: "worktree-b".into(),
+                available_surfaces: repository_surfaces,
+            });
+        }
+        WorkbenchConsistencyScenario::StaleCompletion => {
+            recorder.require([
+                conformance::ActionKind::OpenThread,
+                conformance::ActionKind::BeginSurfaceLoad,
+                conformance::ActionKind::ChangeWorktree,
+                conformance::ActionKind::CompleteSurfaceLoad,
+            ]);
+            let old_binding = production_binding("worktree-a");
+            let new_binding = production_binding("worktree-b");
+            recorder.apply(open_bound_thread(
+                "thread-a",
+                "worktree-a",
+                &repository_surfaces,
+            ));
+            recorder.apply(projection::ProjectionTransition::BeginSurfaceLoad {
+                request_id: "load-old".into(),
+                thread_id: "thread-a".into(),
+                surface: projection::WorkSurface::Git,
+                generation: 0,
+                binding: Some(old_binding.clone()),
+            });
+            recorder.apply(projection::ProjectionTransition::ChangeWorktree {
+                thread_id: "thread-a".into(),
+                generation: 0,
+                worktree_id: "worktree-b".into(),
+                available_surfaces: repository_surfaces,
+            });
+            recorder.apply(projection::ProjectionTransition::CompleteSurfaceLoad {
+                request_id: "load-old".into(),
+                thread_id: "thread-a".into(),
+                surface: projection::WorkSurface::Git,
+                generation: 0,
+                binding: Some(old_binding),
+            });
+            recorder.apply(projection::ProjectionTransition::BeginSurfaceLoad {
+                request_id: "load-current".into(),
+                thread_id: "thread-a".into(),
+                surface: projection::WorkSurface::Git,
+                generation: 1,
+                binding: Some(new_binding.clone()),
+            });
+            recorder.apply(projection::ProjectionTransition::CompleteSurfaceLoad {
+                request_id: "load-current".into(),
+                thread_id: "thread-a".into(),
+                surface: projection::WorkSurface::Git,
+                generation: 1,
+                binding: Some(new_binding),
+            });
+        }
+        WorkbenchConsistencyScenario::Reconnect => {
+            recorder.require([
+                conformance::ActionKind::Disconnect,
+                conformance::ActionKind::Reconnect,
+                conformance::ActionKind::ReceiveProjectionSnapshot,
+            ]);
+            recorder.apply(open_bound_thread(
+                "thread-a",
+                "worktree-a",
+                &repository_surfaces,
+            ));
+            recorder.apply(projection::ProjectionTransition::RequestSurface {
+                thread_id: "thread-a".into(),
+                surface: projection::WorkSurface::Git,
+            });
+            recorder.apply(projection::ProjectionTransition::Disconnect);
+            recorder.apply(projection::ProjectionTransition::Reconnect);
+            recorder.apply(
+                projection::ProjectionTransition::ReceiveProjectionSnapshot {
+                    snapshot: recorder.snapshot(0),
+                },
+            );
+            recorder.apply(
+                projection::ProjectionTransition::ReceiveProjectionSnapshot {
+                    snapshot: recorder.snapshot(1),
+                },
+            );
+        }
+        WorkbenchConsistencyScenario::ValidRestore => {
+            recorder.require([
+                conformance::ActionKind::PersistSelection,
+                conformance::ActionKind::ColdStart,
+                conformance::ActionKind::RestoreSelection,
+            ]);
+            recorder.apply(open_bound_thread(
+                "thread-a",
+                "worktree-a",
+                &repository_surfaces,
+            ));
+            recorder.apply(projection::ProjectionTransition::RequestSurface {
+                thread_id: "thread-a".into(),
+                surface: projection::WorkSurface::Review,
+            });
+            recorder.apply(projection::ProjectionTransition::PersistSelection { revision: 1 });
+            recorder.apply(projection::ProjectionTransition::ColdStart);
+            recorder.apply(projection::ProjectionTransition::RestoreSelection);
+        }
+        WorkbenchConsistencyScenario::InvalidRestoreFallback => {
+            recorder.require([
+                conformance::ActionKind::PersistSelection,
+                conformance::ActionKind::ColdStart,
+                conformance::ActionKind::ChangeWorktree,
+                conformance::ActionKind::RestoreSelection,
+            ]);
+            recorder.apply(open_bound_thread(
+                "thread-a",
+                "worktree-a",
+                &repository_surfaces,
+            ));
+            recorder.apply(projection::ProjectionTransition::RequestSurface {
+                thread_id: "thread-a".into(),
+                surface: projection::WorkSurface::Git,
+            });
+            recorder.apply(projection::ProjectionTransition::PersistSelection { revision: 1 });
+            recorder.apply(projection::ProjectionTransition::ColdStart);
+            recorder.apply(projection::ProjectionTransition::ChangeWorktree {
+                thread_id: "thread-a".into(),
+                generation: 0,
+                worktree_id: "worktree-b".into(),
+                available_surfaces: vec![
+                    projection::WorkSurface::Files,
+                    projection::WorkSurface::Plan,
+                ],
+            });
+            recorder.apply(projection::ProjectionTransition::RestoreSelection);
+        }
+    }
+
+    recorder.finish()
+}
+
+pub struct WorkbenchTransitionRecorder {
+    state: projection::WorkbenchProjection,
+    trace: conformance::ConformanceTrace,
+    attempted_transitions: usize,
+}
+
+impl Default for WorkbenchTransitionRecorder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl WorkbenchTransitionRecorder {
+    pub fn new() -> Self {
+        let state = projection::WorkbenchProjection::new();
+        let trace = conformance::ConformanceTrace::new(conformance_state(&state));
+        Self {
+            state,
+            trace,
+            attempted_transitions: 0,
+        }
+    }
+
+    pub fn require(&mut self, actions: impl IntoIterator<Item = conformance::ActionKind>) {
+        self.trace.required_actions.extend(actions);
+    }
+
+    pub fn state(&self) -> &projection::WorkbenchProjection {
+        &self.state
+    }
+
+    pub fn apply(&mut self, transition: projection::ProjectionTransition) {
+        self.attempted_transitions += 1;
+        let wire_transition = conformance_transition(&transition);
+        let effect = match self.state.apply(transition.clone()) {
+            Ok(effect) => conformance_effect(effect),
+            Err(error) => conformance::TransitionEffect::Rejected {
+                code: conformance_reject_code(&transition, &error),
+            },
+        };
+        self.trace
+            .push_with_effect(wire_transition, effect, conformance_state(&self.state));
+    }
+
+    pub fn snapshot(&self, revision: u64) -> projection::ProjectionSnapshot {
+        projection::ProjectionSnapshot {
+            revision,
+            persistence_revision: self.state.persistence_revision,
+            active_thread_id: self.state.active_thread_id.clone(),
+            threads: self.state.threads.clone(),
+            persisted_selection: self.state.persisted_selection.clone(),
+        }
+    }
+
+    pub fn finish(self) -> Result<conformance::ConformanceTrace> {
+        if self.trace.steps.len() != self.attempted_transitions {
+            bail!(
+                "workbench trace coverage breach: attempted {} critical transitions but recorded {}",
+                self.attempted_transitions,
+                self.trace.steps.len()
+            );
+        }
+        conformance::check_trace(&self.trace)
+            .map_err(|error| anyhow!("workbench conformance failed: {error}"))?;
+        Ok(self.trace)
+    }
+}
+
+fn production_binding(worktree_id: &str) -> projection::RepositoryBinding {
+    projection::RepositoryBinding {
+        repository_id: "repository-a".into(),
+        worktree_id: worktree_id.into(),
+    }
+}
+
+fn open_bound_thread(
+    thread_id: &str,
+    worktree_id: &str,
+    surfaces: &[projection::WorkSurface],
+) -> projection::ProjectionTransition {
+    projection::ProjectionTransition::OpenThread {
+        thread_id: thread_id.into(),
+        binding: Some(production_binding(worktree_id)),
+        available_surfaces: surfaces.to_vec(),
+    }
+}
+
+fn conformance_state(state: &projection::WorkbenchProjection) -> conformance::WorkbenchState {
+    let threads = state
+        .threads
+        .iter()
+        .map(|(thread_id, thread)| {
+            (
+                conformance::ThreadId(thread_id.clone()),
+                conformance::ThreadState {
+                    generation: thread.generation,
+                    binding: thread.binding.as_ref().map(conformance_binding),
+                    available_surfaces: thread
+                        .available_surfaces
+                        .iter()
+                        .copied()
+                        .map(conformance_surface)
+                        .collect(),
+                    requested_surface: thread.requested_surface.map(conformance_surface),
+                    effective_surface: thread.effective_surface.map(conformance_surface),
+                    dock_visible: thread.dock_open,
+                    focus_owner: thread.focus_owner.map(conformance_surface),
+                    artifact_revision: thread.artifact_revision,
+                    event_revision: thread.event_revision,
+                },
+            )
+        })
+        .collect();
+    let pending_loads = state
+        .pending_loads
+        .iter()
+        .map(|(request_id, load)| {
+            (
+                conformance::RequestId(request_id.clone()),
+                conformance::PendingLoad {
+                    thread_id: conformance::ThreadId(load.thread_id.clone()),
+                    surface: conformance_surface(load.surface),
+                    generation: load.generation,
+                    binding: load.binding.as_ref().map(conformance_binding),
+                },
+            )
+        })
+        .collect();
+    let mut projected = conformance::WorkbenchState {
+        projection_revision: state.projection_revision,
+        persistence_revision: state.persistence_revision,
+        connection: conformance_connection(state.connection),
+        active_thread: state
+            .active_thread_id
+            .as_ref()
+            .map(|thread_id| conformance::ThreadId(thread_id.clone())),
+        threads,
+        pending_loads,
+        persisted_selection: state
+            .persisted_selection
+            .as_ref()
+            .map(conformance_persisted_selection),
+        restore_pending: state.restore_pending,
+        visible_projection: None,
+    };
+    projected.visible_projection = projected.expected_visible_projection();
+    projected
+}
+
+fn conformance_transition(
+    transition: &projection::ProjectionTransition,
+) -> conformance::Transition {
+    match transition {
+        projection::ProjectionTransition::OpenThread {
+            thread_id,
+            binding,
+            available_surfaces,
+        } => conformance::Transition::OpenThread {
+            thread_id: conformance::ThreadId(thread_id.clone()),
+            seed: conformance::ThreadSeed::new(
+                0,
+                binding.as_ref().map(conformance_binding),
+                available_surfaces.iter().copied().map(conformance_surface),
+            ),
+        },
+        projection::ProjectionTransition::CloseThread { thread_id } => {
+            conformance::Transition::CloseThread {
+                thread_id: conformance::ThreadId(thread_id.clone()),
+            }
+        }
+        projection::ProjectionTransition::SwitchThread { thread_id } => {
+            conformance::Transition::SwitchThread {
+                thread_id: conformance::ThreadId(thread_id.clone()),
+            }
+        }
+        projection::ProjectionTransition::RequestSurface { thread_id, surface } => {
+            conformance::Transition::RequestSurface {
+                thread_id: conformance::ThreadId(thread_id.clone()),
+                surface: conformance_surface(*surface),
+            }
+        }
+        projection::ProjectionTransition::CloseSurface { thread_id } => {
+            conformance::Transition::CloseSurface {
+                thread_id: conformance::ThreadId(thread_id.clone()),
+            }
+        }
+        projection::ProjectionTransition::CollapseDock { thread_id } => {
+            conformance::Transition::CollapseDock {
+                thread_id: conformance::ThreadId(thread_id.clone()),
+            }
+        }
+        projection::ProjectionTransition::ExpandDock { thread_id } => {
+            conformance::Transition::ExpandDock {
+                thread_id: conformance::ThreadId(thread_id.clone()),
+            }
+        }
+        projection::ProjectionTransition::BindRepository {
+            thread_id,
+            generation,
+            binding,
+            available_surfaces,
+        } => conformance::Transition::BindRepository {
+            thread_id: conformance::ThreadId(thread_id.clone()),
+            generation: *generation,
+            binding: conformance_binding(binding),
+            available_surfaces: available_surfaces
+                .iter()
+                .copied()
+                .map(conformance_surface)
+                .collect(),
+        },
+        projection::ProjectionTransition::ChangeWorktree {
+            thread_id,
+            generation,
+            worktree_id,
+            available_surfaces,
+        } => conformance::Transition::ChangeWorktree {
+            thread_id: conformance::ThreadId(thread_id.clone()),
+            generation: *generation,
+            worktree_id: conformance::WorktreeId(worktree_id.clone()),
+            available_surfaces: available_surfaces
+                .iter()
+                .copied()
+                .map(conformance_surface)
+                .collect(),
+        },
+        projection::ProjectionTransition::RemoveBinding {
+            thread_id,
+            generation,
+            available_surfaces,
+        } => conformance::Transition::RemoveBinding {
+            thread_id: conformance::ThreadId(thread_id.clone()),
+            generation: *generation,
+            available_surfaces: available_surfaces
+                .iter()
+                .copied()
+                .map(conformance_surface)
+                .collect(),
+        },
+        projection::ProjectionTransition::BeginSurfaceLoad {
+            request_id,
+            thread_id,
+            surface,
+            generation,
+            binding,
+        } => conformance::Transition::BeginSurfaceLoad {
+            request_id: conformance::RequestId(request_id.clone()),
+            thread_id: conformance::ThreadId(thread_id.clone()),
+            surface: conformance_surface(*surface),
+            generation: *generation,
+            binding: binding.as_ref().map(conformance_binding),
+        },
+        projection::ProjectionTransition::CompleteSurfaceLoad {
+            request_id,
+            thread_id,
+            surface,
+            generation,
+            binding,
+        } => conformance::Transition::CompleteSurfaceLoad {
+            request_id: conformance::RequestId(request_id.clone()),
+            thread_id: conformance::ThreadId(thread_id.clone()),
+            surface: conformance_surface(*surface),
+            generation: *generation,
+            binding: binding.as_ref().map(conformance_binding),
+        },
+        projection::ProjectionTransition::FailSurfaceLoad {
+            request_id,
+            thread_id,
+            surface,
+            generation,
+            binding,
+        } => conformance::Transition::FailSurfaceLoad {
+            request_id: conformance::RequestId(request_id.clone()),
+            thread_id: conformance::ThreadId(thread_id.clone()),
+            surface: conformance_surface(*surface),
+            generation: *generation,
+            binding: binding.as_ref().map(conformance_binding),
+        },
+        projection::ProjectionTransition::Disconnect => conformance::Transition::Disconnect,
+        projection::ProjectionTransition::Reconnect => conformance::Transition::Reconnect,
+        projection::ProjectionTransition::ReceiveProjectionSnapshot { snapshot } => {
+            conformance::Transition::ReceiveProjectionSnapshot {
+                snapshot: conformance::ProjectionSnapshot {
+                    revision: snapshot.revision,
+                    persistence_revision: snapshot.persistence_revision,
+                    active_thread: snapshot
+                        .active_thread_id
+                        .as_ref()
+                        .map(|thread_id| conformance::ThreadId(thread_id.clone())),
+                    threads: snapshot
+                        .threads
+                        .iter()
+                        .map(|(thread_id, thread)| conformance::SnapshotThread {
+                            thread_id: conformance::ThreadId(thread_id.clone()),
+                            seed: conformance::ThreadSeed {
+                                generation: thread.generation,
+                                binding: thread.binding.as_ref().map(conformance_binding),
+                                available_surfaces: thread
+                                    .available_surfaces
+                                    .iter()
+                                    .copied()
+                                    .map(conformance_surface)
+                                    .collect(),
+                                requested_surface: thread
+                                    .requested_surface
+                                    .map(conformance_surface),
+                                dock_visible: thread.dock_open,
+                                artifact_revision: thread.artifact_revision,
+                                event_revision: thread.event_revision,
+                            },
+                        })
+                        .collect(),
+                    persisted_selection: snapshot
+                        .persisted_selection
+                        .as_ref()
+                        .map(conformance_persisted_selection),
+                },
+            }
+        }
+        projection::ProjectionTransition::PersistSelection { revision } => {
+            conformance::Transition::PersistSelection {
+                revision: *revision,
+            }
+        }
+        projection::ProjectionTransition::ColdStart => conformance::Transition::ColdStart,
+        projection::ProjectionTransition::RestoreSelection => {
+            conformance::Transition::RestoreSelection
+        }
+        projection::ProjectionTransition::InvalidateCapability {
+            thread_id,
+            generation,
+            surface,
+        } => conformance::Transition::InvalidateCapability {
+            thread_id: conformance::ThreadId(thread_id.clone()),
+            generation: *generation,
+            surface: conformance_surface(*surface),
+        },
+        projection::ProjectionTransition::DispatchSurfaceCommand {
+            thread_id,
+            surface,
+            binding,
+            generation,
+        } => conformance::Transition::DispatchSurfaceCommand {
+            thread_id: conformance::ThreadId(thread_id.clone()),
+            surface: conformance_surface(*surface),
+            generation: *generation,
+            binding: binding.as_ref().map(conformance_binding),
+        },
+    }
+}
+
+fn conformance_binding(binding: &projection::RepositoryBinding) -> conformance::Binding {
+    conformance::Binding::new(binding.repository_id.clone(), binding.worktree_id.clone())
+}
+
+fn conformance_persisted_selection(
+    selection: &projection::PersistedSelection,
+) -> conformance::PersistedSelection {
+    conformance::PersistedSelection {
+        revision: selection.revision,
+        thread_id: conformance::ThreadId(selection.thread_id.clone()),
+        generation: selection.generation,
+        binding: selection.binding.as_ref().map(conformance_binding),
+        requested_surface: selection.requested_surface.map(conformance_surface),
+        dock_visible: selection.dock_open,
+    }
+}
+
+fn conformance_surface(surface: projection::WorkSurface) -> conformance::SurfaceId {
+    match surface {
+        projection::WorkSurface::Files => conformance::SurfaceId::Files,
+        projection::WorkSurface::Search => conformance::SurfaceId::Search,
+        projection::WorkSurface::Review => conformance::SurfaceId::Review,
+        projection::WorkSurface::Git => conformance::SurfaceId::Git,
+        projection::WorkSurface::Terminal => conformance::SurfaceId::Terminal,
+        projection::WorkSurface::Plan => conformance::SurfaceId::Plan,
+    }
+}
+
+fn conformance_connection(connection: projection::ConnectionPhase) -> conformance::ConnectionPhase {
+    match connection {
+        projection::ConnectionPhase::Online => conformance::ConnectionPhase::Online,
+        projection::ConnectionPhase::Offline => conformance::ConnectionPhase::Offline,
+        projection::ConnectionPhase::Reconnecting => conformance::ConnectionPhase::Reconnecting,
+        projection::ConnectionPhase::StaleProjection => {
+            conformance::ConnectionPhase::StaleProjection
+        }
+    }
+}
+
+fn conformance_effect(effect: projection::TransitionEffect) -> conformance::TransitionEffect {
+    match effect {
+        projection::TransitionEffect::Applied => conformance::TransitionEffect::Applied,
+        projection::TransitionEffect::StaleCompletionIgnored => {
+            conformance::TransitionEffect::StaleCompletionIgnored
+        }
+        projection::TransitionEffect::OlderRevisionIgnored => {
+            conformance::TransitionEffect::OlderRevisionIgnored
+        }
+        projection::TransitionEffect::DeterministicFallback => {
+            conformance::TransitionEffect::DeterministicFallback
+        }
+    }
+}
+
+fn conformance_reject_code(
+    transition: &projection::ProjectionTransition,
+    error: &projection::ProjectionError,
+) -> conformance::RejectCode {
+    use conformance::RejectCode;
+    use projection::ProjectionError;
+
+    match error {
+        ProjectionError::InvalidConnectionTransition { .. } => RejectCode::InvalidConnectionPhase,
+        ProjectionError::InvalidState(_)
+        | ProjectionError::UnknownThread(_)
+        | ProjectionError::InvalidId { .. }
+            if matches!(
+                transition,
+                projection::ProjectionTransition::ReceiveProjectionSnapshot { .. }
+            ) =>
+        {
+            RejectCode::InvalidSnapshot
+        }
+        ProjectionError::InvalidState(_) | ProjectionError::InvalidBinding(_) => {
+            RejectCode::InvalidBinding
+        }
+        ProjectionError::InvalidId { .. } => RejectCode::InvalidIdentifier,
+        ProjectionError::DuplicateThread(_) => RejectCode::DuplicateThread,
+        ProjectionError::UnknownThread(_) => RejectCode::UnknownThread,
+        ProjectionError::DuplicateRequest(_) => RejectCode::DuplicateRequest,
+        ProjectionError::UnknownRequest(_) => RejectCode::UnknownRequest,
+        ProjectionError::RequestContextMismatch(_) => RejectCode::RequestContextMismatch,
+        ProjectionError::UnavailableSurface { .. } => RejectCode::UnavailableSurface,
+        ProjectionError::NoActiveThread => RejectCode::NoActiveSelection,
+        ProjectionError::NoPersistedSelection => RejectCode::NoPersistedSelection,
+        ProjectionError::RestoreNotPending => RejectCode::RestoreNotPending,
+        ProjectionError::AlreadyBound(_) => RejectCode::AlreadyBound,
+        ProjectionError::AlreadyUnbound(_) => RejectCode::AlreadyUnbound,
+        ProjectionError::CapabilityAlreadyUnavailable { .. } => {
+            RejectCode::CapabilityAlreadyUnavailable
+        }
+        ProjectionError::StaleGeneration { .. } => RejectCode::StaleGeneration,
+        ProjectionError::CommandBindingMismatch(_) => RejectCode::CommandBindingMismatch,
+        ProjectionError::InactiveThread { .. } => RejectCode::InactiveThread,
+        ProjectionError::RevisionOverflow { .. } => RejectCode::RevisionOverflow,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1527,6 +2198,288 @@ mod tests {
             self.restarts += 1;
             Ok(())
         }
+    }
+
+    #[test]
+    fn consistency_scenarios_conform_to_the_independent_checker() {
+        for scenario in WorkbenchConsistencyScenario::ALL {
+            let trace = workbench_consistency_trace(scenario)
+                .unwrap_or_else(|error| panic!("{} failed: {error}", scenario.as_str()));
+            let report = conformance::check_trace(&trace)
+                .unwrap_or_else(|error| panic!("{} was rejected: {error}", scenario.as_str()));
+            assert_eq!(report.steps_checked, trace.steps.len());
+
+            let state = &report.final_state;
+            match scenario {
+                WorkbenchConsistencyScenario::ThreadSwitch => {
+                    let visible = state
+                        .visible_projection
+                        .as_ref()
+                        .expect("switch has a visible projection");
+                    assert_eq!(visible.thread_id.0, "thread-b");
+                    assert_eq!(
+                        visible.effective_surface,
+                        Some(conformance::SurfaceId::Terminal)
+                    );
+                    assert_eq!(visible.focus_owner, Some(conformance::SurfaceId::Terminal));
+                    assert_eq!(visible.artifact_outline.thread_id.0, "thread-b");
+                    assert_eq!(visible.event_outline.thread_id.0, "thread-b");
+                    assert_eq!(
+                        visible
+                            .binding
+                            .as_ref()
+                            .map(|binding| binding.worktree_id.0.as_str()),
+                        Some("worktree-b")
+                    );
+                }
+                WorkbenchConsistencyScenario::WorktreeChange => {
+                    let thread = state
+                        .threads
+                        .get(&conformance::ThreadId("thread-a".into()))
+                        .expect("worktree scenario thread");
+                    assert_eq!(thread.generation, 1);
+                    assert_eq!(
+                        thread
+                            .binding
+                            .as_ref()
+                            .map(|binding| binding.worktree_id.0.as_str()),
+                        Some("worktree-b")
+                    );
+                }
+                WorkbenchConsistencyScenario::StaleCompletion => {
+                    let thread = state
+                        .threads
+                        .get(&conformance::ThreadId("thread-a".into()))
+                        .expect("stale completion thread");
+                    assert_eq!(thread.generation, 1);
+                    assert_eq!(thread.artifact_revision, 1);
+                    assert_eq!(thread.event_revision, 1);
+                    assert!(state.pending_loads.is_empty());
+                    assert!(trace.steps.iter().any(|step| {
+                        step.observed_effect
+                            == conformance::TransitionEffect::StaleCompletionIgnored
+                    }));
+                }
+                WorkbenchConsistencyScenario::Reconnect => {
+                    assert_eq!(state.connection, conformance::ConnectionPhase::Online);
+                    assert_eq!(state.projection_revision, 1);
+                    assert!(trace.steps.iter().any(|step| {
+                        step.observed_effect == conformance::TransitionEffect::OlderRevisionIgnored
+                    }));
+                }
+                WorkbenchConsistencyScenario::ValidRestore => {
+                    let visible = state
+                        .visible_projection
+                        .as_ref()
+                        .expect("restored visible projection");
+                    assert_eq!(visible.thread_id.0, "thread-a");
+                    assert_eq!(
+                        visible.effective_surface,
+                        Some(conformance::SurfaceId::Review)
+                    );
+                    assert_eq!(visible.focus_owner, Some(conformance::SurfaceId::Review));
+                }
+                WorkbenchConsistencyScenario::InvalidRestoreFallback => {
+                    let visible = state
+                        .visible_projection
+                        .as_ref()
+                        .expect("fallback visible projection");
+                    assert_eq!(
+                        visible.effective_surface,
+                        Some(conformance::SurfaceId::Files)
+                    );
+                    assert_eq!(
+                        visible
+                            .binding
+                            .as_ref()
+                            .map(|binding| binding.worktree_id.0.as_str()),
+                        Some("worktree-b")
+                    );
+                    let persisted = state
+                        .persisted_selection
+                        .as_ref()
+                        .expect("fallback rewrites persisted selection");
+                    assert_eq!(
+                        persisted.requested_surface,
+                        Some(conformance::SurfaceId::Files)
+                    );
+                    assert_eq!(persisted.generation, 1);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn rejected_production_transition_is_recorded_without_mutating_state() {
+        let mut recorder = WorkbenchTransitionRecorder::new();
+        let surfaces = projection::WorkSurface::FALLBACK_ORDER.to_vec();
+        recorder.apply(open_bound_thread("thread-a", "worktree-a", &surfaces));
+        let before = recorder.state.clone();
+        recorder.apply(open_bound_thread("thread-a", "worktree-b", &surfaces));
+        assert_eq!(recorder.state, before);
+
+        let trace = recorder.finish().expect("rejected trace conforms");
+        assert_eq!(
+            trace.steps.last().map(|step| step.observed_effect),
+            Some(conformance::TransitionEffect::Rejected {
+                code: conformance::RejectCode::DuplicateThread,
+            })
+        );
+    }
+
+    #[test]
+    fn rejected_production_paths_match_closed_checker_reasons() {
+        let mut recorder = WorkbenchTransitionRecorder::new();
+        let surfaces = projection::WorkSurface::FALLBACK_ORDER.to_vec();
+        recorder.apply(projection::ProjectionTransition::RequestSurface {
+            thread_id: "thread-a".into(),
+            surface: projection::WorkSurface::Git,
+        });
+        recorder.apply(open_bound_thread("thread-a", "worktree-a", &surfaces));
+        recorder.apply(projection::ProjectionTransition::RequestSurface {
+            thread_id: "thread-a".into(),
+            surface: projection::WorkSurface::Git,
+        });
+        recorder.apply(projection::ProjectionTransition::CollapseDock {
+            thread_id: "thread-a".into(),
+        });
+        recorder.apply(projection::ProjectionTransition::DispatchSurfaceCommand {
+            thread_id: "thread-a".into(),
+            surface: projection::WorkSurface::Git,
+            binding: Some(production_binding("worktree-a")),
+            generation: 0,
+        });
+        recorder.apply(projection::ProjectionTransition::ChangeWorktree {
+            thread_id: "thread-a".into(),
+            generation: 7,
+            worktree_id: "worktree-b".into(),
+            available_surfaces: surfaces,
+        });
+        recorder.apply(projection::ProjectionTransition::RestoreSelection);
+        recorder.apply(projection::ProjectionTransition::Disconnect);
+        recorder.apply(projection::ProjectionTransition::Disconnect);
+
+        let trace = recorder.finish().expect("rejected paths conform");
+        let rejected_codes: Vec<_> = trace
+            .steps
+            .iter()
+            .filter_map(|step| match step.observed_effect {
+                conformance::TransitionEffect::Rejected { code } => Some(code),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            rejected_codes,
+            [
+                conformance::RejectCode::InactiveThread,
+                conformance::RejectCode::UnavailableSurface,
+                conformance::RejectCode::StaleGeneration,
+                conformance::RejectCode::RestoreNotPending,
+                conformance::RejectCode::InvalidConnectionPhase,
+            ]
+        );
+    }
+
+    #[test]
+    fn production_trace_adapter_covers_every_critical_action() {
+        let mut recorder = WorkbenchTransitionRecorder::new();
+        recorder.require(conformance::ActionKind::ALL);
+        let surfaces = projection::WorkSurface::FALLBACK_ORDER.to_vec();
+        let binding_a = production_binding("worktree-a");
+        recorder.apply(open_bound_thread("thread-a", "worktree-a", &surfaces));
+        recorder.apply(projection::ProjectionTransition::RequestSurface {
+            thread_id: "thread-a".into(),
+            surface: projection::WorkSurface::Git,
+        });
+        recorder.apply(projection::ProjectionTransition::DispatchSurfaceCommand {
+            thread_id: "thread-a".into(),
+            surface: projection::WorkSurface::Git,
+            binding: Some(binding_a.clone()),
+            generation: 0,
+        });
+        recorder.apply(projection::ProjectionTransition::CollapseDock {
+            thread_id: "thread-a".into(),
+        });
+        recorder.apply(projection::ProjectionTransition::ExpandDock {
+            thread_id: "thread-a".into(),
+        });
+        recorder.apply(projection::ProjectionTransition::CloseSurface {
+            thread_id: "thread-a".into(),
+        });
+        recorder.apply(projection::ProjectionTransition::BeginSurfaceLoad {
+            request_id: "load-complete".into(),
+            thread_id: "thread-a".into(),
+            surface: projection::WorkSurface::Git,
+            generation: 0,
+            binding: Some(binding_a.clone()),
+        });
+        recorder.apply(projection::ProjectionTransition::CompleteSurfaceLoad {
+            request_id: "load-complete".into(),
+            thread_id: "thread-a".into(),
+            surface: projection::WorkSurface::Git,
+            generation: 0,
+            binding: Some(binding_a.clone()),
+        });
+        recorder.apply(projection::ProjectionTransition::BeginSurfaceLoad {
+            request_id: "load-fail".into(),
+            thread_id: "thread-a".into(),
+            surface: projection::WorkSurface::Terminal,
+            generation: 0,
+            binding: Some(binding_a),
+        });
+        recorder.apply(projection::ProjectionTransition::FailSurfaceLoad {
+            request_id: "load-fail".into(),
+            thread_id: "thread-a".into(),
+            surface: projection::WorkSurface::Terminal,
+            generation: 0,
+            binding: Some(production_binding("worktree-a")),
+        });
+        recorder.apply(projection::ProjectionTransition::InvalidateCapability {
+            thread_id: "thread-a".into(),
+            generation: 0,
+            surface: projection::WorkSurface::Search,
+        });
+        recorder.apply(projection::ProjectionTransition::ChangeWorktree {
+            thread_id: "thread-a".into(),
+            generation: 1,
+            worktree_id: "worktree-b".into(),
+            available_surfaces: surfaces.clone(),
+        });
+        recorder.apply(projection::ProjectionTransition::RemoveBinding {
+            thread_id: "thread-a".into(),
+            generation: 2,
+            available_surfaces: vec![projection::WorkSurface::Plan],
+        });
+        recorder.apply(projection::ProjectionTransition::BindRepository {
+            thread_id: "thread-a".into(),
+            generation: 3,
+            binding: production_binding("worktree-c"),
+            available_surfaces: surfaces.clone(),
+        });
+        recorder.apply(projection::ProjectionTransition::PersistSelection { revision: 1 });
+        recorder.apply(projection::ProjectionTransition::ColdStart);
+        recorder.apply(projection::ProjectionTransition::RestoreSelection);
+        recorder.apply(projection::ProjectionTransition::Disconnect);
+        recorder.apply(projection::ProjectionTransition::Reconnect);
+        recorder.apply(
+            projection::ProjectionTransition::ReceiveProjectionSnapshot {
+                snapshot: recorder.snapshot(1),
+            },
+        );
+        recorder.apply(open_bound_thread("thread-b", "worktree-b", &surfaces));
+        recorder.apply(projection::ProjectionTransition::SwitchThread {
+            thread_id: "thread-b".into(),
+        });
+        recorder.apply(projection::ProjectionTransition::CloseThread {
+            thread_id: "thread-b".into(),
+        });
+
+        let trace = recorder.finish().expect("all critical actions conform");
+        let report = conformance::check_trace(&trace).expect("full trace remains conformant");
+        assert_eq!(
+            report.seen_actions,
+            conformance::ActionKind::ALL.into_iter().collect()
+        );
     }
 
     #[test]

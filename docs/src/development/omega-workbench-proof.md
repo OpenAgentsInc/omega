@@ -74,6 +74,13 @@ Each layer catches a different failure. A plausible screenshot can still show
 the wrong thread or worktree. A correct state reducer can still render a
 clipped control. Keep both assertions.
 
+The logical workbench reducer also has a bounded TLA+ model and an independent
+runtime trace checker. See
+[Workbench projection consistency](./workbench-consistency.md) for the exact
+claims, bounds, trace schema, and reducer-to-model mapping. Those checks prove
+neither GPUI semantics nor pixels; this harness attaches those remaining proof
+layers.
+
 ## Typed scenes {#typed-scenes}
 
 The shared scene types and proof records live in
@@ -447,6 +454,10 @@ out-of-range shard.
 `.github/workflows/omega_workbench_proof.yml` runs on pull requests, merge
 groups, pushes to `main`, and manual dispatches. Its jobs are:
 
+- **Projection model and conformance** on GitHub-hosted `ubuntu-22.04`. It
+  exhausts the bounded model, confirms every reachability probe and red
+  mutation, tests the independent checker, and runs all production reducer
+  traces.
 - **Portable semantics** on GitHub-hosted `ubuntu-22.04`. It runs the
   `omega_workbench_harness` tests, the production Agent UI scene adapter, a
   16-iteration GPUI `debug_render_snapshot` seed sweep starting at seed `0`,
@@ -455,9 +466,9 @@ groups, pushes to `main`, and manual dispatches. Its jobs are:
   image for these baselines. A two-shard matrix verifies that the runner is
   `arm64`, then runs the pixel lane at seed `0`. The output for shard `<n>` is
   `target/omega-workbench-proof/shard-<n>`.
-- **Required** on GitHub-hosted `ubuntu-24.04`. It fails unless both the portable
-  and Metal jobs succeeded, including when an upstream job was cancelled or
-  skipped.
+- **Required** on GitHub-hosted `ubuntu-24.04`. It fails unless the model,
+  portable, and Metal jobs all succeeded, including when an upstream job was
+  cancelled or skipped.
 
 The workflow disables Cargo debug information for its dev, test, and release
 profiles. The proof does not inspect debug symbols, and omitting them keeps the
@@ -473,6 +484,7 @@ hiding the original test failure.
 Use these focused checks while developing the harness:
 
 ```sh
+script/omega-workbench-model
 cargo test -p omega_workbench_harness
 cargo test -p omega_workbench_harness --features gpui-support
 ```

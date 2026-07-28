@@ -1,0 +1,18 @@
+[package]
+name = "omega_workbench_state"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license = "GPL-3.0-or-later"
+description = "Canonical repository-bound projection state for Omega's desktop workbench"
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/omega_workbench_state.rs"
+doctest = false
+
+[dependencies]
+serde.workspace = true
+thiserror.workspace = true

@@ -235,6 +235,7 @@
   - [Omega RC installed proof](./development/omega-rc-installed-proof.md)
   - [Omega slim-agent proof](./development/omega-slim-agent-proof.md)
   - [Deterministic Omega workbench proofs](./development/omega-workbench-proof.md)
+  - [Workbench projection consistency](./development/workbench-consistency.md)
   - [macOS](./development/macos.md)
   - [Linux](./development/linux.md)
   - [Windows](./development/windows.md)
