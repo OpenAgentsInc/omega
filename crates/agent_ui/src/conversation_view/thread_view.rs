@@ -13613,11 +13613,18 @@ impl ThreadView {
                 h_flex()
                     .gap_1()
                     .child(
+                        // The notice still says what a folder buys, because
+                        // OMEGA-DELTA-0054 exists for an agent that searched an
+                        // empty workspace and told the owner his code was not
+                        // there. It asks in the ordinary colour: on a fresh
+                        // install nothing has gone wrong yet, and a warning for
+                        // a state every new window starts in teaches a person
+                        // to read past warnings.
                         Label::new(
-                            "No folder open — file search and terminal have nothing to read",
+                            "Choose a folder to let file search and the terminal read your code",
                         )
                         .size(LabelSize::XSmall)
-                        .color(Color::Warning),
+                        .color(Color::Muted),
                     )
                     .child(
                         Button::new("omega-zero-base-open-folder", "Open Folder")

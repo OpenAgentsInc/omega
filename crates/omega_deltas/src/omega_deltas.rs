@@ -9317,11 +9317,15 @@ mod tests {
              it"
         );
         assert!(
-            notice.contains("No folder open") && notice.contains("visible_worktrees"),
-            "OMEGA-DELTA-0054: the composer notice in {} no longer says when \
-             there is no folder, or no longer asks the project. A thread that \
-             silently searches nothing is how \"the workspace appears to be \
-             empty\" gets said to somebody about their own code.",
+            notice.contains("Choose a folder to let file search and the terminal read your code")
+                && notice.contains("Color::Muted")
+                && notice.contains("visible_worktrees"),
+            "OMEGA-DELTA-0054: the composer notice in {} no longer asks for a \
+             folder, no longer asks in the ordinary colour, or no longer asks \
+             the project. A thread that silently searches nothing is how \"the \
+             workspace appears to be empty\" gets said to somebody about their \
+             own code. Saying it in a warning colour, in a state every new \
+             window starts in, teaches a person to read past warnings.",
             thread_path.display()
         );
 
@@ -18894,7 +18898,7 @@ mod tests {
         );
         for required in [
             "visible_worktrees(cx)",
-            "\"No folder attached\"",
+            "\"Choose a folder\"",
             "Button::new(\"omega-zero-base-working-directory\", glance)",
             ".style(ButtonStyle::Subtle)",
             "IconName::ChevronDown",

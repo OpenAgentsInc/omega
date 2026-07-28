@@ -7417,10 +7417,14 @@ impl AgentPanel {
                 Color::Muted,
             )
         } else {
+            // Asking is not a fault. A fresh install has no folder yet, and
+            // the owner met two yellow notices before he had done anything
+            // wrong. This is the invitation, in the ordinary colour, and the
+            // control it sits on already opens the picker.
             (
-                "No folder attached".to_string(),
-                "No folder attached".to_string(),
-                Color::Warning,
+                "Choose a folder".to_string(),
+                "Choose a folder".to_string(),
+                Color::Muted,
             )
         };
         let aria_description = if root.is_some() {

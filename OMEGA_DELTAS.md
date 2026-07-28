@@ -2782,8 +2782,13 @@ than it sounds, because the harness omega#81's acceptance sentence names —
   no files why???????? what the fuck is the working dir"*.
 - **Omega now:** in zero base, a working directory somebody chose is opened as
   the project. `crates/omega_workdir/` decides what "somebody chose" means, and
-  when the answer is no the composer says so in one line with a control that
-  opens a folder picker. There is no setup page: nothing is asked before the
+  when the answer is no the composer asks for one in a single line, in the
+  ordinary text colour, beside a control that opens the folder picker. It asks
+  rather than warns, and the header control beside the thread title reads
+  `Choose a folder` for the same reason: the owner installed a candidate,
+  opened it, and met two yellow notices before he had done anything wrong. A
+  warning for the state every new window starts in is how a person learns to
+  read past warnings. There is no setup page: nothing is asked before the
   thread opens.
 - **Why the test is plausibility and not project-ness.** Requiring a marker — a
   `.git`, a `Cargo.toml` — would refuse a plain folder of files, which is a
