@@ -394,10 +394,18 @@ impl PublicChannelController {
 
     pub fn selected_channel(&self) -> Option<&ChannelDescriptor> {
         let selected = self.selected.as_deref()?;
+        self.channel(selected)
+    }
+
+    pub fn selected_channel_id(&self) -> Option<&str> {
+        self.selected.as_deref()
+    }
+
+    pub fn channel(&self, channel_id: &str) -> Option<&ChannelDescriptor> {
         self.registry
             .channels
             .iter()
-            .find(|channel| channel.channel_id == selected)
+            .find(|channel| channel.channel_id == channel_id)
     }
 
     pub fn selected_snapshot(&self) -> Option<&ChannelSnapshot> {

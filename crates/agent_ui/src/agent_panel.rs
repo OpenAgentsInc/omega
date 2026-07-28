@@ -223,7 +223,9 @@ struct SourcePanelInitialization {
 async fn fetch_public_channel_registry(
     http_client: Arc<HttpClientWithUrl>,
 ) -> Result<crate::omega_public_channels::ChannelRegistry> {
-    let mut response = http_client
+    const MAX_REGISTRY_BYTES: u64 = 256 * 1024;
+
+    let response = http_client
         .get(
             omega_nostr_activity::MANIFEST_URL,
             AsyncBody::default(),
@@ -231,16 +233,21 @@ async fn fetch_public_channel_registry(
         )
         .await
         .context("fetching the public chat manifest")?;
-    let mut body = Vec::new();
-    response
-        .body_mut()
-        .read_to_end(&mut body)
-        .await
-        .context("reading the public chat manifest")?;
     anyhow::ensure!(
         response.status().is_success(),
         "the public chat manifest answered {}",
         response.status().as_u16()
+    );
+    let mut body = Vec::new();
+    response
+        .into_body()
+        .take(MAX_REGISTRY_BYTES + 1)
+        .read_to_end(&mut body)
+        .await
+        .context("reading the public chat manifest")?;
+    anyhow::ensure!(
+        body.len() as u64 <= MAX_REGISTRY_BYTES,
+        "the public chat manifest exceeded the size limit"
     );
     crate::omega_public_channels::ChannelRegistry::from_agent_chat_manifest(
         &String::from_utf8_lossy(&body),
@@ -1294,6 +1301,13 @@ pub struct AgentPanel {
     public_channels_error: Option<SharedString>,
     /// Held so the manifest load dies with the panel.
     _public_channels_load: Option<Task<()>>,
+    /// Relay-qualified channel views retain verified rows across selection
+    /// changes. Only the selected view keeps its relay session active.
+    public_channel_views:
+        HashMap<String, Entity<crate::omega_public_channel_view::PublicChannelView>>,
+    /// Snapshot events keep sidebar lifecycle, cursor, and unread state in
+    /// agreement with each retained channel view.
+    _public_channel_view_subscriptions: HashMap<String, Subscription>,
     /// The sentence the last refused reopen produced, if the sidebar is showing
     /// one.
     ///
@@ -1725,6 +1739,8 @@ impl AgentPanel {
             public_channels: crate::omega_public_channels::PublicChannelController::empty(),
             public_channels_error: None,
             _public_channels_load: None,
+            public_channel_views: HashMap::default(),
+            _public_channel_view_subscriptions: HashMap::default(),
             threads_sidebar_refusal: None,
             device_pairing_surface: None,
             _engine_capacity_poll: None,
@@ -3350,6 +3366,7 @@ impl AgentPanel {
             this.update(cx, |this, cx| {
                 match read {
                     Ok(registry) => {
+                        this.stop_all_public_channel_views(cx);
                         this.public_channels =
                             crate::omega_public_channels::PublicChannelController::new(registry);
                         this.public_channels_error = None;
@@ -3364,6 +3381,14 @@ impl AgentPanel {
             })
             .ok();
         }));
+    }
+
+    fn stop_all_public_channel_views(&mut self, cx: &mut Context<Self>) {
+        for view in self.public_channel_views.values() {
+            view.update(cx, |view, cx| view.pause(cx));
+        }
+        self.public_channel_views.clear();
+        self._public_channel_view_subscriptions.clear();
     }
 
     /// The rows the threads sidebar draws, newest first.
@@ -3811,7 +3836,55 @@ impl AgentPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let previous_channel_id = self
+            .public_channels
+            .selected_channel_id()
+            .map(str::to_string);
+        if previous_channel_id.as_deref() != Some(channel_id)
+            && let Some(previous_view) = previous_channel_id
+                .as_ref()
+                .and_then(|channel_id| self.public_channel_views.get(channel_id))
+        {
+            previous_view.update(cx, |view, cx| view.pause(cx));
+        }
         if self.public_channels.select(channel_id) {
+            let Some(channel) = self.public_channels.channel(channel_id).cloned() else {
+                return;
+            };
+            let view = if let Some(view) = self.public_channel_views.get(channel_id) {
+                view.clone()
+            } else {
+                let http_client: Arc<dyn http_client::HttpClient> =
+                    self.project.read(cx).client().http_client();
+                let view = cx.new(|cx| {
+                    crate::omega_public_channel_view::PublicChannelView::new(
+                        channel,
+                        http_client,
+                        cx,
+                    )
+                });
+                let channel_id_for_snapshot = channel_id.to_string();
+                let subscription = cx.subscribe(
+                    &view,
+                    move |this,
+                          _view,
+                          event: &crate::omega_public_channel_view::PublicChannelViewEvent,
+                          cx| {
+                        let crate::omega_public_channel_view::PublicChannelViewEvent::SnapshotChanged(
+                            snapshot,
+                        ) = event;
+                        this.public_channels
+                            .apply_snapshot(&channel_id_for_snapshot, snapshot.clone());
+                        cx.notify();
+                    },
+                );
+                self._public_channel_view_subscriptions
+                    .insert(channel_id.to_string(), subscription);
+                self.public_channel_views
+                    .insert(channel_id.to_string(), view.clone());
+                view
+            };
+            view.update(cx, |view, cx| view.resume(cx));
             self.showing_full_auto = false;
             self.threads_sidebar_refusal = None;
             self.focus_handle.focus(window, cx);
@@ -3821,6 +3894,13 @@ impl AgentPanel {
     }
 
     fn close_selected_public_channel(&mut self, cx: &mut Context<Self>) {
+        if let Some(view) = self
+            .public_channels
+            .selected_channel_id()
+            .and_then(|channel_id| self.public_channel_views.get(channel_id))
+        {
+            view.update(cx, |view, cx| view.pause(cx));
+        }
         self.public_channels.clear_selection();
         cx.emit(AgentPanelEvent::ActiveViewChanged);
         cx.notify();
@@ -3916,6 +3996,18 @@ impl AgentPanel {
         let Some(channel) = self.public_channels.selected_channel() else {
             return div().into_any_element();
         };
+        let selected_view = self.public_channel_views.get(&channel.channel_id).cloned();
+        let last_sync = selected_view
+            .as_ref()
+            .and_then(|view| view.read(cx).last_current_at())
+            .and_then(|millis| i64::try_from(millis).ok())
+            .and_then(DateTime::<Utc>::from_timestamp_millis)
+            .map(|time| {
+                format!(
+                    "Last sync {}",
+                    time.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+                )
+            });
         let lifecycle = self
             .public_channels
             .selected_snapshot()
@@ -3941,6 +4033,11 @@ impl AgentPanel {
                                 Label::new(channel.display_name.clone())
                                     .size(LabelSize::XSmall)
                                     .color(Color::Muted),
+                            )
+                            .child(
+                                Label::new(format!("{} · {}", channel.relay_url, channel.group_id))
+                                    .size(LabelSize::XSmall)
+                                    .color(Color::Muted),
                             ),
                     )
                     .child(
@@ -3951,6 +4048,13 @@ impl AgentPanel {
                                     .size(LabelSize::XSmall)
                                     .color(Color::Muted),
                             )
+                            .when_some(last_sync, |this, last_sync| {
+                                this.child(
+                                    Label::new(last_sync)
+                                        .size(LabelSize::XSmall)
+                                        .color(Color::Muted),
+                                )
+                            })
                             .child(
                                 IconButton::new(
                                     "close-omega-selected-public-channel",
@@ -3967,25 +4071,22 @@ impl AgentPanel {
                     ),
             )
             .child(
-                v_flex()
+                div()
                     .id("omega-selected-public-channel-content")
+                    .min_h_0()
                     .flex_1()
-                    .p_4()
-                    .gap_2()
-                    .child(
-                        Label::new(format!("Relay: {}", channel.relay_url))
-                            .size(LabelSize::Small)
-                            .color(Color::Muted),
-                    )
-                    .child(
-                        Label::new(format!("Group: {}", channel.group_id))
-                            .size(LabelSize::Small)
-                            .color(Color::Muted),
-                    )
-                    .child(
-                        Label::new("The live timeline is not active in this build.")
-                            .size(LabelSize::Small)
-                            .color(Color::Muted),
+                    .when_some(selected_view, |this, view| this.child(view))
+                    .when(
+                        !self.public_channel_views.contains_key(&channel.channel_id),
+                        |this| {
+                            this.child(
+                                v_flex().size_full().items_center().justify_center().child(
+                                    Label::new("The channel view could not start.")
+                                        .size(LabelSize::Small)
+                                        .color(Color::Muted),
+                                ),
+                            )
+                        },
                     ),
             )
             .into_any_element()
@@ -5458,6 +5559,13 @@ impl AgentPanel {
         // the surface is retained, so returning to it restores the draft and
         // the selected run.
         self.showing_full_auto = false;
+        if let Some(view) = self
+            .public_channels
+            .selected_channel_id()
+            .and_then(|channel_id| self.public_channel_views.get(channel_id))
+        {
+            view.update(cx, |view, cx| view.pause(cx));
+        }
         self.public_channels.clear_selection();
 
         let old_view = std::mem::replace(&mut self.base_view, new_view);
