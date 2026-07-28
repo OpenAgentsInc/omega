@@ -20092,6 +20092,19 @@ mod tests {
              with the status that explains them."
         );
 
+        // Pairing reaches identity custody before hosted sign-in ever runs: a
+        // person can click "Pair phone" without sending a message. If only the
+        // hosted lane provisions, that click on a fresh install refuses with
+        // "custody is not ready" and nothing on screen can make it ready.
+        let bridge = read_repository_file("crates/agent_ui/src/omega_host_bridge.rs");
+        let pairing = function_body(&bridge, "production_sarah_conversation")
+            .expect("OMEGA-DELTA-0159: the pairing conversation constructor is gone");
+        assert!(
+            pairing.contains("provision_unattended"),
+            "OMEGA-DELTA-0159: phone pairing no longer provisions custody, so \
+             a fresh install that pairs before it chats is refused."
+        );
+
         let custody = read_repository_file("crates/omega_identity/src/custody.rs");
         let unattended = function_body(&custody, "provision_unattended")
             .expect("OMEGA-DELTA-0159: unattended provisioning is gone");

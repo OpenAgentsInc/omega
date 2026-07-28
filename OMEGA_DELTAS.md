@@ -6961,6 +6961,13 @@ brand-new install sat at custody state `Absent` forever and every hosted request
 failed. `mint_openagents_nostr_session` now brings custody to `Ready` itself
 before it signs.
 
+Phone pairing provisions the same way. Pairing reaches custody before hosted
+sign-in ever runs, because a person can click "Pair phone" without sending a
+message, and the bridge constructor used to inspect and refuse with "custody is
+not ready" — a sentence nothing on screen could act on. The same
+narrow provisioning applies: a state the profile cannot sign for still refuses,
+by name.
+
 Provisioning is deliberately narrow. `Absent` creates, `Unadopted` adopts the
 identity this data root's own secret file already holds, and every other state
 is a refusal that names itself. `Lost`, `Conflict`, `Incomplete`, and the reset

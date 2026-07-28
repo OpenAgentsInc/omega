@@ -605,8 +605,18 @@ fn production_sarah_conversation() -> Result<SarahConversationClient, HostRespon
     let identity_service = Arc::new(omega_identity::IdentityService::system(
         *app_identity::CHANNEL,
     ));
+    // Provision rather than inspect. A fresh install has no identity and the
+    // startup onboarding gate is dormant, so hosted sign-in learned to create
+    // one on demand — but a person who clicks "Pair phone" before ever sending
+    // a message reached this older inspect-and-refuse first and was told
+    // custody "is not ready", with nothing on screen that could make it ready.
+    // The states `provision_unattended` refuses (`Lost`, `Conflict`, reset)
+    // still refuse here, by name, because replacing an identity unattended is
+    // the silent pick omega#110 forbids.
+    let receipt_ref = omega_identity::ReceiptRef::new("omega-device-pairing-provision-v1")
+        .map_err(|error| unavailable(format!("Omega identity receipt ref is invalid: {error}")))?;
     let custody = identity_service
-        .inspect()
+        .provision_unattended(receipt_ref)
         .map_err(|error| unavailable(format!("Omega identity custody is unavailable: {error}")))?;
     let owner_public_key_hex = custody
         .identity
