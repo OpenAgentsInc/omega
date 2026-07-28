@@ -4519,9 +4519,15 @@ impl ThreadView {
                                     )
                                 })
                                 .child(
-                                    IconButton::new("minimize_subagent", IconName::Dash)
+                                    // The card that opened this view is
+                                    // labelled `Maximize`; its inverse should
+                                    // read as the same pair rather than as a
+                                    // dash that could mean anything, and the
+                                    // tooltip names the key so the way back is
+                                    // learnable from the way in.
+                                    IconButton::new("minimize_subagent", IconName::Minimize)
                                         .icon_size(IconSize::Small)
-                                        .tooltip(Tooltip::text("Minimize Subagent"))
+                                        .tooltip(Tooltip::text("Minimize Subagent (esc)"))
                                         .on_click(move |_, window, cx| {
                                             let _ = server_view.update(cx, |server_view, cx| {
                                                 server_view.navigate_to_thread(
@@ -11167,15 +11173,30 @@ impl ThreadView {
                                 this.cursor_pointer()
                                     .hover(|s| s.bg(cx.theme().colors().element_hover))
                                     .child(
-                                        div().visible_on_hover(card_header_id).child(
-                                            Icon::new(if is_expanded {
-                                                IconName::ChevronUp
-                                            } else {
-                                                IconName::ChevronDown
+                                        // The chevron that opens the card can
+                                        // wait for the pointer: the card is one
+                                        // row tall and the whole row is the
+                                        // target. The chevron that closes it
+                                        // cannot. Once the card fills the
+                                        // thread the reader's pointer is down
+                                        // in the content they just opened, and
+                                        // a control that is not drawn is a
+                                        // control they do not have — which is
+                                        // how the only way back became a
+                                        // one-way door.
+                                        div()
+                                            .when(!is_expanded, |this| {
+                                                this.visible_on_hover(card_header_id)
                                             })
-                                            .color(Color::Muted)
-                                            .size(IconSize::Small),
-                                        ),
+                                            .child(
+                                                Icon::new(if is_expanded {
+                                                    IconName::ChevronUp
+                                                } else {
+                                                    IconName::ChevronDown
+                                                })
+                                                .color(Color::Muted)
+                                                .size(IconSize::Small),
+                                            ),
                                     )
                                     .on_click(cx.listener({
                                         let tool_call_id = tool_call.id.clone();
@@ -11250,11 +11271,8 @@ impl ThreadView {
                 let fullscreen_toggle = h_flex()
                     .id(entry_ix)
                     .py_1()
-                    .w_full()
+                    .flex_1()
                     .justify_center()
-                    .border_t_1()
-                    .when(is_failed, |this| this.border_dashed())
-                    .border_color(self.tool_card_border_color(cx))
                     .cursor_pointer()
                     .hover(|s| s.bg(cx.theme().colors().element_hover))
                     .child(
@@ -11272,6 +11290,47 @@ impl ThreadView {
                             .ok();
                     }));
 
+                let collapse_toggle = h_flex()
+                    .id(("collapse-subagent", entry_ix))
+                    .py_1()
+                    .flex_1()
+                    .justify_center()
+                    .cursor_pointer()
+                    .hover(|s| s.bg(cx.theme().colors().element_hover))
+                    .child(
+                        Icon::new(IconName::ChevronUp)
+                            .color(Color::Muted)
+                            .size(IconSize::Small),
+                    )
+                    .tooltip(Tooltip::text("Collapse Subagent"))
+                    .on_click(cx.listener({
+                        let tool_call_id = tool_call.id.clone();
+                        move |this, _event, window, cx| {
+                            this.entry_view_state.update(cx, |state, _cx| {
+                                state.collapse_tool_call(&tool_call_id);
+                            });
+                            this.refresh_thread_search(window, cx);
+                            telemetry::event!("Subagent Toggled", expanded = false);
+                            cx.notify();
+                        }
+                    }));
+
+                // The strip along the bottom is the only control on an open
+                // card that is drawn without the pointer on it, and it offered
+                // one direction: further in. Both directions live here now, so
+                // the way back is beside the way further in rather than a
+                // hover away at the top of a card the reader has scrolled past.
+                let footer = h_flex()
+                    .w_full()
+                    .border_t_1()
+                    .when(is_failed, |this| this.border_dashed())
+                    .border_color(self.tool_card_border_color(cx))
+                    .when(is_expanded, |this| {
+                        this.child(collapse_toggle)
+                            .child(Divider::vertical().color(DividerColor::Border))
+                    })
+                    .child(fullscreen_toggle);
+
                 if is_running && let Some((_, subagent_tool_call_id, _)) = pending_tool_call {
                     if let Some((entry_ix, tool_call)) =
                         thread.read(cx).tool_call(&subagent_tool_call_id)
@@ -11286,7 +11345,7 @@ impl ThreadView {
                                 window,
                                 cx,
                             ))
-                            .child(fullscreen_toggle)
+                            .child(footer)
                     } else {
                         this
                     }
@@ -11306,7 +11365,7 @@ impl ThreadView {
                                     .title(message),
                             )
                         })
-                        .child(fullscreen_toggle)
+                        .child(footer)
                     })
                 }
             })
@@ -11368,7 +11427,17 @@ impl ThreadView {
             .or_default()
             .clone();
 
-        scroll_handle.scroll_to_bottom();
+        // Follow the tail only while the reader is already at it. This used to
+        // run on every render, so a delegation that was still producing output
+        // pulled the view back to the bottom under anyone trying to read what
+        // had scrolled past — which, together with the card not scrolling at
+        // all, is why the only way to read a subagent's output was to leave the
+        // card. `max_offset` is zero until the card has been laid out once, and
+        // an unlaid card reads as at-the-tail, which is where a new one starts.
+        let scrolled_up = scroll_handle.max_offset().y + scroll_handle.offset().y > px(1.);
+        if !scrolled_up {
+            scroll_handle.scroll_to_bottom();
+        }
 
         let rendered_entries: Vec<AnyElement> = entries
             .get(entry_range)
@@ -11398,6 +11467,25 @@ impl ThreadView {
                         "subagent-entries-{}-{}",
                         session_id, tool_call.id.0
                     ))
+                    // `track_scroll` alone records an offset nothing moves.
+                    // Without this the card was a fixed 14rem window onto
+                    // content that is routinely taller, clipped by the
+                    // `overflow_hidden` above with no gesture that could reach
+                    // the rest: the reader could see that a command had
+                    // produced output and could not read it.
+                    .overflow_y_scroll()
+                    // The transcript is a `List`, which registers its scroll
+                    // handler after painting its items and does not stop
+                    // propagation, so without this both it and the card take
+                    // the same wheel delta and the thread jumps out from under
+                    // whatever is being read. Occluding drops the list's hitbox
+                    // from the hit test while the pointer is over the card, so
+                    // the card holds the gesture — including at its own top and
+                    // bottom, where the scroll stops rather than chaining
+                    // outward. That is the deliberate choice: a gesture that
+                    // began inside a bounded region should not end by moving
+                    // the page behind it.
+                    .occlude()
                     .track_scroll(&scroll_handle)
                     .children(rendered_entries),
             )
@@ -13767,10 +13855,30 @@ impl Render for ThreadView {
         v_flex()
             .key_context("AcpThread")
             .track_focus(&self.focus_handle)
-            .on_action(cx.listener(|this, _: &menu::Cancel, _, cx| {
+            .on_action(cx.listener(|this, _: &menu::Cancel, window, cx| {
                 if this.parent_session_id.is_none() {
                     this.cancel_generation(cx);
+                    return;
                 }
+                // Escape in a subagent view used to be swallowed and do
+                // nothing — the guard above exists so it cannot cancel work the
+                // parent's tool call is waiting on. The way back out was one
+                // unlabelled button in the titlebar, so the key a person
+                // presses to leave something did nothing, twice over. It leaves
+                // the full-screen view instead; stopping the delegation is
+                // still the Stop button, which says so.
+                if this.close_thread_search(window, cx) {
+                    return;
+                }
+                let Some(parent_session_id) = this.thread.read(cx).parent_session_id().cloned()
+                else {
+                    return;
+                };
+                this.server_view
+                    .update(cx, |view, cx| {
+                        view.navigate_to_thread(parent_session_id, window, cx);
+                    })
+                    .ok();
             }))
             .on_action(cx.listener(
                 |this, _: &super::thread_search_bar::DismissThreadSearch, window, cx| {

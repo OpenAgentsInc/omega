@@ -2393,6 +2393,20 @@ impl AcpThread {
         self.parent_session_id.as_ref()
     }
 
+    /// Records the thread this one was spawned from.
+    ///
+    /// A native subagent is handed its parent at construction. An external ACP
+    /// subagent cannot be: it is opened by `new_session` on the *other* agent's
+    /// connection, which has never heard of the thread that asked for it, so
+    /// the parent is only knowable at the call site that asked. The panel reads
+    /// this field to decide that a thread is a subagent at all — whether it
+    /// draws a way back out of the full-screen view, whether Escape cancels,
+    /// and whether it offers a composer — so a subagent that does not name its
+    /// parent is drawn as a root thread with no exit.
+    pub fn set_parent_session_id(&mut self, parent_session_id: acp::SessionId) {
+        self.parent_session_id = Some(parent_session_id);
+    }
+
     pub fn prompt_capabilities(&self) -> acp::PromptCapabilities {
         self.prompt_capabilities.clone()
     }

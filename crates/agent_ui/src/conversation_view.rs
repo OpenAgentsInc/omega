@@ -1928,7 +1928,17 @@ impl ConversationView {
         if !has_thread {
             return;
         };
-        let is_subagent = thread.read(cx).parent_session_id().is_some();
+        // Asked of the conversation, not of the thread. A subagent that does
+        // not record a parent used to answer "I am the root" here, and an
+        // external ACP subagent never records one: `new_session` opens it on
+        // the other agent's connection, which has never heard of the thread
+        // that asked for it. So a Codex or Claude delegation finishing read as
+        // the root finishing, and the root's message queue was spent on it —
+        // a follow-up the person had typed was dispatched mid-turn and left
+        // the queue with nothing said. The conversation already knows which
+        // session is its root; every other thread it holds is a subagent of
+        // it, whatever the thread says about itself.
+        let is_subagent = self.root_session_id.as_ref() != Some(&session_id);
         if !is_subagent && affects_thread_metadata(event) {
             cx.emit(RootThreadUpdated);
         }
@@ -11487,6 +11497,73 @@ pub(crate) mod tests {
                 "Floating row should disappear once the permission is granted"
             );
         });
+    }
+
+    /// A queued message is the person's typing, and only the thread it was
+    /// queued on may spend it.
+    ///
+    /// The subagent here records no parent, which is not a contrived state: an
+    /// external ACP subagent is opened by `new_session` on the *other* agent's
+    /// connection, which has never heard of the thread that asked for it, so
+    /// `parent_session_id` is `None` on every Codex or Claude delegation. The
+    /// root's queue was driven by asking the thread that stopped whether it
+    /// named a parent, so a delegation finishing read as the root finishing:
+    /// the queued message was dispatched mid-turn and left the queue, and the
+    /// person who had queued a follow-up and gone to watch the delegation work
+    /// saw it disappear with nothing said.
+    #[gpui::test]
+    async fn a_subagent_turn_ending_cannot_spend_the_root_threads_queue(cx: &mut TestAppContext) {
+        init_test(cx);
+
+        let (conversation_view, cx) =
+            setup_conversation_view(StubAgentServer::default_response(), cx).await;
+        add_to_workspace(conversation_view.clone(), cx);
+
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+        let stub: Rc<dyn AgentConnection> = Rc::new(StubAgentConnection::new());
+        let subagent_thread = cx.update(|_window, cx| {
+            create_test_acp_thread(None, "external-subagent", stub, project, cx)
+        });
+        conversation_view.update_in(cx, |view, window, cx| {
+            view.register_subagent_thread_view(subagent_thread.clone(), window, cx);
+        });
+
+        active_thread(&conversation_view, cx).update_in(cx, |thread, window, cx| {
+            thread.add_to_queue(
+                vec![acp::ContentBlock::Text(acp::TextContent::new(
+                    "queued message".to_string(),
+                ))],
+                vec![],
+                window,
+                cx,
+            );
+        });
+        cx.run_until_parked();
+
+        subagent_thread.update(cx, |_thread, cx| {
+            cx.emit(AcpThreadEvent::Stopped(acp::StopReason::EndTurn));
+        });
+        cx.run_until_parked();
+
+        let root_thread = cx.read(|cx| conversation_view.read(cx).root_thread_view().unwrap());
+        let (queued, text) = root_thread.read_with(cx, |thread, _cx| {
+            (
+                thread.message_queue.len(),
+                thread
+                    .message_queue
+                    .first()
+                    .and_then(|entry| match entry.content.first() {
+                        Some(acp::ContentBlock::Text(text)) => Some(text.text.clone()),
+                        _ => None,
+                    }),
+            )
+        });
+        assert_eq!(
+            queued, 1,
+            "a subagent's turn ending spent the root thread's queued message"
+        );
+        assert_eq!(text.as_deref(), Some("queued message"));
     }
 
     #[gpui::test]

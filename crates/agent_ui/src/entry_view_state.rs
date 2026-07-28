@@ -1514,6 +1514,60 @@ mod tests {
         assert_eq!(reindex_after_removal(3, &(2..2)), Some(3));
     }
 
+    /// The subagent card's expansion is a door, and a door opens both ways.
+    ///
+    /// The card drew its close control only on hover and its always-visible
+    /// strip offered only "full screen", so a reader who opened a card had no
+    /// drawn way to shut it. The state underneath was always reversible; the
+    /// defect was that nothing reached this. Both controls the card now draws
+    /// land here, so the round trip is checked where it is decided.
+    #[gpui::test]
+    async fn a_subagent_card_closes_by_the_same_state_that_opened_it(cx: &mut TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+        let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
+
+        let view_state = cx.new(|_cx| {
+            EntryViewState::new(
+                workspace.downgrade(),
+                project.downgrade(),
+                None,
+                Arc::new(RwLock::new(SessionCapabilities::default())),
+                "Test Agent".into(),
+            )
+        });
+
+        let opened = acp::ToolCallId::new("subagent-card");
+        let other = acp::ToolCallId::new("another-card");
+
+        view_state.update(cx, |view_state, _cx| {
+            assert!(!view_state.is_tool_call_expanded(&opened));
+
+            // The header chevron.
+            view_state.toggle_tool_call_expansion(&opened);
+            assert!(view_state.is_tool_call_expanded(&opened));
+
+            // The strip along the bottom of the open card, which only ever
+            // closes — a second press of a toggle would have re-opened it.
+            view_state.collapse_tool_call(&opened);
+            assert!(!view_state.is_tool_call_expanded(&opened));
+            view_state.collapse_tool_call(&opened);
+            assert!(!view_state.is_tool_call_expanded(&opened));
+
+            // And the round trip returns to the same state rather than to a
+            // fresh one, for every card independently: closing one card is not
+            // an opinion about any other.
+            view_state.toggle_tool_call_expansion(&opened);
+            view_state.toggle_tool_call_expansion(&other);
+            view_state.collapse_tool_call(&other);
+            assert!(view_state.is_tool_call_expanded(&opened));
+            assert!(!view_state.is_tool_call_expanded(&other));
+        });
+    }
+
     #[gpui::test]
     async fn test_diff_sync(cx: &mut TestAppContext) {
         init_test(cx);

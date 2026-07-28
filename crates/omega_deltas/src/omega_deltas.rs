@@ -150,6 +150,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0159",
     "OMEGA-DELTA-0160",
     "OMEGA-DELTA-0161",
+    "OMEGA-DELTA-0162",
 ];
 
 pub const GOOGLE_PROVIDER_PATH: &str = "crates/language_models/src/provider/google.rs";
@@ -794,6 +795,16 @@ pub const SUBAGENT_MISSING_TRANSCRIPT_FN: &str = "pub fn no_transcript_available
 
 /// OMEGA-DELTA-0112. The function that opens an external subagent's session.
 pub const EXTERNAL_SUBAGENT_OPEN_FN: &str = "fn create_external_acp_subagent";
+
+/// OMEGA-DELTA-0162. The function that opens an Exo delegate's session.
+///
+/// The same shape as the external ACP opener and the same defect: it opens a
+/// session on somebody else's connection, so it is the only place that knows
+/// which thread asked for it.
+pub const EXO_SUBAGENT_OPEN_FN: &str = "fn create_exo_subagent";
+
+/// OMEGA-DELTA-0162. Where a subagent's thread is told which thread spawned it.
+pub const SUBAGENT_PARENT_RECORD_FN: &str = "fn record_subagent_parent";
 
 /// OMEGA-DELTA-0112. Where a session id can be turned back into the thread
 /// behind it.
@@ -20175,6 +20186,159 @@ mod tests {
             "OMEGA-DELTA-0160: opening a thread or terminal no longer leaves the \
              selected-channel shell in {}.",
             panel_path.display()
+        );
+    }
+
+    // ------ OMEGA-DELTA-0162 — A delegated subagent names its parent
+
+    /// OMEGA-DELTA-0162. The one place that knows which thread asked for a
+    /// delegation records it on the thread the delegation runs in.
+    ///
+    /// `new_session` cannot: it runs on the external agent's own connection,
+    /// which has never heard of the parent. So an external subagent used to
+    /// arrive claiming to be a root thread, and four separate surfaces
+    /// believed it — the way back out of the full-screen view, `GoBack`,
+    /// whether Escape cancels the delegation, and whether the root's message
+    /// queue may be spent when this thread stops.
+    #[test]
+    fn a_delegated_subagent_records_the_thread_that_spawned_it() {
+        let agent = without_comments(&read_repository_file(SUBAGENT_EXTERNAL_HANDLE_PATH));
+
+        for opener in [EXTERNAL_SUBAGENT_OPEN_FN, EXO_SUBAGENT_OPEN_FN] {
+            let body = body_of(&agent, opener.trim_start_matches("fn "));
+            let call = format!("{}(", SUBAGENT_PARENT_RECORD_FN.trim_start_matches("fn "));
+            assert!(
+                without_whitespace(body).contains(&without_whitespace(&call)),
+                "OMEGA-DELTA-0162: `{opener}` opens a subagent session and does \
+                 not record which thread asked for it. Every surface that \
+                 treats a thread as a subagent reads `parent_session_id`, so an \
+                 unrecorded parent is drawn as a root thread: a full-screen \
+                 delegation with no control that returns, and an Escape that \
+                 cancels it instead."
+            );
+            assert!(
+                without_whitespace(body)
+                    .contains(&without_whitespace("let parent_session_id = self")),
+                "OMEGA-DELTA-0162: `{opener}` no longer reads the spawning \
+                 thread's session id. It is the only place that has it."
+            );
+        }
+
+        let record = body_of(&agent, SUBAGENT_PARENT_RECORD_FN.trim_start_matches("fn "));
+        assert!(
+            record.contains("set_parent_session_id"),
+            "OMEGA-DELTA-0162: `{SUBAGENT_PARENT_RECORD_FN}` no longer sets the \
+             parent on the subagent's thread."
+        );
+
+        // And the queue does not depend on the thread being honest about
+        // itself. Recording the parent makes the self-report true; asking the
+        // conversation makes it not matter. The person's queued typing is not
+        // something to spend on a thread's own account of what it is.
+        let panel = without_comments(&read_repository_file(EXTERNAL_SUBAGENT_PANEL_PATH));
+        let handler = body_of(&panel, "handle_thread_event");
+        assert!(
+            without_whitespace(handler).contains(&without_whitespace(
+                "let is_subagent = self.root_session_id.as_ref() != Some(&session_id)"
+            )),
+            "OMEGA-DELTA-0162: {} decides whether the *root* thread stopped by \
+             asking the stopping thread whether it names a parent again. A \
+             delegation that records none then reads as the root finishing, and \
+             the root's message queue is dispatched mid-turn — a follow-up the \
+             person typed leaves the queue with nothing said.",
+            repository_path(EXTERNAL_SUBAGENT_PANEL_PATH).display()
+        );
+    }
+
+    /// OMEGA-DELTA-0162. An opened card can be closed, and can be read without
+    /// being opened.
+    ///
+    /// The two halves of the same complaint. The card's always-visible strip
+    /// offered only `Maximize`, and its content did not scroll — so the only
+    /// way to read a delegation's output was through a door that did not open
+    /// back.
+    #[test]
+    fn a_subagent_card_draws_a_way_back_and_a_way_to_read_it() {
+        let card = without_comments(&read_repository_file(EXTERNAL_SUBAGENT_CARD_PATH));
+
+        let body = without_whitespace(body_of(&card, "render_subagent_card"));
+        for required in [
+            "let collapse_toggle",
+            "state.collapse_tool_call(&tool_call_id)",
+            ".when(is_expanded,|this|{this.child(collapse_toggle)",
+        ] {
+            assert!(
+                body.contains(&without_whitespace(required)),
+                "OMEGA-DELTA-0162: the subagent card in {} lost `{required}`. \
+                 The strip along the bottom is the only control an open card \
+                 draws without the pointer on it, and a strip that offers only \
+                 full screen is a one-way door.",
+                repository_path(EXTERNAL_SUBAGENT_CARD_PATH).display()
+            );
+        }
+        assert!(
+            body.contains(&without_whitespace(
+                ".when(!is_expanded,|this|{this.visible_on_hover(card_header_id)"
+            )),
+            "OMEGA-DELTA-0162: the subagent card in {} hides its chevron on \
+             hover again while the card is open. A reader whose pointer is down \
+             in the content they just opened cannot find a control that is not \
+             drawn.",
+            repository_path(EXTERNAL_SUBAGENT_CARD_PATH).display()
+        );
+
+        let preview = without_whitespace(body_of(&card, "render_subagent_expanded_content"));
+        assert!(
+            preview.contains(&without_whitespace(".overflow_y_scroll()")),
+            "OMEGA-DELTA-0162: the subagent preview in {} tracks a scroll offset \
+             nothing moves again. `track_scroll` alone under an \
+             `overflow_hidden` is a fixed window onto taller content with no \
+             gesture that reaches the rest.",
+            repository_path(EXTERNAL_SUBAGENT_CARD_PATH).display()
+        );
+        assert!(
+            preview.contains(&without_whitespace(".occlude()")),
+            "OMEGA-DELTA-0162: the subagent preview in {} no longer occludes. \
+             The transcript is a `List` that registers its scroll handler after \
+             painting its items and never stops propagation, so both take the \
+             same wheel delta and the thread jumps out from under what is being \
+             read.",
+            repository_path(EXTERNAL_SUBAGENT_CARD_PATH).display()
+        );
+        assert!(
+            preview.contains(&without_whitespace("if !scrolled_up {")),
+            "OMEGA-DELTA-0162: the subagent preview in {} follows the tail \
+             unconditionally again, which pulls a live delegation's output back \
+             down under a reader who has scrolled up in it.",
+            repository_path(EXTERNAL_SUBAGENT_CARD_PATH).display()
+        );
+
+        // Escape leaves the view rather than being swallowed. The guard that
+        // keeps it from cancelling a parent's delegation stays; what changes is
+        // that the key now does something. Read from the action itself rather
+        // than from a `fn render` — `thread_view.rs` has several, and the first
+        // one is not this one.
+        // `thread_view.rs` handles `menu::Cancel` twice; the feedback editor's
+        // dismissal is not this one, and anchoring on the thread's own guard is
+        // what tells them apart.
+        let at = card
+            .find("|this, _: &menu::Cancel, window, cx| {")
+            .expect("OMEGA-DELTA-0162: the subagent view no longer handles Escape at all.");
+        let handler = without_whitespace(&card[at..card.len().min(at + 1_600)]);
+        assert!(
+            handler.contains(&without_whitespace("this.parent_session_id.is_none()"))
+                && handler.contains(&without_whitespace("this.cancel_generation(cx)")),
+            "OMEGA-DELTA-0162: Escape can now cancel from inside a subagent \
+             view. The parent's tool call is waiting on that work, and the key \
+             a person presses to leave a view must not be the key that kills it."
+        );
+        assert!(
+            handler.contains(&without_whitespace(
+                "view.navigate_to_thread(parent_session_id,"
+            )),
+            "OMEGA-DELTA-0162: Escape in a subagent view is swallowed again. It \
+             cannot cancel — see above — so a key that does nothing leaves one \
+             unlabelled button as the only way out."
         );
     }
 }

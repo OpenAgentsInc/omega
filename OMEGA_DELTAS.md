@@ -7108,3 +7108,90 @@ timeline work remains separate.
   `a_delegation_is_refused_when_the_mode_is_not_on_offer` and the live
   `a_delegated_claude_subagent_reads_outside_its_folder_without_asking` in
   `crates/agent`.
+
+### OMEGA-DELTA-0162 — A delegated subagent names the thread that spawned it, and its card opens both ways
+
+- **Upstream Zed:** a subagent is the parent's own loop, so there is no second
+  session, no second connection, and nothing that can fail to record a parent.
+  There is no upstream behaviour to revert to; the divergence is that Omega
+  delegates a turn to another agent's server at all.
+- **Omega, before this.** `OMEGA-DELTA-0112` made an external subagent
+  *findable* — the panel could resolve the session id in
+  `SubagentSpawned` and draw a card. What it could not do was say whose
+  subagent it was. `AcpConnection::new_session` builds the thread with
+  `parent_session_id: None`, because it runs on the external agent's own
+  connection, which has never heard of the thread that asked for it. So every
+  Codex, Claude and Exo delegation arrived claiming to be a root thread, and
+  the panel believed it. That one missing fact produced four separate defects,
+  and the owner hit three of them in one sitting:
+  - `render_subagent_titlebar` returns `None` for a thread with no parent, so
+    the full-screen subagent view had **no minimize control at all**. The card's
+    always-visible strip offered `Maximize` and nothing else, and the header
+    chevron that would have closed the card in place was drawn only on hover.
+    Expanding was a **one-way door**: *"if I click the button to expand it, I
+    see no way to shrink it back down."*
+  - `workspace::GoBack` reads the same field, so the keyboard way back was dead
+    for the same reason.
+  - `menu::Cancel` cancels generation only for a thread with no parent — a
+    guard written so Escape cannot kill work a parent's tool call is waiting
+    on. A delegation that claimed no parent fell on the wrong side of it, so
+    **Escape cancelled the delegation** in the one view where a person presses
+    Escape to leave.
+  - `ConversationView::handle_thread_event` decided "did the root thread stop?"
+    by asking the stopping thread whether it named a parent. A delegation
+    finishing therefore read as the root finishing, and the root's message
+    queue was spent on it: a follow-up the person had typed was dispatched
+    mid-turn and left the queue. *"I had a message queued out, but then it just
+    was gone."* Silent loss of the person's own typing, with no undo and no
+    notice.
+- **Omega now.** The one place that knows the parent records it.
+  `create_external_acp_subagent` and `create_exo_subagent` read the spawning
+  thread's session id before opening the session and set it on the returned
+  `AcpThread`, beside the `external_subagent_sessions` registration
+  `OMEGA-DELTA-0112` already puts there. A parent that is already gone leaves
+  the field alone rather than inventing one.
+- **And the queue asks the conversation, not the thread.** Recording the parent
+  fixes the queue defect, but it fixed it by making a thread's self-report
+  true, and a queue that spends the person's typing must not depend on a thread
+  being honest about itself. `handle_thread_event` now asks whether the
+  stopping session **is** this conversation's root, which the conversation
+  already knows from `root_session_id`. The failure mode inverts with it: an
+  unknown root suppresses the auto-send and leaves the message queued and
+  visible, where before an unrecorded parent dispatched it. A message that
+  stays queued is a message the person can still see and still send.
+- **The way back is drawn, not hovered.** The card's bottom strip is the only
+  control on an open card that exists without the pointer on it, and it offered
+  one direction. It now carries collapse beside full-screen, and the header
+  chevron stops hiding on hover once the card is open — a control that appears
+  only under the pointer is not a control a reader can find at the bottom of
+  content they have just opened. Escape leaves the full-screen subagent view
+  rather than being swallowed, and the titlebar's minimize reads as the inverse
+  of the card's `Maximize` and names the key.
+- **The card scrolls.** The preview was a 14rem window onto content that is
+  routinely taller, with `track_scroll` recording an offset and no
+  `overflow_y_scroll` to move it, under an `overflow_hidden` that clipped the
+  rest: *"I can't scroll inside those subagent things."* Expanding was not only
+  a one-way door, it was the only door. It scrolls now, and it **occludes**: the
+  transcript is a `List` that registers its scroll handler after painting its
+  items and never stops propagation, so without occlusion the same wheel delta
+  moves both and the thread jumps out from under what is being read. The
+  deliberate edge behaviour is that the gesture stops at the card's top and
+  bottom rather than chaining outward. Following the tail is also now
+  conditional on the reader being at the tail; it used to be unconditional on
+  every render, which pulled a live delegation's output back down under anyone
+  reading it.
+- **Enforced by:** `a_delegated_subagent_records_the_thread_that_spawned_it` and
+  `a_subagent_card_draws_a_way_back_and_a_way_to_read_it` in
+  `crates/omega_deltas`;
+  `a_subagent_turn_ending_cannot_spend_the_root_threads_queue` in
+  `crates/agent_ui/src/conversation_view.rs`; and
+  `a_subagent_card_closes_by_the_same_state_that_opened_it` in
+  `crates/agent_ui/src/entry_view_state.rs`.
+- **What this does not cover.** **Nobody has seen it move.** The controls, the
+  key, the queue and the scroll are checked headlessly and in unit tests; none
+  of it has been driven in a window. `OMEGA-DELTA-0112`'s acceptance 3 was left
+  open for the same reason and stays open. Recording the parent also makes an
+  external subagent's own view stop drawing a composer, which is what a native
+  subagent's view has always done — a person can no longer type directly into a
+  delegated thread from the panel, and that consequence has not been rendered
+  either.

@@ -3121,6 +3121,10 @@ impl NativeThreadEnvironment {
             .upgrade()
             .and_then(|acp_thread| acp_thread.read(cx).work_dirs().cloned())
             .unwrap_or_else(|| project.read(cx).default_path_list(cx));
+        let parent_session_id = self
+            .acp_thread
+            .upgrade()
+            .map(|acp_thread| acp_thread.read(cx).session_id().clone());
         let root = omega_exo_lane::ExoRoot::at(lane.root.to_string_lossy().into_owned());
         let mut child_env: HashMap<String, String> = lane
             .secret_store
@@ -3205,6 +3209,7 @@ impl NativeThreadEnvironment {
                 .context("Could not open an Exo ACP session for this delegate")?;
             let session_id = cx.update(|cx| {
                 let session_id = acp_thread.read(cx).session_id().clone();
+                record_subagent_parent(&acp_thread, parent_session_id, cx);
                 crate::register_external_subagent_session(session_id.clone(), &acp_thread, cx);
                 session_id
             });
@@ -3271,6 +3276,14 @@ impl NativeThreadEnvironment {
             .and_then(|acp_thread| acp_thread.read(cx).work_dirs().cloned())
             .unwrap_or_else(|| project.read(cx).default_path_list(cx));
 
+        // The thread that asked for this subagent. Only this call site knows
+        // it: `new_session` below opens the session on the external agent's
+        // own connection, which has never heard of the parent.
+        let parent_session_id = self
+            .acp_thread
+            .upgrade()
+            .map(|acp_thread| acp_thread.read(cx).session_id().clone());
+
         let server: Rc<dyn agent_servers::AgentServer> =
             Rc::new(agent_servers::CustomAgentServer::new(
                 project::agent_server_store::AgentId::new(agent_id.clone()),
@@ -3312,6 +3325,7 @@ impl NativeThreadEnvironment {
             // will be. See `external_subagent_sessions`.
             let session_id = cx.update(|cx| {
                 let session_id = acp_thread.read(cx).session_id().clone();
+                record_subagent_parent(&acp_thread, parent_session_id, cx);
                 crate::register_external_subagent_session(session_id.clone(), &acp_thread, cx);
                 session_id
             });
@@ -3784,6 +3798,31 @@ impl NativeSubagentHandle {
             acp_thread,
         }
     }
+}
+
+/// Tell a freshly opened external subagent's thread which thread spawned it.
+///
+/// Every panel surface that treats a thread as a subagent asks the thread for
+/// its parent: the titlebar that draws the way back out of the full-screen
+/// view, the `GoBack` and Escape handlers that use it, and the decision not to
+/// draw a composer for a thread a tool call is driving. `new_session` cannot
+/// supply it — it runs on the external agent's connection, which knows nothing
+/// about this conversation — so an external subagent arrived claiming to be a
+/// root thread, and the panel drew it as one: a person who opened a delegation
+/// full screen had no control that returned them to the thread they came from.
+///
+/// A parent that is already gone leaves this alone rather than inventing one.
+fn record_subagent_parent(
+    subagent_thread: &Entity<AcpThread>,
+    parent_session_id: Option<acp::SessionId>,
+    cx: &mut App,
+) {
+    let Some(parent_session_id) = parent_session_id else {
+        return;
+    };
+    subagent_thread.update(cx, |subagent_thread, _cx| {
+        subagent_thread.set_parent_session_id(parent_session_id);
+    });
 }
 
 /// A subagent that *is* an external ACP agent — Codex, Claude Code — rather
