@@ -146,12 +146,14 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0155",
     "OMEGA-DELTA-0156",
     "OMEGA-DELTA-0157",
+    "OMEGA-DELTA-0158",
 ];
 
 pub const GOOGLE_PROVIDER_PATH: &str = "crates/language_models/src/provider/google.rs";
 pub const GOOGLE_CLIENT_PATH: &str = "crates/google_ai/src/google_ai.rs";
 pub const BASIC_SYSTEM_PROMPT_PATH: &str = "crates/agent/src/templates/basic_system_prompt.hbs";
 pub const AGENT_THREAD_PATH: &str = "crates/agent/src/thread.rs";
+pub const SESSION_DIRECTORIES_PATH: &str = "crates/agent_servers/src/acp.rs";
 
 /// OMEGA-DELTA-0125. Every entry the thread header's `…` menu offers, the
 /// action a click on it finally reaches, and whether zero base offers it.
@@ -18932,6 +18934,104 @@ mod tests {
             notice.contains("\"Open Folder\"") && notice.contains("create_new_window: Some(false)"),
             "OMEGA-DELTA-0140: the initial no-folder warning no longer offers \
              the same in-window folder picker as the persistent header."
+        );
+    }
+
+    /// OMEGA-DELTA-0158. A recorded working directory that is no longer there
+    /// is never sent as an agent session's `cwd`.
+    ///
+    /// The owner met this on a fresh `0.2.0-rc21`: the header said
+    /// `~/work/openagents`, the agent was started in a temporary directory left
+    /// over from an earlier smoke run, and the whole thread became unusable
+    /// behind `Failed to Launch — Invalid params: cwd does not exist`.
+    ///
+    /// Four things have to hold, and each fails silently on its own. The
+    /// decision has to be able to reject a directory at all; the substitute has
+    /// to be the value the header renders rather than the home directory
+    /// `default_path_list` stands in; a remote project, whose directories are
+    /// on another machine, must not be probed from here; and the refusal, when
+    /// there is nothing left, has to name the control that fixes it.
+    #[test]
+    fn a_session_never_opens_in_a_directory_that_is_gone() {
+        let path = repository_path(SESSION_DIRECTORIES_PATH);
+        let file = read_repository_file(SESSION_DIRECTORIES_PATH);
+        let source = production_source(&file);
+        // `method_body` ends a body at an `impl` member's indent. These two are
+        // free functions, so they end at the left margin instead.
+        let free_function_body = |signature: &str| -> &str {
+            let after = source
+                .split_once(signature)
+                .map(|(_, rest)| rest)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "OMEGA-DELTA-0158: {} no longer has `{signature}`.",
+                        path.display()
+                    )
+                });
+            after.split_once("\n}\n").map_or(after, |(body, _)| body)
+        };
+
+        let decision =
+            free_function_body("fn session_directories_from_work_dirs(\n    work_dirs: &PathList,");
+        assert!(
+            decision.contains("directory_exists"),
+            "OMEGA-DELTA-0158: the session-directory decision in {} no longer \
+             consults whether a directory exists, so a thread whose folder was \
+             deleted sends it as `cwd` again and the agent refuses the whole \
+             request.",
+            path.display()
+        );
+        assert!(
+            !without_whitespace(decision).contains(&without_whitespace(
+                "let mut ordered_paths = work_dirs.ordered_paths();\n    let cwd = ordered_paths\n        .next()"
+            )),
+            "OMEGA-DELTA-0158: {} takes the first recorded working directory as \
+             `cwd` unconditionally again. That is the zero-base behaviour this \
+             delta replaced.",
+            path.display()
+        );
+
+        let resolution = method_body(
+            source,
+            "fn session_directories(\n        &self,",
+            &path,
+            "The fallback directory and the decision about whose filesystem can \
+             answer belong together at the connection.",
+        );
+        assert!(
+            resolution.contains("project.visible_worktrees(cx).next().is_some()")
+                && resolution.contains("PathList::default()"),
+            "OMEGA-DELTA-0158: the fallback in {} is no longer the project's \
+             visible worktree roots. `default_path_list` stands the home \
+             directory in when there are none, while the header says `Choose a \
+             folder` — substituting it starts an agent in a directory nothing \
+             on screen ever named.",
+            path.display()
+        );
+        assert!(
+            resolution.contains("project.is_local().then("),
+            "OMEGA-DELTA-0158: {} probes directories without first establishing \
+             that the agent runs on this machine. A remote project's `cwd` \
+             names a directory on the other host, and a local answer would drop \
+             directories that are really there.",
+            path.display()
+        );
+
+        // The sentences wrap, so a phrase can straddle a string continuation.
+        let refusal = free_function_body("fn no_usable_work_dir_error(").replace("\\\n", "");
+        let refusal = without_whitespace(&refusal);
+        assert!(
+            refusal.contains(&without_whitespace("folder button in the thread header")),
+            "OMEGA-DELTA-0158: the refusal in {} no longer names the control \
+             that fixes it. The sentence it replaced was a JSON dump of a \
+             directory the reader did not choose.",
+            path.display()
+        );
+        assert!(
+            refusal.contains(&without_whitespace("display_paths(work_dirs)")),
+            "OMEGA-DELTA-0158: the refusal in {} no longer names the directory \
+             that went missing.",
+            path.display()
         );
     }
 

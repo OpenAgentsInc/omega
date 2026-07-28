@@ -6864,3 +6864,46 @@ shown action type before it reads the admitted set, so the ordinary
 - **Enforced by:** `omega_installs_the_titlebar_view_it_renders` in
   `crates/omega_deltas`, plus
   `sealed_zero_base_keeps_a_full_width_platform_drag_strip`.
+
+### OMEGA-DELTA-0158 — A session never opens in a directory that is gone
+
+- **Upstream Zed:** `session_directories_from_work_dirs` takes the first of a
+  thread's recorded working directories and sends it as the session's `cwd`,
+  whatever it names.
+- **Omega:** a recorded directory that is no longer there is dropped instead of
+  sent. If that leaves nothing, the session opens in the project's visible
+  worktree roots — the value the thread header is already showing
+  (`OMEGA-DELTA-0140`). If there are none of those either, it refuses in a
+  sentence naming the directory that went and the control that fixes it.
+- **Why:** owner report against `0.2.0-rc21`, on a fresh install. He set the
+  thread's folder to `~/work/openagents`, watched the header say so, sent a
+  message, and got `Failed to Launch — Invalid params: cwd does not exist on
+  the machine running the agent: /private/tmp/omega-rc-final-project.JpARAa`
+  with the path repeated as a JSON blob. The temporary directory was left over
+  from an earlier release-candidate smoke run.
+- **The two values had drifted apart.** The header renders
+  `project.visible_worktrees(cx).next()`, live. The agent's `cwd` comes from
+  `AcpThread::work_dirs`, restored from `ThreadMetadataStore::folder_paths` or
+  the serialized panel state and preferred over the project's own list at
+  `conversation_view.rs`'s `work_dirs.unwrap_or_else(..)`. Choosing a folder
+  from the header calls `MultiWorkspace::open_project`, which does not write the
+  thread's record, so the window could show one folder while the agent was
+  started in another that no longer existed.
+- **Why the fallback is the worktree roots and not `default_path_list`.** That
+  helper stands the home directory in when a project has no folder open, while
+  the header says `Choose a folder`. Substituting `$HOME` would start an agent
+  in a directory nothing on screen ever named — the failure this delta is
+  about, with the error removed rather than the cause.
+- **A remote project is not probed.** It starts its agent through its remote
+  client, where `cwd` names a directory on the other host, so nothing here can
+  answer for it and every directory is taken on trust. The guarantee is
+  therefore local-project-only, and says so in the code.
+- **An empty recorded list still refuses.** That is a caller that never chose a
+  directory, which `OMEGA-DELTA-0112` found and fixed at the caller.
+  Substituting for it here would hide the next one.
+- **What this does not do.** The thread's recorded working directories are left
+  as they are, so a substituted session re-substitutes on the next send rather
+  than repairing the record. Reconciling the record with the header is a
+  separate change to who owns that value.
+- **Enforced by:** `a_session_never_opens_in_a_directory_that_is_gone` in
+  `crates/omega_deltas`.

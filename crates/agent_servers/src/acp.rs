@@ -23,7 +23,7 @@ use project::{AgentId, Project};
 use remote::remote_client::Interactive;
 use serde::Deserialize;
 use settings::{AgentConfigOptionValue, SettingsStore};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{ExitStatus, Stdio};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
@@ -1195,12 +1195,54 @@ impl AcpConnection {
         }
     }
 
-    fn session_directories_from_work_dirs(
+    /// The directories this session opens in, resolved against the filesystem
+    /// the agent will run on.
+    ///
+    /// OMEGA-DELTA-0158. A thread's recorded working directories outlive the
+    /// directories themselves, so this asks before sending rather than letting
+    /// the agent refuse the whole request.
+    fn session_directories(
         &self,
-        work_dirs: &PathList,
-    ) -> Result<SessionDirectories> {
+        work_dirs: PathList,
+        project: &Entity<Project>,
+        cx: &App,
+    ) -> Task<Result<SessionDirectories>> {
         let supports_additional_directories = self.supports_session_additional_directories();
-        session_directories_from_work_dirs(work_dirs, supports_additional_directories)
+        let project = project.read(cx);
+        // The fallback is the project's visible worktree roots rather than
+        // `default_path_list`, which stands the home directory in when there
+        // are none. The thread header renders exactly these roots
+        // (`render_zero_base_working_directory`, OMEGA-DELTA-0140) and says
+        // "Choose a folder" when there are none, so an empty list here is the
+        // header's own empty state. Substituting the home directory would put
+        // the agent in a folder nothing on screen ever named.
+        let project_roots = if project.visible_worktrees(cx).next().is_some() {
+            project.default_path_list(cx)
+        } else {
+            PathList::default()
+        };
+        // Only a local project runs its agent server on this machine. A remote
+        // one starts the agent through its remote client, where `cwd` names a
+        // directory on the other host, so there is nothing here that can
+        // answer for it and every directory has to be taken on trust.
+        let fs = project.is_local().then(|| project.fs().clone());
+
+        cx.background_spawn(async move {
+            let existing = match fs {
+                Some(fs) => Some(existing_directories(&fs, &work_dirs, &project_roots).await),
+                None => None,
+            };
+            session_directories_from_work_dirs(
+                &work_dirs,
+                &project_roots,
+                supports_additional_directories,
+                |path| {
+                    existing
+                        .as_ref()
+                        .is_none_or(|existing| existing.contains(path))
+                },
+            )
+        })
     }
 
     fn open_or_create_session(
@@ -1239,16 +1281,26 @@ impl AcpConnection {
             }
         }
 
-        let directories = match self.session_directories_from_work_dirs(&work_dirs) {
-            Ok(directories) => directories,
-            Err(error) => return Task::ready(Err(error)),
-        };
+        let directories = self.session_directories(work_dirs.clone(), &project, cx);
 
         let shared_task = cx
             .spawn({
                 let session_id = session_id.clone();
                 let this = self.clone();
                 async move |cx| {
+                    // Before the thread exists, so a thread is never created
+                    // for a session that has nowhere to run. The pending entry
+                    // is inserted below by the caller of this task, and is
+                    // removed here for the same reason the RPC failure removes
+                    // it: a failed open must not leave the id looking busy.
+                    let directories = match directories.await {
+                        Ok(directories) => directories,
+                        Err(error) => {
+                            this.pending_sessions.borrow_mut().remove(&session_id);
+                            return Err(Arc::new(error));
+                        }
+                    };
+
                     let action_log = cx.new(|_| ActionLog::new(project.clone()));
                     let thread: Entity<AcpThread> = cx.new(|cx| {
                         AcpThread::new(
@@ -1510,17 +1562,81 @@ impl SessionDirectories {
     }
 }
 
+/// Which of the directories this session might open in are really there.
+///
+/// Asked through the project's own `Fs` rather than `Path::is_dir` so the
+/// answer comes from the filesystem the project is on, which is also the one a
+/// test substitutes.
+async fn existing_directories(
+    fs: &Arc<dyn fs::Fs>,
+    work_dirs: &PathList,
+    project_roots: &PathList,
+) -> HashSet<PathBuf> {
+    let mut existing = HashSet::default();
+    for path in work_dirs
+        .ordered_paths()
+        .chain(project_roots.ordered_paths())
+    {
+        if !existing.contains(path) && fs.is_dir(path).await {
+            existing.insert(path.clone());
+        }
+    }
+    existing
+}
+
+/// OMEGA-DELTA-0158. Choose the directories to open an agent session in,
+/// discarding any that are no longer there.
+///
+/// Zero base sends the first recorded working directory as `cwd` whatever it
+/// names. A thread keeps the folders it was last opened with, and a folder can
+/// be deleted between one session and the next — a temporary checkout, a
+/// removed clone, an unmounted volume. The agent then refuses the entire
+/// request, so the thread cannot be used at all, in a window whose header is
+/// showing the folder the person actually chose.
+///
+/// `project_roots` is that header's own value, which is why it is the
+/// substitute: it is the one directory the reader has already been told this
+/// thread works in. It is empty when the project has no folder open, and that
+/// case fails rather than inventing one.
+///
+/// `directory_exists` comes from the caller because only the caller knows
+/// whose filesystem the agent will run on.
 fn session_directories_from_work_dirs(
     work_dirs: &PathList,
+    project_roots: &PathList,
     supports_additional_directories: bool,
+    directory_exists: impl Fn(&Path) -> bool,
 ) -> Result<SessionDirectories> {
-    let mut ordered_paths = work_dirs.ordered_paths();
-    let cwd = ordered_paths
+    let reachable = |paths: &PathList| -> Vec<PathBuf> {
+        paths
+            .ordered_paths()
+            .filter(|path| directory_exists(path.as_path()))
+            .cloned()
+            .collect()
+    };
+
+    let mut usable = reachable(work_dirs);
+    // An empty recorded list is a caller that never chose a directory, which
+    // `OMEGA-DELTA-0112` found and fixed at the caller. Substituting for it
+    // here would hide the next one, so only a list that named directories and
+    // outlived them gets the project's folder.
+    if usable.is_empty() && !work_dirs.is_empty() {
+        usable = reachable(project_roots);
+        if !usable.is_empty() {
+            log::warn!(
+                "none of this thread's working directories exist any more ({}); \
+                 opening the session in the project's folder instead",
+                display_paths(work_dirs)
+            );
+        }
+    }
+
+    let mut usable = usable.into_iter();
+    let cwd = usable
         .next()
-        .cloned()
-        .ok_or_else(|| anyhow!("Working directory cannot be empty"))?;
+        .ok_or_else(|| no_usable_work_dir_error(work_dirs))?;
     let additional_directories = if supports_additional_directories {
-        ordered_paths.cloned().collect()
+        usable.collect()
     } else {
         Vec::new()
     };
@@ -1529,6 +1645,37 @@ fn session_directories_from_work_dirs(
         cwd,
         additional_directories,
     })
+}
+
+fn display_paths(paths: &PathList) -> String {
+    paths
+        .ordered_paths()
+        .map(|path| path.display().to_string())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// The refusal when there is nowhere left to run.
+///
+/// Left to the agent this arrived as `Failed to Launch — Invalid params: cwd
+/// does not exist on the machine running the agent: /private/tmp/… { "cwd":
+/// "/private/tmp/…" }`: a heading blaming startup, a JSON dump of a directory
+/// the reader did not choose and had no reason to recognise, and no statement
+/// of the one thing that fixes it.
+fn no_usable_work_dir_error(work_dirs: &PathList) -> anyhow::Error {
+    if work_dirs.is_empty() {
+        anyhow!(
+            "This thread has no folder to work in. Choose one with the folder \
+             button in the thread header, then send the message again."
+        )
+    } else {
+        anyhow!(
+            "This thread's folder no longer exists: {}. This project has no \
+             folder open to use instead. Choose one with the folder button in \
+             the thread header, then send the message again.",
+            display_paths(work_dirs)
+        )
+    }
 }
 
 fn work_dirs_from_session_info(cwd: PathBuf, additional_directories: Vec<PathBuf>) -> PathList {
@@ -1642,14 +1789,12 @@ impl AgentConnection for AcpConnection {
         work_dirs: PathList,
         cx: &mut App,
     ) -> Task<Result<Entity<AcpThread>>> {
-        let directories = match self.session_directories_from_work_dirs(&work_dirs) {
-            Ok(directories) => directories,
-            Err(error) => return Task::ready(Err(error)),
-        };
+        let directories = self.session_directories(work_dirs.clone(), &project, cx);
         let name = self.id.0.clone();
         let mcp_servers = mcp_servers_for_project(&project, cx);
 
         cx.spawn(async move |cx| {
+            let directories = directories.await?;
             let response = self
                 .connection
                 .send_request(directories.into_new_session_request(mcp_servers))
@@ -3333,7 +3478,8 @@ mod tests {
         ]);
 
         let directories =
-            session_directories_from_work_dirs(&work_dirs, true).expect("work dirs should convert");
+            session_directories_from_work_dirs(&work_dirs, &PathList::default(), true, |_| true)
+                .expect("work dirs should convert");
 
         assert_eq!(
             directories,
@@ -3382,8 +3528,9 @@ mod tests {
             std::path::PathBuf::from("/workspace-a"),
         ]);
 
-        let directories = session_directories_from_work_dirs(&work_dirs, false)
-            .expect("work dirs should convert");
+        let directories =
+            session_directories_from_work_dirs(&work_dirs, &PathList::default(), false, |_| true)
+                .expect("work dirs should convert");
 
         assert_eq!(
             directories,
@@ -3391,6 +3538,86 @@ mod tests {
                 cwd: std::path::PathBuf::from("/workspace-b"),
                 additional_directories: Vec::new(),
             }
+        );
+    }
+
+    /// OMEGA-DELTA-0158. The owner's report against `0.2.0-rc21`: a thread
+    /// whose recorded folder was a temporary directory from an earlier smoke
+    /// run, reopened after that directory was gone, with the header showing
+    /// `~/work/openagents`. Sending a message answered `Failed to Launch —
+    /// Invalid params: cwd does not exist on the machine running the agent`.
+    #[test]
+    fn a_working_directory_that_is_gone_is_replaced_by_the_project_folder() {
+        let deleted = std::path::PathBuf::from("/private/tmp/omega-rc-final-project.JpARAa");
+        let project_folder = std::path::PathBuf::from("/Users/owner/work/openagents");
+
+        let directories = session_directories_from_work_dirs(
+            &PathList::new(std::slice::from_ref(&deleted)),
+            &PathList::new(std::slice::from_ref(&project_folder)),
+            true,
+            |path| path != deleted,
+        )
+        .expect("a project folder that exists should be usable");
+
+        assert_eq!(
+            directories,
+            SessionDirectories {
+                cwd: project_folder,
+                additional_directories: Vec::new(),
+            },
+            "the session must open in the folder the header is showing, not in \
+             a directory that is no longer there"
+        );
+    }
+
+    /// The substitution is only for the directories that are gone. One that is
+    /// still there is still where the person put it.
+    #[test]
+    fn a_working_directory_that_exists_is_never_substituted() {
+        let kept = std::path::PathBuf::from("/Users/owner/work/kept");
+        let gone = std::path::PathBuf::from("/private/tmp/gone");
+
+        let directories = session_directories_from_work_dirs(
+            &PathList::new(&[kept.clone(), gone.clone()]),
+            &PathList::new(&[std::path::PathBuf::from("/Users/owner/work/other")]),
+            true,
+            |path| path != gone,
+        )
+        .expect("a recorded directory that exists should be usable");
+
+        assert_eq!(
+            directories,
+            SessionDirectories {
+                cwd: kept,
+                additional_directories: Vec::new(),
+            },
+            "a directory that is gone must not be sent as an additional one \
+             either"
+        );
+    }
+
+    /// With nowhere left to run, the refusal names the directory that went and
+    /// the control that fixes it.
+    #[test]
+    fn a_thread_with_nowhere_to_run_says_what_went_and_what_to_do() {
+        let deleted = std::path::PathBuf::from("/private/tmp/omega-rc-final-project.JpARAa");
+
+        let error = session_directories_from_work_dirs(
+            &PathList::new(std::slice::from_ref(&deleted)),
+            &PathList::default(),
+            true,
+            |_| false,
+        )
+        .expect_err("a thread with no reachable directory cannot open a session");
+
+        let message = error.to_string();
+        assert!(
+            message.contains(&deleted.display().to_string()),
+            "the refusal does not name the directory that is gone: {message}"
+        );
+        assert!(
+            message.contains("folder button in the thread header"),
+            "the refusal does not name the control that fixes it: {message}"
         );
     }
 
@@ -3526,19 +3753,26 @@ mod tests {
         });
 
         let fs = fs::FakeFs::new(cx.executor());
-        fs.insert_tree("/", serde_json::json!({ "a": {}, "b": {} }))
-            .await;
+        fs.insert_tree(
+            "/",
+            serde_json::json!({ "a": {}, "b": {}, "workspace-a": {}, "workspace-b": {} }),
+        )
+        .await;
         let project = project::Project::test(fs, [std::path::Path::new("/a")], cx).await;
-        let mut harness = test_support::connect_fake_acp_connection(project, cx).await;
+        let mut harness = test_support::connect_fake_acp_connection(project.clone(), cx).await;
 
         let work_dirs = PathList::new(&[
             std::path::PathBuf::from("/workspace-b"),
             std::path::PathBuf::from("/workspace-a"),
         ]);
 
-        let missing_capability = harness
-            .connection
-            .session_directories_from_work_dirs(&work_dirs)
+        let missing_capability = cx
+            .update(|cx| {
+                harness
+                    .connection
+                    .session_directories(work_dirs.clone(), &project, cx)
+            })
+            .await
             .expect("work dirs should convert");
         assert!(missing_capability.additional_directories.is_empty());
 
@@ -3548,9 +3782,13 @@ mod tests {
             .session_capabilities
             .additional_directories = Some(acp::SessionAdditionalDirectoriesCapabilities::new());
 
-        let supported = harness
-            .connection
-            .session_directories_from_work_dirs(&work_dirs)
+        let supported = cx
+            .update(|cx| {
+                harness
+                    .connection
+                    .session_directories(work_dirs.clone(), &project, cx)
+            })
+            .await
             .expect("work dirs should convert");
         assert_eq!(
             supported,

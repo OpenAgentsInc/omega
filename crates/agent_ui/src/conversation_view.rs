@@ -6485,6 +6485,12 @@ pub(crate) mod tests {
         cx: &mut TestAppContext,
     ) -> (Entity<ConversationView>, &mut VisualTestContext) {
         let fs = FakeFs::new(cx.executor());
+        // A project with no worktrees names the home directory as its working
+        // directory (`Project::default_path_list`), and a session now opens
+        // only where the agent will really find one (OMEGA-DELTA-0158). Without
+        // this the fake filesystem contradicts the project standing on it.
+        fs.insert_tree(util::paths::home_dir().as_path(), serde_json::json!({}))
+            .await;
         let project = Project::test(fs, [], cx).await;
         let (multi_workspace, cx) =
             cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
