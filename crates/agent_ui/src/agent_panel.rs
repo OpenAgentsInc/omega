@@ -3648,6 +3648,7 @@ impl AgentPanel {
                                 })),
                         ),
                 )
+                .child(self.render_sidebar_controls(cx))
                 .child(sections)
                 .children(pairing_surface)
                 .child(
@@ -3694,6 +3695,50 @@ impl AgentPanel {
                 )
                 .into_any_element(),
         )
+    }
+
+    fn render_sidebar_controls(&self, cx: &mut Context<Self>) -> AnyElement {
+        h_flex()
+            .w_full()
+            .flex_shrink_0()
+            .gap_1()
+            .px_2()
+            .pt_2()
+            .pb_1()
+            .child(
+                div().flex_1().child(
+                    Button::new("search-omega-sidebar", "Search")
+                        .full_width()
+                        .style(ButtonStyle::Subtle)
+                        .size(ButtonSize::Default)
+                        .label_size(LabelSize::Small)
+                        .start_icon(
+                            Icon::new(IconName::MagnifyingGlass)
+                                .size(IconSize::Small)
+                                .color(Color::Muted),
+                        )
+                        .key_binding(KeyBinding::for_action(
+                            &zed_actions::command_palette::Toggle,
+                            cx,
+                        ))
+                        .on_click(|_, window, cx| {
+                            window.dispatch_action(
+                                zed_actions::command_palette::Toggle.boxed_clone(),
+                                cx,
+                            );
+                        }),
+                ),
+            )
+            .child(
+                IconButton::new("new-omega-sidebar-thread", IconName::Plus)
+                    .style(ButtonStyle::Subtle)
+                    .icon_size(IconSize::Small)
+                    .tooltip(|_, cx| Tooltip::for_action("New Thread", &NewThread, cx))
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.new_thread(&NewThread, window, cx);
+                    })),
+            )
+            .into_any_element()
     }
 
     /// One vertically collapsible section: a header that toggles, and a body.
@@ -3975,9 +4020,12 @@ impl AgentPanel {
                 .into_any_element();
         }
 
+        let active_thread_id = self.active_thread_id(cx);
+
         rows.into_iter()
             .enumerate()
             .fold(v_flex().w_full().pb_1(), |list, (index, row)| {
+                let is_active = active_thread_id.as_ref() == Some(&row.thread_id);
                 let reopenable = row.is_reopenable();
                 // A row that will refuse says so unclicked. It already knew, and
                 // a list whose dead rows look exactly like its live ones asks a
@@ -3990,7 +4038,7 @@ impl AgentPanel {
                 let title = row.title.clone();
                 list.child(
                     ListItem::new(("threads-sidebar-row", index))
-                        .toggle_state(false)
+                        .toggle_state(is_active)
                         .inset(true)
                         .spacing(ListItemSpacing::Sparse)
                         .on_click(cx.listener(move |this, _, window, cx| {
@@ -4003,7 +4051,9 @@ impl AgentPanel {
                                 .child(
                                     Label::new(title)
                                         .size(LabelSize::Small)
-                                        .color(if reopenable {
+                                        .color(if is_active {
+                                            Color::Accent
+                                        } else if reopenable {
                                             Color::Default
                                         } else {
                                             Color::Muted
