@@ -46,6 +46,7 @@ pub use omega_device_bridge::{
     ServerConfig as DeviceBridgeServerConfig, ServerFrame as DeviceBridgeServerFrame,
     ServerHandle as DeviceBridgeServerHandle, ThreadState,
 };
+pub use openagents_nostr_auth::HostedSessionBlocker;
 pub use openagents_session::{
     OpenAgentsSession, OpenAgentsSessionPhase, VerifiedOpenAgentsSession, init_openagents_session,
     openagents_session,

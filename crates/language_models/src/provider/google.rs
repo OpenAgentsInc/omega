@@ -31,6 +31,7 @@ use strum::IntoEnumIterator;
 use ui::IconName;
 
 use language_model::ApiKeyState;
+use omega_effectd::HostedSessionBlocker;
 
 const PROVIDER_ID: LanguageModelProviderId = GOOGLE_PROVIDER_ID;
 const PROVIDER_NAME: LanguageModelProviderName = GOOGLE_PROVIDER_NAME;
@@ -281,12 +282,14 @@ impl GoogleLanguageModel {
             let session = cx.update(|cx| omega_effectd::openagents_session(cx));
             Some(cx.spawn(async move |cx| {
                 if let Some(verified) = session.resolve_verified(cx).await {
-                    return Some(verified);
+                    return (Some(verified), None);
                 }
                 if session.connect(cx).await == omega_effectd::OpenAgentsSessionPhase::Ready {
-                    session.resolve_verified(cx).await
+                    let verified = session.resolve_verified(cx).await;
+                    let blocker = verified.is_none().then(|| session.blocker()).flatten();
+                    (verified, blocker)
                 } else {
-                    None
+                    (None, session.blocker())
                 }
             }))
         } else {
@@ -314,8 +317,11 @@ impl GoogleLanguageModel {
         });
 
         async move {
+            let mut hosted_blocker = None;
             if let Some(hosted_session_task) = hosted_session_task {
-                if let Some(session) = hosted_session_task.await {
+                let (session, blocker) = hosted_session_task.await;
+                hosted_blocker = blocker;
+                if let Some(session) = session {
                     let grant_ref = request_hosted_grant(
                         http_client.as_ref(),
                         &session.base_url,
@@ -357,11 +363,39 @@ impl GoogleLanguageModel {
             }
 
             Err(LanguageModelCompletionError::Other(anyhow::anyhow!(
-                "OpenAgents sign-in was not completed. Send the message again to connect hosted Omega, \
-                 or set {GEMINI_API_KEY_VAR_NAME} to send through a direct key."
+                "{}",
+                hosted_sign_in_failure_message(hosted_blocker.as_ref())
             )))
         }
         .boxed()
+    }
+}
+
+/// Say what actually stopped the hosted lane, and offer only advice that can
+/// work.
+///
+/// The message this replaces claimed sign-in "was not completed" and told the
+/// person to send the message again. For the failure the owner actually hit —
+/// a signing identity the hosted service refuses, and before that an install
+/// with no identity at all — both halves were false, and the log said nothing,
+/// so the only diagnosis available was guesswork.
+fn hosted_sign_in_failure_message(blocker: Option<&HostedSessionBlocker>) -> String {
+    let Some(blocker) = blocker else {
+        return format!(
+            "Hosted Omega did not sign in, and reported no reason. \
+             Check the Omega log, or set {GEMINI_API_KEY_VAR_NAME} to send through a direct key."
+        );
+    };
+    if blocker.is_retryable() {
+        format!(
+            "{} Send the message again, or set {GEMINI_API_KEY_VAR_NAME} to send through a direct key.",
+            blocker.summary()
+        )
+    } else {
+        format!(
+            "{} Set {GEMINI_API_KEY_VAR_NAME} to send through a direct key instead.",
+            blocker.summary()
+        )
     }
 }
 
@@ -479,6 +513,42 @@ mod tests {
             error.to_string(),
             "Hosted Omega's daily usage limit was reached. It resets at 2026-07-28T00:00:00.000Z."
         );
+    }
+
+    /// A refused proof is terminal. Telling the owner to send the message
+    /// again is advice that can never work, and is what made this defect look
+    /// like a transient network problem for days.
+    #[test]
+    fn a_refused_hosted_proof_is_not_reported_as_an_incomplete_sign_in() {
+        let message = hosted_sign_in_failure_message(Some(&HostedSessionBlocker::ProofRejected {
+            status: 401,
+        }));
+
+        assert!(message.contains("401"));
+        assert!(message.contains("not admitted"));
+        assert!(!message.contains("Send the message again"));
+        assert!(!message.contains("sign-in was not completed"));
+        assert!(message.contains(GEMINI_API_KEY_VAR_NAME));
+    }
+
+    #[test]
+    fn an_unprovisioned_install_is_told_which_custody_state_blocked_it() {
+        let message =
+            hosted_sign_in_failure_message(Some(&HostedSessionBlocker::IdentityUnavailable {
+                custody_state: "identity custody is unavailable in state Lost".to_string(),
+            }));
+
+        assert!(message.contains("Lost"));
+        assert!(message.contains("onboarding"));
+        assert!(!message.contains("Send the message again"));
+    }
+
+    #[test]
+    fn a_transient_failure_keeps_the_retry_advice() {
+        let message =
+            hosted_sign_in_failure_message(Some(&HostedSessionBlocker::ServiceUnreachable));
+
+        assert!(message.contains("Send the message again"));
     }
 }
 

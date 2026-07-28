@@ -7,6 +7,8 @@ use http_client::{AsyncBody, HttpClient, Method, Request, StatusCode};
 use serde::{Deserialize, Serialize};
 use smol::io::AsyncReadExt as _;
 
+use super::openagents_nostr_auth::HostedSessionBlocker;
+
 pub const OPENAGENTS_BASE_URL: &str = "https://openagents.com";
 pub const OPENAGENTS_AUTH_SESSION_URL: &str = "https://openagents.com/api/mobile/auth/session";
 pub const OPENAGENTS_SESSION_KEY: &str = "omega://openagents/native-session/v1";
@@ -51,6 +53,12 @@ pub struct OpenAgentsSession {
     credentials: Arc<dyn CredentialsProvider>,
     http_client: Arc<dyn HttpClient>,
     phase: Arc<Mutex<OpenAgentsSessionPhase>>,
+    /// The last reason a connection attempt did not produce a session.
+    ///
+    /// `OpenAgentsSessionPhase` is deliberately coarse — it drives a status
+    /// label. Callers that have to tell a person what to do next need the
+    /// specific reason, and reconstructing it from `Unavailable` is impossible.
+    blocker: Arc<Mutex<Option<HostedSessionBlocker>>>,
 }
 
 struct OpenAgentsSessionGlobal(OpenAgentsSession);
@@ -109,6 +117,7 @@ pub fn init_openagents_session(cx: &mut App) {
         credentials: zed_credentials_provider::local_credentials(cx),
         http_client: cx.http_client(),
         phase: Arc::new(Mutex::new(OpenAgentsSessionPhase::SignedOut)),
+        blocker: Arc::default(),
     }));
 }
 
@@ -121,21 +130,46 @@ impl OpenAgentsSession {
         self.phase.lock().map(|phase| *phase).unwrap_or_default()
     }
 
+    /// The reason the most recent connection attempt did not produce a session.
+    pub fn blocker(&self) -> Option<HostedSessionBlocker> {
+        self.blocker.lock().ok().and_then(|blocker| blocker.clone())
+    }
+
     fn set_phase(&self, phase: OpenAgentsSessionPhase) {
         if let Ok(mut current) = self.phase.lock() {
             *current = phase;
         }
     }
 
+    fn record_blocker(&self, blocker: Option<HostedSessionBlocker>) {
+        if let Some(blocker) = &blocker {
+            log::error!(
+                "hosted OpenAgents session unavailable: {}",
+                blocker.summary()
+            );
+        }
+        if let Ok(mut current) = self.blocker.lock() {
+            *current = blocker;
+        }
+    }
+
     pub async fn connect(&self, cx: &mut AsyncApp) -> OpenAgentsSessionPhase {
         self.set_phase(OpenAgentsSessionPhase::Connecting);
-        let phase = match self.connect_inner().await {
-            Ok(Some(credential)) if self.save_credential(&credential, cx).await.is_ok() => {
-                OpenAgentsSessionPhase::Ready
+        let (phase, blocker) = match self.connect_inner().await {
+            Ok(credential) => {
+                if let Err(error) = self.save_credential(&credential, cx).await {
+                    log::error!("hosted OpenAgents session could not be stored: {error:#}");
+                    (
+                        OpenAgentsSessionPhase::Unavailable,
+                        Some(HostedSessionBlocker::CredentialStorageFailed),
+                    )
+                } else {
+                    (OpenAgentsSessionPhase::Ready, None)
+                }
             }
-            Ok(None) => OpenAgentsSessionPhase::SignedOut,
-            Ok(Some(_)) | Err(_) => OpenAgentsSessionPhase::Unavailable,
+            Err(blocker) => (OpenAgentsSessionPhase::Unavailable, Some(blocker)),
         };
+        self.record_blocker(blocker);
         self.set_phase(phase);
         phase
     }
@@ -163,7 +197,9 @@ impl OpenAgentsSession {
                 self.set_phase(OpenAgentsSessionPhase::SignedOut);
                 return None;
             }
-            Err(_) => {
+            Err(error) => {
+                log::error!("hosted OpenAgents credential could not be read: {error:#}");
+                self.record_blocker(Some(HostedSessionBlocker::CredentialStorageFailed));
                 self.set_phase(OpenAgentsSessionPhase::Unavailable);
                 return None;
             }
@@ -173,9 +209,11 @@ impl OpenAgentsSession {
                 if verified.access_token.len() > MAX_ACCESS_TOKEN_BYTES
                     || self.save_credential(&verified, cx).await.is_err()
                 {
+                    self.record_blocker(Some(HostedSessionBlocker::CredentialStorageFailed));
                     self.set_phase(OpenAgentsSessionPhase::Unavailable);
                     return None;
                 }
+                self.record_blocker(None);
                 self.set_phase(OpenAgentsSessionPhase::Ready);
                 Some(VerifiedOpenAgentsSession {
                     base_url: OPENAGENTS_BASE_URL.to_string(),
@@ -192,13 +230,14 @@ impl OpenAgentsSession {
                 None
             }
             VerificationResult::Unavailable => {
+                self.record_blocker(Some(HostedSessionBlocker::SessionNotVerified));
                 self.set_phase(OpenAgentsSessionPhase::Unavailable);
                 None
             }
         }
     }
 
-    async fn connect_inner(&self) -> Result<Option<StoredCredential>> {
+    async fn connect_inner(&self) -> Result<StoredCredential, HostedSessionBlocker> {
         let session =
             super::openagents_nostr_auth::mint_openagents_nostr_session(&self.http_client).await?;
         let credential = StoredCredential {
@@ -208,9 +247,9 @@ impl OpenAgentsSession {
             refresh_token: None,
         };
         match self.verify_credential(&credential).await {
-            VerificationResult::Verified(credential) => Ok(Some(credential)),
+            VerificationResult::Verified(credential) => Ok(credential),
             VerificationResult::Denied | VerificationResult::Unavailable => {
-                Err(anyhow!("OpenAgents session verification failed"))
+                Err(HostedSessionBlocker::SessionNotVerified)
             }
         }
     }
@@ -218,19 +257,31 @@ impl OpenAgentsSession {
     async fn verify_credential(&self, credential: &StoredCredential) -> VerificationResult {
         let request = match authenticated_session_request(Method::GET, credential) {
             Ok(request) => request,
-            Err(_) => return VerificationResult::Unavailable,
+            Err(error) => {
+                log::error!("hosted OpenAgents session check could not be built: {error:#}");
+                return VerificationResult::Unavailable;
+            }
         };
         let (status, body) = match send_json(&self.http_client, request).await {
             Ok(response) => response,
-            Err(_) => return VerificationResult::Unavailable,
+            Err(error) => {
+                log::error!(
+                    "hosted OpenAgents session check could not reach \
+                     {OPENAGENTS_AUTH_SESSION_URL}: {error:#}"
+                );
+                return VerificationResult::Unavailable;
+            }
         };
         if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
+            log::error!("hosted OpenAgents session check was denied (HTTP {status})");
             return VerificationResult::Denied;
         }
         if !status.is_success() {
+            log::error!("hosted OpenAgents session check failed (HTTP {status})");
             return VerificationResult::Unavailable;
         }
         let Ok(session) = serde_json::from_slice::<VerifiedSessionResponse>(&body) else {
+            log::error!("hosted OpenAgents session check returned an undecodable body");
             return VerificationResult::Unavailable;
         };
         let owner_user_id = session.user.user_id.trim();

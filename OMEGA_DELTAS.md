@@ -6907,3 +6907,35 @@ shown action type before it reads the admitted set, so the ordinary
   separate change to who owns that value.
 - **Enforced by:** `a_session_never_opens_in_a_directory_that_is_gone` in
   `crates/omega_deltas`.
+
+### OMEGA-DELTA-0159 — Hosted sign-in provisions its identity and names its refusal
+
+A hosted Gemini request is the only way a zero-base install can send a message,
+and the only credential it can present is a NIP-98 proof signed by this
+channel's Omega identity. Nothing else creates that identity: the startup
+onboarding gate is dormant (`OPEN_ONBOARDING_DURING_STARTUP` is `false`), so a
+brand-new install sat at custody state `Absent` forever and every hosted request
+failed. `mint_openagents_nostr_session` now brings custody to `Ready` itself
+before it signs.
+
+Provisioning is deliberately narrow. `Absent` creates, `Unadopted` adopts the
+identity this data root's own secret file already holds, and every other state
+is a refusal that names itself. `Lost`, `Conflict`, `Incomplete`, and the reset
+states each mean an identity exists that this profile cannot sign for, and
+replacing one with a fresh key unattended is the silent pick omega#110 forbids.
+
+Every step logs. Before this delta the whole path — provisioning, signing, the
+mint request, verification, and the grant — swallowed each error into a phase
+enum and wrote nothing, so a refused installation produced no log line at all
+and the only evidence was a UI sentence that named none of the causes.
+
+That sentence is retired. `OpenAgents sign-in was not completed. Send the
+message again…` was wrong in both halves for the failure people actually hit: a
+`401` from the session endpoint is terminal, and retrying can never turn it into
+a session. The message now carries the specific blocker — the custody state, or
+the HTTP status — and offers retry advice only when a retry could work.
+
+- **Enforced by:** `hosted_sign_in_provisions_its_identity_and_names_every_refusal`
+  in `crates/omega_deltas`, plus unattended-provisioning tests in
+  `omega_identity`, blocker tests in `omega_effectd`, and failure-message tests
+  in `language_models`.

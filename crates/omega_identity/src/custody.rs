@@ -221,6 +221,35 @@ impl IdentityService {
         self.commit_secret_locked(secret, transaction)
     }
 
+    /// Bring custody to `Ready` for a background caller that has no owner in
+    /// front of it, or refuse and name the state it refused in.
+    ///
+    /// A signed proof is the only way an install reaches hosted OpenAgents
+    /// compute, and nothing else provisions custody: the startup onboarding
+    /// gate is dormant (`OPEN_ONBOARDING_DURING_STARTUP`), so a brand-new
+    /// install sits at `Absent` forever and every hosted request fails. This
+    /// closes that gap for the two states where the answer is not a guess:
+    /// `Absent` has nothing to lose, and `Unadopted` names the identity in
+    /// this data root's own secret file.
+    ///
+    /// Deliberately narrow. `Lost`, `Conflict`, `Incomplete`, and the reset
+    /// states each mean an identity exists that this profile cannot sign for,
+    /// and replacing one unattended is the silent pick omega#110 forbids. They
+    /// stay a refusal that names its state so the caller can say what happened
+    /// instead of reporting a generic sign-in failure.
+    pub fn provision_unattended(
+        &self,
+        receipt_ref: ReceiptRef,
+    ) -> Result<CustodyResult, CustodyError> {
+        let inspected = self.inspect()?;
+        match inspected.state {
+            CustodyState::Ready => Ok(inspected),
+            CustodyState::Absent => self.create(receipt_ref),
+            CustodyState::Unadopted => self.adopt_custodied(receipt_ref),
+            state => Err(CustodyError::CustodyDenied(state)),
+        }
+    }
+
     pub fn resume_incomplete_create(&self) -> Result<CustodyResult, CustodyError> {
         let _mutation_guard = IdentityMutationGuard::acquire(&self.locator)?;
         self.require_no_reset_locked()?;
@@ -1948,6 +1977,61 @@ mod tests {
         let second = service.create(receipt()).expect("repeat same create");
         assert_eq!(first, second);
         assert_eq!(generator_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(store.state.lock().expect("lock fake store").writes, 1);
+    }
+
+    /// A brand-new install must reach a signable identity with nobody in front
+    /// of the window, because the hosted lane is the only way it can send a
+    /// message and no other code path provisions custody at startup.
+    #[test]
+    fn unattended_provisioning_creates_adopts_and_is_idempotent() {
+        let temporary_directory = tempfile::tempdir().expect("create temporary directory");
+        let store = FakeStore::empty();
+
+        let fresh = service(store.clone(), temporary_directory.path().to_path_buf());
+        let created = fresh
+            .provision_unattended(receipt())
+            .expect("provision a fresh install");
+        assert_eq!(created.state, CustodyState::Ready);
+        let repeated = fresh
+            .provision_unattended(receipt())
+            .expect("repeat provisioning");
+        assert_eq!(created, repeated);
+        assert_eq!(store.state.lock().expect("lock fake store").writes, 1);
+
+        let adopting_root = tempfile::tempdir().expect("create adopting directory");
+        let adopting = service(store, adopting_root.path().to_path_buf());
+        assert_eq!(
+            adopting.inspect().expect("inspect unadopted profile").state,
+            CustodyState::Unadopted
+        );
+        let adopted = adopting
+            .provision_unattended(receipt())
+            .expect("adopt the identity this data root already holds");
+        assert_eq!(adopted.state, CustodyState::Ready);
+        assert_eq!(adopted.identity, created.identity);
+    }
+
+    /// The refusal has to name its state: a caller that cannot tell "no
+    /// identity yet" from "the signing key is gone" can only report the
+    /// generic sign-in failure that hid this defect for a week.
+    #[test]
+    fn unattended_provisioning_refuses_a_lost_identity_by_name() {
+        let temporary_directory = tempfile::tempdir().expect("create temporary directory");
+        let store = FakeStore::empty();
+        let service = service(store.clone(), temporary_directory.path().to_path_buf());
+        service.create(receipt()).expect("create identity");
+
+        store.lose_secret();
+        assert_eq!(
+            service.inspect().expect("inspect lost identity").state,
+            CustodyState::Lost
+        );
+
+        assert!(matches!(
+            service.provision_unattended(second_receipt()),
+            Err(CustodyError::CustodyDenied(CustodyState::Lost))
+        ));
         assert_eq!(store.state.lock().expect("lock fake store").writes, 1);
     }
 

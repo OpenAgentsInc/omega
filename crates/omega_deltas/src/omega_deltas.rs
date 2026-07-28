@@ -147,6 +147,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0156",
     "OMEGA-DELTA-0157",
     "OMEGA-DELTA-0158",
+    "OMEGA-DELTA-0159",
 ];
 
 pub const GOOGLE_PROVIDER_PATH: &str = "crates/language_models/src/provider/google.rs";
@@ -19854,6 +19855,57 @@ mod tests {
                 && pump.contains("complete_agent_thread_command"),
             "OMEGA-DELTA-0157: command delivery can precede its durable \
              admission fence or a delivered command can be re-admitted."
+        );
+    }
+
+    /// OMEGA-DELTA-0159. The hosted lane provisions the identity it signs
+    /// with, and every refusal is logged and named.
+    #[test]
+    fn hosted_sign_in_provisions_its_identity_and_names_every_refusal() {
+        let proof = read_repository_file("crates/omega_effectd/src/openagents_nostr_auth.rs");
+        let mint = function_body(&proof, "mint_openagents_nostr_session")
+            .expect("OMEGA-DELTA-0159: the background proof is gone");
+        let provision = mint.find("provision_unattended").expect(
+            "OMEGA-DELTA-0159: hosted sign-in no longer provisions custody, so a \
+                    brand-new install can never present a signed proof",
+        );
+        let signing = mint
+            .find("identity_service")
+            .and_then(|_| mint.find(".sign(&AdmittedSigningRequest"))
+            .expect("OMEGA-DELTA-0159: the signing step is gone");
+        assert!(
+            provision < signing,
+            "OMEGA-DELTA-0159: {} signs before it provisions custody, which \
+             fails on every install that has no identity yet.",
+            repository_path("crates/omega_effectd/src/openagents_nostr_auth.rs").display()
+        );
+        assert!(
+            mint.contains("log::error!") && mint.contains("HTTP {status}"),
+            "OMEGA-DELTA-0159: hosted sign-in stopped logging its failures \
+             with the status that explains them."
+        );
+
+        let custody = read_repository_file("crates/omega_identity/src/custody.rs");
+        let unattended = function_body(&custody, "provision_unattended")
+            .expect("OMEGA-DELTA-0159: unattended provisioning is gone");
+        assert!(
+            unattended.contains("CustodyState::Absent => self.create(receipt_ref)")
+                && unattended
+                    .contains("CustodyState::Unadopted => self.adopt_custodied(receipt_ref)")
+                && unattended.contains("state => Err(CustodyError::CustodyDenied(state))"),
+            "OMEGA-DELTA-0159: unattended provisioning no longer refuses every \
+             state but `Absent` and `Unadopted`; replacing a `Lost` or \
+             `Conflict` identity without the owner is the silent pick \
+             omega#110 forbids."
+        );
+
+        let provider = read_repository_file(GOOGLE_PROVIDER_PATH);
+        assert!(
+            !provider.contains("OpenAgents sign-in was not completed")
+                && provider.contains("hosted_sign_in_failure_message"),
+            "OMEGA-DELTA-0159: {} reports a generic incomplete sign-in again \
+             instead of the reason the hosted lane actually refused.",
+            repository_path(GOOGLE_PROVIDER_PATH).display()
         );
     }
 }

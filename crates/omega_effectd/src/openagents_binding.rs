@@ -367,7 +367,11 @@ impl OpenAgentsBinding {
         cx: &mut AsyncApp,
     ) -> Result<BindingProjection> {
         let session =
-            super::openagents_nostr_auth::mint_openagents_nostr_session(&self.http_client).await?;
+            super::openagents_nostr_auth::mint_openagents_nostr_session(&self.http_client)
+                .await
+                .map_err(|blocker| {
+                    anyhow::anyhow!("OpenAgents binding sign-in failed: {}", blocker.summary())
+                })?;
         let mut credential = BindingCredential {
             schema_version: 1,
             openagents_account_id: session.user.user_id,
