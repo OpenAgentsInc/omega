@@ -47,6 +47,15 @@ pub enum HostedSessionBlocker {
          Retrying will not change the answer: this identity is not admitted for hosted Omega."
     )]
     ProofRejected { status: u16 },
+    /// Google Frontend returns 411 when a POST is missing `Content-Length`.
+    /// That is a client framing bug, not an identity refusal — naming it as
+    /// "not admitted" sent the owner looking for an allowlist that does not
+    /// exist.
+    #[error(
+        "Omega could not complete hosted sign-in: the request was missing its \
+         Content-Length (HTTP 411). This is a client bug, not an identity refusal."
+    )]
+    RequestFramingRejected,
     #[error("OpenAgents could not issue a session right now (HTTP {status}).")]
     ServiceUnavailable { status: u16 },
     #[error("OpenAgents returned a sign-in response Omega could not use.")]
@@ -175,11 +184,18 @@ pub async fn mint_openagents_nostr_session(
         })?;
     let authorization =
         base64::engine::general_purpose::STANDARD.encode(signed.signed_event_json.as_bytes());
+    // Empty body on purpose: the NIP-98 `payload` tag is the SHA-256 of the
+    // empty byte string. Google Frontend (HTTP/1.1) answers 411 Length Required
+    // when a POST has a Content-Type and no Content-Length — which is how
+    // `AsyncBody::empty()` was being framed — so the length must be stated
+    // explicitly as zero. Without it the owner saw "identity is not admitted"
+    // for a request that never reached the auth handler.
     let request = Request::builder()
         .method(Method::POST)
         .uri(OPENAGENTS_NOSTR_SESSION_URL)
         .header("authorization", format!("Nostr {authorization}"))
         .header("content-type", "application/octet-stream")
+        .header("content-length", "0")
         .body(AsyncBody::empty())
         .map_err(|error| HostedSessionBlocker::ProofSigningFailed {
             reason: error.to_string(),
@@ -212,14 +228,13 @@ pub async fn mint_openagents_nostr_session(
             identity.public_key_hex().as_str(),
             public_error_code(&body)
         );
-        return Err(if status.is_client_error() {
-            HostedSessionBlocker::ProofRejected {
-                status: status.as_u16(),
-            }
+        let code = status.as_u16();
+        return Err(if code == 411 {
+            HostedSessionBlocker::RequestFramingRejected
+        } else if status.is_client_error() {
+            HostedSessionBlocker::ProofRejected { status: code }
         } else {
-            HostedSessionBlocker::ServiceUnavailable {
-                status: status.as_u16(),
-            }
+            HostedSessionBlocker::ServiceUnavailable { status: code }
         });
     }
     let session: MintedOpenAgentsSession = serde_json::from_slice(&body).map_err(|error| {
@@ -310,6 +325,7 @@ mod tests {
             },
             HostedSessionBlocker::ServiceUnreachable,
             HostedSessionBlocker::ProofRejected { status: 401 },
+            HostedSessionBlocker::RequestFramingRejected,
             HostedSessionBlocker::ServiceUnavailable { status: 503 },
             HostedSessionBlocker::ResponseInvalid,
             HostedSessionBlocker::SessionNotVerified,
@@ -323,6 +339,17 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// HTTP 411 is Google Frontend rejecting a POST with no Content-Length.
+    /// It must never be narrated as an identity allowlist refusal.
+    #[test]
+    fn length_required_is_named_as_framing_not_admission() {
+        let framing = HostedSessionBlocker::RequestFramingRejected;
+        assert!(!framing.is_retryable());
+        assert!(framing.summary().contains("411") || framing.summary().contains("Content-Length"));
+        assert!(!framing.summary().to_lowercase().contains("not admitted"));
+        assert!(!framing.summary().to_lowercase().contains("gemini_api_key"));
     }
 
     #[test]
