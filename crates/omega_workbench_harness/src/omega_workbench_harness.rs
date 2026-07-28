@@ -455,6 +455,122 @@ pub struct WorkbenchBindingFixture {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReviewCheckpointFixture {
+    pub action_log_entity_id: String,
+    pub generation: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReviewBindingFixture {
+    pub thread_id: String,
+    pub session_id: String,
+    pub repository_id: String,
+    pub worktree_id: String,
+    pub checkpoint: ReviewCheckpointFixture,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "state", content = "message")]
+pub enum ReviewLifecycleFixture {
+    Unbound,
+    Loading,
+    Empty,
+    Ready,
+    Streaming,
+    AllReviewed,
+    Offline,
+    UnavailableCheckpoint,
+    UnsupportedBinary,
+    Invalidated,
+    Error(String),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewFileStatusFixture {
+    Added,
+    Modified,
+    Deleted,
+    Renamed,
+    Binary,
+    Conflict,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewHunkStatusFixture {
+    Pending,
+    Kept,
+    Rejected,
+    Conflict,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReviewHunkFixture {
+    pub id: String,
+    pub start_row: u32,
+    pub start_column: u32,
+    pub end_row: u32,
+    pub end_column: u32,
+    pub status: ReviewHunkStatusFixture,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReviewFileFixture {
+    pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub old_path: Option<String>,
+    pub status: ReviewFileStatusFixture,
+    pub hunks: Vec<ReviewHunkFixture>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewFocusFixture {
+    Surface,
+    FileList,
+    Diff,
+    Toolbar,
+    Editor,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewMutationKindFixture {
+    KeepHunk,
+    RejectHunk,
+    KeepAll,
+    RejectAll,
+    OpenInEditor,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReviewMutationFixture {
+    pub kind: ReviewMutationKindFixture,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hunk_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resulting_contents: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReviewSessionFixture {
+    pub binding: ReviewBindingFixture,
+    pub lifecycle: ReviewLifecycleFixture,
+    pub files: Vec<ReviewFileFixture>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected_file_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected_hunk_id: Option<String>,
+    pub focus: ReviewFocusFixture,
+    pub mutations: Vec<ReviewMutationFixture>,
+    pub pending_operation_count: u32,
+    pub ignored_stale_completion_count: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ThreadWorkbenchFixture {
     pub thread_id: String,
     pub generation: u64,
@@ -508,6 +624,8 @@ pub struct WorkbenchScene {
     pub dock_open: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub thread_workbenches: Vec<ThreadWorkbenchFixture>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub review_sessions: Vec<ReviewSessionFixture>,
     pub persisted: Option<PersistedSceneFixture>,
 }
 
@@ -541,6 +659,7 @@ impl WorkbenchScene {
             active_surface: None,
             dock_open: false,
             thread_workbenches: Vec::new(),
+            review_sessions: Vec::new(),
             persisted: None,
         }
     }
@@ -733,6 +852,7 @@ impl WorkbenchScene {
             }
         }
         self.validate_thread_workbenches()?;
+        self.validate_review_sessions()?;
 
         for artifact in &self.artifacts {
             if let Some(worktree_id) = &artifact.worktree_id
@@ -895,6 +1015,179 @@ impl WorkbenchScene {
         Ok(())
     }
 
+    fn validate_review_sessions(&self) -> Result<()> {
+        unique_ids(
+            "review session thread",
+            self.review_sessions
+                .iter()
+                .map(|review| review.binding.thread_id.as_str()),
+        )?;
+        unique_ids(
+            "review session",
+            self.review_sessions
+                .iter()
+                .map(|review| review.binding.session_id.as_str()),
+        )?;
+
+        for review in &self.review_sessions {
+            let binding = &review.binding;
+            let thread = self
+                .threads
+                .iter()
+                .find(|thread| thread.id == binding.thread_id)
+                .ok_or_else(|| {
+                    anyhow!(
+                        "review session references missing thread {:?}",
+                        binding.thread_id
+                    )
+                })?;
+            if thread.repository_id.as_deref() != Some(binding.repository_id.as_str())
+                || thread.worktree_id.as_deref() != Some(binding.worktree_id.as_str())
+            {
+                bail!(
+                    "review session for thread {:?} does not match its repository/worktree binding",
+                    binding.thread_id
+                );
+            }
+            if binding.session_id.trim().is_empty()
+                || binding.checkpoint.action_log_entity_id.trim().is_empty()
+            {
+                bail!("review session and checkpoint IDs must not be empty");
+            }
+            if let ReviewLifecycleFixture::Error(message) = &review.lifecycle
+                && message.trim().is_empty()
+            {
+                bail!("review error lifecycle must contain a message");
+            }
+
+            unique_ids(
+                "review file",
+                review.files.iter().map(|file| file.path.as_str()),
+            )?;
+            let mut hunk_ids = BTreeSet::new();
+            for file in &review.files {
+                if file.path.trim().is_empty()
+                    || file
+                        .old_path
+                        .as_deref()
+                        .is_some_and(|path| path.trim().is_empty())
+                {
+                    bail!("review file paths must not be empty");
+                }
+                match file.status {
+                    ReviewFileStatusFixture::Renamed if file.old_path.is_none() => {
+                        bail!("renamed review file {:?} has no old path", file.path);
+                    }
+                    ReviewFileStatusFixture::Renamed => {}
+                    _ if file.old_path.is_some() => {
+                        bail!("non-renamed review file {:?} has an old path", file.path);
+                    }
+                    _ => {}
+                }
+                for hunk in &file.hunks {
+                    if hunk.id.trim().is_empty() || !hunk_ids.insert(hunk.id.as_str()) {
+                        bail!("review hunk IDs must be non-empty and unique within a session");
+                    }
+                    if (hunk.start_row, hunk.start_column) > (hunk.end_row, hunk.end_column) {
+                        bail!("review hunk {:?} has a reversed buffer range", hunk.id);
+                    }
+                }
+            }
+
+            match (
+                review.selected_file_path.as_deref(),
+                review.selected_hunk_id.as_deref(),
+            ) {
+                (None, None) => {}
+                (Some(file_path), selected_hunk_id) => {
+                    let file = review
+                        .files
+                        .iter()
+                        .find(|file| file.path == file_path)
+                        .ok_or_else(|| {
+                            anyhow!("review selection references missing file {file_path:?}")
+                        })?;
+                    if let Some(hunk_id) = selected_hunk_id
+                        && !file.hunks.iter().any(|hunk| hunk.id == hunk_id)
+                    {
+                        bail!(
+                            "review selection references hunk {hunk_id:?} outside file {file_path:?}"
+                        );
+                    }
+                }
+                (None, Some(hunk_id)) => {
+                    bail!("review hunk {hunk_id:?} is selected without a selected file");
+                }
+            }
+
+            if matches!(
+                review.lifecycle,
+                ReviewLifecycleFixture::Empty
+                    | ReviewLifecycleFixture::Loading
+                    | ReviewLifecycleFixture::Offline
+                    | ReviewLifecycleFixture::UnavailableCheckpoint
+                    | ReviewLifecycleFixture::UnsupportedBinary
+                    | ReviewLifecycleFixture::Invalidated
+                    | ReviewLifecycleFixture::Error(_)
+            ) && !review.files.is_empty()
+            {
+                bail!(
+                    "review lifecycle {:?} cannot expose file fixtures",
+                    review.lifecycle
+                );
+            }
+
+            for mutation in &review.mutations {
+                match mutation.kind {
+                    ReviewMutationKindFixture::KeepHunk
+                    | ReviewMutationKindFixture::RejectHunk
+                    | ReviewMutationKindFixture::OpenInEditor => {
+                        let file_path = mutation.file_path.as_deref().ok_or_else(|| {
+                            anyhow!("review {:?} mutation has no file path", mutation.kind)
+                        })?;
+                        let Some(file) = review.files.iter().find(|file| file.path == file_path)
+                        else {
+                            if matches!(review.lifecycle, ReviewLifecycleFixture::AllReviewed)
+                                && !matches!(mutation.kind, ReviewMutationKindFixture::OpenInEditor)
+                            {
+                                continue;
+                            }
+                            bail!(
+                                "review {:?} mutation references missing file {file_path:?}",
+                                mutation.kind
+                            );
+                        };
+                        let hunk_id = mutation.hunk_id.as_deref().ok_or_else(|| {
+                            anyhow!("review {:?} mutation has no hunk ID", mutation.kind)
+                        })?;
+                        if !file.hunks.iter().any(|hunk| hunk.id == hunk_id) {
+                            bail!(
+                                "review {:?} mutation references missing hunk {hunk_id:?}",
+                                mutation.kind
+                            );
+                        }
+                    }
+                    ReviewMutationKindFixture::KeepAll | ReviewMutationKindFixture::RejectAll => {
+                        if mutation.file_path.is_some() || mutation.hunk_id.is_some() {
+                            bail!(
+                                "review {:?} mutation must not target a single hunk",
+                                mutation.kind
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub fn active_review_session(&self) -> Option<&ReviewSessionFixture> {
+        let active_thread_id = self.active_thread_id.as_deref()?;
+        self.review_sessions
+            .iter()
+            .find(|review| review.binding.thread_id == active_thread_id)
+    }
+
     fn validate_mutation(&self, mutation: &SceneMutation) -> Result<()> {
         match mutation {
             SceneMutation::SetActiveThread { thread_id } => {
@@ -1019,7 +1312,7 @@ impl SceneSpec {
     }
 }
 
-pub const WORKBENCH_SHELL_PIXEL_SCENES: [&str; 26] = [
+pub const WORKBENCH_SHELL_PIXEL_SCENES: [&str; 35] = [
     "omega_workbench_shell_default",
     "omega_workbench_shell_active_dock",
     "omega_workbench_shell_focus_visible",
@@ -1042,6 +1335,15 @@ pub const WORKBENCH_SHELL_PIXEL_SCENES: [&str; 26] = [
     "omega_workbench_search_narrow",
     "omega_workbench_search_focused_result",
     "omega_workbench_search_error",
+    "omega_workbench_review_empty",
+    "omega_workbench_review_multi_file",
+    "omega_workbench_review_selected_hunk",
+    "omega_workbench_review_streaming_update",
+    "omega_workbench_review_rename_delete",
+    "omega_workbench_review_conflict",
+    "omega_workbench_review_all_reviewed",
+    "omega_workbench_review_narrow",
+    "omega_workbench_review_error",
     "omega_workbench_identity_clean",
     "omega_workbench_identity_dirty_conflict",
     "omega_workbench_identity_long_narrow",
@@ -1069,6 +1371,12 @@ pub const WORKBENCH_FILES_REGIONS: &[CaptureRegionSpec] = &[CaptureRegionSpec::s
 pub const WORKBENCH_SEARCH_REGIONS: &[CaptureRegionSpec] = &[CaptureRegionSpec::selector_union(
     "search-surface",
     &["omega.workbench.surface.search"],
+    8,
+)];
+
+pub const WORKBENCH_REVIEW_REGIONS: &[CaptureRegionSpec] = &[CaptureRegionSpec::selector_union(
+    "review-surface",
+    &["omega.workbench.surface.review"],
     8,
 )];
 
@@ -1250,6 +1558,78 @@ pub const HERMETIC_SCENES: &[SceneSpec] = &[
         regions: WORKBENCH_SEARCH_REGIONS,
     },
     SceneSpec {
+        name: "omega_workbench_review_empty",
+        phase: ScenePhase::Recording,
+        viewport: ViewportFixture::new(1200, 720, 2000),
+        fixture_version: 2,
+        pixel_policy: APPLE_SILICON_METAL_POLICY,
+        regions: WORKBENCH_REVIEW_REGIONS,
+    },
+    SceneSpec {
+        name: "omega_workbench_review_multi_file",
+        phase: ScenePhase::Recording,
+        viewport: ViewportFixture::new(1200, 720, 2000),
+        fixture_version: 2,
+        pixel_policy: APPLE_SILICON_METAL_POLICY,
+        regions: WORKBENCH_REVIEW_REGIONS,
+    },
+    SceneSpec {
+        name: "omega_workbench_review_selected_hunk",
+        phase: ScenePhase::Recording,
+        viewport: ViewportFixture::new(1200, 720, 2000),
+        fixture_version: 2,
+        pixel_policy: APPLE_SILICON_METAL_POLICY,
+        regions: WORKBENCH_REVIEW_REGIONS,
+    },
+    SceneSpec {
+        name: "omega_workbench_review_streaming_update",
+        phase: ScenePhase::Recording,
+        viewport: ViewportFixture::new(1200, 720, 2000),
+        fixture_version: 2,
+        pixel_policy: APPLE_SILICON_METAL_POLICY,
+        regions: WORKBENCH_REVIEW_REGIONS,
+    },
+    SceneSpec {
+        name: "omega_workbench_review_rename_delete",
+        phase: ScenePhase::Recording,
+        viewport: ViewportFixture::new(1200, 720, 2000),
+        fixture_version: 2,
+        pixel_policy: APPLE_SILICON_METAL_POLICY,
+        regions: WORKBENCH_REVIEW_REGIONS,
+    },
+    SceneSpec {
+        name: "omega_workbench_review_conflict",
+        phase: ScenePhase::Recording,
+        viewport: ViewportFixture::new(1200, 720, 2000),
+        fixture_version: 2,
+        pixel_policy: APPLE_SILICON_METAL_POLICY,
+        regions: WORKBENCH_REVIEW_REGIONS,
+    },
+    SceneSpec {
+        name: "omega_workbench_review_all_reviewed",
+        phase: ScenePhase::Recording,
+        viewport: ViewportFixture::new(1200, 720, 2000),
+        fixture_version: 2,
+        pixel_policy: APPLE_SILICON_METAL_POLICY,
+        regions: WORKBENCH_REVIEW_REGIONS,
+    },
+    SceneSpec {
+        name: "omega_workbench_review_narrow",
+        phase: ScenePhase::Recording,
+        viewport: ViewportFixture::new(910, 720, 2000),
+        fixture_version: 2,
+        pixel_policy: APPLE_SILICON_METAL_POLICY,
+        regions: WORKBENCH_REVIEW_REGIONS,
+    },
+    SceneSpec {
+        name: "omega_workbench_review_error",
+        phase: ScenePhase::Recording,
+        viewport: ViewportFixture::new(1200, 720, 2000),
+        fixture_version: 2,
+        pixel_policy: APPLE_SILICON_METAL_POLICY,
+        regions: WORKBENCH_REVIEW_REGIONS,
+    },
+    SceneSpec {
         name: "omega_workbench_identity_clean",
         phase: ScenePhase::Recording,
         viewport: ViewportFixture::new(1200, 720, 2000),
@@ -1357,6 +1737,324 @@ pub const HERMETIC_SCENES: &[SceneSpec] = &[
 
 pub fn scene_spec(name: &str) -> Option<&'static SceneSpec> {
     HERMETIC_SCENES.iter().find(|scene| scene.name == name)
+}
+
+pub fn workbench_review_scene(name: &str) -> Result<WorkbenchScene> {
+    let spec = scene_spec(name).ok_or_else(|| anyhow!("unknown workbench scene {name:?}"))?;
+    if !name.starts_with("omega_workbench_review_") {
+        bail!("{name:?} is not a Review workbench scene");
+    }
+
+    let mut scene = spec.fixture();
+    scene.content_state = ContentStateFixture::Ready;
+    scene.project = Some(ProjectFixture {
+        id: "visual-project".into(),
+        display_name: "Omega".into(),
+    });
+    scene.repositories.push(RepositoryFixture {
+        id: "visual-repository".into(),
+        project_id: "visual-project".into(),
+        worktrees: vec![
+            WorktreeFixture {
+                id: "alpha-worktree".into(),
+                branch: Some("alpha-review".into()),
+                git_state: None,
+                dirty_files: 1,
+                conflicts: 0,
+                ahead: 1,
+                behind: 0,
+            },
+            WorktreeFixture {
+                id: "beta-worktree".into(),
+                branch: Some("beta-review".into()),
+                git_state: None,
+                dirty_files: if name == "omega_workbench_review_empty" {
+                    0
+                } else {
+                    2
+                },
+                conflicts: u32::from(name == "omega_workbench_review_conflict"),
+                ahead: 2,
+                behind: 0,
+            },
+        ],
+    });
+    scene.threads = vec![
+        ThreadFixture {
+            id: "active-thread".into(),
+            project_id: Some("visual-project".into()),
+            repository_id: Some("visual-repository".into()),
+            worktree_id: Some("beta-worktree".into()),
+        },
+        ThreadFixture {
+            id: "foreign-thread".into(),
+            project_id: Some("visual-project".into()),
+            repository_id: Some("visual-repository".into()),
+            worktree_id: Some("alpha-worktree".into()),
+        },
+    ];
+    scene.active_thread_id = Some("active-thread".into());
+
+    for surface in &mut scene.surfaces {
+        surface.available = true;
+        if surface.id == WorkSurfaceId::Git {
+            surface.badge = match name {
+                "omega_workbench_review_rename_delete" => Some(3),
+                _ => None,
+            };
+        }
+    }
+    scene.active_surface = Some(WorkSurfaceId::Review);
+    scene.dock_open = true;
+    scene.thread_workbenches = vec![
+        ThreadWorkbenchFixture {
+            thread_id: "active-thread".into(),
+            generation: 7,
+            binding: Some(WorkbenchBindingFixture {
+                repository_id: "visual-repository".into(),
+                worktree_id: "beta-worktree".into(),
+            }),
+            requested_surface: Some(WorkSurfaceId::Review),
+            effective_surface: Some(WorkSurfaceId::Review),
+            dock_open: true,
+            surfaces: scene.surfaces.clone(),
+        },
+        ThreadWorkbenchFixture {
+            thread_id: "foreign-thread".into(),
+            generation: 3,
+            binding: Some(WorkbenchBindingFixture {
+                repository_id: "visual-repository".into(),
+                worktree_id: "alpha-worktree".into(),
+            }),
+            requested_surface: Some(WorkSurfaceId::Review),
+            effective_surface: Some(WorkSurfaceId::Review),
+            dock_open: false,
+            surfaces: scene.surfaces.clone(),
+        },
+    ];
+
+    let active_binding = ReviewBindingFixture {
+        thread_id: "active-thread".into(),
+        session_id: "beta-session".into(),
+        repository_id: "visual-repository".into(),
+        worktree_id: "beta-worktree".into(),
+        checkpoint: ReviewCheckpointFixture {
+            action_log_entity_id: "beta-action-log".into(),
+            generation: 7,
+        },
+    };
+    let active_review = review_fixture_for_scene(name, active_binding)?;
+    let foreign_review = ReviewSessionFixture {
+        binding: ReviewBindingFixture {
+            thread_id: "foreign-thread".into(),
+            session_id: "alpha-session".into(),
+            repository_id: "visual-repository".into(),
+            worktree_id: "alpha-worktree".into(),
+            checkpoint: ReviewCheckpointFixture {
+                action_log_entity_id: "alpha-action-log".into(),
+                generation: 3,
+            },
+        },
+        lifecycle: ReviewLifecycleFixture::Ready,
+        files: vec![ReviewFileFixture {
+            path: "src/foreign_thread_only.rs".into(),
+            old_path: None,
+            status: ReviewFileStatusFixture::Modified,
+            hunks: vec![review_hunk(
+                "foreign-hunk",
+                0,
+                0,
+                1,
+                0,
+                ReviewHunkStatusFixture::Pending,
+            )],
+        }],
+        selected_file_path: Some("src/foreign_thread_only.rs".into()),
+        selected_hunk_id: Some("foreign-hunk".into()),
+        focus: ReviewFocusFixture::Diff,
+        mutations: Vec::new(),
+        pending_operation_count: 0,
+        ignored_stale_completion_count: 0,
+    };
+    scene.review_sessions = vec![active_review, foreign_review];
+    scene.validate()?;
+    Ok(scene)
+}
+
+fn review_fixture_for_scene(
+    name: &str,
+    binding: ReviewBindingFixture,
+) -> Result<ReviewSessionFixture> {
+    let standard_files = || {
+        vec![
+            ReviewFileFixture {
+                path: "src/main.rs".into(),
+                old_path: None,
+                status: ReviewFileStatusFixture::Modified,
+                hunks: vec![
+                    review_hunk("main-imports", 0, 0, 1, 0, ReviewHunkStatusFixture::Pending),
+                    review_hunk("main-body", 20, 0, 21, 0, ReviewHunkStatusFixture::Pending),
+                ],
+            },
+            ReviewFileFixture {
+                path: "src/settings.rs".into(),
+                old_path: None,
+                status: ReviewFileStatusFixture::Added,
+                hunks: vec![review_hunk(
+                    "settings-new",
+                    0,
+                    0,
+                    1,
+                    0,
+                    ReviewHunkStatusFixture::Pending,
+                )],
+            },
+        ]
+    };
+
+    let mut fixture = ReviewSessionFixture {
+        binding,
+        lifecycle: ReviewLifecycleFixture::Ready,
+        files: standard_files(),
+        selected_file_path: Some("src/main.rs".into()),
+        selected_hunk_id: Some("main-imports".into()),
+        focus: ReviewFocusFixture::Diff,
+        mutations: Vec::new(),
+        pending_operation_count: 0,
+        ignored_stale_completion_count: 0,
+    };
+
+    match name {
+        "omega_workbench_review_empty" => {
+            fixture.lifecycle = ReviewLifecycleFixture::Empty;
+            fixture.files.clear();
+            fixture.selected_file_path = None;
+            fixture.selected_hunk_id = None;
+            fixture.focus = ReviewFocusFixture::Surface;
+        }
+        "omega_workbench_review_multi_file" | "omega_workbench_review_narrow" => {}
+        "omega_workbench_review_selected_hunk" => {
+            fixture.selected_hunk_id = Some("main-body".into());
+        }
+        "omega_workbench_review_streaming_update" => {
+            fixture.lifecycle = ReviewLifecycleFixture::Streaming;
+            fixture.files[0].hunks.push(review_hunk(
+                "main-streamed",
+                35,
+                0,
+                36,
+                0,
+                ReviewHunkStatusFixture::Pending,
+            ));
+            fixture.selected_hunk_id = Some("main-body".into());
+            fixture.pending_operation_count = 1;
+            fixture.ignored_stale_completion_count = 1;
+        }
+        "omega_workbench_review_rename_delete" => {
+            fixture.files = vec![
+                ReviewFileFixture {
+                    path: "src/current_name.rs".into(),
+                    old_path: Some("src/previous_name.rs".into()),
+                    status: ReviewFileStatusFixture::Renamed,
+                    hunks: vec![review_hunk(
+                        "rename-edit",
+                        1,
+                        0,
+                        2,
+                        0,
+                        ReviewHunkStatusFixture::Pending,
+                    )],
+                },
+                ReviewFileFixture {
+                    path: "src/obsolete.rs".into(),
+                    old_path: None,
+                    status: ReviewFileStatusFixture::Deleted,
+                    hunks: vec![review_hunk(
+                        "delete-file",
+                        0,
+                        0,
+                        0,
+                        0,
+                        ReviewHunkStatusFixture::Pending,
+                    )],
+                },
+            ];
+            fixture.selected_file_path = Some("src/current_name.rs".into());
+            fixture.selected_hunk_id = Some("rename-edit".into());
+        }
+        "omega_workbench_review_conflict" => {
+            fixture.files = vec![ReviewFileFixture {
+                path: "src/conflicted.rs".into(),
+                old_path: None,
+                status: ReviewFileStatusFixture::Conflict,
+                hunks: vec![review_hunk(
+                    "conflict-hunk",
+                    1,
+                    0,
+                    2,
+                    0,
+                    ReviewHunkStatusFixture::Conflict,
+                )],
+            }];
+            fixture.selected_file_path = Some("src/conflicted.rs".into());
+            fixture.selected_hunk_id = Some("conflict-hunk".into());
+        }
+        "omega_workbench_review_all_reviewed" => {
+            fixture.lifecycle = ReviewLifecycleFixture::AllReviewed;
+            fixture.files.clear();
+            fixture.selected_file_path = None;
+            fixture.selected_hunk_id = None;
+            fixture.focus = ReviewFocusFixture::Surface;
+            fixture.mutations = vec![
+                ReviewMutationFixture {
+                    kind: ReviewMutationKindFixture::KeepHunk,
+                    file_path: Some("src/main.rs".into()),
+                    hunk_id: Some("main-imports".into()),
+                    resulting_contents: Some("use omega::review;\n".into()),
+                },
+                ReviewMutationFixture {
+                    kind: ReviewMutationKindFixture::RejectHunk,
+                    file_path: Some("src/main.rs".into()),
+                    hunk_id: Some("main-body".into()),
+                    resulting_contents: Some("const REVIEW_MODE: bool = false;\n".into()),
+                },
+                ReviewMutationFixture {
+                    kind: ReviewMutationKindFixture::KeepHunk,
+                    file_path: Some("src/settings.rs".into()),
+                    hunk_id: Some("settings-new".into()),
+                    resulting_contents: Some("pub const REVIEW_ENABLED: bool = true;\n".into()),
+                },
+            ];
+        }
+        "omega_workbench_review_error" => {
+            fixture.lifecycle =
+                ReviewLifecycleFixture::Error("Could not load this checkpoint".into());
+            fixture.files.clear();
+            fixture.selected_file_path = None;
+            fixture.selected_hunk_id = None;
+            fixture.focus = ReviewFocusFixture::Surface;
+        }
+        _ => bail!("unknown Review workbench scene {name:?}"),
+    }
+    Ok(fixture)
+}
+
+fn review_hunk(
+    id: &str,
+    start_row: u32,
+    start_column: u32,
+    end_row: u32,
+    end_column: u32,
+    status: ReviewHunkStatusFixture,
+) -> ReviewHunkFixture {
+    ReviewHunkFixture {
+        id: id.into(),
+        start_row,
+        start_column,
+        end_row,
+        end_column,
+        status,
+    }
 }
 
 pub fn validate_scene_catalog() -> Result<()> {
@@ -2072,6 +2770,143 @@ pub fn prove_workbench_shell(
         probe.require_absent("omega.workbench.dock")?;
     }
     Ok(probe.into_checks())
+}
+
+pub fn prove_review_surface(
+    scene: &WorkbenchScene,
+    actual: &ReviewSessionFixture,
+) -> Result<Vec<ProofCheck>> {
+    scene.validate()?;
+    let expected = scene
+        .active_review_session()
+        .context("Review proof scene has no active review session")?;
+    let mut checks = Vec::new();
+
+    require_review_match(
+        "review-binding-identity",
+        &expected.binding,
+        &actual.binding,
+        &mut checks,
+    )?;
+    require_review_match(
+        "review-lifecycle",
+        &expected.lifecycle,
+        &actual.lifecycle,
+        &mut checks,
+    )?;
+    require_review_match(
+        "review-file-count",
+        &expected.files.len(),
+        &actual.files.len(),
+        &mut checks,
+    )?;
+    let expected_hunk_count = expected
+        .files
+        .iter()
+        .map(|file| file.hunks.len())
+        .sum::<usize>();
+    let actual_hunk_count = actual
+        .files
+        .iter()
+        .map(|file| file.hunks.len())
+        .sum::<usize>();
+    require_review_match(
+        "review-hunk-count",
+        &expected_hunk_count,
+        &actual_hunk_count,
+        &mut checks,
+    )?;
+    require_review_match(
+        "review-ordered-file-hunk-status",
+        &expected.files,
+        &actual.files,
+        &mut checks,
+    )?;
+    require_review_match(
+        "review-selected-file",
+        &expected.selected_file_path,
+        &actual.selected_file_path,
+        &mut checks,
+    )?;
+    require_review_match(
+        "review-selected-hunk",
+        &expected.selected_hunk_id,
+        &actual.selected_hunk_id,
+        &mut checks,
+    )?;
+    require_review_match(
+        "review-focus-owner",
+        &expected.focus,
+        &actual.focus,
+        &mut checks,
+    )?;
+    require_review_match(
+        "review-filesystem-mutations",
+        &expected.mutations,
+        &actual.mutations,
+        &mut checks,
+    )?;
+    require_review_match(
+        "review-pending-operation-count",
+        &expected.pending_operation_count,
+        &actual.pending_operation_count,
+        &mut checks,
+    )?;
+    require_review_match(
+        "review-ignored-stale-completion-count",
+        &expected.ignored_stale_completion_count,
+        &actual.ignored_stale_completion_count,
+        &mut checks,
+    )?;
+
+    let expected_paths = expected
+        .files
+        .iter()
+        .map(|file| file.path.as_str())
+        .collect::<BTreeSet<_>>();
+    let foreign_paths = scene
+        .review_sessions
+        .iter()
+        .filter(|review| review.binding.thread_id != expected.binding.thread_id)
+        .flat_map(|review| review.files.iter())
+        .map(|file| file.path.as_str())
+        .filter(|path| !expected_paths.contains(path))
+        .collect::<BTreeSet<_>>();
+    let leaked_paths = actual
+        .files
+        .iter()
+        .map(|file| file.path.as_str())
+        .filter(|path| foreign_paths.contains(path))
+        .collect::<Vec<_>>();
+    if !leaked_paths.is_empty() {
+        let detail = format!("active Review snapshot leaked foreign-thread paths {leaked_paths:?}");
+        checks.push(ProofCheck::failed(
+            "review-no-foreign-thread-files",
+            &detail,
+        ));
+        bail!("{detail}");
+    }
+    checks.push(ProofCheck::passed("review-no-foreign-thread-files"));
+
+    Ok(checks)
+}
+
+fn require_review_match<T>(
+    name: &str,
+    expected: &T,
+    actual: &T,
+    checks: &mut Vec<ProofCheck>,
+) -> Result<()>
+where
+    T: std::fmt::Debug + PartialEq,
+{
+    if expected != actual {
+        let detail = format!("expected {expected:?}, got {actual:?}");
+        checks.push(ProofCheck::failed(name, &detail));
+        bail!("{name}: {detail}");
+    }
+    checks.push(ProofCheck::passed(name));
+    Ok(())
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -3476,6 +4311,136 @@ mod tests {
     }
 
     #[test]
+    fn review_scene_catalog_uses_two_distinct_thread_worktree_checkpoints() -> Result<()> {
+        let names = [
+            "omega_workbench_review_empty",
+            "omega_workbench_review_multi_file",
+            "omega_workbench_review_selected_hunk",
+            "omega_workbench_review_streaming_update",
+            "omega_workbench_review_rename_delete",
+            "omega_workbench_review_conflict",
+            "omega_workbench_review_all_reviewed",
+            "omega_workbench_review_narrow",
+            "omega_workbench_review_error",
+        ];
+        for name in names {
+            let scene = workbench_review_scene(name)?;
+            assert_eq!(scene.fixture_version, 2);
+            assert_eq!(scene.threads.len(), 2);
+            assert_eq!(scene.review_sessions.len(), 2);
+            assert_eq!(scene.active_surface, Some(WorkSurfaceId::Review));
+            assert!(scene.dock_open);
+
+            let active = scene
+                .active_review_session()
+                .context("Review fixture has no active session")?;
+            let foreign = scene
+                .review_sessions
+                .iter()
+                .find(|review| review.binding.thread_id != active.binding.thread_id)
+                .context("Review fixture has no foreign session")?;
+            assert_ne!(active.binding.thread_id, foreign.binding.thread_id);
+            assert_ne!(active.binding.session_id, foreign.binding.session_id);
+            assert_ne!(active.binding.worktree_id, foreign.binding.worktree_id);
+            assert_ne!(
+                active.binding.checkpoint.action_log_entity_id,
+                foreign.binding.checkpoint.action_log_entity_id
+            );
+            assert_ne!(
+                active.binding.checkpoint.generation,
+                foreign.binding.checkpoint.generation
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn review_fixture_validation_rejects_cross_binding_and_invalid_selection() -> Result<()> {
+        let scene = workbench_review_scene("omega_workbench_review_selected_hunk")?;
+
+        let mut cross_bound = scene.clone();
+        cross_bound.review_sessions[0].binding.worktree_id = "alpha-worktree".into();
+        assert!(
+            cross_bound
+                .validate()
+                .expect_err("cross-bound Review fixture must fail")
+                .to_string()
+                .contains("does not match its repository/worktree binding")
+        );
+
+        let mut invalid_selection = scene;
+        invalid_selection.review_sessions[0].selected_hunk_id = Some("foreign-hunk".into());
+        assert!(
+            invalid_selection
+                .validate()
+                .expect_err("foreign hunk selection must fail")
+                .to_string()
+                .contains("outside file")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn review_proof_checks_identity_counts_status_selection_focus_and_leaks() -> Result<()> {
+        let scene = workbench_review_scene("omega_workbench_review_selected_hunk")?;
+        let actual = scene
+            .active_review_session()
+            .context("Review fixture has no active session")?
+            .clone();
+        let checks = prove_review_surface(&scene, &actual)?;
+        let names = checks
+            .iter()
+            .map(|check| check.name.as_str())
+            .collect::<BTreeSet<_>>();
+        for required in [
+            "review-binding-identity",
+            "review-lifecycle",
+            "review-file-count",
+            "review-hunk-count",
+            "review-ordered-file-hunk-status",
+            "review-selected-file",
+            "review-selected-hunk",
+            "review-focus-owner",
+            "review-filesystem-mutations",
+            "review-pending-operation-count",
+            "review-ignored-stale-completion-count",
+            "review-no-foreign-thread-files",
+        ] {
+            assert!(names.contains(required), "missing Review proof {required}");
+        }
+
+        let mut leaked = actual;
+        leaked.files.push(scene.review_sessions[1].files[0].clone());
+        assert!(prove_review_surface(&scene, &leaked).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn review_proof_observes_mutations_and_stale_completion_rejection() -> Result<()> {
+        let all_reviewed = workbench_review_scene("omega_workbench_review_all_reviewed")?;
+        let actual = all_reviewed
+            .active_review_session()
+            .context("all-reviewed fixture has no active session")?
+            .clone();
+        assert_eq!(actual.mutations.len(), 3);
+        prove_review_surface(&all_reviewed, &actual)?;
+
+        let mut stale_scene = workbench_review_scene("omega_workbench_review_streaming_update")?;
+        stale_scene.review_sessions[0].ignored_stale_completion_count = 1;
+        stale_scene.validate()?;
+        let stale_actual = stale_scene
+            .active_review_session()
+            .context("streaming fixture has no active session")?
+            .clone();
+        prove_review_surface(&stale_scene, &stale_actual)?;
+
+        let mut missed_rejection = stale_actual;
+        missed_rejection.ignored_stale_completion_count = 0;
+        assert!(prove_review_surface(&stale_scene, &missed_rejection).is_err());
+        Ok(())
+    }
+
+    #[test]
     fn version_1_fixture_encoding_remains_backward_compatible() {
         let scene = valid_scene();
         let encoded = serde_json::to_value(&scene).expect("encode version 1 scene");
@@ -3786,6 +4751,34 @@ mod tests {
             let scene = scene_spec(name).expect("registered Search scene");
             assert_eq!(scene.phase, ScenePhase::Recording);
             assert_eq!(scene.regions, WORKBENCH_SEARCH_REGIONS);
+            assert!(WORKBENCH_SHELL_PIXEL_SCENES.contains(&name));
+        }
+    }
+
+    #[test]
+    fn review_pixel_catalog_covers_required_states_and_region() {
+        let expected = BTreeSet::from([
+            "omega_workbench_review_empty",
+            "omega_workbench_review_multi_file",
+            "omega_workbench_review_selected_hunk",
+            "omega_workbench_review_streaming_update",
+            "omega_workbench_review_rename_delete",
+            "omega_workbench_review_conflict",
+            "omega_workbench_review_all_reviewed",
+            "omega_workbench_review_narrow",
+            "omega_workbench_review_error",
+        ]);
+        let registered = HERMETIC_SCENES
+            .iter()
+            .filter(|scene| scene.name.starts_with("omega_workbench_review_"))
+            .map(|scene| scene.name)
+            .collect::<BTreeSet<_>>();
+        assert_eq!(registered, expected);
+        for name in registered {
+            let scene = scene_spec(name).expect("registered Review scene");
+            assert_eq!(scene.phase, ScenePhase::Recording);
+            assert_eq!(scene.fixture_version, 2);
+            assert_eq!(scene.regions, WORKBENCH_REVIEW_REGIONS);
             assert!(WORKBENCH_SHELL_PIXEL_SCENES.contains(&name));
         }
     }

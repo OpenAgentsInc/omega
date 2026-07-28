@@ -100,7 +100,15 @@ pub use crate::inline_assistant::InlineAssistant;
 pub use crate::message_editor::MessageEditorEvent;
 pub use crate::omega_host_bridge::omega_effectd_host_handler;
 pub use crate::thread_metadata_store::ThreadId;
-pub use agent_diff::{AgentDiffPane, AgentDiffToolbar};
+pub use agent_diff::{
+    AgentDiff, AgentDiffBinding, AgentDiffCheckpoint, AgentDiffLifecycle, AgentDiffPane,
+    AgentDiffToolbar,
+};
+#[cfg(any(test, feature = "test-support"))]
+pub use agent_diff::{
+    AgentDiffFileSnapshot, AgentDiffFileState, AgentDiffFixtureChange, AgentDiffHunkSnapshot,
+    AgentDiffPaneSnapshot,
+};
 pub use conversation_view::open_markdown_in_workspace;
 pub use conversation_view::{ConversationView, StateChange};
 pub use external_source_prompt::ExternalSourcePrompt;

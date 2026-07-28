@@ -8907,6 +8907,10 @@ impl AgentPanel {
             .workbench_shell
             .search_surface_for_active_binding(cx)
             .is_some_and(|surface| surface.focus_handle(cx).contains_focused(window, cx));
+        let review_surface_was_focused = self
+            .workbench_shell
+            .review_surface_for_active_binding(cx)
+            .is_some_and(|surface| surface.focus_handle(cx).contains_focused(window, cx));
         let context = self.workbench_thread_context(cx);
         let result = match context {
             Ok((thread_id, observation)) => self
@@ -9007,6 +9011,88 @@ impl AgentPanel {
                 cx,
             );
         }
+        if let Some(review_surface) = self.workbench_shell.review_surface_for_active_binding(cx)
+            && let Some(binding) = review_surface.read(cx).binding(cx)
+        {
+            let generation = binding.checkpoint.generation();
+            if self.workbench_shell.projection().connection
+                != omega_workbench_state::ConnectionPhase::Online
+            {
+                review_surface.update(cx, |review_surface, cx| {
+                    review_surface.set_offline(generation, cx);
+                });
+                self.workbench_shell.set_active_review_content_state(
+                    workbench_shell::SurfaceContentState::Offline,
+                    window,
+                    cx,
+                );
+            } else if self.workbench_review_has_authority(cx) {
+                if matches!(
+                    review_surface.read(cx).lifecycle(cx),
+                    crate::AgentDiffLifecycle::Offline
+                        | crate::AgentDiffLifecycle::UnavailableCheckpoint(_)
+                ) {
+                    review_surface.update(cx, |review_surface, cx| {
+                        review_surface.set_online(generation, window, cx);
+                    });
+                }
+                self.workbench_shell.set_active_review_content_state(
+                    workbench_shell::SurfaceContentState::Ready,
+                    window,
+                    cx,
+                );
+            } else {
+                let message: gpui::SharedString =
+                    "The active Review checkpoint is unavailable".into();
+                review_surface.update(cx, |review_surface, cx| {
+                    review_surface.set_checkpoint_unavailable(generation, message.clone(), cx);
+                });
+                self.workbench_shell.set_active_review_content_state(
+                    workbench_shell::SurfaceContentState::Error(message),
+                    window,
+                    cx,
+                );
+            }
+        }
+        let review_is_visible = self
+            .workbench_shell
+            .projection()
+            .visible_projection()
+            .is_some_and(|visible| {
+                visible.dock_open
+                    && visible.effective_surface == Some(omega_workbench_state::WorkSurface::Review)
+            });
+        if self.workbench_shell_enabled
+            && review_is_visible
+            && self.workbench_review_has_authority(cx)
+        {
+            let review_host_was_missing = self
+                .workbench_shell
+                .review_surface_for_active_binding(cx)
+                .is_none();
+            match self
+                .prepare_review_surface(window, cx)
+                .and_then(|review_surface| {
+                    self.workbench_shell
+                        .ensure_visible_review_host(review_surface, cx)
+                }) {
+                Ok(Some(host)) if review_surface_was_focused && review_host_was_missing => {
+                    host.focus_handle(cx).focus(window, cx);
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    log::warn!("failed to synchronize the native Review host: {error:#}");
+                    self.workbench_shell.record_error(error.to_string());
+                    if let Err(collapse_error) = self.workbench_shell.collapse_dock() {
+                        log::warn!(
+                            "failed to collapse Review after host synchronization failed: \
+                             {collapse_error:#}"
+                        );
+                    }
+                    self.focus_thread_transcript(window, cx);
+                }
+            }
+        }
         let files_is_visible = self
             .workbench_shell
             .projection()
@@ -9030,6 +9116,11 @@ impl AgentPanel {
         }
         if search_surface_was_focused
             && (!search_is_visible || !self.workbench_search_has_authority(cx))
+        {
+            self.focus_thread_transcript(window, cx);
+        }
+        if review_surface_was_focused
+            && (!review_is_visible || !self.workbench_review_has_authority(cx))
         {
             self.focus_thread_transcript(window, cx);
         }
@@ -9060,6 +9151,13 @@ impl AgentPanel {
             omega_workbench_state::WorkSurface::Search,
             cx,
         )
+    }
+
+    fn workbench_review_has_authority(&self, cx: &App) -> bool {
+        self.workbench_repository_surface_has_authority(
+            omega_workbench_state::WorkSurface::Review,
+            cx,
+        ) && self.active_agent_thread(cx).is_some()
     }
 
     fn workbench_repository_surface_has_authority(
@@ -9248,6 +9346,64 @@ impl AgentPanel {
         let search_view = search_surface.read(cx).search_view().clone();
         Self::synchronize_native_search_scope(&search_view, Some(worktree_id), false, cx);
         Ok(search_surface)
+    }
+
+    fn prepare_review_surface(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<Entity<workbench_shell::NativeReviewSurface>> {
+        if !self.workbench_review_has_authority(cx) {
+            anyhow::bail!("the native Review surface has no usable thread repository authority");
+        }
+        let visible = self
+            .workbench_shell
+            .projection()
+            .visible_projection()
+            .ok_or_else(|| anyhow!("open a thread before preparing native Review"))?;
+        let repository = visible
+            .binding
+            .clone()
+            .ok_or_else(|| anyhow!("the active thread has no repository binding"))?;
+        let generation = visible.generation;
+        let thread_id = self
+            .active_thread_id(cx)
+            .ok_or_else(|| anyhow!("the active thread has no typed thread identity"))?;
+        if thread_id.to_key_string() != visible.thread_id {
+            anyhow::bail!(
+                "the active typed thread changed before native Review could bind to its projection"
+            );
+        }
+        let worktree_id = self
+            .active_workbench_worktree_id(cx)
+            .ok_or_else(|| anyhow!("the active thread worktree is unavailable"))?;
+        let thread = self
+            .active_agent_thread(cx)
+            .ok_or_else(|| anyhow!("the active thread cannot provide native Review"))?;
+        let binding = crate::AgentDiffBinding::for_thread(
+            thread_id,
+            repository,
+            worktree_id,
+            generation,
+            &thread,
+            cx,
+        );
+        if let Some(review_surface) = self.workbench_shell.review_surface_for_active_binding(cx) {
+            review_surface.update(cx, |review_surface, cx| {
+                review_surface.bind(binding, window, cx)
+            })?;
+            return Ok(review_surface);
+        }
+        let workspace = self
+            .workspace
+            .upgrade()
+            .ok_or_else(|| anyhow!("the workspace closed while opening Review"))?;
+        let review_surface =
+            cx.new(|cx| workbench_shell::NativeReviewSurface::new(workspace, thread, window, cx));
+        review_surface.update(cx, |review_surface, cx| {
+            review_surface.bind(binding, window, cx)
+        })?;
+        Ok(review_surface)
     }
 
     fn synchronize_native_search_scope(
@@ -9593,9 +9749,26 @@ impl AgentPanel {
         } else {
             None
         };
-        let selection =
-            self.workbench_shell
-                .select_surface(surface, files_panel.clone(), search_surface, cx);
+        let review_surface = if surface == omega_workbench_state::WorkSurface::Review {
+            match self.prepare_review_surface(window, cx) {
+                Ok(review_surface) => Some(review_surface),
+                Err(error) => {
+                    log::warn!("could not prepare the Review work surface: {error:#}");
+                    self.workbench_shell.record_error(error.to_string());
+                    cx.notify();
+                    return;
+                }
+            }
+        } else {
+            None
+        };
+        let selection = self.workbench_shell.select_surface(
+            surface,
+            files_panel.clone(),
+            search_surface,
+            review_surface,
+            cx,
+        );
         match selection {
             Ok(workbench_shell::SurfaceSelection::Collapsed) => {
                 self.focus_thread_transcript(window, cx);
@@ -10487,6 +10660,13 @@ impl AgentPanel {
         self.workbench_shell.search_surface_for_active_binding(cx)
     }
 
+    pub fn workbench_review_surface_for_tests(
+        &self,
+        cx: &App,
+    ) -> Option<Entity<workbench_shell::NativeReviewSurface>> {
+        self.workbench_shell.review_surface_for_active_binding(cx)
+    }
+
     pub fn workbench_host_count_for_tests(&self) -> usize {
         self.workbench_shell.host_count()
     }
@@ -10539,7 +10719,7 @@ impl AgentPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Result<omega_workbench_state::TransitionEffect> {
-        let effect = self.workbench_shell.invalidate_surface(surface)?;
+        let effect = self.workbench_shell.invalidate_surface(surface, cx)?;
         if self.workbench_shell.focus_target() == workbench_shell::WorkbenchFocusTarget::Transcript
         {
             self.focus_thread_transcript(window, cx);

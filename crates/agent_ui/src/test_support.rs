@@ -657,6 +657,157 @@ impl AgentWorkbenchFrontDoor {
             .map(|surface| surface.entity_id())
     }
 
+    pub fn native_review_surface(
+        &self,
+        cx: &TestAppContext,
+    ) -> Option<Entity<crate::workbench_shell::NativeReviewSurface>> {
+        self.panel
+            .read_with(cx, |panel, cx| panel.workbench_review_surface_for_tests(cx))
+    }
+
+    pub fn native_review_surface_entity_id(&self, cx: &TestAppContext) -> Option<EntityId> {
+        self.native_review_surface(cx)
+            .map(|surface| surface.entity_id())
+    }
+
+    pub fn native_review_agent_diff_entity_id(&self, cx: &TestAppContext) -> Option<EntityId> {
+        self.native_review_surface(cx)
+            .map(|surface| surface.read_with(cx, |surface, _cx| surface.agent_diff().entity_id()))
+    }
+
+    pub fn native_review_pane_entity_id(&self, cx: &TestAppContext) -> Option<EntityId> {
+        self.native_review_surface(cx)
+            .map(|surface| surface.read_with(cx, |surface, _cx| surface.diff_pane().entity_id()))
+    }
+
+    pub fn native_review_toolbar_entity_id(&self, cx: &TestAppContext) -> Option<EntityId> {
+        self.native_review_surface(cx)
+            .map(|surface| surface.read_with(cx, |surface, _cx| surface.diff_toolbar().entity_id()))
+    }
+
+    pub fn native_review_state(&self, cx: &TestAppContext) -> Option<crate::AgentDiffPaneSnapshot> {
+        let surface = self.native_review_surface(cx)?;
+        let pane = surface.read_with(cx, |surface, _cx| surface.diff_pane().clone());
+        let mut visual = VisualTestContext::from_window(self.window, cx);
+        Some(pane.update_in(&mut visual, |pane, window, cx| {
+            pane.snapshot_for_tests(window, cx)
+        }))
+    }
+
+    pub fn complete_native_review_generation(
+        &self,
+        generation: u64,
+        cx: &TestAppContext,
+    ) -> Option<bool> {
+        let surface = self.native_review_surface(cx)?;
+        let pane = surface.read_with(cx, |surface, _cx| surface.diff_pane().clone());
+        let mut visual = VisualTestContext::from_window(self.window, cx);
+        Some(pane.update_in(&mut visual, |pane, window, cx| {
+            pane.complete_load(generation, window, cx)
+        }))
+    }
+
+    pub fn focus_native_review(&self, cx: &TestAppContext) -> Result<()> {
+        let surface = self
+            .native_review_surface(cx)
+            .context("native Review surface is unavailable")?;
+        let mut visual = VisualTestContext::from_window(self.window, cx);
+        surface.update_in(&mut visual, |surface, window, cx| {
+            surface.focus_handle(cx).focus(window, cx);
+        });
+        visual.run_until_parked();
+        Ok(())
+    }
+
+    pub fn dispatch_native_review_action(
+        &self,
+        action: impl Action,
+        cx: &TestAppContext,
+    ) -> Result<()> {
+        let surface = self
+            .native_review_surface(cx)
+            .context("native Review surface is unavailable")?;
+        let mut visual = VisualTestContext::from_window(self.window, cx);
+        surface.update_in(&mut visual, |surface, window, cx| {
+            surface.focus_handle(cx).focus(window, cx);
+        });
+        visual.dispatch_action(action);
+        visual.run_until_parked();
+        Ok(())
+    }
+
+    pub fn focus_native_review_editor(&self, cx: &TestAppContext) -> Result<()> {
+        let surface = self
+            .native_review_surface(cx)
+            .context("native Review surface is unavailable")?;
+        let pane = surface.read_with(cx, |surface, _cx| surface.diff_pane().clone());
+        let mut visual = VisualTestContext::from_window(self.window, cx);
+        pane.update_in(&mut visual, |pane, window, cx| {
+            pane.focus_handle(cx).focus(window, cx);
+        });
+        visual.run_until_parked();
+        anyhow::ensure!(
+            surface.update_in(&mut visual, |surface, window, cx| {
+                surface.contains_focus(window, cx)
+            }),
+            "native Review editor did not retain focus"
+        );
+        Ok(())
+    }
+
+    pub async fn seed_native_review_edit(
+        &self,
+        fixture_id: &str,
+        relative_path: &str,
+        replacement: &str,
+        cx: &mut TestAppContext,
+    ) -> Result<Entity<language::Buffer>> {
+        let worktree_id = self
+            .fixture_worktree_id(fixture_id, cx)
+            .with_context(|| format!("fixture worktree {fixture_id:?} is unavailable"))?;
+        let project_path = ProjectPath {
+            worktree_id,
+            path: util::rel_path::rel_path(relative_path).into(),
+        };
+        let project = self
+            .workspace
+            .read_with(cx, |workspace, _cx| workspace.project().clone());
+        let buffer = project
+            .update(cx, |project, cx| project.open_buffer(project_path, cx))
+            .await
+            .with_context(|| format!("opening native Review fixture {relative_path:?}"))?;
+        let surface = self
+            .native_review_surface(cx)
+            .context("native Review surface is unavailable")?;
+        let pane = surface.read_with(cx, |surface, _cx| surface.diff_pane().clone());
+        let mut visual = VisualTestContext::from_window(self.window, cx);
+        visual.update(|_window, cx| -> Result<()> {
+            pane.update(cx, |pane, cx| {
+                pane.record_buffer_change_for_tests(
+                    buffer.clone(),
+                    crate::AgentDiffFixtureChange::Read,
+                    cx,
+                );
+            });
+            buffer.update(cx, |buffer, cx| {
+                let end = buffer.snapshot().max_point();
+                buffer
+                    .edit([(language::Point::new(0, 0)..end, replacement)], None, cx)
+                    .context("editing the native Review fixture buffer")
+            })?;
+            pane.update(cx, |pane, cx| {
+                pane.record_buffer_change_for_tests(
+                    buffer.clone(),
+                    crate::AgentDiffFixtureChange::Edited,
+                    cx,
+                );
+            });
+            Ok(())
+        })?;
+        visual.run_until_parked();
+        Ok(buffer)
+    }
+
     pub fn native_search_view_entity_id(&self, cx: &TestAppContext) -> Option<EntityId> {
         self.native_search_surface(cx)
             .map(|surface| surface.read_with(cx, |surface, _cx| surface.search_view().entity_id()))
@@ -4930,5 +5081,279 @@ mod workbench_front_door_tests {
         front_door
             .teardown(cx)
             .expect("Search binding-change workbench should tear down");
+    }
+
+    #[gpui::test]
+    async fn native_review_retains_exact_entities_and_routes_one_keep(cx: &mut TestAppContext) {
+        let scene = scene_with_thread("workbench_native_review", 1200, true);
+        let front_door = AgentWorkbenchFrontDoor::mount(scene, cx)
+            .await
+            .expect("native Review scene should mount");
+        front_door.dispatch_action(crate::workbench_shell::SelectReview, cx);
+
+        let surface_id = front_door
+            .native_review_surface_entity_id(cx)
+            .expect("native Review surface");
+        let agent_diff_id = front_door
+            .native_review_agent_diff_entity_id(cx)
+            .expect("native AgentDiff authority");
+        let pane_id = front_door
+            .native_review_pane_entity_id(cx)
+            .expect("native AgentDiffPane");
+        let toolbar_id = front_door
+            .native_review_toolbar_entity_id(cx)
+            .expect("native AgentDiffToolbar");
+        let empty = front_door
+            .native_review_state(cx)
+            .expect("empty native Review state");
+        let worktree_id = front_door
+            .fixture_worktree_id("worktree-1", cx)
+            .expect("Review fixture worktree");
+        assert_eq!(
+            empty.binding.as_ref().map(|binding| binding.worktree_id),
+            Some(worktree_id)
+        );
+        assert!(matches!(empty.lifecycle, crate::AgentDiffLifecycle::Empty));
+
+        let snapshot = front_door.snapshot(cx);
+        let mut probe = SemanticProbe::new(&snapshot);
+        probe
+            .require_accessible(
+                "omega.workbench.review.toolbar",
+                "Toolbar",
+                "Review controls",
+            )
+            .expect("native Review toolbar should be accessible");
+        probe
+            .require_accessible("omega.workbench.review.content", "Group", "Review changes")
+            .expect("native Review content should be accessible");
+
+        front_door
+            .seed_native_review_edit(
+                "worktree-1",
+                "src/main.rs",
+                "use omega::review;\nfn main() {}\n",
+                cx,
+            )
+            .await
+            .expect("seed one exact native Review hunk");
+        front_door
+            .focus_native_review_editor(cx)
+            .expect("focus the exact native Review editor after changes appear");
+        let changed = front_door
+            .native_review_state(cx)
+            .expect("changed native Review state");
+        assert!(
+            matches!(
+                changed.lifecycle,
+                crate::AgentDiffLifecycle::Ready | crate::AgentDiffLifecycle::Streaming
+            ),
+            "unexpected changed Review state: {changed:?}"
+        );
+        assert_eq!(changed.files.len(), 1);
+        assert_eq!(
+            changed
+                .files
+                .iter()
+                .map(|file| file.hunks.len())
+                .sum::<usize>(),
+            1
+        );
+        assert_eq!(changed.selected_path.as_deref(), Some("src/main.rs"));
+        assert!(
+            changed.editor_focused,
+            "the exact native diff editor should receive focus when changes appear"
+        );
+
+        front_door.dispatch_action(crate::workbench_shell::SelectReview, cx);
+        front_door.dispatch_action(crate::workbench_shell::SelectReview, cx);
+        assert_eq!(
+            front_door.native_review_surface_entity_id(cx),
+            Some(surface_id)
+        );
+        assert_eq!(
+            front_door.native_review_agent_diff_entity_id(cx),
+            Some(agent_diff_id)
+        );
+        assert_eq!(front_door.native_review_pane_entity_id(cx), Some(pane_id));
+        assert_eq!(
+            front_door.native_review_toolbar_entity_id(cx),
+            Some(toolbar_id)
+        );
+        let reopened = front_door
+            .native_review_state(cx)
+            .expect("reopened native Review state");
+        assert_eq!(reopened.selected_path, changed.selected_path);
+        assert_eq!(reopened.selected_range, changed.selected_range);
+
+        let before_keep = front_door
+            .native_review_state(cx)
+            .expect("state before one Keep");
+        assert!(
+            front_door
+                .snapshot(cx)
+                .bounds("omega.workbench.surface.review")
+                .is_some(),
+            "the Review surface must be rendered before a routed action"
+        );
+        front_door
+            .dispatch_native_review_action(crate::Keep, cx)
+            .expect("route one Keep through the exact native Review surface");
+        let after_keep = front_door
+            .native_review_state(cx)
+            .expect("state after one Keep");
+        assert_eq!(after_keep.kept_hunks, before_keep.kept_hunks + 1);
+        assert_eq!(after_keep.rejected_hunks, before_keep.rejected_hunks);
+        assert_eq!(
+            after_keep
+                .files
+                .iter()
+                .map(|file| file.hunks.len())
+                .sum::<usize>(),
+            0,
+            "one Keep action must review exactly the one selected hunk"
+        );
+
+        front_door
+            .seed_native_review_edit("worktree-1", "README.md", "# Reviewed artifact\n", cx)
+            .await
+            .expect("seed a second hunk for the editor round trip");
+        front_door
+            .focus_native_review_editor(cx)
+            .expect("focus exact native Review editor");
+        front_door.dispatch_action(editor::actions::OpenExcerpts, cx);
+        assert!(
+            front_door.workspace_center_is_visible(cx),
+            "opening a reviewed hunk must reveal the sealed center"
+        );
+        assert_eq!(
+            front_door
+                .active_workspace_item_path(cx)
+                .map(|path| path.path),
+            Some(util::rel_path::rel_path("README.md").into())
+        );
+        assert!(
+            front_door.active_workspace_item_is_focused(cx),
+            "the opened center editor must receive deterministic focus"
+        );
+
+        assert_eq!(
+            front_door.native_review_surface_entity_id(cx),
+            Some(surface_id)
+        );
+        assert_eq!(
+            front_door.native_review_agent_diff_entity_id(cx),
+            Some(agent_diff_id)
+        );
+        assert_eq!(front_door.native_review_pane_entity_id(cx), Some(pane_id));
+        assert_eq!(
+            front_door.native_review_toolbar_entity_id(cx),
+            Some(toolbar_id)
+        );
+
+        front_door
+            .teardown(cx)
+            .expect("native Review workbench should tear down");
+    }
+
+    #[gpui::test]
+    async fn native_review_rebind_and_invalidation_isolate_stale_state(cx: &mut TestAppContext) {
+        let scene = scene_with_two_worktrees("workbench_review_binding_isolation");
+        let front_door = AgentWorkbenchFrontDoor::mount(scene, cx)
+            .await
+            .expect("Review binding-isolation scene should mount");
+        front_door.dispatch_action(crate::workbench_shell::SelectReview, cx);
+        front_door
+            .seed_native_review_edit(
+                "worktree-1",
+                "src/main.rs",
+                "const WORKTREE: usize = 1;\n",
+                cx,
+            )
+            .await
+            .expect("seed old binding Review change");
+        let old_surface = front_door
+            .native_review_surface(cx)
+            .expect("old binding Review surface");
+        let old_surface_id = old_surface.entity_id();
+        let weak_old_surface = old_surface.downgrade();
+        drop(old_surface);
+        let old_state = front_door
+            .native_review_state(cx)
+            .expect("old binding Review state");
+        let generation = old_state
+            .binding
+            .as_ref()
+            .expect("old Review binding")
+            .checkpoint
+            .generation();
+        assert_eq!(
+            front_door.complete_native_review_generation(generation + 1, cx),
+            Some(false)
+        );
+        let after_stale = front_door
+            .native_review_state(cx)
+            .expect("state after stale completion");
+        assert_eq!(
+            after_stale.stale_completions_ignored,
+            old_state.stale_completions_ignored + 1
+        );
+        assert_eq!(after_stale.files, old_state.files);
+
+        front_door
+            .select_worktree_picker_row(1, cx)
+            .expect("select the second worktree through the rendered picker");
+        let new_surface_id = front_door
+            .native_review_surface_entity_id(cx)
+            .expect("new binding Review surface");
+        assert_ne!(new_surface_id, old_surface_id);
+        assert!(
+            weak_old_surface.upgrade().is_none(),
+            "the old binding must release its exact native Review entity graph"
+        );
+        let worktree_2 = front_door
+            .fixture_worktree_id("worktree-2", cx)
+            .expect("second fixture worktree");
+        let new_state = front_door
+            .native_review_state(cx)
+            .expect("new binding Review state");
+        assert_eq!(
+            new_state
+                .binding
+                .as_ref()
+                .map(|binding| binding.worktree_id),
+            Some(worktree_2)
+        );
+        assert!(
+            new_state.files.is_empty(),
+            "the old worktree's action-log changes must not leak into the new binding"
+        );
+
+        let weak_new_surface = front_door
+            .native_review_surface(cx)
+            .expect("new binding Review surface")
+            .downgrade();
+        assert_eq!(
+            front_door
+                .invalidate_surface(omega_workbench_state::WorkSurface::Review, cx)
+                .expect("invalidate native Review"),
+            omega_workbench_state::TransitionEffect::DeterministicFallback
+        );
+        assert!(front_door.native_review_surface(cx).is_none());
+        assert!(
+            weak_new_surface.upgrade().is_none(),
+            "invalidating Review must release its native entity graph"
+        );
+        assert!(
+            front_door
+                .snapshot(cx)
+                .bounds("omega.workbench.surface.review")
+                .is_none(),
+            "invalidated Review must not leave foreign content rendered"
+        );
+
+        front_door
+            .teardown(cx)
+            .expect("Review binding-isolation workbench should tear down");
     }
 }

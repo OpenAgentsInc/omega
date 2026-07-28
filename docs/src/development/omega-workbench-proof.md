@@ -105,6 +105,10 @@ The shared scene types and proof records live in
   persistence, route-decision, and executor-disclosure events;
 - each work surface's availability and optional badge, the active surface, and
   whether the dock is open; and
+- each Review session's thread, ACP session, repository, worktree, action-log
+  checkpoint and generation, lifecycle, ordered files and hunks, statuses and
+  ranges, selection, focus, pending work, rejected stale completions, and
+  observed mutations with resulting temporary-repository contents; and
 - the requested surface, dock state, revision, and mutations persisted across a
   cold restart.
 
@@ -287,6 +291,69 @@ Each Search scene captures the whole workbench and a named `search-surface`
 region derived from `omega.workbench.surface.search`. A capture is recorded
 only after semantic ownership, lifecycle, focus, accessibility, action, and
 bounds checks pass.
+
+### Native Review scenes {#native-review-scenes}
+
+Nine registered scenes exercise the native Agent Diff pane and toolbar inside
+the thread-bound Review work surface:
+
+| Scene                                      | Fixture and proof boundary                                                                                                                                               |
+| ------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `omega_workbench_review_empty`             | A valid checkpoint with no changed buffers. Proves the native empty lifecycle, no file/hunk projection, and no fallback to the foreign thread.                           |
+| `omega_workbench_review_multi_file`        | Modified and added files with three ordered hunks. Proves exact file/hunk counts, statuses and ranges under the active beta checkpoint.                                  |
+| `omega_workbench_review_selected_hunk`     | Selects the second hunk in a multi-file review. Proves native selection, diff focus, and editor-open routing without changing Review ownership.                           |
+| `omega_workbench_review_streaming_update`  | Adds an incoming hunk while the agent edit stream is pending. Proves the surviving selected hunk remains selected and the lifecycle stays `Streaming`.                   |
+| `omega_workbench_review_rename_delete`     | Projects one renamed file with its old path and one deleted file. Proves that non-modified statuses and zero-sided ranges survive the native snapshot.                   |
+| `omega_workbench_review_conflict`          | Projects a conflicted file and conflict hunk. Proves conflict status, disabled unsafe mutations, and exact active-worktree ownership.                                    |
+| `omega_workbench_review_all_reviewed`      | Drives keep/reject through native actions until no pending hunks remain. Proves `AllReviewed`, mutation counts, and resulting working-tree contents.                    |
+| `omega_workbench_review_narrow`            | Renders the multi-file review at the 910-pixel minimum allocation. Proves the native toolbar and diff remain contained without overlapping transcript or composer.       |
+| `omega_workbench_review_error`             | Publishes a generation-bound checkpoint error. Proves an accessible alert, no interactive stale diff, and retention of the typed binding needed for deterministic retry. |
+
+Every Review fixture contains two logical threads, ACP sessions, worktrees, and
+action-log checkpoints. Alpha contains `src/foreign_thread_only.rs`; beta owns
+the visible scene. The active session's `ReviewBindingFixture` must match the
+production `AgentDiffBinding` field for field, including checkpoint entity ID
+and generation. The proof then compares lifecycle, ordered file and hunk
+projection, selected path and hunk, focus owner, native mutation records,
+pending-operation count, and ignored-stale-completion count. It separately
+rejects any foreign-only path even when other counts happen to match.
+
+The runner never derives expected Review state from visible text. It creates two
+temporary Git repositories with committed base files, translates the production
+Agent Diff test snapshot into the shared typed fixture, and calls
+`prove_review_surface` before pixel capture. Fixture edits use a test-only
+awaitable entry into the same action-log and `BufferDiff` path as production,
+so the scheduler cannot turn an unobserved detached edit into an apparent
+empty-state success. Keep/reject assertions read the repository working tree
+after dispatching the native action, so incrementing a counter without applying
+the authoritative mutation cannot pass.
+
+The stale-completion proof starts an alpha generation, switches the active
+thread/worktree/checkpoint to beta, and only then releases alpha. It requires
+the alpha completion to be rejected by its checkpoint generation, the beta
+entity and selection to remain unchanged, and alpha's path to be absent from
+both native state and the rendered selector set. Seeded GPUI scheduler
+iterations cover different completion, render, and focus task orderings. A
+worktree-invalidation case removes the bound worktree and requires
+`Invalidated`, zero actionable hunks, no mutation, and no retained focus inside
+hidden native content.
+
+Ready Review scenes require accessible
+`omega.workbench.review.toolbar` and
+`omega.workbench.review.content` targets inside
+`omega.workbench.surface.review`. File and hunk selectors must be unique,
+ordered, labeled, and expose selected/disabled state through accessibility
+properties. Empty, error, offline, unavailable-checkpoint, and invalidated
+states expose one accessible status or alert and hide stale interactive diff
+and mutation controls. Narrow captures additionally require the Review surface
+to remain inside the dock and disjoint from transcript and composer.
+
+Each scene captures the whole workbench and a named `review-surface` region
+derived from `omega.workbench.surface.review`. Baselines are generated only
+after native identity, lifecycle, mutation, focus, accessibility, leak, stale
+completion, and teardown assertions pass. Teardown invalidates the generation,
+clears tracked buffers, removes the GPUI window and project worktrees, drains
+scheduled work, and only then releases the temporary repositories.
 
 ### Registering a scene {#registering-a-scene}
 

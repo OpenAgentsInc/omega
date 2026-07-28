@@ -18,9 +18,10 @@ Issue 128 installed the production rail and dock boundary, normal GPUI actions,
 per-thread reducer integration, retained generic hosts, typed badge plumbing,
 accessibility semantics, and deterministic tests. Issue 133 added the
 authoritative repository, worktree, branch, and Git-state projection described
-below. Issue 129 rehomes the Workspace-created native Project Panel into Files.
-The remaining generic hosts render loading, ready, error, or offline
-placeholders until their native adapters land.
+below. Issue 129 rehomes the Workspace-created native Project Panel into Files,
+issue 134 mounts native project Search, and issue 136 mounts native agent
+change review. The remaining generic hosts render loading, ready, error, or
+offline placeholders until their native adapters land.
 
 The remaining work is deliberately split so each native adapter can prove its
 own identity, behavior, and lifecycle:
@@ -31,13 +32,13 @@ own identity, behavior, and lifecycle:
 | [Issue 130](https://github.com/OpenAgentsInc/omega/issues/130) | Present the thread's typed plan                    |
 | [Issue 131](https://github.com/OpenAgentsInc/omega/issues/131) | Persist and cold-restore each thread's selection   |
 | [Issue 132](https://github.com/OpenAgentsInc/omega/issues/132) | Mount the existing Git Panel                       |
-| [Issue 134](https://github.com/OpenAgentsInc/omega/issues/134) | Mount an embedded project-search entity            |
-| [Issue 136](https://github.com/OpenAgentsInc/omega/issues/136) | Mount a thread-bound review entity                 |
+| [Issue 134](https://github.com/OpenAgentsInc/omega/issues/134) | Mounted an embedded project-search entity          |
+| [Issue 136](https://github.com/OpenAgentsInc/omega/issues/136) | Mounted a thread-bound native review entity        |
 | [Issue 137](https://github.com/OpenAgentsInc/omega/issues/137) | Mount the existing Terminal Panel without spawning |
 
-Files is production content. Until the other adapters land, their entries
-remain retained-host foundations rather than replacements for the existing
-native panels.
+Files, Search, and Review are production content. Until the other adapters
+land, their entries remain retained-host foundations rather than replacements
+for the existing native panels.
 
 ## Composition boundary {#composition-boundary}
 
@@ -184,6 +185,79 @@ leaving stale results interactive. Returning to `Ready` restores focus to the
 native query or result target. Opening a result uses the existing Search editor
 navigation path and reveals the Workspace center beside the retained
 transcript.
+
+### Native Review adapter {#native-review-adapter}
+
+Review embeds the existing `AgentDiffPane`, `AgentDiffToolbar`, split diff
+editor, hunk controls, and keep/reject commands in a retained
+`NativeReviewSurface`. The adapter contributes the workbench host, binding, and
+lifecycle boundary. It does not create another diff engine, patch
+representation, filesystem writer, or keep/reject implementation.
+
+Every mounted pane has an `AgentDiffBinding` containing the logical Omega
+thread ID, ACP session ID, `RepositoryBinding`, typed `WorktreeId`, and an
+`AgentDiffCheckpoint`. The checkpoint is the source action-log entity ID plus
+the workbench binding generation. The host key retains the outer
+`(thread, repository/worktree, Review)` identity; the checkpoint additionally
+prevents a pane or completion from being reused after an action log or
+generation changes inside that host epoch.
+
+Before a pane accepts a binding it verifies that the ACP session, action-log
+entity, and visible worktree still match. Changed buffers are filtered by the
+bound `WorktreeId` before they become multibuffer excerpts. File ordering,
+diff-hunk ranges and statuses, editor decorations, keyboard navigation,
+selection, scrolling, and open-in-editor behavior remain native Agent Diff
+state. The workbench never falls back to the most recently active global diff.
+
+Each generation has an explicit lifecycle:
+
+- `Unbound` before a typed identity is installed;
+- `Loading` while a generation-bound review is being prepared;
+- `Empty`, `Ready`, `Streaming`, or `AllReviewed` for valid native content;
+- `Offline` while the project connection cannot authorize current content;
+- `UnavailableCheckpoint` when the source action log cannot be resolved;
+- `UnsupportedBinary` when a changed binary cannot be represented safely;
+- `Invalidated` when the bound worktree or identity disappears; and
+- `Error` for a surfaced failure with user-readable detail.
+
+Only `Ready` and `Streaming` permit keep/reject mutations. The existing
+`Keep`, `Reject`, `KeepAll`, and `RejectAll` handlers remain the sole mutation
+authority and revalidate the binding before writing. Review lifecycle code
+does not add a second patch-application path, bypass native confirmation, or
+convert an invalid action into apparent success.
+
+An incremental action-log update rebuilds native excerpts while first
+capturing the selected path and hunk range. If that hunk still exists, its
+selection and editor position survive. If it disappeared, selection falls
+forward to the next hunk in the same file and then to the first remaining
+hunk. An empty rebuild focuses the pane-level empty state. This rule is
+deterministic and does not depend on excerpt entity allocation or render order.
+
+Completion and lifecycle callbacks carry the checkpoint generation. A callback
+whose generation no longer matches returns without publishing content or
+status. Worktree removal clears the old excerpts and invalidates the pane;
+disconnect marks it offline. Switching threads or worktrees projects a
+different retained host, so a late completion may settle privately in its old
+host but cannot replace or mutate the visible one.
+
+The embedded toolbar is rendered as the accessible
+`omega.workbench.review.toolbar` (`Toolbar`, “Review controls”) and the native
+diff below it as `omega.workbench.review.content` (`Group`, “Review changes”),
+both inside `omega.workbench.surface.review`. Opening excerpts uses the
+existing editor action, then reveals the Workspace zero-base center beside the
+transcript. Collapse and reopen retain the pane and toolbar entities; an editor
+round trip does not transfer Review ownership to the global Workspace item
+selection.
+
+Deterministic tests inspect a native snapshot rather than rendered labels. That
+snapshot includes the full typed binding and checkpoint, lifecycle and
+pending/error state, ordered file and hunk projection with statuses and ranges,
+stable selection, retained entity IDs, focus owner, and observed keep/reject
+counts. Tests use two threads with different worktrees and action logs, then
+exercise navigation, incremental updates, mutation, collapse/reopen, thread
+switch, invalidation, and a released stale completion. A passing screenshot is
+therefore impossible unless the underlying identity, selection, mutation,
+focus, and no-leak assertions have already passed.
 
 ## State ownership {#state-ownership}
 

@@ -15,6 +15,7 @@ doctest = false
 [features]
 test-support = [
     "acp_thread/test-support",
+    "action_log/test-support",
     "eval_utils",
     "gpui/test-support",
     "git_ui/test-support",

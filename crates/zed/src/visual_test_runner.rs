@@ -523,12 +523,32 @@ fn is_workbench_search_scene(name: &str) -> bool {
 }
 
 #[cfg(target_os = "macos")]
+fn is_workbench_review_scene(name: &str) -> bool {
+    matches!(
+        name,
+        "omega_workbench_review_empty"
+            | "omega_workbench_review_multi_file"
+            | "omega_workbench_review_selected_hunk"
+            | "omega_workbench_review_streaming_update"
+            | "omega_workbench_review_rename_delete"
+            | "omega_workbench_review_conflict"
+            | "omega_workbench_review_all_reviewed"
+            | "omega_workbench_review_narrow"
+            | "omega_workbench_review_error"
+    )
+}
+
+#[cfg(target_os = "macos")]
 fn workbench_fixture_for_scene(name: &str) -> Result<WorkbenchScene> {
     use omega_workbench_harness::{
         ContentStateFixture, EventFixture, EventKindFixture, MessageFixture, MessageRoleFixture,
         MessageStateFixture, PersistedSceneFixture, ProjectFixture, RepositoryFixture,
         ThreadFixture, WorktreeFixture,
     };
+
+    if is_workbench_review_scene(name) {
+        return omega_workbench_harness::workbench_review_scene(name);
+    }
 
     let spec =
         scene_spec(name).ok_or_else(|| anyhow::anyhow!("unknown workbench scene {name:?}"))?;
@@ -1760,6 +1780,80 @@ fn verify_workbench_render_preflight(
             }
             record_workbench_semantic_checks(test_name, probe.into_checks());
             record_workbench_semantic_check(test_name, "search-native-toolbar-content-containment");
+        }
+        if is_workbench_review_scene(test_name) {
+            let mut probe = SemanticProbe::new(&snapshot);
+            probe.require_accessible(
+                "omega.workbench.surface.review",
+                "Group",
+                "Review work surface",
+            )?;
+            probe.require_accessible(
+                "omega.workbench.review.toolbar",
+                "Toolbar",
+                "Review controls",
+            )?;
+            probe.require_accessible(
+                "omega.workbench.review.content",
+                "Group",
+                "Review changes",
+            )?;
+            probe.require_inside(
+                "omega.workbench.review.toolbar",
+                "omega.workbench.surface.review",
+            )?;
+            probe.require_inside(
+                "omega.workbench.review.content",
+                "omega.workbench.surface.review",
+            )?;
+
+            match test_name {
+                "omega_workbench_review_empty" => {
+                    probe.require_accessible(
+                        "omega.workbench.review.lifecycle",
+                        "Status",
+                        "No changes to review",
+                    )?;
+                }
+                "omega_workbench_review_streaming_update" => {
+                    probe.require_accessible(
+                        "omega.workbench.review.lifecycle",
+                        "Status",
+                        "Updating review…",
+                    )?;
+                }
+                "omega_workbench_review_all_reviewed" => {
+                    probe.require_accessible(
+                        "omega.workbench.review.lifecycle",
+                        "Status",
+                        "All changes reviewed",
+                    )?;
+                }
+                "omega_workbench_review_error" => {
+                    probe.require_accessible(
+                        "omega.workbench.review.lifecycle",
+                        "Alert",
+                        "Could not load this checkpoint",
+                    )?;
+                }
+                _ => {
+                    probe.require_absent("omega.workbench.review.lifecycle")?;
+                }
+            }
+            if test_name == "omega_workbench_review_narrow" {
+                probe.require_fully_visible("omega.workbench.review.toolbar")?;
+                probe.require_fully_visible("omega.workbench.review.content")?;
+                probe.require_disjoint(
+                    "omega.workbench.surface.review",
+                    "omega.workbench.transcript",
+                )?;
+                probe.require_disjoint(
+                    "omega.workbench.surface.review",
+                    "omega.workbench.composer",
+                )?;
+            }
+            record_workbench_semantic_checks(test_name, probe.into_checks());
+            record_workbench_semantic_check(test_name, "review-native-toolbar-content-containment");
         }
         if test_name.starts_with("omega_workbench_identity_") {
             let mut probe = SemanticProbe::new(&snapshot);
@@ -3510,6 +3604,44 @@ struct WorkbenchSearchDiskFixture {
 }
 
 #[cfg(all(target_os = "macos", feature = "visual-tests"))]
+struct WorkbenchReviewDiskFixture {
+    _root: tempfile::TempDir,
+    worktrees: Vec<(String, PathBuf)>,
+    active_worktree_id: String,
+}
+
+#[cfg(all(target_os = "macos", feature = "visual-tests"))]
+fn initialize_workbench_git_fixture(path: &Path) -> Result<()> {
+    for arguments in [
+        &["init", "--initial-branch=main"][..],
+        &["config", "user.email", "omega-workbench@example.invalid"][..],
+        &["config", "user.name", "Omega Workbench Proof"][..],
+        &["add", "."][..],
+        &["commit", "-m", "Create Review proof fixture"][..],
+    ] {
+        let output = std::process::Command::new("git")
+            .args(arguments)
+            .current_dir(path)
+            .output()
+            .with_context(|| {
+                format!(
+                    "running `git {}` for Review fixture {}",
+                    arguments.join(" "),
+                    path.display()
+                )
+            })?;
+        anyhow::ensure!(
+            output.status.success(),
+            "`git {}` failed for Review fixture {}: {}",
+            arguments.join(" "),
+            path.display(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(())
+}
+
+#[cfg(all(target_os = "macos", feature = "visual-tests"))]
 fn create_workbench_files_disk_fixture(
     scene_name: &str,
 ) -> Result<Option<WorkbenchFilesDiskFixture>> {
@@ -3632,6 +3764,63 @@ fn create_workbench_search_disk_fixture(
 }
 
 #[cfg(all(target_os = "macos", feature = "visual-tests"))]
+fn create_workbench_review_disk_fixture(
+    scene_name: &str,
+) -> Result<Option<WorkbenchReviewDiskFixture>> {
+    if !is_workbench_review_scene(scene_name) {
+        return Ok(None);
+    }
+
+    let root = tempfile::tempdir().context("creating Review scene directory")?;
+    let root_path = root
+        .path()
+        .canonicalize()
+        .context("canonicalizing Review scene directory")?;
+    let alpha = root_path.join("alpha-worktree");
+    let beta = root_path.join("beta-worktree");
+    std::fs::create_dir_all(alpha.join("src"))?;
+    std::fs::create_dir_all(beta.join("src"))?;
+    std::fs::write(
+        alpha.join("src/foreign_thread_only.rs"),
+        "pub const FOREIGN_THREAD_ONLY: bool = false;\n",
+    )?;
+
+    let mut main_source = String::new();
+    for row in 0..40 {
+        match row {
+            0 => main_source.push_str("use omega::old_review;\n"),
+            20 => main_source.push_str("const REVIEW_MODE: bool = false;\n"),
+            35 => main_source.push_str("const STREAM_REVISION: usize = 0;\n"),
+            _ => main_source.push_str(&format!("// fixture row {row:02}\n")),
+        }
+    }
+    std::fs::write(beta.join("src/main.rs"), main_source)?;
+    std::fs::write(
+        beta.join("src/previous_name.rs"),
+        "// renamed fixture\npub const NAME: &str = \"old\";\n",
+    )?;
+    std::fs::write(
+        beta.join("src/obsolete.rs"),
+        "pub fn obsolete() {\n    unreachable!();\n}\n",
+    )?;
+    std::fs::write(
+        beta.join("src/conflicted.rs"),
+        "pub fn conflicted() {\n    let state = \"base\";\n}\n",
+    )?;
+    initialize_workbench_git_fixture(&alpha)?;
+    initialize_workbench_git_fixture(&beta)?;
+
+    Ok(Some(WorkbenchReviewDiskFixture {
+        _root: root,
+        worktrees: vec![
+            ("alpha-worktree".into(), alpha),
+            ("beta-worktree".into(), beta),
+        ],
+        active_worktree_id: "beta-worktree".into(),
+    }))
+}
+
+#[cfg(all(target_os = "macos", feature = "visual-tests"))]
 fn add_workbench_disk_worktrees(
     workspace_window: WindowHandle<Workspace>,
     worktrees: &[(String, PathBuf)],
@@ -3688,6 +3877,7 @@ fn run_omega_workbench_shell_visual_capture(
         .ok_or_else(|| anyhow::anyhow!("unknown workbench shell scene {scene_name:?}"))?;
     let files_fixture = create_workbench_files_disk_fixture(scene_name)?;
     let search_fixture = create_workbench_search_disk_fixture(scene_name)?;
+    let review_fixture = create_workbench_review_disk_fixture(scene_name)?;
     let project = cx.update(|cx| {
         project::Project::local(
             app_state.client.clone(),
@@ -3734,6 +3924,9 @@ fn run_omega_workbench_shell_visual_capture(
     if let Some(fixture) = search_fixture.as_ref() {
         add_workbench_disk_worktrees(workspace_window, &fixture.worktrees, "Search", cx)?;
     }
+    if let Some(fixture) = review_fixture.as_ref() {
+        add_workbench_disk_worktrees(workspace_window, &fixture.worktrees, "Review", cx)?;
+    }
 
     let result = run_omega_workbench_shell_visual_capture_in_window(
         workspace_window,
@@ -3741,6 +3934,7 @@ fn run_omega_workbench_shell_visual_capture(
         scene_name,
         files_fixture.as_ref(),
         search_fixture.as_ref(),
+        review_fixture.as_ref(),
         update_baseline,
     );
     cx.update_window(workspace_window.into(), |_, window, _cx| {
@@ -3748,7 +3942,7 @@ fn run_omega_workbench_shell_visual_capture(
     })
     .log_err();
     cx.run_until_parked();
-    if files_fixture.is_some() || search_fixture.is_some() {
+    if files_fixture.is_some() || search_fixture.is_some() || review_fixture.is_some() {
         cx.update(|cx| {
             let worktree_ids = project
                 .read(cx)
@@ -3773,6 +3967,7 @@ fn run_omega_workbench_shell_visual_capture_in_window(
     scene_name: &str,
     files_fixture: Option<&WorkbenchFilesDiskFixture>,
     search_fixture: Option<&WorkbenchSearchDiskFixture>,
+    review_fixture: Option<&WorkbenchReviewDiskFixture>,
     update_baseline: bool,
 ) -> Result<TestResult> {
     use agent_ui::AgentPanel;
@@ -3847,16 +4042,32 @@ fn run_omega_workbench_shell_visual_capture_in_window(
         cx.read(|cx| panel.read(cx).active_thread_id(cx).is_some()),
         "workbench shell scene {scene_name:?} has no active production thread"
     );
-    configure_workbench_shell_scene(
+    let configuration = configure_workbench_shell_scene(
         scene_name,
         workspace_window,
         &panel,
         &project_panel,
         files_fixture,
         search_fixture,
+        review_fixture,
         cx,
-    )?;
-    run_visual_test(scene_name, workspace_window.into(), cx, update_baseline)
+    );
+    if let Err(error) = configuration {
+        if is_workbench_review_scene(scene_name) {
+            teardown_workbench_review(&panel, cx).log_err();
+        }
+        return Err(error);
+    }
+    let result = run_visual_test(scene_name, workspace_window.into(), cx, update_baseline);
+    if is_workbench_review_scene(scene_name) {
+        let cleanup_result = teardown_workbench_review(&panel, cx);
+        if result.is_ok() {
+            cleanup_result?;
+        } else {
+            cleanup_result.log_err();
+        }
+    }
+    result
 }
 
 #[cfg(all(target_os = "macos", feature = "visual-tests"))]
@@ -4102,6 +4313,581 @@ fn start_pending_workbench_search(
 }
 
 #[cfg(all(target_os = "macos", feature = "visual-tests"))]
+fn active_workbench_review(
+    panel: &Entity<agent_ui::AgentPanel>,
+    cx: &VisualTestAppContext,
+) -> Result<(
+    Entity<agent_ui::workbench_shell::NativeReviewSurface>,
+    Entity<agent_ui::AgentDiffPane>,
+)> {
+    let surface = cx
+        .read(|cx| panel.read(cx).workbench_review_surface_for_tests(cx))
+        .context("active production Review surface is unavailable")?;
+    let pane = cx.read(|cx| surface.read(cx).diff_pane().clone());
+    Ok((surface, pane))
+}
+
+#[cfg(all(target_os = "macos", feature = "visual-tests"))]
+fn teardown_workbench_review(
+    panel: &Entity<agent_ui::AgentPanel>,
+    cx: &mut VisualTestAppContext,
+) -> Result<()> {
+    let (_, review_pane) = active_workbench_review(panel, cx)?;
+    let active_thread = cx
+        .read(|cx| panel.read(cx).omega_active_acp_thread(cx))
+        .context("tearing down Review without an active ACP thread")?;
+    let generation = cx
+        .read(|cx| {
+            review_pane
+                .read(cx)
+                .binding_snapshot()
+                .map(|binding| binding.checkpoint.generation())
+        })
+        .context("tearing down an unbound Review pane")?;
+    cx.update(|cx| {
+        review_pane.update(cx, |pane, cx| {
+            pane.invalidate(generation, "Review proof completed", cx);
+        });
+        let action_log = active_thread.read(cx).action_log().clone();
+        action_log.update(cx, |action_log, cx| {
+            action_log.clear_tracked_buffers_for_tests(cx);
+        });
+    });
+    cx.run_until_parked();
+    Ok(())
+}
+
+#[cfg(all(target_os = "macos", feature = "visual-tests"))]
+fn open_workbench_review_buffer(
+    workspace_window: WindowHandle<Workspace>,
+    worktree_id: project::WorktreeId,
+    path: &str,
+    cx: &mut VisualTestAppContext,
+) -> Result<Entity<language::Buffer>> {
+    let project_path = project::ProjectPath {
+        worktree_id,
+        path: util::rel_path::rel_path(path).into(),
+    };
+    let task = workspace_window
+        .update(cx, |workspace, _window, cx| {
+            workspace
+                .project()
+                .update(cx, |project, cx| project.open_buffer(project_path, cx))
+        })
+        .with_context(|| format!("opening Review fixture buffer {path:?}"))?;
+    cx.background_executor.allow_parking();
+    let buffer = cx
+        .foreground_executor
+        .block_test(task)
+        .with_context(|| format!("loading Review fixture buffer {path:?}"))?;
+    cx.background_executor.forbid_parking();
+    Ok(buffer)
+}
+
+#[cfg(all(target_os = "macos", feature = "visual-tests"))]
+fn record_workbench_review_change(
+    pane: &Entity<agent_ui::AgentDiffPane>,
+    buffer: Entity<language::Buffer>,
+    change: agent_ui::AgentDiffFixtureChange,
+    cx: &mut VisualTestAppContext,
+) {
+    cx.update(|cx| {
+        pane.update(cx, |pane, cx| {
+            pane.record_buffer_change_for_tests(buffer, change, cx);
+        });
+    });
+}
+
+#[cfg(all(target_os = "macos", feature = "visual-tests"))]
+fn wait_for_recorded_workbench_review_edit(
+    task: gpui::Task<Result<()>>,
+    cx: &mut VisualTestAppContext,
+) -> Result<()> {
+    cx.background_executor.allow_parking();
+    let result = cx.foreground_executor.block_test(task);
+    cx.background_executor.forbid_parking();
+    result?;
+    cx.run_until_parked();
+    Ok(())
+}
+
+#[cfg(all(target_os = "macos", feature = "visual-tests"))]
+fn seed_standard_workbench_review(
+    workspace_window: WindowHandle<Workspace>,
+    pane: &Entity<agent_ui::AgentDiffPane>,
+    worktree_id: project::WorktreeId,
+    cx: &mut VisualTestAppContext,
+) -> Result<(Entity<language::Buffer>, Entity<language::Buffer>)> {
+    use agent_ui::AgentDiffFixtureChange;
+
+    let main = open_workbench_review_buffer(workspace_window, worktree_id, "src/main.rs", cx)?;
+    let (main_transaction, main_edit) = cx.update(|cx| {
+        pane.update(cx, |pane, cx| {
+            pane.record_buffer_change_for_tests(main.clone(), AgentDiffFixtureChange::Read, cx);
+        });
+        let transaction = main.update(cx, |buffer, cx| {
+            buffer.edit(
+                [
+                    (
+                        language::Point::new(0, 0)..language::Point::new(1, 0),
+                        "use omega::review;\n",
+                    ),
+                    (
+                        language::Point::new(20, 0)..language::Point::new(21, 0),
+                        "const REVIEW_MODE: bool = true;\n",
+                    ),
+                ],
+                None,
+                cx,
+            )
+        });
+        let edit = pane.update(cx, |pane, cx| {
+            pane.record_buffer_edit_and_wait_for_tests(main.clone(), cx)
+        });
+        (transaction, edit)
+    });
+    main_transaction.context("standard Review main edit did not create a transaction")?;
+    wait_for_recorded_workbench_review_edit(main_edit, cx)?;
+
+    let settings =
+        open_workbench_review_buffer(workspace_window, worktree_id, "src/settings.rs", cx)?;
+    let settings_edit = cx.update(|cx| {
+        pane.update(cx, |pane, cx| {
+            pane.record_buffer_change_for_tests(
+                settings.clone(),
+                AgentDiffFixtureChange::Created,
+                cx,
+            );
+        });
+        settings.update(cx, |buffer, cx| {
+            buffer.set_text("pub const REVIEW_ENABLED: bool = true;\n", cx);
+        });
+        pane.update(cx, |pane, cx| {
+            pane.record_buffer_edit_and_wait_for_tests(settings.clone(), cx)
+        })
+    });
+    wait_for_recorded_workbench_review_edit(settings_edit, cx)?;
+    Ok((main, settings))
+}
+
+#[cfg(all(target_os = "macos", feature = "visual-tests"))]
+fn seed_foreign_workbench_review(
+    workspace_window: WindowHandle<Workspace>,
+    pane: &Entity<agent_ui::AgentDiffPane>,
+    worktree_id: project::WorktreeId,
+    cx: &mut VisualTestAppContext,
+) -> Result<(Entity<language::Buffer>, String)> {
+    use agent_ui::AgentDiffFixtureChange;
+
+    let buffer = open_workbench_review_buffer(
+        workspace_window,
+        worktree_id,
+        "src/foreign_thread_only.rs",
+        cx,
+    )?;
+    let (transaction, edit) = cx.update(|cx| {
+        pane.update(cx, |pane, cx| {
+            pane.record_buffer_change_for_tests(buffer.clone(), AgentDiffFixtureChange::Read, cx);
+        });
+        let transaction = buffer.update(cx, |buffer, cx| {
+            buffer.edit(
+                [(
+                    language::Point::new(0, 0)..language::Point::new(1, 0),
+                    "pub const FOREIGN_THREAD_ONLY: bool = true;\n",
+                )],
+                None,
+                cx,
+            )
+        });
+        let edit = pane.update(cx, |pane, cx| {
+            pane.record_buffer_edit_and_wait_for_tests(buffer.clone(), cx)
+        });
+        (transaction, edit)
+    });
+    transaction.context("foreign-worktree Review edit did not create a transaction")?;
+    wait_for_recorded_workbench_review_edit(edit, cx)?;
+    let contents = cx.read(|cx| buffer.read(cx).text());
+    Ok((buffer, contents))
+}
+
+#[cfg(all(target_os = "macos", feature = "visual-tests"))]
+fn seed_workbench_review_scene(
+    scene_name: &str,
+    workspace_window: WindowHandle<Workspace>,
+    pane: &Entity<agent_ui::AgentDiffPane>,
+    worktree_id: project::WorktreeId,
+    cx: &mut VisualTestAppContext,
+) -> Result<()> {
+    use agent_ui::AgentDiffFixtureChange;
+
+    match scene_name {
+        "omega_workbench_review_empty" | "omega_workbench_review_error" => {}
+        "omega_workbench_review_multi_file"
+        | "omega_workbench_review_selected_hunk"
+        | "omega_workbench_review_narrow"
+        | "omega_workbench_review_all_reviewed" => {
+            seed_standard_workbench_review(workspace_window, pane, worktree_id, cx)?;
+        }
+        "omega_workbench_review_streaming_update" => {
+            let (main, _) =
+                seed_standard_workbench_review(workspace_window, pane, worktree_id, cx)?;
+            let (transaction, edit) = cx.update(|cx| {
+                let transaction = main.update(cx, |buffer, cx| {
+                    buffer.edit(
+                        [(
+                            language::Point::new(35, 0)..language::Point::new(36, 0),
+                            "const STREAM_REVISION: usize = 1;\n",
+                        )],
+                        None,
+                        cx,
+                    )
+                });
+                let edit = pane.update(cx, |pane, cx| {
+                    pane.record_buffer_edit_and_wait_for_tests(main.clone(), cx)
+                });
+                (transaction, edit)
+            });
+            transaction.context("streaming Review edit did not create a transaction")?;
+            wait_for_recorded_workbench_review_edit(edit, cx)?;
+        }
+        "omega_workbench_review_rename_delete" => {
+            let renamed = open_workbench_review_buffer(
+                workspace_window,
+                worktree_id,
+                "src/previous_name.rs",
+                cx,
+            )?;
+            let (transaction, edit) = cx.update(|cx| {
+                pane.update(cx, |pane, cx| {
+                    pane.record_buffer_change_for_tests(
+                        renamed.clone(),
+                        AgentDiffFixtureChange::Read,
+                        cx,
+                    );
+                });
+                let transaction = renamed.update(cx, |buffer, cx| {
+                    buffer.edit(
+                        [(
+                            language::Point::new(1, 0)..language::Point::new(2, 0),
+                            "pub const NAME: &str = \"current\";\n",
+                        )],
+                        None,
+                        cx,
+                    )
+                });
+                let edit = pane.update(cx, |pane, cx| {
+                    pane.record_buffer_edit_and_wait_for_tests(renamed.clone(), cx)
+                });
+                (transaction, edit)
+            });
+            transaction.context("renamed Review edit did not create a transaction")?;
+            wait_for_recorded_workbench_review_edit(edit, cx)?;
+
+            let renamed_path = project::ProjectPath {
+                worktree_id,
+                path: util::rel_path::rel_path("src/previous_name.rs").into(),
+            };
+            let new_path = project::ProjectPath {
+                worktree_id,
+                path: util::rel_path::rel_path("src/current_name.rs").into(),
+            };
+            let rename_task = workspace_window.update(cx, |workspace, _window, cx| {
+                workspace.project().update(cx, |project, cx| {
+                    let entry = project
+                        .entry_for_path(&renamed_path, cx)
+                        .context("renamed Review fixture entry is unavailable")?;
+                    Ok::<_, anyhow::Error>(project.rename_entry(entry.id, new_path, cx))
+                })
+            })??;
+            cx.background_executor.allow_parking();
+            cx.foreground_executor
+                .block_test(rename_task)
+                .context("renaming Review fixture file")?;
+            cx.background_executor.forbid_parking();
+
+            let deleted =
+                open_workbench_review_buffer(workspace_window, worktree_id, "src/obsolete.rs", cx)?;
+            record_workbench_review_change(pane, deleted, AgentDiffFixtureChange::Deleted, cx);
+            let deleted_path = project::ProjectPath {
+                worktree_id,
+                path: util::rel_path::rel_path("src/obsolete.rs").into(),
+            };
+            let delete_task = workspace_window
+                .update(cx, |workspace, _window, cx| {
+                    workspace
+                        .project()
+                        .update(cx, |project, cx| project.delete_file(deleted_path, cx))
+                })?
+                .context("deleted Review fixture entry is unavailable")?;
+            cx.background_executor.allow_parking();
+            cx.foreground_executor
+                .block_test(delete_task)
+                .context("deleting Review fixture file")?;
+            cx.background_executor.forbid_parking();
+        }
+        "omega_workbench_review_conflict" => {
+            let conflict = open_workbench_review_buffer(
+                workspace_window,
+                worktree_id,
+                "src/conflicted.rs",
+                cx,
+            )?;
+            let (transaction, edit) = cx.update(|cx| {
+                pane.update(cx, |pane, cx| {
+                    pane.record_buffer_change_for_tests(
+                        conflict.clone(),
+                        AgentDiffFixtureChange::Read,
+                        cx,
+                    );
+                });
+                let transaction = conflict.update(cx, |buffer, cx| {
+                    buffer.set_conflict();
+                    buffer.edit(
+                        [(
+                            language::Point::new(1, 0)..language::Point::new(2, 0),
+                            "    let state = \"conflict\";\n",
+                        )],
+                        None,
+                        cx,
+                    )
+                });
+                let edit = pane.update(cx, |pane, cx| {
+                    pane.record_buffer_edit_and_wait_for_tests(conflict.clone(), cx)
+                });
+                (transaction, edit)
+            });
+            transaction.context("conflicted Review edit did not create a transaction")?;
+            wait_for_recorded_workbench_review_edit(edit, cx)?;
+        }
+        _ => anyhow::bail!("unknown Review workbench scene {scene_name:?}"),
+    }
+    cx.run_until_parked();
+    Ok(())
+}
+
+#[cfg(all(target_os = "macos", feature = "visual-tests"))]
+fn wait_for_workbench_review_changes(
+    action_log: Entity<action_log::ActionLog>,
+    worktree_id: project::WorktreeId,
+    expected_file_count: usize,
+    cx: &mut VisualTestAppContext,
+) -> Result<()> {
+    if expected_file_count == 0 {
+        return Ok(());
+    }
+    let wait = cx.update(|cx| {
+        cx.spawn(async move |cx| {
+            for _ in 0..128 {
+                let file_count = cx.read_entity(&action_log, |action_log, cx| {
+                    action_log
+                        .changed_buffers(cx)
+                        .filter(|(buffer, _)| {
+                            buffer
+                                .read(cx)
+                                .file()
+                                .is_some_and(|file| file.worktree_id(cx) == worktree_id)
+                        })
+                        .count()
+                });
+                if file_count >= expected_file_count {
+                    return Ok(());
+                }
+                cx.background_executor()
+                    .timer(Duration::from_millis(10))
+                    .await;
+            }
+            anyhow::bail!(
+                "native Review action log did not publish {expected_file_count} changed files"
+            )
+        })
+    });
+    cx.background_executor.allow_parking();
+    let result = cx.foreground_executor.block_test(wait);
+    cx.background_executor.forbid_parking();
+    result?;
+    cx.run_until_parked();
+    Ok(())
+}
+
+#[cfg(all(target_os = "macos", feature = "visual-tests"))]
+fn wait_for_workbench_review_hunks(
+    action_log: Entity<action_log::ActionLog>,
+    worktree_id: project::WorktreeId,
+    expected_hunk_count: usize,
+    cx: &mut VisualTestAppContext,
+) -> Result<()> {
+    let wait = cx.update(|cx| {
+        cx.spawn(async move |cx| {
+            for _ in 0..128 {
+                let hunk_count = cx.read_entity(&action_log, |action_log, cx| {
+                    action_log
+                        .changed_buffers(cx)
+                        .filter(|(buffer, _)| {
+                            buffer
+                                .read(cx)
+                                .file()
+                                .is_some_and(|file| file.worktree_id(cx) == worktree_id)
+                        })
+                        .map(|(buffer, diff)| {
+                            diff.read(cx).snapshot(cx).hunks(buffer.read(cx)).count()
+                        })
+                        .sum::<usize>()
+                });
+                if hunk_count == expected_hunk_count {
+                    return Ok(());
+                }
+                cx.background_executor()
+                    .timer(Duration::from_millis(10))
+                    .await;
+            }
+            anyhow::bail!(
+                "native Review action log did not settle at {expected_hunk_count} active hunks"
+            )
+        })
+    });
+    cx.background_executor.allow_parking();
+    let result = cx.foreground_executor.block_test(wait);
+    cx.background_executor.forbid_parking();
+    result?;
+    cx.run_until_parked();
+    Ok(())
+}
+
+#[cfg(all(target_os = "macos", feature = "visual-tests"))]
+fn normalized_workbench_review_snapshot(
+    expected: &omega_workbench_harness::ReviewSessionFixture,
+    snapshot: &agent_ui::AgentDiffPaneSnapshot,
+    mutations: Vec<omega_workbench_harness::ReviewMutationFixture>,
+) -> Result<omega_workbench_harness::ReviewSessionFixture> {
+    use agent_ui::{AgentDiffFileState, AgentDiffLifecycle};
+    use omega_workbench_harness::{
+        ReviewFileFixture, ReviewFileStatusFixture, ReviewFocusFixture, ReviewHunkFixture,
+        ReviewHunkStatusFixture, ReviewLifecycleFixture, ReviewSessionFixture,
+    };
+
+    let lifecycle = match &snapshot.lifecycle {
+        AgentDiffLifecycle::Unbound => ReviewLifecycleFixture::Unbound,
+        AgentDiffLifecycle::Loading => ReviewLifecycleFixture::Loading,
+        AgentDiffLifecycle::Empty => ReviewLifecycleFixture::Empty,
+        AgentDiffLifecycle::Ready => ReviewLifecycleFixture::Ready,
+        AgentDiffLifecycle::Streaming => ReviewLifecycleFixture::Streaming,
+        AgentDiffLifecycle::AllReviewed => ReviewLifecycleFixture::AllReviewed,
+        AgentDiffLifecycle::Offline => ReviewLifecycleFixture::Offline,
+        AgentDiffLifecycle::UnavailableCheckpoint(_) => {
+            ReviewLifecycleFixture::UnavailableCheckpoint
+        }
+        AgentDiffLifecycle::UnsupportedBinary(_) => ReviewLifecycleFixture::UnsupportedBinary,
+        AgentDiffLifecycle::Invalidated(_) => ReviewLifecycleFixture::Invalidated,
+        AgentDiffLifecycle::Error(message) => ReviewLifecycleFixture::Error(message.to_string()),
+    };
+
+    let mut native_hunk_ids = BTreeSet::new();
+    let files = snapshot
+        .files
+        .iter()
+        .map(|file| {
+            let expected_file = expected
+                .files
+                .iter()
+                .find(|expected_file| expected_file.path == file.path)
+                .with_context(|| {
+                    format!("native Review published unexpected file {:?}", file.path)
+                })?;
+            let status = match file.state {
+                AgentDiffFileState::Created => ReviewFileStatusFixture::Added,
+                AgentDiffFileState::Modified => ReviewFileStatusFixture::Modified,
+                AgentDiffFileState::Renamed => ReviewFileStatusFixture::Renamed,
+                AgentDiffFileState::Deleted => ReviewFileStatusFixture::Deleted,
+                AgentDiffFileState::Conflict => ReviewFileStatusFixture::Conflict,
+            };
+            let hunks = file
+                .hunks
+                .iter()
+                .enumerate()
+                .map(|(index, hunk)| {
+                    anyhow::ensure!(
+                        !hunk.id.is_empty() && native_hunk_ids.insert(hunk.id.as_str()),
+                        "native Review hunk IDs must be non-empty and unique"
+                    );
+                    anyhow::ensure!(
+                        hunk.old_byte_range.start <= hunk.old_byte_range.end,
+                        "native Review hunk {:?} has a reversed base range",
+                        hunk.id
+                    );
+                    let expected_hunk = expected_file.hunks.get(index).with_context(|| {
+                        format!(
+                            "native Review file {:?} published unexpected hunk {}",
+                            file.path, hunk.id
+                        )
+                    })?;
+                    let status = if matches!(file.state, AgentDiffFileState::Conflict) {
+                        ReviewHunkStatusFixture::Conflict
+                    } else {
+                        ReviewHunkStatusFixture::Pending
+                    };
+                    Ok::<_, anyhow::Error>(ReviewHunkFixture {
+                        id: expected_hunk.id.clone(),
+                        start_row: hunk.range.start.row,
+                        start_column: hunk.range.start.column,
+                        end_row: hunk.range.end.row,
+                        end_column: hunk.range.end.column,
+                        status,
+                    })
+                })
+                .collect::<Result<Vec<_>>>()?;
+            Ok::<_, anyhow::Error>(ReviewFileFixture {
+                path: file.path.clone(),
+                old_path: file.old_path.clone(),
+                status,
+                hunks,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    let selected_hunk_id = match (&snapshot.selected_path, &snapshot.selected_range) {
+        (Some(path), Some(range)) => {
+            let file_index = snapshot
+                .files
+                .iter()
+                .position(|file| &file.path == path)
+                .context("native Review selected path is not in its file snapshot")?;
+            let hunk_index = snapshot.files[file_index]
+                .hunks
+                .iter()
+                .position(|hunk| hunk.range == *range)
+                .context("native Review selected range is not in its hunk snapshot")?;
+            expected
+                .files
+                .get(file_index)
+                .and_then(|file| file.hunks.get(hunk_index))
+                .map(|hunk| hunk.id.clone())
+                .context("native Review selection has no typed fixture hunk")?
+                .into()
+        }
+        (None, None) => None,
+        _ => anyhow::bail!("native Review selection has an incomplete path/range identity"),
+    };
+    let focus = if snapshot.editor_focused {
+        ReviewFocusFixture::Diff
+    } else {
+        ReviewFocusFixture::Surface
+    };
+
+    Ok(ReviewSessionFixture {
+        binding: expected.binding.clone(),
+        lifecycle,
+        files,
+        selected_file_path: snapshot.selected_path.clone(),
+        selected_hunk_id,
+        focus,
+        mutations,
+        pending_operation_count: u32::from(snapshot.pending_edit),
+        ignored_stale_completion_count: u32::try_from(snapshot.stale_completions_ignored)
+            .context("native Review stale-completion count overflowed")?,
+    })
+}
+
+#[cfg(all(target_os = "macos", feature = "visual-tests"))]
 fn configure_workbench_shell_scene(
     scene_name: &str,
     workspace_window: WindowHandle<Workspace>,
@@ -4109,6 +4895,7 @@ fn configure_workbench_shell_scene(
     project_panel: &Entity<ProjectPanel>,
     files_fixture: Option<&WorkbenchFilesDiskFixture>,
     search_fixture: Option<&WorkbenchSearchDiskFixture>,
+    review_fixture: Option<&WorkbenchReviewDiskFixture>,
     cx: &mut VisualTestAppContext,
 ) -> Result<()> {
     use agent_ui::workbench_shell::{
@@ -4131,7 +4918,10 @@ fn configure_workbench_shell_scene(
         .copied()
         .find(|surface| !surface.requires_binding())
         .context("workbench projection has no unbound surface")?;
-    if !is_workbench_files_scene(scene_name) && !is_workbench_search_scene(scene_name) {
+    if !is_workbench_files_scene(scene_name)
+        && !is_workbench_search_scene(scene_name)
+        && !is_workbench_review_scene(scene_name)
+    {
         anyhow::ensure!(
             active_thread.binding.is_none() && active_thread.available_surfaces.len() == 1,
             "workbench shell scene must use the real no-project capability projection"
@@ -4953,6 +5743,328 @@ fn configure_workbench_shell_scene(
                 }
                 _ => unreachable!("Search scene was checked above"),
             }
+        }
+        name if is_workbench_review_scene(name) => {
+            use agent_ui::workbench_shell::SelectReview;
+            use omega_workbench_harness::{ReviewMutationFixture, ReviewMutationKindFixture};
+
+            let fixture = review_fixture.context("Review scene has no disk fixture")?;
+            let active_path = fixture
+                .worktrees
+                .iter()
+                .find_map(|(id, path)| {
+                    (id == &fixture.active_worktree_id).then_some(path.as_path())
+                })
+                .context("Review scene has no active disk worktree")?;
+            let foreign_path = fixture
+                .worktrees
+                .iter()
+                .find_map(|(id, path)| {
+                    (id != &fixture.active_worktree_id).then_some(path.as_path())
+                })
+                .context("Review scene has no foreign disk worktree")?;
+            let (active_worktree_id, foreign_worktree_id) = workspace_window
+                .update(cx, |workspace, _window, cx| {
+                    let project = workspace.project().read(cx);
+                    let active = project
+                        .visible_worktrees(cx)
+                        .find(|worktree| worktree.read(cx).abs_path().as_ref() == active_path)
+                        .map(|worktree| worktree.read(cx).id());
+                    let foreign = project
+                        .visible_worktrees(cx)
+                        .find(|worktree| worktree.read(cx).abs_path().as_ref() == foreign_path)
+                        .map(|worktree| worktree.read(cx).id());
+                    (active, foreign)
+                })
+                .context("reading Review scene worktrees")?;
+            let active_worktree_id = active_worktree_id.with_context(|| {
+                format!(
+                    "active Review worktree {} is not visible",
+                    active_path.display()
+                )
+            })?;
+            let foreign_worktree_id = foreign_worktree_id.with_context(|| {
+                format!(
+                    "foreign Review worktree {} is not visible",
+                    foreign_path.display()
+                )
+            })?;
+            let repository_binding =
+                select_workbench_identity(workspace_window, panel, active_path, "Review", cx)?;
+            dispatch_workbench_action(workspace_window, Box::new(SelectReview), cx)?;
+            let (review_surface, review_pane) = active_workbench_review(panel, cx)?;
+            let initial_snapshot = cx.update_window(workspace_window.into(), |_, window, cx| {
+                review_pane.update(cx, |pane, cx| pane.snapshot_for_tests(window, cx))
+            })?;
+            let production_projection =
+                cx.read(|cx| panel.read(cx).workbench_projection_for_tests().clone());
+            let visible = production_projection
+                .visible_projection()
+                .context("Review scene has no visible projection")?;
+            let active_thread = cx
+                .read(|cx| panel.read(cx).omega_active_acp_thread(cx))
+                .context("Review scene has no active ACP thread")?;
+            let active_action_log_entity_id =
+                cx.read(|cx| active_thread.read(cx).action_log().entity_id());
+            let native_binding = initial_snapshot
+                .binding
+                .as_ref()
+                .context("native Review pane has no typed binding")?;
+            anyhow::ensure!(
+                visible.binding.as_ref() == Some(&repository_binding)
+                    && visible.requested_surface
+                        == Some(omega_workbench_state::WorkSurface::Review)
+                    && visible.effective_surface
+                        == Some(omega_workbench_state::WorkSurface::Review)
+                    && visible.dock_open
+                    && native_binding.thread_id.to_key_string() == visible.thread_id
+                    && native_binding.repository == repository_binding
+                    && native_binding.worktree_id == active_worktree_id
+                    && native_binding.checkpoint.generation() == visible.generation
+                    && native_binding.checkpoint.action_log_entity_id()
+                        == active_action_log_entity_id
+                    && initial_snapshot.thread_entity_id == active_thread.entity_id()
+                    && initial_snapshot.action_log_entity_id == active_action_log_entity_id,
+                "Review scene did not bind the native pane to its active thread/worktree/checkpoint"
+            );
+            record_workbench_semantic_check(name, "review-production-binding-checkpoint-identity");
+
+            let (foreign_buffer, foreign_contents_before_active_mutations) =
+                seed_foreign_workbench_review(
+                    workspace_window,
+                    &review_pane,
+                    foreign_worktree_id,
+                    cx,
+                )?;
+            seed_workbench_review_scene(
+                name,
+                workspace_window,
+                &review_pane,
+                active_worktree_id,
+                cx,
+            )?;
+            let expected_active_file_count = workbench_fixture_for_scene(name)?
+                .active_review_session()
+                .context("Review scene has no expected active session")?
+                .files
+                .len();
+            let action_log = cx.read(|cx| active_thread.read(cx).action_log().clone());
+            wait_for_workbench_review_changes(
+                action_log.clone(),
+                active_worktree_id,
+                expected_active_file_count,
+                cx,
+            )?;
+
+            let generation = native_binding.checkpoint.generation();
+            match name {
+                "omega_workbench_review_streaming_update" => {
+                    let stale_generation = generation.saturating_add(1);
+                    let (stale_rejected, streaming_applied) = cx.update(|cx| {
+                        review_pane.update(cx, |pane, cx| {
+                            (
+                                !pane.set_streaming_for_tests(stale_generation, true, cx),
+                                pane.set_streaming_for_tests(generation, true, cx),
+                            )
+                        })
+                    });
+                    anyhow::ensure!(
+                        stale_rejected && streaming_applied,
+                        "Review streaming scene did not reject a stale generation before applying the active one"
+                    );
+                    record_workbench_semantic_check(
+                        name,
+                        "review-stale-generation-rejected-before-streaming-update",
+                    );
+                    cx.update_window(workspace_window.into(), |_, window, cx| {
+                        review_pane.update(cx, |pane, cx| {
+                            gpui::Focusable::focus_handle(pane, cx).focus(window, cx);
+                        });
+                    })?;
+                    dispatch_workbench_action(
+                        workspace_window,
+                        Box::new(editor::actions::GoToHunk),
+                        cx,
+                    )?;
+                }
+                "omega_workbench_review_selected_hunk" => {
+                    cx.update_window(workspace_window.into(), |_, window, cx| {
+                        review_pane.update(cx, |pane, cx| {
+                            gpui::Focusable::focus_handle(pane, cx).focus(window, cx);
+                        });
+                    })?;
+                    dispatch_workbench_action(
+                        workspace_window,
+                        Box::new(editor::actions::GoToHunk),
+                        cx,
+                    )?;
+                }
+                "omega_workbench_review_all_reviewed" => {
+                    dispatch_workbench_action(workspace_window, Box::new(agent_ui::Keep), cx)?;
+                    wait_for_workbench_review_hunks(action_log.clone(), active_worktree_id, 2, cx)?;
+                    dispatch_workbench_action(workspace_window, Box::new(agent_ui::Reject), cx)?;
+                    wait_for_workbench_review_hunks(action_log.clone(), active_worktree_id, 1, cx)?;
+                    dispatch_workbench_action(workspace_window, Box::new(agent_ui::Keep), cx)?;
+                    wait_for_workbench_review_hunks(action_log, active_worktree_id, 0, cx)?;
+                    let clean_observation = cx.read(|cx| {
+                        let identity = panel
+                            .read(cx)
+                            .workbench_identity_for_tests()
+                            .context("all-reviewed scene has no repository identity")?;
+                        let mut candidates = identity.candidates.clone();
+                        for candidate in &mut candidates {
+                            candidate.git =
+                                agent_ui::thread_identity::GitIdentitySummary::default();
+                        }
+                        Ok::<_, anyhow::Error>(
+                            agent_ui::thread_identity::ThreadIdentityObservation {
+                                revision: identity.observation_revision.saturating_add(1),
+                                phase: agent_ui::thread_identity::IdentityPhase::Ready,
+                                candidates,
+                            },
+                        )
+                    })?;
+                    cx.update_window(workspace_window.into(), |_, window, cx| {
+                        panel.update(cx, |panel, cx| {
+                            panel.set_workbench_identity_observation_for_tests(
+                                Some(clean_observation),
+                                window,
+                                cx,
+                            );
+                        });
+                    })?;
+                    cx.run_until_parked();
+                }
+                "omega_workbench_review_error" => {
+                    let applied = cx.update(|cx| {
+                        review_pane.update(cx, |pane, cx| {
+                            pane.set_error(generation, "Could not load this checkpoint", cx)
+                        })
+                    });
+                    anyhow::ensure!(applied, "Review error lifecycle was not applied");
+                }
+                _ => {}
+            }
+            cx.run_until_parked();
+
+            if name == "omega_workbench_review_multi_file" {
+                let pane_id = review_pane.entity_id();
+                let surface_id = review_surface.entity_id();
+                let before = cx.update_window(workspace_window.into(), |_, window, cx| {
+                    review_pane.update(cx, |pane, cx| pane.snapshot_for_tests(window, cx))
+                })?;
+                dispatch_workbench_action(workspace_window, Box::new(SelectPlan), cx)?;
+                dispatch_workbench_action(workspace_window, Box::new(SelectReview), cx)?;
+                let (reopened_surface, reopened_pane) = active_workbench_review(panel, cx)?;
+                let after = cx.update_window(workspace_window.into(), |_, window, cx| {
+                    reopened_pane.update(cx, |pane, cx| pane.snapshot_for_tests(window, cx))
+                })?;
+                anyhow::ensure!(
+                    reopened_surface.entity_id() == surface_id
+                        && reopened_pane.entity_id() == pane_id
+                        && before.selected_path == after.selected_path
+                        && before.selected_range == after.selected_range,
+                    "Review collapse/surface round trip did not retain its native entity and selection"
+                );
+                record_workbench_semantic_check(
+                    name,
+                    "review-retained-entity-selection-across-surface-round-trip",
+                );
+            }
+
+            cx.update_window(workspace_window.into(), |_, window, cx| {
+                review_pane.update(cx, |pane, cx| {
+                    gpui::Focusable::focus_handle(pane, cx).focus(window, cx);
+                });
+            })?;
+            cx.run_until_parked();
+            let snapshot = cx.update_window(workspace_window.into(), |_, window, cx| {
+                review_pane.update(cx, |pane, cx| pane.snapshot_for_tests(window, cx))
+            })?;
+            let foreign_contents_after_active_mutations =
+                cx.read(|cx| foreign_buffer.read(cx).text());
+            anyhow::ensure!(
+                snapshot
+                    .files
+                    .iter()
+                    .all(|file| file.worktree_id == active_worktree_id)
+                    && snapshot
+                        .files
+                        .iter()
+                        .all(|file| file.path != "src/foreign_thread_only.rs")
+                    && foreign_contents_after_active_mutations
+                        == foreign_contents_before_active_mutations,
+                "native Review leaked or mutated the recorded foreign-worktree diff"
+            );
+            record_workbench_semantic_check(
+                name,
+                "review-recorded-foreign-worktree-diff-isolation",
+            );
+
+            let mutations = if name == "omega_workbench_review_all_reviewed" {
+                anyhow::ensure!(
+                    snapshot.kept_hunks == 2
+                        && snapshot.rejected_hunks == 1
+                        && snapshot.files.is_empty(),
+                    "all-reviewed scene did not apply two keeps and one rejection: {snapshot:?}"
+                );
+                let main = open_workbench_review_buffer(
+                    workspace_window,
+                    active_worktree_id,
+                    "src/main.rs",
+                    cx,
+                )?;
+                let settings = open_workbench_review_buffer(
+                    workspace_window,
+                    active_worktree_id,
+                    "src/settings.rs",
+                    cx,
+                )?;
+                let main_text = cx.read(|cx| main.read(cx).text());
+                let kept_import = main_text
+                    .lines()
+                    .next()
+                    .map(|line| format!("{line}\n"))
+                    .context("reviewed main fixture has no first line")?;
+                let rejected_mode = main_text
+                    .lines()
+                    .nth(20)
+                    .map(|line| format!("{line}\n"))
+                    .context("reviewed main fixture has no mode line")?;
+                let settings_text = cx.read(|cx| settings.read(cx).text());
+                vec![
+                    ReviewMutationFixture {
+                        kind: ReviewMutationKindFixture::KeepHunk,
+                        file_path: Some("src/main.rs".into()),
+                        hunk_id: Some("main-imports".into()),
+                        resulting_contents: Some(kept_import),
+                    },
+                    ReviewMutationFixture {
+                        kind: ReviewMutationKindFixture::RejectHunk,
+                        file_path: Some("src/main.rs".into()),
+                        hunk_id: Some("main-body".into()),
+                        resulting_contents: Some(rejected_mode),
+                    },
+                    ReviewMutationFixture {
+                        kind: ReviewMutationKindFixture::KeepHunk,
+                        file_path: Some("src/settings.rs".into()),
+                        hunk_id: Some("settings-new".into()),
+                        resulting_contents: Some(settings_text),
+                    },
+                ]
+            } else {
+                Vec::new()
+            };
+
+            let fixture_scene = workbench_fixture_for_scene(name)?;
+            let expected = fixture_scene
+                .active_review_session()
+                .context("Review scene has no active typed fixture")?;
+            let normalized = normalized_workbench_review_snapshot(expected, &snapshot, mutations)?;
+            let checks = omega_workbench_harness::prove_review_surface(&fixture_scene, &normalized)
+                .with_context(|| format!("proving native Review scene {name:?}"))?;
+            record_workbench_semantic_checks(name, checks);
+            record_workbench_semantic_check(name, "review-native-snapshot-proved");
         }
         "omega_workbench_shell_active_dock" => {
             dispatch_workbench_action(workspace_window, Box::new(SelectPlan), cx)?;

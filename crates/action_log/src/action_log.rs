@@ -567,6 +567,25 @@ impl ActionLog {
         self.buffer_edited_impl(buffer, true, cx);
     }
 
+    #[cfg(feature = "test-support")]
+    pub fn buffer_edited_and_wait_for_tests(
+        &mut self,
+        buffer: Entity<Buffer>,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<()>> {
+        self.update_file_read_time(&buffer, cx);
+        let new_version = buffer.read(cx).version();
+        let buffer_snapshot = buffer.read(cx).text_snapshot();
+        let tracked_buffer = self.track_buffer_internal(buffer.clone(), false, cx);
+        if let TrackedBufferStatus::Deleted = tracked_buffer.status {
+            tracked_buffer.status = TrackedBufferStatus::Modified;
+        }
+        tracked_buffer.version = new_version;
+        cx.spawn(async move |this, cx| {
+            Self::track_edits(&this, &buffer, ChangeAuthor::Agent, buffer_snapshot, cx).await
+        })
+    }
+
     fn buffer_edited_impl(
         &mut self,
         buffer: Entity<Buffer>,
@@ -1037,6 +1056,14 @@ impl ActionLog {
                         .is_some_and(|file| !file.disk_state().is_deleted())
             })
             .map(|(buffer, _)| buffer)
+    }
+
+    #[cfg(feature = "test-support")]
+    pub fn clear_tracked_buffers_for_tests(&mut self, cx: &mut Context<Self>) {
+        self.tracked_buffers.clear();
+        self.last_reject_undo = None;
+        self.file_read_times.clear();
+        cx.notify();
     }
 }
 

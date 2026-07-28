@@ -1,5 +1,6 @@
 use std::{cell::Cell, collections::BTreeMap};
 
+use acp_thread::AcpThread;
 use anyhow::{Result, anyhow, bail};
 use gpui::{
     Action, App, Context, Entity, FocusHandle, Focusable, Pixels, Render, SharedString, WeakEntity,
@@ -22,6 +23,7 @@ use ui::{Color, Icon, IconName, IconSize, Label, LabelSize, prelude::*, v_flex};
 use workspace::{ToolbarItemView, Workspace, item::Item};
 
 use crate::{
+    AgentDiff, AgentDiffBinding, AgentDiffLifecycle, AgentDiffPane, AgentDiffToolbar,
     omega_sidebar,
     thread_identity::{
         BranchIdentity, IdentityPhase, ThreadIdentityObservation, ThreadIdentityProjection,
@@ -165,6 +167,238 @@ pub enum SurfaceContentState {
 pub enum NativeSearchFocusTarget {
     Query,
     Results,
+}
+
+pub struct NativeReviewSurface {
+    workspace: WeakEntity<Workspace>,
+    focus_handle: FocusHandle,
+    agent_diff: Entity<AgentDiff>,
+    diff_pane: Entity<AgentDiffPane>,
+    diff_toolbar: Entity<AgentDiffToolbar>,
+}
+
+impl NativeReviewSurface {
+    pub fn new(
+        workspace: Entity<Workspace>,
+        thread: Entity<AcpThread>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let weak_workspace = workspace.downgrade();
+        AgentDiff::set_active_thread(&weak_workspace, thread.clone(), window, cx);
+        let agent_diff = AgentDiff::global(cx);
+        let diff_pane = cx.new(|cx| AgentDiffPane::new(thread, weak_workspace.clone(), window, cx));
+        workspace.update(cx, |workspace, cx| {
+            diff_pane.update(cx, |diff_pane, cx| {
+                diff_pane.added_to_workspace(workspace, window, cx);
+            });
+        });
+        let diff_toolbar = cx.new(AgentDiffToolbar::new);
+        diff_toolbar.update(cx, |diff_toolbar, cx| {
+            diff_toolbar.set_agent_diff_pane(&diff_pane, cx);
+        });
+
+        Self {
+            workspace: weak_workspace,
+            focus_handle: cx.focus_handle(),
+            agent_diff,
+            diff_pane,
+            diff_toolbar,
+        }
+    }
+
+    pub fn bind(
+        &mut self,
+        binding: AgentDiffBinding,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<()> {
+        if self.diff_pane.read(cx).binding_snapshot().as_ref() == Some(&binding) {
+            return Ok(());
+        }
+        let generation = binding.checkpoint.generation();
+        self.diff_pane.update(cx, |diff_pane, cx| {
+            diff_pane.bind(binding, window, cx)?;
+            diff_pane.complete_load(generation, window, cx);
+            Ok(())
+        })
+    }
+
+    pub fn set_offline(&mut self, generation: u64, cx: &mut Context<Self>) -> bool {
+        self.diff_pane
+            .update(cx, |diff_pane, cx| diff_pane.set_offline(generation, cx))
+    }
+
+    pub fn set_online(
+        &mut self,
+        generation: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        self.diff_pane.update(cx, |diff_pane, cx| {
+            diff_pane.set_online(generation, window, cx)
+        })
+    }
+
+    pub fn set_checkpoint_unavailable(
+        &mut self,
+        generation: u64,
+        message: impl Into<SharedString>,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        self.diff_pane.update(cx, |diff_pane, cx| {
+            diff_pane.set_checkpoint_unavailable(generation, message, cx)
+        })
+    }
+
+    pub fn invalidate(
+        &mut self,
+        generation: u64,
+        message: impl Into<SharedString>,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        self.diff_pane.update(cx, |diff_pane, cx| {
+            diff_pane.invalidate(generation, message, cx)
+        })
+    }
+
+    pub fn agent_diff(&self) -> &Entity<AgentDiff> {
+        &self.agent_diff
+    }
+
+    pub fn diff_pane(&self) -> &Entity<AgentDiffPane> {
+        &self.diff_pane
+    }
+
+    pub fn diff_toolbar(&self) -> &Entity<AgentDiffToolbar> {
+        &self.diff_toolbar
+    }
+
+    pub fn binding(&self, cx: &App) -> Option<AgentDiffBinding> {
+        self.diff_pane.read(cx).binding_snapshot()
+    }
+
+    pub fn lifecycle(&self, cx: &App) -> AgentDiffLifecycle {
+        self.diff_pane.read(cx).lifecycle()
+    }
+
+    pub fn contains_focus(&self, window: &Window, cx: &App) -> bool {
+        self.focus_handle.contains_focused(window, cx)
+    }
+
+    fn keep(&mut self, action: &crate::Keep, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.focus_handle.is_focused(window) {
+            cx.propagate();
+            return;
+        }
+        self.diff_pane
+            .update(cx, |diff_pane, cx| diff_pane.keep(action, window, cx));
+    }
+
+    fn reject(&mut self, action: &crate::Reject, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.focus_handle.is_focused(window) {
+            cx.propagate();
+            return;
+        }
+        self.diff_pane
+            .update(cx, |diff_pane, cx| diff_pane.reject(action, window, cx));
+    }
+
+    fn keep_all(&mut self, action: &crate::KeepAll, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.focus_handle.is_focused(window) {
+            cx.propagate();
+            return;
+        }
+        self.diff_pane
+            .update(cx, |diff_pane, cx| diff_pane.keep_all(action, window, cx));
+    }
+
+    fn reject_all(
+        &mut self,
+        action: &crate::RejectAll,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.focus_handle.is_focused(window) {
+            cx.propagate();
+            return;
+        }
+        self.diff_pane
+            .update(cx, |diff_pane, cx| diff_pane.reject_all(action, window, cx));
+    }
+
+    fn reveal_center_for_open_excerpts(
+        &mut self,
+        _: &editor::actions::OpenExcerpts,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(workspace) = self.workspace.upgrade() {
+            workspace.update(cx, |workspace, cx| {
+                workspace.reveal_zero_base_center(window, cx);
+            });
+        }
+        cx.propagate();
+    }
+
+    fn reveal_center_for_open_excerpts_split(
+        &mut self,
+        _: &editor::actions::OpenExcerptsSplit,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(workspace) = self.workspace.upgrade() {
+            workspace.update(cx, |workspace, cx| {
+                workspace.reveal_zero_base_center(window, cx);
+            });
+        }
+        cx.propagate();
+    }
+}
+
+impl Focusable for NativeReviewSurface {
+    fn focus_handle(&self, _cx: &App) -> FocusHandle {
+        self.focus_handle.clone()
+    }
+}
+
+impl Render for NativeReviewSurface {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        v_flex()
+            .id("omega-native-review-surface")
+            .track_focus(&self.focus_handle)
+            .size_full()
+            .on_action(cx.listener(Self::keep))
+            .on_action(cx.listener(Self::reject))
+            .on_action(cx.listener(Self::keep_all))
+            .on_action(cx.listener(Self::reject_all))
+            .capture_action(cx.listener(Self::reveal_center_for_open_excerpts))
+            .capture_action(cx.listener(Self::reveal_center_for_open_excerpts_split))
+            .child(
+                v_flex()
+                    .id("omega.workbench.review.toolbar")
+                    .debug_selector(|| "omega.workbench.review.toolbar".to_string())
+                    .role(gpui::Role::Toolbar)
+                    .aria_label("Review controls")
+                    .flex_none()
+                    .w_full()
+                    .border_b_1()
+                    .border_color(cx.theme().colors().border)
+                    .p_2()
+                    .child(self.diff_toolbar.clone()),
+            )
+            .child(
+                v_flex()
+                    .id("omega.workbench.review.content")
+                    .debug_selector(|| "omega.workbench.review.content".to_string())
+                    .role(gpui::Role::Group)
+                    .aria_label("Review changes")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_hidden()
+                    .child(self.diff_pane.clone()),
+            )
+    }
 }
 
 pub struct NativeSearchSurface {
@@ -452,6 +686,7 @@ pub struct WorkSurfaceHost {
     content_state: SurfaceContentState,
     files_panel: Option<Entity<ProjectPanel>>,
     search_surface: Option<Entity<NativeSearchSurface>>,
+    review_surface: Option<Entity<NativeReviewSurface>>,
 }
 
 impl WorkSurfaceHost {
@@ -459,6 +694,7 @@ impl WorkSurfaceHost {
         key: SurfaceHostKey,
         files_panel: Option<Entity<ProjectPanel>>,
         search_surface: Option<Entity<NativeSearchSurface>>,
+        review_surface: Option<Entity<NativeReviewSurface>>,
         cx: &mut Context<Self>,
     ) -> Self {
         Self {
@@ -467,6 +703,7 @@ impl WorkSurfaceHost {
             content_state: SurfaceContentState::Ready,
             files_panel,
             search_surface,
+            review_surface,
         }
     }
 
@@ -488,12 +725,21 @@ impl WorkSurfaceHost {
         self.search_surface.as_ref()
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn review_surface(&self) -> Option<&Entity<NativeReviewSurface>> {
+        self.review_surface.as_ref()
+    }
+
     fn native_content_contains_focus(&self, window: &Window, cx: &App) -> bool {
         self.files_panel
             .as_ref()
             .is_some_and(|panel| panel.focus_handle(cx).contains_focused(window, cx))
             || self
                 .search_surface
+                .as_ref()
+                .is_some_and(|surface| surface.read(cx).contains_focus(window, cx))
+            || self
+                .review_surface
                 .as_ref()
                 .is_some_and(|surface| surface.read(cx).contains_focus(window, cx))
     }
@@ -503,10 +749,15 @@ impl WorkSurfaceHost {
             panel.focus_handle(cx).focus(window, cx);
         } else if let Some(surface) = self.search_surface.as_ref() {
             surface.focus_handle(cx).focus(window, cx);
+        } else if let Some(surface) = self.review_surface.as_ref() {
+            surface.focus_handle(cx).focus(window, cx);
         }
     }
 
     fn set_content_state(&mut self, content_state: SurfaceContentState, cx: &mut Context<Self>) {
+        if self.content_state == content_state {
+            return;
+        }
         self.content_state = content_state;
         cx.notify();
     }
@@ -554,6 +805,11 @@ impl Focusable for WorkSurfaceHost {
                         .as_ref()
                         .map(|surface| surface.focus_handle(cx))
                 })
+                .or_else(|| {
+                    self.review_surface
+                        .as_ref()
+                        .map(|surface| surface.focus_handle(cx))
+                })
                 .unwrap_or_else(|| self.focus_handle.clone())
         } else {
             self.focus_handle.clone()
@@ -575,8 +831,19 @@ impl Render for WorkSurfaceHost {
         } else {
             None
         };
+        let review_surface = if matches!(self.content_state, SurfaceContentState::Ready) {
+            self.review_surface.clone()
+        } else {
+            None
+        };
         let status = match &self.content_state {
-            SurfaceContentState::Ready if files_panel.is_some() || search_surface.is_some() => None,
+            SurfaceContentState::Ready
+                if files_panel.is_some()
+                    || search_surface.is_some()
+                    || review_surface.is_some() =>
+            {
+                None
+            }
             SurfaceContentState::Ready => {
                 let message: SharedString = format!("{label} is ready").into();
                 Some((
@@ -630,6 +897,7 @@ impl Render for WorkSurfaceHost {
             .size_full()
             .when_some(files_panel, |this, panel| this.child(panel))
             .when_some(search_surface, |this, surface| this.child(surface))
+            .when_some(review_surface, |this, surface| this.child(surface))
             .when_some(status, |this, (status, role, message)| {
                 this.child(
                     v_flex()
@@ -1225,6 +1493,7 @@ impl WorkbenchShell {
         surface: WorkSurface,
         files_panel: Option<Entity<ProjectPanel>>,
         search_surface: Option<Entity<NativeSearchSurface>>,
+        review_surface: Option<Entity<NativeReviewSurface>>,
         cx: &mut Context<crate::AgentPanel>,
     ) -> Result<SurfaceSelection> {
         let unavailable_reason = self
@@ -1262,6 +1531,7 @@ impl WorkbenchShell {
             surface,
             files_panel,
             search_surface,
+            review_surface,
             cx,
         ) {
             Ok(host) => host,
@@ -1283,6 +1553,7 @@ impl WorkbenchShell {
         surface: WorkSurface,
         files_panel: Option<Entity<ProjectPanel>>,
         search_surface: Option<Entity<NativeSearchSurface>>,
+        review_surface: Option<Entity<NativeReviewSurface>>,
         cx: &mut Context<crate::AgentPanel>,
     ) -> Result<Entity<WorkSurfaceHost>> {
         if surface == WorkSurface::Files && files_panel.is_none() {
@@ -1290,6 +1561,9 @@ impl WorkbenchShell {
         }
         if surface == WorkSurface::Search && search_surface.is_none() {
             bail!("the native Search surface is unavailable");
+        }
+        if surface == WorkSurface::Review && review_surface.is_none() {
+            bail!("the native Review surface is unavailable");
         }
         let key = SurfaceHostKey {
             thread_id: thread_id.into(),
@@ -1307,7 +1581,9 @@ impl WorkbenchShell {
             self.last_error = Some(message.clone());
             bail!("{message}");
         }
-        let host = cx.new(|cx| WorkSurfaceHost::new(key.clone(), files_panel, search_surface, cx));
+        let host = cx.new(|cx| {
+            WorkSurfaceHost::new(key.clone(), files_panel, search_surface, review_surface, cx)
+        });
         self.hosts.insert(key, host.clone());
         Ok(host)
     }
@@ -1330,6 +1606,7 @@ impl WorkbenchShell {
             binding,
             WorkSurface::Files,
             Some(files_panel),
+            None,
             None,
             cx,
         )
@@ -1373,9 +1650,76 @@ impl WorkbenchShell {
             WorkSurface::Search,
             None,
             Some(search_surface),
+            None,
             cx,
         )
         .map(Some)
+    }
+
+    pub fn review_surface_for_active_binding(
+        &self,
+        cx: &App,
+    ) -> Option<Entity<NativeReviewSurface>> {
+        let visible = self.projection.visible_projection()?;
+        let key = SurfaceHostKey {
+            thread_id: visible.thread_id,
+            binding: visible.binding,
+            surface: WorkSurface::Review,
+        };
+        self.hosts
+            .get(&key)?
+            .read(cx)
+            .review_surface
+            .as_ref()
+            .cloned()
+    }
+
+    pub fn ensure_visible_review_host(
+        &mut self,
+        review_surface: Entity<NativeReviewSurface>,
+        cx: &mut Context<crate::AgentPanel>,
+    ) -> Result<Option<Entity<WorkSurfaceHost>>> {
+        let Some(visible) = self.projection.visible_projection() else {
+            return Ok(None);
+        };
+        if !visible.dock_open || visible.effective_surface != Some(WorkSurface::Review) {
+            return Ok(None);
+        }
+        let thread_id = visible.thread_id.clone();
+        let binding = visible.binding;
+        self.ensure_host(
+            &thread_id,
+            binding,
+            WorkSurface::Review,
+            None,
+            None,
+            Some(review_surface),
+            cx,
+        )
+        .map(Some)
+    }
+
+    pub fn set_active_review_content_state(
+        &mut self,
+        content_state: SurfaceContentState,
+        window: &mut Window,
+        cx: &mut Context<crate::AgentPanel>,
+    ) -> bool {
+        let Some(visible) = self.projection.visible_projection() else {
+            return false;
+        };
+        let key = SurfaceHostKey {
+            thread_id: visible.thread_id,
+            binding: visible.binding,
+            surface: WorkSurface::Review,
+        };
+        let Some(host) = self.hosts.get(&key) else {
+            return false;
+        };
+        host.update(cx, |host, cx| {
+            host.set_content_state_with_focus(content_state, window, cx);
+        });
+        true
     }
 
     pub fn set_visible_files_identity_error(
@@ -1608,6 +1952,7 @@ impl WorkbenchShell {
     pub fn invalidate_surface(
         &mut self,
         surface: WorkSurface,
+        cx: &mut Context<crate::AgentPanel>,
     ) -> Result<omega_workbench_state::TransitionEffect> {
         let visible = self
             .projection
@@ -1625,11 +1970,25 @@ impl WorkbenchShell {
             surface,
             SurfaceCapability::unavailable("This surface is no longer available"),
         );
-        self.hosts.remove(&SurfaceHostKey {
+        let invalidated_host = self.hosts.remove(&SurfaceHostKey {
             thread_id: visible.thread_id.clone(),
             binding: visible.binding.clone(),
             surface,
         });
+        if surface == WorkSurface::Review
+            && let Some(review_surface) = invalidated_host
+                .as_ref()
+                .and_then(|host| host.read(cx).review_surface.clone())
+            && let Some(binding) = review_surface.read(cx).binding(cx)
+        {
+            review_surface.update(cx, |review_surface, cx| {
+                review_surface.invalidate(
+                    binding.checkpoint.generation(),
+                    "The Review capability was invalidated",
+                    cx,
+                );
+            });
+        }
         if visible.effective_surface == Some(surface) {
             self.collapse_dock()?;
             self.focus_target = WorkbenchFocusTarget::Transcript;
