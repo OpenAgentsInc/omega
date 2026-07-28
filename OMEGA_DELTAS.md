@@ -6811,10 +6811,24 @@ generation and lane readiness. Subsequent thread, transcript, run, and health
 changes are ordered deltas from that same projection.
 
 The run feed reads the existing Issue 31 Full Auto observation used by the Sync
-lane. GPUI does not create a second run registry. Tool calls, raw provider
-payloads, credentials, exact paths, and unbounded transcript or artifact data
-do not enter the mirror. A generation change resets the cursor and requires a
-fresh snapshot.
+lane. GPUI does not create a second run registry. Raw provider payloads,
+credentials, exact paths, model reasoning, and unbounded transcript or artifact
+data do not enter the mirror. A generation change resets the cursor and requires
+a fresh snapshot.
+
+A tool call contributes one bounded line: its label and its state, through the
+same public-text bound every other mirrored string passes. Arguments, diffs,
+file contents, command output, and raw results stay on the desktop. The owner
+directed this on 2026-07-27, because excluding tool calls entirely left a phone
+showing a question and then a silence while the desktop delegated the work and
+answered. A delegation to another harness is a tool call, so hiding the class
+hid the thing the mirror most needed to show.
+
+Reduction happens before the safety check, not after. The check used to read the
+raw Markdown export, which still carried the model's reasoning inside
+`<thinking>` tags, and one disallowed line in a thought rejected the whole
+message. That is why a streaming answer stayed invisible until its reasoning
+ended and then arrived in one piece.
 
 - **Enforced by:** `mobile_mirror_projects_live_state_without_new_authority` in
   `crates/omega_deltas`, plus projection journey, redaction, bound, resume, and

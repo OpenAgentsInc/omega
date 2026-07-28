@@ -23,6 +23,15 @@ pub const PAIRING_BOOTSTRAP_SCHEMA: &str = "openagents.omega.device_pairing.v1";
 const MAX_PROOF_AGE_SECONDS: u64 = 300;
 const MAX_FUTURE_PROOF_SECONDS: u64 = 30;
 const DEFAULT_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
+
+/// How often pending deltas leave the host for a connected device.
+///
+/// A heartbeat every five seconds is the right cadence for proving the link is
+/// alive. It is the wrong cadence for carrying an answer as it is written, and
+/// the two used to share one timer, so a phone received a whole reply in one
+/// lump. Flushing on its own short interval makes the mirror read as the
+/// desktop does.
+const DELTA_FLUSH_INTERVAL: Duration = Duration::from_millis(100);
 const DEFAULT_DELTA_CAPACITY: usize = 1_024;
 const MAX_RECENT_PROOFS: usize = 4_096;
 const MAX_PROJECTED_THREADS: usize = 64;
@@ -901,6 +910,7 @@ async fn serve_connection(
     send_frame(&mut socket, &ServerFrame::accepted(&admission)).await?;
     let mut cursor = hello.resume_cursor;
     send_projection_frames(&mut socket, &journal, &mut cursor).await?;
+    let mut last_heartbeat_at = now_millis;
 
     loop {
         if shutdown.load(Ordering::Acquire) {
@@ -914,7 +924,11 @@ async fn serve_connection(
             return Ok(());
         }
         let incoming = socket.next().fuse();
-        let tick = FutureExt::fuse(network_timer(heartbeat_interval));
+        // Deltas used to leave the host only on the heartbeat, so a phone saw a
+        // whole answer arrive in one five-second lump rather than as the words
+        // were written. Wake on the shorter of the two intervals, and let the
+        // heartbeat keep its own slower schedule below.
+        let tick = FutureExt::fuse(network_timer(heartbeat_interval.min(DELTA_FLUSH_INTERVAL)));
         pin_mut!(incoming, tick);
         select! {
             message = incoming => {
@@ -987,15 +1001,23 @@ async fn serve_connection(
                     }
                 }
                 send_projection_frames(&mut socket, &journal, &mut cursor).await?;
-                let current = journal.cursor()?;
-                send_frame(
-                    &mut socket,
-                    &ServerFrame::Heartbeat {
-                        generation: current.generation,
-                        sequence: current.sequence,
-                        sent_at: now_millis,
-                    },
-                ).await?;
+                // The flush runs on every short tick. The heartbeat keeps its
+                // own slower schedule, so a device still reads one heartbeat
+                // per interval rather than fifty.
+                if now_millis.saturating_sub(last_heartbeat_at)
+                    >= heartbeat_interval.as_millis() as u64
+                {
+                    last_heartbeat_at = now_millis;
+                    let current = journal.cursor()?;
+                    send_frame(
+                        &mut socket,
+                        &ServerFrame::Heartbeat {
+                            generation: current.generation,
+                            sequence: current.sequence,
+                            sent_at: now_millis,
+                        },
+                    ).await?;
+                }
             }
         }
     }

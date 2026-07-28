@@ -23,7 +23,7 @@ use workspace::{AppState, Workspace};
 use crate::agent_panel::CreateThreadOptions;
 use crate::{
     Agent, AgentPanel, AgentThreadSource, ConversationView, ThreadId,
-    agent_connection_store::AgentConnectionStatus,
+    agent_connection_store::AgentConnectionStatus, thread_metadata_store::ThreadMetadataStore,
 };
 
 const SUPERVISED_WORKSPACE_REF: &str = "workspace.omega.supervised";
@@ -628,10 +628,14 @@ fn start_panel_thread_projection(state: Rc<RefCell<HostBridgeState>>, cx: &mut A
             };
             let projected = cx.update(|cx| panel_mirror_threads(&state, cx));
             for thread in projected {
-                let changed = published
+                // The stamp now comes from the thread metadata store rather
+                // than from the poll clock, so an unchanged thread projects
+                // identically pass after pass and this comparison stops the
+                // mirror republishing every thread several times a second.
+                if published
                     .get(&thread.thread_ref)
-                    .is_none_or(|previous| previous != &thread);
-                if !changed {
+                    .is_some_and(|previous| previous == &thread)
+                {
                     continue;
                 }
                 if journal
@@ -1065,6 +1069,7 @@ fn device_loaded_thread(
 ) -> omega_effectd::MirrorThread {
     let conversation = conversation.read(cx);
     let thread_ref = conversation.thread_id.to_key_string();
+    let projected_at = device_thread_updated_at(conversation, projected_at, cx);
     let Some(thread_view) = conversation.root_thread_view() else {
         return omega_effectd::MirrorThread {
             thread_ref,
@@ -1128,6 +1133,73 @@ fn without_role_heading(text: &str) -> &str {
     text
 }
 
+/// When this thread last did anything, as the desktop itself knows it.
+///
+/// The projection used to stamp every thread with the time it happened to run,
+/// so on a phone all threads read "now" and their order was arbitrary. The
+/// thread metadata store is the same record the desktop sidebar dates its own
+/// list from, so both surfaces now agree. A thread the store has never seen —
+/// a brand new one — falls back to the projection time.
+fn device_thread_updated_at(conversation: &ConversationView, projected_at: u64, cx: &App) -> u64 {
+    let Some(store) = ThreadMetadataStore::try_global(cx) else {
+        return projected_at;
+    };
+    store
+        .read(cx)
+        .entry(conversation.thread_id)
+        .and_then(|entry| u64::try_from(entry.updated_at.timestamp_millis()).ok())
+        .unwrap_or(projected_at)
+}
+
+/// One public-safe line for a tool call.
+///
+/// The label is what the desktop already shows in its own header, and a
+/// delegation names the harness there. The state is what a person watching
+/// from a phone actually wants. Arguments, diffs, file contents, and command
+/// output stay on the desktop.
+fn device_tool_call_line(tool_call: &acp_thread::ToolCall, cx: &App) -> String {
+    let label = tool_call.label.read(cx).source().to_string();
+    let state = match &tool_call.status {
+        acp_thread::ToolCallStatus::Pending => "queued",
+        acp_thread::ToolCallStatus::WaitingForConfirmation { .. } => "waiting for approval",
+        acp_thread::ToolCallStatus::InProgress => "running",
+        acp_thread::ToolCallStatus::Completed => "done",
+        acp_thread::ToolCallStatus::Failed => "failed",
+        acp_thread::ToolCallStatus::Canceled => "canceled",
+        acp_thread::ToolCallStatus::Rejected => "rejected",
+    };
+    format!("{} — {state}", device_label_preview(&label).trim())
+}
+
+/// Remove the reasoning blocks that Zed's Markdown export wraps in
+/// `<thinking>` tags.
+///
+/// The desktop draws a thought as its own collapsed affordance and never as
+/// prose, so its Markdown tag has no reader on the phone. An empty thought
+/// still exports as a tag pair, which arrived as a literal `<thinking>` and
+/// `</thinking>` under the answer.
+fn without_thoughts(text: &str) -> String {
+    const OPEN: &str = "<thinking>";
+    const CLOSE: &str = "</thinking>";
+    let mut kept = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find(OPEN) {
+        kept.push_str(&rest[..start]);
+        let after_open = &rest[start + OPEN.len()..];
+        match after_open.find(CLOSE) {
+            Some(end) => rest = &after_open[end + CLOSE.len()..],
+            // A thought that is still streaming has no closing tag yet. Drop
+            // the remainder rather than leaking a half-written thought.
+            None => {
+                rest = "";
+                break;
+            }
+        }
+    }
+    kept.push_str(rest);
+    kept.trim().to_string()
+}
+
 fn device_transcript(
     thread_ref: &str,
     entries: &[AgentThreadEntry],
@@ -1148,17 +1220,32 @@ fn device_transcript(
                     omega_effectd::MessageRole::Assistant,
                     message.to_markdown(cx),
                 ),
+                // A tool call is most of what a coding turn actually does, and
+                // a delegation to another harness is one. Dropping them left
+                // the phone showing a question and then a silence while the
+                // desktop worked. Mirror the label and the state only: never
+                // the arguments, the diff, or the command output.
+                AgentThreadEntry::ToolCall(tool_call) => (
+                    omega_effectd::MessageRole::Tool,
+                    device_tool_call_line(tool_call, cx),
+                ),
                 AgentThreadEntry::SystemNote(_)
-                | AgentThreadEntry::ToolCall(_)
                 | AgentThreadEntry::Elicitation(_)
                 | AgentThreadEntry::CompletedPlan(_)
                 | AgentThreadEntry::ContextCompaction(_) => return None,
             };
+            // Reduce the entry to what the phone is allowed to read BEFORE the
+            // safety check, not after. The check ran on the raw export, which
+            // still carried the model's reasoning, and reasoning names paths
+            // and identifiers far more often than an answer does. One
+            // disallowed line inside a thought dropped the whole message, so a
+            // streaming answer stayed invisible until its reasoning ended and
+            // then landed in one piece. The mirror never wanted the thought.
+            let text = without_thoughts(without_role_heading(&text));
             if !full_auto_ui::issue31_device_mirror_text_is_safe(&text) {
                 return None;
             }
-            let text = without_role_heading(&text);
-            let preview = device_transcript_preview(text);
+            let preview = device_transcript_preview(&text);
             let text = full_auto_ui::issue31_device_mirror_text(
                 &preview,
                 MAX_DEVICE_TRANSCRIPT_TEXT_BYTES,

@@ -11128,9 +11128,29 @@ impl ThreadView {
                                     }))
                             }),
                     )
-                    .when(is_running && subagent_session_id.is_some(), |buttons| {
-                        buttons.child(
-                            IconButton::new(format!("stop-subagent-{}", entry_ix), IconName::Stop)
+                    // A collapsed card gets a turning indicator, not a stop
+                    // control. A small red square sitting on a card reads as a
+                    // fault light rather than as work in progress, and it was
+                    // the only thing the card said while a delegation ran.
+                    .when(
+                        is_running && subagent_session_id.is_some() && !is_expanded,
+                        |buttons| {
+                            buttons.child(
+                                Icon::new(IconName::TodoProgress)
+                                    .size(IconSize::Small)
+                                    .color(Color::Accent)
+                                    .with_rotate_animation(2),
+                            )
+                        },
+                    )
+                    .when(
+                        is_running && subagent_session_id.is_some() && is_expanded,
+                        |buttons| {
+                            buttons.child(
+                                IconButton::new(
+                                    format!("stop-subagent-{}", entry_ix),
+                                    IconName::Stop,
+                                )
                                 .icon_size(IconSize::Small)
                                 .icon_color(Color::Error)
                                 .tooltip(Tooltip::text("Stop Subagent"))
@@ -11149,8 +11169,9 @@ impl ThreadView {
                                         ))
                                     },
                                 ),
-                        )
-                    }),
+                            )
+                        },
+                    ),
             )
             .when_some(thread_view, |this, thread_view| {
                 let thread = &thread_view.read(cx).thread;

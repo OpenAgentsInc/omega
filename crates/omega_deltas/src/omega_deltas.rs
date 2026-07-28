@@ -19658,12 +19658,30 @@ mod tests {
             "full_auto_ui::issue31_device_mirror_reading()",
             "full_auto_ui::issue31_device_mirror_text_is_safe(",
             "full_auto_ui::issue31_device_mirror_text(",
-            "AgentThreadEntry::ToolCall(_)",
+            // A tool call carries a bounded label and state, never its
+            // arguments or output, and a delegation to another harness is one.
+            "AgentThreadEntry::ToolCall(tool_call)",
+            "device_tool_call_line(tool_call, cx)",
+            // The reduction runs before the safety check, so a thought cannot
+            // reject the answer it precedes.
+            "let text = without_thoughts(without_role_heading(&text));",
             "journal.replace_snapshot(device_mirror_snapshot(",
         ] {
             assert!(
                 host_bridge.contains(required),
                 "OMEGA-DELTA-0156: the desktop mirror lost `{required}`."
+            );
+        }
+
+        for forbidden in [
+            "tool_call.raw_input",
+            "tool_call.raw_output",
+            "tool_call.content",
+            "tool_call.locations",
+        ] {
+            assert!(
+                !host_bridge.contains(forbidden),
+                "OMEGA-DELTA-0156: the desktop mirror reads `{forbidden}` into a phone projection."
             );
         }
 
