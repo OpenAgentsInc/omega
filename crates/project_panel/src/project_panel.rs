@@ -93,6 +93,56 @@ use crate::{
 const PROJECT_PANEL_KEY: &str = "ProjectPanel";
 const NEW_ENTRY_ID: ProjectEntryId = ProjectEntryId::MAX;
 
+fn project_panel_row_selector(
+    worktree_id: WorktreeId,
+    entry_id: ProjectEntryId,
+    is_sticky: bool,
+) -> String {
+    let row_kind = if is_sticky { "sticky-row" } else { "row" };
+    format!(
+        "omega.project-panel.{row_kind}.{worktree_id}.{}",
+        entry_id.to_usize()
+    )
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProjectPanelScopeState {
+    Unscoped,
+    Unavailable,
+    Loading {
+        worktree_id: WorktreeId,
+        revision: u64,
+    },
+    Ready {
+        worktree_id: WorktreeId,
+        revision: u64,
+    },
+    Empty {
+        worktree_id: WorktreeId,
+        revision: u64,
+    },
+    Missing {
+        worktree_id: WorktreeId,
+        revision: u64,
+    },
+}
+
+#[cfg(any(test, feature = "test-support"))]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProjectPanelVisibleRow {
+    pub worktree_id: WorktreeId,
+    pub entry_id: ProjectEntryId,
+    pub path: Arc<RelPath>,
+    pub is_expanded: bool,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl ProjectPanelVisibleRow {
+    pub fn selector(&self) -> String {
+        project_panel_row_selector(self.worktree_id, self.entry_id, false)
+    }
+}
+
 struct VisibleEntriesForWorktree {
     worktree_id: WorktreeId,
     entries: Vec<GitEntry>,
@@ -166,6 +216,10 @@ pub struct ProjectPanel {
     update_visible_entries_task: UpdateVisibleEntriesTask,
     undo_manager: UndoManager,
     state: State,
+    worktree_scope: Option<WorktreeId>,
+    worktree_scope_unavailable: bool,
+    scope_state: ProjectPanelScopeState,
+    visible_entries_revision: u64,
 }
 
 struct UpdateVisibleEntriesTask {
@@ -515,6 +569,12 @@ pub fn init(cx: &mut App) {
         });
 
         workspace.register_action(|workspace, action: &Rename, window, cx| {
+            if workspace
+                .panel::<ProjectPanel>(cx)
+                .is_some_and(|panel| panel.read(cx).worktree_scope_unavailable)
+            {
+                return;
+            }
             workspace.open_panel::<ProjectPanel>(window, cx);
             if let Some(panel) = workspace.panel::<ProjectPanel>(cx) {
                 panel.update(cx, |panel, cx| {
@@ -529,6 +589,12 @@ pub fn init(cx: &mut App) {
         });
 
         workspace.register_action(|workspace, action: &Duplicate, window, cx| {
+            if workspace
+                .panel::<ProjectPanel>(cx)
+                .is_some_and(|panel| panel.read(cx).worktree_scope_unavailable)
+            {
+                return;
+            }
             workspace.open_panel::<ProjectPanel>(window, cx);
             if let Some(panel) = workspace.panel::<ProjectPanel>(cx) {
                 panel.update(cx, |panel, cx| {
@@ -577,6 +643,7 @@ pub fn init(cx: &mut App) {
                         else {
                             return;
                         };
+                        workspace.reveal_zero_base_center(window, cx);
                         let git_store = workspace.project().read(cx).git_store().clone();
                         git_ui::git_graph::open_or_reuse_graph(
                             workspace, repo_id, git_store, log_source, None, window, cx,
@@ -743,7 +810,18 @@ impl ProjectPanel {
                     }
                     project::Event::WorktreeRemoved(id) => {
                         this.state.expanded_dir_ids.remove(id);
-                        this.update_visible_entries(None, false, false, window, cx);
+                        if this.worktree_scope == Some(*id) {
+                            this.undo_manager.clear().log_err();
+                            this.clear_incompatible_scope_state(Some(*id), false, cx);
+                            let revision =
+                                this.update_visible_entries(None, false, false, window, cx);
+                            this.scope_state = ProjectPanelScopeState::Loading {
+                                worktree_id: *id,
+                                revision,
+                            };
+                        } else {
+                            this.update_visible_entries(None, false, false, window, cx);
+                        }
                         cx.notify();
                     }
                     project::Event::WorktreeUpdatedEntries(_, _)
@@ -881,6 +959,10 @@ impl ProjectPanel {
                     project.read(cx).is_via_collab(),
                     &cx,
                 ),
+                worktree_scope: None,
+                worktree_scope_unavailable: false,
+                scope_state: ProjectPanelScopeState::Unscoped,
+                visible_entries_revision: 0,
             };
             this.update_visible_entries(None, false, false, window, cx);
 
@@ -896,12 +978,25 @@ impl ProjectPanel {
                     allow_preview,
                 } => {
                     if let Some(worktree) = project.read(cx).worktree_for_entry(entry_id, cx)
-                        && let Some(entry) = worktree.read(cx).entry_for_id(entry_id) {
-                            let file_path = entry.path.clone();
+                        && let Some((file_path, entry_id)) = worktree.read_with(cx, |worktree, _| {
+                            worktree
+                                .entry_for_id(entry_id)
+                                .map(|entry| (entry.path.clone(), entry.id))
+                        })
+                    {
                             let worktree_id = worktree.read(cx).id();
-                            let entry_id = entry.id;
                             let is_via_ssh = project.read(cx).is_via_remote_server();
+                            let Some(project_panel) = project_panel.upgrade() else {
+                                return;
+                            };
+                            if !project_panel
+                                .read(cx)
+                                .worktree_is_in_scope(worktree_id)
+                            {
+                                return;
+                            }
 
+                            workspace.reveal_zero_base_center(window, cx);
                             workspace
                                 .open_path_preview(
                                     ProjectPath {
@@ -932,18 +1027,16 @@ impl ProjectPanel {
                                     }
                                 });
 
-                            if let Some(project_panel) = project_panel.upgrade() {
-                                // Always select and mark the entry, regardless of whether it is opened or not.
-                                project_panel.update(cx, |project_panel, _| {
-                                    let entry = SelectedEntry { worktree_id, entry_id };
-                                    project_panel.marked_entries.clear();
-                                    project_panel.marked_entries.push(entry);
-                                    project_panel.selection = Some(entry);
-                                });
-                                if !focus_opened_item {
-                                    let focus_handle = project_panel.read(cx).focus_handle.clone();
-                                    window.focus(&focus_handle, cx);
-                                }
+                            // Always select and mark the entry, regardless of whether it is opened or not.
+                            project_panel.update(cx, |project_panel, _| {
+                                let entry = SelectedEntry { worktree_id, entry_id };
+                                project_panel.marked_entries.clear();
+                                project_panel.marked_entries.push(entry);
+                                project_panel.selection = Some(entry);
+                            });
+                            if !focus_opened_item {
+                                let focus_handle = project_panel.read(cx).focus_handle.clone();
+                                window.focus(&focus_handle, cx);
                             }
                         }
                 }
@@ -953,12 +1046,26 @@ impl ProjectPanel {
                     split_direction,
                 } => {
                     if let Some(worktree) = project.read(cx).worktree_for_entry(entry_id, cx)
-                        && let Some(entry) = worktree.read(cx).entry_for_id(entry_id) {
+                        && let Some(entry_path) = worktree.read_with(cx, |worktree, _| {
+                            worktree
+                                .entry_for_id(entry_id)
+                                .map(|entry| entry.path.clone())
+                        })
+                    {
+                            let worktree_id = worktree.read(cx).id();
+                            if !project_panel.upgrade().is_some_and(|project_panel| {
+                                project_panel
+                                    .read(cx)
+                                    .worktree_is_in_scope(worktree_id)
+                            }) {
+                                return;
+                            }
+                            workspace.reveal_zero_base_center(window, cx);
                             workspace
                                 .split_path_preview(
                                     ProjectPath {
-                                        worktree_id: worktree.read(cx).id(),
-                                        path: entry.path.clone(),
+                                        worktree_id,
+                                        path: entry_path,
                                     },
                                     allow_preview,
                                     split_direction,
@@ -983,6 +1090,163 @@ impl ProjectPanel {
         workspace.update_in(&mut cx, |workspace, window, cx| {
             ProjectPanel::new(workspace, window, cx)
         })
+    }
+
+    pub fn worktree_scope(&self) -> Option<WorktreeId> {
+        self.worktree_scope
+    }
+
+    pub fn scope_state(&self) -> ProjectPanelScopeState {
+        self.scope_state
+    }
+
+    pub fn set_worktree_scope(
+        &mut self,
+        worktree_id: Option<WorktreeId>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !self.worktree_scope_unavailable && self.worktree_scope == worktree_id {
+            return false;
+        }
+
+        let filename_editor_was_focused = self
+            .filename_editor
+            .read(cx)
+            .focus_handle(cx)
+            .contains_focused(window, cx);
+        self.worktree_scope = worktree_id;
+        self.worktree_scope_unavailable = false;
+        if let Some(worktree_id) = worktree_id {
+            self.undo_manager.retain_worktree(worktree_id).log_err();
+        }
+        self.clear_incompatible_scope_state(worktree_id, false, cx);
+        let restore_filename_editor_focus =
+            filename_editor_was_focused && self.state.edit_state.is_some();
+        if filename_editor_was_focused {
+            self.focus_handle.focus(window, cx);
+        }
+
+        let revision =
+            self.update_visible_entries(None, restore_filename_editor_focus, false, window, cx);
+        self.scope_state = match worktree_id {
+            Some(worktree_id) => ProjectPanelScopeState::Loading {
+                worktree_id,
+                revision,
+            },
+            None => ProjectPanelScopeState::Unscoped,
+        };
+        cx.notify();
+        true
+    }
+
+    pub fn set_worktree_scope_unavailable(
+        &mut self,
+        compatible_worktree_id: Option<WorktreeId>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.worktree_scope_unavailable && self.worktree_scope == compatible_worktree_id {
+            return false;
+        }
+
+        let filename_editor_was_focused = self
+            .filename_editor
+            .read(cx)
+            .focus_handle(cx)
+            .contains_focused(window, cx);
+        self.worktree_scope = compatible_worktree_id;
+        self.worktree_scope_unavailable = true;
+        if let Some(worktree_id) = compatible_worktree_id {
+            self.undo_manager.retain_worktree(worktree_id).log_err();
+        } else {
+            self.undo_manager.clear().log_err();
+        }
+        self.clear_incompatible_scope_state(compatible_worktree_id, true, cx);
+        if filename_editor_was_focused {
+            self.focus_handle.focus(window, cx);
+        }
+        self.visible_entries_revision = self.visible_entries_revision.saturating_add(1);
+        self.scope_state = ProjectPanelScopeState::Unavailable;
+        cx.notify();
+        true
+    }
+
+    fn clear_incompatible_scope_state(
+        &mut self,
+        worktree_scope: Option<WorktreeId>,
+        scope_unavailable: bool,
+        cx: &App,
+    ) {
+        let scope_is_available = match worktree_scope {
+            Some(worktree_id) => self
+                .project
+                .read(cx)
+                .worktree_for_id(worktree_id, cx)
+                .is_some(),
+            None => !scope_unavailable,
+        };
+        let worktree_is_compatible =
+            |worktree_id| scope_is_available && worktree_scope.is_none_or(|id| id == worktree_id);
+        let selection_is_compatible = self
+            .selection
+            .is_some_and(|selection| worktree_is_compatible(selection.worktree_id));
+        let edit_state_is_compatible = self
+            .state
+            .edit_state
+            .as_ref()
+            .is_some_and(|edit_state| worktree_is_compatible(edit_state.worktree_id));
+        let preserve_scroll = scope_is_available
+            && (worktree_scope.is_none() || selection_is_compatible || edit_state_is_compatible);
+
+        self.update_visible_entries_task = UpdateVisibleEntriesTask::default();
+        self.hover_scroll_task.take();
+        self.hover_expand_task.take();
+        self.context_menu.take();
+        self.selection = self
+            .selection
+            .filter(|selection| worktree_is_compatible(selection.worktree_id));
+        self.marked_entries
+            .retain(|entry| worktree_is_compatible(entry.worktree_id));
+        self.clipboard = self
+            .clipboard
+            .take()
+            .and_then(|clipboard| clipboard.filtered_for_scope(worktree_scope, scope_is_available));
+        self.drag_target_entry = None;
+        self.folded_directory_drag_target = None;
+        self._dragged_entry_destination = None;
+        self.previous_drag_position = None;
+        self.mouse_down = false;
+        self.rendered_entries_len = 0;
+        self.sticky_items_count = 0;
+        self.state.last_worktree_root_id = None;
+        self.state.visible_entries.clear();
+        self.state.max_width_item_index = None;
+        self.state.ancestors.clear();
+        self.state.edit_state = self.state.edit_state.take().and_then(|mut edit_state| {
+            if !worktree_is_compatible(edit_state.worktree_id) {
+                return None;
+            }
+            edit_state.previously_focused = edit_state
+                .previously_focused
+                .filter(|entry| worktree_is_compatible(entry.worktree_id));
+            Some(edit_state)
+        });
+        self.state.temporarily_unfolded_pending_state = self
+            .state
+            .temporarily_unfolded_pending_state
+            .take()
+            .filter(|state| {
+                worktree_is_compatible(state.previously_focused_leaf_entry.worktree_id)
+            });
+        if !preserve_scroll {
+            self.scroll_handle.set_offset(Point::default());
+        }
+    }
+
+    fn worktree_is_in_scope(&self, worktree_id: WorktreeId) -> bool {
+        !self.worktree_scope_unavailable
+            && self.worktree_scope.is_none_or(|scope| scope == worktree_id)
     }
 
     fn update_diagnostics(&mut self, cx: &mut Context<Self>) {
@@ -1095,7 +1359,10 @@ impl ProjectPanel {
             let is_markdown = !is_dir && MarkdownPreviewView::is_markdown_path(&*entry.path);
 
             let settings = ProjectPanelSettings::get_global(cx);
-            let visible_worktrees_count = project.visible_worktrees(cx).count();
+            let visible_worktrees_count = project
+                .visible_worktrees(cx)
+                .filter(|worktree| self.worktree_is_in_scope(worktree.read(cx).id()))
+                .count();
             let should_hide_rename = is_root
                 && (cfg!(target_os = "windows")
                     || (settings.hide_root && visible_worktrees_count == 1));
@@ -1417,7 +1684,13 @@ impl ProjectPanel {
         root_id: ProjectEntryId,
         cx: &App,
     ) {
-        let single_worktree = self.project.read(cx).visible_worktrees(cx).count() == 1;
+        let single_worktree = self
+            .project
+            .read(cx)
+            .visible_worktrees(cx)
+            .filter(|worktree| self.worktree_is_in_scope(worktree.read(cx).id()))
+            .count()
+            == 1;
         if let Some(expanded_dir_ids) = self.state.expanded_dir_ids.get_mut(&worktree_id) {
             if single_worktree {
                 expanded_dir_ids.retain(|id| id == &root_id);
@@ -1428,9 +1701,13 @@ impl ProjectPanel {
     }
 
     fn all_worktree_roots(&self, cx: &App) -> Vec<(WorktreeId, ProjectEntryId)> {
+        if self.worktree_scope_unavailable {
+            return Vec::new();
+        }
         self.project
             .read(cx)
             .visible_worktrees(cx)
+            .filter(|worktree| self.worktree_is_in_scope(worktree.read(cx).id()))
             .filter_map(|worktree| {
                 let worktree = worktree.read(cx);
                 Some((worktree.id(), worktree.root_entry()?.id))
@@ -1792,6 +2069,7 @@ impl ProjectPanel {
         };
         self.workspace
             .update(cx, |workspace, cx| {
+                workspace.reveal_zero_base_center(window, cx);
                 MarkdownPreviewView::open_for_project_path(project_path, workspace, window, cx);
             })
             .ok();
@@ -2035,6 +2313,9 @@ impl ProjectPanel {
                         .update_in(cx, |project_panel, window, cx| {
                             project_panel.marked_entries.clear();
                             project_panel.update_visible_entries(None, false, false, window, cx);
+                            if !project_panel.worktree_is_in_scope(worktree_id) {
+                                return None;
+                            }
 
                             if is_dir {
                                 project_panel.project.update(cx, |_, cx| {
@@ -2056,6 +2337,7 @@ impl ProjectPanel {
                                 project_panel
                                     .workspace
                                     .update(cx, |workspace, cx| {
+                                        workspace.reveal_zero_base_center(window, cx);
                                         workspace.open_abs_path(
                                             abs_path,
                                             OpenOptions {
@@ -2155,6 +2437,9 @@ impl ProjectPanel {
 
         cx: &mut Context<Self>,
     ) {
+        if self.worktree_scope_unavailable {
+            return;
+        }
         cx.emit(Event::OpenedEntry {
             entry_id,
             focus_opened_item,
@@ -2170,6 +2455,9 @@ impl ProjectPanel {
 
         cx: &mut Context<Self>,
     ) {
+        if self.worktree_scope_unavailable {
+            return;
+        }
         cx.emit(Event::SplitEntry {
             entry_id,
             allow_preview,
@@ -2280,10 +2568,16 @@ impl ProjectPanel {
     }
 
     pub fn undo(&mut self, _: &Undo, _window: &mut Window, _cx: &mut Context<Self>) {
+        if self.worktree_scope_unavailable {
+            return;
+        }
         self.undo_manager.undo().log_err();
     }
 
     pub fn redo(&mut self, _: &Redo, _window: &mut Window, _cx: &mut Context<Self>) {
+        if self.worktree_scope_unavailable {
+            return;
+        }
         self.undo_manager.redo().log_err();
     }
 
@@ -2308,8 +2602,12 @@ impl ProjectPanel {
 
                 if Some(entry) == worktree.read(cx).root_entry() {
                     let settings = ProjectPanelSettings::get_global(cx);
-                    let visible_worktrees_count =
-                        self.project.read(cx).visible_worktrees(cx).count();
+                    let visible_worktrees_count = self
+                        .project
+                        .read(cx)
+                        .visible_worktrees(cx)
+                        .filter(|worktree| self.worktree_is_in_scope(worktree.read(cx).id()))
+                        .count();
                     if settings.hide_root && visible_worktrees_count == 1 {
                         return;
                     }
@@ -3775,6 +4073,9 @@ impl ProjectPanel {
     }
 
     fn file_abs_paths_to_diff(&self, cx: &Context<Self>) -> Option<(PathBuf, PathBuf)> {
+        if self.worktree_scope_unavailable {
+            return None;
+        }
         let mut selections_abs_path = self
             .marked_entries
             .iter()
@@ -3804,6 +4105,7 @@ impl ProjectPanel {
         if let Some((file_path1, file_path2)) = selected_files {
             self.workspace
                 .update(cx, |workspace, cx| {
+                    workspace.reveal_zero_base_center(window, cx);
                     FileDiffView::open(
                         file_path1,
                         file_path2,
@@ -3872,6 +4174,7 @@ impl ProjectPanel {
                         // File at root, open search with empty filter
                         self.workspace
                             .update(cx, |workspace, cx| {
+                                workspace.reveal_zero_base_center(window, cx);
                                 search::ProjectSearchView::new_search_in_directory(
                                     workspace,
                                     RelPath::empty(),
@@ -3885,7 +4188,13 @@ impl ProjectPanel {
                 }
             };
 
-            let include_root = self.project.read(cx).visible_worktrees(cx).count() > 1;
+            let include_root = self
+                .project
+                .read(cx)
+                .visible_worktrees(cx)
+                .filter(|worktree| self.worktree_is_in_scope(worktree.read(cx).id()))
+                .count()
+                > 1;
             let dir_path = if include_root {
                 worktree.read(cx).root_name().join(&dir_path)
             } else {
@@ -3894,6 +4203,7 @@ impl ProjectPanel {
 
             self.workspace
                 .update(cx, |workspace, cx| {
+                    workspace.reveal_zero_base_center(window, cx);
                     search::ProjectSearchView::new_search_in_directory(
                         workspace, &dir_path, window, cx,
                     );
@@ -3908,6 +4218,9 @@ impl ProjectPanel {
         destination: ProjectEntryId,
         cx: &mut Context<Self>,
     ) {
+        if self.worktree_scope_unavailable {
+            return;
+        }
         self.project.update(cx, |project, cx| {
             let Some(worktree_to_move) = project.worktree_for_entry(entry_to_move, cx) else {
                 return;
@@ -3932,7 +4245,7 @@ impl ProjectPanel {
         destination_is_file: bool,
         cx: &mut Context<Self>,
     ) -> Option<Task<Result<CreatedEntry>>> {
-        if entry_to_move == destination_entry {
+        if self.worktree_scope_unavailable || entry_to_move == destination_entry {
             return None;
         }
 
@@ -4045,6 +4358,9 @@ impl ProjectPanel {
     }
 
     fn effective_entries(&self) -> BTreeSet<SelectedEntry> {
+        if self.worktree_scope_unavailable {
+            return BTreeSet::new();
+        }
         if let Some(selection) = self.selection {
             let selection = SelectedEntry {
                 entry_id: self.resolve_entry(selection.entry_id),
@@ -4176,6 +4492,9 @@ impl ProjectPanel {
         &self,
         cx: &'a App,
     ) -> Option<(Entity<Worktree>, &'a project::Entry)> {
+        if self.worktree_scope_unavailable {
+            return None;
+        }
         let selection = self.selection?;
         let project = self.project.read(cx);
         let worktree = project.worktree_for_id(selection.worktree_id, cx)?;
@@ -4241,7 +4560,11 @@ impl ProjectPanel {
         autoscroll: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) {
+    ) -> u64 {
+        self.visible_entries_revision = self.visible_entries_revision.saturating_add(1);
+        let derivation_revision = self.visible_entries_revision;
+        let worktree_scope = self.worktree_scope;
+        let worktree_scope_unavailable = self.worktree_scope_unavailable;
         let now = Instant::now();
         let settings = ProjectPanelSettings::get_global(cx);
         let auto_collapse_dirs = settings.auto_fold_dirs;
@@ -4256,23 +4579,50 @@ impl ProjectPanel {
         let mut new_state = State::derive(&self.state);
         new_state.last_worktree_root_id = project
             .visible_worktrees(cx)
-            .next_back()
+            .rfind(|worktree| {
+                !worktree_scope_unavailable
+                    && worktree_scope.is_none_or(|scope| worktree.read(cx).id() == scope)
+            })
             .and_then(|worktree| worktree.read(cx).root_entry())
             .map(|entry| entry.id);
         let mut max_width_item = None;
 
         let visible_worktrees: Vec<_> = project
             .visible_worktrees(cx)
+            .filter(|worktree| {
+                !worktree_scope_unavailable
+                    && worktree_scope.is_none_or(|scope| worktree.read(cx).id() == scope)
+            })
             .map(|worktree| worktree.read(cx).snapshot())
             .collect();
+        let scoped_worktree_is_visible = !worktree_scope_unavailable
+            && worktree_scope.is_none_or(|scope| {
+                visible_worktrees
+                    .iter()
+                    .any(|worktree| worktree.id() == scope)
+            });
         let hide_root = settings.hide_root && visible_worktrees.len() == 1;
         let hide_hidden = settings.hide_hidden;
 
         let visible_entries_task = cx.spawn_in(window, async move |this, cx| {
-            let new_state = cx
+            let (new_state, scoped_worktree_has_visible_non_root_entry) = cx
                 .background_spawn(async move {
+                    let mut scoped_worktree_has_visible_non_root_entry = false;
                     for worktree_snapshot in visible_worktrees {
                         let worktree_id = worktree_snapshot.id();
+                        if worktree_scope == Some(worktree_id) {
+                            let root_entry_id =
+                                worktree_snapshot.root_entry().map(|entry| entry.id);
+                            scoped_worktree_has_visible_non_root_entry =
+                                new_state.edit_state.as_ref().is_some_and(|edit_state| {
+                                    edit_state.worktree_id == worktree_id
+                                        && edit_state.is_new_entry()
+                                }) || worktree_snapshot.entries(true, 0).any(|entry| {
+                                    Some(entry.id) != root_entry_id
+                                        && (!hide_gitignore || !entry.is_ignored)
+                                        && (!hide_hidden || !entry.is_hidden)
+                                });
+                        }
 
                         let mut new_entry_parent_id = None;
                         let mut new_entry_kind = EntryKind::Dir;
@@ -4461,17 +4811,24 @@ impl ProjectPanel {
 
                             let expanded_dir_ids =
                                 match new_state.expanded_dir_ids.entry(worktree_id) {
-                                    hash_map::Entry::Occupied(e) => e.into_mut(),
-                                    hash_map::Entry::Vacant(e) => {
+                                    hash_map::Entry::Occupied(entry) => entry.into_mut(),
+                                    hash_map::Entry::Vacant(entry) => {
                                         // The first time a worktree's root entry becomes available,
                                         // mark that root entry as expanded.
-                                        if let Some(entry) = worktree_snapshot.root_entry() {
-                                            e.insert(vec![entry.id]).as_slice()
-                                        } else {
-                                            &[]
-                                        }
+                                        entry.insert(
+                                            worktree_snapshot
+                                                .root_entry()
+                                                .map(|entry| vec![entry.id])
+                                                .unwrap_or_default(),
+                                        )
                                     }
                                 };
+                            if worktree_scope == Some(worktree_id)
+                                && Some(entry.entry) == worktree_snapshot.root_entry()
+                                && let Err(index) = expanded_dir_ids.binary_search(&entry.id)
+                            {
+                                expanded_dir_ids.insert(index, entry.id);
+                            }
 
                             if expanded_dir_ids.binary_search(&entry.id).is_err()
                                 && entry_iter.advance_to_sibling()
@@ -4512,16 +4869,44 @@ impl ProjectPanel {
                             new_state.max_width_item_index = Some(visited_worktrees_length + index);
                         }
                     }
-                    new_state
+                    (new_state, scoped_worktree_has_visible_non_root_entry)
                 })
                 .await;
             this.update_in(cx, |this, window, cx| {
+                if this.visible_entries_revision != derivation_revision
+                    || this.worktree_scope != worktree_scope
+                    || this.worktree_scope_unavailable != worktree_scope_unavailable
+                {
+                    return;
+                }
                 this.state = new_state;
-                if let Some((worktree_id, entry_id)) = new_selected_entry {
-                    this.selection = Some(SelectedEntry {
+                this.scope_state = match (worktree_scope_unavailable, worktree_scope) {
+                    (true, _) => ProjectPanelScopeState::Unavailable,
+                    (false, Some(worktree_id)) if !scoped_worktree_is_visible => {
+                        ProjectPanelScopeState::Missing {
+                            worktree_id,
+                            revision: derivation_revision,
+                        }
+                    }
+                    (false, Some(worktree_id)) if !scoped_worktree_has_visible_non_root_entry => {
+                        ProjectPanelScopeState::Empty {
+                            worktree_id,
+                            revision: derivation_revision,
+                        }
+                    }
+                    (false, Some(worktree_id)) => ProjectPanelScopeState::Ready {
                         worktree_id,
-                        entry_id,
-                    });
+                        revision: derivation_revision,
+                    },
+                    (false, None) => ProjectPanelScopeState::Unscoped,
+                };
+                if let Some((worktree_id, entry_id)) = new_selected_entry {
+                    if this.worktree_is_in_scope(worktree_id) {
+                        this.selection = Some(SelectedEntry {
+                            worktree_id,
+                            entry_id,
+                        });
+                    }
                 }
                 let elapsed = now.elapsed();
                 if this.last_reported_update.elapsed() > Duration::from_secs(3600) {
@@ -4557,6 +4942,7 @@ impl ProjectPanel {
                 || self.update_visible_entries_task.focus_filename_editor,
             autoscroll: autoscroll || self.update_visible_entries_task.autoscroll,
         };
+        derivation_revision
     }
 
     fn expand_entry(
@@ -4599,6 +4985,9 @@ impl ProjectPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.worktree_scope_unavailable {
+            return;
+        }
         let mut paths: Vec<Arc<Path>> = paths.iter().map(|path| Arc::from(path.clone())).collect();
 
         let open_file_after_drop = paths.len() == 1 && paths[0].is_file();
@@ -5638,6 +6027,7 @@ impl ProjectPanel {
 
         let depth = details.depth;
         let worktree_id = details.worktree_id;
+        let is_expanded = details.is_expanded;
 
         let bg_color = if is_marked {
             item_colors.marked
@@ -5718,14 +6108,27 @@ impl ProjectPanel {
             .then(|| git_status_indicator(details.git_status))
             .flatten();
 
-        let id: ElementId = if is_sticky {
+        let list_item_id: ElementId = if is_sticky {
             SharedString::from(format!("project_panel_sticky_item_{}", entry_id.to_usize())).into()
         } else {
             (entry_id.to_proto() as usize).into()
         };
+        let row_selector = project_panel_row_selector(worktree_id, entry_id, is_sticky);
+        let accessible_label: SharedString = if path.is_empty() {
+            file_name.clone()
+        } else {
+            path.display(path_style).to_string()
+        }
+        .into();
 
         div()
-            .id(id.clone())
+            .id(row_selector.clone())
+            .debug_selector(move || row_selector)
+            .role(gpui::Role::TreeItem)
+            .aria_label(accessible_label)
+            .aria_level(depth.saturating_add(1))
+            .aria_selected(is_active || is_marked)
+            .when(kind.is_dir(), |this| this.aria_expanded(is_expanded))
             .relative()
             .group(GROUP_NAME)
             .cursor_pointer()
@@ -6066,7 +6469,7 @@ impl ProjectPanel {
                 }),
             )
             .child(
-                ListItem::new(id)
+                ListItem::new(list_item_id)
                     .indent_level(depth)
                     .indent_step_size(px(settings.indent_size))
                     .spacing(match settings.entry_spacing {
@@ -6245,6 +6648,10 @@ impl ProjectPanel {
             .when_some(validation_color_and_message, |this, (color, message)| {
                 this.relative().child(deferred(
                     div()
+                        .id("omega.project-panel.validation")
+                        .debug_selector(|| "omega.project-panel.validation".into())
+                        .role(gpui::Role::Alert)
+                        .aria_label(message.clone())
                         .occlude()
                         .absolute()
                         .top_full()
@@ -6610,6 +7017,9 @@ impl ProjectPanel {
             .context("can't reveal a non-existent entry in the project panel")?;
         let worktree = worktree.read(cx);
         let worktree_id = worktree.id();
+        if !self.worktree_is_in_scope(worktree_id) {
+            anyhow::bail!("can't reveal an entry outside the project panel's worktree scope");
+        }
         let is_ignored = worktree
             .entry_for_id(entry_id)
             .is_none_or(|entry| entry.is_ignored && !entry.is_always_included);
@@ -6864,8 +7274,67 @@ fn item_width_estimate(depth: usize, item_text_chars: usize, is_symlink: bool) -
     item_width
 }
 
+fn render_scoped_project_panel_state(
+    state: ProjectPanelScopeState,
+    focus_handle: &FocusHandle,
+) -> Option<AnyElement> {
+    let (selector, label) = match state {
+        ProjectPanelScopeState::Loading { .. } => (
+            "omega.project-panel.scope.loading",
+            "Loading files for this worktree",
+        ),
+        ProjectPanelScopeState::Empty { .. } => (
+            "omega.project-panel.scope.empty",
+            "This worktree has no visible files",
+        ),
+        ProjectPanelScopeState::Missing { .. } => (
+            "omega.project-panel.scope.missing",
+            "This worktree is no longer available",
+        ),
+        ProjectPanelScopeState::Unavailable => (
+            "omega.project-panel.scope.unavailable",
+            "Files are unavailable until a worktree is selected",
+        ),
+        ProjectPanelScopeState::Unscoped | ProjectPanelScopeState::Ready { .. } => return None,
+    };
+
+    Some(
+        v_flex()
+            .id("omega.project-panel.tree")
+            .debug_selector(|| "omega.project-panel.tree".into())
+            .track_focus(focus_handle)
+            .tab_index(0)
+            .size_full()
+            .role(gpui::Role::Tree)
+            .aria_label("Files")
+            .items_center()
+            .justify_center()
+            .child(
+                v_flex()
+                    .id(selector)
+                    .debug_selector(move || selector.into())
+                    .role(gpui::Role::Status)
+                    .aria_label(label)
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        Icon::new(IconName::FileTree)
+                            .size(IconSize::Medium)
+                            .color(Color::Muted),
+                    )
+                    .child(Label::new(label).size(LabelSize::Small).color(Color::Muted)),
+            )
+            .into_any_element(),
+    )
+}
+
 impl Render for ProjectPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if let Some(state) = render_scoped_project_panel_state(self.scope_state, &self.focus_handle)
+        {
+            return state;
+        }
+
         let has_worktree = !self.state.visible_entries.is_empty();
         let project = self.project.read(cx);
         let panel_settings = ProjectPanelSettings::get_global(cx);
@@ -6970,7 +7439,10 @@ impl Render for ProjectPanel {
                 }));
             }
             h_flex()
-                .id("project-panel")
+                .id("omega.project-panel.tree")
+                .debug_selector(|| "omega.project-panel.tree".into())
+                .role(gpui::Role::Tree)
+                .aria_label("Files")
                 .group("project-panel")
                 .when(panel_settings.drag_and_drop, |this| {
                     this.on_drag_move(cx.listener(handle_drag_move::<ExternalPaths>))
@@ -7472,6 +7944,7 @@ impl Render for ProjectPanel {
                     )
                     .with_priority(3)
                 }))
+                .into_any_element()
         } else {
             let focus_handle = self.focus_handle(cx);
             let workspace = self.workspace.clone();
@@ -7479,6 +7952,9 @@ impl Render for ProjectPanel {
 
             v_flex()
                 .id("empty-project_panel-wrapper")
+                .debug_selector(|| "omega.project-panel.tree".into())
+                .role(gpui::Role::Tree)
+                .aria_label("Files")
                 .size_full()
                 .child(
                     ProjectEmptyState::new(
@@ -7531,6 +8007,7 @@ impl Render for ProjectPanel {
                         ))
                     })
                 })
+                .into_any_element()
         }
     }
 }
@@ -7625,11 +8102,14 @@ impl Panel for ProjectPanel {
         }
 
         let project = &self.project.read(cx);
-        project.visible_worktrees(cx).any(|tree| {
-            tree.read(cx)
-                .root_entry()
-                .is_some_and(|entry| entry.is_dir())
-        })
+        project
+            .visible_worktrees(cx)
+            .filter(|worktree| self.worktree_is_in_scope(worktree.read(cx).id()))
+            .any(|tree| {
+                tree.read(cx)
+                    .root_entry()
+                    .is_some_and(|entry| entry.is_dir())
+            })
     }
 
     fn activation_priority(&self) -> u32 {
@@ -7644,7 +8124,11 @@ impl Panel for ProjectPanel {
 }
 
 impl ProjectPanel {
+    #[cfg(any(test, feature = "test-support"))]
     pub fn select_path_for_test(&mut self, project_path: ProjectPath, cx: &App) {
+        if !self.worktree_is_in_scope(project_path.worktree_id) {
+            return;
+        }
         let Some(worktree) = self
             .project
             .read(cx)
@@ -7660,6 +8144,62 @@ impl ProjectPanel {
             entry_id: entry.id,
         });
     }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn visible_rows_for_test(&self) -> Vec<ProjectPanelVisibleRow> {
+        if matches!(
+            self.scope_state,
+            ProjectPanelScopeState::Unavailable
+                | ProjectPanelScopeState::Loading { .. }
+                | ProjectPanelScopeState::Empty { .. }
+                | ProjectPanelScopeState::Missing { .. }
+        ) {
+            return Vec::new();
+        }
+        self.state
+            .visible_entries
+            .iter()
+            .flat_map(|visible_worktree| {
+                visible_worktree.entries.iter().map(|entry| {
+                    let is_expanded = self
+                        .state
+                        .expanded_dir_ids
+                        .get(&visible_worktree.worktree_id)
+                        .is_some_and(|expanded| expanded.binary_search(&entry.id).is_ok());
+                    ProjectPanelVisibleRow {
+                        worktree_id: visible_worktree.worktree_id,
+                        entry_id: entry.id,
+                        path: entry.path.clone(),
+                        is_expanded,
+                    }
+                })
+            })
+            .collect()
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn visible_entries_revision_for_test(&self) -> u64 {
+        self.visible_entries_revision
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn selection_for_test(&self) -> Option<(WorktreeId, ProjectEntryId)> {
+        self.selection
+            .map(|selection| (selection.worktree_id, selection.entry_id))
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn marked_entries_for_test(&self) -> Vec<(WorktreeId, ProjectEntryId)> {
+        self.marked_entries
+            .iter()
+            .map(|entry| (entry.worktree_id, entry.entry_id))
+            .collect()
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn has_edit_state_for_test(&self) -> bool {
+        self.state.edit_state.is_some()
+    }
 }
 
 impl Focusable for ProjectPanel {
@@ -7669,6 +8209,24 @@ impl Focusable for ProjectPanel {
 }
 
 impl ClipboardEntry {
+    fn filtered_for_scope(
+        self,
+        worktree_scope: Option<WorktreeId>,
+        scope_is_available: bool,
+    ) -> Option<Self> {
+        let filter_entries = |mut entries: BTreeSet<SelectedEntry>| {
+            entries.retain(|entry| {
+                scope_is_available
+                    && worktree_scope.is_none_or(|worktree_id| worktree_id == entry.worktree_id)
+            });
+            (!entries.is_empty()).then_some(entries)
+        };
+        match self {
+            Self::Copied(entries) => filter_entries(entries).map(Self::Copied),
+            Self::Cut(entries) => filter_entries(entries).map(Self::Cut),
+        }
+    }
+
     fn is_cut(&self) -> bool {
         matches!(self, Self::Cut { .. })
     }

@@ -62,6 +62,46 @@ Files, Search, Review, Git, and Terminal require an active workspace and
 worktree. Plan requires an active agent thread. Unavailable items remain visible
 and explain what is missing instead of opening another surface.
 
+Files renders the same native Project Panel entity used by the workspace. It is
+scoped to the active thread's selected worktree, so a multi-root workspace does
+not mix files from another thread target into the dock. Native tree navigation,
+file opening, reveal, rename, drag-and-drop, Git decorations, diagnostics, and
+context menus continue to use the Project Panel implementation.
+
+Before you open Files for the first time, the Project Panel remains unchanged
+in its existing workspace dock. A successful Files activation moves that same
+entity into the work-surface dock while retaining a nonvisual Workspace
+registration for native commands such as reveal, rename, and File History. It
+is never rendered in both docks. If activation fails, the workspace panel keeps
+its previous owner and scope. Collapsing and reopening Files retains the
+entity, its selection, and its expansion state. Scope changes preserve
+selection, rename, marked-entry, clipboard, and undo state only when it belongs
+to the compatible worktree. Expansion remains keyed by worktree. Transient drag
+and context-menu state is cleared during the switch.
+
+A scoped worktree root remains the tree's authority and is expanded when it is
+rendered. Files shows a distinct empty state only when that worktree has no
+visible entries below its root after the Project Panel's normal filters. A
+missing root is a different state and never falls back to files from another
+workspace root.
+
+When the selected identity reports an error, Files replaces the tree with an
+inline alert and keeps focus on that visible alert host. Loading, error,
+offline, inconsistent, unbound, and missing-root states also disable the
+rehomed panel's native actions, so a command cannot mutate a hidden or stale
+worktree. A transient outage preserves compatible tree state for recovery;
+changing to a different worktree filters the old selection and undo history.
+Recovering the same identity restores the tree and its state. If the selected
+root disappears or the repository connection goes offline, Omega closes Files
+and moves actual keyboard focus back to the active thread.
+
+Opening a file from Files uses the native Project Panel and Workspace path.
+Preview open keeps focus in the tree; permanent open and split actions reveal
+and focus the ordinary editor beside the still-mounted agent transcript.
+Closing the final center item restores the agent-only surface. Project Panel
+toggle and close-dock shortcuts operate on the embedded Files dock rather than
+closing the outer Agent Panel.
+
 The thread header shows the active project/repository, worktree, and Git branch
 as separate controls. It also shows changed files, conflicts, and upstream
 ahead/behind state when present. These values are the target used by Files,
@@ -111,11 +151,10 @@ rails, and transcript still do not fit, it collapses the work-surface dock and
 returns focus to the transcript. Widening the window does not reopen the dock;
 select the rail item again.
 
-> **Note:** The current desktop foundation provides the rail, actions,
-> responsive dock, and retained generic hosts. Native Files, Search, Review,
-> Git, Terminal, and Plan content is being mounted in follow-up work. Until
-> those adapters land, use the existing native panels for the corresponding
-> task. See
+> **Note:** Files now mounts the native Project Panel. Search, Review, Git,
+> Terminal, and Plan still use retained placeholder hosts while their native
+> adapters are completed. Until those adapters land, use the existing native
+> panels for the corresponding task. See
 > [Omega desktop workbench shell](../development/omega-desktop-workbench-shell.md)
 > for implementation scope.
 

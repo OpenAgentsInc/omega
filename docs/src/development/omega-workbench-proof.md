@@ -176,6 +176,71 @@ toolbar, the offline status node, and full untruncated accessibility text in
 the narrow scene. The clean identity scene also opens and closes the repository
 picker before capture and requires the repository control to retain focus.
 
+### Native Files scenes {#native-files-scenes}
+
+Seven registered scenes exercise the native Project Panel after it becomes the
+canonical Files work-surface entity:
+
+| Scene                                               | Fixture and proof boundary                                                                                                                                                                                                                                                                                                                     |
+| --------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `omega_workbench_files_wide`                        | A ready worktree at 1200 pixels. Proves the scoped native tree, selected path, accessible rows, and tree-to-surface containment.                                                                                                                                                                                                               |
+| `omega_workbench_files_narrow`                      | The same ready tree at the exact 910-pixel minimum allocation. Proves the 240-pixel Files dock without changing semantic ownership.                                                                                                                                                                                                            |
+| `omega_workbench_files_empty`                       | An empty active worktree. Proves an accessible scoped-empty status, no rendered file rows, and no fallback to another project root.                                                                                                                                                                                                            |
+| `omega_workbench_files_loading`                     | Begins a generation-bound Files load after activation. Proves the active scope remains authoritative while the non-ready host hides the native tree.                                                                                                                                                                                           |
+| `omega_workbench_files_error`                       | Completes that typed load with an error. Proves the error transition applies to the active host and does not expose stale native rows.                                                                                                                                                                                                         |
+| `omega_workbench_files_multi_root`                  | Materializes alpha and beta roots while binding the thread to beta. Proves every native row belongs to beta and excludes alpha-only content.                                                                                                                                                                                                   |
+| `omega_workbench_files_stale_filesystem_completion` | Selects distinct alpha and beta production bindings through the rendered identity pickers. It starts an alpha derivation, advances exactly one scheduler task while that derivation remains pending, then selects beta. Proves a newer beta binding generation and scope revision supersede alpha and that every alpha row selector is absent. |
+
+The runner creates each fixture in an isolated `TempDir`, retains that owner
+through the capture, adds its folders through the real Project worktree scan,
+and loads one Workspace-created `ProjectPanel` before `AgentPanel`. Before any
+pixel capture, it verifies that only that entity is registered for the fixture,
+that the projected `WorktreeId` matches the active thread target, and that
+every materialized row carries that scope. After the capture it removes the
+fixture worktrees and drains their tasks before dropping the `TempDir`, so the
+proof neither leaks fixture directories nor invalidates paths still owned by a
+live worktree.
+
+Ready scenes require `omega.project-panel.tree` to be an accessible `Tree`
+inside `omega.workbench.surface.files`. Every rendered
+`omega.project-panel.row.<worktree>.<entry>` must be a visible `TreeItem` with a
+non-empty label, lie inside that tree, and contribute to exactly one selected
+row. The empty scene instead requires
+`omega.project-panel.scope.empty` as an accessible `Status`. Loading and error
+scenes require the non-ready Files host to hide the native tree and its row
+selectors.
+
+Each scene captures the whole window and a named `files-surface` region derived
+from `omega.workbench.surface.files`. The visual stale-completion scene uses
+the production identity controls to establish distinct alpha and beta binding
+epochs. It deliberately leaves the alpha Project Panel derivation in
+`Loading`, records its revision and visible row selectors, and then selects
+beta. Before capture it requires the beta projection generation and scope
+revision to be newer, the beta-only path to be present, the alpha-only path to
+be absent, and every recorded alpha selector to be absent from the rendered
+tree.
+
+That Metal scene proves deterministic derivation supersession; the portable
+Agent UI test separately exercises a late filesystem notification. It pauses
+`FakeFs` events for worktree A, rebinds to worktree B, flushes the delayed A
+watcher event, and proves neither the old row selectors nor the late A path can
+repopulate the native tree. Portable ownership tests also compare entity IDs
+across first activation, collapse, reopen, and rebind so a plausible Files
+screenshot cannot hide a second Project Panel. They also exercise the
+Workspace's nonvisual rehome registry: project reveal, external activation,
+toggle, close-dock, and exact-path File History must route to the one embedded
+entity without reopening the legacy dock.
+
+The portable suite treats hidden behavior as a semantic failure even when the
+pixels look plausible. Preview open must keep native tree focus, permanent open
+must reveal and focus the Workspace editor beside the retained transcript, and
+File History must produce a visible focused graph. Loading, error, offline,
+inconsistent, unbound, and missing-root states dispatch native mutating and
+activation commands and require filesystem, selection, focus, and outer Agent
+Panel ownership to remain unchanged. Cross-worktree tests record undo state
+under A, rebind to B, and prove B cannot replay it; same-binding recovery
+retains compatible tree state.
+
 ### Registering a scene {#registering-a-scene}
 
 Add every named scene to `HERMETIC_SCENES`. A `SceneSpec` defines:

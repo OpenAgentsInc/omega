@@ -48,7 +48,7 @@ use client::{
     proto::{self, ErrorCode, PanelId, PeerId},
 };
 use collections::{HashMap, HashSet, TypeIdHashMap, hash_map};
-use dock::{Dock, DockPosition, PanelButtons, PanelHandle, RESIZE_HANDLE_SIZE};
+use dock::{Dock, DockPosition, PanelButtons, PanelEvent, PanelHandle, RESIZE_HANDLE_SIZE};
 use fs::Fs;
 use futures::{
     Future, FutureExt, StreamExt,
@@ -1374,6 +1374,7 @@ pub struct Workspace {
     left_dock: Entity<Dock>,
     bottom_dock: Entity<Dock>,
     right_dock: Entity<Dock>,
+    rehomed_panels: TypeIdHashMap<Arc<dyn PanelHandle>>,
     panes: Vec<Entity<Pane>>,
     panes_by_item: HashMap<EntityId, WeakEntity<Pane>>,
     active_pane: Entity<Pane>,
@@ -1847,6 +1848,7 @@ impl Workspace {
             left_dock,
             bottom_dock,
             right_dock,
+            rehomed_panels: Default::default(),
             _panels_task: None,
             project: project.clone(),
             follower_states: Default::default(),
@@ -2587,6 +2589,58 @@ impl Workspace {
         for dock in [&self.left_dock, &self.bottom_dock, &self.right_dock] {
             dock.update(cx, |dock, cx| dock.remove_panel(panel, window, cx));
         }
+        if self
+            .rehomed_panel::<T>()
+            .is_some_and(|rehomed_panel| rehomed_panel == *panel)
+        {
+            self.rehomed_panels.remove(&TypeId::of::<T>());
+        }
+    }
+
+    /// Removes a panel from the ordinary docks while retaining the exact entity
+    /// as a nonvisual participant in Workspace panel routing.
+    pub fn rehome_panel<T: Panel>(
+        &mut self,
+        panel: &Entity<T>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<()> {
+        if let Some(rehomed_panel) = self.rehomed_panel::<T>() {
+            if rehomed_panel != *panel {
+                anyhow::bail!(
+                    "a different {} entity is already rehomed",
+                    T::persistent_name()
+                );
+            }
+            for dock in [&self.left_dock, &self.bottom_dock, &self.right_dock] {
+                dock.update(cx, |dock, cx| dock.remove_panel(panel, window, cx));
+            }
+            return Ok(());
+        }
+
+        let registered_panel = self
+            .all_docks()
+            .iter()
+            .find_map(|dock| dock.read(cx).panel::<T>())
+            .ok_or_else(|| {
+                anyhow!(
+                    "{} is not registered in this workspace",
+                    T::persistent_name()
+                )
+            })?;
+        if registered_panel != *panel {
+            anyhow::bail!(
+                "cannot rehome an unregistered {} entity",
+                T::persistent_name()
+            );
+        }
+
+        for dock in [&self.left_dock, &self.bottom_dock, &self.right_dock] {
+            dock.update(cx, |dock, cx| dock.remove_panel(panel, window, cx));
+        }
+        self.rehomed_panels
+            .insert(TypeId::of::<T>(), Arc::new(panel.clone()));
+        Ok(())
     }
 
     pub fn status_bar(&self) -> &Entity<StatusBar> {
@@ -4316,6 +4370,11 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<Entity<T>> {
+        if let Some(panel) = self.rehomed_panel::<T>() {
+            panel.update(cx, |_, cx| cx.emit(PanelEvent::Activate));
+            cx.notify();
+            return Some(panel);
+        }
         let panel = self.focus_or_unfocus_panel::<T>(window, cx, &mut |_, _, _| true)?;
         panel.to_any().downcast().ok()
     }
@@ -4329,6 +4388,25 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
+        if let Some(panel) = self.rehomed_panel::<T>() {
+            let did_focus_panel = !panel.read(cx).focus_handle(cx).contains_focused(window, cx);
+            if did_focus_panel {
+                panel.update(cx, |_, cx| cx.emit(PanelEvent::Activate));
+            } else if WorkspaceSettings::get_global(cx).close_panel_on_toggle {
+                panel.update(cx, |_, cx| cx.emit(PanelEvent::Close));
+            } else {
+                self.active_pane
+                    .update(cx, |pane, cx| window.focus(&pane.focus_handle(cx), cx));
+            }
+            telemetry::event!(
+                "Panel Button Clicked",
+                name = T::persistent_name(),
+                toggle_state = did_focus_panel
+            );
+            cx.notify();
+            return did_focus_panel;
+        }
+
         let mut did_focus_panel = false;
         self.focus_or_unfocus_panel::<T>(window, cx, &mut |panel, window, cx| {
             did_focus_panel = !panel.panel_focus_handle(cx).contains_focused(window, cx);
@@ -4371,6 +4449,16 @@ impl Workspace {
                     dock.active_panel().cloned()
                 });
                 break;
+            }
+        }
+        if panel.is_none() {
+            panel = self
+                .rehomed_panels
+                .values()
+                .find(|panel| panel.remote_id() == Some(panel_id))
+                .cloned();
+            if let Some(panel) = panel.as_ref() {
+                panel.emit_event(PanelEvent::Activate, cx);
             }
         }
 
@@ -4430,6 +4518,10 @@ impl Workspace {
 
     /// Open the panel of the given type
     pub fn open_panel<T: Panel>(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(panel) = self.rehomed_panel::<T>() {
+            panel.update(cx, |_, cx| cx.emit(PanelEvent::Activate));
+            return;
+        }
         for dock in self.all_docks() {
             if let Some(panel_index) = dock.read(cx).panel_index_for_type::<T>() {
                 dock.update(cx, |dock, cx| {
@@ -4443,6 +4535,10 @@ impl Workspace {
     /// Open the panel of the given type, dismissing any zoomed items that
     /// would obscure it (e.g. a zoomed terminal).
     pub fn reveal_panel<T: Panel>(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.rehomed_panel::<T>().is_some() {
+            self.open_panel::<T>(window, cx);
+            return;
+        }
         let dock_position = self.all_docks().iter().find_map(|dock| {
             let dock = dock.read(cx);
             dock.panel_index_for_type::<T>().map(|_| dock.position())
@@ -4453,8 +4549,9 @@ impl Workspace {
 
     /// Reveal the ordinary editor beside the agent surface in sealed zero base.
     ///
-    /// Transcript file links are the only entry point. The centre stays absent
-    /// at startup, and closing its final item restores the agent-only surface.
+    /// Transcript links and native Files editor/history routes are the entry
+    /// points. The centre stays absent at startup, and closing its final item
+    /// restores the agent-only surface.
     pub fn reveal_zero_base_center(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !omega_zero_base::is_sealed() {
             return;
@@ -4467,6 +4564,11 @@ impl Workspace {
         self.zoomed_position = None;
         cx.emit(Event::ZoomChanged);
         cx.notify();
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn center_visible_for_tests(&self) -> bool {
+        !omega_zero_base::is_sealed() || self.zero_base_center_visible
     }
 
     fn restore_zero_base_agent_surface(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -4486,6 +4588,10 @@ impl Workspace {
     }
 
     pub fn close_panel<T: Panel>(&self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(panel) = self.rehomed_panel::<T>() {
+            panel.update(cx, |_, cx| cx.emit(PanelEvent::Close));
+            return;
+        }
         for dock in self.all_docks().iter() {
             dock.update(cx, |dock, cx| {
                 if dock.panel::<T>().is_some() {
@@ -4499,6 +4605,13 @@ impl Workspace {
         self.all_docks()
             .iter()
             .find_map(|dock| dock.read(cx).panel::<T>())
+            .or_else(|| self.rehomed_panel::<T>())
+    }
+
+    fn rehomed_panel<T: Panel>(&self) -> Option<Entity<T>> {
+        self.rehomed_panels
+            .get(&TypeId::of::<T>())
+            .and_then(|panel| panel.to_any().downcast().ok())
     }
 
     fn dismiss_zoomed_items_to_reveal(
@@ -9286,9 +9399,9 @@ impl Render for Workspace {
                             })
                             .child({
                                 // OMEGA-DELTA-0139. Sealed zero base still
-                                // starts with no centre. A transcript file
-                                // link can reveal the normal editor beside the
-                                // agent dock; no other action restores it.
+                                // starts with no centre. Transcript file links
+                                // and explicitly authorized native actions can
+                                // reveal the normal editor beside the agent dock.
                                 if zero_base_sealed {
                                     div()
                                         .flex()
@@ -13604,6 +13717,75 @@ mod tests {
         workspace.update_in(cx, |_workspace, window, _cx| {
             assert!(activation_focus_handle.is_focused(window));
         });
+    }
+
+    #[gpui::test]
+    async fn test_rehomed_panel_remains_addressable_by_workspace_panel_routes(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+        let (workspace, cx) =
+            cx.add_window_view(|window, cx| Workspace::test_new(project, window, cx));
+
+        let panel = workspace.update_in(cx, |workspace, window, cx| {
+            let panel = cx.new(|cx| TestPanel::new(DockPosition::Right, 100, cx));
+            workspace.add_panel(panel.clone(), window, cx);
+            workspace
+                .rehome_panel(&panel, window, cx)
+                .expect("test panel should be rehomed");
+            panel
+        });
+        let panel_id = panel.entity_id();
+        assert!(workspace.read_with(cx, |workspace, cx| {
+            workspace
+                .panel::<TestPanel>(cx)
+                .is_some_and(|registered| registered.entity_id() == panel_id)
+                && workspace
+                    .all_docks()
+                    .iter()
+                    .all(|dock| dock.read(cx).panel::<TestPanel>().is_none())
+        }));
+
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let _subscription = workspace.update(cx, |_workspace, cx| {
+            let events = events.clone();
+            cx.subscribe(&panel, move |_workspace, _panel, event, _cx| {
+                events.borrow_mut().push(match event {
+                    PanelEvent::Activate => "activate",
+                    PanelEvent::Close => "close",
+                    PanelEvent::ZoomIn => "zoom-in",
+                    PanelEvent::ZoomOut => "zoom-out",
+                });
+            })
+        });
+        cx.run_until_parked();
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.open_panel::<TestPanel>(window, cx);
+        });
+        cx.run_until_parked();
+        assert_eq!(&*events.borrow(), &["activate"]);
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            let focused = workspace
+                .focus_panel::<TestPanel>(window, cx)
+                .expect("rehomed panel should be focusable");
+            assert_eq!(focused.entity_id(), panel_id);
+            assert!(workspace.toggle_panel_focus::<TestPanel>(window, cx));
+        });
+        cx.run_until_parked();
+        assert_eq!(&*events.borrow(), &["activate", "activate", "activate"]);
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.close_panel::<TestPanel>(window, cx);
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            &*events.borrow(),
+            &["activate", "activate", "activate", "close"]
+        );
     }
 
     #[gpui::test]

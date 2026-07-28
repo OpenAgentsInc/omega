@@ -9,6 +9,7 @@ use omega_workbench_state::{
     ConnectionPhase, ProjectionSnapshot, ProjectionTransition, RepositoryBinding, WorkSurface,
     WorkbenchProjection,
 };
+use project_panel::ProjectPanel;
 use ui::{Color, Icon, IconName, IconSize, Label, LabelSize, prelude::*, v_flex};
 
 use crate::{
@@ -155,14 +156,20 @@ pub struct WorkSurfaceHost {
     key: SurfaceHostKey,
     focus_handle: FocusHandle,
     content_state: SurfaceContentState,
+    files_panel: Option<Entity<ProjectPanel>>,
 }
 
 impl WorkSurfaceHost {
-    fn new(key: SurfaceHostKey, cx: &mut Context<Self>) -> Self {
+    fn new(
+        key: SurfaceHostKey,
+        files_panel: Option<Entity<ProjectPanel>>,
+        cx: &mut Context<Self>,
+    ) -> Self {
         Self {
             key,
             focus_handle: cx.focus_handle(),
             content_state: SurfaceContentState::Ready,
+            files_panel,
         }
     }
 
@@ -174,9 +181,40 @@ impl WorkSurfaceHost {
         &self.content_state
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn files_panel_entity_id(&self) -> Option<gpui::EntityId> {
+        self.files_panel.as_ref().map(Entity::entity_id)
+    }
+
     fn set_content_state(&mut self, content_state: SurfaceContentState, cx: &mut Context<Self>) {
         self.content_state = content_state;
         cx.notify();
+    }
+
+    fn set_content_state_with_focus(
+        &mut self,
+        content_state: SurfaceContentState,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let was_ready = matches!(self.content_state, SurfaceContentState::Ready);
+        let is_ready = matches!(content_state, SurfaceContentState::Ready);
+        if was_ready
+            && !is_ready
+            && self
+                .files_panel
+                .as_ref()
+                .is_some_and(|panel| panel.focus_handle(cx).contains_focused(window, cx))
+        {
+            self.focus_handle.focus(window, cx);
+        } else if !was_ready
+            && is_ready
+            && self.focus_handle.contains_focused(window, cx)
+            && let Some(panel) = self.files_panel.as_ref()
+        {
+            panel.focus_handle(cx).focus(window, cx);
+        }
+        self.set_content_state(content_state, cx);
     }
 }
 
@@ -196,8 +234,14 @@ pub enum SurfaceLoadOutcome {
 }
 
 impl Focusable for WorkSurfaceHost {
-    fn focus_handle(&self, _cx: &App) -> FocusHandle {
-        self.focus_handle.clone()
+    fn focus_handle(&self, cx: &App) -> FocusHandle {
+        if matches!(self.content_state, SurfaceContentState::Ready) {
+            self.files_panel
+                .as_ref()
+                .map_or_else(|| self.focus_handle.clone(), |panel| panel.focus_handle(cx))
+        } else {
+            self.focus_handle.clone()
+        }
     }
 }
 
@@ -205,23 +249,54 @@ impl Render for WorkSurfaceHost {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         let surface = self.key.surface;
         let label = surface.label();
-        let content = match &self.content_state {
-            SurfaceContentState::Ready => Label::new(format!("{label} is ready"))
-                .size(LabelSize::Small)
-                .color(Color::Muted)
-                .into_any_element(),
-            SurfaceContentState::Loading => Label::new(format!("Loading {label}…"))
-                .size(LabelSize::Small)
-                .color(Color::Muted)
-                .into_any_element(),
-            SurfaceContentState::Error(error) => Label::new(error.clone())
-                .size(LabelSize::Small)
-                .color(Color::Error)
-                .into_any_element(),
-            SurfaceContentState::Offline => Label::new(format!("{label} is unavailable offline"))
-                .size(LabelSize::Small)
-                .color(Color::Warning)
-                .into_any_element(),
+        let files_panel = if matches!(self.content_state, SurfaceContentState::Ready) {
+            self.files_panel.clone()
+        } else {
+            None
+        };
+        let status = match &self.content_state {
+            SurfaceContentState::Ready if files_panel.is_some() => None,
+            SurfaceContentState::Ready => {
+                let message: SharedString = format!("{label} is ready").into();
+                Some((
+                    Label::new(message.clone())
+                        .size(LabelSize::Small)
+                        .color(Color::Muted)
+                        .into_any_element(),
+                    gpui::Role::Status,
+                    message,
+                ))
+            }
+            SurfaceContentState::Loading => {
+                let message: SharedString = format!("Loading {label}…").into();
+                Some((
+                    Label::new(message.clone())
+                        .size(LabelSize::Small)
+                        .color(Color::Muted)
+                        .into_any_element(),
+                    gpui::Role::Status,
+                    message,
+                ))
+            }
+            SurfaceContentState::Error(error) => Some((
+                Label::new(error.clone())
+                    .size(LabelSize::Small)
+                    .color(Color::Error)
+                    .into_any_element(),
+                gpui::Role::Alert,
+                error.clone(),
+            )),
+            SurfaceContentState::Offline => {
+                let message: SharedString = format!("{label} is unavailable offline").into();
+                Some((
+                    Label::new(message.clone())
+                        .size(LabelSize::Small)
+                        .color(Color::Warning)
+                        .into_any_element(),
+                    gpui::Role::Status,
+                    message,
+                ))
+            }
         };
 
         v_flex()
@@ -232,15 +307,26 @@ impl Render for WorkSurfaceHost {
             .role(gpui::Role::Group)
             .aria_label(format!("{label} work surface"))
             .size_full()
-            .items_center()
-            .justify_center()
-            .gap_2()
-            .child(
-                Icon::new(surface.icon())
-                    .size(IconSize::Medium)
-                    .color(Color::Muted),
-            )
-            .child(content)
+            .when_some(files_panel, |this, panel| this.child(panel))
+            .when_some(status, |this, (status, role, message)| {
+                this.child(
+                    v_flex()
+                        .size_full()
+                        .id(format!("{}.status", surface.surface_selector()))
+                        .debug_selector(move || format!("{}.status", surface.surface_selector()))
+                        .role(role)
+                        .aria_label(message)
+                        .items_center()
+                        .justify_center()
+                        .gap_2()
+                        .child(
+                            Icon::new(surface.icon())
+                                .size(IconSize::Medium)
+                                .color(Color::Muted),
+                        )
+                        .child(status),
+                )
+            })
     }
 }
 
@@ -329,6 +415,7 @@ pub struct WorkbenchShell {
     focus_target: WorkbenchFocusTarget,
     dock_width: Pixels,
     last_error: Option<SharedString>,
+    files_identity_error_visible: bool,
     #[cfg(any(test, feature = "test-support"))]
     fail_next_host_creation: Option<WorkSurface>,
 }
@@ -357,6 +444,7 @@ impl WorkbenchShell {
             focus_target: WorkbenchFocusTarget::Transcript,
             dock_width: DEFAULT_DOCK_WIDTH,
             last_error: None,
+            files_identity_error_visible: false,
             #[cfg(any(test, feature = "test-support"))]
             fail_next_host_creation: None,
         }
@@ -554,6 +642,24 @@ impl WorkbenchShell {
             }
         }
         self.capabilities = capabilities;
+        let identity_is_inconsistent = self
+            .identity
+            .active()
+            .is_some_and(|identity| matches!(identity.phase, IdentityPhase::Inconsistent(_)));
+        if (self.projection.connection != ConnectionPhase::Online || identity_is_inconsistent)
+            && self.projection.visible_projection().is_some_and(|visible| {
+                visible.dock_open
+                    && visible
+                        .effective_surface
+                        .is_some_and(|surface| surface != omega_workbench_state::WorkSurface::Plan)
+            })
+        {
+            self.projection
+                .apply(ProjectionTransition::CollapseDock {
+                    thread_id: thread_id.clone(),
+                })
+                .map_err(anyhow::Error::new)?;
+        }
         if let Some(visible) = self.projection.visible_projection() {
             self.focus_target = if visible.dock_open {
                 visible
@@ -795,6 +901,7 @@ impl WorkbenchShell {
     pub fn select_surface(
         &mut self,
         surface: WorkSurface,
+        files_panel: Option<Entity<ProjectPanel>>,
         cx: &mut Context<crate::AgentPanel>,
     ) -> Result<SurfaceSelection> {
         let unavailable_reason = self
@@ -826,8 +933,13 @@ impl WorkbenchShell {
         self.projection
             .apply(ProjectionTransition::RequestSurface { thread_id, surface })
             .map_err(anyhow::Error::new)?;
-        let host = match self.ensure_host(&visible.thread_id, visible.binding.clone(), surface, cx)
-        {
+        let host = match self.ensure_host(
+            &visible.thread_id,
+            visible.binding.clone(),
+            surface,
+            files_panel,
+            cx,
+        ) {
             Ok(host) => host,
             Err(error) => {
                 self.projection = previous_projection;
@@ -845,8 +957,12 @@ impl WorkbenchShell {
         thread_id: &str,
         binding: Option<RepositoryBinding>,
         surface: WorkSurface,
+        files_panel: Option<Entity<ProjectPanel>>,
         cx: &mut Context<crate::AgentPanel>,
     ) -> Result<Entity<WorkSurfaceHost>> {
+        if surface == WorkSurface::Files && files_panel.is_none() {
+            bail!("the native Files surface is unavailable");
+        }
         let key = SurfaceHostKey {
             thread_id: thread_id.into(),
             binding,
@@ -863,15 +979,71 @@ impl WorkbenchShell {
             self.last_error = Some(message.clone());
             bail!("{message}");
         }
-        let host = cx.new(|cx| WorkSurfaceHost::new(key.clone(), cx));
+        let host = cx.new(|cx| WorkSurfaceHost::new(key.clone(), files_panel, cx));
         self.hosts.insert(key, host.clone());
         Ok(host)
+    }
+
+    pub fn ensure_visible_files_host(
+        &mut self,
+        files_panel: Entity<ProjectPanel>,
+        cx: &mut Context<crate::AgentPanel>,
+    ) -> Result<Option<Entity<WorkSurfaceHost>>> {
+        let Some(visible) = self.projection.visible_projection() else {
+            return Ok(None);
+        };
+        if !visible.dock_open || visible.effective_surface != Some(WorkSurface::Files) {
+            return Ok(None);
+        }
+        let thread_id = visible.thread_id.clone();
+        let binding = visible.binding;
+        self.ensure_host(
+            &thread_id,
+            binding,
+            WorkSurface::Files,
+            Some(files_panel),
+            cx,
+        )
+        .map(Some)
+    }
+
+    pub fn set_visible_files_identity_error(
+        &mut self,
+        error: Option<SharedString>,
+        window: &mut Window,
+        cx: &mut Context<crate::AgentPanel>,
+    ) -> bool {
+        if error.is_none() && !self.files_identity_error_visible {
+            return false;
+        }
+        let Some(visible) = self.projection.visible_projection() else {
+            return false;
+        };
+        if !visible.dock_open || visible.effective_surface != Some(WorkSurface::Files) {
+            return false;
+        }
+        let key = SurfaceHostKey {
+            thread_id: visible.thread_id,
+            binding: visible.binding,
+            surface: WorkSurface::Files,
+        };
+        let Some(host) = self.hosts.get(&key) else {
+            return false;
+        };
+        let has_error = error.is_some();
+        let content_state = error.map_or(SurfaceContentState::Ready, SurfaceContentState::Error);
+        host.update(cx, |host, cx| {
+            host.set_content_state_with_focus(content_state, window, cx);
+        });
+        self.files_identity_error_visible = has_error;
+        true
     }
 
     pub fn begin_surface_load(
         &mut self,
         request_id: impl Into<String>,
         surface: WorkSurface,
+        window: &mut Window,
         cx: &mut Context<crate::AgentPanel>,
     ) -> Result<SurfaceLoadContext> {
         let request_id = request_id.into();
@@ -909,7 +1081,7 @@ impl WorkbenchShell {
             })
             .map_err(anyhow::Error::new)?;
         host.update(cx, |host, cx| {
-            host.set_content_state(SurfaceContentState::Loading, cx);
+            host.set_content_state_with_focus(SurfaceContentState::Loading, window, cx);
         });
         Ok(context)
     }
@@ -918,6 +1090,7 @@ impl WorkbenchShell {
         &mut self,
         context: SurfaceLoadContext,
         outcome: SurfaceLoadOutcome,
+        window: &mut Window,
         cx: &mut Context<crate::AgentPanel>,
     ) -> Result<omega_workbench_state::TransitionEffect> {
         let transition = match &outcome {
@@ -952,7 +1125,7 @@ impl WorkbenchShell {
                     SurfaceLoadOutcome::Error(error) => SurfaceContentState::Error(error),
                 };
                 host.update(cx, |host, cx| {
-                    host.set_content_state(content_state, cx);
+                    host.set_content_state_with_focus(content_state, window, cx);
                 });
             }
         }
@@ -970,6 +1143,22 @@ impl WorkbenchShell {
             surface: visible.effective_surface?,
         };
         self.hosts.get(&key)
+    }
+
+    pub fn active_surface_content_state(
+        &self,
+        surface: WorkSurface,
+        cx: &App,
+    ) -> Option<SurfaceContentState> {
+        let visible = self.projection.visible_projection()?;
+        let key = SurfaceHostKey {
+            thread_id: visible.thread_id,
+            binding: visible.binding,
+            surface,
+        };
+        self.hosts
+            .get(&key)
+            .map(|host| host.read(cx).content_state().clone())
     }
 
     pub fn collapse_dock(&mut self) -> Result<bool> {

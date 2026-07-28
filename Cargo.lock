@@ -573,6 +573,7 @@ dependencies = [
  "postage",
  "pretty_assertions",
  "project",
+ "project_panel",
  "prompt_store",
  "proto",
  "rand 0.9.4",

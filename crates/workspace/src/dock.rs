@@ -129,6 +129,7 @@ pub trait PanelHandle: Send + Sync {
     fn panel_focus_handle(&self, cx: &App) -> FocusHandle;
     /// See `Panel::activation_focus_handle`.
     fn activation_focus_handle(&self, cx: &App) -> FocusHandle;
+    fn emit_event(&self, event: PanelEvent, cx: &mut App);
     fn to_any(&self) -> AnyView;
     fn activation_priority(&self, cx: &App) -> u32;
     fn enabled(&self, cx: &App) -> bool;
@@ -253,6 +254,10 @@ where
 
     fn activation_focus_handle(&self, cx: &App) -> FocusHandle {
         self.read(cx).activation_focus_handle(cx)
+    }
+
+    fn emit_event(&self, event: PanelEvent, cx: &mut App) {
+        self.update(cx, |_, cx| cx.emit(event));
     }
 
     fn activation_priority(&self, cx: &App) -> u32 {

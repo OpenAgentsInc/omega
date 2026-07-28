@@ -494,6 +494,20 @@ fn record_workbench_pixel(scene: &str, pixel: PixelProof) {
 }
 
 #[cfg(target_os = "macos")]
+fn is_workbench_files_scene(name: &str) -> bool {
+    matches!(
+        name,
+        "omega_workbench_files_wide"
+            | "omega_workbench_files_narrow"
+            | "omega_workbench_files_multi_root"
+            | "omega_workbench_files_empty"
+            | "omega_workbench_files_loading"
+            | "omega_workbench_files_error"
+            | "omega_workbench_files_stale_filesystem_completion"
+    )
+}
+
+#[cfg(target_os = "macos")]
 fn workbench_fixture_for_scene(name: &str) -> Result<WorkbenchScene> {
     use omega_workbench_harness::{
         ContentStateFixture, EventFixture, EventKindFixture, MessageFixture, MessageRoleFixture,
@@ -515,7 +529,79 @@ fn workbench_fixture_for_scene(name: &str) -> Result<WorkbenchScene> {
 
     if WORKBENCH_SHELL_PIXEL_SCENES.contains(&name) {
         let identity_scene = name.starts_with("omega_workbench_identity_");
-        if identity_scene {
+        if is_workbench_files_scene(name) {
+            for surface in &mut scene.surfaces {
+                surface.available =
+                    !matches!(surface.id, WorkSurfaceId::Review | WorkSurfaceId::Git);
+            }
+            scene.project = Some(ProjectFixture {
+                id: "visual-project".into(),
+                display_name: "Omega".into(),
+            });
+            let worktrees = if matches!(
+                name,
+                "omega_workbench_files_multi_root"
+                    | "omega_workbench_files_stale_filesystem_completion"
+            ) {
+                vec![
+                    WorktreeFixture {
+                        id: "alpha-worktree".into(),
+                        branch: Some("main".into()),
+                        git_state: None,
+                        dirty_files: 0,
+                        conflicts: 0,
+                        ahead: 0,
+                        behind: 0,
+                    },
+                    WorktreeFixture {
+                        id: "beta-worktree".into(),
+                        branch: Some("main".into()),
+                        git_state: None,
+                        dirty_files: 0,
+                        conflicts: 0,
+                        ahead: 0,
+                        behind: 0,
+                    },
+                ]
+            } else {
+                vec![WorktreeFixture {
+                    id: if name == "omega_workbench_files_empty" {
+                        "empty-worktree".into()
+                    } else {
+                        "ready-worktree".into()
+                    },
+                    branch: Some("main".into()),
+                    git_state: None,
+                    dirty_files: 0,
+                    conflicts: 0,
+                    ahead: 0,
+                    behind: 0,
+                }]
+            };
+            let active_worktree_id = worktrees
+                .last()
+                .context("Files scene has no worktree fixture")?
+                .id
+                .clone();
+            scene.repositories.push(RepositoryFixture {
+                id: "visual-repository".into(),
+                project_id: "visual-project".into(),
+                worktrees,
+            });
+            scene.threads[0].project_id = Some("visual-project".into());
+            scene.threads[0].repository_id = Some("visual-repository".into());
+            scene.threads[0].worktree_id = Some(active_worktree_id);
+            scene.active_surface = Some(WorkSurfaceId::Files);
+            scene.dock_open = true;
+            scene.content_state = match name {
+                "omega_workbench_files_empty" => ContentStateFixture::Empty,
+                "omega_workbench_files_loading" => ContentStateFixture::Loading,
+                "omega_workbench_files_error" => {
+                    ContentStateFixture::Error("Could not load Files".into())
+                }
+                _ => ContentStateFixture::Ready,
+            };
+        } else if identity_scene {
             for surface in &mut scene.surfaces {
                 surface.available = name != "omega_workbench_identity_offline_error"
                     || surface.id == WorkSurfaceId::Plan;
@@ -1350,7 +1436,9 @@ fn verify_workbench_render_preflight(
     let snapshot = cx.debug_render_snapshot(window)?;
     let duplicate_targets: Vec<_> = snapshot
         .duplicate_selectors()
-        .filter(|selector| is_workbench_selector(selector))
+        .filter(|selector| {
+            is_workbench_selector(selector) || selector.starts_with("omega.project-panel.")
+        })
         .collect();
     anyhow::ensure!(
         duplicate_targets.is_empty(),
@@ -1368,6 +1456,120 @@ fn verify_workbench_render_preflight(
             let mut probe = SemanticProbe::new(&snapshot);
             probe.require_focus(WorkSurfaceId::Plan.rail_selector(), true)?;
             record_workbench_semantic_checks(test_name, probe.into_checks());
+        }
+        if is_workbench_files_scene(test_name) {
+            let mut probe = SemanticProbe::new(&snapshot);
+            let row_selectors = snapshot
+                .selectors()
+                .map(|(selector, _)| selector)
+                .filter(|selector| selector.starts_with("omega.project-panel.row."))
+                .collect::<Vec<_>>();
+            probe.require_accessible(
+                "omega.workbench.surface.files",
+                "Group",
+                "Files work surface",
+            )?;
+            if matches!(
+                test_name,
+                "omega_workbench_files_loading" | "omega_workbench_files_error"
+            ) {
+                probe.require_absent("omega.project-panel.tree")?;
+                anyhow::ensure!(
+                    row_selectors.is_empty(),
+                    "non-ready Files host rendered row selectors {row_selectors:?}"
+                );
+                record_workbench_semantic_check(
+                    test_name,
+                    "files-non-ready-host-hides-native-tree",
+                );
+            } else {
+                probe.require_accessible("omega.project-panel.tree", "Tree", "Files")?;
+                probe
+                    .require_inside("omega.project-panel.tree", "omega.workbench.surface.files")?;
+            }
+
+            if test_name == "omega_workbench_files_empty" {
+                anyhow::ensure!(
+                    row_selectors.is_empty(),
+                    "empty Files scene rendered row selectors {row_selectors:?}"
+                );
+                probe.require_accessible(
+                    "omega.project-panel.scope.empty",
+                    "Status",
+                    "This worktree has no visible files",
+                )?;
+                probe.require_inside(
+                    "omega.project-panel.scope.empty",
+                    "omega.project-panel.tree",
+                )?;
+            } else if !matches!(
+                test_name,
+                "omega_workbench_files_loading" | "omega_workbench_files_error"
+            ) {
+                anyhow::ensure!(
+                    !row_selectors.is_empty(),
+                    "ready Files scene rendered no semantic rows"
+                );
+                for selector in &row_selectors {
+                    probe.require_visible(selector)?;
+                    probe.require_inside(selector, "omega.project-panel.tree")?;
+                }
+
+                let tree = snapshot
+                    .accessibility_tree_json()
+                    .context("Files scene accessibility tree was not active")?;
+                let tree: serde_json::Value =
+                    serde_json::from_str(tree).context("parsing Files accessibility tree")?;
+                let nodes = tree
+                    .get("nodes")
+                    .and_then(serde_json::Value::as_object)
+                    .context("Files accessibility tree has no nodes")?;
+                let mut selected_rows = 0;
+                for selector in &row_selectors {
+                    let matching = nodes
+                        .values()
+                        .filter(|node| {
+                            node.get("element_id").and_then(serde_json::Value::as_str)
+                                == Some(*selector)
+                        })
+                        .collect::<Vec<_>>();
+                    anyhow::ensure!(
+                        matching.len() == 1,
+                        "Files row {selector:?} has {} accessibility identities",
+                        matching.len()
+                    );
+                    let aria = matching[0]
+                        .get("aria")
+                        .and_then(serde_json::Value::as_object)
+                        .with_context(|| format!("Files row {selector:?} has no aria object"))?;
+                    anyhow::ensure!(
+                        aria.get("role").and_then(serde_json::Value::as_str) == Some("TreeItem")
+                            && aria
+                                .get("label")
+                                .and_then(serde_json::Value::as_str)
+                                .is_some_and(|label| !label.trim().is_empty()),
+                        "Files row {selector:?} needs a TreeItem role and non-empty label"
+                    );
+                    selected_rows += usize::from(
+                        aria.get("selected")
+                            .and_then(serde_json::Value::as_bool)
+                            .unwrap_or(false),
+                    );
+                }
+                anyhow::ensure!(
+                    selected_rows == 1,
+                    "Files scene expected one selected semantic row, found {selected_rows}"
+                );
+                record_workbench_semantic_check(test_name, "files-rows-accessible");
+                record_workbench_semantic_check(test_name, "files-one-selected-semantic-row");
+            }
+            record_workbench_semantic_checks(test_name, probe.into_checks());
+            if !matches!(
+                test_name,
+                "omega_workbench_files_loading" | "omega_workbench_files_error"
+            ) {
+                record_workbench_semantic_check(test_name, "files-tree-row-containment");
+            }
         }
         if test_name.starts_with("omega_workbench_identity_") {
             let mut probe = SemanticProbe::new(&snapshot);
@@ -3103,6 +3305,123 @@ fn run_omega_workbench_shell_visual_tests(
 }
 
 #[cfg(all(target_os = "macos", feature = "visual-tests"))]
+struct WorkbenchFilesDiskFixture {
+    _root: tempfile::TempDir,
+    worktrees: Vec<(String, PathBuf)>,
+    active_worktree_id: String,
+    selected_path: Option<&'static str>,
+}
+
+#[cfg(all(target_os = "macos", feature = "visual-tests"))]
+fn create_workbench_files_disk_fixture(
+    scene_name: &str,
+) -> Result<Option<WorkbenchFilesDiskFixture>> {
+    if !is_workbench_files_scene(scene_name) {
+        return Ok(None);
+    }
+
+    let root = tempfile::tempdir().context("creating Files scene directory")?;
+    let root_path = root
+        .path()
+        .canonicalize()
+        .context("canonicalizing Files scene directory")?;
+    let create_worktree = |id: &str| -> Result<PathBuf> {
+        let path = root_path.join(id);
+        std::fs::create_dir_all(&path)
+            .with_context(|| format!("creating Files scene worktree {id:?}"))?;
+        Ok(path)
+    };
+
+    let fixture = match scene_name {
+        "omega_workbench_files_wide"
+        | "omega_workbench_files_narrow"
+        | "omega_workbench_files_loading"
+        | "omega_workbench_files_error" => {
+            let worktree = create_worktree("ready-worktree")?;
+            std::fs::create_dir_all(worktree.join("src"))?;
+            std::fs::write(worktree.join("src/main.rs"), "fn main() {}\n")?;
+            std::fs::write(worktree.join("README.md"), "# Ready fixture\n")?;
+            WorkbenchFilesDiskFixture {
+                _root: root,
+                worktrees: vec![("ready-worktree".into(), worktree)],
+                active_worktree_id: "ready-worktree".into(),
+                selected_path: matches!(
+                    scene_name,
+                    "omega_workbench_files_wide" | "omega_workbench_files_narrow"
+                )
+                .then_some("README.md"),
+            }
+        }
+        "omega_workbench_files_multi_root"
+        | "omega_workbench_files_stale_filesystem_completion" => {
+            let alpha = create_worktree("alpha-worktree")?;
+            std::fs::write(alpha.join("alpha-only.txt"), "alpha\n")?;
+            let beta = create_worktree("beta-worktree")?;
+            std::fs::create_dir_all(beta.join("src"))?;
+            std::fs::write(beta.join("beta-only.txt"), "beta\n")?;
+            std::fs::write(beta.join("src/beta.rs"), "pub fn beta() {}\n")?;
+            WorkbenchFilesDiskFixture {
+                _root: root,
+                worktrees: vec![
+                    ("alpha-worktree".into(), alpha),
+                    ("beta-worktree".into(), beta),
+                ],
+                active_worktree_id: "beta-worktree".into(),
+                selected_path: Some("beta-only.txt"),
+            }
+        }
+        "omega_workbench_files_empty" => {
+            let worktree = create_worktree("empty-worktree")?;
+            WorkbenchFilesDiskFixture {
+                _root: root,
+                worktrees: vec![("empty-worktree".into(), worktree)],
+                active_worktree_id: "empty-worktree".into(),
+                selected_path: None,
+            }
+        }
+        _ => unreachable!("Files scene was checked above"),
+    };
+    Ok(Some(fixture))
+}
+
+#[cfg(all(target_os = "macos", feature = "visual-tests"))]
+fn add_workbench_files_worktrees(
+    workspace_window: WindowHandle<Workspace>,
+    fixture: &WorkbenchFilesDiskFixture,
+    cx: &mut VisualTestAppContext,
+) -> Result<()> {
+    for (_, path) in &fixture.worktrees {
+        let task = workspace_window
+            .update(cx, |workspace, _window, cx| {
+                workspace.project().update(cx, |project, cx| {
+                    project.find_or_create_worktree(path, true, cx)
+                })
+            })
+            .with_context(|| {
+                format!("starting Files scene worktree scan for {}", path.display())
+            })?;
+        cx.background_executor.allow_parking();
+        let result = cx.foreground_executor.block_test(task);
+        cx.background_executor.forbid_parking();
+        let (worktree, _) =
+            result.with_context(|| format!("adding Files scene worktree {}", path.display()))?;
+        let scan_complete = cx
+            .read(|cx| {
+                worktree
+                    .read(cx)
+                    .as_local()
+                    .map(|worktree| worktree.scan_complete())
+            })
+            .with_context(|| format!("Files scene worktree {} is not local", path.display()))?;
+        cx.background_executor.allow_parking();
+        cx.foreground_executor.block_test(scan_complete);
+        cx.background_executor.forbid_parking();
+    }
+    cx.run_until_parked();
+    Ok(())
+}
+
+#[cfg(all(target_os = "macos", feature = "visual-tests"))]
 fn run_omega_workbench_shell_visual_capture(
     app_state: Arc<AppState>,
     cx: &mut VisualTestAppContext,
@@ -3111,6 +3430,7 @@ fn run_omega_workbench_shell_visual_capture(
 ) -> Result<TestResult> {
     let scene = scene_spec(scene_name)
         .ok_or_else(|| anyhow::anyhow!("unknown workbench shell scene {scene_name:?}"))?;
+    let files_fixture = create_workbench_files_disk_fixture(scene_name)?;
     let project = cx.update(|cx| {
         project::Project::local(
             app_state.client.clone(),
@@ -3151,11 +3471,15 @@ fn run_omega_workbench_shell_visual_capture(
         })
         .with_context(|| format!("opening workbench shell scene {scene_name:?}"))?;
     cx.run_until_parked();
+    if let Some(fixture) = files_fixture.as_ref() {
+        add_workbench_files_worktrees(workspace_window, fixture, cx)?;
+    }
 
     let result = run_omega_workbench_shell_visual_capture_in_window(
         workspace_window,
         cx,
         scene_name,
+        files_fixture.as_ref(),
         update_baseline,
     );
     cx.update_window(workspace_window.into(), |_, window, _cx| {
@@ -3163,6 +3487,21 @@ fn run_omega_workbench_shell_visual_capture(
     })
     .log_err();
     cx.run_until_parked();
+    if files_fixture.is_some() {
+        cx.update(|cx| {
+            let worktree_ids = project
+                .read(cx)
+                .visible_worktrees(cx)
+                .map(|worktree| worktree.read(cx).id())
+                .collect::<Vec<_>>();
+            project.update(cx, |project, cx| {
+                for worktree_id in worktree_ids {
+                    project.remove_worktree(worktree_id, cx);
+                }
+            });
+        });
+        cx.run_until_parked();
+    }
     result
 }
 
@@ -3171,6 +3510,7 @@ fn run_omega_workbench_shell_visual_capture_in_window(
     workspace_window: WindowHandle<Workspace>,
     cx: &mut VisualTestAppContext,
     scene_name: &str,
+    files_fixture: Option<&WorkbenchFilesDiskFixture>,
     update_baseline: bool,
 ) -> Result<TestResult> {
     use agent_ui::AgentPanel;
@@ -3181,11 +3521,51 @@ fn run_omega_workbench_shell_visual_capture_in_window(
             (workspace.weak_handle(), window.to_async(cx))
         })
         .context("getting workbench shell workspace handle")?;
+    let project_panel = match workspace_window
+        .update(cx, |workspace, _window, cx| {
+            workspace.panel::<ProjectPanel>(cx)
+        })
+        .context("checking for a workspace-owned ProjectPanel")?
+    {
+        Some(project_panel) => project_panel,
+        None => {
+            cx.background_executor.allow_parking();
+            let project_panel = cx
+                .foreground_executor
+                .block_test(ProjectPanel::load(weak_workspace, async_window_context))
+                .context("loading ProjectPanel before AgentPanel")?;
+            cx.background_executor.forbid_parking();
+            workspace_window
+                .update(cx, |workspace, window, cx| {
+                    workspace.add_panel(project_panel.clone(), window, cx);
+                })
+                .context("adding the workspace-owned ProjectPanel")?;
+            project_panel
+        }
+    };
+    cx.run_until_parked();
+    let workspace_project_panel = workspace_window
+        .update(cx, |workspace, _window, cx| {
+            workspace.panel::<ProjectPanel>(cx)
+        })
+        .context("reading the workspace-owned ProjectPanel")?
+        .context("ProjectPanel was not registered in the workspace")?;
+    anyhow::ensure!(
+        workspace_project_panel.entity_id() == project_panel.entity_id(),
+        "the Files surface did not retain the one workspace-owned ProjectPanel"
+    );
+    record_workbench_semantic_check(scene_name, "files-single-workspace-owned-project-panel");
+
+    let (weak_workspace, async_window_context) = workspace_window
+        .update(cx, |workspace, window, cx| {
+            (workspace.weak_handle(), window.to_async(cx))
+        })
+        .context("getting workbench shell workspace handle after ProjectPanel")?;
     cx.background_executor.allow_parking();
     let panel = cx
         .foreground_executor
         .block_test(AgentPanel::load(weak_workspace, async_window_context))
-        .context("loading AgentPanel for workbench shell scene")?;
+        .context("loading AgentPanel after ProjectPanel for workbench shell scene")?;
     cx.background_executor.forbid_parking();
 
     workspace_window
@@ -3205,7 +3585,14 @@ fn run_omega_workbench_shell_visual_capture_in_window(
         cx.read(|cx| panel.read(cx).active_thread_id(cx).is_some()),
         "workbench shell scene {scene_name:?} has no active production thread"
     );
-    configure_workbench_shell_scene(scene_name, workspace_window, &panel, cx)?;
+    configure_workbench_shell_scene(
+        scene_name,
+        workspace_window,
+        &panel,
+        &project_panel,
+        files_fixture,
+        cx,
+    )?;
     run_visual_test(scene_name, workspace_window.into(), cx, update_baseline)
 }
 
@@ -3244,10 +3631,85 @@ fn focus_workbench_selector(
 }
 
 #[cfg(all(target_os = "macos", feature = "visual-tests"))]
+fn select_workbench_files_identity(
+    workspace_window: WindowHandle<Workspace>,
+    panel: &Entity<agent_ui::AgentPanel>,
+    worktree_path: &Path,
+    cx: &mut VisualTestAppContext,
+) -> Result<omega_workbench_state::RepositoryBinding> {
+    let (target_binding, current_binding) = cx.read(|cx| {
+        let identity = panel
+            .read(cx)
+            .workbench_identity_for_tests()
+            .context("Files scene has no production identity")?;
+        let target_binding = identity
+            .candidates
+            .iter()
+            .find(|candidate| candidate.worktree_abs_path == worktree_path)
+            .map(|candidate| candidate.binding.clone())
+            .with_context(|| {
+                format!(
+                    "Files scene identity has no candidate for {}",
+                    worktree_path.display()
+                )
+            })?;
+        Ok::<_, anyhow::Error>((target_binding, identity.binding().cloned()))
+    })?;
+    if current_binding.as_ref() != Some(&target_binding) {
+        let (trigger_selector, row_selector) = if current_binding
+            .as_ref()
+            .is_some_and(|current| current.repository_id == target_binding.repository_id)
+        {
+            (
+                "omega.workbench.control.identity.worktree",
+                format!(
+                    "omega.workbench.control.worktree.{}",
+                    target_binding.worktree_id
+                ),
+            )
+        } else {
+            (
+                "omega.workbench.control.identity.repository",
+                format!(
+                    "omega.workbench.control.repository.{}",
+                    target_binding.repository_id
+                ),
+            )
+        };
+        cx.simulate_click_selector(workspace_window.into(), trigger_selector)?;
+        cx.run_until_parked();
+        cx.simulate_click_selector(workspace_window.into(), &row_selector)?;
+        cx.run_until_parked();
+    }
+    let (identity_binding, projection_binding) = cx.read(|cx| {
+        let panel = panel.read(cx);
+        (
+            panel
+                .workbench_identity_for_tests()
+                .and_then(|identity| identity.binding())
+                .cloned(),
+            panel
+                .workbench_projection_for_tests()
+                .visible_projection()
+                .and_then(|visible| visible.binding),
+        )
+    });
+    anyhow::ensure!(
+        identity_binding.as_ref() == Some(&target_binding)
+            && projection_binding.as_ref() == Some(&target_binding),
+        "Files scene did not select the production identity for {}",
+        worktree_path.display()
+    );
+    Ok(target_binding)
+}
+
+#[cfg(all(target_os = "macos", feature = "visual-tests"))]
 fn configure_workbench_shell_scene(
     scene_name: &str,
     workspace_window: WindowHandle<Workspace>,
     panel: &Entity<agent_ui::AgentPanel>,
+    project_panel: &Entity<ProjectPanel>,
+    files_fixture: Option<&WorkbenchFilesDiskFixture>,
     cx: &mut VisualTestAppContext,
 ) -> Result<()> {
     use agent_ui::workbench_shell::{
@@ -3270,13 +3732,335 @@ fn configure_workbench_shell_scene(
         .copied()
         .find(|surface| !surface.requires_binding())
         .context("workbench projection has no unbound surface")?;
-    anyhow::ensure!(
-        active_thread.binding.is_none() && active_thread.available_surfaces.len() == 1,
-        "workbench shell scene must use the real no-project capability projection"
-    );
+    if !is_workbench_files_scene(scene_name) {
+        anyhow::ensure!(
+            active_thread.binding.is_none() && active_thread.available_surfaces.len() == 1,
+            "workbench shell scene must use the real no-project capability projection"
+        );
+    }
 
     match scene_name {
         "omega_workbench_shell_default" => {}
+        name if is_workbench_files_scene(name) => {
+            let fixture = files_fixture.context("Files scene has no disk fixture")?;
+            let active_path = fixture
+                .worktrees
+                .iter()
+                .find_map(|(id, path)| {
+                    (id == &fixture.active_worktree_id).then_some(path.as_path())
+                })
+                .context("Files scene has no active disk worktree")?;
+            let active_worktree_id = workspace_window
+                .update(cx, |workspace, _window, cx| {
+                    workspace
+                        .project()
+                        .read(cx)
+                        .visible_worktrees(cx)
+                        .find(|worktree| worktree.read(cx).abs_path().as_ref() == active_path)
+                        .map(|worktree| worktree.read(cx).id())
+                })
+                .context("reading Files scene worktrees")?
+                .with_context(|| {
+                    format!(
+                        "active Files worktree {} is not visible",
+                        active_path.display()
+                    )
+                })?;
+            let mut stale_alpha_derivation = None;
+            if name == "omega_workbench_files_stale_filesystem_completion" {
+                let (_, first_path) = fixture
+                    .worktrees
+                    .first()
+                    .context("stale Files scene has no first worktree")?;
+                let alpha_binding =
+                    select_workbench_files_identity(workspace_window, panel, first_path, cx)?;
+                dispatch_workbench_action(workspace_window, Box::new(SelectFiles), cx)?;
+                cx.run_until_parked();
+                let first_worktree_id = workspace_window
+                    .update(cx, |workspace, _window, cx| {
+                        workspace
+                            .project()
+                            .read(cx)
+                            .visible_worktrees(cx)
+                            .find(|worktree| {
+                                worktree.read(cx).abs_path().as_ref() == first_path.as_path()
+                            })
+                            .map(|worktree| worktree.read(cx).id())
+                    })
+                    .context("reading initial stale-scene worktree")?
+                    .context("initial stale-scene worktree is unavailable")?;
+                anyhow::ensure!(
+                    cx.read(|cx| project_panel.read(cx).worktree_scope())
+                        == Some(first_worktree_id),
+                    "stale Files scene never projected its first worktree"
+                );
+                let alpha_projection = cx
+                    .read(|cx| panel.read(cx).workbench_projection_for_tests().clone())
+                    .visible_projection()
+                    .context("stale Files scene has no alpha projection")?;
+                anyhow::ensure!(
+                    alpha_projection.binding.as_ref() == Some(&alpha_binding),
+                    "stale Files scene did not establish the distinct alpha binding"
+                );
+                let alpha_row_selectors = cx
+                    .read(|cx| project_panel.read(cx).visible_rows_for_test())
+                    .into_iter()
+                    .map(|row| row.selector())
+                    .collect::<Vec<_>>();
+                anyhow::ensure!(
+                    !alpha_row_selectors.is_empty(),
+                    "stale Files scene has no alpha semantic rows to reject"
+                );
+                let alpha_derivation_revision =
+                    cx.update_window(workspace_window.into(), |_, window, cx| {
+                        project_panel.update(cx, |project_panel, cx| -> Result<u64> {
+                            anyhow::ensure!(
+                                project_panel.set_worktree_scope(None, window, cx),
+                                "could not clear alpha scope before stale derivation"
+                            );
+                            anyhow::ensure!(
+                                project_panel.set_worktree_scope(
+                                    Some(first_worktree_id),
+                                    window,
+                                    cx,
+                                ),
+                                "could not start the pending alpha derivation"
+                            );
+                            match project_panel.scope_state() {
+                                project_panel::ProjectPanelScopeState::Loading {
+                                    worktree_id,
+                                    revision,
+                                } if worktree_id == first_worktree_id => Ok(revision),
+                                state => anyhow::bail!(
+                                    "alpha derivation was not pending after scheduling: {state:?}"
+                                ),
+                            }
+                        })
+                    })??;
+                anyhow::ensure!(
+                    cx.background_executor.tick(),
+                    "pending alpha derivation did not schedule executor work"
+                );
+                anyhow::ensure!(
+                    matches!(
+                        cx.read(|cx| project_panel.read(cx).scope_state()),
+                        project_panel::ProjectPanelScopeState::Loading {
+                            worktree_id,
+                            revision,
+                        } if worktree_id == first_worktree_id
+                            && revision == alpha_derivation_revision
+                    ),
+                    "alpha derivation completed before the controlled beta rebind"
+                );
+                record_workbench_semantic_check(
+                    name,
+                    "files-alpha-derivation-pending-before-rebind",
+                );
+                let beta_binding =
+                    select_workbench_files_identity(workspace_window, panel, active_path, cx)?;
+                stale_alpha_derivation = Some((
+                    alpha_binding,
+                    beta_binding,
+                    alpha_projection.generation,
+                    alpha_derivation_revision,
+                    alpha_row_selectors,
+                ));
+                dispatch_workbench_action(workspace_window, Box::new(SelectFiles), cx)?;
+                dispatch_workbench_action(workspace_window, Box::new(SelectFiles), cx)?;
+            } else {
+                select_workbench_files_identity(workspace_window, panel, active_path, cx)?;
+                dispatch_workbench_action(workspace_window, Box::new(SelectFiles), cx)?;
+            }
+
+            let expects_empty = name == "omega_workbench_files_empty";
+            for _ in 0..64 {
+                cx.run_until_parked();
+                let state = cx.read(|cx| project_panel.read(cx).scope_state());
+                let ready = matches!(
+                    state,
+                    project_panel::ProjectPanelScopeState::Ready { worktree_id, .. }
+                        if !expects_empty && worktree_id == active_worktree_id
+                ) || matches!(
+                    state,
+                    project_panel::ProjectPanelScopeState::Empty { worktree_id, .. }
+                        if expects_empty && worktree_id == active_worktree_id
+                );
+                if ready {
+                    break;
+                }
+                cx.advance_clock(Duration::from_millis(10));
+            }
+
+            let scope_state = cx.read(|cx| project_panel.read(cx).scope_state());
+            let scope_matches = matches!(
+                scope_state,
+                project_panel::ProjectPanelScopeState::Ready { worktree_id, .. }
+                    if !expects_empty && worktree_id == active_worktree_id
+            ) || matches!(
+                scope_state,
+                project_panel::ProjectPanelScopeState::Empty { worktree_id, .. }
+                    if expects_empty && worktree_id == active_worktree_id
+            );
+            anyhow::ensure!(
+                scope_matches,
+                "Files scene {name:?} reached {scope_state:?}, expected active scope {active_worktree_id:?}"
+            );
+            record_workbench_semantic_check(name, "files-active-worktree-scope");
+            if let Some((
+                alpha_binding,
+                beta_binding,
+                alpha_generation,
+                alpha_derivation_revision,
+                _,
+            )) = stale_alpha_derivation.as_ref()
+            {
+                let beta_projection = cx
+                    .read(|cx| panel.read(cx).workbench_projection_for_tests().clone())
+                    .visible_projection()
+                    .context("stale Files scene has no beta projection")?;
+                let beta_scope_revision = match scope_state {
+                    project_panel::ProjectPanelScopeState::Ready { revision, .. } => revision,
+                    state => anyhow::bail!(
+                        "stale Files scene did not settle on a ready beta scope: {state:?}"
+                    ),
+                };
+                anyhow::ensure!(
+                    beta_projection.binding.as_ref() == Some(beta_binding)
+                        && beta_projection.binding.as_ref() != Some(alpha_binding)
+                        && beta_projection.generation > *alpha_generation,
+                    "stale Files scene did not advance from the alpha binding epoch to beta"
+                );
+                anyhow::ensure!(
+                    beta_scope_revision > *alpha_derivation_revision,
+                    "beta scope revision {beta_scope_revision} did not supersede pending alpha revision {alpha_derivation_revision}"
+                );
+                record_workbench_semantic_check(name, "files-distinct-alpha-beta-binding-epochs");
+                record_workbench_semantic_check(
+                    name,
+                    "files-beta-scope-supersedes-alpha-derivation",
+                );
+            }
+
+            let rows = cx.read(|cx| project_panel.read(cx).visible_rows_for_test());
+            anyhow::ensure!(
+                rows.iter().all(|row| row.worktree_id == active_worktree_id),
+                "Files scene {name:?} leaked rows from an inactive worktree"
+            );
+            if expects_empty {
+                anyhow::ensure!(
+                    rows.iter()
+                        .all(|row| row.path.as_ref().as_unix_str().is_empty()),
+                    "empty Files scene rendered a non-root row"
+                );
+            } else {
+                anyhow::ensure!(
+                    rows.iter()
+                        .any(|row| !row.path.as_ref().as_unix_str().is_empty()),
+                    "ready Files scene rendered no file rows"
+                );
+            }
+            if matches!(
+                name,
+                "omega_workbench_files_multi_root"
+                    | "omega_workbench_files_stale_filesystem_completion"
+            ) {
+                anyhow::ensure!(
+                    rows.iter()
+                        .any(|row| row.path.as_ref() == util::rel_path::rel_path("beta-only.txt"))
+                        && rows.iter().all(|row| {
+                            row.path.as_ref() != util::rel_path::rel_path("alpha-only.txt")
+                        }),
+                    "multi-root Files scene did not isolate the active beta worktree"
+                );
+            }
+            if name == "omega_workbench_files_stale_filesystem_completion" {
+                let (_, _, _, _, alpha_row_selectors) = stale_alpha_derivation
+                    .as_ref()
+                    .context("stale Files scene lost its alpha derivation evidence")?;
+                let snapshot = cx.debug_render_snapshot(workspace_window.into())?;
+                let mut probe = SemanticProbe::new(&snapshot);
+                for selector in alpha_row_selectors {
+                    probe.require_absent(selector)?;
+                }
+                record_workbench_semantic_checks(name, probe.into_checks());
+                record_workbench_semantic_check(
+                    name,
+                    "files-stale-alpha-derivation-rejected-after-beta-rebind",
+                );
+            }
+            record_workbench_semantic_check(name, "files-visible-rows-match-active-scope");
+
+            if let Some(selected_path) = fixture.selected_path {
+                let selected_project_path = project::ProjectPath {
+                    worktree_id: active_worktree_id,
+                    path: util::rel_path::rel_path(selected_path).into(),
+                };
+                cx.update(|cx| {
+                    project_panel.update(cx, |project_panel, cx| {
+                        project_panel.select_path_for_test(selected_project_path.clone(), cx);
+                        cx.notify();
+                    });
+                });
+                cx.run_until_parked();
+                let selected = cx.read(|cx| project_panel.read(cx).selected_entry_project_path(cx));
+                anyhow::ensure!(
+                    selected.as_ref() == Some(&selected_project_path),
+                    "Files scene {name:?} did not select {selected_path:?}"
+                );
+                record_workbench_semantic_check(name, "files-selected-row-state");
+            }
+
+            if matches!(
+                name,
+                "omega_workbench_files_loading" | "omega_workbench_files_error"
+            ) {
+                let load = cx.update_window(workspace_window.into(), |_, window, cx| {
+                    panel.update(cx, |panel, cx| {
+                        panel.begin_workbench_surface_load_for_tests(
+                            format!("{name}-request"),
+                            omega_workbench_state::WorkSurface::Files,
+                            window,
+                            cx,
+                        )
+                    })
+                })??;
+                if name == "omega_workbench_files_error" {
+                    let effect =
+                        cx.update_window(workspace_window.into(), |_, window, cx| {
+                            panel.update(cx, |panel, cx| {
+                                panel.complete_workbench_surface_load_for_tests(
+                                    load,
+                                    agent_ui::workbench_shell::SurfaceLoadOutcome::Error(
+                                        "Could not load Files".into(),
+                                    ),
+                                    window,
+                                    cx,
+                                )
+                            })
+                        })??;
+                    anyhow::ensure!(
+                        effect == omega_workbench_state::TransitionEffect::Applied,
+                        "Files error scene load completion was not applied"
+                    );
+                    record_workbench_semantic_check(name, "files-error-state-applied");
+                } else {
+                    record_workbench_semantic_check(name, "files-loading-state-applied");
+                }
+                cx.run_until_parked();
+            }
+
+            let projection = cx.read(|cx| panel.read(cx).workbench_projection_for_tests().clone());
+            let visible = projection
+                .visible_projection()
+                .context("Files scene has no visible projection")?;
+            anyhow::ensure!(
+                visible.requested_surface == Some(omega_workbench_state::WorkSurface::Files)
+                    && visible.effective_surface == Some(omega_workbench_state::WorkSurface::Files)
+                    && visible.dock_open,
+                "Files scene did not reach its expected production Files layout"
+            );
+            record_workbench_semantic_check(name, "files-production-surface-open");
+        }
         "omega_workbench_shell_active_dock" => {
             dispatch_workbench_action(workspace_window, Box::new(SelectPlan), cx)?;
             let projection = cx.read(|cx| panel.read(cx).workbench_projection_for_tests().clone());
@@ -3413,7 +4197,7 @@ fn configure_workbench_shell_scene(
                 },
                 source_revision: 1,
             };
-            cx.update_window(workspace_window.into(), |_, _window, cx| {
+            cx.update_window(workspace_window.into(), |_, window, cx| {
                 panel.update(cx, |panel, cx| {
                     panel.set_workbench_identity_observation_for_tests(
                         Some(ThreadIdentityObservation {
@@ -3421,6 +4205,7 @@ fn configure_workbench_shell_scene(
                             phase,
                             candidates: vec![candidate],
                         }),
+                        window,
                         cx,
                     );
                 });

@@ -11,7 +11,8 @@ use omega_workbench_harness::{
     ConnectivityFixture, ContentStateFixture, ProofCheck, SemanticProbe, ThemeFixture,
     WorkSurfaceId, WorkbenchScene,
 };
-use project::{AgentId, Project};
+use project::{AgentId, Project, ProjectPath, WorktreeId};
+use project_panel::ProjectPanel;
 use settings::SettingsStore;
 use std::any::Any;
 use std::cell::RefCell;
@@ -121,6 +122,7 @@ pub fn init_test(cx: &mut TestAppContext) {
         theme_settings::init(theme::LoadThemes::JustBase, cx);
         editor::init(cx);
         release_channel::init("0.0.0".parse().unwrap(), cx);
+        project_panel::init(cx);
         agent_panel::init(cx);
         crate::terminal_thread_metadata_store::TerminalThreadMetadataStore::init_global(cx);
     });
@@ -354,6 +356,31 @@ impl AgentWorkbenchFrontDoor {
                 .map(|worktree| std::path::PathBuf::from(format!("/{}", worktree.id)));
             for (worktree_index, worktree) in repository.worktrees.iter().enumerate() {
                 let path = std::path::PathBuf::from(format!("/{}", worktree.id));
+                fs.insert_tree(
+                    &path,
+                    serde_json::json!({
+                        ".gitignore": "target/\n",
+                        "src": {
+                            "existing.rs": "// Existing fixture",
+                            "main.rs": "// Main fixture",
+                            "rename-me.rs": "// Rename fixture",
+                            "nested": {
+                                "deep": {
+                                    "a-deliberately-long-fixture-file-name.rs": "// Long fixture"
+                                }
+                            }
+                        },
+                        "target": {
+                            "ignored.rs": "// Ignored fixture"
+                        }
+                    }),
+                )
+                .await;
+                fs.insert_file(
+                    path.join(format!("{}-only.txt", worktree.id)),
+                    worktree.id.as_bytes().to_vec(),
+                )
+                .await;
                 if matches!(
                     worktree.git_state,
                     Some(omega_workbench_harness::WorktreeGitStateFixture::NoGit)
@@ -469,6 +496,18 @@ impl AgentWorkbenchFrontDoor {
             px(scene.viewport.width as f32),
             px(scene.viewport.height as f32),
         ));
+
+        let (weak_workspace, async_window_context) = workspace
+            .update_in(&mut visual, |workspace, window, cx| {
+                (workspace.weak_handle(), window.to_async(cx))
+            });
+        let project_panel = ProjectPanel::load(weak_workspace, async_window_context)
+            .await
+            .context("loading the native ProjectPanel for the Files surface")?;
+        workspace.update_in(&mut visual, |workspace, window, cx| {
+            workspace.add_panel(project_panel, window, cx);
+        });
+        visual.run_until_parked();
 
         let (panel, focused) = workspace.update_in(&mut visual, |workspace, window, cx| {
             let panel = cx.new(|cx| AgentPanel::new(workspace, window, cx));
@@ -586,6 +625,201 @@ impl AgentWorkbenchFrontDoor {
         })
     }
 
+    pub fn native_files_panel(&self, cx: &TestAppContext) -> Option<Entity<ProjectPanel>> {
+        self.workspace
+            .read_with(cx, |workspace, cx| workspace.panel::<ProjectPanel>(cx))
+            .or_else(|| {
+                self.panel
+                    .read_with(cx, |panel, _cx| panel.workbench_files_panel_for_tests())
+            })
+    }
+
+    pub fn native_files_panel_entity_id(&self, cx: &TestAppContext) -> Option<EntityId> {
+        self.native_files_panel(cx).map(|panel| panel.entity_id())
+    }
+
+    pub fn mounted_files_panel_entity_id(&self, cx: &TestAppContext) -> Option<EntityId> {
+        self.visible_surface_host(cx)
+            .and_then(|host| host.read_with(cx, |host, _cx| host.files_panel_entity_id()))
+    }
+
+    pub fn native_files_scope(&self, cx: &TestAppContext) -> Option<WorktreeId> {
+        self.native_files_panel(cx)
+            .and_then(|panel| panel.read_with(cx, |panel, _cx| panel.worktree_scope()))
+    }
+
+    pub fn native_files_rows(
+        &self,
+        cx: &TestAppContext,
+    ) -> Vec<project_panel::ProjectPanelVisibleRow> {
+        self.native_files_panel(cx)
+            .map(|panel| panel.read_with(cx, |panel, _cx| panel.visible_rows_for_test()))
+            .unwrap_or_default()
+    }
+
+    pub fn native_files_scope_state(
+        &self,
+        cx: &TestAppContext,
+    ) -> Option<project_panel::ProjectPanelScopeState> {
+        self.native_files_panel(cx)
+            .map(|panel| panel.read_with(cx, |panel, _cx| panel.scope_state()))
+    }
+
+    pub fn native_files_has_edit_state(&self, cx: &TestAppContext) -> bool {
+        self.native_files_panel(cx)
+            .is_some_and(|panel| panel.read_with(cx, |panel, _cx| panel.has_edit_state_for_test()))
+    }
+
+    pub fn native_files_selected_path(&self, cx: &TestAppContext) -> Option<ProjectPath> {
+        self.native_files_panel(cx).and_then(|panel| {
+            panel.read_with(cx, |panel, cx| panel.selected_entry_project_path(cx))
+        })
+    }
+
+    pub fn native_files_is_focused(&self, cx: &TestAppContext) -> bool {
+        let Some(panel) = self.native_files_panel(cx) else {
+            return false;
+        };
+        let mut visual = VisualTestContext::from_window(self.window, cx);
+        panel.update_in(&mut visual, |panel, window, cx| {
+            panel.focus_handle(cx).contains_focused(window, cx)
+        })
+    }
+
+    pub fn transcript_activation_is_focused(&self, cx: &TestAppContext) -> bool {
+        let mut visual = VisualTestContext::from_window(self.window, cx);
+        self.panel.update_in(&mut visual, |panel, window, cx| {
+            panel
+                .activation_focus_handle(cx)
+                .contains_focused(window, cx)
+        })
+    }
+
+    pub fn workspace_notification_count(&self, cx: &TestAppContext) -> usize {
+        self.workspace
+            .read_with(cx, |workspace, _cx| workspace.notification_ids().len())
+    }
+
+    pub fn fixture_worktree_id(&self, fixture_id: &str, cx: &TestAppContext) -> Option<WorktreeId> {
+        let expected_path = Path::new("/").join(fixture_id);
+        self.workspace.read_with(cx, |workspace, cx| {
+            workspace
+                .project()
+                .read(cx)
+                .visible_worktrees(cx)
+                .find(|worktree| worktree.read(cx).abs_path().as_ref() == expected_path)
+                .map(|worktree| worktree.read(cx).id())
+        })
+    }
+
+    pub fn focus_and_select_files_path(
+        &self,
+        fixture_id: &str,
+        relative_path: &str,
+        cx: &TestAppContext,
+    ) -> Result<()> {
+        let worktree_id = self
+            .fixture_worktree_id(fixture_id, cx)
+            .with_context(|| format!("fixture worktree {fixture_id:?} is unavailable"))?;
+        let panel = self
+            .native_files_panel(cx)
+            .context("native ProjectPanel is unavailable")?;
+        let project_path = ProjectPath {
+            worktree_id,
+            path: util::rel_path::rel_path(relative_path).into(),
+        };
+        let mut visual = VisualTestContext::from_window(self.window, cx);
+        panel.update_in(&mut visual, |panel, window, cx| {
+            panel.select_path_for_test(project_path, cx);
+            panel.focus_handle(cx).focus(window, cx);
+            cx.notify();
+        });
+        visual.run_until_parked();
+        Ok(())
+    }
+
+    pub fn reveal_files_path(
+        &self,
+        fixture_id: &str,
+        relative_path: &str,
+        cx: &mut TestAppContext,
+    ) -> Result<ProjectPath> {
+        let worktree_id = self
+            .fixture_worktree_id(fixture_id, cx)
+            .with_context(|| format!("fixture worktree {fixture_id:?} is unavailable"))?;
+        let project_path = ProjectPath {
+            worktree_id,
+            path: util::rel_path::rel_path(relative_path).into(),
+        };
+        let project = self
+            .workspace
+            .read_with(cx, |workspace, _cx| workspace.project().clone());
+        let entry_id = project
+            .read_with(cx, |project, cx| {
+                project
+                    .entry_for_path(&project_path, cx)
+                    .map(|entry| entry.id)
+            })
+            .with_context(|| {
+                format!("fixture path {fixture_id:?}/{relative_path} is unavailable for reveal")
+            })?;
+        project.update(cx, |_, cx| {
+            cx.emit(project::Event::RevealInProjectPanel(entry_id));
+        });
+        let visual = VisualTestContext::from_window(self.window, cx);
+        visual.run_until_parked();
+        Ok(project_path)
+    }
+
+    pub fn activate_files_panel(&self, cx: &mut TestAppContext) {
+        let project = self
+            .workspace
+            .read_with(cx, |workspace, _cx| workspace.project().clone());
+        project.update(cx, |_, cx| {
+            cx.emit(project::Event::ActivateProjectPanel);
+        });
+        let visual = VisualTestContext::from_window(self.window, cx);
+        visual.run_until_parked();
+    }
+
+    pub fn active_workspace_item_path(&self, cx: &TestAppContext) -> Option<ProjectPath> {
+        self.workspace.read_with(cx, |workspace, cx| {
+            workspace.active_item(cx)?.project_path(cx)
+        })
+    }
+
+    pub fn active_workspace_item_is_focused(&self, cx: &mut TestAppContext) -> bool {
+        let mut visual = VisualTestContext::from_window(self.window, cx);
+        self.workspace
+            .update_in(&mut visual, |workspace, window, cx| {
+                workspace
+                    .active_item(cx)
+                    .is_some_and(|item| item.item_focus_handle(cx).contains_focused(window, cx))
+            })
+    }
+
+    pub fn workspace_center_is_visible(&self, cx: &TestAppContext) -> bool {
+        self.workspace
+            .read_with(cx, |workspace, _cx| workspace.center_visible_for_tests())
+    }
+
+    pub fn git_graph_file_history_paths(&self, cx: &TestAppContext) -> Vec<String> {
+        self.workspace.read_with(cx, |workspace, cx| {
+            workspace
+                .items_of_type::<git_ui::git_graph::GitGraph>(cx)
+                .filter_map(|graph| {
+                    let graph = graph.read(cx);
+                    match graph.log_source_for_test() {
+                        git::repository::LogSource::Path(path) => {
+                            Some(path.as_unix_str().to_string())
+                        }
+                        _ => None,
+                    }
+                })
+                .collect()
+        })
+    }
+
     pub fn surface_host_entity_id(
         &self,
         surface: omega_workbench_state::WorkSurface,
@@ -627,8 +861,8 @@ impl AgentWorkbenchFrontDoor {
         cx: &mut TestAppContext,
     ) {
         let mut visual = VisualTestContext::from_window(self.window, cx);
-        self.panel.update_in(&mut visual, |panel, _window, cx| {
-            panel.set_workbench_identity_phase_for_tests(Some(phase), cx);
+        self.panel.update_in(&mut visual, |panel, window, cx| {
+            panel.set_workbench_identity_phase_for_tests(Some(phase), window, cx);
         });
         visual.run_until_parked();
     }
@@ -675,8 +909,9 @@ impl AgentWorkbenchFrontDoor {
         cx: &mut TestAppContext,
     ) -> Result<crate::workbench_shell::SurfaceLoadContext> {
         let request_id = request_id.into();
-        self.panel.update(cx, |panel, cx| {
-            panel.begin_workbench_surface_load_for_tests(request_id, surface, cx)
+        let mut visual = VisualTestContext::from_window(self.window, cx);
+        self.panel.update_in(&mut visual, |panel, window, cx| {
+            panel.begin_workbench_surface_load_for_tests(request_id, surface, window, cx)
         })
     }
 
@@ -686,8 +921,9 @@ impl AgentWorkbenchFrontDoor {
         outcome: crate::workbench_shell::SurfaceLoadOutcome,
         cx: &mut TestAppContext,
     ) -> Result<omega_workbench_state::TransitionEffect> {
-        self.panel.update(cx, |panel, cx| {
-            panel.complete_workbench_surface_load_for_tests(load, outcome, cx)
+        let mut visual = VisualTestContext::from_window(self.window, cx);
+        self.panel.update_in(&mut visual, |panel, window, cx| {
+            panel.complete_workbench_surface_load_for_tests(load, outcome, window, cx)
         })
     }
 
@@ -820,10 +1056,6 @@ impl AgentWorkbenchFrontDoor {
         });
         cx.run_until_parked();
         let mut visual = VisualTestContext::from_window(self.window, cx);
-        self.workspace
-            .update_in(&mut visual, |workspace, window, cx| {
-                workspace.focus_panel::<AgentPanel>(window, cx);
-            });
         self.panel.update(&mut visual, |_, cx| cx.notify());
         visual.run_until_parked();
         Ok(())
@@ -1225,6 +1457,20 @@ mod workbench_front_door_tests {
         for surface in &mut scene.surfaces {
             surface.available = with_project || surface.id == WorkSurfaceId::Plan;
         }
+        scene
+    }
+
+    fn scene_with_two_worktrees(name: &str) -> WorkbenchScene {
+        let mut scene = scene_with_thread(name, 1200, true);
+        scene.repositories[0].worktrees.push(WorktreeFixture {
+            id: "worktree-2".into(),
+            branch: Some("main".into()),
+            git_state: None,
+            dirty_files: 0,
+            conflicts: 0,
+            ahead: 0,
+            behind: 0,
+        });
         scene
     }
 
@@ -1699,6 +1945,14 @@ mod workbench_front_door_tests {
             .await
             .expect("inconsistent reconciliation fixture should mount");
         front_door.open_external_thread(StubAgentConnection::new(), cx);
+        let files_panel_id = front_door
+            .native_files_panel_entity_id(cx)
+            .expect("workspace ProjectPanel");
+        front_door.dispatch_action(crate::workbench_shell::SelectFiles, cx);
+        assert!(
+            front_door.native_files_is_focused(cx),
+            "inconsistent transition proof requires focus to begin inside Files"
+        );
         let before = front_door
             .projection(cx)
             .visible_projection()
@@ -1719,6 +1973,20 @@ mod workbench_front_door_tests {
         probe
             .require_interactive(WORKBENCH_REPOSITORY_SELECTOR)
             .expect("target selection is the explicit reconciliation action");
+        probe
+            .require_absent(WORKBENCH_DOCK_SELECTOR)
+            .expect("an inconsistent repository authority must close Files");
+        probe
+            .require_absent("omega.project-panel.tree")
+            .expect("an inconsistent repository authority must hide the native tree");
+        assert!(
+            front_door.transcript_activation_is_focused(cx),
+            "inconsistent Files must transfer actual focus to the transcript"
+        );
+        assert!(
+            !front_door.native_files_is_focused(cx),
+            "the hidden native tree must not retain focus while identity is inconsistent"
+        );
         for surface in [
             omega_workbench_state::WorkSurface::Files,
             omega_workbench_state::WorkSurface::Search,
@@ -1755,6 +2023,21 @@ mod workbench_front_door_tests {
                 .expect("Git capability after reconciliation")
                 .availability
                 .is_available()
+        );
+        front_door.dispatch_action(crate::workbench_shell::SelectFiles, cx);
+        assert_eq!(
+            front_door.native_files_panel_entity_id(cx),
+            Some(files_panel_id),
+            "inconsistent recovery must retain the workspace-created ProjectPanel"
+        );
+        assert_eq!(
+            front_door.mounted_files_panel_entity_id(cx),
+            Some(files_panel_id),
+            "recovered Files must mount the same native ProjectPanel"
+        );
+        assert!(
+            front_door.native_files_is_focused(cx),
+            "reopening Files after reconciliation must focus the recovered native tree"
         );
 
         front_door
@@ -2665,6 +2948,1237 @@ mod workbench_front_door_tests {
     }
 
     #[gpui::test]
+    async fn files_mounts_native_panel_reuses_entities_and_opens_files(cx: &mut TestAppContext) {
+        let scene = scene_with_thread("workbench_native_files", 1200, true);
+        let front_door = AgentWorkbenchFrontDoor::mount(scene, cx)
+            .await
+            .expect("native Files fixture should mount");
+        let transcript_id = front_door
+            .transcript_entity_id(cx)
+            .expect("Files fixture should have a transcript");
+        let files_panel_id = front_door
+            .native_files_panel_entity_id(cx)
+            .expect("the workspace should own one native ProjectPanel");
+        let worktree_id = front_door
+            .fixture_worktree_id("worktree-1", cx)
+            .expect("fixture worktree should be visible");
+
+        front_door.dispatch_action(crate::workbench_shell::SelectFiles, cx);
+
+        let projection = front_door
+            .projection(cx)
+            .visible_projection()
+            .expect("Files projection should be visible");
+        assert_eq!(
+            projection.effective_surface,
+            Some(omega_workbench_state::WorkSurface::Files)
+        );
+        assert!(projection.dock_open);
+        assert_eq!(front_door.native_files_scope(cx), Some(worktree_id));
+        assert!(matches!(
+            front_door.native_files_scope_state(cx),
+            Some(project_panel::ProjectPanelScopeState::Ready {
+                worktree_id: ready_worktree_id,
+                ..
+            }) if ready_worktree_id == worktree_id
+        ));
+        let rows = front_door.native_files_rows(cx);
+        assert!(
+            !rows.is_empty(),
+            "the native tree should project fixture rows"
+        );
+        assert!(
+            rows.iter().all(|row| row.worktree_id == worktree_id),
+            "Files must render rows from the active worktree only"
+        );
+        assert!(
+            rows.iter()
+                .any(|row| row.path.as_unix_str() == "worktree-1-only.txt"),
+            "the active-worktree-only sentinel should be rendered"
+        );
+        assert!(
+            front_door.native_files_is_focused(cx),
+            "selecting Files should focus the native ProjectPanel"
+        );
+        let snapshot = front_door.snapshot(cx);
+        let mut probe = SemanticProbe::new(&snapshot);
+        assert_eq!(
+            front_door.mounted_files_panel_entity_id(cx),
+            Some(files_panel_id),
+            "the Files host must mount the workspace-owned ProjectPanel entity"
+        );
+        probe
+            .require_accessible("omega.project-panel.tree", "Tree", "Files")
+            .expect("the embedded native Files tree should remain accessible");
+        probe
+            .require_inside(
+                "omega.project-panel.tree",
+                WorkSurfaceId::Files.surface_selector(),
+            )
+            .expect("the native tree should render inside the Files work-surface host");
+
+        front_door
+            .focus_and_select_files_path("worktree-1", "src", cx)
+            .expect("select the src directory");
+        front_door.dispatch_action(project_panel::ExpandSelectedEntry, cx);
+        front_door
+            .focus_and_select_files_path("worktree-1", "src/main.rs", cx)
+            .expect("select the file that will be opened");
+        let expanded_src = front_door
+            .native_files_rows(cx)
+            .into_iter()
+            .find(|row| row.path.as_unix_str() == "src")
+            .expect("expanded src row should remain visible");
+        assert!(expanded_src.is_expanded);
+        let main_row = front_door
+            .native_files_rows(cx)
+            .into_iter()
+            .find(|row| row.path.as_unix_str() == "src/main.rs")
+            .expect("expanded tree should expose src/main.rs");
+        let expanded_snapshot = front_door.snapshot(cx);
+        let mut probe = SemanticProbe::new(&expanded_snapshot);
+        let expanded_src_selector = expanded_src.selector();
+        probe
+            .require_accessibility_property(
+                &expanded_src_selector,
+                "expanded",
+                serde_json::Value::Bool(true),
+            )
+            .expect("directory expansion should be observable without pixels");
+        let main_row_selector = main_row.selector();
+        probe
+            .require_accessible(&main_row_selector, "TreeItem", "src/main.rs")
+            .expect("the selected native file row should be accessible");
+
+        let host_id = front_door
+            .surface_host_entity_id(omega_workbench_state::WorkSurface::Files, cx)
+            .expect("Files should have one retained host");
+        front_door.dispatch_action(crate::workbench_shell::SelectFiles, cx);
+        assert!(
+            front_door
+                .snapshot(cx)
+                .bounds(WORKBENCH_DOCK_SELECTOR)
+                .is_none(),
+            "selecting active Files should collapse the dock"
+        );
+        front_door.dispatch_action(crate::workbench_shell::SelectFiles, cx);
+        assert_eq!(
+            front_door.surface_host_entity_id(omega_workbench_state::WorkSurface::Files, cx),
+            Some(host_id),
+            "collapse and reopen should retain the Files host"
+        );
+        assert_eq!(
+            front_door.native_files_panel_entity_id(cx),
+            Some(files_panel_id),
+            "collapse and reopen should reuse the workspace ProjectPanel entity"
+        );
+        assert_eq!(
+            front_door
+                .native_files_selected_path(cx)
+                .map(|path| path.path),
+            Some(util::rel_path::rel_path("src/main.rs").into()),
+            "native tree selection should survive collapse and reopen"
+        );
+        assert!(
+            front_door
+                .native_files_rows(cx)
+                .iter()
+                .any(|row| row.path.as_unix_str() == "src" && row.is_expanded),
+            "native expansion state should survive collapse and reopen"
+        );
+
+        front_door.dispatch_action(project_panel::Open, cx);
+        assert_eq!(
+            front_door.active_workspace_item_path(cx),
+            front_door.native_files_selected_path(cx),
+            "opening a Files row should use the workspace's native file-open path"
+        );
+        assert!(
+            front_door.workspace_center_is_visible(cx),
+            "native Files open must leave the workspace center rendered"
+        );
+        assert!(
+            front_door.native_files_is_focused(cx),
+            "preview open must preserve the native Files focus contract"
+        );
+        front_door.dispatch_action(project_panel::OpenPermanent, cx);
+        assert!(
+            front_door.active_workspace_item_is_focused(cx),
+            "permanent open must render and focus the native editor"
+        );
+        assert_eq!(
+            front_door.transcript_entity_id(cx),
+            Some(transcript_id),
+            "native file open must not recreate the active transcript"
+        );
+
+        front_door
+            .teardown(cx)
+            .expect("native Files scene should tear down");
+    }
+
+    #[gpui::test]
+    async fn reveal_reopens_collapsed_files_and_focuses_the_reused_native_tree(
+        cx: &mut TestAppContext,
+    ) {
+        let scene = scene_with_thread("workbench_files_reveal", 1200, true);
+        let front_door = AgentWorkbenchFrontDoor::mount(scene, cx)
+            .await
+            .expect("Files reveal fixture should mount");
+        let files_panel_id = front_door
+            .native_files_panel_entity_id(cx)
+            .expect("workspace ProjectPanel");
+
+        front_door.dispatch_action(crate::workbench_shell::SelectFiles, cx);
+        front_door.dispatch_action(crate::workbench_shell::SelectFiles, cx);
+        assert!(
+            front_door.transcript_activation_is_focused(cx),
+            "collapsing Files should focus the transcript before reveal"
+        );
+        front_door.activate_files_panel(cx);
+        assert_eq!(
+            front_door.mounted_files_panel_entity_id(cx),
+            Some(files_panel_id),
+            "ActivateProjectPanel must reopen the exact rehomed native entity"
+        );
+        assert!(
+            front_door.native_files_is_focused(cx),
+            "ActivateProjectPanel must focus the available native tree"
+        );
+        front_door.dispatch_action(crate::workbench_shell::SelectFiles, cx);
+        assert!(front_door.transcript_activation_is_focused(cx));
+
+        let revealed_path = front_door
+            .reveal_files_path("worktree-1", "src/main.rs", cx)
+            .expect("emit the native ProjectPanel reveal event");
+        let projection = front_door
+            .projection(cx)
+            .visible_projection()
+            .expect("Files reveal projection");
+        assert_eq!(
+            projection.effective_surface,
+            Some(omega_workbench_state::WorkSurface::Files)
+        );
+        assert!(projection.dock_open, "native reveal should reopen Files");
+        assert_eq!(
+            front_door.native_files_panel_entity_id(cx),
+            Some(files_panel_id),
+            "reveal must retain the workspace-created ProjectPanel"
+        );
+        assert_eq!(
+            front_door.mounted_files_panel_entity_id(cx),
+            Some(files_panel_id),
+            "the reopened host must mount the same ProjectPanel entity"
+        );
+        assert_eq!(
+            front_door.native_files_selected_path(cx),
+            Some(revealed_path.clone()),
+            "native reveal must select its exact project path"
+        );
+        assert!(
+            front_door.native_files_is_focused(cx),
+            "native reveal must transfer focus into the reopened tree"
+        );
+
+        let revealed_row = front_door
+            .native_files_rows(cx)
+            .into_iter()
+            .find(|row| row.path == revealed_path.path)
+            .expect("revealed native row should be visible");
+        let snapshot = front_door.snapshot(cx);
+        let mut probe = SemanticProbe::new(&snapshot);
+        probe
+            .require_unique("omega.workbench.root")
+            .expect("native reveal must leave the outer AgentPanel rendered");
+        probe
+            .require_inside(
+                "omega.project-panel.tree",
+                WorkSurfaceId::Files.surface_selector(),
+            )
+            .expect("the revealed tree should render inside Files");
+        probe
+            .require_accessibility_property(
+                &revealed_row.selector(),
+                "selected",
+                serde_json::Value::Bool(true),
+            )
+            .expect("the revealed row should expose its native selected state");
+
+        front_door.dispatch_action(crate::workbench_shell::SelectFiles, cx);
+        assert!(
+            front_door.transcript_activation_is_focused(cx),
+            "collapsing the revealed tree should return focus to the transcript"
+        );
+        front_door.dispatch_action(zed_actions::project_panel::ToggleFocus, cx);
+        assert_eq!(
+            front_door.mounted_files_panel_entity_id(cx),
+            Some(files_panel_id),
+            "the global ProjectPanel action must route to the rehomed native entity"
+        );
+        assert!(
+            front_door.native_files_is_focused(cx),
+            "the global ProjectPanel action must reopen and focus Files"
+        );
+        front_door.dispatch_action(zed_actions::project_panel::ToggleFocus, cx);
+        let snapshot = front_door.snapshot(cx);
+        SemanticProbe::new(&snapshot)
+            .require_absent(WORKBENCH_DOCK_SELECTOR)
+            .expect("global ToggleFocus should collapse focused Files");
+        assert!(
+            front_door.transcript_activation_is_focused(cx),
+            "global ToggleFocus must leave focus in the visible transcript, not the hidden center"
+        );
+        front_door.dispatch_action(zed_actions::project_panel::ToggleFocus, cx);
+        assert_eq!(
+            front_door.mounted_files_panel_entity_id(cx),
+            Some(files_panel_id),
+            "global ToggleFocus must continue reusing the rehomed native entity"
+        );
+        assert!(
+            front_door.native_files_is_focused(cx),
+            "global ToggleFocus must refocus Files after reopening it"
+        );
+        front_door.dispatch_action(workspace::CloseActiveDock, cx);
+        let snapshot = front_door.snapshot(cx);
+        let mut probe = SemanticProbe::new(&snapshot);
+        probe
+            .require_unique("omega.workbench.root")
+            .expect("CloseActiveDock must leave the outer AgentPanel visible");
+        probe
+            .require_absent(WORKBENCH_DOCK_SELECTOR)
+            .expect("CloseActiveDock must collapse the embedded Files dock");
+        assert!(
+            front_door.transcript_activation_is_focused(cx),
+            "CloseActiveDock must transfer focus from Files to the visible transcript"
+        );
+
+        front_door.set_identity_phase(crate::thread_identity::IdentityPhase::Missing, cx);
+        front_door.snapshot(cx);
+        assert!(matches!(
+            front_door.native_files_scope_state(cx),
+            Some(project_panel::ProjectPanelScopeState::Unavailable)
+        ));
+        front_door.activate_files_panel(cx);
+        assert!(
+            front_door.transcript_activation_is_focused(cx),
+            "ActivateProjectPanel must leave focus in the transcript without repository authority"
+        );
+        front_door.dispatch_action(zed_actions::project_panel::ToggleFocus, cx);
+        assert!(
+            front_door.transcript_activation_is_focused(cx),
+            "ToggleFocus must not focus the unavailable rehomed tree"
+        );
+        front_door.dispatch_action(git::FileHistory, cx);
+        assert!(
+            front_door.git_graph_file_history_paths(cx).is_empty(),
+            "FileHistory must be a no-op while the ProjectPanel authority is unavailable"
+        );
+
+        front_door.set_identity_phase(crate::thread_identity::IdentityPhase::Ready, cx);
+        front_door.snapshot(cx);
+        front_door.dispatch_action(zed_actions::project_panel::ToggleFocus, cx);
+        front_door
+            .focus_and_select_files_path("worktree-1", "src/main.rs", cx)
+            .expect("restore the recovered native selection");
+        front_door.dispatch_action(git::FileHistory, cx);
+        assert_eq!(
+            front_door.git_graph_file_history_paths(cx),
+            vec!["src/main.rs".to_string()],
+            "FileHistory must resolve the exact selection from the rehomed native tree"
+        );
+        assert!(
+            front_door.workspace_center_is_visible(cx),
+            "native FileHistory must leave the workspace center rendered"
+        );
+        assert!(
+            front_door.active_workspace_item_is_focused(cx),
+            "the native FileHistory graph must be rendered and focused"
+        );
+
+        front_door
+            .teardown(cx)
+            .expect("Files reveal scene should tear down");
+    }
+
+    #[gpui::test(iterations = 16)]
+    async fn files_keyboard_actions_route_through_the_focused_native_tree(cx: &mut TestAppContext) {
+        let scene = scene_with_thread("workbench_files_keyboard", 1200, true);
+        let front_door = AgentWorkbenchFrontDoor::mount(scene, cx)
+            .await
+            .expect("Files keyboard fixture should mount");
+
+        front_door.dispatch_action(crate::workbench_shell::FocusActivityRail, cx);
+        front_door.dispatch_action(crate::workbench_shell::FocusFirstSurface, cx);
+        let rail_snapshot = front_door.snapshot(cx);
+        SemanticProbe::new(&rail_snapshot)
+            .require_focus(WorkSurfaceId::Files.rail_selector(), true)
+            .expect("the first rail action should focus Files");
+
+        front_door.dispatch_action(crate::workbench_shell::ActivateFocusedSurface, cx);
+        assert!(
+            front_door.native_files_is_focused(cx),
+            "activating the focused rail item should transfer GPUI focus into ProjectPanel"
+        );
+
+        let src_row = front_door
+            .native_files_rows(cx)
+            .into_iter()
+            .find(|row| row.path.as_unix_str() == "src")
+            .expect("Files fixture should render src");
+        front_door
+            .click(&src_row.selector(), cx)
+            .expect("the rendered src row should be selectable");
+        assert_eq!(
+            front_door
+                .native_files_selected_path(cx)
+                .map(|path| path.path),
+            Some(util::rel_path::rel_path("src").into())
+        );
+
+        front_door.dispatch_action(project_panel::ExpandSelectedEntry, cx);
+        front_door.dispatch_action(menu::SelectNext, cx);
+        let selected = front_door
+            .native_files_selected_path(cx)
+            .expect("Down/SelectNext should select a child row through ProjectPanel");
+        assert_ne!(
+            selected.path.as_unix_str(),
+            "src",
+            "keyboard navigation must move the native selection"
+        );
+        assert!(
+            selected.path.starts_with(util::rel_path::rel_path("src")),
+            "the next native row should come from the expanded src directory"
+        );
+        let selected_row = front_door
+            .native_files_rows(cx)
+            .into_iter()
+            .find(|row| row.path == selected.path)
+            .expect("keyboard-selected row should remain visible");
+        let selected_snapshot = front_door.snapshot(cx);
+        SemanticProbe::new(&selected_snapshot)
+            .require_accessibility_property(
+                &selected_row.selector(),
+                "selected",
+                serde_json::Value::Bool(true),
+            )
+            .expect("keyboard selection should be exposed through tree-item accessibility");
+
+        front_door.dispatch_action(project_panel::Open, cx);
+        assert_eq!(
+            front_door.active_workspace_item_path(cx),
+            Some(selected),
+            "Open should continue routing to the focused embedded ProjectPanel"
+        );
+
+        front_door
+            .teardown(cx)
+            .expect("Files keyboard fixture should tear down");
+    }
+
+    #[gpui::test(iterations = 16)]
+    async fn files_rebinds_atomically_and_rejects_stale_filesystem_events(cx: &mut TestAppContext) {
+        let scene = scene_with_two_worktrees("workbench_files_rebind");
+        let front_door = AgentWorkbenchFrontDoor::mount(scene, cx)
+            .await
+            .expect("multi-worktree Files fixture should mount");
+        let worktree_a = front_door
+            .fixture_worktree_id("worktree-1", cx)
+            .expect("first fixture worktree");
+        let worktree_b = front_door
+            .fixture_worktree_id("worktree-2", cx)
+            .expect("second fixture worktree");
+        let files_panel_id = front_door
+            .native_files_panel_entity_id(cx)
+            .expect("workspace ProjectPanel");
+
+        front_door.dispatch_action(crate::workbench_shell::SelectFiles, cx);
+        let host_a = front_door
+            .surface_host_entity_id(omega_workbench_state::WorkSurface::Files, cx)
+            .expect("first binding should own a Files host");
+        let old_rows = front_door.native_files_rows(cx);
+        assert!(
+            old_rows.iter().all(|row| row.worktree_id == worktree_a),
+            "the first binding must not project another worktree"
+        );
+        let old_selectors = old_rows
+            .iter()
+            .map(project_panel::ProjectPanelVisibleRow::selector)
+            .collect::<Vec<_>>();
+
+        front_door.fs.pause_events();
+        front_door
+            .fs
+            .insert_file(
+                "/worktree-1/stale-after-switch.rs",
+                b"// stale event".to_vec(),
+            )
+            .await;
+        front_door
+            .select_worktree_picker_row(1, cx)
+            .expect("switch to the second worktree through the rendered picker");
+        front_door.fs.simulate_watcher_overflow("/worktree-1");
+        front_door.fs.unpause_events_and_flush();
+        cx.run_until_parked();
+
+        let projection = front_door
+            .projection(cx)
+            .visible_projection()
+            .expect("rebound Files projection");
+        assert_eq!(
+            projection.effective_surface,
+            Some(omega_workbench_state::WorkSurface::Files)
+        );
+        assert!(
+            projection.dock_open,
+            "a binding change should restore the active Files surface for the new binding"
+        );
+        assert_eq!(front_door.native_files_scope(cx), Some(worktree_b));
+        assert_eq!(
+            front_door.native_files_panel_entity_id(cx),
+            Some(files_panel_id),
+            "worktree rebinding should reuse the native ProjectPanel entity"
+        );
+        assert_eq!(
+            front_door.mounted_files_panel_entity_id(cx),
+            Some(files_panel_id),
+            "the rebound host must mount the same workspace-owned ProjectPanel"
+        );
+        let host_b = front_door
+            .surface_host_entity_id(omega_workbench_state::WorkSurface::Files, cx)
+            .expect("new binding should own a Files host");
+        assert_ne!(
+            host_b, host_a,
+            "binding-scoped hosts must not be reused across worktrees"
+        );
+        let rows = front_door.native_files_rows(cx);
+        assert!(!rows.is_empty());
+        assert!(
+            rows.iter().all(|row| row.worktree_id == worktree_b),
+            "late worktree-A events must not repopulate the rebound native tree"
+        );
+        assert!(
+            rows.iter()
+                .any(|row| row.path.as_unix_str() == "worktree-2-only.txt")
+        );
+        assert!(
+            rows.iter()
+                .all(|row| row.path.as_unix_str() != "worktree-1-only.txt"
+                    && row.path.as_unix_str() != "stale-after-switch.rs")
+        );
+        let snapshot = front_door.snapshot(cx);
+        let mut probe = SemanticProbe::new(&snapshot);
+        for selector in old_selectors {
+            probe
+                .require_absent(&selector)
+                .expect("old-binding row selectors must disappear after rebind");
+        }
+
+        front_door
+            .teardown(cx)
+            .expect("rebound Files scene should tear down");
+    }
+
+    #[gpui::test]
+    async fn files_thread_switch_restores_binding_scoped_hosts_and_tree_state(
+        cx: &mut TestAppContext,
+    ) {
+        let scene = scene_with_two_worktrees("workbench_files_thread_switch");
+        let front_door = AgentWorkbenchFrontDoor::mount(scene, cx)
+            .await
+            .expect("Files thread-switch fixture should mount");
+        let worktree_a = front_door
+            .fixture_worktree_id("worktree-1", cx)
+            .expect("first fixture worktree");
+        let worktree_b = front_door
+            .fixture_worktree_id("worktree-2", cx)
+            .expect("second fixture worktree");
+        let files_panel_id = front_door
+            .native_files_panel_entity_id(cx)
+            .expect("workspace ProjectPanel");
+
+        let thread_a = front_door.open_external_thread(StubAgentConnection::new(), cx);
+        front_door.dispatch_action(crate::workbench_shell::SelectFiles, cx);
+        let host_a = front_door
+            .surface_host_entity_id(omega_workbench_state::WorkSurface::Files, cx)
+            .expect("thread A should create a Files host");
+        front_door
+            .focus_and_select_files_path("worktree-1", "src", cx)
+            .expect("select thread A directory");
+        front_door.dispatch_action(project_panel::ExpandSelectedEntry, cx);
+
+        let thread_b = front_door.open_external_thread(StubAgentConnection::new(), cx);
+        assert_ne!(thread_a, thread_b);
+        assert!(
+            !front_door
+                .projection(cx)
+                .visible_projection()
+                .expect("thread B projection")
+                .dock_open,
+            "a new thread must not inherit thread A's open Files dock"
+        );
+        front_door
+            .select_worktree_picker_row(1, cx)
+            .expect("bind thread B to the second worktree");
+        front_door.dispatch_action(crate::workbench_shell::SelectFiles, cx);
+        let host_b = front_door
+            .surface_host_entity_id(omega_workbench_state::WorkSurface::Files, cx)
+            .expect("thread B should create a Files host");
+        assert_ne!(host_a, host_b, "Files hosts must remain thread scoped");
+        assert_eq!(front_door.native_files_scope(cx), Some(worktree_b));
+        assert!(
+            front_door
+                .native_files_rows(cx)
+                .iter()
+                .any(|row| row.path.as_unix_str() == "src" && !row.is_expanded),
+            "thread B should start with its own collapsed source directory"
+        );
+
+        front_door.activate_thread(thread_a, cx);
+        assert_eq!(
+            front_door.surface_host_entity_id(omega_workbench_state::WorkSurface::Files, cx),
+            Some(host_a),
+            "thread A should restore its retained Files host"
+        );
+        assert_eq!(front_door.native_files_scope(cx), Some(worktree_a));
+        assert_eq!(
+            front_door.mounted_files_panel_entity_id(cx),
+            Some(files_panel_id),
+            "thread restoration must keep reusing the one native ProjectPanel"
+        );
+        assert!(
+            front_door
+                .native_files_rows(cx)
+                .iter()
+                .all(|row| row.worktree_id == worktree_a),
+            "thread A restoration must not leak thread B rows"
+        );
+        assert!(
+            front_door
+                .native_files_rows(cx)
+                .iter()
+                .any(|row| row.path.as_unix_str() == "src" && row.is_expanded),
+            "thread A should restore its worktree-keyed expansion state"
+        );
+
+        front_door.activate_thread(thread_b, cx);
+        assert_eq!(
+            front_door.surface_host_entity_id(omega_workbench_state::WorkSurface::Files, cx),
+            Some(host_b),
+            "thread B should restore its retained Files host"
+        );
+        assert_eq!(front_door.native_files_scope(cx), Some(worktree_b));
+        assert!(
+            front_door
+                .native_files_rows(cx)
+                .iter()
+                .all(|row| row.worktree_id == worktree_b),
+            "thread B restoration must not leak thread A rows"
+        );
+        assert!(
+            front_door
+                .native_files_rows(cx)
+                .iter()
+                .any(|row| row.path.as_unix_str() == "src" && !row.is_expanded),
+            "thread B should restore its independent collapsed expansion state"
+        );
+
+        front_door
+            .teardown(cx)
+            .expect("Files thread-switch fixture should tear down");
+    }
+
+    #[gpui::test]
+    async fn files_root_removal_clears_scope_rows_and_visible_host(cx: &mut TestAppContext) {
+        let scene = scene_with_two_worktrees("workbench_files_root_removal");
+        let front_door = AgentWorkbenchFrontDoor::mount(scene, cx)
+            .await
+            .expect("Files root-removal fixture should mount");
+        let removed_worktree = front_door
+            .fixture_worktree_id("worktree-1", cx)
+            .expect("selected fixture worktree");
+        let files_panel_id = front_door
+            .native_files_panel_entity_id(cx)
+            .expect("workspace ProjectPanel");
+        front_door.dispatch_action(crate::workbench_shell::SelectFiles, cx);
+        assert!(
+            front_door.native_files_is_focused(cx),
+            "root-removal proof requires focus to begin inside Files"
+        );
+        let old_rows = front_door.native_files_rows(cx);
+        let selected = front_door
+            .identity(cx)
+            .and_then(|identity| identity.selected)
+            .expect("selected identity before root removal");
+
+        front_door
+            .remove_worktree(&selected.worktree_abs_path, cx)
+            .expect("remove the Files worktree");
+
+        assert_eq!(
+            front_door.identity(cx).map(|identity| identity.phase),
+            Some(crate::thread_identity::IdentityPhase::Missing)
+        );
+        let projection = front_door
+            .projection(cx)
+            .visible_projection()
+            .expect("projection after Files root removal");
+        assert_eq!(projection.binding, None);
+        assert!(!projection.dock_open);
+        assert_eq!(
+            front_door
+                .capability(omega_workbench_state::WorkSurface::Files, cx)
+                .and_then(|capability| capability.availability.reason().cloned()),
+            Some("The selected worktree is missing".into())
+        );
+        assert_eq!(
+            front_door.native_files_panel_entity_id(cx),
+            Some(files_panel_id),
+            "root removal should retain the workspace-owned ProjectPanel for recovery"
+        );
+        assert_eq!(front_door.native_files_scope(cx), None);
+        assert!(
+            front_door
+                .native_files_rows(cx)
+                .iter()
+                .all(|row| row.worktree_id != removed_worktree),
+            "unscoping must clear rows from the removed authority"
+        );
+        let snapshot = front_door.snapshot(cx);
+        let mut probe = SemanticProbe::new(&snapshot);
+        probe
+            .require_absent(WORKBENCH_DOCK_SELECTOR)
+            .expect("root removal should hide the Files host");
+        for row in old_rows {
+            let row_selector = row.selector();
+            probe
+                .require_absent(&row_selector)
+                .expect("removed-root rows must no longer render");
+        }
+        assert_eq!(
+            front_door
+                .panel()
+                .read_with(cx, |panel, _| panel.workbench_host_count_for_tests()),
+            0,
+            "root removal should release binding-scoped Files hosts"
+        );
+        assert!(
+            front_door.transcript_activation_is_focused(cx),
+            "root removal must transfer actual GPUI focus to the transcript composer"
+        );
+        assert!(
+            !front_door.native_files_is_focused(cx),
+            "the unrendered ProjectPanel must not retain focus after root removal"
+        );
+
+        front_door
+            .teardown(cx)
+            .expect("Files root-removal scene should tear down");
+    }
+
+    #[gpui::test]
+    async fn files_host_creation_failure_rolls_back_without_orphaning_native_panel(
+        cx: &mut TestAppContext,
+    ) {
+        let scene = scene_with_thread("workbench_files_host_failure", 1200, true);
+        let front_door = AgentWorkbenchFrontDoor::mount(scene, cx)
+            .await
+            .expect("Files host-failure fixture should mount");
+        let before = front_door.projection(cx);
+        let files_panel_id = front_door
+            .native_files_panel_entity_id(cx)
+            .expect("workspace ProjectPanel");
+        assert_eq!(
+            front_door.native_files_scope_state(cx),
+            Some(project_panel::ProjectPanelScopeState::Unscoped),
+            "the legacy workspace panel must remain genuinely unscoped before handoff"
+        );
+
+        front_door.fail_next_host_creation(omega_workbench_state::WorkSurface::Files, cx);
+        front_door.dispatch_action(crate::workbench_shell::SelectFiles, cx);
+
+        assert_eq!(
+            front_door.projection(cx),
+            before,
+            "failed Files host creation should roll the projection back atomically"
+        );
+        assert_eq!(
+            front_door
+                .panel()
+                .read_with(cx, |panel, _| panel.workbench_host_count_for_tests()),
+            0
+        );
+        assert_eq!(
+            front_door.native_files_panel_entity_id(cx),
+            Some(files_panel_id),
+            "host construction failure must not replace the native ProjectPanel"
+        );
+        assert_eq!(
+            front_door.native_files_scope(cx),
+            None,
+            "failed handoff must restore the native panel's prior unscoped state"
+        );
+        let failed = front_door.snapshot(cx);
+        let mut probe = SemanticProbe::new(&failed);
+        probe
+            .require_absent(WORKBENCH_DOCK_SELECTOR)
+            .expect("failed Files host creation must not open an empty dock");
+        probe
+            .require_visible("omega-workbench-rail-error")
+            .expect("failed Files host creation should be visible");
+
+        front_door.dispatch_action(crate::workbench_shell::SelectFiles, cx);
+        assert!(
+            front_door
+                .surface_host_entity_id(omega_workbench_state::WorkSurface::Files, cx)
+                .is_some(),
+            "a subsequent Files request should recover"
+        );
+        assert_eq!(
+            front_door.native_files_panel_entity_id(cx),
+            Some(files_panel_id),
+            "recovery should still use the original native ProjectPanel"
+        );
+
+        front_door
+            .teardown(cx)
+            .expect("Files host-failure scene should tear down");
+    }
+
+    #[gpui::test]
+    async fn files_rename_rejects_duplicate_and_preserves_filesystem_until_confirmed(
+        cx: &mut TestAppContext,
+    ) {
+        let scene = scene_with_thread("workbench_files_rename", 1200, true);
+        let front_door = AgentWorkbenchFrontDoor::mount(scene, cx)
+            .await
+            .expect("Files rename fixture should mount");
+        front_door.dispatch_action(crate::workbench_shell::SelectFiles, cx);
+        front_door
+            .focus_and_select_files_path("worktree-1", "src", cx)
+            .expect("select src");
+        front_door.dispatch_action(project_panel::ExpandSelectedEntry, cx);
+        front_door
+            .focus_and_select_files_path("worktree-1", "src/rename-me.rs", cx)
+            .expect("select rename fixture");
+
+        front_door.dispatch_action(project_panel::Rename, cx);
+        assert!(
+            front_door.native_files_has_edit_state(cx),
+            "Rename should enter the native ProjectPanel editor"
+        );
+        cx.simulate_input(front_door.window, "existing");
+        front_door.dispatch_action(menu::Confirm, cx);
+
+        assert!(
+            front_door.native_files_has_edit_state(cx),
+            "a conflicting native rename should retain edit state for correction"
+        );
+        let validation_snapshot = front_door.snapshot(cx);
+        SemanticProbe::new(&validation_snapshot)
+            .require_accessible(
+                "omega.project-panel.validation",
+                "Alert",
+                "File or directory 'existing.rs' already exists at location. Please choose a different name.",
+            )
+            .expect("duplicate rename validation should be semantically observable");
+        let fixture_fs = &*front_door.fs as &dyn fs::Fs;
+        assert!(
+            fixture_fs
+                .metadata(Path::new("/worktree-1/src/rename-me.rs"))
+                .await
+                .expect("read original rename fixture metadata")
+                .is_some(),
+            "the rejected rename must preserve the original path"
+        );
+        assert!(
+            fixture_fs
+                .metadata(Path::new("/worktree-1/src/existing.rs"))
+                .await
+                .expect("read conflicting fixture metadata")
+                .is_some(),
+            "the rejected rename must not replace the conflicting path"
+        );
+
+        front_door.dispatch_action(menu::Cancel, cx);
+        assert!(
+            !front_door.native_files_has_edit_state(cx),
+            "Cancel should leave the native rename editor"
+        );
+
+        front_door
+            .focus_and_select_files_path("worktree-1", "src/main.rs", cx)
+            .expect("select the filesystem-error fixture");
+        front_door.dispatch_action(project_panel::Rename, cx);
+        cx.simulate_input(front_door.window, "unavailable");
+        let notifications_before = front_door.workspace_notification_count(cx);
+        front_door.fs.pause_events();
+        fixture_fs
+            .remove_file(
+                Path::new("/worktree-1/src/main.rs"),
+                fs::RemoveOptions::default(),
+            )
+            .await
+            .expect("remove the rename source behind the native panel");
+        front_door.dispatch_action(menu::Confirm, cx);
+        cx.run_until_parked();
+        front_door.fs.unpause_events_and_flush();
+        cx.run_until_parked();
+
+        assert!(
+            !front_door.native_files_has_edit_state(cx),
+            "a failed native filesystem rename should finish its in-flight editor"
+        );
+        assert!(
+            fixture_fs
+                .metadata(Path::new("/worktree-1/src/unavailable.rs"))
+                .await
+                .expect("read failed rename destination metadata")
+                .is_none(),
+            "a native filesystem failure must not manufacture the requested destination"
+        );
+        assert!(
+            front_door.workspace_notification_count(cx) > notifications_before,
+            "the native async action error must surface through the workspace notification path"
+        );
+
+        front_door
+            .focus_and_select_files_path("worktree-1", "src/rename-me.rs", cx)
+            .expect("reselect rename fixture");
+        front_door.dispatch_action(project_panel::Rename, cx);
+        cx.simulate_input(front_door.window, "renamed");
+        front_door.dispatch_action(menu::Confirm, cx);
+        cx.run_until_parked();
+
+        assert!(
+            fixture_fs
+                .metadata(Path::new("/worktree-1/src/rename-me.rs"))
+                .await
+                .expect("read old path after rename")
+                .is_none(),
+            "successful native rename should remove the old path"
+        );
+        assert!(
+            fixture_fs
+                .metadata(Path::new("/worktree-1/src/renamed.rs"))
+                .await
+                .expect("read new path after rename")
+                .is_some(),
+            "successful native rename should create the requested path"
+        );
+        assert!(
+            !front_door.native_files_has_edit_state(cx),
+            "successful native rename should finish editing"
+        );
+        assert_eq!(
+            front_door
+                .native_files_selected_path(cx)
+                .map(|path| path.path),
+            Some(util::rel_path::rel_path("src/renamed.rs").into()),
+            "native selection should follow the renamed entry"
+        );
+
+        front_door
+            .teardown(cx)
+            .expect("Files rename scene should tear down");
+    }
+
+    #[gpui::test]
+    async fn files_loading_error_and_offline_states_are_explicit(cx: &mut TestAppContext) {
+        let scene = scene_with_thread("workbench_files_states", 1200, true);
+        let front_door = AgentWorkbenchFrontDoor::mount(scene, cx)
+            .await
+            .expect("Files state fixture should mount");
+        front_door.dispatch_action(crate::workbench_shell::SelectFiles, cx);
+        let files_panel_id = front_door
+            .native_files_panel_entity_id(cx)
+            .expect("workspace ProjectPanel");
+        let host = front_door
+            .visible_surface_host(cx)
+            .expect("Files host should be visible");
+        front_door
+            .focus_and_select_files_path("worktree-1", "src/main.rs", cx)
+            .expect("select native state that transient failures must preserve");
+        let selected_path = front_door
+            .native_files_selected_path(cx)
+            .expect("native state selection");
+
+        let failed_load = front_door
+            .begin_surface_load(
+                "files-load-error",
+                omega_workbench_state::WorkSurface::Files,
+                cx,
+            )
+            .expect("begin Files load");
+        assert_eq!(
+            host.read_with(cx, |host, _| host.content_state().clone()),
+            crate::workbench_shell::SurfaceContentState::Loading
+        );
+        let loading = front_door.snapshot(cx);
+        let mut probe = SemanticProbe::new(&loading);
+        probe
+            .require_absent("omega.project-panel.tree")
+            .expect("host loading state should not expose stale native tree rows");
+        probe
+            .require_accessible(
+                "omega.workbench.surface.files.status",
+                "Status",
+                "Loading Files…",
+            )
+            .expect("Files loading should be semantically observable");
+        probe
+            .require_focus(WorkSurfaceId::Files.surface_selector(), true)
+            .expect("loading should move focus from the hidden tree to the surface host");
+        assert!(
+            !front_door.native_files_is_focused(cx),
+            "loading must not leave focus on the unrendered ProjectPanel"
+        );
+        assert!(matches!(
+            front_door.native_files_scope_state(cx),
+            Some(project_panel::ProjectPanelScopeState::Unavailable)
+        ));
+        front_door.activate_files_panel(cx);
+        assert!(
+            front_door.transcript_activation_is_focused(cx),
+            "ActivateProjectPanel must fail closed while Files is loading"
+        );
+        front_door.dispatch_action(project_panel::Rename, cx);
+        assert!(
+            !front_door.native_files_has_edit_state(cx),
+            "a mutating global ProjectPanel action must be a no-op while Files is loading"
+        );
+        assert!(front_door.transcript_activation_is_focused(cx));
+        front_door.dispatch_action(zed_actions::project_panel::ToggleFocus, cx);
+        SemanticProbe::new(&front_door.snapshot(cx))
+            .require_focus(WorkSurfaceId::Files.surface_selector(), true)
+            .expect("ToggleFocus may reopen Loading only on its visible status host");
+        assert!(!front_door.native_files_is_focused(cx));
+        front_door.dispatch_action(workspace::CloseActiveDock, cx);
+        let loading_closed = front_door.snapshot(cx);
+        let mut probe = SemanticProbe::new(&loading_closed);
+        probe
+            .require_unique("omega.workbench.root")
+            .expect("Loading CloseActiveDock must retain the outer AgentPanel");
+        probe
+            .require_absent(WORKBENCH_DOCK_SELECTOR)
+            .expect("Loading CloseActiveDock must collapse the internal Files dock");
+        assert!(front_door.transcript_activation_is_focused(cx));
+        front_door.dispatch_action(zed_actions::project_panel::ToggleFocus, cx);
+        SemanticProbe::new(&front_door.snapshot(cx))
+            .require_focus(WorkSurfaceId::Files.surface_selector(), true)
+            .expect("Loading must reopen on its visible status host after internal close");
+
+        front_door.dispatch_action(crate::workbench_shell::SelectFiles, cx);
+        assert!(
+            front_door.transcript_activation_is_focused(cx),
+            "collapsing a loading Files surface should focus the transcript"
+        );
+        front_door.dispatch_action(crate::workbench_shell::SelectFiles, cx);
+        let reopened_loading = front_door.snapshot(cx);
+        SemanticProbe::new(&reopened_loading)
+            .require_focus(WorkSurfaceId::Files.surface_selector(), true)
+            .expect("reopening Loading must focus the visible host, not its hidden native child");
+        assert!(!front_door.native_files_is_focused(cx));
+
+        assert_eq!(
+            front_door
+                .complete_surface_load(
+                    failed_load,
+                    crate::workbench_shell::SurfaceLoadOutcome::Error(
+                        "Fixture Files load failed".into(),
+                    ),
+                    cx,
+                )
+                .expect("complete Files load with an error"),
+            omega_workbench_state::TransitionEffect::Applied
+        );
+        assert_eq!(
+            host.read_with(cx, |host, _| host.content_state().clone()),
+            crate::workbench_shell::SurfaceContentState::Error("Fixture Files load failed".into())
+        );
+        let error_snapshot = front_door.snapshot(cx);
+        SemanticProbe::new(&error_snapshot)
+            .require_accessible(
+                "omega.workbench.surface.files.status",
+                "Alert",
+                "Fixture Files load failed",
+            )
+            .expect("Files load failure should be semantically observable");
+        SemanticProbe::new(&error_snapshot)
+            .require_focus(WorkSurfaceId::Files.surface_selector(), true)
+            .expect("an error surface should retain focus on its rendered host");
+        assert!(
+            !front_door.native_files_is_focused(cx),
+            "error state must not focus the hidden ProjectPanel"
+        );
+        assert!(matches!(
+            front_door.native_files_scope_state(cx),
+            Some(project_panel::ProjectPanelScopeState::Unavailable)
+        ));
+        front_door.activate_files_panel(cx);
+        assert!(
+            front_door.transcript_activation_is_focused(cx),
+            "ActivateProjectPanel must fail closed while Files is in Error"
+        );
+        front_door.dispatch_action(zed_actions::project_panel::ToggleFocus, cx);
+        SemanticProbe::new(&front_door.snapshot(cx))
+            .require_focus(WorkSurfaceId::Files.surface_selector(), true)
+            .expect("ToggleFocus may reopen Error only on its visible status host");
+        assert!(!front_door.native_files_is_focused(cx));
+        front_door.dispatch_action(workspace::CloseActiveDock, cx);
+        let error_closed = front_door.snapshot(cx);
+        let mut probe = SemanticProbe::new(&error_closed);
+        probe
+            .require_unique("omega.workbench.root")
+            .expect("Error CloseActiveDock must retain the outer AgentPanel");
+        probe
+            .require_absent(WORKBENCH_DOCK_SELECTOR)
+            .expect("Error CloseActiveDock must collapse the internal Files dock");
+        assert!(front_door.transcript_activation_is_focused(cx));
+        front_door.dispatch_action(zed_actions::project_panel::ToggleFocus, cx);
+        SemanticProbe::new(&front_door.snapshot(cx))
+            .require_focus(WorkSurfaceId::Files.surface_selector(), true)
+            .expect("Error must reopen on its visible status host after internal close");
+
+        front_door.dispatch_action(crate::workbench_shell::SelectFiles, cx);
+        assert!(front_door.transcript_activation_is_focused(cx));
+        front_door.dispatch_action(crate::workbench_shell::SelectFiles, cx);
+        let reopened_error = front_door.snapshot(cx);
+        SemanticProbe::new(&reopened_error)
+            .require_focus(WorkSurfaceId::Files.surface_selector(), true)
+            .expect("reopening Error must focus the rendered host");
+        assert!(!front_door.native_files_is_focused(cx));
+
+        let retry = front_door
+            .begin_surface_load(
+                "files-load-retry",
+                omega_workbench_state::WorkSurface::Files,
+                cx,
+            )
+            .expect("retry Files load");
+        front_door
+            .complete_surface_load(retry, crate::workbench_shell::SurfaceLoadOutcome::Ready, cx)
+            .expect("complete Files retry");
+        front_door.snapshot(cx);
+        assert!(
+            front_door.native_files_is_focused(cx),
+            "a successful retry should return focus to the rendered native tree"
+        );
+        assert_eq!(
+            front_door.native_files_selected_path(cx),
+            Some(selected_path.clone()),
+            "surface load recovery must restore the compatible native selection"
+        );
+
+        front_door.set_identity_phase(
+            crate::thread_identity::IdentityPhase::Error("Fixture Files identity failed".into()),
+            cx,
+        );
+        let identity_error = front_door.snapshot(cx);
+        let mut probe = SemanticProbe::new(&identity_error);
+        probe
+            .require_accessible(
+                "omega.workbench.surface.files.status",
+                "Alert",
+                "Fixture Files identity failed",
+            )
+            .expect("the live identity error should feed the visible Files host");
+        probe
+            .require_focus(WorkSurfaceId::Files.surface_selector(), true)
+            .expect("an identity error should move focus off the hidden native tree");
+        assert!(!front_door.native_files_is_focused(cx));
+
+        front_door.set_identity_phase(crate::thread_identity::IdentityPhase::Ready, cx);
+        let identity_recovered = front_door.snapshot(cx);
+        SemanticProbe::new(&identity_recovered)
+            .require_accessible("omega.project-panel.tree", "Tree", "Files")
+            .expect("identity recovery should restore the native Files tree");
+        assert!(
+            front_door.native_files_is_focused(cx),
+            "identity recovery should return focus to the native tree"
+        );
+        assert_eq!(
+            front_door.native_files_selected_path(cx),
+            Some(selected_path.clone()),
+            "identity error recovery must restore the compatible native selection"
+        );
+
+        front_door.set_identity_phase(crate::thread_identity::IdentityPhase::Offline, cx);
+        let projection = front_door
+            .projection(cx)
+            .visible_projection()
+            .expect("offline projection");
+        assert!(!projection.dock_open);
+        assert_eq!(
+            front_door
+                .panel()
+                .read_with(cx, |panel, _| panel.workbench_focus_target_for_tests()),
+            crate::workbench_shell::WorkbenchFocusTarget::Transcript
+        );
+        assert!(
+            !front_door
+                .capability(omega_workbench_state::WorkSurface::Files, cx)
+                .expect("Files capability")
+                .availability
+                .is_available()
+        );
+        assert_eq!(
+            front_door.native_files_panel_entity_id(cx),
+            Some(files_panel_id),
+            "offline transition should retain the native panel cache without rendering it"
+        );
+        assert!(
+            front_door.transcript_activation_is_focused(cx),
+            "offline invalidation must transfer actual GPUI focus to the transcript"
+        );
+        assert!(
+            !front_door.native_files_is_focused(cx),
+            "offline Files must not leave focus inside its unrendered native panel"
+        );
+        let offline = front_door.snapshot(cx);
+        let mut probe = SemanticProbe::new(&offline);
+        probe
+            .require_absent(WORKBENCH_DOCK_SELECTOR)
+            .expect("offline repository-bound Files should close");
+        probe
+            .require_accessibility_property(
+                WorkSurfaceId::Files.rail_selector(),
+                "disabled",
+                serde_json::Value::Bool(true),
+            )
+            .expect("offline Files rail item should be disabled");
+        assert!(matches!(
+            front_door.native_files_scope_state(cx),
+            Some(project_panel::ProjectPanelScopeState::Unavailable)
+        ));
+        front_door.activate_files_panel(cx);
+        front_door.dispatch_action(zed_actions::project_panel::ToggleFocus, cx);
+        assert!(
+            front_door.transcript_activation_is_focused(cx),
+            "offline activation routes must leave focus in the visible transcript"
+        );
+        SemanticProbe::new(&front_door.snapshot(cx))
+            .require_absent(WORKBENCH_DOCK_SELECTOR)
+            .expect("offline activation routes must not reopen Files");
+
+        front_door.set_identity_phase(crate::thread_identity::IdentityPhase::Ready, cx);
+        front_door.snapshot(cx);
+        front_door.dispatch_action(zed_actions::project_panel::ToggleFocus, cx);
+        assert_eq!(
+            front_door.native_files_selected_path(cx),
+            Some(selected_path),
+            "offline recovery must restore the compatible native selection"
+        );
+        assert!(
+            front_door.native_files_is_focused(cx),
+            "offline recovery must reopen on the restored native tree"
+        );
+
+        front_door
+            .teardown(cx)
+            .expect("Files state scene should tear down");
+    }
+
+    #[gpui::test]
     async fn workbench_rail_wide_selects_every_surface_and_retains_transcript(
         cx: &mut TestAppContext,
     ) {
@@ -3080,25 +4594,31 @@ mod workbench_front_door_tests {
     }
 
     #[gpui::test]
-    async fn workbench_surface_hosts_release_with_window(cx: &mut TestAppContext) {
-        let scene = scene_with_thread("workbench_release", 1200, false);
+    async fn files_host_and_native_panel_release_with_window(cx: &mut TestAppContext) {
+        let scene = scene_with_thread("workbench_files_release", 1200, true);
         let front_door = AgentWorkbenchFrontDoor::mount(scene, cx)
             .await
-            .expect("release scene should mount");
-        front_door
-            .click(WorkSurfaceId::Plan.rail_selector(), cx)
-            .expect("Plan should open");
+            .expect("Files release scene should mount");
+        front_door.dispatch_action(crate::workbench_shell::SelectFiles, cx);
         let weak_host = front_door
             .visible_surface_host(cx)
-            .expect("visible Plan host")
+            .expect("visible Files host")
+            .downgrade();
+        let weak_files_panel = front_door
+            .native_files_panel(cx)
+            .expect("native ProjectPanel")
             .downgrade();
 
         front_door
             .teardown(cx)
-            .expect("release workbench should tear down");
+            .expect("Files release workbench should tear down");
         assert!(
             weak_host.upgrade().is_none(),
-            "surface host must not outlive its panel and window"
+            "Files host must not outlive its panel and window"
+        );
+        assert!(
+            weak_files_panel.upgrade().is_none(),
+            "the handed-off native ProjectPanel must not leak after window teardown"
         );
     }
 }

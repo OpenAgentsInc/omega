@@ -18,16 +18,16 @@ Issue 128 installed the production rail and dock boundary, normal GPUI actions,
 per-thread reducer integration, retained generic hosts, typed badge plumbing,
 accessibility semantics, and deterministic tests. Issue 133 added the
 authoritative repository, worktree, branch, and Git-state projection described
-below. The generic host currently
-renders a loading, ready, error, or offline placeholder. It does not yet render
-the workspace's native Files, Search, Review, Git, Terminal, or Plan entity.
+below. Issue 129 rehomes the Workspace-created native Project Panel into Files.
+The remaining generic hosts render loading, ready, error, or offline
+placeholders until their native adapters land.
 
 The remaining work is deliberately split so each native adapter can prove its
 own identity, behavior, and lifecycle:
 
 | Follow-up                                                      | Responsibility                                     |
 | -------------------------------------------------------------- | -------------------------------------------------- |
-| [Issue 129](https://github.com/OpenAgentsInc/omega/issues/129) | Mount the existing Project Panel as Files          |
+| [Issue 129](https://github.com/OpenAgentsInc/omega/issues/129) | Mounted the existing Project Panel as Files        |
 | [Issue 130](https://github.com/OpenAgentsInc/omega/issues/130) | Present the thread's typed plan                    |
 | [Issue 131](https://github.com/OpenAgentsInc/omega/issues/131) | Persist and cold-restore each thread's selection   |
 | [Issue 132](https://github.com/OpenAgentsInc/omega/issues/132) | Mount the existing Git Panel                       |
@@ -35,8 +35,9 @@ own identity, behavior, and lifecycle:
 | [Issue 136](https://github.com/OpenAgentsInc/omega/issues/136) | Mount a thread-bound review entity                 |
 | [Issue 137](https://github.com/OpenAgentsInc/omega/issues/137) | Mount the existing Terminal Panel without spawning |
 
-Until those adapters land, the shell is a retained-host foundation rather than
-a replacement for the existing native panels.
+Files is production content. Until the other adapters land, their entries
+remain retained-host foundations rather than replacements for the existing
+native panels.
 
 ## Composition boundary {#composition-boundary}
 
@@ -58,6 +59,98 @@ Agent Panel's zero-base surface. Calling a Workspace panel toggle from this
 host can unzoom the Agent Panel or reveal the editor, so native adapters must
 render or delegate to retained native entities without routing through the
 ordinary Workspace open-panel path.
+
+### Native Files adapter {#native-files-adapter}
+
+Workspace creates the native `ProjectPanel` and initially registers it with the
+legacy Workspace dock. Agent Panel captures that exact `Entity<ProjectPanel>`
+when both panels are available. If concurrent startup finishes in the other
+order, the first Files action resolves it from
+`workspace.panel::<ProjectPanel>()`. Merely constructing or rendering Agent
+Panel does not scope, clear, or detach the legacy Project Panel. It remains
+unscoped and retains its existing state outside the first Files handoff
+transaction.
+
+The first successful Files activation establishes the canonical ownership
+boundary. Agent Panel resolves and applies the typed worktree scope, asks the
+shell to create or find the retained Files host, and only then calls
+`Workspace::rehome_panel`. Rehoming removes the entity from every ordinary Dock
+render list while retaining the exact entity in a generic nonvisual Workspace
+panel registry. The Files host is its sole visual parent from that point
+forward, while `workspace.panel::<ProjectPanel>()` and the native
+open/focus/toggle/close routes still resolve through `PanelEvent::Activate` and
+`PanelEvent::Close`. Later collapse, reopen, thread switch, and worktree switch
+operations reuse the cached entity instead of registering another Project
+Panel or moving it back to a Workspace dock.
+
+The handoff is transactional. Agent Panel snapshots the previous scope before
+preparing Files. If host creation or detaching fails, it restores that scope,
+rolls back the surface projection, keeps or returns the entity to its previous
+visual owner, returns focus to visible thread content, and reports the error.
+The first-failure case therefore leaves the legacy panel genuinely unscoped
+and registered with its previous owner. Compatible state survives scope
+reconciliation; incompatible state is deliberately filtered rather than
+resurrected by rollback. This prevents two visible parents, an ownerless panel,
+and a partially applied first activation.
+
+The adapter subscribes to the rehomed entity's panel events before changing
+ownership. Project-driven reveal, `ActivateProjectPanel`, command-palette
+actions, File History, and external Workspace panel callers therefore activate
+the Files host rather than an absent legacy dock. `ToggleFocus` and
+`CloseActiveDock` are captured at the embedded boundary: they collapse Files
+and focus the visible transcript without closing the outer Agent Panel. An
+unavailable host refuses activation instead of focusing a hidden native tree.
+
+The adapter does not construct a second project tree, filesystem watcher, Git
+projection, selection model, or editor-opening path.
+
+Before the host becomes visible, Agent Panel resolves the selected identity
+candidate's absolute worktree path back to the Project's typed `WorktreeId`.
+Project Panel applies that identifier as a fail-closed scope and derives rows
+from only that visible worktree. Scope reconciliation preserves selection,
+marked entries, edit state, clipboard entries, and scroll state only when they
+are compatible with the new scope. It filters incompatible state and clears
+transient drag, hover, context-menu, and row-derivation state. Expansion
+remains keyed by worktree, so returning to a target restores that worktree's
+native expansion state without leaking rows from another target.
+
+Authority and compatibility are distinct. Loading, content error, offline,
+inconsistent identity, and other transient failures put Project Panel in an
+explicit `Unavailable` interaction state. With the same resolved worktree, the
+adapter retains compatible selection, expansion, edit, clipboard, scroll, and
+undo state while publishing no rows and allowing no action. An unbound,
+missing, or incompatible target clears that state. Undo history is filtered by
+typed `WorktreeId`, so an operation recorded under worktree A cannot execute
+after rebinding to worktree B.
+
+The scoped root is the structural authority and is kept expanded when it is
+rendered. It is not counted as file content. `Empty` means the scoped worktree
+has no visible non-root entry after the Project Panel's existing hidden-file
+and Git-ignore filters. `Missing` means the typed root no longer exists.
+Neither state can publish rows from another visible workspace root.
+
+Project Panel captures a monotonic scope revision with each asynchronous row
+derivation and checks it before publishing. A filesystem update started for
+worktree A therefore cannot overwrite the visible tree after the thread moves
+to worktree B. The shell's existing `(thread, binding, surface)` host key and
+generation-gated completion contract remain the outer consistency boundary.
+
+When content is `Ready`, the Files host delegates its `Focusable`
+implementation to Project Panel. Loading and error content hides the native
+tree and focuses the visible host instead. Returning to `Ready` transfers focus
+back into Project Panel. Keyboard traversal, open, rename, context menus,
+reveal, drag-and-drop, diagnostics, and Git decoration are consequently the
+existing native behavior, not workbench-specific replicas. Stable tree and
+path-row semantics make the same production rendering observable to
+deterministic GPUI tests.
+
+Native actions that produce Workspace center items explicitly call
+`Workspace::reveal_zero_base_center` after revalidating the current scope.
+Open, permanent open, split, File History, Markdown preview, compare, and search
+results therefore become visible beside the Agent Panel instead of succeeding
+into a hidden zero-base pane. Preview open preserves Project Panel focus;
+permanent open focuses the editor. Closing the final center item restores the
+agent-only presentation.
 
 ## State ownership {#state-ownership}
 
@@ -242,7 +335,11 @@ The selected, focused, hovered, unavailable, badge, and attention states must
 not depend on color alone.
 
 Hidden hosts must not retain focus or receive workbench actions. Transfer focus
-before detaching a host from presentation.
+before detaching a host from presentation. Files applies this to the actual
+focus chain, not only the reducer's logical focus target: loading and inline
+error states focus the rendered Files host, while root removal, offline
+invalidation, and dock collapse focus the active transcript or composer. The
+unrendered Project Panel cannot remain the keyboard-action owner.
 
 ## Responsive allocation {#responsive-allocation}
 
@@ -304,10 +401,12 @@ Closing a thread:
 3. Cancels or generation-gates pending work.
 4. Returns focus to the transcript when no active thread remains.
 
-Closing the window drops the shell and its retained generic hosts. Native
-workspace entities added by later adapters remain owned by their existing
-Workspace lifecycle; the shell must not create a second repository, terminal,
-search, diff, or plan store.
+Closing the window drops Agent Panel, the shell, its retained hosts, and the
+Workspace's nonvisual rehome registration for Project Panel. The Project and
+its filesystem and Git stores still follow the existing Workspace lifecycle;
+the Project Panel's canonical visual ownership follows the Files host after the
+first successful handoff. The shell must not create a second project tree,
+repository, terminal, search, diff, or plan store.
 
 Issue 128 retains state only for the lifetime of the Agent Panel. Cold restart
 persistence and restoration belong to
@@ -330,10 +429,20 @@ Capability availability and content state are separate:
   retained for reconciliation. A reconnect snapshot must pass through the
   reducer before a host becomes actionable again.
 
-The generic host defines these content states for adapters and tests. Issue 128
-does not yet connect every desktop transport event or native surface status to
-them. Native adapter issues must add those production feeds instead of using
-the rail as an inferred connection indicator.
+The host defines these content states for adapters and tests. Files replaces
+the ready placeholder with the native Project Panel only after a typed
+worktree scope is available. Missing or removed roots fail closed through the
+identity capability instead of falling back to all workspace roots. The active
+thread's production `Error` identity phase feeds the visible Files host's inline
+alert directly. Returning to a healthy identity restores `Ready`; this path
+does not depend on a test-only load transition. `Inconsistent` disables
+repository-bound surfaces and closes the dock through the capability
+projection. Every non-ready state also disables the rehomed Project Panel's
+action and reveal paths even though native Workspace lookup still resolves its
+entity. Compatible same-binding state remains available for recovery; no
+hidden action can rename, duplicate, delete, undo, or open history while
+authority is absent. Other native adapter issues must add their production
+feeds instead of using the rail as an inferred connection indicator.
 
 ## Deterministic test contract {#deterministic-test-contract}
 
@@ -362,6 +471,9 @@ Stable selectors include:
 | Worktree row     | `omega.workbench.control.worktree.<id>`       |
 | Identity status  | `omega.workbench.identity.status`             |
 | Git indicator    | `omega.workbench.identity.indicator.<kind>`   |
+| Files tree       | `omega.project-panel.tree`                    |
+| Files row        | `omega.project-panel.row.<worktree>.<entry>`  |
+| Files scope      | `omega.project-panel.scope.<state>`           |
 
 For every interaction, assert logical state and rendered semantics:
 
@@ -371,9 +483,28 @@ For every interaction, assert logical state and rendered semantics:
 - containment, disjoint columns, clipping, and composer reachability;
 - transcript entity identity before and after surface changes;
 - host entity identity across collapse and reopen;
-- independent selections across thread switches;
+- native Project Panel identity before and after the first Workspace-to-Files
+  handoff;
+- an unscoped, unmodified legacy Project Panel before handoff and restoration of
+  its prior scope and ownership after a failed first activation;
+- per-thread Files host and dock isolation across thread switches, with
+  worktree-keyed native expansion state;
+- native keyboard row traversal and file opening through the focused
+  Project Panel action path;
+- Workspace rehome lookup and panel-event routing for reveal, toggle, close,
+  external focus, and exact-path File History;
+- preview-open focus preservation, permanent-open editor focus, and visible
+  zero-base center presentation without replacing the transcript;
+- unavailable-state no-ops for global rename, duplicate, delete, undo, reveal,
+  and activation actions;
+- cross-worktree undo filtering and same-binding transient state recovery;
+- actual focus ownership across loading, identity error, recovery, root
+  removal, offline invalidation, collapse, and reopen;
+- a native asynchronous rename failure surfaced through the Workspace
+  notification path without creating the requested destination;
 - stale completion rejection after thread or binding changes; and
-- host release after thread and window teardown.
+- weak-entity release for both the Files host and rehomed Project Panel after
+  window teardown.
 
 Identity tests additionally assert exact picker candidates, one-generation
 binding replacement, full tooltip/accessibility values under visual
@@ -401,16 +532,29 @@ The common shell scene matrix must include:
 - an active thread with no workspace binding;
 - pointer and keyboard activation;
 - collapse and reopen with stable transcript and host entity IDs;
-- two threads with independent requested surfaces;
+- two threads with independent requested surfaces and Files hosts;
 - an active surface invalidated after it opens;
 - a stale completion after switching surface, thread, or worktree;
-- host construction failure and offline, loading, and content-error states; and
-- thread and window teardown with weak-entity leak probes.
+- transactional Files handoff rollback from the unscoped legacy panel;
+- host construction failure and offline, loading, content-error, and production
+  identity-error states;
+- native reveal, toggle, File History, editor-open, and `CloseActiveDock`
+  routing without closing the outer Agent Panel or focusing hidden content;
+- transient same-binding recovery and incompatible cross-worktree undo
+  isolation;
+- a native asynchronous filesystem-action error; and
+- thread and window teardown with Files host and Project Panel weak-entity leak
+  probes.
 
 Record whole-workbench and rail/dock region baselines for the default, active,
 focus-visible, badge, unavailable, narrow, and collapsed states. Loading and
-error behavior is covered by semantic state-transition tests. A baseline is
-added only after its semantic scene passes.
+error behavior must pass semantic state-transition tests before pixel capture.
+Files adds seven registered whole-window and `files-surface` scenes for wide,
+910-pixel narrow, empty, loading, error, multi-root, and stale-filesystem
+completion states. See
+[Native Files scenes](./omega-workbench-proof.md#native-files-scenes) for their
+state, semantic, race, and region contracts. A baseline is added only after its
+semantic scene passes.
 
 ## Native adapter checklist {#native-adapter-checklist}
 

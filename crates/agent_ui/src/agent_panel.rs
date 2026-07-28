@@ -95,7 +95,8 @@ use gpui::{
 use language::LanguageRegistry;
 use language_model::LanguageModelRegistry;
 use notifications::status_toast::StatusToast;
-use project::{Project, ProjectPath, Worktree};
+use project::{Project, ProjectPath, Worktree, WorktreeId};
+use project_panel::ProjectPanel;
 use settings::TerminalDockPosition;
 use settings::{NotifyWhenAgentWaiting, Settings, update_settings_file};
 
@@ -1356,6 +1357,10 @@ pub struct AgentPanel {
     _engine_capacity_poll: Option<Task<()>>,
     workbench_shell: workbench_shell::WorkbenchShell,
     workbench_shell_enabled: bool,
+    workbench_files_panel: Option<Entity<ProjectPanel>>,
+    workbench_files_panel_handed_off: bool,
+    _workbench_files_panel_observation: Option<Subscription>,
+    _workbench_files_panel_event_subscription: Option<Subscription>,
     #[cfg(any(test, feature = "test-support"))]
     workbench_identity_phase_override: Option<IdentityPhase>,
     #[cfg(any(test, feature = "test-support"))]
@@ -1656,11 +1661,25 @@ impl AgentPanel {
         })
     }
 
-    pub(crate) fn new(workspace: &Workspace, _window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub(crate) fn new(workspace: &Workspace, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let fs = workspace.app_state().fs.clone();
         let project = workspace.project();
         let language_registry = project.read(cx).languages().clone();
         let workspace_id = workspace.database_id();
+        let workbench_files_panel = workspace.panel::<ProjectPanel>(cx);
+        let workbench_files_panel_observation = workbench_files_panel
+            .as_ref()
+            .map(|panel| cx.observe(panel, |_this, _panel, cx| cx.notify()));
+        let workbench_files_panel_event_subscription =
+            workbench_files_panel.as_ref().map(|panel| {
+                cx.subscribe_in(
+                    panel,
+                    window,
+                    |this, _panel, event: &PanelEvent, window, cx| {
+                        this.handle_workbench_files_panel_event(event, window, cx);
+                    },
+                )
+            });
         let workspace = workspace.weak_handle();
 
         let context_server_registry =
@@ -1808,6 +1827,10 @@ impl AgentPanel {
             _engine_capacity_poll: None,
             workbench_shell,
             workbench_shell_enabled: omega_zero_base::is_active(),
+            workbench_files_panel,
+            workbench_files_panel_handed_off: false,
+            _workbench_files_panel_observation: workbench_files_panel_observation,
+            _workbench_files_panel_event_subscription: workbench_files_panel_event_subscription,
             #[cfg(any(test, feature = "test-support"))]
             workbench_identity_phase_override: None,
             #[cfg(any(test, feature = "test-support"))]
@@ -5639,7 +5662,7 @@ impl AgentPanel {
         }
 
         self.refresh_base_view_subscriptions(window, cx);
-        self.sync_workbench_shell(cx);
+        self.sync_workbench_shell(window, cx);
 
         if focus {
             if matches!(
@@ -8875,7 +8898,11 @@ impl AgentPanel {
         ))
     }
 
-    fn sync_workbench_shell(&mut self, cx: &mut Context<Self>) {
+    fn sync_workbench_shell(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let files_panel_was_focused = self
+            .workbench_files_panel
+            .as_ref()
+            .is_some_and(|panel| panel.focus_handle(cx).contains_focused(window, cx));
         let context = self.workbench_thread_context(cx);
         let result = match context {
             Ok((thread_id, observation)) => self
@@ -8887,6 +8914,248 @@ impl AgentPanel {
             log::warn!("failed to synchronize workbench shell: {error:#}");
             self.workbench_shell.record_error(error.to_string());
         }
+        if self.workbench_shell_enabled
+            && self.workbench_files_panel_handed_off
+            && let Some(panel) = self.workbench_files_panel.clone()
+        {
+            let compatible_worktree_id = self.workbench_files_compatible_worktree_id(cx);
+            let worktree_id = self
+                .workbench_files_are_actionable(cx)
+                .then(|| self.active_workbench_worktree_id(cx))
+                .flatten();
+            panel.update(cx, |panel, cx| match worktree_id {
+                Some(worktree_id) => {
+                    panel.set_worktree_scope(Some(worktree_id), window, cx);
+                }
+                None => {
+                    panel.set_worktree_scope_unavailable(compatible_worktree_id, window, cx);
+                }
+            });
+            if worktree_id.is_some()
+                && let Err(error) = self.workbench_shell.ensure_visible_files_host(panel, cx)
+            {
+                log::warn!("failed to synchronize the native Files host: {error:#}");
+                self.workbench_shell.record_error(error.to_string());
+                if let Err(collapse_error) = self.workbench_shell.collapse_dock() {
+                    log::warn!(
+                        "failed to collapse Files after host synchronization failed: \
+                         {collapse_error:#}"
+                    );
+                }
+            }
+            let identity_error =
+                self.workbench_shell
+                    .identity()
+                    .and_then(|identity| match &identity.phase {
+                        IdentityPhase::Error(error) => Some(error.clone()),
+                        _ => None,
+                    });
+            self.workbench_shell
+                .set_visible_files_identity_error(identity_error, window, cx);
+        }
+        let files_is_visible = self
+            .workbench_shell
+            .projection()
+            .visible_projection()
+            .is_some_and(|visible| {
+                visible.dock_open
+                    && visible.effective_surface == Some(omega_workbench_state::WorkSurface::Files)
+            });
+        if files_panel_was_focused && !self.workbench_files_are_actionable(cx) {
+            if files_is_visible {
+                if let Some(host) = self.workbench_shell.visible_host().cloned() {
+                    host.focus_handle(cx).focus(window, cx);
+                } else {
+                    self.focus_thread_transcript(window, cx);
+                }
+            } else {
+                self.focus_thread_transcript(window, cx);
+            }
+        } else if files_panel_was_focused && !files_is_visible {
+            self.focus_thread_transcript(window, cx);
+        }
+    }
+
+    fn active_workbench_worktree_id(&self, cx: &App) -> Option<WorktreeId> {
+        let selected_path = self
+            .workbench_shell
+            .identity()
+            .and_then(|identity| identity.selected.as_ref())
+            .map(|selected| selected.worktree_abs_path.as_path())?;
+        self.project
+            .read(cx)
+            .visible_worktrees(cx)
+            .find(|worktree| worktree.read(cx).abs_path().as_ref() == selected_path)
+            .map(|worktree| worktree.read(cx).id())
+    }
+
+    fn workbench_files_have_authority(&self, cx: &App) -> bool {
+        self.workbench_shell.projection().connection
+            == omega_workbench_state::ConnectionPhase::Online
+            && self
+                .workbench_shell
+                .capability(omega_workbench_state::WorkSurface::Files)
+                .is_some_and(|capability| capability.availability.is_available())
+            && self
+                .workbench_shell
+                .identity()
+                .is_some_and(|identity| matches!(&identity.phase, IdentityPhase::Ready))
+            && self.active_workbench_worktree_id(cx).is_some()
+    }
+
+    fn workbench_files_are_actionable(&self, cx: &App) -> bool {
+        self.workbench_files_have_authority(cx)
+            && !matches!(
+                self.workbench_shell
+                    .active_surface_content_state(omega_workbench_state::WorkSurface::Files, cx,),
+                Some(
+                    workbench_shell::SurfaceContentState::Loading
+                        | workbench_shell::SurfaceContentState::Error(_)
+                        | workbench_shell::SurfaceContentState::Offline
+                )
+            )
+    }
+
+    fn workbench_files_compatible_worktree_id(&self, cx: &App) -> Option<WorktreeId> {
+        let worktree_id = self.active_workbench_worktree_id(cx)?;
+        let identity = self.workbench_shell.identity()?;
+        (!matches!(
+            &identity.phase,
+            IdentityPhase::NoProject | IdentityPhase::Missing | IdentityPhase::Inconsistent(_)
+        ))
+        .then_some(worktree_id)
+    }
+
+    fn handle_workbench_files_panel_event(
+        &mut self,
+        event: &PanelEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.workbench_files_panel_handed_off {
+            return;
+        }
+        match event {
+            PanelEvent::Activate => {
+                if !self.workbench_files_are_actionable(cx) {
+                    let files_is_open = self
+                        .workbench_shell
+                        .projection()
+                        .visible_projection()
+                        .is_some_and(|visible| {
+                            visible.dock_open
+                                && visible.effective_surface
+                                    == Some(omega_workbench_state::WorkSurface::Files)
+                        });
+                    if files_is_open && let Err(error) = self.workbench_shell.collapse_dock() {
+                        log::warn!("failed to close unavailable Files: {error:#}");
+                        self.workbench_shell.record_error(error.to_string());
+                    }
+                    self.focus_thread_transcript(window, cx);
+                    return;
+                }
+                let files_is_open = self
+                    .workbench_shell
+                    .projection()
+                    .visible_projection()
+                    .is_some_and(|visible| {
+                        visible.dock_open
+                            && visible.effective_surface
+                                == Some(omega_workbench_state::WorkSurface::Files)
+                    });
+                if files_is_open {
+                    if let Some(panel) = self.workbench_files_panel.as_ref() {
+                        panel.focus_handle(cx).focus(window, cx);
+                    }
+                    cx.notify();
+                } else {
+                    self.select_work_surface(omega_workbench_state::WorkSurface::Files, window, cx);
+                }
+            }
+            PanelEvent::Close => {
+                let files_is_open = self
+                    .workbench_shell
+                    .projection()
+                    .visible_projection()
+                    .is_some_and(|visible| {
+                        visible.dock_open
+                            && visible.effective_surface
+                                == Some(omega_workbench_state::WorkSurface::Files)
+                    });
+                if files_is_open {
+                    if let Err(error) = self.workbench_shell.collapse_dock() {
+                        log::warn!("failed to close the native Files surface: {error:#}");
+                        self.workbench_shell.record_error(error.to_string());
+                    }
+                    self.focus_thread_transcript(window, cx);
+                }
+            }
+            PanelEvent::ZoomIn | PanelEvent::ZoomOut => {}
+        }
+    }
+
+    fn prepare_files_surface(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<(Entity<ProjectPanel>, Option<WorktreeId>, bool)> {
+        if !self.workbench_files_have_authority(cx) {
+            anyhow::bail!("the native Files surface has no usable repository authority");
+        }
+        let worktree_id = self
+            .active_workbench_worktree_id(cx)
+            .ok_or_else(|| anyhow!("the active thread worktree is unavailable"))?;
+        let panel = if let Some(panel) = self.workbench_files_panel.clone() {
+            panel
+        } else {
+            let panel = self
+                .workspace
+                .upgrade()
+                .and_then(|workspace| workspace.read(cx).panel::<ProjectPanel>(cx))
+                .ok_or_else(|| anyhow!("the native Files surface is still loading"))?;
+            self.workbench_files_panel = Some(panel.clone());
+            self._workbench_files_panel_observation =
+                Some(cx.observe(&panel, |_this, _panel, cx| cx.notify()));
+            self._workbench_files_panel_event_subscription = Some(cx.subscribe_in(
+                &panel,
+                window,
+                |this, _panel, event: &PanelEvent, window, cx| {
+                    this.handle_workbench_files_panel_event(event, window, cx);
+                },
+            ));
+            panel
+        };
+        let previous_scope = panel.read(cx).worktree_scope();
+        let previous_scope_was_unavailable = matches!(
+            panel.read(cx).scope_state(),
+            project_panel::ProjectPanelScopeState::Unavailable
+        );
+        let files_are_actionable = self.workbench_files_are_actionable(cx);
+        panel.update(cx, |panel, cx| {
+            if files_are_actionable {
+                panel.set_worktree_scope(Some(worktree_id), window, cx);
+            } else {
+                panel.set_worktree_scope_unavailable(Some(worktree_id), window, cx);
+            }
+        });
+        Ok((panel, previous_scope, previous_scope_was_unavailable))
+    }
+
+    fn detach_workspace_files_panel(
+        &mut self,
+        panel: &Entity<ProjectPanel>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<()> {
+        let workspace = self
+            .workspace
+            .upgrade()
+            .context("the workspace closed while opening Files")?;
+        workspace.update(cx, |workspace, cx| {
+            workspace.rehome_panel(panel, window, cx)
+        })?;
+        self.workbench_files_panel_handed_off = true;
+        Ok(())
     }
 
     fn binding_epoch_matches(
@@ -9158,15 +9427,66 @@ impl AgentPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        match self.workbench_shell.select_surface(surface, cx) {
+        let (files_panel, previous_scope, previous_scope_was_unavailable) =
+            if surface == omega_workbench_state::WorkSurface::Files {
+                match self.prepare_files_surface(window, cx) {
+                    Ok((panel, previous_scope, previous_scope_was_unavailable)) => {
+                        (Some(panel), previous_scope, previous_scope_was_unavailable)
+                    }
+                    Err(error) => {
+                        log::warn!("could not prepare the Files work surface: {error:#}");
+                        self.workbench_shell.record_error(error.to_string());
+                        cx.notify();
+                        return;
+                    }
+                }
+            } else {
+                (None, None, false)
+            };
+        let selection = self
+            .workbench_shell
+            .select_surface(surface, files_panel.clone(), cx);
+        match selection {
             Ok(workbench_shell::SurfaceSelection::Collapsed) => {
                 self.focus_thread_transcript(window, cx);
             }
             Ok(workbench_shell::SurfaceSelection::Opened(host)) => {
+                if let Some(panel) = files_panel.as_ref()
+                    && let Err(error) = self.detach_workspace_files_panel(panel, window, cx)
+                {
+                    panel.update(cx, |panel, cx| {
+                        if previous_scope_was_unavailable {
+                            panel.set_worktree_scope_unavailable(previous_scope, window, cx);
+                        } else {
+                            panel.set_worktree_scope(previous_scope, window, cx);
+                        }
+                    });
+                    if let Err(collapse_error) = self.workbench_shell.collapse_dock() {
+                        log::warn!(
+                            "failed to collapse Files after workspace handoff failed: \
+                             {collapse_error:#}"
+                        );
+                    }
+                    log::warn!(
+                        "could not hand the native Files panel to the work surface: {error:#}"
+                    );
+                    self.workbench_shell.record_error(error.to_string());
+                    cx.notify();
+                    return;
+                }
                 host.focus_handle(cx).focus(window, cx);
                 cx.notify();
             }
             Err(error) => {
+                if let Some(panel) = files_panel {
+                    panel.update(cx, |panel, cx| {
+                        if previous_scope_was_unavailable {
+                            panel.set_worktree_scope_unavailable(previous_scope, window, cx);
+                        } else {
+                            panel.set_worktree_scope(previous_scope, window, cx);
+                        }
+                    });
+                }
                 log::warn!(
                     "could not select the {} work surface: {error:#}",
                     workbench_shell::WorkSurfaceExt::label(surface)
@@ -9516,7 +9836,7 @@ impl AgentPanel {
 
 impl Render for AgentPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.sync_workbench_shell(cx);
+        self.sync_workbench_shell(window, cx);
 
         // WARNING: Changes to this element hierarchy can have
         // non-obvious implications to the layout of children.
@@ -9714,6 +10034,46 @@ impl Render for AgentPanel {
                         );
                     }),
                 )
+                .on_action(cx.listener(
+                    |this, _: &zed_actions::project_panel::ToggleFocus, window, cx| {
+                        if this.workbench_files_panel_handed_off {
+                            cx.stop_propagation();
+                            this.select_work_surface(
+                                omega_workbench_state::WorkSurface::Files,
+                                window,
+                                cx,
+                            );
+                        }
+                    },
+                ))
+                .on_action(
+                    cx.listener(|this, _: &workspace::CloseActiveDock, window, cx| {
+                        let files_is_open = this
+                            .workbench_shell
+                            .projection()
+                            .visible_projection()
+                            .is_some_and(|visible| {
+                                visible.dock_open
+                                    && visible.effective_surface
+                                        == Some(omega_workbench_state::WorkSurface::Files)
+                            });
+                        let files_tree_is_focused =
+                            this.workbench_files_panel.as_ref().is_some_and(|panel| {
+                                panel.focus_handle(cx).contains_focused(window, cx)
+                            });
+                        let files_host_is_focused = this
+                            .workbench_shell
+                            .visible_host()
+                            .is_some_and(|host| host.focus_handle(cx).contains_focused(window, cx));
+                        if this.workbench_files_panel_handed_off
+                            && files_is_open
+                            && (files_tree_is_focused || files_host_is_focused)
+                        {
+                            cx.stop_propagation();
+                            this.collapse_work_surface_dock(window, cx);
+                        }
+                    }),
+                )
                 .on_action(
                     cx.listener(|this, _: &workbench_shell::SelectSearch, window, cx| {
                         this.select_work_surface(
@@ -9890,20 +10250,24 @@ impl AgentPanel {
     pub fn set_workbench_identity_phase_for_tests(
         &mut self,
         phase: Option<IdentityPhase>,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         self.workbench_identity_phase_override = phase;
         self.thread_identity_observation_revision =
             self.thread_identity_observation_revision.saturating_add(1);
+        self.sync_workbench_shell(window, cx);
         cx.notify();
     }
 
     pub fn set_workbench_identity_observation_for_tests(
         &mut self,
         observation: Option<ThreadIdentityObservation>,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         self.workbench_identity_observation_override = observation;
+        self.sync_workbench_shell(window, cx);
         cx.notify();
     }
 
@@ -9962,6 +10326,10 @@ impl AgentPanel {
         self.workbench_shell.visible_host().cloned()
     }
 
+    pub fn workbench_files_panel_for_tests(&self) -> Option<Entity<ProjectPanel>> {
+        self.workbench_files_panel.clone()
+    }
+
     pub fn workbench_host_count_for_tests(&self) -> usize {
         self.workbench_shell.host_count()
     }
@@ -9987,21 +10355,23 @@ impl AgentPanel {
         &mut self,
         request_id: impl Into<String>,
         surface: omega_workbench_state::WorkSurface,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Result<workbench_shell::SurfaceLoadContext> {
         self.workbench_shell
-            .begin_surface_load(request_id, surface, cx)
+            .begin_surface_load(request_id, surface, window, cx)
     }
 
     pub fn complete_workbench_surface_load_for_tests(
         &mut self,
         load: workbench_shell::SurfaceLoadContext,
         outcome: workbench_shell::SurfaceLoadOutcome,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Result<omega_workbench_state::TransitionEffect> {
         let effect = self
             .workbench_shell
-            .complete_surface_load(load, outcome, cx)?;
+            .complete_surface_load(load, outcome, window, cx)?;
         cx.notify();
         Ok(effect)
     }

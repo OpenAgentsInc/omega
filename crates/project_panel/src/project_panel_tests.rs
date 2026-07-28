@@ -6,7 +6,7 @@ use git::{
     Oid,
     repository::{InitialGraphCommitData, LogSource, RepoPath},
 };
-use gpui::{Empty, Entity, TestAppContext, VisualTestContext};
+use gpui::{Empty, Entity, TestAppContext, VisualTestContext, point, px};
 use menu::Cancel;
 use pretty_assertions::assert_eq;
 use project::{FakeFs, ProjectPath};
@@ -111,6 +111,625 @@ async fn test_visible_list(cx: &mut gpui::TestAppContext) {
             "      .dockerignore",
             "v root2",
         ]
+    );
+}
+
+#[gpui::test]
+async fn test_worktree_scope_filters_rows_and_preserves_expansion(cx: &mut gpui::TestAppContext) {
+    init_test(cx);
+
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree(
+        "/root1",
+        json!({
+            "src": {
+                "nested": {
+                    "one.rs": ""
+                }
+            }
+        }),
+    )
+    .await;
+    fs.insert_tree(
+        "/root2",
+        json!({
+            "other": {
+                "two.rs": ""
+            }
+        }),
+    )
+    .await;
+
+    let project = Project::test(fs, ["/root1".as_ref(), "/root2".as_ref()], cx).await;
+    let window = cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+    let workspace = window
+        .read_with(cx, |multi_workspace, _| multi_workspace.workspace().clone())
+        .expect("test window should contain a workspace");
+    let cx = &mut VisualTestContext::from_window(window.into(), cx);
+    let panel = workspace.update_in(cx, ProjectPanel::new);
+    cx.run_until_parked();
+
+    let (root1_id, root2_id) = project.read_with(cx, |project, cx| {
+        let mut root1_id = None;
+        let mut root2_id = None;
+        for worktree in project.visible_worktrees(cx) {
+            let worktree = worktree.read(cx);
+            match worktree.abs_path().as_ref() {
+                path if path == Path::new("/root1") => root1_id = Some(worktree.id()),
+                path if path == Path::new("/root2") => root2_id = Some(worktree.id()),
+                _ => {}
+            }
+        }
+        (
+            root1_id.expect("root1 worktree should be visible"),
+            root2_id.expect("root2 worktree should be visible"),
+        )
+    });
+
+    toggle_expand_dir(&panel, "root1/src", cx);
+    assert!(panel.update_in(cx, |panel, window, cx| {
+        panel.set_worktree_scope(Some(root1_id), window, cx)
+    }));
+    cx.run_until_parked();
+
+    select_path_with_mark(&panel, "root1/src", cx);
+    panel.update_in(cx, |panel, window, cx| {
+        panel.rename(&Rename, window, cx);
+    });
+    assert!(panel.read_with(cx, |panel, _| panel.state.edit_state.is_some()));
+    let root1_selection = panel
+        .read_with(cx, |panel, _| panel.selection)
+        .expect("root1 selection should exist");
+    panel.update(cx, |panel, _| {
+        panel.clipboard = Some(ClipboardEntry::Copied(BTreeSet::from([root1_selection])));
+        panel.scroll_handle.set_offset(point(px(11.), px(17.)));
+    });
+
+    assert!(panel.update_in(cx, |panel, window, cx| {
+        panel.set_worktree_scope(Some(root2_id), window, cx)
+    }));
+    assert!(matches!(
+        panel.read_with(cx, |panel, _| panel.scope_state()),
+        ProjectPanelScopeState::Loading {
+            worktree_id,
+            ..
+        } if worktree_id == root2_id
+    ));
+    assert!(panel.read_with(cx, |panel, _| panel.state.visible_entries.is_empty()));
+    assert!(panel.read_with(cx, |panel, _| panel.selection.is_none()));
+    assert!(panel.read_with(cx, |panel, _| panel.marked_entries.is_empty()));
+    assert!(panel.read_with(cx, |panel, _| panel.state.edit_state.is_none()));
+    assert!(panel.read_with(cx, |panel, _| panel.clipboard.is_none()));
+    assert_eq!(
+        panel.read_with(cx, |panel, _| panel.scroll_handle.offset()),
+        Point::default()
+    );
+    cx.run_until_parked();
+
+    assert!(matches!(
+        panel.read_with(cx, |panel, _| panel.scope_state()),
+        ProjectPanelScopeState::Ready {
+            worktree_id,
+            ..
+        } if worktree_id == root2_id
+    ));
+    assert!(
+        panel
+            .read_with(cx, |panel, _| panel.visible_rows_for_test())
+            .iter()
+            .all(|row| row.worktree_id == root2_id)
+    );
+    let root1_entry_id = project.read_with(cx, |project, cx| {
+        project
+            .worktree_for_id(root1_id, cx)
+            .expect("root1 worktree should remain visible")
+            .read(cx)
+            .entry_for_path(rel_path("src"))
+            .expect("root1 src entry should exist")
+            .id
+    });
+    project.update(cx, |_project, cx| {
+        cx.emit(project::Event::RevealInProjectPanel(root1_entry_id));
+    });
+    cx.run_until_parked();
+    assert!(matches!(
+        panel.read_with(cx, |panel, _| panel.scope_state()),
+        ProjectPanelScopeState::Ready {
+            worktree_id,
+            ..
+        } if worktree_id == root2_id
+    ));
+    assert!(panel.read_with(cx, |panel, _| panel.selection.is_none()));
+    assert!(
+        panel
+            .read_with(cx, |panel, _| panel.visible_rows_for_test())
+            .iter()
+            .all(|row| row.worktree_id == root2_id)
+    );
+    panel.update(cx, |panel, cx| {
+        panel.select_path_for_test(
+            ProjectPath {
+                worktree_id: root1_id,
+                path: rel_path("src").into(),
+            },
+            cx,
+        );
+    });
+    assert!(panel.read_with(cx, |panel, _| panel.selection.is_none()));
+
+    assert!(panel.update_in(cx, |panel, window, cx| {
+        panel.set_worktree_scope(Some(root1_id), window, cx)
+    }));
+    cx.run_until_parked();
+
+    let rows = panel.read_with(cx, |panel, _| panel.visible_rows_for_test());
+    assert!(rows.iter().all(|row| row.worktree_id == root1_id));
+    assert!(
+        rows.iter()
+            .any(|row| { row.path.as_ref() == rel_path("src") && row.is_expanded })
+    );
+    assert!(
+        rows.iter()
+            .any(|row| row.path.as_ref() == rel_path("src/nested"))
+    );
+}
+
+#[gpui::test]
+async fn test_scoped_empty_and_missing_states(cx: &mut gpui::TestAppContext) {
+    init_test(cx);
+
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree("/empty", json!({})).await;
+    let project = Project::test(fs, ["/empty".as_ref()], cx).await;
+    let window = cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+    let workspace = window
+        .read_with(cx, |multi_workspace, _| multi_workspace.workspace().clone())
+        .expect("test window should contain a workspace");
+    let cx = &mut VisualTestContext::from_window(window.into(), cx);
+    let worktree_id = project.read_with(cx, |project, cx| {
+        project
+            .visible_worktrees(cx)
+            .next()
+            .expect("empty worktree should be visible")
+            .read(cx)
+            .id()
+    });
+    let panel = workspace.update_in(cx, ProjectPanel::new);
+    assert!(panel.update_in(cx, |panel, window, cx| {
+        panel.set_worktree_scope(Some(worktree_id), window, cx)
+    }));
+    cx.run_until_parked();
+
+    assert!(matches!(
+        panel.read_with(cx, |panel, _| panel.scope_state()),
+        ProjectPanelScopeState::Empty {
+            worktree_id: scoped_id,
+            ..
+        } if scoped_id == worktree_id
+    ));
+    assert!(panel.read_with(cx, |panel, _| panel.visible_rows_for_test().is_empty()));
+
+    project.update(cx, |project, cx| {
+        project.remove_worktree(worktree_id, cx);
+    });
+    cx.run_until_parked();
+
+    assert!(matches!(
+        panel.read_with(cx, |panel, _| panel.scope_state()),
+        ProjectPanelScopeState::Missing {
+            worktree_id: scoped_id,
+            ..
+        } if scoped_id == worktree_id
+    ));
+    assert!(panel.read_with(cx, |panel, _| panel.visible_rows_for_test().is_empty()));
+}
+
+#[gpui::test(iterations = 16)]
+async fn test_latest_worktree_scope_derivation_wins(cx: &mut gpui::TestAppContext) {
+    init_test(cx);
+
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree("/first", json!({"first.txt": ""})).await;
+    fs.insert_tree("/second", json!({"second.txt": ""})).await;
+    let project = Project::test(fs, ["/first".as_ref(), "/second".as_ref()], cx).await;
+    let window = cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+    let workspace = window
+        .read_with(cx, |multi_workspace, _| multi_workspace.workspace().clone())
+        .expect("test window should contain a workspace");
+    let cx = &mut VisualTestContext::from_window(window.into(), cx);
+    let panel = workspace.update_in(cx, ProjectPanel::new);
+    cx.run_until_parked();
+
+    let (first_id, second_id) = project.read_with(cx, |project, cx| {
+        let mut first_id = None;
+        let mut second_id = None;
+        for worktree in project.visible_worktrees(cx) {
+            let worktree = worktree.read(cx);
+            match worktree.abs_path().as_ref() {
+                path if path == Path::new("/first") => first_id = Some(worktree.id()),
+                path if path == Path::new("/second") => second_id = Some(worktree.id()),
+                _ => {}
+            }
+        }
+        (
+            first_id.expect("first worktree should be visible"),
+            second_id.expect("second worktree should be visible"),
+        )
+    });
+    let first_revision = panel.update_in(cx, |panel, window, cx| {
+        assert!(panel.set_worktree_scope(Some(first_id), window, cx));
+        panel.visible_entries_revision_for_test()
+    });
+    let second_revision = panel.update_in(cx, |panel, window, cx| {
+        assert!(panel.set_worktree_scope(Some(second_id), window, cx));
+        panel.visible_entries_revision_for_test()
+    });
+    assert!(second_revision > first_revision);
+    assert!(panel.read_with(cx, |panel, _| panel.state.visible_entries.is_empty()));
+    cx.run_until_parked();
+
+    assert!(matches!(
+        panel.read_with(cx, |panel, _| panel.scope_state()),
+        ProjectPanelScopeState::Ready {
+            worktree_id,
+            revision,
+        } if worktree_id == second_id && revision == second_revision
+    ));
+    let rows = panel.read_with(cx, |panel, _| panel.visible_rows_for_test());
+    assert!(rows.iter().all(|row| row.worktree_id == second_id));
+    assert!(
+        rows.iter()
+            .any(|row| row.path.as_ref() == rel_path("second.txt"))
+    );
+    assert!(
+        !rows
+            .iter()
+            .any(|row| row.path.as_ref() == rel_path("first.txt"))
+    );
+}
+
+#[gpui::test(iterations = 16)]
+async fn test_unavailable_worktree_scope_fails_closed_and_recovers_compatible_state(
+    cx: &mut gpui::TestAppContext,
+) {
+    init_test(cx);
+
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree("/first", json!({"first.txt": "first"}))
+        .await;
+    fs.insert_tree("/second", json!({"second.txt": "second"}))
+        .await;
+    let project = Project::test(fs.clone(), ["/first".as_ref(), "/second".as_ref()], cx).await;
+    let window = cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+    let workspace = window
+        .read_with(cx, |multi_workspace, _| multi_workspace.workspace().clone())
+        .expect("test window should contain a workspace");
+    let cx = &mut VisualTestContext::from_window(window.into(), cx);
+    let panel = workspace.update_in(cx, ProjectPanel::new);
+    cx.run_until_parked();
+
+    let (first_id, first_entry_id, second_entry_id) = project.read_with(cx, |project, cx| {
+        let first = project
+            .worktree_for_root_name("first", cx)
+            .expect("first worktree should exist");
+        let second = project
+            .worktree_for_root_name("second", cx)
+            .expect("second worktree should exist");
+        let first = first.read(cx);
+        let second = second.read(cx);
+        (
+            first.id(),
+            first
+                .entry_for_path(rel_path("first.txt"))
+                .expect("first file should exist")
+                .id,
+            second
+                .entry_for_path(rel_path("second.txt"))
+                .expect("second file should exist")
+                .id,
+        )
+    });
+
+    assert!(panel.update_in(cx, |panel, window, cx| {
+        panel.set_worktree_scope(Some(first_id), window, cx)
+    }));
+    cx.run_until_parked();
+    select_path_with_mark(&panel, "first/first.txt", cx);
+    panel.update_in(cx, |panel, window, cx| {
+        panel.rename(&Rename, window, cx);
+    });
+    let selection = panel
+        .read_with(cx, |panel, _| panel.selection)
+        .expect("first file should be selected");
+    let scroll_offset = point(px(7.), px(19.));
+    panel.update(cx, |panel, _| {
+        panel.clipboard = Some(ClipboardEntry::Copied(BTreeSet::from([selection])));
+        panel.scroll_handle.set_offset(scroll_offset);
+        panel
+            .undo_manager
+            .record([Change::Created(ProjectPath {
+                worktree_id: first_id,
+                path: rel_path("first.txt").into(),
+            })])
+            .expect("first-worktree change should be recorded");
+    });
+    cx.run_until_parked();
+    assert!(panel.read_with(cx, |panel, _| panel.undo_manager.can_undo()));
+
+    let loading_revision = panel.update_in(cx, |panel, window, cx| {
+        let revision = panel.update_visible_entries(None, false, false, window, cx);
+        assert!(panel.set_worktree_scope_unavailable(Some(first_id), window, cx));
+        revision
+    });
+    assert_eq!(
+        panel.read_with(cx, |panel, _| panel.scope_state()),
+        ProjectPanelScopeState::Unavailable
+    );
+    assert!(panel.read_with(cx, |panel, _| panel.visible_rows_for_test().is_empty()));
+    assert_eq!(
+        panel.read_with(cx, |panel, _| panel.selection),
+        Some(selection)
+    );
+    assert_eq!(
+        panel.read_with(cx, |panel, _| panel.marked_entries.clone()),
+        vec![selection]
+    );
+    assert!(panel.read_with(cx, |panel, _| panel.state.edit_state.is_some()));
+    assert!(panel.read_with(cx, |panel, _| panel.clipboard.is_some()));
+    assert_eq!(
+        panel.read_with(cx, |panel, _| panel.scroll_handle.offset()),
+        scroll_offset
+    );
+
+    panel.update_in(cx, |panel, window, cx| {
+        panel.delete(&Delete { skip_prompt: true }, window, cx);
+        panel.rename(&Rename, window, cx);
+        panel.undo(&Undo, window, cx);
+        assert!(
+            panel
+                .reveal_entry(project.clone(), second_entry_id, false, window, cx)
+                .is_err()
+        );
+        panel.open_entry(first_entry_id, true, false, cx);
+    });
+    project.update(cx, |_project, cx| {
+        cx.emit(project::Event::RevealInProjectPanel(second_entry_id));
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        panel.read_with(cx, |panel, _| panel.scope_state()),
+        ProjectPanelScopeState::Unavailable
+    );
+    assert!(panel.read_with(cx, |panel, _| {
+        panel.visible_entries_revision_for_test() > loading_revision
+    }));
+    assert!(fs.is_file(Path::new("/first/first.txt")).await);
+    assert!(panel.read_with(cx, |panel, _| panel.undo_manager.can_undo()));
+    assert_eq!(
+        panel.read_with(cx, |panel, _| panel.selection),
+        Some(selection)
+    );
+    assert_eq!(
+        workspace.read_with(cx, |workspace, cx| workspace.panes()[0]
+            .read(cx)
+            .items_len()),
+        0
+    );
+
+    assert!(panel.update_in(cx, |panel, window, cx| {
+        panel.set_worktree_scope(Some(first_id), window, cx)
+    }));
+    cx.run_until_parked();
+    assert!(matches!(
+        panel.read_with(cx, |panel, _| panel.scope_state()),
+        ProjectPanelScopeState::Ready { worktree_id, .. } if worktree_id == first_id
+    ));
+    assert_eq!(
+        panel.read_with(cx, |panel, _| panel.selection),
+        Some(selection)
+    );
+    assert!(panel.read_with(cx, |panel, _| panel.state.edit_state.is_some()));
+    assert_eq!(
+        panel.read_with(cx, |panel, _| panel.scroll_handle.offset()),
+        scroll_offset
+    );
+}
+
+#[gpui::test]
+async fn test_scope_change_filters_undo_history_before_undo(cx: &mut gpui::TestAppContext) {
+    init_test(cx);
+
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree("/first", json!({"first.txt": "first"}))
+        .await;
+    fs.insert_tree("/second", json!({"second.txt": "second"}))
+        .await;
+    let project = Project::test(fs.clone(), ["/first".as_ref(), "/second".as_ref()], cx).await;
+    let window = cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+    let workspace = window
+        .read_with(cx, |multi_workspace, _| multi_workspace.workspace().clone())
+        .expect("test window should contain a workspace");
+    let cx = &mut VisualTestContext::from_window(window.into(), cx);
+    let panel = workspace.update_in(cx, ProjectPanel::new);
+    cx.run_until_parked();
+
+    let (first_id, second_id) = project.read_with(cx, |project, cx| {
+        (
+            project
+                .worktree_for_root_name("first", cx)
+                .expect("first worktree should exist")
+                .read(cx)
+                .id(),
+            project
+                .worktree_for_root_name("second", cx)
+                .expect("second worktree should exist")
+                .read(cx)
+                .id(),
+        )
+    });
+    panel.update(cx, |panel, _| {
+        panel
+            .undo_manager
+            .record([Change::Created(ProjectPath {
+                worktree_id: first_id,
+                path: rel_path("first.txt").into(),
+            })])
+            .expect("first-worktree change should be recorded");
+    });
+    cx.run_until_parked();
+    assert!(panel.read_with(cx, |panel, _| panel.undo_manager.can_undo()));
+
+    panel.update_in(cx, |panel, window, cx| {
+        assert!(panel.set_worktree_scope(Some(second_id), window, cx));
+        panel.undo(&Undo, window, cx);
+    });
+    cx.run_until_parked();
+
+    assert!(fs.is_file(Path::new("/first/first.txt")).await);
+    assert!(!panel.read_with(cx, |panel, _| panel.undo_manager.can_undo()));
+}
+
+#[gpui::test]
+async fn test_compatible_worktree_scope_preserves_native_state(cx: &mut gpui::TestAppContext) {
+    init_test(cx);
+
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree("/root", json!({"rename-me.rs": "", "other.rs": ""}))
+        .await;
+    let project = Project::test(fs, ["/root".as_ref()], cx).await;
+    let window = cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+    let workspace = window
+        .read_with(cx, |multi_workspace, _| multi_workspace.workspace().clone())
+        .expect("test window should contain a workspace");
+    let cx = &mut VisualTestContext::from_window(window.into(), cx);
+    let panel = workspace.update_in(cx, ProjectPanel::new);
+    cx.run_until_parked();
+
+    let worktree_id = project.read_with(cx, |project, cx| {
+        project
+            .visible_worktrees(cx)
+            .next()
+            .expect("root worktree should be visible")
+            .read(cx)
+            .id()
+    });
+    select_path_with_mark(&panel, "root/rename-me.rs", cx);
+    panel.update_in(cx, |panel, window, cx| {
+        panel.rename(&Rename, window, cx);
+    });
+    let selection = panel
+        .read_with(cx, |panel, _| panel.selection)
+        .expect("selected entry should exist");
+    let scroll_offset = point(px(9.), px(23.));
+    panel.update(cx, |panel, _| {
+        panel.clipboard = Some(ClipboardEntry::Cut(BTreeSet::from([selection])));
+        panel.scroll_handle.set_offset(scroll_offset);
+    });
+
+    assert!(panel.update_in(cx, |panel, window, cx| {
+        panel.set_worktree_scope(Some(worktree_id), window, cx)
+    }));
+    assert!(panel.read_with(cx, |panel, _| panel.state.visible_entries.is_empty()));
+    assert_eq!(
+        panel.read_with(cx, |panel, _| panel.selection),
+        Some(selection)
+    );
+    assert_eq!(
+        panel.read_with(cx, |panel, _| panel.marked_entries.clone()),
+        vec![selection]
+    );
+    assert!(panel.read_with(cx, |panel, _| panel.state.edit_state.is_some()));
+    assert_eq!(
+        panel.read_with(cx, |panel, _| panel
+            .clipboard
+            .as_ref()
+            .map(|clipboard| clipboard.items().clone())),
+        Some(BTreeSet::from([selection]))
+    );
+    assert_eq!(
+        panel.read_with(cx, |panel, _| panel.scroll_handle.offset()),
+        scroll_offset
+    );
+
+    cx.run_until_parked();
+    assert!(matches!(
+        panel.read_with(cx, |panel, _| panel.scope_state()),
+        ProjectPanelScopeState::Ready {
+            worktree_id: ready_worktree_id,
+            ..
+        } if ready_worktree_id == worktree_id
+    ));
+    assert_eq!(
+        panel.read_with(cx, |panel, _| panel.selection),
+        Some(selection)
+    );
+    assert_eq!(
+        panel.read_with(cx, |panel, _| panel.marked_entries.clone()),
+        vec![selection]
+    );
+    assert!(panel.read_with(cx, |panel, _| panel.state.edit_state.is_some()));
+    assert_eq!(
+        panel.read_with(cx, |panel, _| panel
+            .clipboard
+            .as_ref()
+            .map(|clipboard| clipboard.items().clone())),
+        Some(BTreeSet::from([selection]))
+    );
+    assert_eq!(
+        panel.read_with(cx, |panel, _| panel.scroll_handle.offset()),
+        scroll_offset
+    );
+}
+
+#[gpui::test]
+async fn test_collapsing_scoped_root_does_not_report_empty(cx: &mut gpui::TestAppContext) {
+    init_test(cx);
+
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree("/root", json!({"child.rs": ""})).await;
+    let project = Project::test(fs, ["/root".as_ref()], cx).await;
+    let window = cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+    let workspace = window
+        .read_with(cx, |multi_workspace, _| multi_workspace.workspace().clone())
+        .expect("test window should contain a workspace");
+    let cx = &mut VisualTestContext::from_window(window.into(), cx);
+    let panel = workspace.update_in(cx, ProjectPanel::new);
+    cx.run_until_parked();
+
+    let worktree_id = project.read_with(cx, |project, cx| {
+        project
+            .visible_worktrees(cx)
+            .next()
+            .expect("root worktree should be visible")
+            .read(cx)
+            .id()
+    });
+    assert!(panel.update_in(cx, |panel, window, cx| {
+        panel.set_worktree_scope(Some(worktree_id), window, cx)
+    }));
+    cx.run_until_parked();
+    select_path(&panel, "root", cx);
+    panel.update_in(cx, |panel, window, cx| {
+        panel.collapse_selected_entry_and_children(&CollapseSelectedEntryAndChildren, window, cx);
+    });
+    cx.run_until_parked();
+
+    assert!(matches!(
+        panel.read_with(cx, |panel, _| panel.scope_state()),
+        ProjectPanelScopeState::Ready {
+            worktree_id: ready_worktree_id,
+            ..
+        } if ready_worktree_id == worktree_id
+    ));
+    let rows = panel.read_with(cx, |panel, _| panel.visible_rows_for_test());
+    assert!(
+        rows.iter()
+            .any(|row| row.path.as_ref() == rel_path("child.rs"))
+    );
+    assert!(
+        rows.iter()
+            .find(|row| row.path.as_ref().is_empty())
+            .is_some_and(|row| row.is_expanded)
     );
 }
 
@@ -276,7 +895,7 @@ async fn test_file_history_action_uses_focused_project_panel_selection(
     });
     cx.run_until_parked();
 
-    workspace.read_with(&*cx, |workspace, cx| {
+    let graph = workspace.read_with(&*cx, |workspace, cx| {
         let graphs = workspace
             .items_of_type::<git_ui::git_graph::GitGraph>(cx)
             .collect::<Vec<_>>();
@@ -284,6 +903,39 @@ async fn test_file_history_action_uses_focused_project_panel_selection(
         assert_eq!(
             graphs[0].read(cx).log_source_for_test(),
             &LogSource::Path(project_panel_repo_path)
+        );
+        let graph = graphs[0].clone();
+        assert_eq!(
+            workspace
+                .active_item(cx)
+                .and_then(|item| item.downcast::<git_ui::git_graph::GitGraph>())
+                .map(|item| item.entity_id()),
+            Some(graph.entity_id())
+        );
+        graph
+    });
+    multi_workspace.update_in(cx, |_multi_workspace, window, cx| {
+        assert!(graph.focus_handle(cx).contains_focused(window, cx));
+    });
+
+    project_panel.update_in(cx, |panel, window, cx| {
+        assert!(panel.set_worktree_scope_unavailable(
+            Some(project_panel_path.worktree_id),
+            window,
+            cx,
+        ));
+        panel.focus_handle(cx).focus(window, cx);
+    });
+    cx.update(|window, cx| {
+        window.dispatch_action(Box::new(git::FileHistory), cx);
+    });
+    cx.run_until_parked();
+    workspace.read_with(&*cx, |workspace, cx| {
+        assert_eq!(
+            workspace
+                .items_of_type::<git_ui::git_graph::GitGraph>(cx)
+                .count(),
+            1
         );
     });
 }

@@ -188,6 +188,19 @@ pub(crate) enum Change {
 }
 
 impl Change {
+    fn belongs_to_worktree(&self, worktree_id: WorktreeId) -> bool {
+        match self {
+            Change::Created(path) | Change::Restored(path) => path.worktree_id == worktree_id,
+            Change::Trashed(change_worktree_id, _) => *change_worktree_id == worktree_id,
+            Change::Renamed(from, to) => {
+                from.worktree_id == worktree_id && to.worktree_id == worktree_id
+            }
+            Change::Batched(changes) => changes
+                .iter()
+                .all(|change| change.belongs_to_worktree(worktree_id)),
+        }
+    }
+
     fn to_inverse(self) -> Operation {
         match self {
             Change::Created(project_path) => Operation::Trash(project_path),
@@ -283,6 +296,18 @@ impl UndoManager {
             .try_send(UndoMessage::Changed(changes.into_iter().collect()))
             .context("Undo and redo task can not keep up")
     }
+
+    pub fn retain_worktree(&mut self, worktree_id: WorktreeId) -> Result<()> {
+        self.tx
+            .try_send(UndoMessage::RetainWorktree(worktree_id))
+            .context("Undo and redo task can not keep up")
+    }
+
+    pub fn clear(&mut self) -> Result<()> {
+        self.tx
+            .try_send(UndoMessage::Clear)
+            .context("Undo and redo task can not keep up")
+    }
     /// just for the UI, an undo may still fail if there are concurrent file
     /// operations happening.
     pub fn can_undo(&self) -> bool {
@@ -305,6 +330,8 @@ enum UndoMessage {
     Changed(Vec<Change>),
     Undo,
     Redo,
+    RetainWorktree(WorktreeId),
+    Clear,
 }
 
 impl UndoMessage {
@@ -315,6 +342,7 @@ impl UndoMessage {
             }
             UndoMessage::Undo => "Undo failed",
             UndoMessage::Redo => "Redo failed",
+            UndoMessage::RetainWorktree(_) | UndoMessage::Clear => "Undo history reset failed",
         }
     }
 }
@@ -342,6 +370,15 @@ impl Inner {
                     let res = self.redo(&mut cx).await;
                     let _ = self.panel.update(&mut cx, |_, cx| cx.notify());
                     res
+                }
+                UndoMessage::RetainWorktree(worktree_id) => {
+                    self.retain_worktree(worktree_id);
+                    Ok(())
+                }
+                UndoMessage::Clear => {
+                    self.history.clear();
+                    self.cursor = 0;
+                    Ok(())
                 }
             };
 
@@ -388,6 +425,21 @@ impl Inner {
 
     pub fn can_redo(&self) -> bool {
         self.cursor < self.history.len()
+    }
+
+    fn retain_worktree(&mut self, worktree_id: WorktreeId) {
+        let mut retained_cursor = 0;
+        let mut retained_history = VecDeque::new();
+        for (index, change) in self.history.drain(..).enumerate() {
+            if change.belongs_to_worktree(worktree_id) {
+                if index < self.cursor {
+                    retained_cursor += 1;
+                }
+                retained_history.push_back(change);
+            }
+        }
+        self.history = retained_history;
+        self.cursor = retained_cursor;
     }
 
     pub async fn undo(&mut self, cx: &mut AsyncApp) -> Result<()> {

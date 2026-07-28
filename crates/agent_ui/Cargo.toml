@@ -17,9 +17,11 @@ test-support = [
     "acp_thread/test-support",
     "eval_utils",
     "gpui/test-support",
+    "git_ui/test-support",
     "language/test-support",
     "language_model/test-support",
     "dep:omega_workbench_harness",
+    "project_panel/test-support",
     "reqwest_client",
     "remote_connection/test-support",
     "workspace/test-support",
@@ -111,6 +113,7 @@ picker.workspace = true
 platform_title_bar.workspace = true
 postage.workspace = true
 project.workspace = true
+project_panel.workspace = true
 prompt_store.workspace = true
 proto.workspace = true
 rand.workspace = true
@@ -160,6 +163,7 @@ db = { workspace = true, features = ["test-support"] }
 editor = { workspace = true, features = ["test-support"] }
 eval_utils.workspace = true
 gpui = { workspace = true, "features" = ["test-support"] }
+git_ui = { workspace = true, features = ["test-support"] }
 http_client = { workspace = true, features = ["test-support"] }
 indoc.workspace = true
 language = { workspace = true, "features" = ["test-support"] }
@@ -169,6 +173,7 @@ node_runtime = { workspace = true, features = ["test-support"] }
 omega_workbench_harness = { workspace = true, features = ["gpui-support"] }
 pretty_assertions.workspace = true
 project = { workspace = true, features = ["test-support"] }
+project_panel = { workspace = true, features = ["test-support"] }
 remote = { workspace = true, features = ["test-support"] }
 remote_connection = { workspace = true, features = ["test-support"] }
 remote_server = { workspace = true, features = ["test-support"] }

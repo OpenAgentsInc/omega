@@ -1019,7 +1019,7 @@ impl SceneSpec {
     }
 }
 
-pub const WORKBENCH_SHELL_PIXEL_SCENES: [&str; 11] = [
+pub const WORKBENCH_SHELL_PIXEL_SCENES: [&str; 18] = [
     "omega_workbench_shell_default",
     "omega_workbench_shell_active_dock",
     "omega_workbench_shell_focus_visible",
@@ -1027,6 +1027,13 @@ pub const WORKBENCH_SHELL_PIXEL_SCENES: [&str; 11] = [
     "omega_workbench_shell_unavailable_no_project",
     "omega_workbench_shell_narrow",
     "omega_workbench_shell_collapsed_after_open",
+    "omega_workbench_files_wide",
+    "omega_workbench_files_narrow",
+    "omega_workbench_files_multi_root",
+    "omega_workbench_files_empty",
+    "omega_workbench_files_loading",
+    "omega_workbench_files_error",
+    "omega_workbench_files_stale_filesystem_completion",
     "omega_workbench_identity_clean",
     "omega_workbench_identity_dirty_conflict",
     "omega_workbench_identity_long_narrow",
@@ -1042,6 +1049,12 @@ pub const WORKBENCH_SHELL_REGIONS: &[CaptureRegionSpec] = &[CaptureRegionSpec::s
 pub const WORKBENCH_IDENTITY_REGIONS: &[CaptureRegionSpec] = &[CaptureRegionSpec::selector_union(
     "thread-identity",
     &["omega.workbench.thread-identity"],
+    8,
+)];
+
+pub const WORKBENCH_FILES_REGIONS: &[CaptureRegionSpec] = &[CaptureRegionSpec::selector_union(
+    "files-surface",
+    &["omega.workbench.surface.files"],
     8,
 )];
 
@@ -1101,6 +1114,62 @@ pub const HERMETIC_SCENES: &[SceneSpec] = &[
         fixture_version: 1,
         pixel_policy: APPLE_SILICON_METAL_POLICY,
         regions: WORKBENCH_SHELL_REGIONS,
+    },
+    SceneSpec {
+        name: "omega_workbench_files_wide",
+        phase: ScenePhase::Recording,
+        viewport: ViewportFixture::new(1200, 720, 2000),
+        fixture_version: 1,
+        pixel_policy: APPLE_SILICON_METAL_POLICY,
+        regions: WORKBENCH_FILES_REGIONS,
+    },
+    SceneSpec {
+        name: "omega_workbench_files_narrow",
+        phase: ScenePhase::Recording,
+        viewport: ViewportFixture::new(910, 720, 2000),
+        fixture_version: 1,
+        pixel_policy: APPLE_SILICON_METAL_POLICY,
+        regions: WORKBENCH_FILES_REGIONS,
+    },
+    SceneSpec {
+        name: "omega_workbench_files_multi_root",
+        phase: ScenePhase::Recording,
+        viewport: ViewportFixture::new(1200, 720, 2000),
+        fixture_version: 1,
+        pixel_policy: APPLE_SILICON_METAL_POLICY,
+        regions: WORKBENCH_FILES_REGIONS,
+    },
+    SceneSpec {
+        name: "omega_workbench_files_empty",
+        phase: ScenePhase::Recording,
+        viewport: ViewportFixture::new(1200, 720, 2000),
+        fixture_version: 1,
+        pixel_policy: APPLE_SILICON_METAL_POLICY,
+        regions: WORKBENCH_FILES_REGIONS,
+    },
+    SceneSpec {
+        name: "omega_workbench_files_loading",
+        phase: ScenePhase::Recording,
+        viewport: ViewportFixture::new(1200, 720, 2000),
+        fixture_version: 1,
+        pixel_policy: APPLE_SILICON_METAL_POLICY,
+        regions: WORKBENCH_FILES_REGIONS,
+    },
+    SceneSpec {
+        name: "omega_workbench_files_error",
+        phase: ScenePhase::Recording,
+        viewport: ViewportFixture::new(1200, 720, 2000),
+        fixture_version: 1,
+        pixel_policy: APPLE_SILICON_METAL_POLICY,
+        regions: WORKBENCH_FILES_REGIONS,
+    },
+    SceneSpec {
+        name: "omega_workbench_files_stale_filesystem_completion",
+        phase: ScenePhase::Recording,
+        viewport: ViewportFixture::new(1200, 720, 2000),
+        fixture_version: 1,
+        pixel_policy: APPLE_SILICON_METAL_POLICY,
+        regions: WORKBENCH_FILES_REGIONS,
     },
     SceneSpec {
         name: "omega_workbench_identity_clean",
