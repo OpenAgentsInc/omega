@@ -19,6 +19,7 @@ use std::cell::RefCell;
 use std::path::Path;
 use std::rc::Rc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use text::OffsetRangeExt as _;
 use workspace::{
     MultiWorkspace, Sidebar as WorkspaceSidebar, SidebarEvent, SidebarSide, Workspace,
     dock::Panel as _,
@@ -643,6 +644,90 @@ impl AgentWorkbenchFrontDoor {
             .and_then(|host| host.read_with(cx, |host, _cx| host.files_panel_entity_id()))
     }
 
+    pub fn native_search_surface(
+        &self,
+        cx: &TestAppContext,
+    ) -> Option<Entity<crate::workbench_shell::NativeSearchSurface>> {
+        self.panel
+            .read_with(cx, |panel, cx| panel.workbench_search_surface_for_tests(cx))
+    }
+
+    pub fn native_search_surface_entity_id(&self, cx: &TestAppContext) -> Option<EntityId> {
+        self.native_search_surface(cx)
+            .map(|surface| surface.entity_id())
+    }
+
+    pub fn native_search_view_entity_id(&self, cx: &TestAppContext) -> Option<EntityId> {
+        self.native_search_surface(cx)
+            .map(|surface| surface.read_with(cx, |surface, _cx| surface.search_view().entity_id()))
+    }
+
+    pub fn native_search_model_entity_id(&self, cx: &TestAppContext) -> Option<EntityId> {
+        self.native_search_surface(cx).map(|surface| {
+            surface.read_with(cx, |surface, _cx| surface.project_search().entity_id())
+        })
+    }
+
+    pub fn native_search_bar_entity_id(&self, cx: &TestAppContext) -> Option<EntityId> {
+        self.native_search_surface(cx)
+            .map(|surface| surface.read_with(cx, |surface, _cx| surface.search_bar().entity_id()))
+    }
+
+    pub fn native_search_query(&self, cx: &TestAppContext) -> Option<String> {
+        let surface = self.native_search_surface(cx)?;
+        let search_view = surface.read_with(cx, |surface, _cx| surface.search_view().clone());
+        Some(search_view.read_with(cx, |search_view, cx| search_view.search_query_text(cx)))
+    }
+
+    pub fn native_search_match_count(&self, cx: &TestAppContext) -> Option<usize> {
+        let surface = self.native_search_surface(cx)?;
+        let search_view = surface.read_with(cx, |surface, _cx| surface.search_view().clone());
+        Some(search_view.read_with(cx, |search_view, cx| search_view.get_matches(cx).len()))
+    }
+
+    pub fn native_search_state(
+        &self,
+        cx: &TestAppContext,
+    ) -> Option<search::project_search::ProjectSearchTestSnapshot> {
+        let surface = self.native_search_surface(cx)?;
+        let search_view = surface.read_with(cx, |surface, _cx| surface.search_view().clone());
+        Some(search_view.read_with(cx, |search_view, cx| search_view.test_snapshot(cx)))
+    }
+
+    pub fn native_search_focus_target(
+        &self,
+        cx: &TestAppContext,
+    ) -> Option<crate::workbench_shell::NativeSearchFocusTarget> {
+        let surface = self.native_search_surface(cx)?;
+        let mut visual = VisualTestContext::from_window(self.window, cx);
+        surface.update_in(&mut visual, |surface, window, cx| {
+            surface.focus_target(window, cx)
+        })
+    }
+
+    pub fn perform_native_search(
+        &self,
+        query: impl Into<std::sync::Arc<str>>,
+        cx: &TestAppContext,
+    ) -> Result<()> {
+        let surface = self
+            .native_search_surface(cx)
+            .context("native Search surface is unavailable")?;
+        let (search_view, search_bar) = surface.read_with(cx, |surface, _cx| {
+            (surface.search_view().clone(), surface.search_bar().clone())
+        });
+        let mut visual = VisualTestContext::from_window(self.window, cx);
+        search_bar.update_in(&mut visual, |search_bar, window, cx| {
+            search_bar.focus_search(window, cx);
+        });
+        search::project_search::perform_project_search(&search_view, query, &mut visual);
+        search_bar.update_in(&mut visual, |search_bar, window, cx| {
+            search_bar.move_focus_to_results(window, cx);
+        });
+        visual.run_until_parked();
+        Ok(())
+    }
+
     pub fn native_files_scope(&self, cx: &TestAppContext) -> Option<WorktreeId> {
         self.native_files_panel(cx)
             .and_then(|panel| panel.read_with(cx, |panel, _cx| panel.worktree_scope()))
@@ -785,6 +870,36 @@ impl AgentWorkbenchFrontDoor {
     pub fn active_workspace_item_path(&self, cx: &TestAppContext) -> Option<ProjectPath> {
         self.workspace.read_with(cx, |workspace, cx| {
             workspace.active_item(cx)?.project_path(cx)
+        })
+    }
+
+    pub fn active_workspace_selection(
+        &self,
+        cx: &TestAppContext,
+    ) -> Option<(language::Point, language::Point)> {
+        let editor = self.workspace.read_with(cx, |workspace, cx| {
+            workspace.active_item(cx)?.downcast::<editor::Editor>()
+        })?;
+        let mut visual = VisualTestContext::from_window(self.window, cx);
+        editor.update_in(&mut visual, |editor, _window, cx| {
+            let snapshot = editor.display_snapshot(cx);
+            let selection = editor.selections.newest::<language::Point>(&snapshot);
+            Some((selection.start, selection.end))
+        })
+    }
+
+    pub fn active_workspace_point_range(
+        &self,
+        range: &std::ops::Range<text::Anchor>,
+        cx: &TestAppContext,
+    ) -> Option<(language::Point, language::Point)> {
+        let editor = self.workspace.read_with(cx, |workspace, cx| {
+            workspace.active_item(cx)?.downcast::<editor::Editor>()
+        })?;
+        editor.read_with(cx, |editor, cx| {
+            let buffer = editor.buffer().read(cx).as_singleton()?;
+            let point_range = range.to_point(&buffer.read(cx).snapshot());
+            Some((point_range.start, point_range.end))
         })
     }
 
@@ -2447,6 +2562,14 @@ mod workbench_front_door_tests {
         );
 
         let snapshot = front_door.snapshot(cx);
+        let rendered_search_selectors = snapshot
+            .selectors()
+            .filter_map(|(selector, _)| selector.contains("search").then_some(selector))
+            .collect::<Vec<_>>();
+        assert!(
+            snapshot.bounds("omega.workbench.surface.search").is_some(),
+            "Search host should render before its native children: {rendered_search_selectors:?}"
+        );
         let mut probe = SemanticProbe::new(&snapshot);
         for selector in [
             "omega.workbench.identity.indicator.dirty",
@@ -2567,7 +2690,7 @@ mod workbench_front_door_tests {
             identity_after_render.phase,
             crate::thread_identity::IdentityPhase::Missing
         );
-        front_door.snapshot(cx);
+        let _reopened_snapshot = front_door.snapshot(cx);
         assert_eq!(
             front_door
                 .identity(cx)
@@ -4620,5 +4743,192 @@ mod workbench_front_door_tests {
             weak_files_panel.upgrade().is_none(),
             "the handed-off native ProjectPanel must not leak after window teardown"
         );
+    }
+
+    #[gpui::test]
+    async fn native_search_routes_one_action_once_and_opens_the_selected_result(
+        cx: &mut TestAppContext,
+    ) {
+        let scene = scene_with_thread("workbench_native_search", 1200, true);
+        let front_door = AgentWorkbenchFrontDoor::mount(scene, cx)
+            .await
+            .expect("native Search scene should mount");
+        front_door.dispatch_action(crate::workbench_shell::SelectSearch, cx);
+
+        let search_surface_id = front_door
+            .native_search_surface_entity_id(cx)
+            .expect("Search should mount its native adapter");
+        let search_view_id = front_door
+            .native_search_view_entity_id(cx)
+            .expect("Search should mount the exact native view");
+        let search_model_id = front_door
+            .native_search_model_entity_id(cx)
+            .expect("Search should mount the exact native model");
+        let search_bar_id = front_door
+            .native_search_bar_entity_id(cx)
+            .expect("Search should mount the exact native bar");
+        let fixture_worktree_id = front_door
+            .fixture_worktree_id("worktree-1", cx)
+            .expect("fixture worktree");
+        assert_eq!(
+            front_door
+                .native_search_state(cx)
+                .expect("native Search state")
+                .worktree_scope,
+            Some(fixture_worktree_id)
+        );
+
+        let snapshot = front_door.snapshot(cx);
+        let mut probe = SemanticProbe::new(&snapshot);
+        probe
+            .require_accessible(
+                "omega.workbench.search.toolbar",
+                "Toolbar",
+                "Search controls",
+            )
+            .expect("native Search toolbar should expose its accessible contract");
+        probe
+            .require_accessible("omega.workbench.search.content", "Group", "Search results")
+            .expect("native Search results should expose their accessible contract");
+
+        front_door.dispatch_action(crate::workbench_shell::SelectSearch, cx);
+        assert_eq!(
+            front_door.native_search_surface_entity_id(cx),
+            Some(search_surface_id),
+            "collapsing Search must retain its binding-owned native entity graph"
+        );
+        front_door.dispatch_action(crate::workbench_shell::SelectSearch, cx);
+        assert_eq!(
+            front_door.native_search_view_entity_id(cx),
+            Some(search_view_id),
+            "reopening Search must restore the exact native view"
+        );
+        front_door.snapshot(cx);
+
+        front_door
+            .perform_native_search("fixture", cx)
+            .expect("native Search should run through its exact view");
+        let searched = front_door
+            .native_search_state(cx)
+            .expect("populated native Search state");
+        assert!(
+            searched.matches.len() >= 3,
+            "the fixture should provide enough matches to detect duplicate action routing"
+        );
+        assert_eq!(searched.active_match_index, Some(0));
+        assert_eq!(
+            front_door.native_search_focus_target(cx),
+            Some(crate::workbench_shell::NativeSearchFocusTarget::Results)
+        );
+
+        front_door.dispatch_action(search::SelectNextMatch, cx);
+        let advanced = front_door
+            .native_search_state(cx)
+            .expect("advanced native Search state");
+        assert_eq!(
+            advanced.active_match_index,
+            Some(1),
+            "one SelectNextMatch action must advance exactly one native match"
+        );
+        let selected_match = advanced
+            .active_match
+            .expect("the native Search state should identify its selected result");
+
+        front_door.dispatch_action(editor::actions::OpenExcerpts, cx);
+        assert!(
+            front_door.workspace_center_is_visible(cx),
+            "opening a Search result must reveal the sealed center"
+        );
+        assert_eq!(
+            front_door.active_workspace_item_path(cx),
+            Some(selected_match.path.clone())
+        );
+        let (selection_start, selection_end) = front_door
+            .active_workspace_selection(cx)
+            .expect("opened Search result selection");
+        let (expected_start, expected_end) = front_door
+            .active_workspace_point_range(&selected_match.range, cx)
+            .expect("selected native Search match range in the opened singleton buffer");
+        assert_eq!(selection_start, expected_start);
+        assert_eq!(selection_end, expected_end);
+        assert!(
+            front_door.active_workspace_item_is_focused(cx),
+            "opening a Search result must predictably focus the center editor"
+        );
+
+        assert_eq!(
+            front_door.native_search_surface_entity_id(cx),
+            Some(search_surface_id)
+        );
+        assert_eq!(
+            front_door.native_search_view_entity_id(cx),
+            Some(search_view_id)
+        );
+        assert_eq!(
+            front_door.native_search_model_entity_id(cx),
+            Some(search_model_id)
+        );
+        assert_eq!(
+            front_door.native_search_bar_entity_id(cx),
+            Some(search_bar_id)
+        );
+
+        front_door
+            .teardown(cx)
+            .expect("native Search workbench should tear down");
+    }
+
+    #[gpui::test]
+    async fn visible_search_rebinds_to_a_fresh_native_host(cx: &mut TestAppContext) {
+        let scene = scene_with_two_worktrees("workbench_search_binding_change");
+        let front_door = AgentWorkbenchFrontDoor::mount(scene, cx)
+            .await
+            .expect("Search binding-change scene should mount");
+        front_door.dispatch_action(crate::workbench_shell::SelectSearch, cx);
+        front_door
+            .perform_native_search("worktree-1", cx)
+            .expect("old binding Search should accept a query");
+        let old_surface = front_door
+            .native_search_surface(cx)
+            .expect("old binding native Search surface");
+        let old_surface_id = old_surface.entity_id();
+        let weak_old_surface = old_surface.downgrade();
+        drop(old_surface);
+
+        front_door
+            .select_worktree_picker_row(1, cx)
+            .expect("select the second worktree through the rendered picker");
+
+        let new_surface_id = front_door
+            .native_search_surface_entity_id(cx)
+            .expect("new binding native Search surface");
+        assert_ne!(new_surface_id, old_surface_id);
+        assert!(
+            weak_old_surface.upgrade().is_none(),
+            "the old binding must not retain its native Search entity graph"
+        );
+        let new_worktree_id = front_door
+            .fixture_worktree_id("worktree-2", cx)
+            .expect("new fixture worktree");
+        let state = front_door
+            .native_search_state(cx)
+            .expect("new binding native Search state");
+        assert_eq!(state.worktree_scope, Some(new_worktree_id));
+        assert_eq!(state.query, "");
+        assert!(
+            front_door
+                .projection(cx)
+                .visible_projection()
+                .is_some_and(|visible| {
+                    visible.dock_open
+                        && visible.effective_surface
+                            == Some(omega_workbench_state::WorkSurface::Search)
+                }),
+            "a live Search binding change must not leave an empty open dock"
+        );
+
+        front_door
+            .teardown(cx)
+            .expect("Search binding-change workbench should tear down");
     }
 }

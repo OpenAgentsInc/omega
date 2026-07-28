@@ -1019,7 +1019,7 @@ impl SceneSpec {
     }
 }
 
-pub const WORKBENCH_SHELL_PIXEL_SCENES: [&str; 18] = [
+pub const WORKBENCH_SHELL_PIXEL_SCENES: [&str; 26] = [
     "omega_workbench_shell_default",
     "omega_workbench_shell_active_dock",
     "omega_workbench_shell_focus_visible",
@@ -1034,6 +1034,14 @@ pub const WORKBENCH_SHELL_PIXEL_SCENES: [&str; 18] = [
     "omega_workbench_files_loading",
     "omega_workbench_files_error",
     "omega_workbench_files_stale_filesystem_completion",
+    "omega_workbench_search_empty",
+    "omega_workbench_search_populated",
+    "omega_workbench_search_no_results",
+    "omega_workbench_search_invalid_regex",
+    "omega_workbench_search_loading",
+    "omega_workbench_search_narrow",
+    "omega_workbench_search_focused_result",
+    "omega_workbench_search_error",
     "omega_workbench_identity_clean",
     "omega_workbench_identity_dirty_conflict",
     "omega_workbench_identity_long_narrow",
@@ -1055,6 +1063,12 @@ pub const WORKBENCH_IDENTITY_REGIONS: &[CaptureRegionSpec] = &[CaptureRegionSpec
 pub const WORKBENCH_FILES_REGIONS: &[CaptureRegionSpec] = &[CaptureRegionSpec::selector_union(
     "files-surface",
     &["omega.workbench.surface.files"],
+    8,
+)];
+
+pub const WORKBENCH_SEARCH_REGIONS: &[CaptureRegionSpec] = &[CaptureRegionSpec::selector_union(
+    "search-surface",
+    &["omega.workbench.surface.search"],
     8,
 )];
 
@@ -1170,6 +1184,70 @@ pub const HERMETIC_SCENES: &[SceneSpec] = &[
         fixture_version: 1,
         pixel_policy: APPLE_SILICON_METAL_POLICY,
         regions: WORKBENCH_FILES_REGIONS,
+    },
+    SceneSpec {
+        name: "omega_workbench_search_empty",
+        phase: ScenePhase::Recording,
+        viewport: ViewportFixture::new(1200, 720, 2000),
+        fixture_version: 1,
+        pixel_policy: APPLE_SILICON_METAL_POLICY,
+        regions: WORKBENCH_SEARCH_REGIONS,
+    },
+    SceneSpec {
+        name: "omega_workbench_search_populated",
+        phase: ScenePhase::Recording,
+        viewport: ViewportFixture::new(1200, 720, 2000),
+        fixture_version: 1,
+        pixel_policy: APPLE_SILICON_METAL_POLICY,
+        regions: WORKBENCH_SEARCH_REGIONS,
+    },
+    SceneSpec {
+        name: "omega_workbench_search_no_results",
+        phase: ScenePhase::Recording,
+        viewport: ViewportFixture::new(1200, 720, 2000),
+        fixture_version: 1,
+        pixel_policy: APPLE_SILICON_METAL_POLICY,
+        regions: WORKBENCH_SEARCH_REGIONS,
+    },
+    SceneSpec {
+        name: "omega_workbench_search_invalid_regex",
+        phase: ScenePhase::Recording,
+        viewport: ViewportFixture::new(1200, 720, 2000),
+        fixture_version: 1,
+        pixel_policy: APPLE_SILICON_METAL_POLICY,
+        regions: WORKBENCH_SEARCH_REGIONS,
+    },
+    SceneSpec {
+        name: "omega_workbench_search_loading",
+        phase: ScenePhase::Recording,
+        viewport: ViewportFixture::new(1200, 720, 2000),
+        fixture_version: 1,
+        pixel_policy: APPLE_SILICON_METAL_POLICY,
+        regions: WORKBENCH_SEARCH_REGIONS,
+    },
+    SceneSpec {
+        name: "omega_workbench_search_narrow",
+        phase: ScenePhase::Recording,
+        viewport: ViewportFixture::new(910, 720, 2000),
+        fixture_version: 1,
+        pixel_policy: APPLE_SILICON_METAL_POLICY,
+        regions: WORKBENCH_SEARCH_REGIONS,
+    },
+    SceneSpec {
+        name: "omega_workbench_search_focused_result",
+        phase: ScenePhase::Recording,
+        viewport: ViewportFixture::new(1200, 720, 2000),
+        fixture_version: 1,
+        pixel_policy: APPLE_SILICON_METAL_POLICY,
+        regions: WORKBENCH_SEARCH_REGIONS,
+    },
+    SceneSpec {
+        name: "omega_workbench_search_error",
+        phase: ScenePhase::Recording,
+        viewport: ViewportFixture::new(1200, 720, 2000),
+        fixture_version: 1,
+        pixel_policy: APPLE_SILICON_METAL_POLICY,
+        regions: WORKBENCH_SEARCH_REGIONS,
     },
     SceneSpec {
         name: "omega_workbench_identity_clean",
@@ -3684,6 +3762,32 @@ mod tests {
             HERMETIC_SCENES.len()
         );
         assert_eq!(left, select_scenes(None, Some(0), Some(2)).unwrap());
+    }
+
+    #[test]
+    fn search_pixel_catalog_covers_required_states_and_region() {
+        let expected = BTreeSet::from([
+            "omega_workbench_search_empty",
+            "omega_workbench_search_populated",
+            "omega_workbench_search_no_results",
+            "omega_workbench_search_invalid_regex",
+            "omega_workbench_search_loading",
+            "omega_workbench_search_narrow",
+            "omega_workbench_search_focused_result",
+            "omega_workbench_search_error",
+        ]);
+        let registered = HERMETIC_SCENES
+            .iter()
+            .filter(|scene| scene.name.starts_with("omega_workbench_search_"))
+            .map(|scene| scene.name)
+            .collect::<BTreeSet<_>>();
+        assert_eq!(registered, expected);
+        for name in registered {
+            let scene = scene_spec(name).expect("registered Search scene");
+            assert_eq!(scene.phase, ScenePhase::Recording);
+            assert_eq!(scene.regions, WORKBENCH_SEARCH_REGIONS);
+            assert!(WORKBENCH_SHELL_PIXEL_SCENES.contains(&name));
+        }
     }
 
     #[test]

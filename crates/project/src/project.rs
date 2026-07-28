@@ -4664,7 +4664,12 @@ impl Project {
         })
     }
 
-    fn search_impl(&mut self, query: SearchQuery, cx: &mut Context<Self>) -> SearchResultsHandle {
+    fn search_impl(
+        &mut self,
+        query: SearchQuery,
+        worktree_scope: Option<WorktreeId>,
+        cx: &mut Context<Self>,
+    ) -> SearchResultsHandle {
         let client: Option<(AnyProtoClient, _)> = if let Some(ssh_client) = &self.remote_client {
             Some((ssh_client.read(cx).proto_client(), 0))
         } else if let Some(remote_id) = self.remote_id() {
@@ -4697,7 +4702,9 @@ impl Project {
                 ),
             }
         };
-        searcher.into_handle(query, cx)
+        searcher
+            .with_worktree_scope(worktree_scope)
+            .into_handle(query, cx)
     }
 
     pub fn search(
@@ -4705,7 +4712,16 @@ impl Project {
         query: SearchQuery,
         cx: &mut Context<Self>,
     ) -> SearchResults<SearchResult> {
-        self.search_impl(query, cx).results(cx)
+        self.search_impl(query, None, cx).results(cx)
+    }
+
+    pub fn search_in_worktree(
+        &mut self,
+        query: SearchQuery,
+        worktree_scope: Option<WorktreeId>,
+        cx: &mut Context<Self>,
+    ) -> SearchResults<SearchResult> {
+        self.search_impl(query, worktree_scope, cx).results(cx)
     }
 
     pub fn request_lsp<R: LspCommand>(
@@ -5748,7 +5764,8 @@ impl Project {
         let client = this.read_with(&cx, |this, _| this.client());
         let task = cx.spawn(async move |cx| {
             let results = this.update(cx, |this, cx| {
-                this.search_impl(query, cx).matching_buffers(cx)
+                this.search_impl(query, message.worktree_id.map(WorktreeId::from_proto), cx)
+                    .matching_buffers(cx)
             });
             let (batcher, batches) = project_search::AdaptiveBatcher::new(cx.background_executor());
             let mut new_matches = Box::pin(results.rx);

@@ -32,7 +32,7 @@ use language::{Buffer, Language};
 use menu::Confirm;
 use multi_buffer;
 use project::{
-    Project, ProjectPath, SearchResults,
+    Event as ProjectEvent, Project, ProjectPath, SearchResults, WorktreeId,
     search::{SearchInputKind, SearchQuery, SearchResult},
     search_history::SearchHistoryCursor,
 };
@@ -242,43 +242,88 @@ pub struct ProjectSearch {
     pub match_ranges: Vec<Range<Anchor>>,
     pub(crate) active_query: Option<SearchQuery>,
     last_search_query_text: Option<String>,
-    pub search_id: usize,
-    search_state: SearchState,
+    pub search_id: u64,
+    worktree_scope: Option<WorktreeId>,
+    search_state: ProjectSearchLifecycle,
+    detached_search_binding: Option<ProjectSearchRequest>,
     search_history_cursor: SearchHistoryCursor,
     search_included_history_cursor: SearchHistoryCursor,
     search_excluded_history_cursor: SearchHistoryCursor,
     pub project_search_turning_into_text_finder: Arc<AtomicBool>,
     _excerpts_subscription: Subscription,
+    _project_subscription: Subscription,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-enum SearchState {
+pub enum ProjectSearchLifecycle {
     #[default]
     Idle,
-    Running(SearchActivity),
-    Completed(SearchCompletion),
+    Running {
+        request: ProjectSearchRequest,
+        activity: ProjectSearchActivity,
+    },
+    Completed {
+        request: ProjectSearchRequest,
+        completion: ProjectSearchCompletion,
+    },
+    Cancelled {
+        request: ProjectSearchRequest,
+    },
+    Failed {
+        request: ProjectSearchRequest,
+        error: ProjectSearchError,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum SearchActivity {
+pub enum ProjectSearchActivity {
     Searching,
     WaitingForScan,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum SearchCompletion {
+pub enum ProjectSearchCompletion {
     NoResults,
-    Results { limit_reached: bool },
+    Results {
+        match_count: usize,
+        limit_reached: bool,
+    },
 }
 
-impl SearchState {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProjectSearchError {
+    Disconnected,
+    WorktreeUnavailable,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ProjectSearchRequest {
+    pub generation: u64,
+    pub worktree_id: Option<WorktreeId>,
+}
+
+impl ProjectSearchLifecycle {
     fn limit_reached(self) -> bool {
         matches!(
             self,
-            SearchState::Completed(SearchCompletion::Results {
-                limit_reached: true
-            })
+            ProjectSearchLifecycle::Completed {
+                completion: ProjectSearchCompletion::Results {
+                    limit_reached: true,
+                    ..
+                },
+                ..
+            }
         )
+    }
+
+    fn is_running(self) -> bool {
+        matches!(self, ProjectSearchLifecycle::Running { .. })
+    }
+}
+
+impl ProjectSearchRequest {
+    fn accepts(self, generation: u64, worktree_id: Option<WorktreeId>) -> bool {
+        self.generation == generation && self.worktree_id == worktree_id
     }
 }
 
@@ -300,7 +345,7 @@ pub struct ProjectSearchView {
     pub(crate) search_options: SearchOptions,
     panels_with_errors: HashMap<InputPanel, String>,
     active_match_index: Option<usize>,
-    search_id: usize,
+    search_id: u64,
     included_files_editor: Entity<Editor>,
     excluded_files_editor: Entity<Editor>,
     filters_enabled: bool,
@@ -320,6 +365,7 @@ pub struct ProjectSearchSettings {
 pub struct ProjectSearchBar {
     active_project_search: Option<Entity<ProjectSearchView>>,
     subscription: Option<Subscription>,
+    compact_mode: bool,
 }
 
 impl ProjectSearch {
@@ -327,6 +373,7 @@ impl ProjectSearch {
         let capability = project.read(cx).capability();
         let excerpts = cx.new(|_| MultiBuffer::new(capability));
         let subscription = Self::subscribe_to_excerpts(&excerpts, cx);
+        let project_subscription = Self::subscribe_to_project(&project, cx);
 
         Self {
             project,
@@ -336,12 +383,15 @@ impl ProjectSearch {
             active_query: None,
             last_search_query_text: None,
             search_id: 0,
-            search_state: SearchState::Idle,
+            worktree_scope: None,
+            search_state: ProjectSearchLifecycle::Idle,
+            detached_search_binding: None,
             search_history_cursor: Default::default(),
             search_included_history_cursor: Default::default(),
             search_excluded_history_cursor: Default::default(),
             project_search_turning_into_text_finder: Arc::new(AtomicBool::new(false)),
             _excerpts_subscription: subscription,
+            _project_subscription: project_subscription,
         }
     }
 
@@ -351,6 +401,7 @@ impl ProjectSearch {
                 .excerpts
                 .update(cx, |excerpts, cx| cx.new(|cx| excerpts.clone(cx)));
             let subscription = Self::subscribe_to_excerpts(&excerpts, cx);
+            let project_subscription = Self::subscribe_to_project(&self.project, cx);
 
             Self {
                 project: self.project.clone(),
@@ -360,17 +411,38 @@ impl ProjectSearch {
                 active_query: self.active_query.clone(),
                 last_search_query_text: self.last_search_query_text.clone(),
                 search_id: self.search_id,
+                worktree_scope: self.worktree_scope,
                 search_state: if self.pending_search.is_some() {
-                    SearchState::Idle
+                    ProjectSearchLifecycle::Idle
                 } else {
                     self.search_state
                 },
+                detached_search_binding: None,
                 search_history_cursor: self.search_history_cursor.clone(),
                 search_included_history_cursor: self.search_included_history_cursor.clone(),
                 search_excluded_history_cursor: self.search_excluded_history_cursor.clone(),
                 project_search_turning_into_text_finder: Arc::new(AtomicBool::new(false)),
                 _excerpts_subscription: subscription,
+                _project_subscription: project_subscription,
             }
+        })
+    }
+
+    fn subscribe_to_project(project: &Entity<Project>, cx: &mut Context<Self>) -> Subscription {
+        cx.subscribe(project, |this, _, event, cx| match event {
+            ProjectEvent::WorktreeRemoved(worktree_id)
+                if this.worktree_scope == Some(*worktree_id) =>
+            {
+                this.fail(ProjectSearchError::WorktreeUnavailable, cx);
+            }
+            ProjectEvent::DisconnectedFromHost
+            | ProjectEvent::DisconnectedFromRemote { .. }
+            | ProjectEvent::Closed
+                if this.search_state.is_running() =>
+            {
+                this.fail(ProjectSearchError::Disconnected, cx);
+            }
+            _ => {}
         })
     }
     fn subscribe_to_excerpts(
@@ -415,6 +487,107 @@ impl ProjectSearch {
         cx.notify();
     }
 
+    fn next_request(&mut self) -> ProjectSearchRequest {
+        self.search_id = self.search_id.wrapping_add(1);
+        ProjectSearchRequest {
+            generation: self.search_id,
+            worktree_id: self.worktree_scope,
+        }
+    }
+
+    fn current_request(&self) -> ProjectSearchRequest {
+        ProjectSearchRequest {
+            generation: self.search_id,
+            worktree_id: self.worktree_scope,
+        }
+    }
+
+    fn request_is_current(&self, request: ProjectSearchRequest) -> bool {
+        request.accepts(self.search_id, self.worktree_scope)
+    }
+
+    fn clear_search_output(&mut self, cx: &mut Context<Self>) {
+        self.pending_search.take();
+        self.project_search_turning_into_text_finder
+            .store(false, Ordering::Relaxed);
+        self.match_ranges.clear();
+        self.excerpts.update(cx, |excerpts, cx| excerpts.clear(cx));
+    }
+
+    fn fail(&mut self, error: ProjectSearchError, cx: &mut Context<Self>) {
+        let request = self.next_request();
+        self.clear_search_output(cx);
+        self.active_query = None;
+        self.last_search_query_text = None;
+        self.search_state = ProjectSearchLifecycle::Failed { request, error };
+        cx.notify();
+    }
+
+    fn set_worktree_scope(
+        &mut self,
+        worktree_scope: Option<WorktreeId>,
+        unavailable: bool,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let worktree_is_missing = worktree_scope.is_some_and(|worktree_id| {
+            self.project
+                .read(cx)
+                .worktree_for_id(worktree_id, cx)
+                .is_none()
+        });
+        let already_unavailable = matches!(
+            self.search_state,
+            ProjectSearchLifecycle::Failed {
+                error: ProjectSearchError::WorktreeUnavailable,
+                ..
+            }
+        );
+        let target_is_unavailable = unavailable || worktree_is_missing;
+        if self.worktree_scope == worktree_scope && target_is_unavailable == already_unavailable {
+            return false;
+        }
+
+        self.worktree_scope = worktree_scope;
+        self.detached_search_binding = None;
+        self.clear_search_output(cx);
+        self.active_query = None;
+        self.last_search_query_text = None;
+        let request = self.next_request();
+        if target_is_unavailable {
+            self.search_state = ProjectSearchLifecycle::Failed {
+                request,
+                error: ProjectSearchError::WorktreeUnavailable,
+            };
+        } else {
+            self.search_state = ProjectSearchLifecycle::Idle;
+        }
+        cx.notify();
+        true
+    }
+
+    fn cancel(&mut self, cx: &mut Context<Self>) -> bool {
+        if !self.search_state.is_running() && self.pending_search.is_none() {
+            return false;
+        }
+
+        let request = self.next_request();
+        self.clear_search_output(cx);
+        self.detached_search_binding = None;
+        self.search_state = ProjectSearchLifecycle::Cancelled { request };
+        cx.notify();
+        true
+    }
+
+    fn buffer_matches_scope(&self, buffer: &Entity<Buffer>, cx: &App) -> bool {
+        let Some(worktree_id) = self.worktree_scope else {
+            return true;
+        };
+        buffer
+            .read(cx)
+            .file()
+            .is_some_and(|file| file.worktree_id(cx) == worktree_id)
+    }
+
     fn cursor(&self, kind: SearchInputKind) -> &SearchHistoryCursor {
         match kind {
             SearchInputKind::Query => &self.search_history_cursor,
@@ -431,8 +604,27 @@ impl ProjectSearch {
     }
 
     fn search(&mut self, query: SearchQuery, cx: &mut Context<Self>) {
+        let preflight_error = {
+            let project = self.project.read(cx);
+            if project.is_disconnected(cx) {
+                Some(ProjectSearchError::Disconnected)
+            } else if self
+                .worktree_scope
+                .is_some_and(|worktree_id| project.worktree_for_id(worktree_id, cx).is_none())
+            {
+                Some(ProjectSearchError::WorktreeUnavailable)
+            } else {
+                None
+            }
+        };
+        if let Some(error) = preflight_error {
+            self.fail(error, cx);
+            return;
+        }
+
         let project_search_turning_into_text_finder =
             Arc::clone(&self.project_search_turning_into_text_finder);
+        let worktree_scope = self.worktree_scope;
         let search = self.project.update(cx, |project, cx| {
             project
                 .search_history_mut(SearchInputKind::Query)
@@ -449,16 +641,33 @@ impl ProjectSearch {
                     .search_history_mut(SearchInputKind::Exclude)
                     .add(&mut self.search_excluded_history_cursor, excluded);
             }
-            project.search(query.clone(), cx)
+            project.search_in_worktree(query.clone(), worktree_scope, cx)
         });
+        self.start_search_results(query, search, project_search_turning_into_text_finder, cx);
+    }
+
+    fn start_search_results(
+        &mut self,
+        query: SearchQuery,
+        search: SearchResults<SearchResult>,
+        project_search_turning_into_text_finder: Arc<AtomicBool>,
+        cx: &mut Context<Self>,
+    ) {
         self.last_search_query_text = Some(query.as_str().to_string());
-        self.search_id += 1;
+        let request = self.next_request();
         self.active_query = Some(query);
         self.match_ranges.clear();
-        self.search_state = SearchState::Running(SearchActivity::Searching);
+        self.detached_search_binding = None;
+        self.search_state = ProjectSearchLifecycle::Running {
+            request,
+            activity: ProjectSearchActivity::Searching,
+        };
         self.pending_search = Some(cx.spawn(async move |project_search, cx| {
             project_search
                 .update(cx, |project_search, cx| {
+                    if !project_search.request_is_current(request) {
+                        return;
+                    }
                     project_search.match_ranges.clear();
                     project_search
                         .excerpts
@@ -470,6 +679,7 @@ impl ProjectSearch {
                 project_search,
                 search,
                 project_search_turning_into_text_finder,
+                request,
                 cx,
             )
             .await
@@ -484,6 +694,13 @@ impl ProjectSearch {
         search_results: SearchResults<SearchResult>,
         cx: &mut Context<Self>,
     ) {
+        let request = self
+            .detached_search_binding
+            .take()
+            .unwrap_or_else(|| self.current_request());
+        if !self.request_is_current(request) {
+            return;
+        }
         let project_search_turning_into_text_finder =
             Arc::clone(&self.project_search_turning_into_text_finder);
 
@@ -492,11 +709,22 @@ impl ProjectSearch {
                 project_search,
                 search_results,
                 project_search_turning_into_text_finder,
+                request,
                 cx,
             )
             .await
         }));
         cx.notify();
+    }
+
+    pub(crate) fn take_pending_search(
+        &mut self,
+    ) -> Option<Task<Option<SearchResults<SearchResult>>>> {
+        let pending_search = self.pending_search.take();
+        if pending_search.is_some() {
+            self.detached_search_binding = Some(self.current_request());
+        }
+        pending_search
     }
 }
 
@@ -505,6 +733,7 @@ async fn consume_search_stream(
     project_search: WeakEntity<ProjectSearch>,
     search_results: SearchResults<SearchResult>,
     project_search_turning_into_text_finder: Arc<AtomicBool>,
+    request: ProjectSearchRequest,
     cx: &mut AsyncApp,
 ) -> Option<SearchResults<SearchResult>> {
     // Note: is cancel safe
@@ -512,6 +741,14 @@ async fn consume_search_stream(
 
     let mut limit_reached = false;
     while let Some(results) = matches.next().await {
+        let request_is_current = project_search
+            .read_with(cx, |project_search, _| {
+                project_search.request_is_current(request)
+            })
+            .ok()?;
+        if !request_is_current {
+            return None;
+        }
         let (buffers_with_ranges, has_reached_limit, search_activity) = cx
             .background_executor()
             .spawn(async move {
@@ -527,10 +764,10 @@ async fn consume_search_stream(
                             limit_reached = true;
                         }
                         project::search::SearchResult::WaitingForScan => {
-                            search_activity = Some(SearchActivity::WaitingForScan);
+                            search_activity = Some(ProjectSearchActivity::WaitingForScan);
                         }
                         project::search::SearchResult::Searching => {
-                            search_activity = Some(SearchActivity::Searching);
+                            search_activity = Some(ProjectSearchActivity::Searching);
                         }
                     }
                 }
@@ -541,14 +778,27 @@ async fn consume_search_stream(
         if let Some(search_activity) = search_activity {
             project_search
                 .update(cx, |project_search, cx| {
-                    project_search.search_state = SearchState::Running(search_activity);
+                    if !project_search.request_is_current(request) {
+                        return;
+                    }
+                    project_search.search_state = ProjectSearchLifecycle::Running {
+                        request,
+                        activity: search_activity,
+                    };
                     cx.notify();
                 })
                 .ok()?;
         }
-        let mut new_ranges = project_search
+        let new_ranges = project_search
             .update(cx, |project_search, cx| {
-                project_search.excerpts.update(cx, |excerpts, cx| {
+                if !project_search.request_is_current(request) {
+                    return None;
+                }
+                let buffers_with_ranges = buffers_with_ranges
+                    .into_iter()
+                    .filter(|(buffer, _)| project_search.buffer_matches_scope(buffer, cx))
+                    .collect::<Vec<_>>();
+                Some(project_search.excerpts.update(cx, |excerpts, cx| {
                     buffers_with_ranges
                         .into_iter()
                         .map(|(buffer, ranges)| {
@@ -561,15 +811,19 @@ async fn consume_search_stream(
                             )
                         })
                         .collect::<FuturesOrdered<_>>()
-                })
+                }))
             })
-            .ok()?;
+            .ok()??;
+        let mut new_ranges = new_ranges;
         while let Some(new_ranges) = new_ranges.next().await {
             // `new_ranges.next().await` likely never gets hit while still pending so `async_task`
             // will not reschedule, starving other front end tasks, insert a yield point for that here
             smol::future::yield_now().await;
             project_search
                 .update(cx, |project_search, cx| {
+                    if !project_search.request_is_current(request) {
+                        return;
+                    }
                     project_search.match_ranges.extend(new_ranges);
                     cx.notify();
                 })
@@ -590,10 +844,22 @@ async fn consume_search_stream(
 
     project_search
         .update(cx, |project_search, cx| {
+            if !project_search.request_is_current(request) {
+                return;
+            }
             project_search.search_state = if project_search.match_ranges.is_empty() {
-                SearchState::Completed(SearchCompletion::NoResults)
+                ProjectSearchLifecycle::Completed {
+                    request,
+                    completion: ProjectSearchCompletion::NoResults,
+                }
             } else {
-                SearchState::Completed(SearchCompletion::Results { limit_reached })
+                ProjectSearchLifecycle::Completed {
+                    request,
+                    completion: ProjectSearchCompletion::Results {
+                        match_count: project_search.match_ranges.len(),
+                        limit_reached,
+                    },
+                }
             };
             project_search.pending_search.take();
             cx.notify();
@@ -629,21 +895,71 @@ impl Render for ProjectSearchView {
         } else {
             let model = self.entity.read(cx);
 
-            let heading_text = match model.search_state {
-                SearchState::Running(SearchActivity::WaitingForScan) => "Loading project…",
-                SearchState::Running(SearchActivity::Searching) => "Searching…",
-                SearchState::Completed(SearchCompletion::NoResults) => "No Results",
+            let heading_label = match model.search_state {
+                ProjectSearchLifecycle::Running {
+                    activity: ProjectSearchActivity::WaitingForScan,
+                    ..
+                } => "Loading project…",
+                ProjectSearchLifecycle::Running {
+                    activity: ProjectSearchActivity::Searching,
+                    ..
+                } => "Searching…",
+                ProjectSearchLifecycle::Completed {
+                    completion: ProjectSearchCompletion::NoResults,
+                    ..
+                } => "No Results",
+                ProjectSearchLifecycle::Cancelled { .. } => "Search Cancelled",
+                ProjectSearchLifecycle::Failed {
+                    error: ProjectSearchError::Disconnected,
+                    ..
+                } => "Search Unavailable",
+                ProjectSearchLifecycle::Failed {
+                    error: ProjectSearchError::WorktreeUnavailable,
+                    ..
+                } => "Worktree Unavailable",
                 _ => "Search All Files",
             };
+            let lifecycle_role =
+                if matches!(model.search_state, ProjectSearchLifecycle::Failed { .. }) {
+                    gpui::Role::Alert
+                } else {
+                    gpui::Role::Status
+                };
 
             let heading_text = div()
                 .justify_center()
-                .child(Label::new(heading_text).size(LabelSize::Large));
+                .child(Label::new(heading_label).size(LabelSize::Large));
 
             let page_content: Option<AnyElement> = match model.search_state {
-                SearchState::Idle => Some(self.landing_text_minor(cx).into_any_element()),
-                SearchState::Completed(SearchCompletion::NoResults) => Some(
+                ProjectSearchLifecycle::Idle => {
+                    Some(self.landing_text_minor(cx).into_any_element())
+                }
+                ProjectSearchLifecycle::Completed {
+                    completion: ProjectSearchCompletion::NoResults,
+                    ..
+                } => Some(
                     Label::new("No results found in this project for the provided query")
+                        .size(LabelSize::Small)
+                        .into_any_element(),
+                ),
+                ProjectSearchLifecycle::Cancelled { .. } => Some(
+                    Label::new("The search was cancelled")
+                        .size(LabelSize::Small)
+                        .into_any_element(),
+                ),
+                ProjectSearchLifecycle::Failed {
+                    error: ProjectSearchError::Disconnected,
+                    ..
+                } => Some(
+                    Label::new("Reconnect the project before searching again")
+                        .size(LabelSize::Small)
+                        .into_any_element(),
+                ),
+                ProjectSearchLifecycle::Failed {
+                    error: ProjectSearchError::WorktreeUnavailable,
+                    ..
+                } => Some(
+                    Label::new("The bound worktree is no longer available")
                         .size(LabelSize::Small)
                         .into_any_element(),
                 ),
@@ -662,12 +978,19 @@ impl Render for ProjectSearchView {
                 .bg(cx.theme().colors().editor_background)
                 .track_focus(&self.focus_handle(cx))
                 .child(
-                    v_flex()
-                        .id("project-search-landing-page")
-                        .overflow_y_scroll()
-                        .gap_1()
-                        .child(heading_text)
-                        .children(page_content),
+                    div()
+                        .id("omega.workbench.search.lifecycle")
+                        .debug_selector(|| "omega.workbench.search.lifecycle".to_string())
+                        .role(lifecycle_role)
+                        .aria_label(heading_label)
+                        .child(
+                            v_flex()
+                                .id("project-search-landing-page")
+                                .overflow_y_scroll()
+                                .gap_1()
+                                .child(heading_text)
+                                .children(page_content),
+                        ),
                 )
         }
     }
@@ -863,6 +1186,57 @@ impl Item for ProjectSearchView {
 impl ProjectSearchView {
     pub fn get_matches(&self, cx: &App) -> Vec<Range<Anchor>> {
         self.entity.read(cx).match_ranges.clone()
+    }
+
+    pub fn worktree_scope(&self, cx: &App) -> Option<WorktreeId> {
+        self.entity.read(cx).worktree_scope
+    }
+
+    pub fn lifecycle(&self, cx: &App) -> ProjectSearchLifecycle {
+        self.entity.read(cx).search_state
+    }
+
+    pub fn request_generation(&self, cx: &App) -> u64 {
+        self.entity.read(cx).search_id
+    }
+
+    pub fn set_worktree_scope(
+        &mut self,
+        worktree_scope: Option<WorktreeId>,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let changed = self.entity.update(cx, |search, cx| {
+            search.set_worktree_scope(worktree_scope, false, cx)
+        });
+        if changed {
+            self.active_match_index = None;
+            self.pending_replace_all = false;
+        }
+        changed
+    }
+
+    pub fn set_worktree_scope_unavailable(
+        &mut self,
+        compatible_worktree_scope: Option<WorktreeId>,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let changed = self.entity.update(cx, |search, cx| {
+            search.set_worktree_scope(compatible_worktree_scope, true, cx)
+        });
+        if changed {
+            self.active_match_index = None;
+            self.pending_replace_all = false;
+        }
+        changed
+    }
+
+    pub fn cancel_search(&mut self, cx: &mut Context<Self>) -> bool {
+        let cancelled = self.entity.update(cx, |search, cx| search.cancel(cx));
+        if cancelled {
+            self.active_match_index = None;
+            self.pending_replace_all = false;
+        }
+        cancelled
     }
 
     fn open_text_finder(
@@ -1689,14 +2063,24 @@ impl ProjectSearchView {
         self.adjust_query_regex_language(cx);
         if let Some(query) = active_query {
             let query_text = query.as_str().to_string();
-            self.entity.update(cx, |search, _| {
+            self.entity.update(cx, |search, cx| {
                 search.active_query = Some(query.clone());
                 search.last_search_query_text = Some(query_text.clone());
-                // Force `entity_changed` to treat this as a new search so the
-                // first match gets selected and scrolled into view. The text
-                // finder ran its searches via `project.search` directly, so the
-                // entity's `search_id` was never advanced.
-                search.search_id += 1;
+                let request = search.next_request();
+                let completion = if search.match_ranges.is_empty() {
+                    ProjectSearchCompletion::NoResults
+                } else {
+                    ProjectSearchCompletion::Results {
+                        match_count: search.match_ranges.len(),
+                        limit_reached: false,
+                    }
+                };
+                search.search_state = ProjectSearchLifecycle::Completed {
+                    request,
+                    completion,
+                };
+                search.detached_search_binding = None;
+                cx.notify();
             });
             self.set_search_editor(SearchInputKind::Query, &query_text, window, cx);
             self.focus_results_editor(window, cx);
@@ -1971,7 +2355,21 @@ impl ProjectSearchBar {
         Self {
             active_project_search: None,
             subscription: None,
+            compact_mode: false,
         }
+    }
+
+    pub fn set_compact_mode(&mut self, compact_mode: bool, cx: &mut Context<Self>) -> bool {
+        if self.compact_mode == compact_mode {
+            return false;
+        }
+        self.compact_mode = compact_mode;
+        cx.notify();
+        true
+    }
+
+    pub fn is_compact_mode(&self) -> bool {
+        self.compact_mode
     }
 
     fn confirm(&mut self, _: &Confirm, window: &mut Window, cx: &mut Context<Self>) {
@@ -1999,7 +2397,7 @@ impl ProjectSearchBar {
         self.cycle_field(Direction::Prev, window, cx);
     }
 
-    fn focus_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn focus_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(search_view) = self.active_project_search.as_ref() {
             search_view.update(cx, |search_view, cx| {
                 search_view.focus_query_editor(window, cx);
@@ -2040,7 +2438,7 @@ impl ProjectSearchBar {
         });
     }
 
-    pub(crate) fn toggle_search_option(
+    pub fn toggle_search_option(
         &mut self,
         option: SearchOptions,
         window: &mut Window,
@@ -2075,7 +2473,12 @@ impl ProjectSearchBar {
         true
     }
 
-    fn toggle_replace(&mut self, _: &ToggleReplace, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn toggle_replace(
+        &mut self,
+        _: &ToggleReplace,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if let Some(search) = &self.active_project_search {
             search.update(cx, |this, cx| {
                 this.replace_enabled = !this.replace_enabled;
@@ -2090,7 +2493,33 @@ impl ProjectSearchBar {
         }
     }
 
-    fn toggle_filters(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+    pub fn replace_next(
+        &mut self,
+        action: &ReplaceNext,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(search) = &self.active_project_search else {
+            return false;
+        };
+        search.update(cx, |search, cx| search.replace_next(action, window, cx));
+        true
+    }
+
+    pub fn replace_all(
+        &mut self,
+        action: &ReplaceAll,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(search) = &self.active_project_search else {
+            return false;
+        };
+        search.update(cx, |search, cx| search.replace_all(action, window, cx));
+        true
+    }
+
+    pub fn toggle_filters(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
         if let Some(search_view) = self.active_project_search.as_ref() {
             search_view.update(cx, |search_view, cx| {
                 search_view.toggle_filters(cx);
@@ -2148,7 +2577,7 @@ impl ProjectSearchBar {
         }
     }
 
-    fn move_focus_to_results(&self, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn move_focus_to_results(&self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(search_view) = self.active_project_search.as_ref() {
             search_view.update(cx, |search_view, cx| {
                 search_view.move_focus_to_results(window, cx);
@@ -2266,7 +2695,7 @@ impl ProjectSearchBar {
         }
     }
 
-    fn select_next_match(
+    pub fn select_next_match(
         &mut self,
         _: &SelectNextMatch,
         window: &mut Window,
@@ -2279,7 +2708,7 @@ impl ProjectSearchBar {
         }
     }
 
-    fn select_prev_match(
+    pub fn select_prev_match(
         &mut self,
         _: &SelectPreviousMatch,
         window: &mut Window,
@@ -2317,10 +2746,15 @@ impl Render for ProjectSearchBar {
 
         let container_width = window.viewport_size().width;
         let input_width = SearchInputWidth::calc_width(container_width);
+        let compact_mode = self.compact_mode;
 
         let input_base_styles = |panel: InputPanel| {
             input_base_styles(search.border_color_for(panel, cx), |div| match panel {
+                InputPanel::Query | InputPanel::Replacement if compact_mode => {
+                    div.w_full().min_w_0()
+                }
                 InputPanel::Query | InputPanel::Replacement => div.w(input_width),
+                InputPanel::Include | InputPanel::Exclude if compact_mode => div.w_full().min_w_0(),
                 InputPanel::Include | InputPanel::Exclude => div.flex_grow_1(),
             })
         };
@@ -2335,7 +2769,10 @@ impl Render for ProjectSearchBar {
             &project_search.last_search_query_text,
         ) {
             (
-                SearchState::Completed(SearchCompletion::NoResults),
+                ProjectSearchLifecycle::Completed {
+                    completion: ProjectSearchCompletion::NoResults,
+                    ..
+                },
                 Some(query),
                 Some(previous_query),
             ) if query.as_str() == previous_query => Some(Color::Error),
@@ -2363,6 +2800,7 @@ impl Render for ProjectSearchBar {
         let query_focus = search.query_editor.focus_handle(cx);
 
         let query_column = input_base_styles(InputPanel::Query)
+            .when(compact_mode, |this| this.flex_1().min_w_0())
             .on_action(cx.listener(|this, action, window, cx| this.confirm(action, window, cx)))
             .on_action(cx.listener(|this, action, window, cx| {
                 this.previous_history_query(action, window, cx)
@@ -2456,7 +2894,8 @@ impl Render for ProjectSearchBar {
 
         let mode_column = h_flex()
             .gap_1()
-            .min_w_64()
+            .when(!compact_mode, |this| this.min_w_64())
+            .when(compact_mode, |this| this.w_full().justify_between())
             .child(
                 IconButton::new("project-search-filter-button", IconName::Filter)
                     .shape(IconButtonShape::Square)
@@ -2523,13 +2962,32 @@ impl Render for ProjectSearchBar {
                 }
             }));
 
-        let search_line = h_flex()
-            .pl_0p5()
-            .w_full()
-            .gap_2()
-            .child(expand_button)
-            .child(query_column)
-            .child(mode_column);
+        let search_line = if compact_mode {
+            v_flex()
+                .pl_0p5()
+                .w_full()
+                .min_w_0()
+                .gap_1()
+                .child(
+                    h_flex()
+                        .w_full()
+                        .min_w_0()
+                        .gap_1()
+                        .child(expand_button)
+                        .child(query_column),
+                )
+                .child(mode_column)
+                .into_any_element()
+        } else {
+            h_flex()
+                .pl_0p5()
+                .w_full()
+                .gap_2()
+                .child(expand_button)
+                .child(query_column)
+                .child(mode_column)
+                .into_any_element()
+        };
 
         let replace_line = search.replace_enabled.then(|| {
             let replace_column = input_base_styles(InputPanel::Replacement).child(
@@ -2542,7 +3000,8 @@ impl Render for ProjectSearchBar {
 
             let focus_handle = search.replacement_editor.read(cx).focus_handle(cx);
             let replace_actions = h_flex()
-                .min_w_64()
+                .when(!compact_mode, |this| this.min_w_64())
+                .when(compact_mode, |this| this.w_full().justify_end())
                 .gap_1()
                 .child(render_action_button(
                     "project-search-replace-button",
@@ -2561,12 +3020,23 @@ impl Render for ProjectSearchBar {
                     focus_handle,
                 ));
 
-            h_flex()
-                .w_full()
-                .gap_2()
-                .child(alignment_element())
-                .child(replace_column)
-                .child(replace_actions)
+            if compact_mode {
+                v_flex()
+                    .w_full()
+                    .min_w_0()
+                    .gap_1()
+                    .child(replace_column)
+                    .child(replace_actions)
+                    .into_any_element()
+            } else {
+                h_flex()
+                    .w_full()
+                    .gap_2()
+                    .child(alignment_element())
+                    .child(replace_column)
+                    .child(replace_actions)
+                    .into_any_element()
+            }
         });
 
         let filter_line = search.filters_enabled.then(|| {
@@ -2588,7 +3058,8 @@ impl Render for ProjectSearchBar {
                 .child(render_text_input(&search.excluded_files_editor, None, cx));
             let mode_column = h_flex()
                 .gap_1()
-                .min_w_64()
+                .when(!compact_mode, |this| this.min_w_64())
+                .when(compact_mode, |this| this.w_full().justify_end())
                 .child(
                     IconButton::new("project-search-opened-only", IconName::FolderSearch)
                         .shape(IconButtonShape::Square)
@@ -2604,18 +3075,30 @@ impl Render for ProjectSearchBar {
                     focus_handle,
                 ));
 
-            h_flex()
-                .w_full()
-                .gap_2()
-                .child(alignment_element())
-                .child(
-                    h_flex()
-                        .w(input_width)
-                        .gap_2()
-                        .child(include)
-                        .child(exclude),
-                )
-                .child(mode_column)
+            if compact_mode {
+                v_flex()
+                    .w_full()
+                    .min_w_0()
+                    .gap_1()
+                    .child(include)
+                    .child(exclude)
+                    .child(mode_column)
+                    .into_any_element()
+            } else {
+                h_flex()
+                    .w_full()
+                    .gap_2()
+                    .child(alignment_element())
+                    .child(
+                        h_flex()
+                            .w(input_width)
+                            .gap_2()
+                            .child(include)
+                            .child(exclude),
+                    )
+                    .child(mode_column)
+                    .into_any_element()
+            }
         });
 
         let mut key_context = KeyContext::default();
@@ -2632,11 +3115,14 @@ impl Render for ProjectSearchBar {
             .panels_with_errors
             .get(&InputPanel::Query)
             .map(|error| {
-                Label::new(error)
-                    .size(LabelSize::Small)
-                    .color(Color::Error)
+                div()
+                    .id("omega.workbench.search.query-error")
+                    .debug_selector(|| "omega.workbench.search.query-error".to_string())
+                    .role(gpui::Role::Alert)
+                    .aria_label(error.clone())
                     .mt_neg_1()
                     .ml_2()
+                    .child(Label::new(error).size(LabelSize::Small).color(Color::Error))
             });
 
         let filter_error_line = search
@@ -2654,6 +3140,7 @@ impl Render for ProjectSearchBar {
         v_flex()
             .gap_2()
             .w_full()
+            .when(compact_mode, |this| this.min_w_0())
             .key_context(key_context)
             .on_action(cx.listener(|this, _: &ToggleFocus, window, cx| {
                 this.move_focus_to_results(window, cx)
@@ -2781,6 +3268,160 @@ fn register_workspace_action_for_present_search<A: Action>(
 }
 
 #[cfg(any(test, feature = "test-support"))]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProjectSearchTestMatch {
+    pub path: ProjectPath,
+    pub range: Range<text::Anchor>,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProjectSearchTestSnapshot {
+    pub generation: u64,
+    pub lifecycle: ProjectSearchLifecycle,
+    pub worktree_scope: Option<WorktreeId>,
+    pub query: String,
+    pub replacement: String,
+    pub included_files: String,
+    pub excluded_files: String,
+    pub search_options: SearchOptions,
+    pub filters_enabled: bool,
+    pub replace_enabled: bool,
+    pub active_query: Option<String>,
+    pub query_error: Option<String>,
+    pub pending: bool,
+    pub matches: Vec<ProjectSearchTestMatch>,
+    pub active_match_index: Option<usize>,
+    pub active_match: Option<ProjectSearchTestMatch>,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl ProjectSearchView {
+    pub fn query_editor_for_tests(&self) -> &Entity<Editor> {
+        &self.query_editor
+    }
+
+    pub fn results_editor_for_tests(&self) -> &Entity<Editor> {
+        &self.results_editor
+    }
+
+    pub fn test_snapshot(&self, cx: &App) -> ProjectSearchTestSnapshot {
+        let search = self.entity.read(cx);
+        let excerpts = search.excerpts.read(cx);
+        let snapshot = excerpts.snapshot(cx);
+        let matches = search
+            .match_ranges
+            .iter()
+            .filter_map(|range| {
+                let (buffer_snapshot, range) =
+                    snapshot.anchor_range_to_buffer_anchor_range(range.clone())?;
+                let file = buffer_snapshot.file()?;
+                Some(ProjectSearchTestMatch {
+                    path: ProjectPath {
+                        worktree_id: file.worktree_id(cx),
+                        path: Arc::clone(file.path()),
+                    },
+                    range,
+                })
+            })
+            .collect::<Vec<_>>();
+        let active_match = self
+            .active_match_index
+            .and_then(|index| matches.get(index).cloned());
+
+        ProjectSearchTestSnapshot {
+            generation: search.search_id,
+            lifecycle: search.search_state,
+            worktree_scope: search.worktree_scope,
+            query: self.query_editor.read(cx).text(cx),
+            replacement: self.replacement_editor.read(cx).text(cx),
+            included_files: self.included_files_editor.read(cx).text(cx),
+            excluded_files: self.excluded_files_editor.read(cx).text(cx),
+            search_options: self.search_options,
+            filters_enabled: self.filters_enabled,
+            replace_enabled: self.replace_enabled,
+            active_query: search
+                .active_query
+                .as_ref()
+                .map(|query| query.as_str().to_owned()),
+            query_error: self.panels_with_errors.get(&InputPanel::Query).cloned(),
+            pending: search.pending_search.is_some(),
+            matches,
+            active_match_index: self.active_match_index,
+            active_match,
+        }
+    }
+
+    pub fn test_set_query(
+        &mut self,
+        query: impl Into<Arc<str>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.query_editor
+            .update(cx, |editor, cx| editor.set_text(query, window, cx));
+    }
+
+    pub fn test_set_replacement(
+        &mut self,
+        replacement: impl Into<Arc<str>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.replacement_editor
+            .update(cx, |editor, cx| editor.set_text(replacement, window, cx));
+    }
+
+    pub fn test_set_filters(
+        &mut self,
+        included_files: impl Into<Arc<str>>,
+        excluded_files: impl Into<Arc<str>>,
+        enabled: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.filters_enabled = enabled;
+        self.included_files_editor
+            .update(cx, |editor, cx| editor.set_text(included_files, window, cx));
+        self.excluded_files_editor
+            .update(cx, |editor, cx| editor.set_text(excluded_files, window, cx));
+        cx.notify();
+    }
+
+    pub fn test_set_search_options(
+        &mut self,
+        search_options: SearchOptions,
+        cx: &mut Context<Self>,
+    ) {
+        self.search_options = search_options;
+        self.adjust_query_regex_language(cx);
+        cx.notify();
+    }
+
+    pub fn test_start_search(&mut self, cx: &mut Context<Self>) {
+        self.search(cx);
+    }
+
+    pub fn test_start_search_results(
+        &mut self,
+        query: SearchQuery,
+        search_results: SearchResults<SearchResult>,
+        cx: &mut Context<Self>,
+    ) {
+        let project_search_turning_into_text_finder =
+            Arc::clone(&self.entity.read(cx).project_search_turning_into_text_finder);
+        self.entity.update(cx, |search, cx| {
+            search.start_search_results(
+                query,
+                search_results,
+                project_search_turning_into_text_finder,
+                cx,
+            )
+        });
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
 pub fn perform_project_search(
     search_view: &Entity<ProjectSearchView>,
     text: impl Into<std::sync::Arc<str>>,
@@ -2808,6 +3449,7 @@ pub mod tests {
     };
 
     use super::*;
+    use async_channel::unbounded;
     use editor::{DisplayPoint, display_map::DisplayRow};
     use gpui::{Action, TestAppContext, VisualTestContext, WindowHandle};
     use language::{FakeLspAdapter, Point as BufferPoint, rust_lang};
@@ -2843,6 +3485,301 @@ pub mod tests {
         assert_eq!(split_glob_patterns(r"\{a,b\}"), vec![r"\{a", r"b\}"]);
         assert_eq!(split_glob_patterns(r"a\\,b"), vec![r"a\\", "b"]);
         assert_eq!(split_glob_patterns(r"a\\\,b"), vec![r"a\\\,b"]);
+    }
+
+    #[gpui::test]
+    async fn test_worktree_scope_filters_native_search_before_results(cx: &mut TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.background_executor.clone());
+        fs.insert_tree(
+            path!("/alpha"),
+            json!({
+                "target.txt": "needle α",
+                "ignored.txt": "needle ignored",
+                ".gitignore": "ignored.txt\n",
+            }),
+        )
+        .await;
+        fs.insert_tree(
+            path!("/beta"),
+            json!({
+                "target.txt": "needle β",
+                "very-long.txt": format!("{}needle", "x".repeat(32_000)),
+            }),
+        )
+        .await;
+
+        let project =
+            Project::test(fs, [path!("/alpha").as_ref(), path!("/beta").as_ref()], cx).await;
+        let worktrees = project.read_with(cx, |project, cx| {
+            project
+                .visible_worktrees(cx)
+                .map(|worktree| {
+                    let worktree = worktree.read(cx);
+                    (worktree.root_name().as_unix_str().to_owned(), worktree.id())
+                })
+                .collect::<HashMap<_, _>>()
+        });
+        let Some(alpha_worktree_id) = worktrees.get("alpha").copied() else {
+            panic!("alpha worktree should exist");
+        };
+        let Some(beta_worktree_id) = worktrees.get("beta").copied() else {
+            panic!("beta worktree should exist");
+        };
+
+        let window =
+            cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+        let Ok(workspace) = window.read_with(cx, |workspace, _| workspace.workspace().clone())
+        else {
+            panic!("workspace should exist");
+        };
+        let search = cx.new(|cx| ProjectSearch::new(project.clone(), cx));
+        let search_view = cx.add_window(|window, cx| {
+            ProjectSearchView::new(workspace.downgrade(), search, window, cx, None)
+        });
+
+        let scope_changed = search_view.update(cx, |search_view, _, cx| {
+            search_view.set_worktree_scope(Some(alpha_worktree_id), cx)
+        });
+        let Ok(scope_changed) = scope_changed else {
+            panic!("alpha scope should be settable");
+        };
+        assert!(scope_changed);
+        perform_search(search_view, "needle", cx);
+        let alpha_snapshot =
+            search_view.update(cx, |search_view, _, cx| search_view.test_snapshot(cx));
+        let Ok(alpha_snapshot) = alpha_snapshot else {
+            panic!("alpha search snapshot should be readable");
+        };
+        assert_eq!(alpha_snapshot.matches.len(), 1);
+        assert!(
+            alpha_snapshot
+                .matches
+                .iter()
+                .all(|search_match| search_match.path.worktree_id == alpha_worktree_id)
+        );
+
+        let scope_changed = search_view.update(cx, |search_view, _, cx| {
+            search_view.set_worktree_scope(Some(beta_worktree_id), cx)
+        });
+        let Ok(scope_changed) = scope_changed else {
+            panic!("beta scope should be settable");
+        };
+        assert!(scope_changed);
+        perform_search(search_view, "needle", cx);
+        let beta_snapshot =
+            search_view.update(cx, |search_view, _, cx| search_view.test_snapshot(cx));
+        let Ok(beta_snapshot) = beta_snapshot else {
+            panic!("beta search snapshot should be readable");
+        };
+        assert_eq!(beta_snapshot.matches.len(), 2);
+        assert!(
+            beta_snapshot
+                .matches
+                .iter()
+                .all(|search_match| search_match.path.worktree_id == beta_worktree_id)
+        );
+        let same_scope = search_view.update(cx, |search_view, _, cx| {
+            search_view.set_worktree_scope(Some(beta_worktree_id), cx)
+        });
+        let Ok(same_scope) = same_scope else {
+            panic!("beta scope should be reassertable");
+        };
+        assert!(!same_scope);
+        let reasserted_snapshot =
+            search_view.update(cx, |search_view, _, cx| search_view.test_snapshot(cx));
+        let Ok(reasserted_snapshot) = reasserted_snapshot else {
+            panic!("reasserted search snapshot should be readable");
+        };
+        assert_eq!(reasserted_snapshot.generation, beta_snapshot.generation);
+        assert_eq!(
+            reasserted_snapshot.active_match_index,
+            beta_snapshot.active_match_index
+        );
+
+        project.update(cx, |project, cx| {
+            project.remove_worktree(beta_worktree_id, cx);
+        });
+        cx.run_until_parked();
+        let removed_snapshot =
+            search_view.update(cx, |search_view, _, cx| search_view.test_snapshot(cx));
+        let Ok(removed_snapshot) = removed_snapshot else {
+            panic!("removed-worktree search snapshot should be readable");
+        };
+        assert!(removed_snapshot.matches.is_empty());
+        assert_eq!(
+            removed_snapshot.lifecycle,
+            ProjectSearchLifecycle::Failed {
+                request: ProjectSearchRequest {
+                    generation: removed_snapshot.generation,
+                    worktree_id: Some(beta_worktree_id),
+                },
+                error: ProjectSearchError::WorktreeUnavailable,
+            }
+        );
+    }
+
+    #[gpui::test(iterations = 10)]
+    async fn test_search_generation_rejects_stale_stream_and_cancel_is_observable(
+        cx: &mut TestAppContext,
+    ) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.background_executor.clone());
+        fs.insert_tree(path!("/project"), json!({})).await;
+        let project = Project::test(fs, [path!("/project").as_ref()], cx).await;
+        let window =
+            cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+        let Ok(workspace) = window.read_with(cx, |workspace, _| workspace.workspace().clone())
+        else {
+            panic!("workspace should exist");
+        };
+        let search = cx.new(|cx| ProjectSearch::new(project, cx));
+        let search_view = cx.add_window(|window, cx| {
+            ProjectSearchView::new(workspace.downgrade(), search.clone(), window, cx, None)
+        });
+
+        let Ok(first_query) = SearchQuery::text(
+            "first",
+            false,
+            false,
+            false,
+            PathMatcher::default(),
+            PathMatcher::default(),
+            false,
+            None,
+        ) else {
+            panic!("first query should be valid");
+        };
+        let (first_tx, first_rx) = unbounded();
+        let first_started = search_view.update(cx, |search_view, _, cx| {
+            search_view.test_start_search_results(
+                first_query,
+                SearchResults {
+                    task_handle: Task::ready(()),
+                    rx: first_rx,
+                },
+                cx,
+            );
+            search_view.request_generation(cx)
+        });
+        let Ok(first_generation) = first_started else {
+            panic!("first search should start");
+        };
+        let Some(_first_pending_task) = search.update(cx, |search, _| search.take_pending_search())
+        else {
+            panic!("first search should be pending");
+        };
+
+        let Ok(second_query) = SearchQuery::text(
+            "second",
+            false,
+            false,
+            false,
+            PathMatcher::default(),
+            PathMatcher::default(),
+            false,
+            None,
+        ) else {
+            panic!("second query should be valid");
+        };
+        let (second_tx, second_rx) = unbounded();
+        let second_started = search_view.update(cx, |search_view, _, cx| {
+            search_view.test_start_search_results(
+                second_query,
+                SearchResults {
+                    task_handle: Task::ready(()),
+                    rx: second_rx,
+                },
+                cx,
+            );
+            search_view.request_generation(cx)
+        });
+        let Ok(second_generation) = second_started else {
+            panic!("second search should start");
+        };
+        assert!(second_generation > first_generation);
+
+        assert!(first_tx.try_send(SearchResult::WaitingForScan).is_ok());
+        cx.run_until_parked();
+        let lifecycle = search_view.update(cx, |search_view, _, cx| search_view.lifecycle(cx));
+        let Ok(lifecycle) = lifecycle else {
+            panic!("second search lifecycle should be readable");
+        };
+        assert_eq!(
+            lifecycle,
+            ProjectSearchLifecycle::Running {
+                request: ProjectSearchRequest {
+                    generation: second_generation,
+                    worktree_id: None,
+                },
+                activity: ProjectSearchActivity::Searching,
+            }
+        );
+
+        drop(second_tx);
+        cx.run_until_parked();
+        let completed = search_view.update(cx, |search_view, _, cx| search_view.lifecycle(cx));
+        let Ok(completed) = completed else {
+            panic!("completed search lifecycle should be readable");
+        };
+        assert_eq!(
+            completed,
+            ProjectSearchLifecycle::Completed {
+                request: ProjectSearchRequest {
+                    generation: second_generation,
+                    worktree_id: None,
+                },
+                completion: ProjectSearchCompletion::NoResults,
+            }
+        );
+
+        let Ok(third_query) = SearchQuery::text(
+            "third",
+            false,
+            false,
+            false,
+            PathMatcher::default(),
+            PathMatcher::default(),
+            false,
+            None,
+        ) else {
+            panic!("third query should be valid");
+        };
+        let (third_tx, third_rx) = unbounded();
+        let third_started = search_view.update(cx, |search_view, _, cx| {
+            search_view.test_start_search_results(
+                third_query,
+                SearchResults {
+                    task_handle: Task::ready(()),
+                    rx: third_rx,
+                },
+                cx,
+            );
+            search_view.request_generation(cx)
+        });
+        let Ok(third_generation) = third_started else {
+            panic!("third search should start");
+        };
+        let cancelled = search_view.update(cx, |search_view, _, cx| {
+            let cancelled = search_view.cancel_search(cx);
+            (cancelled, search_view.test_snapshot(cx))
+        });
+        let Ok((true, cancelled)) = cancelled else {
+            panic!("third search should be cancelled");
+        };
+        assert!(cancelled.generation > third_generation);
+        assert_eq!(
+            cancelled.lifecycle,
+            ProjectSearchLifecycle::Cancelled {
+                request: ProjectSearchRequest {
+                    generation: cancelled.generation,
+                    worktree_id: None,
+                },
+            }
+        );
+        assert!(!cancelled.pending);
+        cx.run_until_parked();
+        assert!(third_tx.try_send(SearchResult::Searching).is_err());
     }
 
     #[perf]

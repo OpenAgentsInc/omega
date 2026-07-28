@@ -107,7 +107,10 @@ pub async fn measure_installed_tree(fs: &dyn Fs, dir: &Path) -> Option<MeasuredD
                 if metadata.len > MAX_MEASURED_FILE_BYTES {
                     return None;
                 }
-                files.push((relative, MeasuredDigest::measure(&fs.load_bytes(&entry).await.ok()?)));
+                files.push((
+                    relative,
+                    MeasuredDigest::measure(&fs.load_bytes(&entry).await.ok()?),
+                ));
             }
             if files.len() > MAX_MEASURED_TREE_FILES {
                 return None;

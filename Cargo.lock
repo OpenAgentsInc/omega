@@ -15992,6 +15992,7 @@ version = "0.1.0"
 dependencies = [
  "any_vec",
  "anyhow",
+ "async-channel 2.5.0",
  "bitflags 2.13.1",
  "collections",
  "db",
@@ -22453,6 +22454,7 @@ dependencies = [
  "ashpd",
  "askpass",
  "assets",
+ "async-channel 2.5.0",
  "audio",
  "auto_update",
  "auto_update_ui",

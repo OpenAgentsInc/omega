@@ -2,15 +2,24 @@ use std::{cell::Cell, collections::BTreeMap};
 
 use anyhow::{Result, anyhow, bail};
 use gpui::{
-    Action, App, Context, Entity, FocusHandle, Focusable, Pixels, Render, SharedString, Window,
-    actions, px,
+    Action, App, Context, Entity, FocusHandle, Focusable, Pixels, Render, SharedString, WeakEntity,
+    Window, actions, px,
 };
 use omega_workbench_state::{
     ConnectionPhase, ProjectionSnapshot, ProjectionTransition, RepositoryBinding, WorkSurface,
     WorkbenchProjection,
 };
+use project::Project;
 use project_panel::ProjectPanel;
+use search::{
+    FocusSearch, ReplaceAll, ReplaceNext, SearchOptions, SelectNextMatch, SelectPreviousMatch,
+    ToggleCaseSensitive, ToggleIncludeIgnored, ToggleRegex, ToggleReplace, ToggleWholeWord,
+    project_search::{
+        ProjectSearch, ProjectSearchBar, ProjectSearchView, ToggleFilters, ToggleFocus,
+    },
+};
 use ui::{Color, Icon, IconName, IconSize, Label, LabelSize, prelude::*, v_flex};
+use workspace::{ToolbarItemView, Workspace, item::Item};
 
 use crate::{
     omega_sidebar,
@@ -152,17 +161,304 @@ pub enum SurfaceContentState {
     Offline,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NativeSearchFocusTarget {
+    Query,
+    Results,
+}
+
+pub struct NativeSearchSurface {
+    workspace: WeakEntity<Workspace>,
+    focus_handle: FocusHandle,
+    project_search: Entity<ProjectSearch>,
+    search_view: Entity<ProjectSearchView>,
+    search_bar: Entity<ProjectSearchBar>,
+}
+
+impl NativeSearchSurface {
+    pub fn new(
+        workspace: WeakEntity<Workspace>,
+        project: Entity<Project>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let project_search = cx.new(|cx| ProjectSearch::new(project, cx));
+        let search_view = cx.new(|cx| {
+            ProjectSearchView::new(workspace.clone(), project_search.clone(), window, cx, None)
+        });
+        if let Some(workspace_entity) = workspace.upgrade() {
+            workspace_entity.update(cx, |workspace, cx| {
+                search_view.update(cx, |search_view, cx| {
+                    search_view.added_to_workspace(workspace, window, cx);
+                });
+            });
+        }
+        let search_bar = cx.new(|_| ProjectSearchBar::new());
+        search_bar.update(cx, |search_bar, cx| {
+            search_bar.set_compact_mode(true, cx);
+            search_bar.set_active_pane_item(Some(&search_view), window, cx);
+        });
+
+        Self {
+            workspace,
+            focus_handle: cx.focus_handle(),
+            project_search,
+            search_view,
+            search_bar,
+        }
+    }
+
+    pub fn project_search(&self) -> &Entity<ProjectSearch> {
+        &self.project_search
+    }
+
+    pub fn search_view(&self) -> &Entity<ProjectSearchView> {
+        &self.search_view
+    }
+
+    pub fn search_bar(&self) -> &Entity<ProjectSearchBar> {
+        &self.search_bar
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn focus_target(&self, window: &Window, cx: &App) -> Option<NativeSearchFocusTarget> {
+        let query_focus = self
+            .search_view
+            .read(cx)
+            .query_editor_for_tests()
+            .focus_handle(cx);
+        let results_focus = self
+            .search_view
+            .read(cx)
+            .results_editor_for_tests()
+            .focus_handle(cx);
+        if query_focus.is_focused(window) || query_focus.contains_focused(window, cx) {
+            Some(NativeSearchFocusTarget::Query)
+        } else if results_focus.is_focused(window) || results_focus.contains_focused(window, cx) {
+            Some(NativeSearchFocusTarget::Results)
+        } else {
+            None
+        }
+    }
+
+    pub fn contains_focus(&self, window: &Window, cx: &App) -> bool {
+        self.focus_handle.contains_focused(window, cx)
+    }
+
+    fn focus_search(&mut self, _: &FocusSearch, window: &mut Window, cx: &mut Context<Self>) {
+        self.search_bar.update(cx, |search_bar, cx| {
+            search_bar.focus_search(window, cx);
+        });
+        cx.stop_propagation();
+    }
+
+    fn toggle_filters(&mut self, _: &ToggleFilters, window: &mut Window, cx: &mut Context<Self>) {
+        self.search_bar.update(cx, |search_bar, cx| {
+            search_bar.toggle_filters(window, cx);
+        });
+        cx.stop_propagation();
+    }
+
+    fn toggle_search_option(
+        &mut self,
+        search_options: SearchOptions,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.search_bar.update(cx, |search_bar, cx| {
+            search_bar.toggle_search_option(search_options, window, cx);
+        });
+        cx.stop_propagation();
+    }
+
+    fn toggle_regex(&mut self, _: &ToggleRegex, window: &mut Window, cx: &mut Context<Self>) {
+        self.toggle_search_option(SearchOptions::REGEX, window, cx);
+    }
+
+    fn toggle_case_sensitive(
+        &mut self,
+        _: &ToggleCaseSensitive,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.toggle_search_option(SearchOptions::CASE_SENSITIVE, window, cx);
+    }
+
+    fn toggle_whole_word(
+        &mut self,
+        _: &ToggleWholeWord,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.toggle_search_option(SearchOptions::WHOLE_WORD, window, cx);
+    }
+
+    fn toggle_include_ignored(
+        &mut self,
+        _: &ToggleIncludeIgnored,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.toggle_search_option(SearchOptions::INCLUDE_IGNORED, window, cx);
+    }
+
+    fn move_focus_to_results(
+        &mut self,
+        _: &ToggleFocus,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.search_bar.update(cx, |search_bar, cx| {
+            search_bar.move_focus_to_results(window, cx);
+        });
+        cx.stop_propagation();
+    }
+
+    fn toggle_replace(
+        &mut self,
+        action: &ToggleReplace,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.search_bar.update(cx, |search_bar, cx| {
+            search_bar.toggle_replace(action, window, cx);
+        });
+        cx.stop_propagation();
+    }
+
+    fn replace_next(&mut self, action: &ReplaceNext, window: &mut Window, cx: &mut Context<Self>) {
+        self.search_bar.update(cx, |search_bar, cx| {
+            search_bar.replace_next(action, window, cx);
+        });
+        cx.stop_propagation();
+    }
+
+    fn replace_all(&mut self, action: &ReplaceAll, window: &mut Window, cx: &mut Context<Self>) {
+        self.search_bar.update(cx, |search_bar, cx| {
+            search_bar.replace_all(action, window, cx);
+        });
+        cx.stop_propagation();
+    }
+
+    fn select_next_match(
+        &mut self,
+        action: &SelectNextMatch,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.search_bar.update(cx, |search_bar, cx| {
+            search_bar.select_next_match(action, window, cx);
+        });
+        cx.stop_propagation();
+    }
+
+    fn select_previous_match(
+        &mut self,
+        action: &SelectPreviousMatch,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.search_bar.update(cx, |search_bar, cx| {
+            search_bar.select_prev_match(action, window, cx);
+        });
+        cx.stop_propagation();
+    }
+
+    fn reveal_center_for_open_excerpts(
+        &mut self,
+        _: &editor::actions::OpenExcerpts,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(workspace) = self.workspace.upgrade() {
+            workspace.update(cx, |workspace, cx| {
+                workspace.reveal_zero_base_center(window, cx);
+            });
+        }
+        cx.propagate();
+    }
+
+    fn reveal_center_for_open_excerpts_split(
+        &mut self,
+        _: &editor::actions::OpenExcerptsSplit,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(workspace) = self.workspace.upgrade() {
+            workspace.update(cx, |workspace, cx| {
+                workspace.reveal_zero_base_center(window, cx);
+            });
+        }
+        cx.propagate();
+    }
+}
+
+impl Focusable for NativeSearchSurface {
+    fn focus_handle(&self, cx: &App) -> FocusHandle {
+        self.search_view.focus_handle(cx)
+    }
+}
+
+impl Render for NativeSearchSurface {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        v_flex()
+            .id("omega-native-search-surface")
+            .track_focus(&self.focus_handle)
+            .size_full()
+            .capture_action(cx.listener(Self::reveal_center_for_open_excerpts))
+            .capture_action(cx.listener(Self::reveal_center_for_open_excerpts_split))
+            .capture_action(cx.listener(Self::focus_search))
+            .capture_action(cx.listener(Self::toggle_filters))
+            .capture_action(cx.listener(Self::toggle_regex))
+            .capture_action(cx.listener(Self::toggle_case_sensitive))
+            .capture_action(cx.listener(Self::toggle_whole_word))
+            .capture_action(cx.listener(Self::toggle_include_ignored))
+            .capture_action(cx.listener(Self::move_focus_to_results))
+            .capture_action(cx.listener(Self::toggle_replace))
+            .capture_action(cx.listener(Self::replace_next))
+            .capture_action(cx.listener(Self::replace_all))
+            .capture_action(cx.listener(Self::select_next_match))
+            .capture_action(cx.listener(Self::select_previous_match))
+            .child(
+                v_flex()
+                    .id("omega.workbench.search.toolbar")
+                    .debug_selector(|| "omega.workbench.search.toolbar".to_string())
+                    .role(gpui::Role::Toolbar)
+                    .aria_label("Search controls")
+                    .flex_none()
+                    .w_full()
+                    .border_b_1()
+                    .border_color(cx.theme().colors().border)
+                    .p_2()
+                    .child(self.search_bar.clone()),
+            )
+            .child(
+                v_flex()
+                    .id("omega.workbench.search.content")
+                    .debug_selector(|| "omega.workbench.search.content".to_string())
+                    .role(gpui::Role::Group)
+                    .aria_label("Search results")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_hidden()
+                    .child(self.search_view.clone()),
+            )
+    }
+}
+
 pub struct WorkSurfaceHost {
     key: SurfaceHostKey,
     focus_handle: FocusHandle,
     content_state: SurfaceContentState,
     files_panel: Option<Entity<ProjectPanel>>,
+    search_surface: Option<Entity<NativeSearchSurface>>,
 }
 
 impl WorkSurfaceHost {
     fn new(
         key: SurfaceHostKey,
         files_panel: Option<Entity<ProjectPanel>>,
+        search_surface: Option<Entity<NativeSearchSurface>>,
         cx: &mut Context<Self>,
     ) -> Self {
         Self {
@@ -170,6 +466,7 @@ impl WorkSurfaceHost {
             focus_handle: cx.focus_handle(),
             content_state: SurfaceContentState::Ready,
             files_panel,
+            search_surface,
         }
     }
 
@@ -186,6 +483,29 @@ impl WorkSurfaceHost {
         self.files_panel.as_ref().map(Entity::entity_id)
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn search_surface(&self) -> Option<&Entity<NativeSearchSurface>> {
+        self.search_surface.as_ref()
+    }
+
+    fn native_content_contains_focus(&self, window: &Window, cx: &App) -> bool {
+        self.files_panel
+            .as_ref()
+            .is_some_and(|panel| panel.focus_handle(cx).contains_focused(window, cx))
+            || self
+                .search_surface
+                .as_ref()
+                .is_some_and(|surface| surface.read(cx).contains_focus(window, cx))
+    }
+
+    fn focus_native_content(&self, window: &mut Window, cx: &mut App) {
+        if let Some(panel) = self.files_panel.as_ref() {
+            panel.focus_handle(cx).focus(window, cx);
+        } else if let Some(surface) = self.search_surface.as_ref() {
+            surface.focus_handle(cx).focus(window, cx);
+        }
+    }
+
     fn set_content_state(&mut self, content_state: SurfaceContentState, cx: &mut Context<Self>) {
         self.content_state = content_state;
         cx.notify();
@@ -199,20 +519,10 @@ impl WorkSurfaceHost {
     ) {
         let was_ready = matches!(self.content_state, SurfaceContentState::Ready);
         let is_ready = matches!(content_state, SurfaceContentState::Ready);
-        if was_ready
-            && !is_ready
-            && self
-                .files_panel
-                .as_ref()
-                .is_some_and(|panel| panel.focus_handle(cx).contains_focused(window, cx))
-        {
+        if was_ready && !is_ready && self.native_content_contains_focus(window, cx) {
             self.focus_handle.focus(window, cx);
-        } else if !was_ready
-            && is_ready
-            && self.focus_handle.contains_focused(window, cx)
-            && let Some(panel) = self.files_panel.as_ref()
-        {
-            panel.focus_handle(cx).focus(window, cx);
+        } else if !was_ready && is_ready && self.focus_handle.contains_focused(window, cx) {
+            self.focus_native_content(window, cx);
         }
         self.set_content_state(content_state, cx);
     }
@@ -238,7 +548,13 @@ impl Focusable for WorkSurfaceHost {
         if matches!(self.content_state, SurfaceContentState::Ready) {
             self.files_panel
                 .as_ref()
-                .map_or_else(|| self.focus_handle.clone(), |panel| panel.focus_handle(cx))
+                .map(|panel| panel.focus_handle(cx))
+                .or_else(|| {
+                    self.search_surface
+                        .as_ref()
+                        .map(|surface| surface.focus_handle(cx))
+                })
+                .unwrap_or_else(|| self.focus_handle.clone())
         } else {
             self.focus_handle.clone()
         }
@@ -254,8 +570,13 @@ impl Render for WorkSurfaceHost {
         } else {
             None
         };
+        let search_surface = if matches!(self.content_state, SurfaceContentState::Ready) {
+            self.search_surface.clone()
+        } else {
+            None
+        };
         let status = match &self.content_state {
-            SurfaceContentState::Ready if files_panel.is_some() => None,
+            SurfaceContentState::Ready if files_panel.is_some() || search_surface.is_some() => None,
             SurfaceContentState::Ready => {
                 let message: SharedString = format!("{label} is ready").into();
                 Some((
@@ -308,6 +629,7 @@ impl Render for WorkSurfaceHost {
             .aria_label(format!("{label} work surface"))
             .size_full()
             .when_some(files_panel, |this, panel| this.child(panel))
+            .when_some(search_surface, |this, surface| this.child(surface))
             .when_some(status, |this, (status, role, message)| {
                 this.child(
                     v_flex()
@@ -902,6 +1224,7 @@ impl WorkbenchShell {
         &mut self,
         surface: WorkSurface,
         files_panel: Option<Entity<ProjectPanel>>,
+        search_surface: Option<Entity<NativeSearchSurface>>,
         cx: &mut Context<crate::AgentPanel>,
     ) -> Result<SurfaceSelection> {
         let unavailable_reason = self
@@ -938,6 +1261,7 @@ impl WorkbenchShell {
             visible.binding.clone(),
             surface,
             files_panel,
+            search_surface,
             cx,
         ) {
             Ok(host) => host,
@@ -958,10 +1282,14 @@ impl WorkbenchShell {
         binding: Option<RepositoryBinding>,
         surface: WorkSurface,
         files_panel: Option<Entity<ProjectPanel>>,
+        search_surface: Option<Entity<NativeSearchSurface>>,
         cx: &mut Context<crate::AgentPanel>,
     ) -> Result<Entity<WorkSurfaceHost>> {
         if surface == WorkSurface::Files && files_panel.is_none() {
             bail!("the native Files surface is unavailable");
+        }
+        if surface == WorkSurface::Search && search_surface.is_none() {
+            bail!("the native Search surface is unavailable");
         }
         let key = SurfaceHostKey {
             thread_id: thread_id.into(),
@@ -979,7 +1307,7 @@ impl WorkbenchShell {
             self.last_error = Some(message.clone());
             bail!("{message}");
         }
-        let host = cx.new(|cx| WorkSurfaceHost::new(key.clone(), files_panel, cx));
+        let host = cx.new(|cx| WorkSurfaceHost::new(key.clone(), files_panel, search_surface, cx));
         self.hosts.insert(key, host.clone());
         Ok(host)
     }
@@ -1002,6 +1330,49 @@ impl WorkbenchShell {
             binding,
             WorkSurface::Files,
             Some(files_panel),
+            None,
+            cx,
+        )
+        .map(Some)
+    }
+
+    pub fn search_surface_for_active_binding(
+        &self,
+        cx: &App,
+    ) -> Option<Entity<NativeSearchSurface>> {
+        let visible = self.projection.visible_projection()?;
+        let key = SurfaceHostKey {
+            thread_id: visible.thread_id,
+            binding: visible.binding,
+            surface: WorkSurface::Search,
+        };
+        self.hosts
+            .get(&key)?
+            .read(cx)
+            .search_surface
+            .as_ref()
+            .cloned()
+    }
+
+    pub fn ensure_visible_search_host(
+        &mut self,
+        search_surface: Entity<NativeSearchSurface>,
+        cx: &mut Context<crate::AgentPanel>,
+    ) -> Result<Option<Entity<WorkSurfaceHost>>> {
+        let Some(visible) = self.projection.visible_projection() else {
+            return Ok(None);
+        };
+        if !visible.dock_open || visible.effective_surface != Some(WorkSurface::Search) {
+            return Ok(None);
+        }
+        let thread_id = visible.thread_id.clone();
+        let binding = visible.binding;
+        self.ensure_host(
+            &thread_id,
+            binding,
+            WorkSurface::Search,
+            None,
+            Some(search_surface),
             cx,
         )
         .map(Some)

@@ -1066,6 +1066,7 @@ impl HeadlessProject {
         )?;
 
         let project_id = message.project_id;
+        let worktree_scope = message.worktree_id.map(WorktreeId::from_proto);
         let buffer_store = this.read_with(&cx, |this, _| this.buffer_store.clone());
         let handle = message.handle;
         let _buffer_store = buffer_store.clone();
@@ -1079,6 +1080,7 @@ impl HeadlessProject {
                     message.limit as _,
                     cx,
                 )
+                .with_worktree_scope(worktree_scope)
                 .into_handle(query, cx)
                 .matching_buffers(cx)
             });

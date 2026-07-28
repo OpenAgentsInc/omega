@@ -24,6 +24,7 @@ test-support = [
     "project_panel/test-support",
     "reqwest_client",
     "remote_connection/test-support",
+    "search/test-support",
     "workspace/test-support",
     "agent/test-support",
 ]

@@ -508,6 +508,21 @@ fn is_workbench_files_scene(name: &str) -> bool {
 }
 
 #[cfg(target_os = "macos")]
+fn is_workbench_search_scene(name: &str) -> bool {
+    matches!(
+        name,
+        "omega_workbench_search_empty"
+            | "omega_workbench_search_populated"
+            | "omega_workbench_search_no_results"
+            | "omega_workbench_search_invalid_regex"
+            | "omega_workbench_search_loading"
+            | "omega_workbench_search_narrow"
+            | "omega_workbench_search_focused_result"
+            | "omega_workbench_search_error"
+    )
+}
+
+#[cfg(target_os = "macos")]
 fn workbench_fixture_for_scene(name: &str) -> Result<WorkbenchScene> {
     use omega_workbench_harness::{
         ContentStateFixture, EventFixture, EventKindFixture, MessageFixture, MessageRoleFixture,
@@ -598,6 +613,51 @@ fn workbench_fixture_for_scene(name: &str) -> Result<WorkbenchScene> {
                 "omega_workbench_files_loading" => ContentStateFixture::Loading,
                 "omega_workbench_files_error" => {
                     ContentStateFixture::Error("Could not load Files".into())
+                }
+                _ => ContentStateFixture::Ready,
+            };
+        } else if is_workbench_search_scene(name) {
+            for surface in &mut scene.surfaces {
+                surface.available =
+                    !matches!(surface.id, WorkSurfaceId::Review | WorkSurfaceId::Git);
+            }
+            scene.project = Some(ProjectFixture {
+                id: "visual-project".into(),
+                display_name: "Omega".into(),
+            });
+            scene.repositories.push(RepositoryFixture {
+                id: "visual-repository".into(),
+                project_id: "visual-project".into(),
+                worktrees: vec![
+                    WorktreeFixture {
+                        id: "alpha-worktree".into(),
+                        branch: Some("main".into()),
+                        git_state: None,
+                        dirty_files: 0,
+                        conflicts: 0,
+                        ahead: 0,
+                        behind: 0,
+                    },
+                    WorktreeFixture {
+                        id: "beta-worktree".into(),
+                        branch: Some("main".into()),
+                        git_state: None,
+                        dirty_files: 0,
+                        conflicts: 0,
+                        ahead: 0,
+                        behind: 0,
+                    },
+                ],
+            });
+            scene.threads[0].project_id = Some("visual-project".into());
+            scene.threads[0].repository_id = Some("visual-repository".into());
+            scene.threads[0].worktree_id = Some("beta-worktree".into());
+            scene.active_surface = Some(WorkSurfaceId::Search);
+            scene.dock_open = true;
+            scene.content_state = match name {
+                "omega_workbench_search_loading" => ContentStateFixture::Loading,
+                "omega_workbench_search_error" => {
+                    ContentStateFixture::Error("Could not search this worktree".into())
                 }
                 _ => ContentStateFixture::Ready,
             };
@@ -1570,6 +1630,136 @@ fn verify_workbench_render_preflight(
             ) {
                 record_workbench_semantic_check(test_name, "files-tree-row-containment");
             }
+        }
+        if is_workbench_search_scene(test_name) {
+            let mut probe = SemanticProbe::new(&snapshot);
+            probe.require_accessible(
+                "omega.workbench.surface.search",
+                "Group",
+                "Search work surface",
+            )?;
+            if matches!(
+                test_name,
+                "omega_workbench_search_loading" | "omega_workbench_search_error"
+            ) {
+                if test_name == "omega_workbench_search_loading" {
+                    probe.require_accessible(
+                        "omega.workbench.surface.search.status",
+                        "Status",
+                        "Loading Search…",
+                    )?;
+                } else {
+                    probe.require_accessible(
+                        "omega.workbench.surface.search.status",
+                        "Alert",
+                        "Could not search this worktree",
+                    )?;
+                }
+                probe.require_inside(
+                    "omega.workbench.surface.search.status",
+                    "omega.workbench.surface.search",
+                )?;
+                probe.require_absent("omega.workbench.search.toolbar")?;
+                probe.require_absent("omega.workbench.search.content")?;
+                probe.require_absent("omega.workbench.search.query-error")?;
+                probe.require_absent("omega.workbench.search.lifecycle")?;
+                record_workbench_semantic_check(
+                    test_name,
+                    "search-non-ready-host-hides-native-content",
+                );
+            } else {
+                probe.require_accessible(
+                    "omega.workbench.search.toolbar",
+                    "Toolbar",
+                    "Search controls",
+                )?;
+                probe.require_accessible(
+                    "omega.workbench.search.content",
+                    "Group",
+                    "Search results",
+                )?;
+                probe.require_inside(
+                    "omega.workbench.search.toolbar",
+                    "omega.workbench.surface.search",
+                )?;
+                probe.require_inside(
+                    "omega.workbench.search.content",
+                    "omega.workbench.surface.search",
+                )?;
+                match test_name {
+                    "omega_workbench_search_empty" | "omega_workbench_search_invalid_regex" => {
+                        probe.require_accessible(
+                            "omega.workbench.search.lifecycle",
+                            "Status",
+                            "Search All Files",
+                        )?;
+                    }
+                    "omega_workbench_search_no_results" => {
+                        probe.require_accessible(
+                            "omega.workbench.search.lifecycle",
+                            "Status",
+                            "No Results",
+                        )?;
+                    }
+                    _ => {
+                        probe.require_absent("omega.workbench.search.lifecycle")?;
+                    }
+                }
+            }
+            if test_name == "omega_workbench_search_invalid_regex" {
+                probe.require_visible("omega.workbench.search.query-error")?;
+                probe.require_inside(
+                    "omega.workbench.search.query-error",
+                    "omega.workbench.search.toolbar",
+                )?;
+                let tree = snapshot
+                    .accessibility_tree_json()
+                    .context("invalid-regex Search accessibility tree was not active")?;
+                let tree: serde_json::Value = serde_json::from_str(tree)
+                    .context("parsing invalid-regex Search accessibility tree")?;
+                let query_errors = tree
+                    .get("nodes")
+                    .and_then(serde_json::Value::as_object)
+                    .context("invalid-regex Search accessibility tree has no nodes")?
+                    .values()
+                    .filter(|node| {
+                        node.get("element_id").and_then(serde_json::Value::as_str)
+                            == Some("omega.workbench.search.query-error")
+                    })
+                    .collect::<Vec<_>>();
+                anyhow::ensure!(
+                    query_errors.len() == 1
+                        && query_errors[0]
+                            .get("aria")
+                            .and_then(serde_json::Value::as_object)
+                            .is_some_and(|aria| {
+                                aria.get("role").and_then(serde_json::Value::as_str)
+                                    == Some("Alert")
+                                    && aria
+                                        .get("label")
+                                        .and_then(serde_json::Value::as_str)
+                                        .is_some_and(|label| !label.trim().is_empty())
+                            }),
+                    "invalid-regex Search error needs one Alert identity with a non-empty label"
+                );
+                record_workbench_semantic_check(test_name, "search-invalid-regex-accessible-alert");
+            } else {
+                probe.require_absent("omega.workbench.search.query-error")?;
+            }
+            if test_name == "omega_workbench_search_narrow" {
+                probe.require_fully_visible("omega.workbench.search.toolbar")?;
+                probe.require_fully_visible("omega.workbench.search.content")?;
+                probe.require_disjoint(
+                    "omega.workbench.surface.search",
+                    "omega.workbench.transcript",
+                )?;
+                probe.require_disjoint(
+                    "omega.workbench.surface.search",
+                    "omega.workbench.composer",
+                )?;
+            }
+            record_workbench_semantic_checks(test_name, probe.into_checks());
+            record_workbench_semantic_check(test_name, "search-native-toolbar-content-containment");
         }
         if test_name.starts_with("omega_workbench_identity_") {
             let mut probe = SemanticProbe::new(&snapshot);
@@ -3313,6 +3503,13 @@ struct WorkbenchFilesDiskFixture {
 }
 
 #[cfg(all(target_os = "macos", feature = "visual-tests"))]
+struct WorkbenchSearchDiskFixture {
+    _root: tempfile::TempDir,
+    worktrees: Vec<(String, PathBuf)>,
+    active_worktree_id: String,
+}
+
+#[cfg(all(target_os = "macos", feature = "visual-tests"))]
 fn create_workbench_files_disk_fixture(
     scene_name: &str,
 ) -> Result<Option<WorkbenchFilesDiskFixture>> {
@@ -3385,12 +3582,63 @@ fn create_workbench_files_disk_fixture(
 }
 
 #[cfg(all(target_os = "macos", feature = "visual-tests"))]
-fn add_workbench_files_worktrees(
+fn create_workbench_search_disk_fixture(
+    scene_name: &str,
+) -> Result<Option<WorkbenchSearchDiskFixture>> {
+    if !is_workbench_search_scene(scene_name) {
+        return Ok(None);
+    }
+
+    let root = tempfile::tempdir().context("creating Search scene directory")?;
+    let root_path = root
+        .path()
+        .canonicalize()
+        .context("canonicalizing Search scene directory")?;
+    let alpha = root_path.join("alpha-worktree");
+    let beta = root_path.join("beta-worktree");
+    std::fs::create_dir_all(alpha.join("src"))?;
+    std::fs::create_dir_all(beta.join("src"))?;
+    std::fs::create_dir_all(beta.join("ignored"))?;
+    std::fs::write(
+        alpha.join("src/alpha.rs"),
+        "pub const OLD_BINDING_ONLY: &str = \"omega_search_hit alpha\";\n",
+    )?;
+    std::fs::write(
+        beta.join("src/first.rs"),
+        "pub const FIRST: &str = \"omega_search_hit\";\n\
+         pub const UNICODE: &str = \"café omega_search_hit\";\n",
+    )?;
+    std::fs::write(
+        beta.join("src/second.rs"),
+        format!(
+            "pub const LONG: &str = \"{} omega_search_hit\";\n",
+            "0123456789".repeat(24)
+        ),
+    )?;
+    std::fs::write(beta.join("README.md"), "# omega_search_hit fixture\n")?;
+    std::fs::write(beta.join(".gitignore"), "ignored/\n")?;
+    std::fs::write(
+        beta.join("ignored/generated.txt"),
+        "omega_search_hit must remain excluded by default\n",
+    )?;
+    Ok(Some(WorkbenchSearchDiskFixture {
+        _root: root,
+        worktrees: vec![
+            ("alpha-worktree".into(), alpha),
+            ("beta-worktree".into(), beta),
+        ],
+        active_worktree_id: "beta-worktree".into(),
+    }))
+}
+
+#[cfg(all(target_os = "macos", feature = "visual-tests"))]
+fn add_workbench_disk_worktrees(
     workspace_window: WindowHandle<Workspace>,
-    fixture: &WorkbenchFilesDiskFixture,
+    worktrees: &[(String, PathBuf)],
+    fixture_label: &str,
     cx: &mut VisualTestAppContext,
 ) -> Result<()> {
-    for (_, path) in &fixture.worktrees {
+    for (_, path) in worktrees {
         let task = workspace_window
             .update(cx, |workspace, _window, cx| {
                 workspace.project().update(cx, |project, cx| {
@@ -3398,13 +3646,16 @@ fn add_workbench_files_worktrees(
                 })
             })
             .with_context(|| {
-                format!("starting Files scene worktree scan for {}", path.display())
+                format!(
+                    "starting {fixture_label} scene worktree scan for {}",
+                    path.display()
+                )
             })?;
         cx.background_executor.allow_parking();
         let result = cx.foreground_executor.block_test(task);
         cx.background_executor.forbid_parking();
-        let (worktree, _) =
-            result.with_context(|| format!("adding Files scene worktree {}", path.display()))?;
+        let (worktree, _) = result
+            .with_context(|| format!("adding {fixture_label} scene worktree {}", path.display()))?;
         let scan_complete = cx
             .read(|cx| {
                 worktree
@@ -3412,7 +3663,12 @@ fn add_workbench_files_worktrees(
                     .as_local()
                     .map(|worktree| worktree.scan_complete())
             })
-            .with_context(|| format!("Files scene worktree {} is not local", path.display()))?;
+            .with_context(|| {
+                format!(
+                    "{fixture_label} scene worktree {} is not local",
+                    path.display()
+                )
+            })?;
         cx.background_executor.allow_parking();
         cx.foreground_executor.block_test(scan_complete);
         cx.background_executor.forbid_parking();
@@ -3431,6 +3687,7 @@ fn run_omega_workbench_shell_visual_capture(
     let scene = scene_spec(scene_name)
         .ok_or_else(|| anyhow::anyhow!("unknown workbench shell scene {scene_name:?}"))?;
     let files_fixture = create_workbench_files_disk_fixture(scene_name)?;
+    let search_fixture = create_workbench_search_disk_fixture(scene_name)?;
     let project = cx.update(|cx| {
         project::Project::local(
             app_state.client.clone(),
@@ -3472,7 +3729,10 @@ fn run_omega_workbench_shell_visual_capture(
         .with_context(|| format!("opening workbench shell scene {scene_name:?}"))?;
     cx.run_until_parked();
     if let Some(fixture) = files_fixture.as_ref() {
-        add_workbench_files_worktrees(workspace_window, fixture, cx)?;
+        add_workbench_disk_worktrees(workspace_window, &fixture.worktrees, "Files", cx)?;
+    }
+    if let Some(fixture) = search_fixture.as_ref() {
+        add_workbench_disk_worktrees(workspace_window, &fixture.worktrees, "Search", cx)?;
     }
 
     let result = run_omega_workbench_shell_visual_capture_in_window(
@@ -3480,6 +3740,7 @@ fn run_omega_workbench_shell_visual_capture(
         cx,
         scene_name,
         files_fixture.as_ref(),
+        search_fixture.as_ref(),
         update_baseline,
     );
     cx.update_window(workspace_window.into(), |_, window, _cx| {
@@ -3487,7 +3748,7 @@ fn run_omega_workbench_shell_visual_capture(
     })
     .log_err();
     cx.run_until_parked();
-    if files_fixture.is_some() {
+    if files_fixture.is_some() || search_fixture.is_some() {
         cx.update(|cx| {
             let worktree_ids = project
                 .read(cx)
@@ -3511,6 +3772,7 @@ fn run_omega_workbench_shell_visual_capture_in_window(
     cx: &mut VisualTestAppContext,
     scene_name: &str,
     files_fixture: Option<&WorkbenchFilesDiskFixture>,
+    search_fixture: Option<&WorkbenchSearchDiskFixture>,
     update_baseline: bool,
 ) -> Result<TestResult> {
     use agent_ui::AgentPanel;
@@ -3591,6 +3853,7 @@ fn run_omega_workbench_shell_visual_capture_in_window(
         &panel,
         &project_panel,
         files_fixture,
+        search_fixture,
         cx,
     )?;
     run_visual_test(scene_name, workspace_window.into(), cx, update_baseline)
@@ -3631,17 +3894,18 @@ fn focus_workbench_selector(
 }
 
 #[cfg(all(target_os = "macos", feature = "visual-tests"))]
-fn select_workbench_files_identity(
+fn select_workbench_identity(
     workspace_window: WindowHandle<Workspace>,
     panel: &Entity<agent_ui::AgentPanel>,
     worktree_path: &Path,
+    fixture_label: &str,
     cx: &mut VisualTestAppContext,
 ) -> Result<omega_workbench_state::RepositoryBinding> {
     let (target_binding, current_binding) = cx.read(|cx| {
         let identity = panel
             .read(cx)
             .workbench_identity_for_tests()
-            .context("Files scene has no production identity")?;
+            .with_context(|| format!("{fixture_label} scene has no production identity"))?;
         let target_binding = identity
             .candidates
             .iter()
@@ -3649,7 +3913,7 @@ fn select_workbench_files_identity(
             .map(|candidate| candidate.binding.clone())
             .with_context(|| {
                 format!(
-                    "Files scene identity has no candidate for {}",
+                    "{fixture_label} scene identity has no candidate for {}",
                     worktree_path.display()
                 )
             })?;
@@ -3697,10 +3961,144 @@ fn select_workbench_files_identity(
     anyhow::ensure!(
         identity_binding.as_ref() == Some(&target_binding)
             && projection_binding.as_ref() == Some(&target_binding),
-        "Files scene did not select the production identity for {}",
+        "{fixture_label} scene did not select the production identity for {}",
         worktree_path.display()
     );
     Ok(target_binding)
+}
+
+#[cfg(all(target_os = "macos", feature = "visual-tests"))]
+fn active_workbench_search(
+    panel: &Entity<agent_ui::AgentPanel>,
+    cx: &VisualTestAppContext,
+) -> Result<(
+    Entity<agent_ui::workbench_shell::NativeSearchSurface>,
+    Entity<search::ProjectSearchView>,
+)> {
+    let surface = cx
+        .read(|cx| panel.read(cx).workbench_search_surface_for_tests(cx))
+        .context("active production Search surface is unavailable")?;
+    let search_view = cx.read(|cx| surface.read(cx).search_view().clone());
+    Ok((surface, search_view))
+}
+
+#[cfg(all(target_os = "macos", feature = "visual-tests"))]
+fn ensure_workbench_search_open(
+    workspace_window: WindowHandle<Workspace>,
+    panel: &Entity<agent_ui::AgentPanel>,
+    cx: &mut VisualTestAppContext,
+) -> Result<()> {
+    let is_open = cx
+        .read(|cx| panel.read(cx).workbench_projection_for_tests().clone())
+        .visible_projection()
+        .is_some_and(|visible| {
+            visible.effective_surface == Some(omega_workbench_state::WorkSurface::Search)
+                && visible.dock_open
+        });
+    if !is_open {
+        dispatch_workbench_action(
+            workspace_window,
+            Box::new(agent_ui::workbench_shell::SelectSearch),
+            cx,
+        )?;
+    }
+    Ok(())
+}
+
+#[cfg(all(target_os = "macos", feature = "visual-tests"))]
+fn workbench_search_snapshot(
+    search_view: &Entity<search::ProjectSearchView>,
+    cx: &VisualTestAppContext,
+) -> search::project_search::ProjectSearchTestSnapshot {
+    cx.read(|cx| search_view.read(cx).test_snapshot(cx))
+}
+
+#[cfg(all(target_os = "macos", feature = "visual-tests"))]
+fn wait_for_workbench_search(
+    search_view: &Entity<search::ProjectSearchView>,
+    cx: &mut VisualTestAppContext,
+) -> Result<search::project_search::ProjectSearchTestSnapshot> {
+    for _ in 0..128 {
+        cx.run_until_parked();
+        let snapshot = workbench_search_snapshot(search_view, cx);
+        if !snapshot.pending
+            && !matches!(
+                snapshot.lifecycle,
+                search::project_search::ProjectSearchLifecycle::Running { .. }
+            )
+        {
+            return Ok(snapshot);
+        }
+        cx.advance_clock(Duration::from_millis(10));
+    }
+    let snapshot = workbench_search_snapshot(search_view, cx);
+    anyhow::bail!(
+        "native Search did not settle: lifecycle={:?}, pending={}, generation={}",
+        snapshot.lifecycle,
+        snapshot.pending,
+        snapshot.generation
+    )
+}
+
+#[cfg(all(target_os = "macos", feature = "visual-tests"))]
+fn perform_workbench_search(
+    workspace_window: WindowHandle<Workspace>,
+    search_view: &Entity<search::ProjectSearchView>,
+    query: &str,
+    cx: &mut VisualTestAppContext,
+) -> Result<search::project_search::ProjectSearchTestSnapshot> {
+    cx.update_window(workspace_window.into(), |_, window, cx| {
+        search_view.update(cx, |search_view, cx| {
+            search_view.test_set_query(query, window, cx);
+            search_view.test_start_search(cx);
+        });
+    })?;
+    wait_for_workbench_search(search_view, cx)
+}
+
+#[cfg(all(target_os = "macos", feature = "visual-tests"))]
+fn start_pending_workbench_search(
+    workspace_window: WindowHandle<Workspace>,
+    search_view: &Entity<search::ProjectSearchView>,
+    query_text: &str,
+    cx: &mut VisualTestAppContext,
+) -> Result<async_channel::Sender<project::search::SearchResult>> {
+    let query = search::SearchOptions::NONE.build_query(
+        query_text,
+        util::paths::PathMatcher::default(),
+        util::paths::PathMatcher::default(),
+        true,
+        None,
+    )?;
+    let (sender, receiver) = async_channel::unbounded();
+    cx.update_window(workspace_window.into(), |_, window, cx| {
+        search_view.update(cx, |search_view, cx| {
+            search_view.test_set_query(query_text, window, cx);
+            search_view.test_start_search_results(
+                query,
+                project::project_search::SearchResults {
+                    task_handle: gpui::Task::ready(()),
+                    rx: receiver,
+                },
+                cx,
+            );
+        });
+    })?;
+    cx.run_until_parked();
+    let snapshot = workbench_search_snapshot(search_view, cx);
+    anyhow::ensure!(
+        snapshot.pending
+            && matches!(
+                snapshot.lifecycle,
+                search::project_search::ProjectSearchLifecycle::Running {
+                    request,
+                    activity: search::project_search::ProjectSearchActivity::Searching,
+                } if request.generation == snapshot.generation
+                    && request.worktree_id == snapshot.worktree_scope
+            ),
+        "controlled native Search did not enter its typed running state: {snapshot:?}"
+    );
+    Ok(sender)
 }
 
 #[cfg(all(target_os = "macos", feature = "visual-tests"))]
@@ -3710,6 +4108,7 @@ fn configure_workbench_shell_scene(
     panel: &Entity<agent_ui::AgentPanel>,
     project_panel: &Entity<ProjectPanel>,
     files_fixture: Option<&WorkbenchFilesDiskFixture>,
+    search_fixture: Option<&WorkbenchSearchDiskFixture>,
     cx: &mut VisualTestAppContext,
 ) -> Result<()> {
     use agent_ui::workbench_shell::{
@@ -3732,7 +4131,7 @@ fn configure_workbench_shell_scene(
         .copied()
         .find(|surface| !surface.requires_binding())
         .context("workbench projection has no unbound surface")?;
-    if !is_workbench_files_scene(scene_name) {
+    if !is_workbench_files_scene(scene_name) && !is_workbench_search_scene(scene_name) {
         anyhow::ensure!(
             active_thread.binding.is_none() && active_thread.available_surfaces.len() == 1,
             "workbench shell scene must use the real no-project capability projection"
@@ -3773,7 +4172,7 @@ fn configure_workbench_shell_scene(
                     .first()
                     .context("stale Files scene has no first worktree")?;
                 let alpha_binding =
-                    select_workbench_files_identity(workspace_window, panel, first_path, cx)?;
+                    select_workbench_identity(workspace_window, panel, first_path, "Files", cx)?;
                 dispatch_workbench_action(workspace_window, Box::new(SelectFiles), cx)?;
                 cx.run_until_parked();
                 let first_worktree_id = workspace_window
@@ -3857,7 +4256,7 @@ fn configure_workbench_shell_scene(
                     "files-alpha-derivation-pending-before-rebind",
                 );
                 let beta_binding =
-                    select_workbench_files_identity(workspace_window, panel, active_path, cx)?;
+                    select_workbench_identity(workspace_window, panel, active_path, "Files", cx)?;
                 stale_alpha_derivation = Some((
                     alpha_binding,
                     beta_binding,
@@ -3868,7 +4267,7 @@ fn configure_workbench_shell_scene(
                 dispatch_workbench_action(workspace_window, Box::new(SelectFiles), cx)?;
                 dispatch_workbench_action(workspace_window, Box::new(SelectFiles), cx)?;
             } else {
-                select_workbench_files_identity(workspace_window, panel, active_path, cx)?;
+                select_workbench_identity(workspace_window, panel, active_path, "Files", cx)?;
                 dispatch_workbench_action(workspace_window, Box::new(SelectFiles), cx)?;
             }
 
@@ -4060,6 +4459,500 @@ fn configure_workbench_shell_scene(
                 "Files scene did not reach its expected production Files layout"
             );
             record_workbench_semantic_check(name, "files-production-surface-open");
+        }
+        name if is_workbench_search_scene(name) => {
+            let fixture = search_fixture.context("Search scene has no disk fixture")?;
+            let active_path = fixture
+                .worktrees
+                .iter()
+                .find_map(|(id, path)| {
+                    (id == &fixture.active_worktree_id).then_some(path.as_path())
+                })
+                .context("Search scene has no active disk worktree")?;
+            let active_worktree_id = workspace_window
+                .update(cx, |workspace, _window, cx| {
+                    workspace
+                        .project()
+                        .read(cx)
+                        .visible_worktrees(cx)
+                        .find(|worktree| worktree.read(cx).abs_path().as_ref() == active_path)
+                        .map(|worktree| worktree.read(cx).id())
+                })
+                .context("reading Search scene worktrees")?
+                .with_context(|| {
+                    format!(
+                        "active Search worktree {} is not visible",
+                        active_path.display()
+                    )
+                })?;
+
+            let mut stale_alpha = None;
+            if name == "omega_workbench_search_populated" {
+                let (_, alpha_path) = fixture
+                    .worktrees
+                    .first()
+                    .context("populated Search scene has no alpha worktree")?;
+                let alpha_binding =
+                    select_workbench_identity(workspace_window, panel, alpha_path, "Search", cx)?;
+                ensure_workbench_search_open(workspace_window, panel, cx)?;
+                let (alpha_surface, alpha_search_view) = active_workbench_search(panel, cx)?;
+                let alpha_snapshot = workbench_search_snapshot(&alpha_search_view, cx);
+                let alpha_projection = cx
+                    .read(|cx| panel.read(cx).workbench_projection_for_tests().clone())
+                    .visible_projection()
+                    .context("populated Search scene has no alpha projection")?;
+                anyhow::ensure!(
+                    alpha_snapshot.worktree_scope.is_some()
+                        && alpha_projection.binding.as_ref() == Some(&alpha_binding),
+                    "populated Search scene did not scope its initial alpha search"
+                );
+                let pending_sender = start_pending_workbench_search(
+                    workspace_window,
+                    &alpha_search_view,
+                    "OLD_BINDING_ONLY",
+                    cx,
+                )?;
+                let pending_snapshot = workbench_search_snapshot(&alpha_search_view, cx);
+                record_workbench_semantic_check(name, "search-alpha-request-pending-before-rebind");
+                stale_alpha = Some((
+                    alpha_surface,
+                    alpha_search_view,
+                    alpha_binding,
+                    alpha_projection.generation,
+                    pending_snapshot.generation,
+                    pending_sender,
+                ));
+            }
+
+            let beta_binding =
+                select_workbench_identity(workspace_window, panel, active_path, "Search", cx)?;
+            ensure_workbench_search_open(workspace_window, panel, cx)?;
+            let (search_surface, search_view) = active_workbench_search(panel, cx)?;
+            let initial_snapshot = workbench_search_snapshot(&search_view, cx);
+            anyhow::ensure!(
+                initial_snapshot.worktree_scope == Some(active_worktree_id),
+                "Search scene {name:?} has scope {:?}, expected {active_worktree_id:?}",
+                initial_snapshot.worktree_scope
+            );
+            record_workbench_semantic_check(name, "search-active-worktree-scope");
+            cx.update_window(workspace_window.into(), |_, window, cx| {
+                search_surface.update(cx, |search_surface, cx| {
+                    gpui::Focusable::focus_handle(search_surface, cx).focus(window, cx);
+                });
+            })?;
+            dispatch_workbench_action(workspace_window, Box::new(search::FocusSearch), cx)?;
+            let query_focus = cx.update_window(workspace_window.into(), |_, window, cx| {
+                search_surface.update(cx, |surface, cx| surface.focus_target(window, cx))
+            })?;
+            anyhow::ensure!(
+                query_focus == Some(agent_ui::workbench_shell::NativeSearchFocusTarget::Query),
+                "Search scene {name:?} could not route focus into the native query"
+            );
+            record_workbench_semantic_check(name, "search-native-query-focus-action");
+
+            let projection = cx.read(|cx| panel.read(cx).workbench_projection_for_tests().clone());
+            let visible = projection
+                .visible_projection()
+                .context("Search scene has no visible projection")?;
+            anyhow::ensure!(
+                visible.binding.as_ref() == Some(&beta_binding)
+                    && visible.requested_surface
+                        == Some(omega_workbench_state::WorkSurface::Search)
+                    && visible.effective_surface
+                        == Some(omega_workbench_state::WorkSurface::Search)
+                    && visible.dock_open,
+                "Search scene did not reach its expected production Search layout"
+            );
+            record_workbench_semantic_check(name, "search-production-surface-open");
+
+            if let Some((
+                alpha_surface,
+                alpha_search_view,
+                alpha_binding,
+                alpha_projection_generation,
+                alpha_search_generation,
+                alpha_sender,
+            )) = stale_alpha
+            {
+                anyhow::ensure!(
+                    alpha_binding != beta_binding
+                        && alpha_surface.entity_id() != search_surface.entity_id()
+                        && visible.generation > alpha_projection_generation,
+                    "Search rebind did not establish a distinct beta host epoch"
+                );
+                alpha_sender
+                    .try_send(project::search::SearchResult::Searching)
+                    .context("releasing stale alpha Search activity")?;
+                drop(alpha_sender);
+                let alpha_completed = wait_for_workbench_search(&alpha_search_view, cx)?;
+                anyhow::ensure!(
+                    alpha_completed.generation == alpha_search_generation
+                        && matches!(
+                            alpha_completed.lifecycle,
+                            search::project_search::ProjectSearchLifecycle::Completed {
+                                request,
+                                completion:
+                                    search::project_search::ProjectSearchCompletion::NoResults,
+                            } if request.worktree_id == alpha_completed.worktree_scope
+                        ),
+                    "controlled alpha Search did not complete in its original host: {alpha_completed:?}"
+                );
+                let active_after_alpha = active_workbench_search(panel, cx)?.0;
+                anyhow::ensure!(
+                    active_after_alpha.entity_id() == search_surface.entity_id(),
+                    "late alpha Search completion replaced the active beta Search host"
+                );
+                record_workbench_semantic_check(
+                    name,
+                    "search-late-alpha-completion-isolated-from-beta-host",
+                );
+            }
+
+            match name {
+                "omega_workbench_search_empty" => {
+                    anyhow::ensure!(
+                        initial_snapshot.query.is_empty()
+                            && initial_snapshot.matches.is_empty()
+                            && initial_snapshot.active_match.is_none()
+                            && matches!(
+                                initial_snapshot.lifecycle,
+                                search::project_search::ProjectSearchLifecycle::Idle
+                            ),
+                        "empty Search scene did not retain native idle state: {initial_snapshot:?}"
+                    );
+                    record_workbench_semantic_check(name, "search-empty-idle-state");
+                }
+                "omega_workbench_search_invalid_regex" => {
+                    dispatch_workbench_action(workspace_window, Box::new(search::FocusSearch), cx)?;
+                    dispatch_workbench_action(workspace_window, Box::new(search::ToggleRegex), cx)?;
+                    let snapshot =
+                        perform_workbench_search(workspace_window, &search_view, "(", cx)?;
+                    anyhow::ensure!(
+                        snapshot
+                            .search_options
+                            .contains(search::SearchOptions::REGEX)
+                            && snapshot.query == "("
+                            && snapshot
+                                .query_error
+                                .as_ref()
+                                .is_some_and(|error| !error.is_empty())
+                            && snapshot.matches.is_empty()
+                            && snapshot.worktree_scope == Some(active_worktree_id),
+                        "invalid-regex Search scene did not expose native query state: {snapshot:?}"
+                    );
+                    record_workbench_semantic_check(name, "search-invalid-regex-native-error");
+                }
+                "omega_workbench_search_loading" | "omega_workbench_search_error" => {
+                    let load = cx.update_window(workspace_window.into(), |_, window, cx| {
+                        panel.update(cx, |panel, cx| {
+                            panel.begin_workbench_surface_load_for_tests(
+                                format!("{name}-request"),
+                                omega_workbench_state::WorkSurface::Search,
+                                window,
+                                cx,
+                            )
+                        })
+                    })??;
+                    if name == "omega_workbench_search_error" {
+                        let effect =
+                            cx.update_window(workspace_window.into(), |_, window, cx| {
+                                panel.update(cx, |panel, cx| {
+                                    panel.complete_workbench_surface_load_for_tests(
+                                        load,
+                                        agent_ui::workbench_shell::SurfaceLoadOutcome::Error(
+                                            "Could not search this worktree".into(),
+                                        ),
+                                        window,
+                                        cx,
+                                    )
+                                })
+                            })??;
+                        anyhow::ensure!(
+                            effect == omega_workbench_state::TransitionEffect::Applied,
+                            "Search error scene load completion was not applied"
+                        );
+                        record_workbench_semantic_check(name, "search-error-state-applied");
+                    } else {
+                        record_workbench_semantic_check(name, "search-loading-state-applied");
+                    }
+                    cx.run_until_parked();
+                }
+                "omega_workbench_search_no_results" => {
+                    let snapshot = perform_workbench_search(
+                        workspace_window,
+                        &search_view,
+                        "omega_no_fixture_match",
+                        cx,
+                    )?;
+                    anyhow::ensure!(
+                        snapshot.query == "omega_no_fixture_match"
+                            && snapshot.matches.is_empty()
+                            && matches!(
+                                snapshot.lifecycle,
+                                search::project_search::ProjectSearchLifecycle::Completed {
+                                    request,
+                                    completion:
+                                        search::project_search::ProjectSearchCompletion::NoResults,
+                                } if request.worktree_id == Some(active_worktree_id)
+                            ),
+                        "no-results Search scene did not settle deterministically: {snapshot:?}"
+                    );
+                    record_workbench_semantic_check(name, "search-no-results-completion");
+                }
+                "omega_workbench_search_populated"
+                | "omega_workbench_search_narrow"
+                | "omega_workbench_search_focused_result" => {
+                    dispatch_workbench_action(workspace_window, Box::new(search::FocusSearch), cx)?;
+                    let mut snapshot = perform_workbench_search(
+                        workspace_window,
+                        &search_view,
+                        "omega_search_hit",
+                        cx,
+                    )?;
+                    let generation_after_initial_search = snapshot.generation;
+                    anyhow::ensure!(
+                        generation_after_initial_search > initial_snapshot.generation
+                            && snapshot.query == "omega_search_hit"
+                            && snapshot.active_query.as_deref() == Some("omega_search_hit")
+                            && snapshot.query_error.is_none()
+                            && snapshot.matches.len() == 4
+                            && matches!(
+                                snapshot.lifecycle,
+                                search::project_search::ProjectSearchLifecycle::Completed {
+                                    request,
+                                    completion:
+                                        search::project_search::ProjectSearchCompletion::Results {
+                                            match_count: 4,
+                                            limit_reached: false,
+                                        },
+                                } if request.generation == snapshot.generation
+                                    && request.worktree_id == Some(active_worktree_id)
+                            ),
+                        "populated Search scene did not settle with four beta matches: {snapshot:?}"
+                    );
+                    let result_paths = snapshot
+                        .matches
+                        .iter()
+                        .map(|search_match| {
+                            (
+                                search_match.path.worktree_id,
+                                search_match.path.path.as_ref().as_unix_str().to_owned(),
+                            )
+                        })
+                        .collect::<Vec<_>>();
+                    anyhow::ensure!(
+                        result_paths
+                            .iter()
+                            .all(|(worktree_id, _)| { *worktree_id == active_worktree_id })
+                            && result_paths
+                                == vec![
+                                    (active_worktree_id, "README.md".into()),
+                                    (active_worktree_id, "src/first.rs".into()),
+                                    (active_worktree_id, "src/first.rs".into()),
+                                    (active_worktree_id, "src/second.rs".into()),
+                                ]
+                            && snapshot
+                                .matches
+                                .iter()
+                                .all(|search_match| search_match.range.start
+                                    != search_match.range.end),
+                        "Search results were not the deterministic beta-only ordered ranges: {result_paths:?}"
+                    );
+                    record_workbench_semantic_check(
+                        name,
+                        "search-result-count-order-ranges-and-scope",
+                    );
+
+                    if name == "omega_workbench_search_populated" {
+                        dispatch_workbench_action(
+                            workspace_window,
+                            Box::new(search::ToggleReplace),
+                            cx,
+                        )?;
+                        cx.update_window(workspace_window.into(), |_, window, cx| {
+                            search_view.update(cx, |search_view, cx| {
+                                search_view.test_set_filters(
+                                    "**/src/**/*.rs",
+                                    "",
+                                    true,
+                                    window,
+                                    cx,
+                                );
+                                search_view.test_set_replacement(
+                                    "omega_search_replacement",
+                                    window,
+                                    cx,
+                                );
+                                search_view.test_start_search(cx);
+                            });
+                        })?;
+                        snapshot = wait_for_workbench_search(&search_view, cx)?;
+                        anyhow::ensure!(
+                            snapshot.replace_enabled
+                                && snapshot.filters_enabled
+                                && snapshot.included_files == "**/src/**/*.rs"
+                                && snapshot.excluded_files.is_empty()
+                                && snapshot.replacement == "omega_search_replacement"
+                                && snapshot.matches.len() == 3,
+                            "Search filters or replacement were not represented in native state: {snapshot:?}"
+                        );
+                        record_workbench_semantic_check(
+                            name,
+                            "search-filter-and-replacement-state",
+                        );
+
+                        cx.update_window(workspace_window.into(), |_, window, cx| {
+                            search_view.update(cx, |search_view, cx| {
+                                search_view.test_set_filters("", "", false, window, cx);
+                                search_view.test_start_search(cx);
+                            });
+                        })?;
+                        wait_for_workbench_search(&search_view, cx)?;
+                        dispatch_workbench_action(
+                            workspace_window,
+                            Box::new(search::ToggleIncludeIgnored),
+                            cx,
+                        )?;
+                        snapshot = wait_for_workbench_search(&search_view, cx)?;
+                        anyhow::ensure!(
+                            snapshot
+                                .search_options
+                                .contains(search::SearchOptions::INCLUDE_IGNORED)
+                                && snapshot.matches.len() == 5,
+                            "include-ignored action did not expose the ignored fifth match: {snapshot:?}"
+                        );
+                        dispatch_workbench_action(
+                            workspace_window,
+                            Box::new(search::ToggleIncludeIgnored),
+                            cx,
+                        )?;
+                        snapshot = wait_for_workbench_search(&search_view, cx)?;
+                        anyhow::ensure!(
+                            !snapshot
+                                .search_options
+                                .contains(search::SearchOptions::INCLUDE_IGNORED)
+                                && snapshot.matches.len() == 4,
+                            "include-ignored action did not restore the default result set: {snapshot:?}"
+                        );
+                        record_workbench_semantic_check(
+                            name,
+                            "search-option-action-reruns-native-query",
+                        );
+
+                        let pending_sender = start_pending_workbench_search(
+                            workspace_window,
+                            &search_view,
+                            "omega_cancelled_query",
+                            cx,
+                        )?;
+                        let pending_generation =
+                            workbench_search_snapshot(&search_view, cx).generation;
+                        cx.update(|cx| {
+                            search_view.update(cx, |search_view, cx| {
+                                anyhow::ensure!(search_view.cancel_search(cx));
+                                Ok::<_, anyhow::Error>(())
+                            })
+                        })?;
+                        drop(pending_sender);
+                        cx.run_until_parked();
+                        let cancelled = workbench_search_snapshot(&search_view, cx);
+                        anyhow::ensure!(
+                            !cancelled.pending
+                                && cancelled.generation > pending_generation
+                                && matches!(
+                                    cancelled.lifecycle,
+                                    search::project_search::ProjectSearchLifecycle::Cancelled {
+                                        request,
+                                    } if request.generation == cancelled.generation
+                                        && request.worktree_id == Some(active_worktree_id)
+                                ),
+                            "cancel action did not advance to a typed cancelled request: {cancelled:?}"
+                        );
+                        snapshot = perform_workbench_search(
+                            workspace_window,
+                            &search_view,
+                            "omega_search_hit",
+                            cx,
+                        )?;
+                        anyhow::ensure!(
+                            snapshot.matches.len() == 4,
+                            "Search did not recover after cancellation: {snapshot:?}"
+                        );
+                        record_workbench_semantic_check(
+                            name,
+                            "search-cancel-generation-and-recovery",
+                        );
+                    }
+
+                    if name == "omega_workbench_search_focused_result" {
+                        let search_bar = cx.read(|cx| search_surface.read(cx).search_bar().clone());
+                        cx.update_window(workspace_window.into(), |_, window, cx| {
+                            search_bar.update(cx, |search_bar, cx| {
+                                search_bar.move_focus_to_results(window, cx);
+                            });
+                        })?;
+                        dispatch_workbench_action(
+                            workspace_window,
+                            Box::new(search::SelectNextMatch),
+                            cx,
+                        )?;
+                        snapshot = workbench_search_snapshot(&search_view, cx);
+                        let active_index = snapshot
+                            .active_match_index
+                            .context("focused Search result has no active index")?;
+                        let selected_match = snapshot
+                            .active_match
+                            .clone()
+                            .context("focused Search result has no selected range")?;
+                        anyhow::ensure!(
+                            active_index < snapshot.matches.len()
+                                && Some(selected_match.clone())
+                                    == snapshot.matches.get(active_index).cloned(),
+                            "focused Search result does not identify its selected range: {snapshot:?}"
+                        );
+                        let focus_target =
+                            cx.update_window(workspace_window.into(), |_, window, cx| {
+                                search_surface
+                                    .update(cx, |surface, cx| surface.focus_target(window, cx))
+                            })?;
+                        anyhow::ensure!(
+                            focus_target
+                                == Some(
+                                    agent_ui::workbench_shell::NativeSearchFocusTarget::Results
+                                ),
+                            "focused Search scene did not move focus to native results"
+                        );
+                        dispatch_workbench_action(
+                            workspace_window,
+                            Box::new(editor::actions::OpenExcerpts),
+                            cx,
+                        )?;
+                        let (center_visible, opened_path, opened_editor) = workspace_window
+                            .update(cx, |workspace, _window, cx| {
+                                (
+                                    workspace.center_visible_for_tests(),
+                                    workspace
+                                        .active_item(cx)
+                                        .and_then(|item| item.project_path(cx)),
+                                    workspace.active_item_as::<editor::Editor>(cx).is_some(),
+                                )
+                            })
+                            .context("reading Search open-result workspace state")?;
+                        anyhow::ensure!(
+                            center_visible
+                                && opened_editor
+                                && opened_path.as_ref() == Some(&selected_match.path),
+                            "opening a Search result did not reveal its exact path in the native center: opened={opened_path:?}, selected={:?}",
+                            selected_match.path
+                        );
+                        record_workbench_semantic_check(
+                            name,
+                            "search-focused-result-range-and-open-navigation",
+                        );
+                    }
+                }
+                _ => unreachable!("Search scene was checked above"),
+            }
         }
         "omega_workbench_shell_active_dock" => {
             dispatch_workbench_action(workspace_window, Box::new(SelectPlan), cx)?;

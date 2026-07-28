@@ -152,6 +152,39 @@ into a hidden zero-base pane. Preview open preserves Project Panel focus;
 permanent open focuses the editor. Closing the final center item restores the
 agent-only presentation.
 
+### Native Search adapter {#native-search-adapter}
+
+The Search work surface uses the search crate's `ProjectSearchView`,
+`ProjectSearchBar`, project search task, result multibuffer, and editor
+navigation. The workbench adapter supplies a visual host and typed binding; it
+does not run a parallel grep service or translate native results into a second
+row model.
+
+Each native search request captures a monotonic request generation and the
+active `WorktreeId`. Running, completed, cancelled, and failed lifecycle states
+retain that request identity. A result publication is accepted only while both
+values still match. Changing the typed scope within one native view cancels the
+prior request, clears incompatible results, applies the new scope, and advances
+the generation before another result can render. When the shell changes to a
+different binding-keyed host, the prior host may finish independently but is no
+longer eligible to project. A late completion from worktree A therefore cannot
+flash into worktree B.
+
+Query text, include and exclude filters, case-sensitive, whole-word, regex, and
+include-ignored options remain native Search state. The native selected match
+owns its project path and range. The workbench host retains that compatible
+state across collapse and reopen, but does not restore it into another typed
+binding. Empty query, no results, invalid regex, loading, cancellation,
+disconnection, and removed-worktree failures are explicit native or host
+states.
+
+The Search toolbar and result content live inside
+`omega.workbench.surface.search`. Non-ready host content hides both instead of
+leaving stale results interactive. Returning to `Ready` restores focus to the
+native query or result target. Opening a result uses the existing Search editor
+navigation path and reveals the Workspace center beside the retained
+transcript.
+
 ## State ownership {#state-ownership}
 
 `omega_workbench_state::WorkbenchProjection` remains the semantic source of

@@ -22,6 +22,7 @@ use postage::oneshot;
 use rpc::{AnyProtoClient, proto};
 
 use util::{ResultExt, maybe, paths::compare_rel_paths, rel_path::RelPath};
+use worktree::WorktreeId;
 use worktree::{Entry, ProjectEntryId, Snapshot, Worktree, WorktreeSettings};
 
 use crate::{
@@ -35,6 +36,7 @@ pub struct Search {
     buffer_store: Entity<BufferStore>,
     worktree_store: Entity<WorktreeStore>,
     limit: usize,
+    worktree_scope: Option<WorktreeId>,
     kind: SearchKind,
 }
 
@@ -118,6 +120,7 @@ impl Search {
             buffer_store,
             worktree_store,
             limit,
+            worktree_scope: None,
         }
     }
 
@@ -136,6 +139,7 @@ impl Search {
             buffer_store,
             worktree_store,
             limit,
+            worktree_scope: None,
         }
     }
     pub(crate) fn open_buffers_only(
@@ -148,7 +152,13 @@ impl Search {
             buffer_store,
             worktree_store,
             limit,
+            worktree_scope: None,
         }
+    }
+
+    pub fn with_worktree_scope(mut self, worktree_scope: Option<WorktreeId>) -> Self {
+        self.worktree_scope = worktree_scope;
+        self
     }
 
     pub(crate) const MAX_SEARCH_RESULT_FILES: usize = 5_000;
@@ -162,7 +172,13 @@ impl Search {
         let buffers = self.buffer_store.read(cx);
         for handle in buffers.buffers() {
             let buffer = handle.read(cx);
-            if !buffers.is_searchable(&buffer.remote_id()) {
+            if self.worktree_scope.is_some_and(|worktree_id| {
+                buffer
+                    .file()
+                    .is_none_or(|file| file.worktree_id(cx) != worktree_id)
+            }) {
+                continue;
+            } else if !buffers.is_searchable(&buffer.remote_id()) {
                 continue;
             } else if buffer
                 .file()
@@ -214,6 +230,11 @@ impl Search {
                         fs,
                         ref mut worktrees,
                     } => {
+                        if let Some(worktree_id) = self.worktree_scope {
+                            worktrees.retain(|worktree| {
+                                worktree.read_with(cx, |worktree, _| worktree.id()) == worktree_id
+                            });
+                        }
                         let (get_buffer_for_full_scan_tx, get_buffer_for_full_scan_rx) =
                             unbounded();
                         let (confirm_contents_will_match_tx, confirm_contents_will_match_rx) =
@@ -277,6 +298,7 @@ impl Search {
                             query: Some(query.to_proto()),
                             limit: self.limit as _,
                             handle,
+                            worktree_id: self.worktree_scope.map(WorktreeId::to_proto),
                         });
 
                         let buffer_store = self.buffer_store;
@@ -622,6 +644,12 @@ impl Search {
             .filter(|buffer| {
                 let b = buffer.read(cx);
                 if let Some(file) = b.file() {
+                    if self
+                        .worktree_scope
+                        .is_some_and(|worktree_id| file.worktree_id(cx) != worktree_id)
+                    {
+                        return false;
+                    }
                     if file.disk_state().is_deleted() {
                         return false;
                     }
@@ -636,8 +664,10 @@ impl Search {
                     {
                         return false;
                     }
+                    true
+                } else {
+                    self.worktree_scope.is_none()
                 }
-                true
             })
             .cloned()
             .collect::<Vec<_>>();

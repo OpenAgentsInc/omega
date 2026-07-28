@@ -314,6 +314,7 @@ message FindSearchCandidates {
   SearchQuery query = 2;
   uint64 limit = 3;
   uint64 handle = 4;
+  optional uint64 worktree_id = 5;
 }
 
 message FindSearchCandidatesDone {}

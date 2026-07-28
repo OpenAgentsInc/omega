@@ -8903,6 +8903,10 @@ impl AgentPanel {
             .workbench_files_panel
             .as_ref()
             .is_some_and(|panel| panel.focus_handle(cx).contains_focused(window, cx));
+        let search_surface_was_focused = self
+            .workbench_shell
+            .search_surface_for_active_binding(cx)
+            .is_some_and(|surface| surface.focus_handle(cx).contains_focused(window, cx));
         let context = self.workbench_thread_context(cx);
         let result = match context {
             Ok((thread_id, observation)) => self
@@ -8953,6 +8957,56 @@ impl AgentPanel {
             self.workbench_shell
                 .set_visible_files_identity_error(identity_error, window, cx);
         }
+        let search_is_visible = self
+            .workbench_shell
+            .projection()
+            .visible_projection()
+            .is_some_and(|visible| {
+                visible.dock_open
+                    && visible.effective_surface == Some(omega_workbench_state::WorkSurface::Search)
+            });
+        if self.workbench_shell_enabled
+            && search_is_visible
+            && self.workbench_search_has_authority(cx)
+        {
+            let search_host_was_missing = self
+                .workbench_shell
+                .search_surface_for_active_binding(cx)
+                .is_none();
+            match self
+                .prepare_search_surface(window, cx)
+                .and_then(|search_surface| {
+                    self.workbench_shell
+                        .ensure_visible_search_host(search_surface, cx)
+                }) {
+                Ok(Some(host)) if search_surface_was_focused && search_host_was_missing => {
+                    host.focus_handle(cx).focus(window, cx);
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    log::warn!("failed to synchronize the native Search host: {error:#}");
+                    self.workbench_shell.record_error(error.to_string());
+                    if let Err(collapse_error) = self.workbench_shell.collapse_dock() {
+                        log::warn!(
+                            "failed to collapse Search after host synchronization failed: \
+                             {collapse_error:#}"
+                        );
+                    }
+                    self.focus_thread_transcript(window, cx);
+                }
+            }
+        }
+        if let Some(search_surface) = self.workbench_shell.search_surface_for_active_binding(cx) {
+            let worktree_id = self.active_workbench_worktree_id(cx);
+            let search_is_authoritative = self.workbench_search_has_authority(cx);
+            let search_view = search_surface.read(cx).search_view().clone();
+            Self::synchronize_native_search_scope(
+                &search_view,
+                worktree_id,
+                !search_is_authoritative,
+                cx,
+            );
+        }
         let files_is_visible = self
             .workbench_shell
             .projection()
@@ -8974,6 +9028,11 @@ impl AgentPanel {
         } else if files_panel_was_focused && !files_is_visible {
             self.focus_thread_transcript(window, cx);
         }
+        if search_surface_was_focused
+            && (!search_is_visible || !self.workbench_search_has_authority(cx))
+        {
+            self.focus_thread_transcript(window, cx);
+        }
     }
 
     fn active_workbench_worktree_id(&self, cx: &App) -> Option<WorktreeId> {
@@ -8990,11 +9049,29 @@ impl AgentPanel {
     }
 
     fn workbench_files_have_authority(&self, cx: &App) -> bool {
+        self.workbench_repository_surface_has_authority(
+            omega_workbench_state::WorkSurface::Files,
+            cx,
+        )
+    }
+
+    fn workbench_search_has_authority(&self, cx: &App) -> bool {
+        self.workbench_repository_surface_has_authority(
+            omega_workbench_state::WorkSurface::Search,
+            cx,
+        )
+    }
+
+    fn workbench_repository_surface_has_authority(
+        &self,
+        surface: omega_workbench_state::WorkSurface,
+        cx: &App,
+    ) -> bool {
         self.workbench_shell.projection().connection
             == omega_workbench_state::ConnectionPhase::Online
             && self
                 .workbench_shell
-                .capability(omega_workbench_state::WorkSurface::Files)
+                .capability(surface)
                 .is_some_and(|capability| capability.availability.is_available())
             && self
                 .workbench_shell
@@ -9139,6 +9216,66 @@ impl AgentPanel {
             }
         });
         Ok((panel, previous_scope, previous_scope_was_unavailable))
+    }
+
+    fn prepare_search_surface(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<Entity<workbench_shell::NativeSearchSurface>> {
+        if !self.workbench_search_has_authority(cx) {
+            anyhow::bail!("the native Search surface has no usable repository authority");
+        }
+        let worktree_id = self
+            .active_workbench_worktree_id(cx)
+            .ok_or_else(|| anyhow!("the active thread worktree is unavailable"))?;
+        if let Some(search_surface) = self.workbench_shell.search_surface_for_active_binding(cx) {
+            let search_view = search_surface.read(cx).search_view().clone();
+            Self::synchronize_native_search_scope(&search_view, Some(worktree_id), false, cx);
+            return Ok(search_surface);
+        }
+        if self.workspace.upgrade().is_none() {
+            anyhow::bail!("the workspace closed while opening Search");
+        }
+        let search_surface = cx.new(|cx| {
+            workbench_shell::NativeSearchSurface::new(
+                self.workspace.clone(),
+                self.project.clone(),
+                window,
+                cx,
+            )
+        });
+        let search_view = search_surface.read(cx).search_view().clone();
+        Self::synchronize_native_search_scope(&search_view, Some(worktree_id), false, cx);
+        Ok(search_surface)
+    }
+
+    fn synchronize_native_search_scope(
+        search_view: &Entity<search::project_search::ProjectSearchView>,
+        worktree_id: Option<WorktreeId>,
+        unavailable: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let needs_update = search_view.read_with(cx, |search_view, cx| {
+            let already_unavailable = matches!(
+                search_view.lifecycle(cx),
+                search::project_search::ProjectSearchLifecycle::Failed {
+                    error: search::project_search::ProjectSearchError::WorktreeUnavailable,
+                    ..
+                }
+            );
+            search_view.worktree_scope(cx) != worktree_id || unavailable != already_unavailable
+        });
+        if !needs_update {
+            return;
+        }
+        search_view.update(cx, |search_view, cx| {
+            if unavailable {
+                search_view.set_worktree_scope_unavailable(worktree_id, cx);
+            } else {
+                search_view.set_worktree_scope(worktree_id, cx);
+            }
+        });
     }
 
     fn detach_workspace_files_panel(
@@ -9443,9 +9580,22 @@ impl AgentPanel {
             } else {
                 (None, None, false)
             };
-        let selection = self
-            .workbench_shell
-            .select_surface(surface, files_panel.clone(), cx);
+        let search_surface = if surface == omega_workbench_state::WorkSurface::Search {
+            match self.prepare_search_surface(window, cx) {
+                Ok(search_surface) => Some(search_surface),
+                Err(error) => {
+                    log::warn!("could not prepare the Search work surface: {error:#}");
+                    self.workbench_shell.record_error(error.to_string());
+                    cx.notify();
+                    return;
+                }
+            }
+        } else {
+            None
+        };
+        let selection =
+            self.workbench_shell
+                .select_surface(surface, files_panel.clone(), search_surface, cx);
         match selection {
             Ok(workbench_shell::SurfaceSelection::Collapsed) => {
                 self.focus_thread_transcript(window, cx);
@@ -10328,6 +10478,13 @@ impl AgentPanel {
 
     pub fn workbench_files_panel_for_tests(&self) -> Option<Entity<ProjectPanel>> {
         self.workbench_files_panel.clone()
+    }
+
+    pub fn workbench_search_surface_for_tests(
+        &self,
+        cx: &App,
+    ) -> Option<Entity<workbench_shell::NativeSearchSurface>> {
+        self.workbench_shell.search_surface_for_active_binding(cx)
     }
 
     pub fn workbench_host_count_for_tests(&self) -> usize {

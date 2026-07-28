@@ -241,6 +241,53 @@ Panel ownership to remain unchanged. Cross-worktree tests record undo state
 under A, rebind to B, and prove B cannot replay it; same-binding recovery
 retains compatible tree state.
 
+### Native Search scenes {#native-search-scenes}
+
+Eight registered scenes exercise the search crate's native Project Search
+entities inside the Search work surface:
+
+| Scene                                   | Fixture and proof boundary                                                                                                                                 |
+| --------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `omega_workbench_search_empty`          | Opens the scoped native view with an empty query. Proves the query toolbar, landing state, focus target, and active beta binding.                          |
+| `omega_workbench_search_populated`      | Searches known cross-file matches. Proves exact count and order, typed beta ownership, native query and options, and exclusion of ignored and alpha files. |
+| `omega_workbench_search_no_results`     | Runs a valid query with no fixture match. Proves completed no-results state instead of stale rows or a fallback worktree.                                  |
+| `omega_workbench_search_invalid_regex`  | Enables the native regex option and enters an invalid expression. Proves the accessible native query error and no result publication.                      |
+| `omega_workbench_search_loading`        | Starts a generation-bound Search load. Proves the visible loading status hides the native toolbar and result content.                                      |
+| `omega_workbench_search_narrow`         | Renders populated Search at the 910-pixel minimum allocation. Proves bounded toolbar/content layout without transcript or composer overlap.                |
+| `omega_workbench_search_focused_result` | Selects a known native match through Search actions. Proves selected path and range, result focus, and existing editor-open navigation.                    |
+| `omega_workbench_search_error`          | Completes the generation-bound load with an error. Proves the accessible error host and absence of interactive stale Search content.                       |
+
+The disk fixture creates alpha and beta worktrees in an isolated `TempDir`.
+Both contain deliberately conflicting search text. Beta also contains
+cross-file matches, Unicode, a long line, and a Git-ignored match. The active
+thread is bound to beta through the rendered identity controls before Search
+opens. Semantic checks compare the production projection binding, native
+Search `WorktreeId`, request generation, query and options, match paths and
+ranges, selected match, and lifecycle state. A result from alpha is a failure
+even when its text would make the screenshot look plausible.
+
+The populated proof controls one pending alpha request, advances the
+deterministic scheduler enough to keep that request in flight, then selects
+beta and runs the final query. The runner requires the beta generation to
+supersede alpha at the production projection boundary before releasing the old
+completion. It then proves the native result snapshot contains only beta paths
+and that the alpha host cannot replace or change the completed beta host. The
+same native snapshot controls cover filters, replacement, option-triggered
+reruns, cancellation, and recovery without screen-coordinate automation.
+
+Ready scenes require accessible `omega.workbench.search.toolbar` and
+`omega.workbench.search.content` targets inside
+`omega.workbench.surface.search`. The invalid-regex scene additionally requires
+`omega.workbench.search.query-error` as an accessible alert. Loading and error
+scenes require the non-ready Search host to hide the toolbar, content, and query
+error. Narrow scenes assert that the Search surface remains inside the
+work-surface dock and disjoint from the transcript and composer.
+
+Each Search scene captures the whole workbench and a named `search-surface`
+region derived from `omega.workbench.surface.search`. A capture is recorded
+only after semantic ownership, lifecycle, focus, accessibility, action, and
+bounds checks pass.
+
 ### Registering a scene {#registering-a-scene}
 
 Add every named scene to `HERMETIC_SCENES`. A `SceneSpec` defines:

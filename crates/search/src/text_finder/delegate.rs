@@ -120,7 +120,7 @@ async fn get_ongoing_search(
 ) -> Option<SearchResults<SearchResult>> {
     let ongoing_search = project_search_view.update(cx, |view, cx| {
         view.entity.update(cx, |search, _| {
-            search.pending_search.take().inspect(|_| {
+            search.take_pending_search().inspect(|_| {
                 search
                     .project_search_turning_into_text_finder
                     .store(true, Ordering::Relaxed);
@@ -854,8 +854,10 @@ impl PickerDelegate for Delegate {
         self.active_query = Some(search_query.clone());
 
         let search_results = self.project_search_view.update(cx, |ps, cx| {
-            ps.entity.update(cx, |pr, cx| {
-                pr.project.update(cx, |p, cx| p.search(search_query, cx))
+            let worktree_scope = ps.worktree_scope(cx);
+            let project = ps.entity.read(cx).project.clone();
+            project.update(cx, |project, cx| {
+                project.search_in_worktree(search_query, worktree_scope, cx)
             })
         });
 
