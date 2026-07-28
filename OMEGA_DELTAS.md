@@ -7347,3 +7347,51 @@ current image build does not decode it inline.
 - **Enforced by:** `worktree_scans_are_bounded_by_default` in
   `crates/omega_deltas`, plus `test_scan_stops_at_max_entries_and_says_so` and
   `test_scan_below_max_entries_is_not_truncated` in `crates/worktree`.
+
+### OMEGA-DELTA-0167 — Phone pairing has no required configuration
+
+- **Upstream Zed:** has no phone pairing, so no configuration surface exists to
+  diverge from. This delta records a divergence from Omega's own earlier shape.
+- **Omega before:** `production_sarah_conversation` refused to build unless six
+  environment variables were present — the relay list, Sarah's public key, the
+  admitted-device allowlist, the device scope set, and the direct bridge's
+  MagicDNS name, port, and bind address.
+- **Omega now:** every one of those has a built-in default. The relay is
+  `wss://relay.openagents.com`, Sarah's public key is the production bridge
+  identity, the scope set is `observe_issue31` alone, the allowlist starts
+  empty, and the direct bridge advertises `localhost:4317` bound to
+  `127.0.0.1`. Each environment variable survives only as a development
+  override, and a blank value counts as unset.
+- **Why:** an installed app is launched from Finder, which passes on no shell
+  environment. A value the pairing runtime refuses to start without therefore
+  cannot live in an environment variable, because it is guaranteed absent in
+  exactly the build that ships. v0.2.0-rc22 shipped this way: pressing
+  **Pair phone** answered `OPENAGENTS_OMEGA_NOSTR_RELAYS is not configured`,
+  and there was no way for the owner to make it say anything else.
+- **The relay variable also killed the lane that needs no relay.** The direct
+  loopback bridge is constructed inside the same function, so a missing relay
+  variable returned before any endpoint was resolved, and the endpoint then
+  defaulted to none. QR pairing over loopback, which never contacts a relay,
+  died of relay configuration. The endpoint is now always present.
+- **The allowlist is state, not configuration.** It is what pairing produces.
+  A fresh install legitimately admits no device, and
+  `issue_direct_pairing_grant` admits the first one only after that device
+  proves possession of its key. An empty allowlist is no longer applied to the
+  host controller, which both keeps the one-to-32 policy check intact and stops
+  a restart overwriting the admissions restored from durable state.
+- **No default carries authority.** OMEGA-DELTA-0154 makes the mirror
+  read-only, so `observe_issue31` is the whole of the default scope set. A
+  default naming a command or steering scope would hand a phone authority the
+  mirror does not have.
+- **A half-set override is refused by name.** Advertising a MagicDNS name with
+  no port, or a port with no name, still fails — but the message says which
+  half is missing and what unsetting both restores, instead of `X is not
+  configured`.
+- **Enforced by:** `phone_pairing_needs_no_configuration` in
+  `crates/omega_deltas`, plus
+  `pairing_configuration_is_complete_with_an_empty_environment`,
+  `a_fresh_install_admits_no_device_and_grants_only_observation`,
+  `no_default_scope_carries_command_authority`,
+  `the_environment_still_overrides_every_default`,
+  `a_blank_override_falls_back_to_the_default`, and
+  `half_an_endpoint_override_names_the_missing_half` in `agent_ui`.

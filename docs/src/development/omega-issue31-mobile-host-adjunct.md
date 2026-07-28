@@ -161,23 +161,31 @@ records retain their conversation binding. NIP-AE, NIP-RS, and NIP-ER instead
 use their native author, address, owner, and time-tag contracts, without an
 invented `conversation` tag.
 
-Production configuration is read from:
+Pairing needs no configuration. Every value below has a built-in default, so a
+freshly installed app that was launched from Finder — which passes on no shell
+environment — pairs without anything being set. Each variable is a development
+override only, and a blank value counts as unset (OMEGA-DELTA-0167):
 
 - `OPENAGENTS_OMEGA_NOSTR_RELAYS`: one to eight comma-separated, credential-free
   `ws://` or `wss://` endpoints. Paths are allowed; credentials, URL query
   strings, and fragments are refused, matching the mobile discovery policy.
+  Defaults to `wss://relay.openagents.com`.
 - `OPENAGENTS_OMEGA_SARAH_PUBLIC_KEY_HEX`: Sarah's lowercase 64-hex Nostr public
-  key.
-- `OPENAGENTS_OMEGA_NOSTR_DEVICE_PUBLIC_KEYS`: required comma-separated
-  allowlist of one to 32 lowercase 64-hex mobile-device Nostr public keys.
-  Missing, empty, duplicated, uppercase, or malformed values fail closed before
-  Omega exposes the production Sarah transport. Omega challenges pairing
+  key. Defaults to the production Sarah bridge identity.
+- `OPENAGENTS_OMEGA_NOSTR_DEVICE_PUBLIC_KEYS`: comma-separated allowlist of up
+  to 32 lowercase 64-hex mobile-device Nostr public keys, pre-admitted to the
+  relay lane. Duplicated, uppercase, or malformed values fail closed before
+  Omega exposes the production Sarah transport. Omega challenges relay pairing
   requests only from this local allowlist, including when the request asks for
   every scope. Bootstrap exposes only uppercase 16-character SHA-256 device
   fingerprints for owner verification; it never exposes or logs the raw
-  configuration value.
-- `OPENAGENTS_OMEGA_NOSTR_DEVICE_SCOPES`: required comma-separated owner-approved
-  scope subset applied to the admitted device keys. Accepted values are
+  configuration value. Defaults to empty, which is what a fresh install has:
+  the allowlist is state pairing produces, and direct QR pairing admits its
+  device itself, after that device proves possession of its key.
+- `OPENAGENTS_OMEGA_NOSTR_DEVICE_SCOPES`: comma-separated owner-approved
+  scope subset applied to the admitted device keys. Defaults to
+  `observe_issue31` alone, because OMEGA-DELTA-0154 makes the mirror
+  read-only. Accepted values are
   `observe_issue31`, `send_message`, `interrupt_turn`, `control_full_auto`,
   `request_provider_handoff`, and `act_in_community`. A grant contains only the
   intersection of this policy and the device request; an empty intersection
@@ -191,15 +199,16 @@ Production configuration is read from:
   With no configured key, no LBR lifecycle record is subscribed to or admitted.
 - `OPENAGENTS_OMEGA_SARAH_CONVERSATION_DIGEST`: optional stable conversation
   digest; by default Omega derives 24 characters from the owner public key.
-- `OPENAGENTS_OMEGA_DEVICE_BRIDGE_MAGIC_DNS`: optional lowercase MagicDNS name
-  advertised in signed discovery v3. It must be configured together with the
-  port and bind address below.
+- `OPENAGENTS_OMEGA_DEVICE_BRIDGE_MAGIC_DNS`: lowercase MagicDNS name
+  advertised in signed discovery v3. Defaults to `localhost`. Overriding it
+  requires the port below, and a half-set pair is refused by name, because a
+  name with no port advertises a host no phone can reach.
 - `OPENAGENTS_OMEGA_DEVICE_BRIDGE_PORT`: nonzero TCP port advertised in
-  discovery and bound by the direct WebSocket bridge.
+  discovery and bound by the direct WebSocket bridge. Defaults to `4317`.
 - `OPENAGENTS_OMEGA_DEVICE_BRIDGE_BIND_ADDRESS`: literal loopback or Tailscale
   address on the local machine. This value is never advertised; it exists to
   keep listener binding separate from MagicDNS naming. Wildcard, LAN, public,
-  and hostname binds fail closed.
+  and hostname binds fail closed. Defaults to `127.0.0.1`.
 
 The Omega identity must already be ready in channel-specific secure custody.
 Missing environment or custody is re-evaluated on the next Sarah host request,

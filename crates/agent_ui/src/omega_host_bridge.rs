@@ -427,50 +427,181 @@ pub fn omega_effectd_host_handler(cx: &App) -> OmegaEffectdHostHandler {
     })
 }
 
+/// OMEGA-DELTA-0167. A shipped app is launched from Finder, which inherits no
+/// shell environment, so a value the pairing runtime refuses to start without
+/// must not live in an environment variable: it is then guaranteed absent
+/// exactly where it is needed. omega#124 shipped with six such variables,
+/// which made "Pair phone" a control that could only fail in an installed
+/// build. Everything below is a product fact rather than a per-machine fact,
+/// so it is compiled in, and each environment variable survives only as a
+/// development override.
+const DEFAULT_NOSTR_RELAY_URL: &str = "wss://relay.openagents.com";
+
+/// Sarah's production Nostr bridge identity. A public key is not a secret —
+/// the same value is what the openagents deployment publishes as
+/// `SARAH_NOSTR_OWNER_PUBKEY`, and a device must already know it to verify
+/// what it reads.
+const DEFAULT_SARAH_PUBLIC_KEY_HEX: &str =
+    "bcf86577b45042c960c99fe4ac1380a3ef0565ccbdd5c81e3f20f0919fe4fd14";
+
+/// OMEGA-DELTA-0154. The mirror is read-only, so observation is the whole of
+/// what a paired phone may hold by default. No scope carrying command or
+/// steering authority may be added here.
+const DEFAULT_DEVICE_SCOPES: &[omega_effectd::Issue31PairingScope] =
+    &[omega_effectd::Issue31PairingScope::ObserveIssue31];
+
+/// Loopback. The QR a phone scans carries this endpoint, and this exact
+/// combination is the one proven to pair.
+const DEFAULT_DEVICE_BRIDGE_MAGIC_DNS: &str = "localhost";
+const DEFAULT_DEVICE_BRIDGE_PORT: u16 = 4317;
+const DEFAULT_DEVICE_BRIDGE_BIND_ADDRESS: &str = "127.0.0.1";
+
+/// How an override is read. Production reads the environment; a test supplies
+/// its own map, so the defaults can be proven without mutating process state
+/// that every other test in the binary shares.
+type PairingOverrides<'a> = &'a dyn Fn(&str) -> Option<String>;
+
+/// Read a development override from the environment.
+fn pairing_override(name: &str) -> Option<String> {
+    std::env::var(name).ok()
+}
+
+/// Read an override through the rule every override obeys: a blank value
+/// counts as unset. An `export` left empty in a launch script would otherwise
+/// erase a product default and put the app back where it started, and this
+/// belongs here rather than in the environment reader so that every lookup —
+/// including a future settings-backed one — inherits it.
+fn resolved_override(overrides: PairingOverrides<'_>, name: &str) -> Option<String> {
+    overrides(name)
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+}
+
+fn comma_separated(value: &str) -> Vec<String> {
+    value
+        .split(',')
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
+fn resolve_relay_urls(overrides: PairingOverrides<'_>) -> Vec<String> {
+    resolved_override(overrides, "OPENAGENTS_OMEGA_NOSTR_RELAYS")
+        .map(|value| comma_separated(&value))
+        .filter(|relay_urls| !relay_urls.is_empty())
+        .unwrap_or_else(|| vec![DEFAULT_NOSTR_RELAY_URL.to_owned()])
+}
+
+fn resolve_sarah_public_key_hex(overrides: PairingOverrides<'_>) -> String {
+    resolved_override(overrides, "OPENAGENTS_OMEGA_SARAH_PUBLIC_KEY_HEX")
+        .unwrap_or_else(|| DEFAULT_SARAH_PUBLIC_KEY_HEX.to_owned())
+}
+
+/// The devices already admitted to the relay lane.
+///
+/// This is state a pairing produces, not configuration an owner types. A fresh
+/// install legitimately admits no device, and the QR flow in
+/// `issue_direct_pairing_grant` is what admits the first one — it writes the
+/// device into its own admitted set only after that device proves possession
+/// of its key. Empty is therefore both honest and the safe end: it admits
+/// nobody who has not paired.
+fn resolve_admitted_device_public_key_hexes(overrides: PairingOverrides<'_>) -> Vec<String> {
+    resolved_override(overrides, "OPENAGENTS_OMEGA_NOSTR_DEVICE_PUBLIC_KEYS")
+        .map(|value| comma_separated(&value))
+        .unwrap_or_default()
+}
+
+fn resolve_approved_device_scopes(
+    overrides: PairingOverrides<'_>,
+) -> Result<Vec<omega_effectd::Issue31PairingScope>, HostResponseError> {
+    match resolved_override(overrides, "OPENAGENTS_OMEGA_NOSTR_DEVICE_SCOPES") {
+        Some(value) => comma_separated(&value)
+            .iter()
+            .map(|scope| omega_effectd::Issue31PairingScope::parse(scope))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| {
+                unavailable(format!("Issue 31 device scope policy is invalid: {error}"))
+            }),
+        None => Ok(DEFAULT_DEVICE_SCOPES.to_vec()),
+    }
+}
+
+fn resolve_bind_address(overrides: PairingOverrides<'_>) -> String {
+    resolved_override(overrides, "OPENAGENTS_OMEGA_DEVICE_BRIDGE_BIND_ADDRESS")
+        .unwrap_or_else(|| DEFAULT_DEVICE_BRIDGE_BIND_ADDRESS.to_owned())
+}
+
+/// Where the direct device bridge advertises itself.
+///
+/// The MagicDNS name and the port describe one endpoint, so supplying one
+/// without the other yields a host a phone can discover and cannot reach. That
+/// stays refused, but the refusal now names which half is missing and what
+/// unsetting both restores.
+fn resolve_direct_device_endpoint(
+    overrides: PairingOverrides<'_>,
+) -> Result<omega_effectd::Issue31DirectEndpoint, HostResponseError> {
+    let magic_dns_override =
+        resolved_override(overrides, "OPENAGENTS_OMEGA_DEVICE_BRIDGE_MAGIC_DNS");
+    let port_override = resolved_override(overrides, "OPENAGENTS_OMEGA_DEVICE_BRIDGE_PORT");
+    let (magic_dns_name, port) = match (magic_dns_override, port_override) {
+        (None, None) => (
+            DEFAULT_DEVICE_BRIDGE_MAGIC_DNS.to_owned(),
+            DEFAULT_DEVICE_BRIDGE_PORT,
+        ),
+        (Some(magic_dns_name), Some(port)) => {
+            let parsed = port.parse::<u16>().ok().filter(|port| *port != 0).ok_or_else(|| {
+                unavailable(format!(
+                    "OPENAGENTS_OMEGA_DEVICE_BRIDGE_PORT is \"{port}\", which is not a TCP port \
+                     between 1 and 65535. Unset it and \
+                     OPENAGENTS_OMEGA_DEVICE_BRIDGE_MAGIC_DNS to use the built-in \
+                     {DEFAULT_DEVICE_BRIDGE_MAGIC_DNS}:{DEFAULT_DEVICE_BRIDGE_PORT}."
+                ))
+            })?;
+            (magic_dns_name, parsed)
+        }
+        (Some(_), None) => {
+            return Err(unavailable(format!(
+                "OPENAGENTS_OMEGA_DEVICE_BRIDGE_MAGIC_DNS is set but \
+                 OPENAGENTS_OMEGA_DEVICE_BRIDGE_PORT is not, so this host would advertise a name \
+                 with no port. Set both, or unset both to use the built-in \
+                 {DEFAULT_DEVICE_BRIDGE_MAGIC_DNS}:{DEFAULT_DEVICE_BRIDGE_PORT}."
+            )));
+        }
+        (None, Some(_)) => {
+            return Err(unavailable(format!(
+                "OPENAGENTS_OMEGA_DEVICE_BRIDGE_PORT is set but \
+                 OPENAGENTS_OMEGA_DEVICE_BRIDGE_MAGIC_DNS is not, so this host would advertise a \
+                 port with no name. Set both, or unset both to use the built-in \
+                 {DEFAULT_DEVICE_BRIDGE_MAGIC_DNS}:{DEFAULT_DEVICE_BRIDGE_PORT}."
+            )));
+        }
+    };
+    Ok(omega_effectd::Issue31DirectEndpoint {
+        magic_dns_name,
+        port,
+        protocol: omega_effectd::DEVICE_BRIDGE_PROTOCOL.into(),
+    })
+}
+
 fn production_sarah_conversation() -> Result<SarahConversationClient, HostResponseError> {
-    let relay_urls = std::env::var("OPENAGENTS_OMEGA_NOSTR_RELAYS")
-        .map_err(|_| unavailable("OPENAGENTS_OMEGA_NOSTR_RELAYS is not configured."))?
-        .split(',')
-        .map(str::trim)
-        .filter(|relay_url| !relay_url.is_empty())
-        .map(str::to_owned)
-        .collect::<Vec<_>>();
-    let sarah_public_key_hex = std::env::var("OPENAGENTS_OMEGA_SARAH_PUBLIC_KEY_HEX")
-        .map_err(|_| unavailable("OPENAGENTS_OMEGA_SARAH_PUBLIC_KEY_HEX is not configured."))?;
+    let relay_urls = resolve_relay_urls(&pairing_override);
+    let sarah_public_key_hex = resolve_sarah_public_key_hex(&pairing_override);
     let admitted_device_public_key_hexes =
-        std::env::var("OPENAGENTS_OMEGA_NOSTR_DEVICE_PUBLIC_KEYS")
-            .map_err(|_| {
-                unavailable("OPENAGENTS_OMEGA_NOSTR_DEVICE_PUBLIC_KEYS is not configured.")
-            })?
-            .split(',')
-            .map(str::trim)
-            .filter(|public_key| !public_key.is_empty())
-            .map(str::to_owned)
-            .collect::<Vec<_>>();
-    let approved_device_scopes = std::env::var("OPENAGENTS_OMEGA_NOSTR_DEVICE_SCOPES")
-        .map_err(|_| unavailable("OPENAGENTS_OMEGA_NOSTR_DEVICE_SCOPES is not configured."))?
-        .split(',')
-        .map(str::trim)
-        .filter(|scope| !scope.is_empty())
-        .map(omega_effectd::Issue31PairingScope::parse)
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|error| {
-            unavailable(format!("Issue 31 device scope policy is invalid: {error}"))
-        })?;
-    let community_group_ids = std::env::var("OPENAGENTS_OMEGA_NOSTR_COMMUNITY_GROUP_IDS")
-        .unwrap_or_default()
-        .split(',')
-        .map(str::trim)
-        .filter(|group_id| !group_id.is_empty())
-        .map(str::to_owned)
-        .collect::<Vec<_>>();
-    let community_public_key_hexes = std::env::var("OPENAGENTS_OMEGA_NOSTR_COMMUNITY_PUBLIC_KEYS")
-        .unwrap_or_default()
-        .split(',')
-        .map(str::trim)
-        .filter(|public_key| !public_key.is_empty())
-        .map(str::to_owned)
-        .collect::<Vec<_>>();
+        resolve_admitted_device_public_key_hexes(&pairing_override);
+    let approved_device_scopes = resolve_approved_device_scopes(&pairing_override)?;
+    let community_group_ids = resolved_override(
+        &pairing_override,
+        "OPENAGENTS_OMEGA_NOSTR_COMMUNITY_GROUP_IDS",
+    )
+    .map(|value| comma_separated(&value))
+    .unwrap_or_default();
+    let community_public_key_hexes = resolved_override(
+        &pairing_override,
+        "OPENAGENTS_OMEGA_NOSTR_COMMUNITY_PUBLIC_KEYS",
+    )
+    .map(|value| comma_separated(&value))
+    .unwrap_or_default();
     let identity_service = Arc::new(omega_identity::IdentityService::system(
         *app_identity::CHANNEL,
     ));
@@ -481,26 +612,16 @@ fn production_sarah_conversation() -> Result<SarahConversationClient, HostRespon
         .identity
         .map(|identity| identity.public_key_hex().as_str().to_string())
         .ok_or_else(|| unavailable("Omega identity custody is not ready."))?;
-    let conversation_digest = std::env::var("OPENAGENTS_OMEGA_SARAH_CONVERSATION_DIGEST")
-        .unwrap_or_else(|_| owner_public_key_hex.chars().take(24).collect());
-    let direct_endpoints = match (
-        std::env::var("OPENAGENTS_OMEGA_DEVICE_BRIDGE_MAGIC_DNS").ok(),
-        std::env::var("OPENAGENTS_OMEGA_DEVICE_BRIDGE_PORT").ok(),
-    ) {
-        (None, None) => Vec::new(),
-        (Some(magic_dns_name), Some(port)) => vec![omega_effectd::Issue31DirectEndpoint {
-            magic_dns_name,
-            port: port
-                .parse()
-                .map_err(|_| unavailable("Omega device bridge port is invalid."))?,
-            protocol: omega_effectd::DEVICE_BRIDGE_PROTOCOL.into(),
-        }],
-        _ => {
-            return Err(unavailable(
-                "Omega device bridge MagicDNS and port must be configured together.",
-            ));
-        }
-    };
+    let conversation_digest = resolved_override(
+        &pairing_override,
+        "OPENAGENTS_OMEGA_SARAH_CONVERSATION_DIGEST",
+    )
+    .unwrap_or_else(|| owner_public_key_hex.chars().take(24).collect());
+    // Always one endpoint. This used to default to none, and because the
+    // direct loopback bridge is built here, a host with no relay configuration
+    // also advertised no direct endpoint — so QR pairing, which needs no relay
+    // at all, died of a missing relay variable.
+    let direct_endpoints = vec![resolve_direct_device_endpoint(&pairing_override)?];
     let config = SarahConversationConfig {
         generation: 1,
         conversation_digest,
@@ -874,12 +995,13 @@ fn start_device_bridge(
     else {
         return Ok(None);
     };
-    let bind_address =
-        std::env::var("OPENAGENTS_OMEGA_DEVICE_BRIDGE_BIND_ADDRESS").map_err(|_| {
-            unavailable("OPENAGENTS_OMEGA_DEVICE_BRIDGE_BIND_ADDRESS is not configured.")
-        })?;
-    let host = omega_effectd::BridgeBindHost::new(&bind_address)
-        .map_err(|error| unavailable(format!("Omega device bridge bind is invalid: {error}")))?;
+    let bind_address = resolve_bind_address(&pairing_override);
+    let host = omega_effectd::BridgeBindHost::new(&bind_address).map_err(|error| {
+        unavailable(format!(
+            "OPENAGENTS_OMEGA_DEVICE_BRIDGE_BIND_ADDRESS is \"{bind_address}\": {error}. Unset it \
+             to bind the built-in {DEFAULT_DEVICE_BRIDGE_BIND_ADDRESS}."
+        ))
+    })?;
     let config = omega_effectd::DeviceBridgeServerConfig {
         host,
         port: endpoint.port,
@@ -3191,5 +3313,184 @@ mod tests {
             external_agent_authority_state(true, AgentConnectionStatus::Disconnected, true),
             (true, "available")
         );
+    }
+
+    /// The environment a shipped app actually has: none.
+    fn no_overrides() -> impl Fn(&str) -> Option<String> {
+        |_| None
+    }
+
+    fn overrides(entries: &[(&str, &str)]) -> Box<dyn Fn(&str) -> Option<String>> {
+        let entries = entries
+            .iter()
+            .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
+            .collect::<StdHashMap<_, _>>();
+        Box::new(move |name: &str| entries.get(name).cloned())
+    }
+
+    #[test]
+    fn pairing_configuration_is_complete_with_an_empty_environment() {
+        let lookup = no_overrides();
+        assert_eq!(
+            resolve_relay_urls(&lookup),
+            vec!["wss://relay.openagents.com".to_owned()]
+        );
+        assert_eq!(
+            resolve_sarah_public_key_hex(&lookup),
+            "bcf86577b45042c960c99fe4ac1380a3ef0565ccbdd5c81e3f20f0919fe4fd14"
+        );
+        assert_eq!(resolve_bind_address(&lookup), "127.0.0.1");
+        let endpoint = resolve_direct_device_endpoint(&lookup)
+            .expect("an empty environment resolves the loopback endpoint");
+        assert_eq!(endpoint.magic_dns_name, "localhost");
+        assert_eq!(endpoint.port, 4317);
+        assert_eq!(
+            endpoint.protocol,
+            omega_effectd::DEVICE_BRIDGE_PROTOCOL.to_string()
+        );
+        assert!(
+            omega_effectd::BridgeBindHost::new(&resolve_bind_address(&lookup)).is_ok(),
+            "the default bind address must satisfy the OMEGA-DELTA-0154 bind rule"
+        );
+    }
+
+    /// A fresh install has admitted no phone, and the QR flow is what admits
+    /// the first one. An invented placeholder key here would be a device
+    /// nobody holds sitting in an allowlist.
+    #[test]
+    fn a_fresh_install_admits_no_device_and_grants_only_observation() {
+        let lookup = no_overrides();
+        assert!(resolve_admitted_device_public_key_hexes(&lookup).is_empty());
+        assert_eq!(
+            resolve_approved_device_scopes(&lookup).expect("the built-in scope set parses"),
+            vec![omega_effectd::Issue31PairingScope::ObserveIssue31]
+        );
+    }
+
+    /// OMEGA-DELTA-0154. The mirror is read-only, so no default may carry
+    /// command or steering authority.
+    #[test]
+    fn no_default_scope_carries_command_authority() {
+        for scope in DEFAULT_DEVICE_SCOPES {
+            assert_eq!(
+                *scope,
+                omega_effectd::Issue31PairingScope::ObserveIssue31,
+                "a default scope beyond observation would grant a phone authority \
+                 the read-only mirror does not have"
+            );
+        }
+    }
+
+    #[test]
+    fn the_environment_still_overrides_every_default() {
+        let lookup = overrides(&[
+            (
+                "OPENAGENTS_OMEGA_NOSTR_RELAYS",
+                "wss://one.test,wss://two.test",
+            ),
+            (
+                "OPENAGENTS_OMEGA_SARAH_PUBLIC_KEY_HEX",
+                "ab".repeat(32).as_str(),
+            ),
+            (
+                "OPENAGENTS_OMEGA_NOSTR_DEVICE_PUBLIC_KEYS",
+                "cd".repeat(32).as_str(),
+            ),
+            (
+                "OPENAGENTS_OMEGA_NOSTR_DEVICE_SCOPES",
+                "observe_issue31,send_message",
+            ),
+            (
+                "OPENAGENTS_OMEGA_DEVICE_BRIDGE_MAGIC_DNS",
+                "desk.tailnet.ts.net",
+            ),
+            ("OPENAGENTS_OMEGA_DEVICE_BRIDGE_PORT", "5900"),
+            ("OPENAGENTS_OMEGA_DEVICE_BRIDGE_BIND_ADDRESS", "100.64.0.7"),
+        ]);
+        assert_eq!(
+            resolve_relay_urls(&lookup),
+            vec!["wss://one.test".to_owned(), "wss://two.test".to_owned()]
+        );
+        assert_eq!(resolve_sarah_public_key_hex(&lookup), "ab".repeat(32));
+        assert_eq!(
+            resolve_admitted_device_public_key_hexes(&lookup),
+            vec!["cd".repeat(32)]
+        );
+        assert_eq!(
+            resolve_approved_device_scopes(&lookup).expect("the override parses"),
+            vec![
+                omega_effectd::Issue31PairingScope::ObserveIssue31,
+                omega_effectd::Issue31PairingScope::SendMessage,
+            ]
+        );
+        assert_eq!(resolve_bind_address(&lookup), "100.64.0.7");
+        let endpoint = resolve_direct_device_endpoint(&lookup).expect("the override resolves");
+        assert_eq!(endpoint.magic_dns_name, "desk.tailnet.ts.net");
+        assert_eq!(endpoint.port, 5900);
+    }
+
+    /// A blank export is the shape a launch script produces when a variable it
+    /// meant to set was itself unset. Treating it as a value would put the
+    /// shipped app back where it started.
+    #[test]
+    fn a_blank_override_falls_back_to_the_default() {
+        let lookup = overrides(&[
+            ("OPENAGENTS_OMEGA_NOSTR_RELAYS", "  "),
+            ("OPENAGENTS_OMEGA_SARAH_PUBLIC_KEY_HEX", ""),
+        ]);
+        assert_eq!(
+            resolve_relay_urls(&lookup),
+            vec!["wss://relay.openagents.com".to_owned()]
+        );
+        assert_eq!(
+            resolve_sarah_public_key_hex(&lookup),
+            DEFAULT_SARAH_PUBLIC_KEY_HEX
+        );
+    }
+
+    #[test]
+    fn half_an_endpoint_override_names_the_missing_half() {
+        let magic_dns_only = resolve_direct_device_endpoint(&overrides(&[(
+            "OPENAGENTS_OMEGA_DEVICE_BRIDGE_MAGIC_DNS",
+            "desk.tailnet.ts.net",
+        )]))
+        .expect_err("advertising a name with no port is refused");
+        assert!(
+            magic_dns_only
+                .message
+                .contains("OPENAGENTS_OMEGA_DEVICE_BRIDGE_PORT is not")
+                && magic_dns_only.message.contains("localhost:4317"),
+            "the refusal must name the missing half and the built-in it replaces: {}",
+            magic_dns_only.message
+        );
+
+        let port_only = resolve_direct_device_endpoint(&overrides(&[(
+            "OPENAGENTS_OMEGA_DEVICE_BRIDGE_PORT",
+            "5900",
+        )]))
+        .expect_err("advertising a port with no name is refused");
+        assert!(
+            port_only
+                .message
+                .contains("OPENAGENTS_OMEGA_DEVICE_BRIDGE_MAGIC_DNS is not"),
+            "the refusal must name the missing half: {}",
+            port_only.message
+        );
+
+        for bad_port in ["0", "not-a-port", "99999"] {
+            let refusal = resolve_direct_device_endpoint(&overrides(&[
+                (
+                    "OPENAGENTS_OMEGA_DEVICE_BRIDGE_MAGIC_DNS",
+                    "desk.tailnet.ts.net",
+                ),
+                ("OPENAGENTS_OMEGA_DEVICE_BRIDGE_PORT", bad_port),
+            ]))
+            .expect_err("an unusable port is refused");
+            assert!(
+                refusal.message.contains(bad_port),
+                "the refusal must quote the rejected port: {}",
+                refusal.message
+            );
+        }
     }
 }

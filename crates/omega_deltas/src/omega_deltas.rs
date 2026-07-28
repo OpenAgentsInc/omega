@@ -155,6 +155,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0164",
     "OMEGA-DELTA-0165",
     "OMEGA-DELTA-0166",
+    "OMEGA-DELTA-0167",
 ];
 
 pub const GOOGLE_PROVIDER_PATH: &str = "crates/language_models/src/provider/google.rs";
@@ -3296,6 +3297,10 @@ pub const EXO_LOG_CLIENT_PATH: &str = "crates/omega_exo_log/src/client.rs";
 
 /// OMEGA-DELTA-0107. Where the rendering and its absences live.
 pub const EXO_LOG_HISTORY_PATH: &str = "crates/omega_exo_log/src/history.rs";
+
+/// OMEGA-DELTA-0167. Where an empty admitted-device allowlist stops being
+/// applied to the host controller.
+pub const SARAH_CONVERSATION_PATH: &str = "crates/omega_effectd/src/sarah_conversation.rs";
 
 /// OMEGA-DELTA-0107. Route B, spelled out, so choosing it is a diff rather than
 /// a convenience.
@@ -20582,6 +20587,86 @@ mod tests {
             "OMEGA-DELTA-0166: the bound is no longer reported to the person who \
              opened the folder. A silent cap leaves them with a folder that \
              cannot find its own files and no way to know why."
+        );
+    }
+    /// OMEGA-DELTA-0167. A shipped app inherits no shell environment, so any
+    /// value phone pairing refuses to start without must be compiled in. Each
+    /// default below is asserted by value: `wss://relay.openagents.com` is the
+    /// relay the owner named, and a rebase that restores a bare `env::var(...)?`
+    /// on any of these ships a "Pair phone" button that can only fail.
+    #[test]
+    fn phone_pairing_needs_no_configuration() {
+        let bridge = without_comments(&read_repository_file(HOST_BRIDGE_PATH));
+        let shipped = bridge
+            .split_once("#[cfg(test)]")
+            .map(|(shipped, _)| shipped)
+            .expect("the host bridge has executable tests");
+
+        for (name, default) in [
+            ("DEFAULT_NOSTR_RELAY_URL", "\"wss://relay.openagents.com\""),
+            (
+                "DEFAULT_SARAH_PUBLIC_KEY_HEX",
+                "\"bcf86577b45042c960c99fe4ac1380a3ef0565ccbdd5c81e3f20f0919fe4fd14\"",
+            ),
+            ("DEFAULT_DEVICE_BRIDGE_MAGIC_DNS", "\"localhost\""),
+            ("DEFAULT_DEVICE_BRIDGE_PORT", "4317"),
+            ("DEFAULT_DEVICE_BRIDGE_BIND_ADDRESS", "\"127.0.0.1\""),
+        ] {
+            assert!(
+                shipped.contains(&format!("const {name}")) && shipped.contains(default),
+                "OMEGA-DELTA-0167: {name} no longer resolves to {default}. \
+                 Without a compiled-in value an installed app, which is launched \
+                 with no shell environment, cannot pair at all."
+            );
+        }
+
+        assert!(
+            shipped.contains("DEFAULT_DEVICE_SCOPES")
+                && shipped.contains("&[omega_effectd::Issue31PairingScope::ObserveIssue31]"),
+            "OMEGA-DELTA-0167: the default device scope set changed. \
+             OMEGA-DELTA-0154 makes the mirror read-only, so observation is the \
+             whole of what a phone may hold before an owner grants more."
+        );
+
+        assert!(
+            !shipped.contains("is not configured."),
+            "OMEGA-DELTA-0167: a `not configured` refusal returned to the host \
+             bridge. Every pairing input has a built-in default, so no input may \
+             refuse merely for being absent — which is its state in every \
+             installed build."
+        );
+        for variable in [
+            "OPENAGENTS_OMEGA_NOSTR_RELAYS",
+            "OPENAGENTS_OMEGA_SARAH_PUBLIC_KEY_HEX",
+            "OPENAGENTS_OMEGA_NOSTR_DEVICE_PUBLIC_KEYS",
+            "OPENAGENTS_OMEGA_NOSTR_DEVICE_SCOPES",
+            "OPENAGENTS_OMEGA_DEVICE_BRIDGE_MAGIC_DNS",
+            "OPENAGENTS_OMEGA_DEVICE_BRIDGE_PORT",
+            "OPENAGENTS_OMEGA_DEVICE_BRIDGE_BIND_ADDRESS",
+        ] {
+            assert!(
+                !shipped.contains(&format!("std::env::var(\"{variable}\")")),
+                "OMEGA-DELTA-0167: {variable} is read directly again. It must go \
+                 through `pairing_override`, which treats a blank export as unset \
+                 and falls back to the built-in default."
+            );
+        }
+
+        assert!(
+            shipped.contains("vec![resolve_direct_device_endpoint(&pairing_override)?]"),
+            "OMEGA-DELTA-0167: the direct endpoint can be empty again. It is \
+             built in the same function as the relay configuration, so an empty \
+             default is what made a missing relay variable kill QR pairing over \
+             loopback, which contacts no relay."
+        );
+
+        let conversation = without_comments(&read_repository_file(SARAH_CONVERSATION_PATH));
+        assert!(
+            conversation.contains("if !config.admitted_device_public_key_hexes.is_empty()"),
+            "OMEGA-DELTA-0167: an empty admitted-device allowlist is applied to \
+             the host controller again. A fresh install has admitted no phone, \
+             and applying the empty set both fails the one-to-32 policy check and \
+             overwrites the admissions restored from durable state."
         );
     }
 }

@@ -1262,12 +1262,21 @@ impl SarahConversationClient {
             Some(persisted) => persisted.controller.clone(),
             None => Issue31HostController::new(host_configuration).map_err(issue31_error)?,
         };
-        issue31_host
-            .set_admitted_device_policy(
-                config.admitted_device_public_key_hexes.clone(),
-                config.approved_device_scopes.clone(),
-            )
-            .map_err(issue31_error)?;
+        // An empty allowlist is a fresh install, not a misconfiguration: no
+        // phone has paired yet. Applying it would both fail the one-to-32
+        // policy check and overwrite the admissions restored from durable
+        // state, so a restart would silently unpair every device. Skipping
+        // leaves the persisted admissions intact and admits nobody new, which
+        // is the safe end. `issue_direct_pairing_grant` is what admits the
+        // first device, after it proves possession of its key.
+        if !config.admitted_device_public_key_hexes.is_empty() {
+            issue31_host
+                .set_admitted_device_policy(
+                    config.admitted_device_public_key_hexes.clone(),
+                    config.approved_device_scopes.clone(),
+                )
+                .map_err(issue31_error)?;
+        }
         let issue31_discovery_generation = persisted
             .as_ref()
             .and_then(|persisted| persisted.discovery_generation);
