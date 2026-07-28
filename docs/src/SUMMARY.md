@@ -234,6 +234,7 @@
   - [Omega RC release](./development/omega-rc-release.md)
   - [Omega RC installed proof](./development/omega-rc-installed-proof.md)
   - [Omega slim-agent proof](./development/omega-slim-agent-proof.md)
+  - [Deterministic Omega workbench proofs](./development/omega-workbench-proof.md)
   - [macOS](./development/macos.md)
   - [Linux](./development/linux.md)
   - [Windows](./development/windows.md)

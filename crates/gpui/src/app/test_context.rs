@@ -885,8 +885,42 @@ impl VisualTestContext {
     }
 
     /// debug_bounds returns the bounds of the element with the given selector.
-    pub fn debug_bounds(&mut self, selector: &'static str) -> Option<Bounds<Pixels>> {
+    pub fn debug_bounds(&mut self, selector: &str) -> Option<Bounds<Pixels>> {
         self.update(|window, _| window.rendered_frame.debug_bounds.get(selector).copied())
+    }
+
+    /// Captures semantic metadata from the most recently rendered frame.
+    pub fn debug_render_snapshot(&mut self) -> crate::DebugRenderSnapshot {
+        self.update(|window, _| window.debug_render_snapshot())
+    }
+
+    /// Forces accessibility tree generation and settles pending foreground work.
+    pub fn set_debug_accessibility_active(&mut self, active: bool) {
+        self.update(|window, _| window.set_debug_accessibility_active(active));
+        self.run_until_parked();
+    }
+
+    /// Clicks the unique visible, hit-testable occurrence of a debug selector.
+    pub fn simulate_click_selector(&mut self, selector: &str) -> Result<()> {
+        let snapshot = self.debug_render_snapshot();
+        let count = snapshot.selector_count(selector);
+        if count != 1 {
+            bail!("debug selector {selector:?} matched {count} rendered elements");
+        }
+        let occurrence = snapshot
+            .occurrences(selector)
+            .first()
+            .ok_or_else(|| anyhow!("debug selector {selector:?} was not rendered"))?;
+        if !occurrence.hit_testable
+            || !matches!(
+                occurrence.visibility,
+                crate::DebugVisibility::Visible | crate::DebugVisibility::PartiallyClipped
+            )
+        {
+            bail!("debug selector {selector:?} is not visibly hit-testable");
+        }
+        self.simulate_click(occurrence.visible_bounds.center(), Modifiers::default());
+        Ok(())
     }
 
     /// Draw an element to the window. Useful for simulating events or actions

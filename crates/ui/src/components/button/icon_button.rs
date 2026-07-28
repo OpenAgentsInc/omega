@@ -48,6 +48,11 @@ impl IconButton {
         this
     }
 
+    pub fn debug_selector(mut self, selector: impl FnOnce() -> String) -> Self {
+        self.base.base = self.base.base.debug_selector(selector);
+        self
+    }
+
     pub fn shape(mut self, shape: IconButtonShape) -> Self {
         self.shape = shape;
         self

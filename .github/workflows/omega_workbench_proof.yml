@@ -1,0 +1,153 @@
+name: Omega workbench proof
+
+on:
+  merge_group: {}
+  pull_request:
+    branches:
+      - "**"
+  push:
+    branches:
+      - main
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: omega-workbench-proof-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_INCREMENTAL: "0"
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: "1"
+
+jobs:
+  portable_semantics:
+    name: Portable semantics
+    runs-on: namespace-profile-8x16-ubuntu-2204
+    timeout-minutes: 60
+    steps:
+      - name: Check out Omega
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+        with:
+          clean: false
+
+      - name: Configure Cargo for CI
+        run: |
+          mkdir -p ../.cargo
+          cp .cargo/ci-config.toml ../.cargo/config.toml
+
+      - name: Cache Rust dependencies
+        uses: namespacelabs/nscloud-cache-action@a90bb5d4b27522ce881c6e98eebd7d7e6d1653f9
+        with:
+          cache: rust
+          path: ~/.rustup
+
+      - name: Install Linux dependencies
+        run: ./script/linux
+
+      - name: Test workbench fixtures, selection, pixels, and receipts
+        run: cargo test -p omega_workbench_harness --features gpui-support -- --nocapture
+
+      - name: Test the production Agent UI scene adapter
+        run: >-
+          cargo test -p agent_ui --features test-support
+          typed_fixture_drives_rendered_front_door_semantics -- --nocapture
+
+      - name: Sweep deterministic GPUI semantic-probe seeds
+        env:
+          ITERATIONS: "16"
+          SEED: "0"
+        run: cargo test -p gpui debug_render_snapshot -- --nocapture
+
+      - name: Prove pending work and retained entities fail deterministically
+        run: |
+          cargo test -p scheduler test_parking_panics -- --nocapture
+          cargo test -p gpui test_leak_detector_snapshot_detects_new_leak -- --nocapture
+
+      - name: Remove CI Cargo configuration
+        if: always()
+        run: rm -rf ../.cargo
+
+  metal_pixels:
+    name: Metal pixels (shard ${{ matrix.shard_index }})
+    runs-on: namespace-profile-mac-large
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        shard_index:
+          - 0
+          - 1
+    steps:
+      - name: Check out Omega
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+        with:
+          clean: false
+
+      - name: Require the Apple Silicon render authority
+        run: |
+          observed_architecture="$(uname -m)"
+          if [[ "$observed_architecture" != "arm64" ]]; then
+            echo "The committed Metal baselines require arm64, found $observed_architecture" >&2
+            exit 1
+          fi
+
+      - name: Configure Cargo for CI
+        run: |
+          mkdir -p ../.cargo
+          cp .cargo/ci-config.toml ../.cargo/config.toml
+
+      - name: Cache Rust dependencies
+        uses: namespacelabs/nscloud-cache-action@a90bb5d4b27522ce881c6e98eebd7d7e6d1653f9
+        with:
+          cache: rust
+          path: ~/.rustup
+
+      - name: Run the deterministic Metal proof shard
+        env:
+          SHARD_INDEX: ${{ matrix.shard_index }}
+        run: |
+          script/omega-workbench-proof \
+            --pixel-only \
+            --seed 0 \
+            --shard-index "$SHARD_INDEX" \
+            --shard-count 2 \
+            --output "target/omega-workbench-proof/shard-$SHARD_INDEX"
+
+      - name: Upload failed proof evidence
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: omega-workbench-proof-shard-${{ matrix.shard_index }}
+          path: target/omega-workbench-proof/shard-${{ matrix.shard_index }}
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Remove CI Cargo configuration
+        if: always()
+        run: rm -rf ../.cargo
+
+  required:
+    name: Required
+    if: always()
+    needs:
+      - portable_semantics
+      - metal_pixels
+    runs-on: namespace-profile-2x4-ubuntu-2404
+    timeout-minutes: 5
+    steps:
+      - name: Require every workbench proof lane
+        env:
+          METAL_PIXELS_RESULT: ${{ needs.metal_pixels.result }}
+          PORTABLE_SEMANTICS_RESULT: ${{ needs.portable_semantics.result }}
+        run: |
+          if [[ "$PORTABLE_SEMANTICS_RESULT" != "success" ]]; then
+            echo "Portable semantics: $PORTABLE_SEMANTICS_RESULT" >&2
+            exit 1
+          fi
+          if [[ "$METAL_PIXELS_RESULT" != "success" ]]; then
+            echo "Metal pixels: $METAL_PIXELS_RESULT" >&2
+            exit 1
+          fi

@@ -2316,18 +2316,49 @@ impl Interactivity {
 
                 let style = self.compute_style_internal(hitbox, element_state.as_mut(), window, cx);
 
-                #[cfg(any(feature = "test-support", test))]
-                if let Some(debug_selector) = &self.debug_selector {
-                    window
-                        .next_frame
-                        .debug_bounds
-                        .insert(debug_selector.clone(), bounds);
-                }
-
                 self.paint_hover_group_handler(window, cx);
 
                 if style.visibility == Visibility::Hidden {
                     return ((), element_state);
+                }
+
+                #[cfg(any(feature = "test-support", test))]
+                if let Some(debug_selector) = &self.debug_selector {
+                    let visible_bounds = bounds.intersect(&window.content_mask().bounds);
+                    let effective_opacity = window.element_opacity() * style.opacity.unwrap_or(1.);
+                    let visibility = if effective_opacity <= 0.0 {
+                        crate::DebugVisibility::Transparent
+                    } else if visible_bounds.size.width <= px(0.)
+                        || visible_bounds.size.height <= px(0.)
+                    {
+                        crate::DebugVisibility::FullyClipped
+                    } else if visible_bounds != bounds {
+                        crate::DebugVisibility::PartiallyClipped
+                    } else {
+                        crate::DebugVisibility::Visible
+                    };
+                    let (focused, contains_focus) = self
+                        .tracked_focus_handle
+                        .as_ref()
+                        .map(|focus_handle| {
+                            (
+                                focus_handle.is_focused(window),
+                                focus_handle.contains_focused(window, cx),
+                            )
+                        })
+                        .unwrap_or_default();
+                    window.next_frame.push_debug_selector(
+                        debug_selector.clone(),
+                        crate::DebugElementOccurrence {
+                            bounds,
+                            visible_bounds,
+                            visibility,
+                            hit_testable: hitbox.is_some(),
+                            focusable: self.focusable || self.tracked_focus_handle.is_some(),
+                            focused,
+                            contains_focus,
+                        },
+                    );
                 }
 
                 let mut tab_group = None;
@@ -4116,8 +4147,8 @@ impl ScrollHandle {
 mod tests {
     use super::*;
     use crate::{
-        AnyWindowHandle, AppContext as _, Context, InputEvent, Keystroke, MouseMoveEvent,
-        TestAppContext, canvas, util::FluentBuilder as _,
+        AnyWindowHandle, AppContext as _, Context, DebugVisibility, InputEvent, Keystroke,
+        MouseMoveEvent, TestAppContext, VisualTestContext, canvas, util::FluentBuilder as _,
     };
     use std::{cell::Cell, rc::Weak};
 
@@ -4898,5 +4929,283 @@ mod tests {
             .unwrap();
 
         assert_eq!(focused, Some(item_b.id));
+    }
+
+    struct CachedDebugSelector;
+
+    impl Render for CachedDebugSelector {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .size_full()
+                .child(div().size(px(40.)).debug_selector(|| "cached".into()))
+        }
+    }
+
+    struct CachedDebugSelectorRoot {
+        child: Entity<CachedDebugSelector>,
+    }
+
+    impl Render for CachedDebugSelectorRoot {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().size_full().child(
+                self.child
+                    .clone()
+                    .cached(StyleRefinement::default().size(px(100.))),
+            )
+        }
+    }
+
+    #[gpui::test]
+    fn debug_render_snapshot_survives_cached_paint_reuse(cx: &mut TestAppContext) {
+        let window = cx.open_window(size(px(200.), px(200.)), |_, cx| {
+            let child = cx.new(|_| CachedDebugSelector);
+            CachedDebugSelectorRoot { child }
+        });
+        cx.run_until_parked();
+
+        for _ in 0..3 {
+            let snapshot = window
+                .update(cx, |_, window, _| window.debug_render_snapshot())
+                .unwrap();
+            assert_eq!(snapshot.selector_count("cached"), 1);
+            let occurrence = snapshot
+                .occurrences("cached")
+                .first()
+                .expect("cached selector should have one occurrence");
+            assert_eq!(occurrence.bounds.size, size(px(40.), px(40.)));
+            assert_eq!(occurrence.visibility, DebugVisibility::Visible);
+
+            window.update(cx, |_, _, cx| cx.notify()).unwrap();
+            cx.run_until_parked();
+        }
+    }
+
+    struct DebugSelectorInteractionView {
+        unique_clicks: Rc<Cell<usize>>,
+        duplicate_clicks: Rc<Cell<usize>>,
+    }
+
+    impl Render for DebugSelectorInteractionView {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let unique_clicks = self.unique_clicks.clone();
+            let first_duplicate_clicks = self.duplicate_clicks.clone();
+            let second_duplicate_clicks = self.duplicate_clicks.clone();
+
+            div()
+                .relative()
+                .size_full()
+                .child(
+                    div()
+                        .absolute()
+                        .left(px(5.))
+                        .top(px(5.))
+                        .size(px(20.))
+                        .invisible()
+                        .debug_selector(|| "hidden".into()),
+                )
+                .child(
+                    div()
+                        .absolute()
+                        .left(px(30.))
+                        .top(px(5.))
+                        .size(px(20.))
+                        .opacity(0.)
+                        .debug_selector(|| "transparent".into()),
+                )
+                .child(
+                    div()
+                        .absolute()
+                        .left(px(5.))
+                        .top(px(40.))
+                        .size(px(40.))
+                        .overflow_hidden()
+                        .child(
+                            div()
+                                .absolute()
+                                .left(px(30.))
+                                .size(px(20.))
+                                .debug_selector(|| "partially-clipped".into()),
+                        )
+                        .child(
+                            div()
+                                .absolute()
+                                .left(px(50.))
+                                .size(px(20.))
+                                .debug_selector(|| "fully-clipped".into()),
+                        ),
+                )
+                .child(
+                    div()
+                        .absolute()
+                        .left(px(60.))
+                        .top(px(5.))
+                        .size(px(30.))
+                        .id("unique")
+                        .debug_selector(|| "unique".into())
+                        .on_click(move |_, _, _| {
+                            unique_clicks.set(unique_clicks.get() + 1);
+                        }),
+                )
+                .child(
+                    div()
+                        .absolute()
+                        .left(px(60.))
+                        .top(px(45.))
+                        .size(px(20.))
+                        .id("duplicate-a")
+                        .debug_selector(|| "duplicate".into())
+                        .on_click(move |_, _, _| {
+                            first_duplicate_clicks.set(first_duplicate_clicks.get() + 1);
+                        }),
+                )
+                .child(
+                    div()
+                        .absolute()
+                        .left(px(85.))
+                        .top(px(45.))
+                        .size(px(20.))
+                        .id("duplicate-b")
+                        .debug_selector(|| "duplicate".into())
+                        .on_click(move |_, _, _| {
+                            second_duplicate_clicks.set(second_duplicate_clicks.get() + 1);
+                        }),
+                )
+        }
+    }
+
+    #[gpui::test]
+    fn debug_render_snapshot_classifies_visibility_and_clicks_unique_targets(
+        cx: &mut TestAppContext,
+    ) {
+        let unique_clicks = Rc::new(Cell::new(0));
+        let duplicate_clicks = Rc::new(Cell::new(0));
+        let window: AnyWindowHandle = cx
+            .open_window(size(px(120.), px(100.)), {
+                let unique_clicks = unique_clicks.clone();
+                let duplicate_clicks = duplicate_clicks.clone();
+                move |_, _| DebugSelectorInteractionView {
+                    unique_clicks,
+                    duplicate_clicks,
+                }
+            })
+            .into();
+        let mut visual = VisualTestContext::from_window(window, cx);
+        visual.run_until_parked();
+
+        let snapshot = visual.debug_render_snapshot();
+        assert_eq!(snapshot.selector_count("hidden"), 0);
+        assert_eq!(
+            snapshot.occurrences("transparent")[0].visibility,
+            DebugVisibility::Transparent
+        );
+        assert_eq!(
+            snapshot.occurrences("partially-clipped")[0].visibility,
+            DebugVisibility::PartiallyClipped
+        );
+        assert_eq!(
+            snapshot.occurrences("fully-clipped")[0].visibility,
+            DebugVisibility::FullyClipped
+        );
+        assert_eq!(snapshot.selector_count("duplicate"), 2);
+        assert_eq!(
+            snapshot.duplicate_selectors().collect::<Vec<_>>(),
+            vec!["duplicate"]
+        );
+
+        visual.simulate_click_selector("unique").unwrap();
+        assert_eq!(unique_clicks.get(), 1);
+
+        let error = visual
+            .simulate_click_selector("duplicate")
+            .expect_err("a duplicate selector must not dispatch a click");
+        assert!(
+            error.to_string().contains("matched 2 rendered elements"),
+            "{error:#}"
+        );
+        assert_eq!(duplicate_clicks.get(), 0);
+    }
+
+    struct DebugSelectorSemanticsView {
+        parent_focus: FocusHandle,
+        child_focus: FocusHandle,
+    }
+
+    impl Render for DebugSelectorSemanticsView {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .id("focus-parent")
+                .debug_selector(|| "focus-parent".into())
+                .track_focus(&self.parent_focus)
+                .size(px(100.))
+                .child(
+                    div()
+                        .id("semantic-button")
+                        .debug_selector(|| "semantic-button".into())
+                        .track_focus(&self.child_focus)
+                        .role(accesskit::Role::Button)
+                        .aria_label("Run tests")
+                        .aria_selected(true)
+                        .aria_expanded(true)
+                        .aria_toggled(accesskit::Toggled::True)
+                        .size(px(40.)),
+                )
+        }
+    }
+
+    #[gpui::test]
+    fn debug_render_snapshot_reports_forced_accessibility_and_focus(cx: &mut TestAppContext) {
+        let (parent_focus, child_focus) = cx.update(|cx| (cx.focus_handle(), cx.focus_handle()));
+        let window: AnyWindowHandle = cx
+            .open_window(size(px(200.), px(200.)), {
+                let child_focus = child_focus.clone();
+                move |_, _| DebugSelectorSemanticsView {
+                    parent_focus,
+                    child_focus,
+                }
+            })
+            .into();
+        let mut visual = VisualTestContext::from_window(window, cx);
+        visual.set_debug_accessibility_active(true);
+
+        visual.update(|window, cx| {
+            window.focus(&child_focus, cx);
+        });
+        visual.run_until_parked();
+
+        let snapshot = visual.debug_render_snapshot();
+        let parent = snapshot
+            .occurrences("focus-parent")
+            .first()
+            .expect("focus parent should be rendered");
+        assert!(parent.focusable);
+        assert!(!parent.focused);
+        assert!(parent.contains_focus);
+
+        let child = snapshot
+            .occurrences("semantic-button")
+            .first()
+            .expect("semantic button should be rendered");
+        assert!(child.focusable);
+        assert!(child.focused);
+        assert!(child.contains_focus);
+
+        let tree: serde_json::Value = serde_json::from_str(
+            snapshot
+                .accessibility_tree_json()
+                .expect("forced accessibility should capture a tree"),
+        )
+        .unwrap();
+        let nodes = tree["nodes"]
+            .as_object()
+            .expect("accessibility tree should contain nodes");
+        let semantic_button = nodes
+            .values()
+            .find(|node| node["aria"]["label"] == "Run tests")
+            .expect("semantic button should be in the accessibility tree");
+        assert_eq!(semantic_button["element_id"], "semantic-button");
+        assert_eq!(semantic_button["aria"]["role"], "Button");
+        assert_eq!(semantic_button["aria"]["selected"], true);
+        assert_eq!(semantic_button["aria"]["expanded"], true);
+        assert_eq!(semantic_button["aria"]["toggled"], "True");
     }
 }

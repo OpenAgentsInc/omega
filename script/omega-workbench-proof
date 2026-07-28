@@ -1,0 +1,232 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+selected_scene=""
+seed=0
+iterations=1
+proof_lane="pixel"
+lane_was_selected=0
+shard_index=""
+shard_count=""
+output_root="target/omega-workbench-proof"
+update_baseline=0
+list_scenes=0
+list_format="text"
+build_runner=1
+
+fail_usage() {
+  echo "omega-workbench-proof: $1" >&2
+  exit 2
+}
+
+require_value() {
+  if [[ $# -lt 2 || -z "$2" ]]; then
+    fail_usage "$1 requires a value"
+  fi
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --scene)
+      require_value "$@"
+      selected_scene="$2"
+      shift 2
+      ;;
+    --seed)
+      require_value "$@"
+      seed="$2"
+      shift 2
+      ;;
+    --iterations)
+      require_value "$@"
+      iterations="$2"
+      shift 2
+      ;;
+    --semantic-only)
+      if [[ "$lane_was_selected" -eq 1 && "$proof_lane" != "semantic" ]]; then
+        fail_usage "--semantic-only conflicts with --pixel-only"
+      fi
+      proof_lane="semantic"
+      lane_was_selected=1
+      shift
+      ;;
+    --pixel-only)
+      if [[ "$lane_was_selected" -eq 1 && "$proof_lane" != "pixel" ]]; then
+        fail_usage "--pixel-only conflicts with --semantic-only"
+      fi
+      proof_lane="pixel"
+      lane_was_selected=1
+      shift
+      ;;
+    --shard-index)
+      require_value "$@"
+      shard_index="$2"
+      shift 2
+      ;;
+    --shard-count)
+      require_value "$@"
+      shard_count="$2"
+      shift 2
+      ;;
+    --output)
+      require_value "$@"
+      output_root="$2"
+      shift 2
+      ;;
+    --update)
+      update_baseline=1
+      shift
+      ;;
+    --list | --list-scenes)
+      list_scenes=1
+      shift
+      ;;
+    --json)
+      list_format="json"
+      shift
+      ;;
+    --no-build)
+      build_runner=0
+      shift
+      ;;
+    --help | -h)
+      echo "usage: script/omega-workbench-proof [options]"
+      echo
+      echo "  --list [--json]               list registered hermetic scenes"
+      echo "  --scene NAME                  run one named scene"
+      echo "  --seed N                      deterministic scheduler seed"
+      echo "  --iterations N                run consecutive seeds"
+      echo "  --semantic-only               run semantic assertions without PNG capture"
+      echo "  --pixel-only                  run semantic preflight and Metal comparison"
+      echo "  --shard-index N --shard-count N"
+      echo "  --output PATH                 proof receipt and image root"
+      echo "  --update                      update committed baselines outside CI"
+      echo "  --no-build                    use the existing release runner"
+      exit 0
+      ;;
+    *)
+      fail_usage "unknown argument $1"
+      ;;
+  esac
+done
+
+if [[ ! "$seed" =~ ^[0-9]+$ ]]; then
+  fail_usage "--seed must be an unsigned integer"
+fi
+if [[ ! "$iterations" =~ ^[1-9][0-9]*$ ]]; then
+  fail_usage "--iterations must be greater than zero"
+fi
+if [[ -n "$shard_index" && ! "$shard_index" =~ ^[0-9]+$ ]]; then
+  fail_usage "--shard-index must be a non-negative integer"
+fi
+if [[ -n "$shard_count" && ! "$shard_count" =~ ^[1-9][0-9]*$ ]]; then
+  fail_usage "--shard-count must be greater than zero"
+fi
+if [[ ( -n "$shard_index" && -z "$shard_count" ) || ( -z "$shard_index" && -n "$shard_count" ) ]]; then
+  fail_usage "--shard-index and --shard-count must be provided together"
+fi
+if [[ "$update_baseline" -eq 1 && "$proof_lane" != "pixel" ]]; then
+  fail_usage "--update requires the pixel lane"
+fi
+if [[ "$update_baseline" -eq 1 && "$iterations" -ne 1 ]]; then
+  fail_usage "--update cannot be combined with multiple iterations"
+fi
+if [[ "$update_baseline" -eq 1 && ( -n "${CI:-}" || -n "${GITHUB_ACTIONS:-}" ) ]]; then
+  fail_usage "baseline updates are disabled in CI"
+fi
+
+if [[ "$build_runner" -eq 1 ]]; then
+  cargo build --release -p zed --bin zed_visual_test_runner --features visual-tests
+fi
+runner="$(cargo metadata --format-version 1 --no-deps | \
+  python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')/release/zed_visual_test_runner"
+if [[ ! -x "$runner" ]]; then
+  fail_usage "visual test runner is missing; rerun without --no-build"
+fi
+
+if [[ "$list_scenes" -eq 1 ]]; then
+  OMEGA_WORKBENCH_LIST_SCENES=1 \
+    OMEGA_WORKBENCH_LIST_FORMAT="$list_format" \
+    "$runner"
+  exit 0
+fi
+
+run_seed() {
+  local current_seed="$1"
+  local seed_output="$output_root"
+  if [[ "$iterations" -gt 1 ]]; then
+    seed_output="$output_root/seed-$current_seed"
+  fi
+  local proof_data_dir
+  proof_data_dir="$(mktemp -d "${TMPDIR:-/tmp}/omega-workbench-proof.XXXXXX")"
+
+  export OMEGA_VISUAL_ONLY=1
+  export OMEGA_WORKBENCH_PROOF=1
+  export OMEGA_WORKBENCH_LANE="$proof_lane"
+  export OMEGA_WORKBENCH_OUTPUT_DIR="$seed_output"
+  export OMEGA_VISUAL_DATA_DIR="$proof_data_dir"
+  export SEED="$current_seed"
+  if [[ -n "$selected_scene" ]]; then
+    export OMEGA_WORKBENCH_SCENE="$selected_scene"
+  else
+    unset OMEGA_WORKBENCH_SCENE || true
+  fi
+  if [[ -n "$shard_index" ]]; then
+    export OMEGA_WORKBENCH_SHARD_INDEX="$shard_index"
+    export OMEGA_WORKBENCH_SHARD_COUNT="$shard_count"
+  else
+    unset OMEGA_WORKBENCH_SHARD_INDEX OMEGA_WORKBENCH_SHARD_COUNT || true
+  fi
+  if [[ "$update_baseline" -eq 1 ]]; then
+    export UPDATE_BASELINE=1
+  else
+    unset UPDATE_BASELINE || true
+  fi
+
+  local recording_result=0
+  local restart_result=0
+  echo "==> recording phase (seed $current_seed)"
+  unset OMEGA_VISUAL_PHASE || true
+  "$runner" || recording_result=$?
+  echo "==> cold restart phase (seed $current_seed)"
+  if [[ "$recording_result" -eq 0 ]]; then
+    OMEGA_WORKBENCH_RECORDING_SUCCEEDED=1 OMEGA_VISUAL_PHASE=restart "$runner" \
+      || restart_result=$?
+  else
+    OMEGA_WORKBENCH_RECORDING_SUCCEEDED=0 OMEGA_VISUAL_PHASE=restart "$runner" \
+      || restart_result=$?
+  fi
+
+  local result="$recording_result"
+  if [[ "$result" -eq 0 ]]; then
+    result="$restart_result"
+  fi
+  rm -rf "$proof_data_dir"
+  if [[ "$result" -ne 0 ]]; then
+    local reproduction=("$0")
+    if [[ -n "$selected_scene" ]]; then
+      reproduction+=(--scene "$selected_scene")
+    fi
+    reproduction+=(--seed "$current_seed")
+    if [[ "$proof_lane" == "semantic" ]]; then
+      reproduction+=(--semantic-only)
+    else
+      reproduction+=(--pixel-only)
+    fi
+    if [[ -n "$shard_index" ]]; then
+      reproduction+=(--shard-index "$shard_index" --shard-count "$shard_count")
+    fi
+    reproduction+=(--output "$seed_output")
+    if [[ "$update_baseline" -eq 1 ]]; then
+      reproduction+=(--update)
+    fi
+    echo "proof failed; reproduce with:" >&2
+    printf '  %q' "${reproduction[@]}" >&2
+    printf '\n' >&2
+    return "$result"
+  fi
+}
+
+for ((iteration = 0; iteration < iterations; iteration++)); do
+  run_seed "$((seed + iteration))"
+done

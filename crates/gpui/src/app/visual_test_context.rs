@@ -321,6 +321,34 @@ impl VisualTestAppContext {
         self.simulate_mouse_up(window, position, MouseButton::Left, modifiers);
     }
 
+    /// Simulates a click and propagates an error when the window is unavailable.
+    pub fn try_simulate_click(
+        &mut self,
+        window: AnyWindowHandle,
+        position: Point<Pixels>,
+        modifiers: Modifiers,
+    ) -> Result<()> {
+        self.try_simulate_event(
+            window,
+            MouseDownEvent {
+                position,
+                modifiers,
+                button: MouseButton::Left,
+                click_count: 1,
+                first_mouse: false,
+            },
+        )?;
+        self.try_simulate_event(
+            window,
+            MouseUpEvent {
+                position,
+                modifiers,
+                button: MouseButton::Left,
+                click_count: 1,
+            },
+        )
+    }
+
     /// Simulates an input event on the given window.
     pub fn simulate_event<E: InputEvent>(&mut self, window: AnyWindowHandle, event: E) {
         self.update_window(window, |_, window, cx| {
@@ -330,6 +358,19 @@ impl VisualTestAppContext {
         self.run_until_parked();
     }
 
+    /// Simulates an input event and propagates an error when the window is unavailable.
+    pub fn try_simulate_event<E: InputEvent>(
+        &mut self,
+        window: AnyWindowHandle,
+        event: E,
+    ) -> Result<()> {
+        self.update_window(window, |_, window, cx| {
+            window.dispatch_event(event.to_platform_input(), cx);
+        })?;
+        self.run_until_parked();
+        Ok(())
+    }
+
     /// Dispatches an action to the given window.
     pub fn dispatch_action(&mut self, window: AnyWindowHandle, action: impl Action) {
         self.update_window(window, |_, window, cx| {
@@ -337,6 +378,58 @@ impl VisualTestAppContext {
         })
         .ok();
         self.run_until_parked();
+    }
+
+    /// Captures semantic metadata from a rendered window.
+    pub fn debug_render_snapshot(
+        &mut self,
+        window: AnyWindowHandle,
+    ) -> Result<crate::DebugRenderSnapshot> {
+        self.update_window(window, |_, window, _cx| window.debug_render_snapshot())
+    }
+
+    /// Forces accessibility tree generation for a rendered window.
+    pub fn set_debug_accessibility_active(
+        &mut self,
+        window: AnyWindowHandle,
+        active: bool,
+    ) -> Result<()> {
+        self.update_window(window, |_, window, _cx| {
+            window.set_debug_accessibility_active(active);
+        })?;
+        self.run_until_parked();
+        Ok(())
+    }
+
+    /// Clicks the unique visible, hit-testable occurrence of a debug selector.
+    pub fn simulate_click_selector(
+        &mut self,
+        window: AnyWindowHandle,
+        selector: &str,
+    ) -> Result<()> {
+        let snapshot = self.debug_render_snapshot(window)?;
+        let count = snapshot.selector_count(selector);
+        if count != 1 {
+            anyhow::bail!("debug selector {selector:?} matched {count} rendered elements");
+        }
+        let occurrence = snapshot
+            .occurrences(selector)
+            .first()
+            .ok_or_else(|| anyhow!("debug selector {selector:?} was not rendered"))?;
+        if !occurrence.hit_testable
+            || !matches!(
+                occurrence.visibility,
+                crate::DebugVisibility::Visible | crate::DebugVisibility::PartiallyClipped
+            )
+        {
+            anyhow::bail!("debug selector {selector:?} is not visibly hit-testable");
+        }
+        self.try_simulate_click(
+            window,
+            occurrence.visible_bounds.center(),
+            Modifiers::default(),
+        )?;
+        Ok(())
     }
 
     /// Writes to the clipboard.

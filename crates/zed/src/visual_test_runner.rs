@@ -44,6 +44,22 @@ fn main() {
 
 #[cfg(target_os = "macos")]
 fn main() {
+    match print_workbench_scene_catalog() {
+        Ok(true) => return,
+        Ok(false) => {}
+        Err(error) => {
+            eprintln!("Failed to list workbench scenes: {error:#}");
+            std::process::exit(2);
+        }
+    }
+    if let Err(error) = initialize_workbench_proof() {
+        eprintln!("Invalid workbench proof configuration: {error:#}");
+        std::process::exit(2);
+    }
+    if workbench_proof_active() && !workbench_has_selected_scene_in_phase() {
+        return;
+    }
+
     // Set ZED_STATELESS early to prevent file system access to real config directories
     // This must be done before any code accesses zed_env_vars::ZED_STATELESS
     // SAFETY: We're at the start of main(), before any threads are spawned
@@ -95,6 +111,11 @@ fn main() {
     create_test_files(&project_path);
 
     let test_result = std::panic::catch_unwind(|| run_visual_tests(project_path, update_baseline));
+    let run_succeeded = matches!(&test_result, Ok(Ok(())));
+    if let Err(error) = finalize_workbench_proof(run_succeeded) {
+        eprintln!("Failed to finalize workbench proof: {error:#}");
+        std::process::exit(1);
+    }
 
     // Note: We don't delete temp_path here because background worktree tasks may still
     // be running. The directory will be cleaned up when the process exits or by the OS.
@@ -118,6 +139,40 @@ fn main() {
     }
 }
 
+#[cfg(target_os = "macos")]
+fn print_workbench_scene_catalog() -> Result<bool> {
+    if std::env::var("OMEGA_WORKBENCH_LIST_SCENES").is_err() {
+        return Ok(false);
+    }
+    omega_workbench_harness::validate_scene_catalog()?;
+    if std::env::var("OMEGA_WORKBENCH_LIST_FORMAT").as_deref() == Ok("json") {
+        let scenes: Vec<_> = HERMETIC_SCENES
+            .iter()
+            .map(|scene| {
+                serde_json::json!({
+                    "name": scene.name,
+                    "phase": scene.phase,
+                    "viewport": {
+                        "width": scene.viewport.width,
+                        "height": scene.viewport.height,
+                        "scale_milli": scene.viewport.scale_milli,
+                    },
+                    "minimum_match": scene.pixel_policy.minimum_match,
+                    "channel_tolerance": scene.pixel_policy.channel_tolerance,
+                    "pixel_policy_rationale": scene.pixel_policy.rationale,
+                    "regions": scene.regions.iter().map(|region| region.name).collect::<Vec<_>>(),
+                })
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&scenes)?);
+    } else {
+        for scene in HERMETIC_SCENES {
+            println!("{}\t{:?}", scene.name, scene.phase);
+        }
+    }
+    Ok(true)
+}
+
 // All macOS-specific imports grouped together
 #[cfg(target_os = "macos")]
 use {
@@ -134,13 +189,19 @@ use {
         App, AppContext as _, Bounds, Entity, KeyBinding, Modifiers, VisualTestAppContext,
         WindowBounds, WindowHandle, WindowOptions, point, px, size,
     },
-    image::RgbaImage,
+    omega_workbench_harness::{
+        CheckStatus, HERMETIC_SCENES, PixelProof, PixelStatus, ProofCheck, ProofLane, ProofOutcome,
+        ProofReceipt, RegionPixelProof, ScenePhase, WorkbenchScene,
+        compare_images as compare_workbench_images, scene_spec, select_scenes,
+    },
     project::{AgentId, Project},
     project_panel::ProjectPanel,
     settings::{NotifyWhenAgentWaiting, PlaySoundWhenAgentDone, Settings as _},
     settings_ui::SettingsWindow,
     std::{
         any::Any,
+        cell::RefCell,
+        collections::{BTreeMap, BTreeSet},
         path::{Path, PathBuf},
         rc::Rc,
         sync::Arc,
@@ -172,10 +233,6 @@ mod constants {
     /// Embedded test image (Zed app icon) for visual tests.
     pub const EMBEDDED_TEST_IMAGE: &[u8] = include_bytes!("../resources/app-icon.png");
 
-    /// Threshold for image comparison (0.0 to 1.0)
-    /// Images must match at least this percentage to pass
-    pub const MATCH_THRESHOLD: f64 = 0.99;
-
     /// omega#99. How many scheduler steps one bounded wait in the Exo capture
     /// is allowed. Large enough that a real turn's work always fits, small
     /// enough that a permanently-runnable transport cannot hold the wait open.
@@ -187,6 +244,378 @@ mod constants {
 
 #[cfg(target_os = "macos")]
 use constants::*;
+
+#[cfg(target_os = "macos")]
+#[derive(Default)]
+struct SceneEvidence {
+    semantic_checks: Vec<ProofCheck>,
+    pixel: Option<PixelProof>,
+}
+
+#[cfg(target_os = "macos")]
+struct WorkbenchProofSession {
+    selected: BTreeSet<String>,
+    phase: ScenePhase,
+    recording_succeeded: bool,
+    lane: ProofLane,
+    seed: u64,
+    output_root: PathBuf,
+    evidence: BTreeMap<String, SceneEvidence>,
+}
+
+#[cfg(target_os = "macos")]
+thread_local! {
+    static WORKBENCH_PROOF_SESSION: RefCell<Option<WorkbenchProofSession>> = const { RefCell::new(None) };
+}
+
+#[cfg(target_os = "macos")]
+fn parse_optional_usize(name: &str) -> Result<Option<usize>> {
+    match std::env::var(name) {
+        Ok(value) if !value.is_empty() => value
+            .parse()
+            .with_context(|| format!("{name} must be a non-negative integer"))
+            .map(Some),
+        Ok(_) | Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(error) => Err(error).with_context(|| format!("reading {name}")),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn proof_seed() -> Result<u64> {
+    match std::env::var("SEED") {
+        Ok(value) => value
+            .parse()
+            .with_context(|| format!("SEED must be an unsigned integer, got {value:?}")),
+        Err(std::env::VarError::NotPresent) => Ok(0),
+        Err(error) => Err(error).context("reading SEED"),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn remove_previous_proof_file(path: &Path) -> Result<()> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => {
+            Err(error).with_context(|| format!("removing stale proof {}", path.display()))
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn initialize_workbench_proof() -> Result<()> {
+    if std::env::var("OMEGA_WORKBENCH_PROOF").is_err() {
+        return Ok(());
+    }
+    if std::env::var("UPDATE_BASELINE").is_ok()
+        && (std::env::var("CI").is_ok() || std::env::var("GITHUB_ACTIONS").is_ok())
+    {
+        anyhow::bail!("baseline updates are disabled in CI");
+    }
+
+    let requested = std::env::var("OMEGA_WORKBENCH_SCENE").ok();
+    let shard_index = parse_optional_usize("OMEGA_WORKBENCH_SHARD_INDEX")?;
+    let shard_count = parse_optional_usize("OMEGA_WORKBENCH_SHARD_COUNT")?;
+    let selected: BTreeSet<String> = select_scenes(requested.as_deref(), shard_index, shard_count)?
+        .into_iter()
+        .map(|scene| scene.name.to_string())
+        .collect();
+    let phase = if std::env::var("OMEGA_VISUAL_PHASE").as_deref() == Ok("restart") {
+        ScenePhase::Restart
+    } else {
+        ScenePhase::Recording
+    };
+    let recording_succeeded =
+        std::env::var("OMEGA_WORKBENCH_RECORDING_SUCCEEDED").as_deref() != Ok("0");
+    let lane = match std::env::var("OMEGA_WORKBENCH_LANE").as_deref() {
+        Ok("semantic") => ProofLane::Semantic,
+        Ok("pixel") | Err(_) => ProofLane::Pixel,
+        Ok(other) => anyhow::bail!("unknown workbench proof lane {other:?}"),
+    };
+    let output_root = std::env::var("OMEGA_WORKBENCH_OUTPUT_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("target/omega-workbench-proof"));
+    for scene in HERMETIC_SCENES
+        .iter()
+        .filter(|scene| scene.phase == phase && selected.contains(scene.name))
+    {
+        let scene_output = output_root.join("scenes").join(scene.name);
+        for file_name in ["receipt.json", "baseline.png", "current.png", "diff.png"] {
+            remove_previous_proof_file(&scene_output.join(file_name))?;
+        }
+        for region in scene.regions {
+            let region_output = scene_output.join("regions");
+            for file_name in [
+                format!("{}_baseline.png", region.name),
+                format!("{}.png", region.name),
+                format!("{}_diff.png", region.name),
+            ] {
+                remove_previous_proof_file(&region_output.join(file_name))?;
+            }
+        }
+    }
+
+    WORKBENCH_PROOF_SESSION.with(|session| {
+        *session.borrow_mut() = Some(WorkbenchProofSession {
+            selected,
+            phase,
+            recording_succeeded,
+            lane,
+            seed: proof_seed()?,
+            output_root,
+            evidence: BTreeMap::new(),
+        });
+        Ok(())
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn workbench_proof_active() -> bool {
+    WORKBENCH_PROOF_SESSION.with(|session| session.borrow().is_some())
+}
+
+#[cfg(target_os = "macos")]
+fn workbench_has_selected_scene_in_phase() -> bool {
+    WORKBENCH_PROOF_SESSION.with(|session| {
+        let session = session.borrow();
+        let Some(session) = session.as_ref() else {
+            return false;
+        };
+        HERMETIC_SCENES.iter().any(|scene| {
+            session.selected.contains(scene.name)
+                && (scene.phase == session.phase
+                    || (session.phase == ScenePhase::Recording
+                        && scene.phase == ScenePhase::Restart))
+        })
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn workbench_any_selected(names: &[&str]) -> bool {
+    WORKBENCH_PROOF_SESSION.with(|session| {
+        let session = session.borrow();
+        let Some(session) = session.as_ref() else {
+            return true;
+        };
+        names.iter().any(|name| session.selected.contains(*name))
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn workbench_should_run_scene(name: &str) -> bool {
+    WORKBENCH_PROOF_SESSION.with(|session| {
+        let session = session.borrow();
+        let Some(session) = session.as_ref() else {
+            return true;
+        };
+        scene_spec(name).is_some_and(|scene| {
+            scene.phase == session.phase && session.selected.contains(scene.name)
+        })
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn workbench_semantic_only() -> bool {
+    WORKBENCH_PROOF_SESSION.with(|session| {
+        session
+            .borrow()
+            .as_ref()
+            .is_some_and(|session| session.lane == ProofLane::Semantic)
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn record_workbench_semantic_check(scene: &str, check: &str) {
+    if !workbench_should_run_scene(scene) {
+        return;
+    }
+    WORKBENCH_PROOF_SESSION.with(|session| {
+        let mut session = session.borrow_mut();
+        let Some(session) = session.as_mut() else {
+            return;
+        };
+        session
+            .evidence
+            .entry(scene.to_string())
+            .or_default()
+            .semantic_checks
+            .push(ProofCheck::passed(check));
+    });
+}
+
+#[cfg(target_os = "macos")]
+fn record_workbench_semantic_failure(scene: &str, check: &str, detail: impl Into<String>) {
+    if !workbench_should_run_scene(scene) {
+        return;
+    }
+    WORKBENCH_PROOF_SESSION.with(|session| {
+        let mut session = session.borrow_mut();
+        let Some(session) = session.as_mut() else {
+            return;
+        };
+        session
+            .evidence
+            .entry(scene.to_string())
+            .or_default()
+            .semantic_checks
+            .push(ProofCheck::failed(check, detail));
+    });
+}
+
+#[cfg(target_os = "macos")]
+fn record_workbench_pixel(scene: &str, pixel: PixelProof) {
+    WORKBENCH_PROOF_SESSION.with(|session| {
+        let mut session = session.borrow_mut();
+        let Some(session) = session.as_mut() else {
+            return;
+        };
+        session.evidence.entry(scene.to_string()).or_default().pixel = Some(pixel);
+    });
+}
+
+#[cfg(target_os = "macos")]
+fn workbench_fixture_for_scene(name: &str) -> Result<WorkbenchScene> {
+    use omega_workbench_harness::{
+        ContentStateFixture, EventFixture, EventKindFixture, MessageFixture, MessageRoleFixture,
+        MessageStateFixture, PersistedSceneFixture, ThreadFixture,
+    };
+
+    let spec =
+        scene_spec(name).ok_or_else(|| anyhow::anyhow!("unknown workbench scene {name:?}"))?;
+    let mut scene = spec.fixture();
+    scene.threads.push(ThreadFixture {
+        id: "active-thread".to_string(),
+        project_id: None,
+        repository_id: None,
+        worktree_id: None,
+    });
+    scene.active_thread_id = Some("active-thread".to_string());
+    scene.content_state = ContentStateFixture::Ready;
+
+    if name == "omega_front_door_typing" {
+        scene.messages.push(MessageFixture {
+            id: "typed-draft".to_string(),
+            thread_id: "active-thread".to_string(),
+            role: MessageRoleFixture::User,
+            state: MessageStateFixture::Complete,
+        });
+    }
+    if name.contains("executor_disclosure") || name.contains("route_pin") {
+        scene.events.push(EventFixture {
+            id: format!("event-{name}"),
+            thread_id: "active-thread".to_string(),
+            revision: 1,
+            kind: if name.contains("route_pin") {
+                EventKindFixture::RouteDecision
+            } else {
+                EventKindFixture::ExecutorDisclosure
+            },
+        });
+    }
+    if spec.phase == ScenePhase::Restart {
+        scene.persisted = Some(PersistedSceneFixture {
+            requested_surface: None,
+            dock_open: false,
+            revision: 1,
+            mutations_before_restart: Vec::new(),
+        });
+    }
+    scene.validate()?;
+    Ok(scene)
+}
+
+#[cfg(target_os = "macos")]
+fn proof_artifact_paths(scene: &str) -> (PathBuf, PathBuf, PathBuf) {
+    (
+        PathBuf::from("scenes").join(scene).join("baseline.png"),
+        PathBuf::from("scenes").join(scene).join("current.png"),
+        PathBuf::from("scenes").join(scene).join("diff.png"),
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn finalize_workbench_proof(run_succeeded: bool) -> Result<()> {
+    let Some(mut session) = WORKBENCH_PROOF_SESSION.with(|session| session.borrow_mut().take())
+    else {
+        return Ok(());
+    };
+
+    for scene in HERMETIC_SCENES
+        .iter()
+        .filter(|scene| scene.phase == session.phase && session.selected.contains(scene.name))
+    {
+        let fixture = workbench_fixture_for_scene(scene.name)?;
+        let mut receipt = ProofReceipt::new(&fixture, session.seed, session.lane.clone())?;
+        let evidence = session.evidence.remove(scene.name).unwrap_or_default();
+        receipt.semantic_checks = evidence.semantic_checks;
+        if receipt.semantic_checks.is_empty() {
+            receipt.semantic_checks.push(ProofCheck::failed(
+                "scene-reached-semantic-preflight",
+                "the selected scene never reached its semantic assertion boundary",
+            ));
+        }
+        if !run_succeeded
+            && !receipt
+                .semantic_checks
+                .iter()
+                .any(|check| check.status == CheckStatus::Failed)
+        {
+            receipt.semantic_checks.push(ProofCheck::failed(
+                "proof-run-completed",
+                "the visual runner failed before the selected scene completed",
+            ));
+        }
+        if session.phase == ScenePhase::Restart && !session.recording_succeeded {
+            receipt.semantic_checks.push(ProofCheck::failed(
+                "recording-phase-completed",
+                "the prerequisite recording process failed",
+            ));
+        }
+
+        receipt.pixel = if receipt.lane == ProofLane::Pixel {
+            let (baseline, current, _) = proof_artifact_paths(scene.name);
+            Some(evidence.pixel.unwrap_or(PixelProof {
+                status: PixelStatus::Failed,
+                minimum_match: scene.pixel_policy.minimum_match,
+                channel_tolerance: scene.pixel_policy.channel_tolerance,
+                policy_rationale: scene.pixel_policy.rationale.to_string(),
+                match_percentage: None,
+                different_pixels: None,
+                total_pixels: None,
+                baseline,
+                current,
+                diff: None,
+                regions: Vec::new(),
+            }))
+        } else {
+            None
+        };
+        let failed = receipt
+            .semantic_checks
+            .iter()
+            .any(|check| check.status == CheckStatus::Failed)
+            || receipt.pixel.as_ref().is_some_and(|pixel| {
+                pixel.status == PixelStatus::Failed
+                    || pixel
+                        .regions
+                        .iter()
+                        .any(|region| region.status == PixelStatus::Failed)
+            });
+        receipt.outcome = if failed {
+            ProofOutcome::Failed
+        } else {
+            ProofOutcome::Passed
+        };
+        let receipt_path = session
+            .output_root
+            .join("scenes")
+            .join(scene.name)
+            .join("receipt.json");
+        receipt.write_json(&receipt_path)?;
+        println!("  Receipt saved to: {}", receipt_path.display());
+    }
+    Ok(())
+}
 
 #[cfg(target_os = "macos")]
 fn run_visual_tests(project_path: PathBuf, update_baseline: bool) -> Result<()> {
@@ -802,12 +1231,130 @@ enum TestResult {
 }
 
 #[cfg(target_os = "macos")]
+fn workbench_output_root() -> Option<PathBuf> {
+    WORKBENCH_PROOF_SESSION.with(|session| {
+        session
+            .borrow()
+            .as_ref()
+            .map(|session| session.output_root.clone())
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn is_workbench_selector(selector: &str) -> bool {
+    selector.starts_with("workbench-")
+        || selector.starts_with("omega-workbench-")
+        || selector.starts_with("omega.workbench.")
+}
+
+#[cfg(target_os = "macos")]
+fn is_workbench_control_selector(selector: &str) -> bool {
+    selector.starts_with("workbench-control-")
+        || selector.starts_with("omega-workbench-control-")
+        || selector.starts_with("omega.workbench.control.")
+}
+
+#[cfg(target_os = "macos")]
+fn verify_workbench_render_preflight(
+    test_name: &str,
+    window: gpui::AnyWindowHandle,
+    cx: &mut VisualTestAppContext,
+) -> Result<()> {
+    cx.set_debug_accessibility_active(window, true)?;
+    let snapshot = cx.debug_render_snapshot(window)?;
+    let duplicate_targets: Vec<_> = snapshot
+        .duplicate_selectors()
+        .filter(|selector| is_workbench_selector(selector))
+        .collect();
+    anyhow::ensure!(
+        duplicate_targets.is_empty(),
+        "workbench semantic selectors must be unique; duplicates: {duplicate_targets:?}"
+    );
+    record_workbench_semantic_check(test_name, "workbench-selectors-unique");
+
+    let accessibility_tree = snapshot
+        .accessibility_tree_json()
+        .ok_or_else(|| anyhow::anyhow!("accessibility tree was not produced"))?;
+    let accessibility_tree: serde_json::Value =
+        serde_json::from_str(accessibility_tree).context("parsing accessibility tree")?;
+    let nodes = accessibility_tree
+        .get("nodes")
+        .and_then(serde_json::Value::as_object)
+        .ok_or_else(|| anyhow::anyhow!("accessibility tree has no nodes"))?;
+    anyhow::ensure!(
+        !nodes.is_empty(),
+        "accessibility tree contains no rendered nodes"
+    );
+    anyhow::ensure!(
+        nodes.values().any(|node| {
+            node.get("aria")
+                .and_then(|aria| aria.get("role"))
+                .and_then(serde_json::Value::as_str)
+                .is_some()
+        }),
+        "accessibility tree contains no semantic roles"
+    );
+    record_workbench_semantic_check(test_name, "accessibility-tree-populated");
+
+    for (selector, _) in snapshot
+        .selectors()
+        .filter(|(selector, _)| is_workbench_control_selector(selector))
+    {
+        anyhow::ensure!(
+            snapshot
+                .occurrences(selector)
+                .iter()
+                .any(|occurrence| occurrence.hit_testable),
+            "workbench control selector {selector:?} is not hit-testable"
+        );
+        let matching_nodes: Vec<_> = nodes
+            .values()
+            .filter(|node| {
+                node.get("element_id").and_then(serde_json::Value::as_str) == Some(selector)
+            })
+            .collect();
+        anyhow::ensure!(
+            matching_nodes.len() == 1,
+            "interactive workbench selector {selector:?} has {} accessibility identities",
+            matching_nodes.len()
+        );
+        let aria = matching_nodes[0]
+            .get("aria")
+            .and_then(serde_json::Value::as_object)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "interactive workbench selector {selector:?} has no accessibility properties"
+                )
+            })?;
+        anyhow::ensure!(
+            aria.get("role")
+                .and_then(serde_json::Value::as_str)
+                .is_some()
+                && aria
+                    .get("label")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|label| !label.trim().is_empty()),
+            "interactive workbench selector {selector:?} needs a role and non-empty label"
+        );
+    }
+    record_workbench_semantic_check(test_name, "workbench-controls-accessible");
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
 fn run_visual_test(
     test_name: &str,
     window: gpui::AnyWindowHandle,
     cx: &mut VisualTestAppContext,
     update_baseline: bool,
 ) -> Result<TestResult> {
+    let registered_scene = scene_spec(test_name);
+    if workbench_proof_active() {
+        if registered_scene.is_none() || !workbench_should_run_scene(test_name) {
+            return Ok(TestResult::Passed);
+        }
+    }
+
     // Ensure all pending work is done
     cx.run_until_parked();
 
@@ -818,61 +1365,315 @@ fn run_visual_test(
 
     cx.run_until_parked();
 
+    if workbench_proof_active() {
+        if let Err(error) = verify_workbench_render_preflight(test_name, window, cx) {
+            record_workbench_semantic_failure(
+                test_name,
+                "render-semantic-preflight",
+                format!("{error:#}"),
+            );
+            return Err(error);
+        }
+        record_workbench_semantic_check(test_name, "typed-state-preflight");
+        if workbench_semantic_only() {
+            return Ok(TestResult::Passed);
+        }
+    }
+
     // Capture the screenshot using direct texture capture
     let screenshot = cx.capture_screenshot(window)?;
+    if let Some(scene) = registered_scene {
+        let expected_width = scene
+            .viewport
+            .width
+            .saturating_mul(scene.viewport.scale_milli)
+            / 1000;
+        let expected_height = scene
+            .viewport
+            .height
+            .saturating_mul(scene.viewport.scale_milli)
+            / 1000;
+        anyhow::ensure!(
+            screenshot.dimensions() == (expected_width, expected_height),
+            "scene {test_name} rendered at {:?}, expected {}x{} from its viewport and scale",
+            screenshot.dimensions(),
+            expected_width,
+            expected_height
+        );
+    }
 
-    // Get paths
     let baseline_path = get_baseline_path(test_name);
-    let output_dir = std::env::var("VISUAL_TEST_OUTPUT_DIR")
-        .unwrap_or_else(|_| "target/visual_tests".to_string());
-    let output_path = PathBuf::from(&output_dir).join(format!("{}.png", test_name));
+    let proof_output_root = workbench_output_root();
+    let (_, current_relative, diff_relative) = proof_artifact_paths(test_name);
+    let output_path = if let Some(output_root) = &proof_output_root {
+        output_root.join(&current_relative)
+    } else {
+        let output_dir = std::env::var("VISUAL_TEST_OUTPUT_DIR")
+            .unwrap_or_else(|_| "target/visual_tests".to_string());
+        PathBuf::from(output_dir).join(format!("{}.png", test_name))
+    };
 
-    // Ensure output directory exists
-    std::fs::create_dir_all(&output_dir)?;
+    if let Some(parent) = output_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
 
-    // Always save the current screenshot
     screenshot.save(&output_path)?;
     println!("  Screenshot saved to: {}", output_path.display());
 
+    let policy = registered_scene
+        .map(|scene| scene.pixel_policy)
+        .unwrap_or(omega_workbench_harness::APPLE_SILICON_METAL_POLICY);
+    let (baseline_relative, _, _) = proof_artifact_paths(test_name);
+
     if update_baseline {
-        // Update the baseline
         if let Some(parent) = baseline_path.parent() {
             std::fs::create_dir_all(parent)?;
         }
         screenshot.save(&baseline_path)?;
+        if let Some(output_root) = &proof_output_root {
+            let proof_baseline_path = output_root.join(&baseline_relative);
+            if let Some(parent) = proof_baseline_path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            screenshot.save(proof_baseline_path)?;
+        }
         println!("  Baseline updated: {}", baseline_path.display());
+        let mut regions = Vec::new();
+        if let Some(scene) = registered_scene {
+            for region_spec in scene.regions {
+                let region = region_spec.capture();
+                let current_region = region.crop(&screenshot)?;
+                let baseline_region_path =
+                    get_baseline_path(&format!("{test_name}__{}", region.name));
+                if let Some(parent) = baseline_region_path.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                current_region.save(&baseline_region_path)?;
+                let current_region_relative = PathBuf::from("scenes")
+                    .join(test_name)
+                    .join("regions")
+                    .join(format!("{}.png", region.name));
+                let baseline_region_relative = PathBuf::from("scenes")
+                    .join(test_name)
+                    .join("regions")
+                    .join(format!("{}_baseline.png", region.name));
+                if let Some(output_root) = &proof_output_root {
+                    let current_region_path = output_root.join(&current_region_relative);
+                    if let Some(parent) = current_region_path.parent() {
+                        std::fs::create_dir_all(parent)?;
+                    }
+                    current_region.save(&current_region_path)?;
+                    let proof_baseline_region_path = output_root.join(&baseline_region_relative);
+                    current_region.save(proof_baseline_region_path)?;
+                }
+                println!(
+                    "  Region baseline updated: {}",
+                    baseline_region_path.display()
+                );
+                regions.push(RegionPixelProof {
+                    name: region.name,
+                    status: PixelStatus::Passed,
+                    match_percentage: Some(1.0),
+                    different_pixels: Some(0),
+                    total_pixels: Some(
+                        current_region
+                            .width()
+                            .saturating_mul(current_region.height()),
+                    ),
+                    baseline: baseline_region_relative,
+                    current: current_region_relative,
+                    diff: None,
+                });
+            }
+        }
+        if workbench_proof_active() {
+            record_workbench_pixel(
+                test_name,
+                PixelProof {
+                    status: PixelStatus::Passed,
+                    minimum_match: policy.minimum_match,
+                    channel_tolerance: policy.channel_tolerance,
+                    policy_rationale: policy.rationale.to_string(),
+                    match_percentage: Some(1.0),
+                    different_pixels: Some(0),
+                    total_pixels: Some(screenshot.width().saturating_mul(screenshot.height())),
+                    baseline: baseline_relative,
+                    current: current_relative,
+                    diff: None,
+                    regions,
+                },
+            );
+        }
         return Ok(TestResult::BaselineUpdated(baseline_path));
     }
 
-    // Compare with baseline
     if !baseline_path.exists() {
+        if workbench_proof_active() {
+            record_workbench_pixel(
+                test_name,
+                PixelProof {
+                    status: PixelStatus::Failed,
+                    minimum_match: policy.minimum_match,
+                    channel_tolerance: policy.channel_tolerance,
+                    policy_rationale: policy.rationale.to_string(),
+                    match_percentage: None,
+                    different_pixels: None,
+                    total_pixels: None,
+                    baseline: baseline_relative,
+                    current: current_relative,
+                    diff: None,
+                    regions: Vec::new(),
+                },
+            );
+        }
         return Err(anyhow::anyhow!(
             "Baseline not found: {}. Run with UPDATE_BASELINE=1 to create it.",
             baseline_path.display()
         ));
     }
 
+    if let Some(output_root) = &proof_output_root {
+        let proof_baseline_path = output_root.join(&baseline_relative);
+        if let Some(parent) = proof_baseline_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::copy(&baseline_path, proof_baseline_path)?;
+    }
+
     let baseline = image::open(&baseline_path)?.to_rgba8();
-    let comparison = compare_images(&screenshot, &baseline);
+    let comparison = compare_workbench_images(&screenshot, &baseline, policy.channel_tolerance);
 
     println!(
         "  Match: {:.2}% ({} different pixels)",
         comparison.match_percentage * 100.0,
-        comparison.diff_pixel_count
+        comparison.different_pixels
     );
 
-    if comparison.match_percentage >= MATCH_THRESHOLD {
-        Ok(TestResult::Passed)
-    } else {
-        // Save diff image
-        let diff_path = PathBuf::from(&output_dir).join(format!("{}_diff.png", test_name));
+    let whole_passed = comparison.match_percentage >= policy.minimum_match;
+    let diff_path = proof_output_root
+        .as_ref()
+        .map(|output_root| output_root.join(&diff_relative))
+        .unwrap_or_else(|| output_path.with_file_name(format!("{test_name}_diff.png")));
+    if !whole_passed {
+        if let Some(parent) = diff_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
         comparison.diff_image.save(&diff_path)?;
         println!("  Diff image saved to: {}", diff_path.display());
+    }
 
+    let mut regions = Vec::new();
+    let mut regions_passed = true;
+    if let Some(scene) = registered_scene {
+        for region_spec in scene.regions {
+            let region = region_spec.capture();
+            let current_region = region.crop(&screenshot)?;
+            let baseline_region_path = get_baseline_path(&format!("{test_name}__{}", region.name));
+            let current_region_relative = PathBuf::from("scenes")
+                .join(test_name)
+                .join("regions")
+                .join(format!("{}.png", region.name));
+            let baseline_region_relative = PathBuf::from("scenes")
+                .join(test_name)
+                .join("regions")
+                .join(format!("{}_baseline.png", region.name));
+            let diff_region_relative = PathBuf::from("scenes")
+                .join(test_name)
+                .join("regions")
+                .join(format!("{}_diff.png", region.name));
+            let current_region_path = proof_output_root
+                .as_ref()
+                .map(|root| root.join(&current_region_relative))
+                .unwrap_or_else(|| {
+                    output_path.with_file_name(format!("{test_name}__{}.png", region.name))
+                });
+            if let Some(parent) = current_region_path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            current_region.save(&current_region_path)?;
+
+            let mut region_proof = RegionPixelProof {
+                name: region.name.clone(),
+                status: PixelStatus::Failed,
+                match_percentage: None,
+                different_pixels: None,
+                total_pixels: None,
+                baseline: baseline_region_relative.clone(),
+                current: current_region_relative,
+                diff: None,
+            };
+            if baseline_region_path.exists() {
+                if let Some(output_root) = &proof_output_root {
+                    let proof_baseline_region_path = output_root.join(&baseline_region_relative);
+                    if let Some(parent) = proof_baseline_region_path.parent() {
+                        std::fs::create_dir_all(parent)?;
+                    }
+                    std::fs::copy(&baseline_region_path, proof_baseline_region_path)?;
+                }
+                let baseline_region = image::open(&baseline_region_path)?.to_rgba8();
+                let region_comparison = compare_workbench_images(
+                    &current_region,
+                    &baseline_region,
+                    policy.channel_tolerance,
+                );
+                let passed = region_comparison.match_percentage >= policy.minimum_match;
+                region_proof.status = if passed {
+                    PixelStatus::Passed
+                } else {
+                    PixelStatus::Failed
+                };
+                region_proof.match_percentage = Some(region_comparison.match_percentage);
+                region_proof.different_pixels = Some(region_comparison.different_pixels);
+                region_proof.total_pixels = Some(region_comparison.total_pixels);
+                if !passed {
+                    regions_passed = false;
+                    let region_diff_path = proof_output_root
+                        .as_ref()
+                        .map(|root| root.join(&diff_region_relative))
+                        .unwrap_or_else(|| {
+                            output_path
+                                .with_file_name(format!("{test_name}__{}_diff.png", region.name))
+                        });
+                    region_comparison.diff_image.save(&region_diff_path)?;
+                    region_proof.diff = Some(diff_region_relative);
+                }
+            } else {
+                regions_passed = false;
+            }
+            regions.push(region_proof);
+        }
+    }
+
+    if workbench_proof_active() {
+        record_workbench_pixel(
+            test_name,
+            PixelProof {
+                status: if whole_passed {
+                    PixelStatus::Passed
+                } else {
+                    PixelStatus::Failed
+                },
+                minimum_match: policy.minimum_match,
+                channel_tolerance: policy.channel_tolerance,
+                policy_rationale: policy.rationale.to_string(),
+                match_percentage: Some(comparison.match_percentage),
+                different_pixels: Some(comparison.different_pixels),
+                total_pixels: Some(comparison.total_pixels),
+                baseline: baseline_relative,
+                current: current_relative,
+                diff: (!whole_passed).then_some(diff_relative),
+                regions,
+            },
+        );
+    }
+
+    if whole_passed && regions_passed {
+        Ok(TestResult::Passed)
+    } else {
         Err(anyhow::anyhow!(
             "Image mismatch: {:.2}% match (threshold: {:.2}%)",
             comparison.match_percentage * 100.0,
-            MATCH_THRESHOLD * 100.0
+            policy.minimum_match * 100.0
         ))
     }
 }
@@ -930,69 +1731,6 @@ fn get_baseline_path(test_name: &str) -> PathBuf {
     workspace_root
         .join(BASELINE_DIR)
         .join(format!("{}.png", test_name))
-}
-
-#[cfg(target_os = "macos")]
-struct ImageComparison {
-    match_percentage: f64,
-    diff_image: RgbaImage,
-    diff_pixel_count: u32,
-    #[allow(dead_code)]
-    total_pixels: u32,
-}
-
-#[cfg(target_os = "macos")]
-fn compare_images(actual: &RgbaImage, expected: &RgbaImage) -> ImageComparison {
-    let width = actual.width().max(expected.width());
-    let height = actual.height().max(expected.height());
-    let total_pixels = width * height;
-
-    let mut diff_image = RgbaImage::new(width, height);
-    let mut matching_pixels = 0u32;
-
-    for y in 0..height {
-        for x in 0..width {
-            let actual_pixel = if x < actual.width() && y < actual.height() {
-                *actual.get_pixel(x, y)
-            } else {
-                image::Rgba([0, 0, 0, 0])
-            };
-
-            let expected_pixel = if x < expected.width() && y < expected.height() {
-                *expected.get_pixel(x, y)
-            } else {
-                image::Rgba([0, 0, 0, 0])
-            };
-
-            if pixels_are_similar(&actual_pixel, &expected_pixel) {
-                matching_pixels += 1;
-                // Semi-transparent green for matching pixels
-                diff_image.put_pixel(x, y, image::Rgba([0, 255, 0, 64]));
-            } else {
-                // Bright red for differing pixels
-                diff_image.put_pixel(x, y, image::Rgba([255, 0, 0, 255]));
-            }
-        }
-    }
-
-    let match_percentage = matching_pixels as f64 / total_pixels as f64;
-    let diff_pixel_count = total_pixels - matching_pixels;
-
-    ImageComparison {
-        match_percentage,
-        diff_image,
-        diff_pixel_count,
-        total_pixels,
-    }
-}
-
-#[cfg(target_os = "macos")]
-fn pixels_are_similar(a: &image::Rgba<u8>, b: &image::Rgba<u8>) -> bool {
-    const TOLERANCE: i16 = 2;
-    (a.0[0] as i16 - b.0[0] as i16).abs() <= TOLERANCE
-        && (a.0[1] as i16 - b.0[1] as i16).abs() <= TOLERANCE
-        && (a.0[2] as i16 - b.0[2] as i16).abs() <= TOLERANCE
-        && (a.0[3] as i16 - b.0[3] as i16).abs() <= TOLERANCE
 }
 
 #[cfg(target_os = "macos")]
@@ -2150,10 +2888,11 @@ import { AiPaneTabContext } from 'context';
 ///
 /// # The threshold, stated
 ///
-/// Comparison is `MATCH_THRESHOLD` (0.99): at least 99% of pixels must match
-/// the committed baseline. Exact equality is not usable even here — font
-/// rasterisation and theme colour rounding differ by a pixel or two between
-/// machines — and a threshold nobody states is worse than a loose one.
+/// Each registered scene declares a minimum match, channel tolerance, and
+/// rationale. The initial Omega scenes require at least 99% matching pixels
+/// with a per-channel tolerance of two. Exact equality is not usable even here
+/// — font rasterisation and theme colour rounding differ by a pixel or two
+/// between machines — and a threshold nobody states is worse than a loose one.
 /// Baselines were generated on Apple Silicon with the Metal renderer; this is
 /// a local gate, and a materially different GPU may need `UPDATE_BASELINE=1`
 /// and a human looking at the result before trusting it.
@@ -2171,6 +2910,26 @@ fn run_omega_agent_visual_tests(
     let outcome = run_omega_agent_visual_tests_inner(app_state, cx, update_baseline);
     cx.run_until_parked();
     outcome
+}
+
+#[cfg(all(target_os = "macos", feature = "visual-tests"))]
+fn finish_omega_agent_visual_tests(
+    workspace_window: WindowHandle<Workspace>,
+    cx: &mut VisualTestAppContext,
+    results: &[TestResult],
+) -> Result<TestResult> {
+    cx.update_window(workspace_window.into(), |_, window, _cx| {
+        window.remove_window();
+    })
+    .log_err();
+    cx.run_until_parked();
+
+    for result in results {
+        if let TestResult::BaselineUpdated(path) = result {
+            return Ok(TestResult::BaselineUpdated(path.clone()));
+        }
+    }
+    Ok(TestResult::Passed)
 }
 
 #[cfg(all(target_os = "macos", feature = "visual-tests"))]
@@ -2308,6 +3067,18 @@ fn run_omega_agent_visual_tests_inner(
         cx,
         update_baseline,
     )?;
+    if !workbench_any_selected(&[
+        "omega_front_door_typing",
+        "omega_executor_disclosure_native",
+        "omega_route_pin_honoured",
+        "omega_route_pin_not_honoured",
+        "omega_executor_disclosure_external_acp",
+        "omega_executor_disclosure_engine_lane",
+        "omega_executor_disclosure_external_acp_after_restart",
+        "omega_executor_disclosure_engine_lane_after_restart",
+    ]) {
+        return finish_omega_agent_visual_tests(workspace_window, cx, &[front_door]);
+    }
 
     // omega#76's exit, second half: **typing starts a real thread**. The
     // keystrokes go into this window through GPUI's own dispatch, so nothing
@@ -2336,6 +3107,17 @@ fn run_omega_agent_visual_tests_inner(
         cx,
         update_baseline,
     )?;
+    if !workbench_any_selected(&[
+        "omega_executor_disclosure_native",
+        "omega_route_pin_honoured",
+        "omega_route_pin_not_honoured",
+        "omega_executor_disclosure_external_acp",
+        "omega_executor_disclosure_engine_lane",
+        "omega_executor_disclosure_external_acp_after_restart",
+        "omega_executor_disclosure_engine_lane_after_restart",
+    ]) {
+        return finish_omega_agent_visual_tests(workspace_window, cx, &[front_door, typing]);
+    }
 
     // Zoom the panel for the disclosure captures. The executor line is long by
     // design — class, agent, model, run, and route reason — and a dock-width
@@ -2350,135 +3132,189 @@ fn run_omega_agent_visual_tests_inner(
     .log_err();
     cx.run_until_parked();
 
-    // omega#77: the executor line, on the native thread the front door just
-    // built. This thread was routed by `OmegaAgentConnection`, so its line also
-    // carries omega#78's route reason.
-    let native_line = cx
-        .read(|cx| omega_executor_line(&panel, cx))
-        .ok_or_else(|| anyhow::anyhow!("the native thread has no executor disclosure"))?;
-    anyhow::ensure!(
-        // omega#100. The line no longer leads with the wire token.
-        // `ExecutorClass::token` documents that a token is never shown to a
-        // user on its own, and the disclosure stopped rendering it. The
-        // property each scene is here for is unchanged: the line names the
-        // agent that ran the turn, and never reads as another executor.
-        native_line.starts_with("Omega Agent") && !native_line.contains("external_acp"),
-        "the front door's own thread must disclose Omega Agent, not {native_line:?}"
-    );
-    anyhow::ensure!(
-        native_line.contains("routed:"),
-        "omega#78's wiring is not reaching the rendered line: {native_line:?}"
-    );
-    println!("  native executor line: {native_line}");
+    let mut native_disclosure = TestResult::Passed;
+    if workbench_any_selected(&["omega_executor_disclosure_native"]) {
+        // omega#77: the executor line on the native thread the front door just
+        // built. A restored or pre-connection draft can legitimately predate
+        // the router's session record, so this scene proves executor
+        // attribution. The two pin scenes below create and assert explicit
+        // route decisions.
+        let native_line = cx
+            .read(|cx| omega_executor_line(&panel, cx))
+            .ok_or_else(|| anyhow::anyhow!("the native thread has no executor disclosure"))?;
+        anyhow::ensure!(
+            // omega#100. The line no longer leads with the wire token.
+            // `ExecutorClass::token` documents that a token is never shown to a
+            // user on its own, and the disclosure stopped rendering it. The
+            // property each scene is here for is unchanged: the line names the
+            // agent that ran the turn, and never reads as another executor.
+            native_line.starts_with("Omega Agent") && !native_line.contains("external_acp"),
+            "the front door's own thread must disclose Omega Agent, not {native_line:?}"
+        );
+        println!("  native executor line: {native_line}");
 
-    let native_disclosure = run_visual_test(
-        "omega_executor_disclosure_native",
-        workspace_window.into(),
-        cx,
-        update_baseline,
-    )?;
-
-    // omega#78, first exit clause: **a pinned executor is always honoured.**
-    // The native loop is the one executor this build has registered on the
-    // router, so it is the one honourable pin — and pinning it is not a no-op:
-    // the line changes from `routed: unpinned` to `routed: pinned`, which is
-    // the difference between "nobody chose this" and "a person did".
-    let session_for_pin = cx
-        .read(|cx| {
-            panel
-                .read(cx)
-                .active_thread_view_for_tests()
-                .and_then(|conversation| conversation.read(cx).root_thread_view())
-                .map(|view| view.read(cx).thread.read(cx).session_id().clone())
-        })
-        .ok_or_else(|| anyhow::anyhow!("no session to pin"))?;
-    let router_for_pin = agent_ui::omega_router::active_router().ok_or_else(|| {
-        anyhow::anyhow!(
-            "no router was built for the native agent entry — omega#78's \
-             wiring is the thing under test and it is absent"
-        )
-    })?;
-    let honoured = router_for_pin.pin_session(
-        &session_for_pin,
-        omega_front_door::ExecutorPin::new(omega_front_door::ExecutorClass::NativeLoop),
-        omega_front_door::PinGesture::ExecutorPinMenuItem,
-    );
-    anyhow::ensure!(
-        honoured.reason == omega_front_door::RouteReason::PinHonored,
-        "a pin to the fail-closed target must be honoured, not {:?}",
-        honoured.reason
-    );
-    cx.update_window(workspace_window.into(), |_, window, _cx| {
-        window.refresh();
-    })?;
-    cx.run_until_parked();
-
-    let honoured_line = cx
-        .read(|cx| omega_executor_line(&panel, cx))
-        .ok_or_else(|| anyhow::anyhow!("the pinned thread has no executor disclosure"))?;
-    anyhow::ensure!(
-        honoured_line.contains("routed: pinned"),
-        "an honoured pin must say so on the thread's own line: {honoured_line:?}"
-    );
-    println!("  honoured-pin executor line: {honoured_line}");
-
-    let pin_honoured = run_visual_test(
+        native_disclosure = run_visual_test(
+            "omega_executor_disclosure_native",
+            workspace_window.into(),
+            cx,
+            update_baseline,
+        )?;
+    }
+    if !workbench_any_selected(&[
         "omega_route_pin_honoured",
-        workspace_window.into(),
-        cx,
-        update_baseline,
-    )?;
-
-    // omega#78: a pin that cannot be honoured, rendered. No engine is running
-    // under this harness, so an engine-lane pin falls closed to the native loop
-    // and the line has to say so — a fallback the user cannot see is the defect
-    // this packet exists to avoid.
-    let session_id = cx
-        .read(|cx| {
-            panel
-                .read(cx)
-                .active_thread_view_for_tests()
-                .and_then(|conversation| conversation.read(cx).root_thread_view())
-                .map(|view| view.read(cx).thread.read(cx).session_id().clone())
-        })
-        .ok_or_else(|| anyhow::anyhow!("no session to pin"))?;
-    let router = agent_ui::omega_router::active_router().ok_or_else(|| {
-        anyhow::anyhow!(
-            "no router was built for the native agent entry — omega#78's \
-             wiring is the thing under test and it is absent"
-        )
-    })?;
-    let decision = router.pin_session(
-        &session_id,
-        omega_front_door::ExecutorPin::new(omega_front_door::ExecutorClass::EngineLane),
-        omega_front_door::PinGesture::ExecutorPinMenuItem,
-    );
-    anyhow::ensure!(
-        decision.reason.is_fallback(),
-        "an engine-lane pin with no engine must fall back, not report {:?}",
-        decision.reason
-    );
-
-    cx.update_window(workspace_window.into(), |_, window, _cx| {
-        window.refresh();
-    })?;
-    cx.run_until_parked();
-
-    let pinned_line = cx
-        .read(|cx| omega_executor_line(&panel, cx))
-        .ok_or_else(|| anyhow::anyhow!("the pinned thread has no executor disclosure"))?;
-    anyhow::ensure!(
-        pinned_line.contains("fell back to the native loop"),
-        "the unhonoured pin is not visible on the thread's line: {pinned_line:?}"
-    );
-    println!("  unhonoured-pin executor line: {pinned_line}");
-
-    let pin_fallback = run_visual_test(
         "omega_route_pin_not_honoured",
-        workspace_window.into(),
-        cx,
-        update_baseline,
-    )?;
+        "omega_executor_disclosure_external_acp",
+        "omega_executor_disclosure_engine_lane",
+        "omega_executor_disclosure_external_acp_after_restart",
+        "omega_executor_disclosure_engine_lane_after_restart",
+    ]) {
+        return finish_omega_agent_visual_tests(
+            workspace_window,
+            cx,
+            &[front_door, typing, native_disclosure],
+        );
+    }
+
+    let mut pin_honoured = TestResult::Passed;
+    if workbench_any_selected(&["omega_route_pin_honoured"]) {
+        // omega#78, first exit clause: **a pinned executor is always
+        // honoured.** The native loop is the one executor this build has
+        // registered on the router.
+        let session_for_pin = cx
+            .read(|cx| {
+                panel
+                    .read(cx)
+                    .active_thread_view_for_tests()
+                    .and_then(|conversation| conversation.read(cx).root_thread_view())
+                    .map(|view| view.read(cx).thread.read(cx).session_id().clone())
+            })
+            .ok_or_else(|| anyhow::anyhow!("no session to pin"))?;
+        let router_for_pin = agent_ui::omega_router::active_router().ok_or_else(|| {
+            anyhow::anyhow!(
+                "no router was built for the native agent entry — omega#78's \
+                 wiring is the thing under test and it is absent"
+            )
+        })?;
+        let honoured = router_for_pin.pin_session(
+            &session_for_pin,
+            omega_front_door::ExecutorPin::new(omega_front_door::ExecutorClass::NativeLoop),
+            omega_front_door::PinGesture::ExecutorPinMenuItem,
+        );
+        anyhow::ensure!(
+            honoured.reason == omega_front_door::RouteReason::PinHonored,
+            "a pin to the fail-closed target must be honoured, not {:?}",
+            honoured.reason
+        );
+        cx.update_window(workspace_window.into(), |_, window, _cx| {
+            window.refresh();
+        })?;
+        cx.run_until_parked();
+
+        let honoured_record = cx
+            .read(|cx| omega_executor_record(&panel, cx))
+            .ok_or_else(|| anyhow::anyhow!("the pinned thread has no executor disclosure"))?;
+        anyhow::ensure!(
+            honoured_record.route == Some(omega_front_door::RouteReason::PinHonored),
+            "an honoured pin must remain in the typed disclosure: {honoured_record:?}"
+        );
+        let honoured_line = honoured_record.label();
+        anyhow::ensure!(
+            !honoured_line.contains("routed:"),
+            "an honoured pin is not a fallback and must not add route noise: {honoured_line:?}"
+        );
+        println!("  honoured-pin executor line: {honoured_line}");
+
+        pin_honoured = run_visual_test(
+            "omega_route_pin_honoured",
+            workspace_window.into(),
+            cx,
+            update_baseline,
+        )?;
+    }
+    if !workbench_any_selected(&[
+        "omega_route_pin_not_honoured",
+        "omega_executor_disclosure_external_acp",
+        "omega_executor_disclosure_engine_lane",
+        "omega_executor_disclosure_external_acp_after_restart",
+        "omega_executor_disclosure_engine_lane_after_restart",
+    ]) {
+        return finish_omega_agent_visual_tests(
+            workspace_window,
+            cx,
+            &[front_door, typing, native_disclosure, pin_honoured],
+        );
+    }
+
+    let mut pin_fallback = TestResult::Passed;
+    if workbench_any_selected(&["omega_route_pin_not_honoured"]) {
+        // omega#78: a pin that cannot be honoured, rendered. No engine is
+        // running under this harness, so an engine-lane pin falls closed to the
+        // native loop.
+        let session_id = cx
+            .read(|cx| {
+                panel
+                    .read(cx)
+                    .active_thread_view_for_tests()
+                    .and_then(|conversation| conversation.read(cx).root_thread_view())
+                    .map(|view| view.read(cx).thread.read(cx).session_id().clone())
+            })
+            .ok_or_else(|| anyhow::anyhow!("no session to pin"))?;
+        let router = agent_ui::omega_router::active_router().ok_or_else(|| {
+            anyhow::anyhow!(
+                "no router was built for the native agent entry — omega#78's \
+                 wiring is the thing under test and it is absent"
+            )
+        })?;
+        let decision = router.pin_session(
+            &session_id,
+            omega_front_door::ExecutorPin::new(omega_front_door::ExecutorClass::EngineLane),
+            omega_front_door::PinGesture::ExecutorPinMenuItem,
+        );
+        anyhow::ensure!(
+            decision.reason.is_fallback(),
+            "an engine-lane pin with no engine must fall back, not report {:?}",
+            decision.reason
+        );
+
+        cx.update_window(workspace_window.into(), |_, window, _cx| {
+            window.refresh();
+        })?;
+        cx.run_until_parked();
+
+        let pinned_line = cx
+            .read(|cx| omega_executor_line(&panel, cx))
+            .ok_or_else(|| anyhow::anyhow!("the pinned thread has no executor disclosure"))?;
+        anyhow::ensure!(
+            pinned_line.contains("fell back to the native loop"),
+            "the unhonoured pin is not visible on the thread's line: {pinned_line:?}"
+        );
+        println!("  unhonoured-pin executor line: {pinned_line}");
+
+        pin_fallback = run_visual_test(
+            "omega_route_pin_not_honoured",
+            workspace_window.into(),
+            cx,
+            update_baseline,
+        )?;
+    }
+    if !workbench_any_selected(&[
+        "omega_executor_disclosure_external_acp",
+        "omega_executor_disclosure_engine_lane",
+        "omega_executor_disclosure_external_acp_after_restart",
+        "omega_executor_disclosure_engine_lane_after_restart",
+    ]) {
+        return finish_omega_agent_visual_tests(
+            workspace_window,
+            cx,
+            &[
+                front_door,
+                typing,
+                native_disclosure,
+                pin_honoured,
+                pin_fallback,
+            ],
+        );
+    }
 
     // omega#77: the external-ACP kind, on a second thread in the same panel.
     let stub: Rc<dyn AgentServer> = Rc::new(StubAgentServer::new(StubAgentConnection::new()));
@@ -2510,6 +3346,24 @@ fn run_omega_agent_visual_tests_inner(
         cx,
         update_baseline,
     )?;
+    if !workbench_any_selected(&[
+        "omega_executor_disclosure_engine_lane",
+        "omega_executor_disclosure_external_acp_after_restart",
+        "omega_executor_disclosure_engine_lane_after_restart",
+    ]) {
+        return finish_omega_agent_visual_tests(
+            workspace_window,
+            cx,
+            &[
+                front_door,
+                typing,
+                native_disclosure,
+                pin_honoured,
+                pin_fallback,
+                external_disclosure,
+            ],
+        );
+    }
 
     // omega#77: the engine-lane kind, on that same external thread.
     //
@@ -2557,6 +3411,24 @@ fn run_omega_agent_visual_tests_inner(
         cx,
         update_baseline,
     )?;
+    if !workbench_any_selected(&[
+        "omega_executor_disclosure_external_acp_after_restart",
+        "omega_executor_disclosure_engine_lane_after_restart",
+    ]) {
+        return finish_omega_agent_visual_tests(
+            workspace_window,
+            cx,
+            &[
+                front_door,
+                typing,
+                native_disclosure,
+                pin_honoured,
+                pin_fallback,
+                external_disclosure,
+                lane_disclosure,
+            ],
+        );
+    }
 
     // omega#77's restart proof, first half: leave behind what a relaunch would
     // find, and then end. Everything below the captures writes; nothing below
@@ -2609,31 +3481,23 @@ fn run_omega_agent_visual_tests_inner(
         operation_ref: "operation.full-auto.visual".to_string(),
     })?;
 
-    cx.update_window(workspace_window.into(), |_, window, _cx| {
-        window.remove_window();
-    })
-    .log_err();
-    cx.run_until_parked();
-
-    // Six captures, and `run_visual_test` returns `Err` on a mismatch, so
+    // Seven captures, and `run_visual_test` returns `Err` on a mismatch, so
     // reaching here means every one of them matched its baseline or wrote one.
     // The aggregate reports "baseline updated" if any capture wrote one, so an
     // `UPDATE_BASELINE=1` run is never reported as a pass.
-    let results = [
-        front_door,
-        typing,
-        native_disclosure,
-        pin_honoured,
-        pin_fallback,
-        lane_disclosure,
-        external_disclosure,
-    ];
-    for result in &results {
-        if let TestResult::BaselineUpdated(path) = result {
-            return Ok(TestResult::BaselineUpdated(path.clone()));
-        }
-    }
-    Ok(TestResult::Passed)
+    finish_omega_agent_visual_tests(
+        workspace_window,
+        cx,
+        &[
+            front_door,
+            typing,
+            native_disclosure,
+            pin_honoured,
+            pin_fallback,
+            external_disclosure,
+            lane_disclosure,
+        ],
+    )
 }
 
 /// The executor line the agent panel's active thread would render.

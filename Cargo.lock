@@ -560,6 +560,7 @@ dependencies = [
  "omega_front_door",
  "omega_harness",
  "omega_identity",
+ "omega_workbench_harness",
  "omega_workdir",
  "omega_zero_base",
  "ordered-float 2.10.1",
@@ -12106,6 +12107,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "omega_workbench_harness"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "gpui",
+ "image",
+ "serde",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
 name = "omega_workdir"
 version = "0.1.0"
 dependencies = [
@@ -22498,6 +22511,7 @@ dependencies = [
  "notifications",
  "omega_effectd",
  "omega_front_door",
+ "omega_workbench_harness",
  "omega_workdir",
  "omega_zero_base",
  "onboarding",

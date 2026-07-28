@@ -378,7 +378,7 @@ impl<E: Element> Drawable<E> {
                             self.element.write_a11y_info(&mut node);
                             window.a11y.node_bounds.insert(node_id, bounds);
                             pushed_a11y_node = window.a11y.nodes.push(node_id, node);
-                            #[cfg(debug_assertions)]
+                            #[cfg(any(debug_assertions, test, feature = "test-support"))]
                             if pushed_a11y_node {
                                 let view = window
                                     .a11y
@@ -391,7 +391,7 @@ impl<E: Element> Drawable<E> {
                                     crate::window::a11y::debug::NodeDebugInfo {
                                         synthetic: false,
                                         view,
-                                        element_id: global_id.0.last().map(|id| format!("{id:?}")),
+                                        element_id: global_id.0.last().map(ToString::to_string),
                                         source_location,
                                     },
                                 );
@@ -413,21 +413,21 @@ impl<E: Element> Drawable<E> {
 
                 if pushed_a11y_node {
                     if let Some(global_id) = global_id.as_ref() {
-                        #[cfg(debug_assertions)]
+                        #[cfg(any(debug_assertions, test, feature = "test-support"))]
                         let creator = crate::window::a11y::debug::NodeCreator {
                             view: window
                                 .a11y
                                 .view_type_names
                                 .get(&window.current_view())
                                 .copied(),
-                            element_id: global_id.0.last().map(|id| format!("{id:?}")),
+                            element_id: global_id.0.last().map(ToString::to_string),
                             source_location: self.element.source_location(),
                         };
                         let mut builder = A11ySubtreeBuilder::new(
                             global_id.accesskit_node_id(),
                             &mut window.a11y.nodes,
                         );
-                        #[cfg(debug_assertions)]
+                        #[cfg(any(debug_assertions, test, feature = "test-support"))]
                         {
                             builder = builder.with_creator(creator);
                         }

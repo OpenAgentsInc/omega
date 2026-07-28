@@ -83,6 +83,91 @@ pub const DEFAULT_ADDITIONAL_WINDOW_SIZE: Size<Pixels> = Size {
     height: Pixels(750.),
 };
 
+#[cfg(any(test, feature = "test-support"))]
+#[derive(Clone, Debug, Default)]
+/// Test-only semantic metadata collected from the most recently rendered frame.
+pub struct DebugRenderSnapshot {
+    bounds: std::collections::BTreeMap<String, Bounds<Pixels>>,
+    occurrences: std::collections::BTreeMap<String, Vec<DebugElementOccurrence>>,
+    accessibility_tree_json: Option<String>,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// The effective rendered visibility of a debug selector occurrence.
+pub enum DebugVisibility {
+    /// The occurrence is fully visible inside its clipping mask.
+    Visible,
+    /// The occurrence is visible, but its bounds are clipped.
+    PartiallyClipped,
+    /// The occurrence is entirely outside its clipping mask.
+    FullyClipped,
+    /// The occurrence has zero effective opacity.
+    Transparent,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+#[derive(Clone, Copy, Debug)]
+/// Test-only layout and interaction metadata for one rendered selector occurrence.
+pub struct DebugElementOccurrence {
+    /// The occurrence's full layout bounds.
+    pub bounds: Bounds<Pixels>,
+    /// The portion of the bounds inside the effective clipping mask.
+    pub visible_bounds: Bounds<Pixels>,
+    /// The effective rendered visibility.
+    pub visibility: DebugVisibility,
+    /// Whether GPUI registered a hitbox for the occurrence.
+    pub hit_testable: bool,
+    /// Whether the occurrence participates in focus navigation.
+    pub focusable: bool,
+    /// Whether the occurrence owns exact focus.
+    pub focused: bool,
+    /// Whether the occurrence or one of its descendants owns focus.
+    pub contains_focus: bool,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl DebugRenderSnapshot {
+    /// Returns the last bounds recorded for a selector, for compatibility with `debug_bounds`.
+    pub fn bounds(&self, selector: &str) -> Option<Bounds<Pixels>> {
+        self.bounds.get(selector).copied()
+    }
+
+    /// Returns how many occurrences of a selector were rendered.
+    pub fn selector_count(&self, selector: &str) -> usize {
+        self.occurrences.get(selector).map(Vec::len).unwrap_or(0)
+    }
+
+    /// Returns every rendered occurrence of a selector.
+    pub fn occurrences(&self, selector: &str) -> &[DebugElementOccurrence] {
+        self.occurrences
+            .get(selector)
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+    }
+
+    /// Iterates over selectors and their compatibility bounds.
+    pub fn selectors(&self) -> impl Iterator<Item = (&str, Bounds<Pixels>)> {
+        self.bounds
+            .iter()
+            .map(|(selector, bounds)| (selector.as_str(), *bounds))
+    }
+
+    /// Iterates over selectors that rendered more than once.
+    pub fn duplicate_selectors(&self) -> impl Iterator<Item = &str> {
+        self.occurrences
+            .iter()
+            .filter_map(|(selector, occurrences)| {
+                (occurrences.len() > 1).then_some(selector.as_str())
+            })
+    }
+
+    /// Returns the raw accessibility tree captured for this frame, when active.
+    pub fn accessibility_tree_json(&self) -> Option<&str> {
+        self.accessibility_tree_json.as_deref()
+    }
+}
+
 /// Represents the two different phases when dispatching events.
 #[derive(Default, Copy, Clone, Debug, Eq, PartialEq)]
 pub enum DispatchPhase {
@@ -920,6 +1005,8 @@ pub(crate) struct Frame {
     pub(crate) cursor_styles: Vec<CursorStyleRequest>,
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) debug_bounds: FxHashMap<String, Bounds<Pixels>>,
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) debug_selector_entries: Vec<(String, DebugElementOccurrence)>,
     #[cfg(any(feature = "inspector", debug_assertions))]
     pub(crate) next_inspector_instance_ids: FxHashMap<Rc<crate::InspectorElementPath>, usize>,
     #[cfg(any(feature = "inspector", debug_assertions))]
@@ -946,6 +1033,8 @@ pub(crate) struct PaintIndex {
     accessed_element_states_index: usize,
     tab_handle_index: usize,
     line_layout_index: LineLayoutIndex,
+    #[cfg(any(test, feature = "test-support"))]
+    debug_selector_index: usize,
 }
 
 impl Frame {
@@ -967,6 +1056,8 @@ impl Frame {
 
             #[cfg(any(test, feature = "test-support"))]
             debug_bounds: FxHashMap::default(),
+            #[cfg(any(test, feature = "test-support"))]
+            debug_selector_entries: Vec::new(),
 
             #[cfg(any(feature = "inspector", debug_assertions))]
             next_inspector_instance_ids: FxHashMap::default(),
@@ -995,6 +1086,7 @@ impl Frame {
         #[cfg(any(test, feature = "test-support"))]
         {
             self.debug_bounds.clear();
+            self.debug_selector_entries.clear();
         }
 
         #[cfg(any(feature = "inspector", debug_assertions))]
@@ -1002,6 +1094,17 @@ impl Frame {
             self.next_inspector_instance_ids.clear();
             self.inspector_hitboxes.clear();
         }
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn push_debug_selector(
+        &mut self,
+        selector: String,
+        occurrence: DebugElementOccurrence,
+    ) {
+        self.debug_bounds
+            .insert(selector.clone(), occurrence.bounds);
+        self.debug_selector_entries.push((selector, occurrence));
     }
 
     pub(crate) fn cursor_style(&self, window: &Window) -> Option<CursorStyle> {
@@ -3349,10 +3452,21 @@ impl Window {
             accessed_element_states_index: self.next_frame.accessed_element_states.len(),
             tab_handle_index: self.next_frame.tab_stops.paint_index(),
             line_layout_index: self.text_system.layout_index(),
+            #[cfg(any(test, feature = "test-support"))]
+            debug_selector_index: self.next_frame.debug_selector_entries.len(),
         }
     }
 
     pub(crate) fn reuse_paint(&mut self, range: Range<PaintIndex>) {
+        #[cfg(any(test, feature = "test-support"))]
+        {
+            let entries = self.rendered_frame.debug_selector_entries
+                [range.start.debug_selector_index..range.end.debug_selector_index]
+                .to_vec();
+            for (selector, occurrence) in entries {
+                self.next_frame.push_debug_selector(selector, occurrence);
+            }
+        }
         self.next_frame.cursor_styles.extend(
             self.rendered_frame.cursor_styles
                 [range.start.cursor_styles_index..range.end.cursor_styles_index]
@@ -5884,6 +5998,36 @@ impl Window {
     /// Debug representation of the last frame's accessibility information.
     pub fn debug_a11y_tree_json(&self) -> Option<String> {
         self.a11y.debug_tree_json()
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    /// Forces accessibility tree generation in tests and refreshes the window.
+    pub fn set_debug_accessibility_active(&mut self, active: bool) {
+        self.a11y.set_active_for_test(active);
+        self.refresh();
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    /// Captures semantic metadata from the most recently rendered frame.
+    pub fn debug_render_snapshot(&self) -> DebugRenderSnapshot {
+        let mut occurrences: std::collections::BTreeMap<String, Vec<DebugElementOccurrence>> =
+            std::collections::BTreeMap::new();
+        for (selector, occurrence) in &self.rendered_frame.debug_selector_entries {
+            occurrences
+                .entry(selector.clone())
+                .or_default()
+                .push(*occurrence);
+        }
+        DebugRenderSnapshot {
+            bounds: self
+                .rendered_frame
+                .debug_bounds
+                .iter()
+                .map(|(selector, bounds)| (selector.clone(), *bounds))
+                .collect(),
+            occurrences,
+            accessibility_tree_json: self.debug_a11y_tree_json(),
+        }
     }
 
     /// Register a listener for an accessibility action on a specific node.

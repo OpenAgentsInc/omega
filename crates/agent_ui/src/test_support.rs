@@ -1,19 +1,26 @@
 use acp_thread::{AgentConnection, StubAgentConnection};
 use agent_client_protocol::schema::v1 as acp;
 use agent_servers::{AgentServer, AgentServerDelegate};
+use anyhow::{Context as _, Result, bail};
 use gpui::{
-    App, AppContext as _, Context, Entity, EventEmitter, FocusHandle, Focusable, IntoElement,
-    Pixels, Render, Task, TestAppContext, VisualTestContext, Window, div, px,
+    AnyWindowHandle, App, AppContext as _, Context, DebugRenderSnapshot, Entity, EventEmitter,
+    FocusHandle, Focusable, IntoElement, Pixels, Render, Task, TestAppContext, VisualTestContext,
+    Window, div, px, size,
 };
-use project::AgentId;
-use project::Project;
+use omega_workbench_harness::{
+    ConnectivityFixture, ContentStateFixture, ProofCheck, SemanticProbe, ThemeFixture,
+    WorkbenchScene,
+};
+use project::{AgentId, Project};
 use settings::SettingsStore;
 use std::any::Any;
 use std::cell::RefCell;
 use std::path::Path;
 use std::rc::Rc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use workspace::{MultiWorkspace, Sidebar as WorkspaceSidebar, SidebarEvent, SidebarSide};
+use workspace::{
+    MultiWorkspace, Sidebar as WorkspaceSidebar, SidebarEvent, SidebarSide, Workspace,
+};
 
 use crate::AgentPanel;
 use crate::agent_panel;
@@ -298,4 +305,298 @@ pub fn active_thread_id(
     cx: &VisualTestContext,
 ) -> crate::thread_metadata_store::ThreadId {
     panel.read_with(cx, |panel, cx| panel.active_thread_id(cx).unwrap())
+}
+
+pub const WORKBENCH_ROOT_SELECTOR: &str = "omega.workbench.root";
+pub const WORKBENCH_TOOLBAR_SELECTOR: &str = "omega.workbench.toolbar";
+pub const WORKBENCH_NEW_THREAD_SELECTOR: &str = "omega.workbench.control.new-thread-menu";
+pub const WORKBENCH_COMPOSER_SELECTOR: &str = "omega.workbench.composer";
+
+pub struct AgentWorkbenchFrontDoor {
+    scene: WorkbenchScene,
+    window: AnyWindowHandle,
+    workspace: Entity<Workspace>,
+    panel: Entity<AgentPanel>,
+}
+
+impl AgentWorkbenchFrontDoor {
+    pub async fn mount(scene: WorkbenchScene, cx: &mut TestAppContext) -> Result<Self> {
+        validate_front_door_scene(&scene)?;
+
+        init_test(cx);
+        cx.update(|cx| {
+            agent::ThreadStore::init_global(cx);
+            language_model::LanguageModelRegistry::test(cx);
+            crate::thread_metadata_store::ThreadMetadataStore::init_global(cx);
+        });
+
+        let fs = fs::FakeFs::new(cx.executor());
+        cx.update(|cx| <dyn fs::Fs>::set_global(fs.clone(), cx));
+        let project = Project::test(fs, [], cx).await;
+        let multi_workspace =
+            cx.add_window(|window, cx| MultiWorkspace::test_new(project, window, cx));
+        let workspace = multi_workspace
+            .read_with(cx, |multi_workspace, _cx| {
+                multi_workspace.workspace().clone()
+            })
+            .context("test window did not create a workspace")?;
+        let window = multi_workspace.into();
+        let mut visual = VisualTestContext::from_window(window, cx);
+        visual.simulate_resize(size(
+            px(scene.viewport.width as f32),
+            px(scene.viewport.height as f32),
+        ));
+
+        let (panel, focused) = workspace.update_in(&mut visual, |workspace, window, cx| {
+            let panel = cx.new(|cx| AgentPanel::new(workspace, window, cx));
+            workspace.add_panel(panel.clone(), window, cx);
+            let focused = workspace.focus_panel::<AgentPanel>(window, cx).is_some();
+            (panel, focused)
+        });
+        if !focused {
+            bail!("AgentPanel was not focusable after being mounted");
+        }
+
+        visual.set_debug_accessibility_active(true);
+        if scene.active_thread_id.is_some() {
+            visual.dispatch_action(crate::NewThread);
+        }
+
+        let has_active_thread =
+            panel.read_with(&visual, |panel, cx| panel.active_thread_view(cx).is_some());
+        if has_active_thread != scene.active_thread_id.is_some() {
+            bail!(
+                "rendered active-thread state {has_active_thread} did not match fixture expectation {}",
+                scene.active_thread_id.is_some()
+            );
+        }
+
+        Ok(Self {
+            scene,
+            window,
+            workspace,
+            panel,
+        })
+    }
+
+    pub fn scene(&self) -> &WorkbenchScene {
+        &self.scene
+    }
+
+    pub fn panel(&self) -> &Entity<AgentPanel> {
+        &self.panel
+    }
+
+    pub fn snapshot(&self, cx: &TestAppContext) -> DebugRenderSnapshot {
+        let mut visual = VisualTestContext::from_window(self.window, cx);
+        visual.debug_render_snapshot()
+    }
+
+    pub fn exercise_new_thread_menu(&self, cx: &TestAppContext) -> Result<()> {
+        let mut visual = VisualTestContext::from_window(self.window, cx);
+        let before = visual.debug_render_snapshot();
+        if accessibility_expanded(&before, WORKBENCH_NEW_THREAD_SELECTOR)? {
+            bail!("new-thread menu started expanded");
+        }
+
+        visual.simulate_click_selector(WORKBENCH_NEW_THREAD_SELECTOR)?;
+        let opened = visual.debug_render_snapshot();
+        if !accessibility_expanded(&opened, WORKBENCH_NEW_THREAD_SELECTOR)? {
+            bail!("clicking the rendered new-thread control did not expand its menu");
+        }
+
+        visual.simulate_click_selector(WORKBENCH_NEW_THREAD_SELECTOR)?;
+        let closed = visual.debug_render_snapshot();
+        if accessibility_expanded(&closed, WORKBENCH_NEW_THREAD_SELECTOR)? {
+            bail!("clicking the rendered new-thread control again did not close its menu");
+        }
+        Ok(())
+    }
+
+    pub fn prove_scene(
+        scene: &WorkbenchScene,
+        snapshot: &DebugRenderSnapshot,
+    ) -> Result<Vec<ProofCheck>> {
+        validate_front_door_scene(scene)?;
+        let mut probe = SemanticProbe::new(snapshot);
+        probe.require_visible(WORKBENCH_ROOT_SELECTOR)?;
+        probe.require_visible(WORKBENCH_TOOLBAR_SELECTOR)?;
+        probe.require_interactive(WORKBENCH_NEW_THREAD_SELECTOR)?;
+        probe.require_inside(WORKBENCH_TOOLBAR_SELECTOR, WORKBENCH_ROOT_SELECTOR)?;
+        probe.require_inside(WORKBENCH_NEW_THREAD_SELECTOR, WORKBENCH_TOOLBAR_SELECTOR)?;
+        probe.require_accessible(WORKBENCH_NEW_THREAD_SELECTOR, "Button", "New Thread")?;
+
+        if scene.active_thread_id.is_some() {
+            probe.require_visible(WORKBENCH_COMPOSER_SELECTOR)?;
+            probe.require_inside(WORKBENCH_COMPOSER_SELECTOR, WORKBENCH_ROOT_SELECTOR)?;
+        } else {
+            probe.require_absent(WORKBENCH_COMPOSER_SELECTOR)?;
+        }
+
+        Ok(probe.into_checks())
+    }
+
+    pub fn teardown(self, cx: &mut TestAppContext) -> Result<()> {
+        let mut visual = VisualTestContext::from_window(self.window, cx);
+        self.workspace
+            .update_in(&mut visual, |workspace, window, cx| {
+                workspace.close_panel::<AgentPanel>(window, cx);
+            });
+        visual.run_until_parked();
+
+        let Self {
+            scene: _,
+            window,
+            workspace,
+            panel,
+        } = self;
+        drop(panel);
+        drop(workspace);
+
+        cx.update_window(window, |_, window, _cx| window.remove_window())
+            .context("closing AgentUI workbench test window")?;
+        cx.run_until_parked();
+
+        if cx.windows().contains(&window) {
+            bail!("AgentUI workbench test window remained open after teardown");
+        }
+        Ok(())
+    }
+}
+
+fn validate_front_door_scene(scene: &WorkbenchScene) -> Result<()> {
+    scene.validate()?;
+    if scene.fixture_version != 1 {
+        bail!(
+            "AgentUI front-door adapter supports fixture version 1, got {}",
+            scene.fixture_version
+        );
+    }
+    if scene.viewport.scale_milli != 2000 {
+        bail!("AgentUI front-door adapter requires a 2x fixture scale");
+    }
+    if scene.theme != ThemeFixture::Dark
+        || scene.fake_time_ms != 0
+        || scene.connectivity != ConnectivityFixture::Online
+        || scene.content_state != ContentStateFixture::Empty
+    {
+        bail!("AgentUI front-door adapter only supports the deterministic empty online dark scene");
+    }
+    if scene.project.is_some()
+        || !scene.repositories.is_empty()
+        || !scene.messages.is_empty()
+        || !scene.tool_calls.is_empty()
+        || !scene.plan_steps.is_empty()
+        || !scene.artifacts.is_empty()
+        || !scene.events.is_empty()
+        || scene.active_surface.is_some()
+        || scene.dock_open
+        || scene.persisted.is_some()
+    {
+        bail!("AgentUI front-door adapter received unsupported workbench content");
+    }
+    if scene
+        .surfaces
+        .iter()
+        .any(|surface| surface.available || surface.badge.is_some())
+    {
+        bail!("AgentUI front-door adapter does not expose work surfaces");
+    }
+    if scene.threads.len() > 1 {
+        bail!("AgentUI front-door adapter supports at most one projectless thread");
+    }
+    if scene.threads.iter().any(|thread| {
+        thread.project_id.is_some()
+            || thread.repository_id.is_some()
+            || thread.worktree_id.is_some()
+    }) {
+        bail!("AgentUI front-door adapter only supports projectless threads");
+    }
+    if scene.active_thread_id.is_some() && scene.threads.len() != 1 {
+        bail!("an active front-door thread requires exactly one thread fixture");
+    }
+    Ok(())
+}
+
+fn accessibility_expanded(snapshot: &DebugRenderSnapshot, element_id: &str) -> Result<bool> {
+    let tree = snapshot
+        .accessibility_tree_json()
+        .context("accessibility tree was not active")?;
+    let value: serde_json::Value =
+        serde_json::from_str(tree).context("parsing accessibility tree")?;
+    let nodes = value
+        .get("nodes")
+        .and_then(serde_json::Value::as_object)
+        .context("accessibility tree has no nodes object")?;
+    let matching: Vec<_> = nodes
+        .values()
+        .filter(|node| {
+            node.get("element_id").and_then(serde_json::Value::as_str) == Some(element_id)
+        })
+        .collect();
+    if matching.len() != 1 {
+        bail!(
+            "expected one accessibility node for {element_id:?}, found {}",
+            matching.len()
+        );
+    }
+    Ok(matching[0]
+        .get("aria")
+        .and_then(|aria| aria.get("expanded"))
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false))
+}
+
+#[cfg(test)]
+mod workbench_front_door_tests {
+    use super::*;
+    use omega_workbench_harness::{ThreadFixture, ViewportFixture};
+
+    #[gpui::test]
+    async fn typed_fixture_drives_rendered_front_door_semantics(cx: &mut TestAppContext) {
+        let mut scene =
+            WorkbenchScene::empty("agent_ui_front_door", ViewportFixture::new(900, 720, 2000));
+        scene.threads.push(ThreadFixture {
+            id: "thread-1".into(),
+            project_id: None,
+            repository_id: None,
+            worktree_id: None,
+        });
+        scene.active_thread_id = Some("thread-1".into());
+
+        let front_door = AgentWorkbenchFrontDoor::mount(scene, cx)
+            .await
+            .expect("typed front-door fixture should mount");
+        front_door
+            .exercise_new_thread_menu(cx)
+            .expect("the rendered new-thread menu should be operable by selector");
+
+        let snapshot = front_door.snapshot(cx);
+        let checks = AgentWorkbenchFrontDoor::prove_scene(front_door.scene(), &snapshot)
+            .expect("rendered front door should satisfy fixture semantics");
+        assert!(
+            !checks.is_empty(),
+            "front-door proof must record semantic checks"
+        );
+
+        let rendered_composer_bounds = snapshot.bounds(WORKBENCH_COMPOSER_SELECTOR);
+        let mut semantic_mutation = front_door.scene().clone();
+        semantic_mutation.active_thread_id = None;
+        semantic_mutation.threads.clear();
+        let error = AgentWorkbenchFrontDoor::prove_scene(&semantic_mutation, &snapshot)
+            .expect_err("semantic mutation must fail without another render");
+        assert!(
+            error.to_string().contains(WORKBENCH_COMPOSER_SELECTOR),
+            "unexpected semantic mutation failure: {error:#}"
+        );
+        assert_eq!(
+            snapshot.bounds(WORKBENCH_COMPOSER_SELECTOR),
+            rendered_composer_bounds,
+            "the semantic oracle must fail against the unchanged rendered frame"
+        );
+
+        front_door
+            .teardown(cx)
+            .expect("front-door teardown should release its window and entities");
+    }
 }

@@ -7467,7 +7467,11 @@ impl AgentPanel {
         let toolbar_content = {
             let new_thread_menu = PopoverMenu::new("new_thread_menu")
                 .trigger_with_tooltip(
-                    IconButton::new("new_thread_menu_btn", IconName::Plus)
+                    IconButton::new("omega.workbench.control.new-thread-menu", IconName::Plus)
+                        .debug_selector(|| "omega.workbench.control.new-thread-menu".into())
+                        .aria_label("New Thread")
+                        .aria_expanded(self.new_thread_menu_handle.is_deployed())
+                        .tab_index(0isize)
                         .icon_size(IconSize::Small),
                     {
                         move |_window, cx| {
@@ -7524,6 +7528,7 @@ impl AgentPanel {
 
         h_flex()
             .id("agent-panel-toolbar")
+            .debug_selector(|| "omega.workbench.toolbar".into())
             .h(Tab::container_height(cx))
             .flex_shrink_0()
             .max_w_full()
@@ -7879,6 +7884,7 @@ impl Render for AgentPanel {
         // - Scrolling in all views works as expected
         // - Files can be dropped into the panel
         let content = v_flex()
+            .debug_selector(|| "omega.workbench.root".into())
             .key_context(self.key_context())
             .relative()
             .size_full()

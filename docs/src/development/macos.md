@@ -60,18 +60,40 @@ cargo test --workspace
 
 ## Visual Regression Tests
 
-Zed includes visual regression tests that capture screenshots of real Zed windows and compare them against baseline images. These tests require macOS with Screen Recording permission.
+Zed includes visual regression tests that render real GPUI windows through
+Metal and compare their textures with baseline images. Direct texture capture
+does not require Screen Recording permission, does not capture system window
+chrome, and does not send input to the foreground application.
 
 ### Prerequisites
 
-You must grant Screen Recording permission to your terminal:
-
-1. Run the visual test runner once - macOS will prompt for permission
-2. Or manually: System Settings > Privacy & Security > Screen Recording
-3. Enable your terminal app (e.g., Terminal.app, iTerm2, Ghostty)
-4. Restart your terminal after granting permission
+Install the Xcode and Metal components described above. Visual comparisons
+depend on the GPU, font rasterizer, loaded fonts, scale, and theme. Generate
+authoritative Omega baselines on the project's pinned Apple Silicon Metal
+environment.
 
 ### Running Visual Tests
+
+Run Omega's registered workbench scenes with:
+
+```sh
+script/omega-workbench-proof
+```
+
+Run one scene without capturing a PNG:
+
+```sh
+script/omega-workbench-proof \
+  --scene omega_front_door_no_project \
+  --semantic-only
+```
+
+See
+[Deterministic Omega workbench proofs](./omega-workbench-proof.md)
+for scene registration, seeds, receipts, artifacts, sharding, and cold-restart
+behavior.
+
+The lower-level runner remains available while developing visual tests:
 
 ```sh
 cargo run -p zed --bin zed_visual_test_runner --features visual-tests
@@ -79,32 +101,26 @@ cargo run -p zed --bin zed_visual_test_runner --features visual-tests
 
 ### Baseline Images
 
-Baseline images are stored in `crates/zed/test_fixtures/visual_tests/` but are
-**gitignored** to avoid bloating the repository. You must generate them locally
-before running tests.
-
-#### Initial Setup
-
-Before making any UI changes, generate baseline images from a known-good state:
-
-```sh
-git checkout origin/main
-UPDATE_BASELINE=1 cargo run -p zed --bin zed_visual_test_runner --features visual-tests
-git checkout -
-```
-
-This creates baselines that reflect the current expected UI.
+Omega's authoritative baseline images are committed in
+`crates/zed/test_fixtures/visual_tests/`. Not every inherited visual-runner
+scene has a committed baseline, so running the lower-level runner without a
+scene filter can report missing inherited baselines.
 
 #### Updating Baselines
 
-When UI changes are intentional, update the baseline images after your changes:
+When an intentional UI change affects a registered Omega scene, update only
+that scene:
 
 ```sh
-UPDATE_BASELINE=1 cargo run -p zed --bin zed_visual_test_runner --features visual-tests
+script/omega-workbench-proof \
+  --scene omega_front_door_no_project \
+  --pixel-only \
+  --update
 ```
 
-> **Note:** In the future, baselines may be stored externally. For now, they
-> remain local-only to keep the git repository lightweight.
+Inspect the current image and changed baseline, then rerun without `--update`.
+If that comparison fails, inspect the generated diff image. Baseline updates
+are disabled in CI.
 
 ## Troubleshooting
 
