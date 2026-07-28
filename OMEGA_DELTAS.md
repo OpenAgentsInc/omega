@@ -6958,22 +6958,18 @@ shown action type before it reads the admitted set, so the ordinary
 - **Enforced by:** `a_session_never_opens_in_a_directory_that_is_gone` in
   `crates/omega_deltas`.
 
-### OMEGA-DELTA-0159 — Hosted sign-in provisions its identity and names its refusal
+### OMEGA-DELTA-0159 — Hosted sign-in respects identity consent and names its refusal
 
 A hosted Gemini request is the only way a zero-base install can send a message,
 and the only credential it can present is a NIP-98 proof signed by this
-channel's Omega identity. Nothing else creates that identity: the startup
-onboarding gate is dormant (`OPEN_ONBOARDING_DURING_STARTUP` is `false`), so a
-brand-new install sat at custody state `Absent` forever and every hosted request
-failed. `mint_openagents_nostr_session` now brings custody to `Ready` itself
-before it signs.
+channel's Omega identity. Automatic hosted sign-in must not create an identity
+or adopt a protected identity for a new profile. It inspects custody and signs
+only when the state is already `Ready`. An `Absent` or `Unadopted` state returns
+an actionable blocker that directs the owner to the existing identity setup.
 
-Phone pairing provisions the same way. Pairing reaches custody before hosted
-sign-in ever runs, because a person can click "Pair phone" without sending a
-message, and the bridge constructor used to inspect and refuse with "custody is
-not ready" — a sentence nothing on screen could act on. The same
-narrow provisioning applies: a state the profile cannot sign for still refuses,
-by name.
+Phone pairing is different because the owner explicitly starts that operation.
+It can use the narrow unattended provisioning transaction after that visible
+action. A state the profile cannot sign for still refuses by name.
 
 Provisioning is deliberately narrow. `Absent` creates, `Unadopted` adopts the
 identity this data root's own secret file already holds, and every other state
@@ -6992,7 +6988,7 @@ message again…` was wrong in both halves for the failure people actually hit: 
 a session. The message now carries the specific blocker — the custody state, or
 the HTTP status — and offers retry advice only when a retry could work.
 
-- **Enforced by:** `hosted_sign_in_provisions_its_identity_and_names_every_refusal`
+- **Enforced by:** `hosted_sign_in_respects_identity_consent_and_names_every_refusal`
   in `crates/omega_deltas`, plus unattended-provisioning tests in
   `omega_identity`, blocker tests in `omega_effectd`, and failure-message tests
   in `language_models`.
@@ -7574,4 +7570,3 @@ current image build does not decode it inline.
 - **Enforced by:** `a_live_tailnet_becomes_the_default_pairing_endpoint` and
   `live_tailnet_is_parsed_from_tailscale_status_json` in `agent_ui`, plus
   `phone_pairing_prefers_the_live_tailnet` in `crates/omega_deltas`.
-

@@ -3035,6 +3035,7 @@ mod tests {
         assert_eq!(
             sync_session_result(Some(VerifiedOpenAgentsSession {
                 base_url: "https://openagents.com".to_string(),
+                owner_user_id: "fixture-owner".to_string(),
                 access_token: "runtime-only-fixture".to_string(),
             })),
             json!({

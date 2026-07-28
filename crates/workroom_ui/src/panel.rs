@@ -17,7 +17,7 @@
 //! Membership, work units, and experience rank are community-only projections.
 //! Two-room rule: rooms never share membership or history.
 
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use agent_ui::{AgentPanel, ThreadId};
 use anyhow::{Context as _, Result};
@@ -1286,24 +1286,23 @@ impl SarahWorkroomPanel {
         cx.notify();
 
         let voice_task = cx.spawn_in(window, async move |this, cx| {
-            let mut verified = openagents_session.resolve_verified(cx).await;
-            if verified.is_none() {
-                openagents_session.connect(cx).await;
-                verified = openagents_session.resolve_verified(cx).await;
-            }
-            let Some(verified) = verified else {
-                this.update(cx, |panel, cx| {
-                    panel.voice_state = SarahVoiceState::Error;
-                    panel.voice_retryable = true;
-                    panel.voice_status =
-                        "Connect an OpenAgents account, then retry Sarah voice.".into();
-                    cx.notify();
-                })?;
-                return anyhow::Ok(());
+            let managed_session = match openagents_session
+                .create_sarah_voice_session("sarah-owner-private", cx)
+                .await
+            {
+                Ok(session) => session,
+                Err(blocker) => {
+                    this.update(cx, |panel, cx| {
+                        panel.voice_state = SarahVoiceState::Error;
+                        panel.voice_retryable = blocker.is_retryable();
+                        panel.voice_status = blocker.summary().into();
+                        cx.notify();
+                    })?;
+                    return anyhow::Ok(());
+                }
             };
-
-            let client = match ManagedSarahVoiceClient::from_verified_session(
-                verified,
+            let client = match ManagedSarahVoiceClient::from_managed_session(
+                managed_session,
                 input_device_id,
                 output_device_id,
             ) {
@@ -1462,21 +1461,28 @@ impl SarahWorkroomPanel {
             } => {
                 self.complete_voice_transcript(item_id, participant, text);
             }
-            SarahVoiceEvent::CommandRequest(request) => {
+            SarahVoiceEvent::CommandProposal(request) => {
                 if request.command.confirmation() == CommandConfirmation::None {
-                    let result = self.execute_voice_command(request, window, cx);
-                    self.send_voice_control(SarahVoiceControl::CommandResult(result));
+                    self.send_voice_control(SarahVoiceControl::CommandDecision {
+                        request_id: request.request_id,
+                        approved: false,
+                    });
+                    self.voice_status =
+                        "Sarah sent an invalid confirmation request. The command was declined."
+                            .into();
                 } else if self.pending_voice_command.is_some() {
-                    self.send_voice_control(SarahVoiceControl::CommandResult(
-                        VoiceCommandResult::rejected(
-                            request.request_id,
-                            "Another Sarah command is already awaiting confirmation.",
-                        ),
-                    ));
+                    self.send_voice_control(SarahVoiceControl::CommandDecision {
+                        request_id: request.request_id,
+                        approved: false,
+                    });
                 } else {
                     self.voice_status = request.command.confirmation_copy().into();
                     self.pending_voice_command = Some(request);
                 }
+            }
+            SarahVoiceEvent::CommandRequest(request) => {
+                let result = self.execute_voice_command(request, window, cx);
+                self.send_voice_control(SarahVoiceControl::CommandResult(result));
             }
             SarahVoiceEvent::Error {
                 message,
@@ -1569,12 +1575,15 @@ impl SarahWorkroomPanel {
         }
     }
 
-    fn approve_voice_command(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn approve_voice_command(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         let Some(request) = self.pending_voice_command.take() else {
             return;
         };
-        let result = self.execute_voice_command(request, window, cx);
-        self.send_voice_control(SarahVoiceControl::CommandResult(result));
+        self.send_voice_control(SarahVoiceControl::CommandDecision {
+            request_id: request.request_id,
+            approved: true,
+        });
+        self.voice_status = "Command approved once. Waiting for secure execution…".into();
         cx.notify();
     }
 
@@ -1582,9 +1591,10 @@ impl SarahWorkroomPanel {
         let Some(request) = self.pending_voice_command.take() else {
             return;
         };
-        self.send_voice_control(SarahVoiceControl::CommandResult(
-            VoiceCommandResult::rejected(request.request_id, "The user declined this command."),
-        ));
+        self.send_voice_control(SarahVoiceControl::CommandDecision {
+            request_id: request.request_id,
+            approved: false,
+        });
         self.voice_status = "Sarah's command was declined.".into();
         cx.notify();
     }
@@ -1596,6 +1606,20 @@ impl SarahWorkroomPanel {
         cx: &mut Context<Self>,
     ) -> VoiceCommandResult {
         let request_id = request.request_id;
+        let expected_path = request.expected_path;
+        if request.expires_at_ms.is_some_and(|expires_at_ms| {
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .ok()
+                .and_then(|duration| u64::try_from(duration.as_millis()).ok())
+                .is_none_or(|now_ms| now_ms > expires_at_ms)
+        }) {
+            self.voice_status = "Sarah's command proposal expired before execution.".into();
+            return VoiceCommandResult::rejected(
+                request_id,
+                "The command proposal expired. Ask Sarah to try again.",
+            );
+        }
         let is_agent_thread_command = matches!(
             &request.command,
             SarahEditorCommand::StartAgentThread { .. }
@@ -1606,7 +1630,9 @@ impl SarahWorkroomPanel {
                     message,
                     presentation,
                 } => self.start_agent_thread(workspace, message, presentation, window, cx),
-                command => Self::execute_editor_command(workspace, command, window, cx),
+                command => {
+                    Self::execute_editor_command(workspace, command, expected_path, window, cx)
+                }
             },
             None => Err(anyhow::anyhow!("the workspace is no longer available")),
         };
@@ -1628,6 +1654,7 @@ impl SarahWorkroomPanel {
     fn execute_editor_command(
         workspace: Entity<Workspace>,
         command: SarahEditorCommand,
+        expected_path: Option<String>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Result<Value> {
@@ -1640,6 +1667,16 @@ impl SarahWorkroomPanel {
                     .and_then(|item| item.project_path(cx)),
             )
         };
+        if let Some(expected_path) = expected_path {
+            let active_path = project_path
+                .as_ref()
+                .map(|path| path.path.as_ref().as_unix_str().to_string());
+            if active_path.as_deref() != Some(expected_path.as_str()) {
+                anyhow::bail!(
+                    "Sarah's command targeted {expected_path}, but that file is not the active editor"
+                );
+            }
+        }
         let editor = editor.context("open an editor before asking Sarah to edit")?;
         match command {
             SarahEditorCommand::ReadContext { max_chars } => editor.update(cx, |editor, cx| {

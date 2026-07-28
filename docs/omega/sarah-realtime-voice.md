@@ -1,232 +1,221 @@
 # Sarah managed Realtime voice contract
 
-Sarah voice is an owner-private feature of Omega's existing Sarah workroom. It is
-independent of collaboration calls: it does not join a LiveKit room, publish a
-LiveKit track, or change collaboration mute/deafen state.
+Sarah voice is an owner-private feature of Omega's Sarah workroom. It is
+independent of collaboration calls. It does not join a LiveKit room, publish a
+LiveKit track, or change collaboration mute or deafen state.
 
 ## Trust and authentication
 
-Omega resolves its existing OpenAgents native session from the operating
-system's credential provider and verifies it with OpenAgents before connecting.
-The verified OpenAgents access token is sent only in the `Authorization: Bearer
-…` header of a same-origin secure WebSocket request:
+Omega first verifies and reuses the normal OpenAgents bearer session in the
+operating system credential provider. It requests a voice session with:
 
 ```text
-wss://openagents.com/api/sarah/realtime
-X-OpenAgents-Sarah-Protocol: 1
+POST https://openagents.com/api/omega/sarah/voice/session
+Authorization: Bearer <short-lived OpenAgents session>
+x-openagents-omega-device-ref: <stable Omega device reference>
+Content-Type: application/json
 ```
 
-Tokens are never placed in the URL, transcript, logs, or protocol messages.
-Omega does not request, store, or transmit an OpenAI API key. The gateway owns
-the OpenAI Realtime connection and credit metering. The gateway must reject
-unverified OpenAgents sessions and enforce `gpt-realtime-2.1` server-side.
+The bearer request has no `auth` member. If the bearer is missing or rejected,
+Omega automatically uses its existing local Nostr identity. This fallback does
+not create, adopt, replace, show, or export an identity. Custody must already be
+`Ready`. `Absent`, `Unadopted`, locked, lost, incomplete, and conflict states
+produce distinct actionable errors in the Sarah panel.
 
-## Session and audio protocol
+Omega first sends:
 
-The first client text frame is:
+```text
+POST https://openagents.com/api/omega/sarah/voice/auth/challenge
+Content-Type: application/json
+
+{"schema":"openagents.sarah.voice.auth-challenge.v1","deviceRef":"<device>","pubkey":"<lowercase 64-character hex pubkey>"}
+```
+
+The successful `201` response is `Cache-Control: no-store`:
 
 ```json
 {
-  "type": "session.start",
-  "protocolVersion": 1,
-  "clientSessionId": "uuid",
-  "model": "gpt-realtime-2.1",
-  "inputAudio": {
-    "encoding": "pcm_s16le",
-    "sampleRate": 24000,
-    "channels": 1
+  "schema": "openagents.sarah.voice.auth-challenge.v1",
+  "challenge": "<base64url nonce>",
+  "expiresAtMs": 0,
+  "ownerRef": "<canonical OpenAgents user ID>"
+}
+```
+
+The challenge expires after at most 120 seconds. Omega validates its bounds and
+copies `ownerRef`; it never guesses the account mapping. The server binds the
+one-use challenge to the lowercase pubkey, device reference, owner reference,
+and expiry.
+
+Omega serializes this final request exactly once:
+
+```json
+{
+  "schema": "openagents.sarah.voice.v1",
+  "identity": {
+    "ownerRef": "<ownerRef from challenge>",
+    "deviceRef": "<same device>",
+    "threadRef": "sarah-owner-private",
+    "sessionRef": "<fresh client reference>",
+    "generation": 1
   },
-  "outputAudio": {
-    "encoding": "pcm_s16le",
-    "sampleRate": 24000,
-    "channels": 1
-  },
-  "editorBridge": {
-    "protocolVersion": 1,
-    "commands": [
-      "read_context",
-      "navigate",
-      "insert",
-      "replace_selection",
-      "action",
-      "start_agent_thread"
-    ],
-    "approvedActions": ["undo", "redo", "save_active_file"],
-    "confirmationRequiredFor": ["destructive", "external_effect"]
+  "disclosureRef": "omega.voice.disclosure.v1",
+  "auth": {
+    "method": "nostr_nip98",
+    "challenge": "<server nonce>"
   }
 }
 ```
 
-After `session.start`, client binary frames are microphone PCM and server binary
-frames are speaker PCM. Each binary frame contains raw little-endian signed
-16-bit mono samples at 24 kHz with no container header. Omega currently emits
-20 ms microphone frames. Omega rejects gateway frames larger than 256 KiB and
-bounds transcript, identifier, error, context, and edit fields before retaining
-or executing them.
+It signs the exact UTF-8 bytes as a NIP-98 event and sends those same bytes:
 
-The gateway sends these text frames:
-
-```json
-{"type":"session.ready","sessionId":"session.ref"}
-{"type":"session.state","state":"listening"}
-{"type":"session.state","state":"user_speaking"}
-{"type":"session.state","state":"sarah_speaking"}
-{"type":"transcript.delta","itemId":"item.ref","participant":"sarah","delta":"Hello"}
-{"type":"transcript.completed","itemId":"item.ref","participant":"sarah","text":"Hello."}
-{"type":"session.ended","reason":"credits_exhausted"}
+```text
+POST https://openagents.com/api/omega/sarah/voice/session
+Authorization: Nostr <base64 JSON event>
+x-openagents-omega-device-ref: <same device>
+Content-Type: application/json
 ```
 
-`participant` is `user` or `sarah`. Transcript deltas for the same `itemId`
-are append-only until the completed frame replaces them with the final text.
+The event has kind `27235`, empty content, a current integer `created_at`, and
+exactly one each of:
 
-To interrupt Sarah's current spoken response, Omega sends:
+- `u`: the full session URL.
+- `method`: `POST`.
+- `payload`: lowercase SHA-256 of the exact request bytes.
+
+Omega uses NIP-98, not NIP-42. The OS credential boundary performs signing.
+The private key and any permanent OpenAI key never enter the request, UI, logs,
+or Sarah protocol.
+
+The successful response contains the existing managed voice ticket and:
 
 ```json
-{"type":"response.cancel"}
+{"auth":{"method":"nostr_nip98","accessToken":"oa_omega_...","expiresIn":900}}
 ```
 
-Omega also immediately discards queued local playback. To end the session,
-Omega sends `{"type":"session.close"}`, closes the WebSocket, stops microphone
-capture, and releases the output device. Dropping the Sarah panel performs the
-same cleanup. A disconnected session is not silently presented as live; the UI
-moves to reconnect-required and starts a new authenticated session only when
-the user retries.
+Omega stores that bearer through the existing OpenAgents credential provider.
+Later sessions use the normal bearer path. Disconnect and session verification
+retain their existing behavior.
 
-Errors use an actionable, public-safe text frame:
+## Voice session and WebSocket
+
+The session response uses schema `openagents.sarah.voice.v1` and contains
+`sessionRef`, `gatewayUrl`, a one-use `ticket`, ticket/session expiries, credit
+reservation, maximum duration, model, and fixed input/output audio formats.
+Omega requires `gpt-realtime-2.1`, 24 kHz mono PCM16, a same-origin `wss` URL,
+and a ticket that has not expired.
+
+Omega opens `gatewayUrl` with:
+
+```text
+x-openagents-sarah-voice-session: <sessionRef>
+x-openagents-sarah-voice-ticket: <ticket>
+```
+
+No bearer, Nostr proof, or OpenAI credential is sent on the WebSocket. The
+first control frame is sequence zero:
 
 ```json
 {
-  "type": "error",
-  "message": "Voice credits are exhausted.",
-  "retryable": false,
-  "action": "Add credits in OpenAgents account settings."
+  "schema": "openagents.sarah.voice.v1",
+  "identity": {
+    "ownerRef": "...",
+    "deviceRef": "...",
+    "threadRef": "...",
+    "sessionRef": "...",
+    "generation": 1
+  },
+  "sequence": 0,
+  "_tag": "session_hello",
+  "disclosureRef": "omega.voice.disclosure.v1"
 }
 ```
 
-The gateway must not put secrets or raw upstream errors in `message` or
-`action`.
+Control frames carry the exact identity and contiguous sequence numbers. Omega
+rejects identity changes, sequence gaps, oversized fields, invalid tool
+digests, and unknown tagged variants.
+
+Audio uses the `OAA1` media envelope. Each binary frame contains:
+
+1. Four ASCII bytes `OAA1`.
+2. A four-byte big-endian JSON-header length.
+3. A bounded `openagents.audio.v1` JSON header.
+4. Raw little-endian signed 16-bit mono PCM at 24 kHz.
+
+The header binds identity, independent audio sequence, direction, format,
+payload length, and lowercase SHA-256. Omega validates all fields and the digest
+before playback. Microphone frames use the same envelope before transmission.
+
+Mute stops new microphone content. Interrupt discards queued playback and sends
+an `interrupt` control. End sends a `close` control, closes the socket, stops
+capture, and releases playback. Dropping the panel performs the same cleanup.
 
 ## Editor command bridge
 
-The gateway can send:
+The gateway and Omega both decode a closed command enum. Unknown variants,
+unknown fields, absolute or parent-traversing paths, oversized ranges, and
+oversized text are rejected. There is no shell, URL, terminal, Git, generic
+action, arbitrary agent, or arbitrary model dispatch.
 
-```json
-{
-  "type": "command.request",
-  "requestId": "command.ref",
-  "command": {"name": "read_context", "maxChars": 8192}
-}
-```
+The managed gateway commands map to Omega's bounded local bridge:
 
-Omega deserializes `command` into a closed enum. Unknown names, unknown fields,
-oversized text, and invalid context limits are rejected without execution.
-There is no shell command, URL opener, generic action name, or arbitrary action
-or agent dispatch in this protocol.
+| Gateway command | Local behavior | Confirmation |
+| --- | --- | --- |
+| `context_read` | Reads bounded context only when the target path is the active editor | No |
+| `reveal_range` | Reveals a bounded position only when the target path is active | No |
+| `replace_selection` | Replaces the current selection in the exact active target | Yes |
+| `save_document` | Saves the exact active target | Yes |
+| `start_agent_thread` | Creates a native Omega Agent thread and submits a bounded message | Yes |
 
-Allowed commands:
+`open_path` is rejected by the local bridge until Omega has a separately
+allowlisted file-opening implementation. The older local enum still prevents
+arbitrary commands if a non-managed test gateway is used.
 
-| Command | Payload | Behavior | Confirmation |
-| --- | --- | --- | --- |
-| `read_context` | `maxChars?: 1..16384` | Returns the active file's relative path, title, zero-based cursor, selected text, and bounded nearby text | No |
-| `navigate` | `line`, `column` | Moves the active editor cursor to a clipped zero-based position | No |
-| `insert` | `text` up to 64 KiB | Collapses any selection and inserts at the cursor | No |
-| `replace_selection` | `text` up to 64 KiB | Replaces the current selection | Yes, destructive |
-| `action` | `action` | Runs one approved action | Depends on action |
-| `start_agent_thread` | `message`, `presentation` | Creates an Omega Agent thread and submits the message through the normal Agent composer/send path | Yes, external effect |
+`start_agent_thread` accepts a non-empty message of at most 16 KiB and one
+presentation:
 
-Approved actions are `undo`, `redo`, and `save_active_file`. Undo and redo
-require destructive confirmation. Saving requires external-effect
-confirmation. Each confirmation is one-shot and visible in the Sarah panel;
-the gateway cannot pre-approve it.
+- `foreground` creates, selects, reveals, and focuses the normal Agent thread.
+- `background` creates and submits a retained thread without changing the
+  active view, panel, or focus.
 
-`start_agent_thread` accepts a non-empty message of at most 16 KiB and exactly
-one of two presentation values:
+The command accepts no agent ID, model, tool list, worktree, or action name.
+Omega always uses the native Agent route and existing authorization. The Sarah
+panel shows the complete message and requires a visible one-shot confirmation.
+It then reports the thread ID and status and offers **Open Agent thread**.
 
-- `foreground`: create and select the thread, reveal the normal Omega Agent
-  panel, and focus it.
-- `background`: create and submit a retained thread without changing the active
-  Agent thread, showing or switching panels, or moving focus.
-
-The command does not accept an agent ID, model, tool list, action, worktree, or
-other dispatch target. Omega always uses its native Omega Agent route and the
-existing Agent authorization. Before either presentation mode runs, the Sarah
-panel shows the complete bounded message and requires **Allow once**. After
-creation, the Sarah panel retains the thread ID, submission status, presentation
-mode, and an explicit **Open Agent thread** button.
-
-Example foreground request:
-
-```json
-{
-  "type": "command.request",
-  "requestId": "command.agent.ref",
-  "command": {
-    "name": "start_agent_thread",
-    "message": "Investigate the failing test and propose a fix.",
-    "presentation": "foreground"
-  }
-}
-```
-
-A completed result identifies the thread without exposing internal credentials:
-
-```json
-{
-  "type": "command.result",
-  "requestId": "command.agent.ref",
-  "status": "completed",
-  "output": {
-    "threadId": "00000000-0000-0000-0000-000000000000",
-    "presentation": "foreground",
-    "status": "submitted"
-  }
-}
-```
-
-Omega replies:
-
-```json
-{
-  "type": "command.result",
-  "requestId": "command.ref",
-  "status": "completed",
-  "output": {}
-}
-```
-
-`status` is `completed`, `rejected`, or `failed`. Rejected and failed results
-can contain a public-safe `message`. Context output is included only for a
-completed `read_context`.
+The gateway binds each proposal to a server digest. For a protected command,
+Omega shows the proposal, sends the visible one-shot choice as `tool_decision`,
+and waits. It performs the action only after the gateway returns the matching
+`tool_execute`; it then returns the matching `tool_outcome`. The command,
+proposal reference, digest, target, and expiry must remain unchanged across
+both phases. Transcript text cannot confirm a command.
 
 ## Manual verification
 
-1. Sign in to OpenAgents through Omega's existing account flow.
-2. In Settings → Collaboration, select and test an input and output device.
-3. Open Agent Panel → New Thread menu → Sarah.
-4. In Sarah's owner-private room, choose **Start voice**. Confirm the lifecycle
-   reaches “Sarah is listening” and a managed-session reference appears.
-5. Speak and verify the user transcript appears. Let Sarah respond and verify
-   audio playback and Sarah's transcript.
-6. Toggle **Mute**, speak, and verify no new microphone audio is accepted.
-   Unmute and verify input resumes.
-7. While Sarah is speaking, choose **Interrupt speech** and verify playback
-   stops immediately.
-8. Ask Sarah to navigate and insert text. Verify those allowlisted operations
-   run without a prompt. Ask Sarah to replace selected text, undo, redo, or save
-   and verify the one-shot Allow/Decline card appears before execution.
-9. Ask Sarah to start an Agent thread in `background` mode. Verify the full
-   message is visible before approval, decline once and confirm no thread is
-   created, then approve and confirm the Sarah panel remains visible and focused.
-   Verify the created-thread card reports `submitted`, then use **Open Agent
-   thread** and confirm the message appears in the normal Agent UI.
-10. Repeat with `foreground` and verify approval creates, selects, and reveals
-    the new Agent thread. Add `agent` or `model` to a gateway fixture and verify
-    the request is rejected rather than dispatched.
-11. Have a test gateway send an unknown command such as `run_shell`; verify the
-   editor is unchanged and the gateway receives a rejected command result.
-12. Choose **End voice** and verify the mic indicator and playback stop. Disable
-    networking during another session, verify reconnect-required appears, then
-    restore networking and use **Retry**.
-13. Deny Omega microphone permission (or select a missing device) and verify the
-    panel offers actionable permission/device guidance and a link to
-    Collaboration settings.
+1. With an existing OpenAgents session, start Sarah voice and verify the bearer
+   session request, one-use WebSocket ticket, listening state, transcript, and
+   playback.
+2. Expire or remove only the OpenAgents session while leaving an already
+   adopted Omega Nostr identity in `Ready`. Start voice and verify challenge,
+   signed session issue, secure bearer storage, and WebSocket connection happen
+   without a login prompt.
+3. Inspect the signed fixture: the `u`, `method`, and `payload` tags occur once;
+   the payload digest matches the exact transmitted JSON; no NIP-42 event,
+   private key, bearer URL parameter, or OpenAI key is present.
+4. Replay the challenge or proof and verify the server returns `409`; retry and
+   verify Omega obtains a fresh challenge and proof.
+5. Test `Absent` and `Unadopted` custody. Verify Sarah explains setup or adoption
+   and does not create or adopt an identity. Test locked/lost/conflict states
+   and verify the state is actionable and contains no key material.
+6. Select and test input/output devices. Verify mute, interrupt, end, network
+   loss, retry, microphone denial, and device removal clean up capture and
+   playback and show actionable state.
+7. Exercise context, reveal, replace, and save against the active path. Change
+   the active file between proposal and execution and verify Omega rejects the
+   stale target.
+8. Request a background Agent thread. Decline once and verify no thread exists;
+   approve once and verify focus does not move, status is shown, and **Open
+   Agent thread** reveals it later. Verify the thread is created only after the
+   matching `tool_execute`, then repeat with foreground mode.
+9. Add `agent`, `model`, or an unknown command such as `run_shell` to a fixture
+   and verify decoding rejects it before dispatch.

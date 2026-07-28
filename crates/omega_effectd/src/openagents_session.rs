@@ -1,6 +1,7 @@
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context as _, Result, anyhow};
+use base64::Engine as _;
 use credentials_provider::CredentialsProvider;
 use gpui::{App, AsyncApp, Global};
 use http_client::{AsyncBody, HttpClient, Method, Request, StatusCode};
@@ -12,6 +13,7 @@ use super::openagents_nostr_auth::HostedSessionBlocker;
 pub const OPENAGENTS_BASE_URL: &str = "https://openagents.com";
 pub const OPENAGENTS_AUTH_SESSION_URL: &str = "https://openagents.com/api/mobile/auth/session";
 pub const OPENAGENTS_SESSION_KEY: &str = "omega://openagents/native-session/v1";
+pub const OPENAGENTS_DEVICE_KEY: &str = "omega://openagents/device-binding/v1";
 
 const OPENAGENTS_REFRESH_HEADER: &str = "x-openagents-refresh-token";
 const MAX_HTTP_BODY_BYTES: u64 = 64 * 1024;
@@ -45,6 +47,7 @@ impl OpenAgentsSessionPhase {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VerifiedOpenAgentsSession {
     pub base_url: String,
+    pub owner_user_id: String,
     pub access_token: String,
 }
 
@@ -72,6 +75,13 @@ struct StoredCredential {
     access_token: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     refresh_token: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct StoredDeviceBinding {
+    schema_version: u8,
+    device_ref: String,
 }
 
 #[derive(Deserialize)]
@@ -217,6 +227,7 @@ impl OpenAgentsSession {
                 self.set_phase(OpenAgentsSessionPhase::Ready);
                 Some(VerifiedOpenAgentsSession {
                     base_url: OPENAGENTS_BASE_URL.to_string(),
+                    owner_user_id: verified.owner_user_id,
                     access_token: verified.access_token,
                 })
             }
@@ -235,6 +246,76 @@ impl OpenAgentsSession {
                 None
             }
         }
+    }
+
+    pub async fn create_sarah_voice_session(
+        &self,
+        thread_ref: &str,
+        cx: &mut AsyncApp,
+    ) -> std::result::Result<
+        super::openagents_sarah_voice::ManagedSarahVoiceSession,
+        HostedSessionBlocker,
+    > {
+        let session_ref = format!("omega-voice-{}", random_device_component());
+        let device_ref = self.load_or_create_device_ref(cx).await.map_err(|error| {
+            log::error!("OpenAgents device binding could not be stored: {error:#}");
+            HostedSessionBlocker::CredentialStorageFailed
+        })?;
+        if let Some(verified) = self.resolve_verified(cx).await {
+            match super::openagents_sarah_voice::issue_bearer_sarah_voice_session(
+                &self.http_client,
+                &verified.access_token,
+                &verified.owner_user_id,
+                &device_ref,
+                thread_ref,
+                &session_ref,
+            )
+            .await
+            {
+                Ok(issued) => {
+                    self.record_blocker(None);
+                    return Ok(issued.voice);
+                }
+                Err(HostedSessionBlocker::VoiceSessionRejected { status: 401 }) => {}
+                Err(blocker) => {
+                    self.record_blocker(Some(blocker.clone()));
+                    return Err(blocker);
+                }
+            }
+        }
+
+        let issued = match super::openagents_sarah_voice::issue_nostr_sarah_voice_session(
+            &self.http_client,
+            &device_ref,
+            thread_ref,
+            &session_ref,
+        )
+        .await
+        {
+            Ok(issued) => issued,
+            Err(blocker) => {
+                self.record_blocker(Some(blocker.clone()));
+                return Err(blocker);
+            }
+        };
+        let access_token = issued
+            .access_token
+            .ok_or(HostedSessionBlocker::ResponseInvalid)?;
+        let credential = StoredCredential {
+            schema_version: 1,
+            owner_user_id: issued.voice.owner_ref.clone(),
+            access_token,
+            refresh_token: None,
+        };
+        self.save_credential(&credential, cx)
+            .await
+            .map_err(|error| {
+                log::error!("Nostr-issued OpenAgents session could not be stored: {error:#}");
+                HostedSessionBlocker::CredentialStorageFailed
+            })?;
+        self.record_blocker(None);
+        self.set_phase(OpenAgentsSessionPhase::Ready);
+        Ok(issued.voice)
     }
 
     async fn connect_inner(&self) -> Result<StoredCredential, HostedSessionBlocker> {
@@ -376,6 +457,46 @@ impl OpenAgentsSession {
             .delete_credentials(OPENAGENTS_SESSION_KEY, cx)
             .await
     }
+
+    async fn load_or_create_device_ref(&self, cx: &AsyncApp) -> Result<String> {
+        if let Some((username, secret)) = self
+            .credentials
+            .read_credentials(OPENAGENTS_DEVICE_KEY, cx)
+            .await?
+        {
+            let stored: StoredDeviceBinding =
+                serde_json::from_slice(&secret).context("OpenAgents device binding was invalid")?;
+            if username != "omega"
+                || stored.schema_version != 1
+                || !valid_device_ref(&stored.device_ref)
+            {
+                return Err(anyhow!("OpenAgents device binding was invalid"));
+            }
+            return Ok(stored.device_ref);
+        }
+        let device_ref = format!("omega-device-{}", random_device_component());
+        let secret = serde_json::to_vec(&StoredDeviceBinding {
+            schema_version: 1,
+            device_ref: device_ref.clone(),
+        })?;
+        self.credentials
+            .write_credentials(OPENAGENTS_DEVICE_KEY, "omega", &secret, cx)
+            .await?;
+        Ok(device_ref)
+    }
+}
+
+fn random_device_component() -> String {
+    let bytes = rand::random::<[u8; 16]>();
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
+}
+
+fn valid_device_ref(value: &str) -> bool {
+    !value.trim().is_empty()
+        && value.len() <= 256
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.' | b':'))
 }
 
 fn authenticated_session_request(
@@ -433,11 +554,34 @@ mod tests {
             OPENAGENTS_SESSION_KEY,
             "omega://openagents/native-session/v1"
         );
+        assert_eq!(
+            OPENAGENTS_DEVICE_KEY,
+            "omega://openagents/device-binding/v1"
+        );
         assert!(!OPENAGENTS_SESSION_KEY.contains("token"));
         let projection =
             serde_json::to_string(&OpenAgentsSessionPhase::Ready).expect("serialize phase");
         assert_eq!(projection, "\"ready\"");
         assert!(!projection.contains("access-fixture"));
+    }
+
+    #[test]
+    fn legacy_bearer_credential_and_device_binding_remain_separate() {
+        let credential: StoredCredential = serde_json::from_value(serde_json::json!({
+            "schemaVersion": 1,
+            "ownerUserId": "owner.fixture",
+            "accessToken": "short-lived-session"
+        }))
+        .expect("legacy bearer credential");
+        assert_eq!(credential.owner_user_id, "owner.fixture");
+        assert_eq!(credential.refresh_token, None);
+
+        let binding = StoredDeviceBinding {
+            schema_version: 1,
+            device_ref: "omega-device-fixture".into(),
+        };
+        assert!(valid_device_ref(&binding.device_ref));
+        assert!(!valid_device_ref("contains a space"));
     }
 
     #[test]
