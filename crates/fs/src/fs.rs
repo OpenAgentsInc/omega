@@ -2149,6 +2149,44 @@ impl FakeFs {
         .unwrap();
     }
 
+    pub fn set_branch_tracking_for_repo(
+        &self,
+        dot_git: &Path,
+        branch: impl Into<String>,
+        ahead: u32,
+        behind: u32,
+    ) {
+        self.with_git_state(dot_git, true, |state| {
+            state.branch_tracking.insert(
+                branch.into(),
+                git::repository::UpstreamTrackingStatus { ahead, behind },
+            );
+        })
+        .unwrap();
+    }
+
+    pub fn set_simulated_change_branch_error(
+        &self,
+        dot_git: &Path,
+        message: Option<impl Into<String>>,
+    ) {
+        self.with_git_state(dot_git, false, |state| {
+            state.simulated_change_branch_error_message = message.map(Into::into);
+        })
+        .unwrap();
+    }
+
+    pub fn set_simulated_change_branch_delay(
+        &self,
+        dot_git: &Path,
+        delay: Option<std::time::Duration>,
+    ) {
+        self.with_git_state(dot_git, false, |state| {
+            state.simulated_change_branch_delay = delay;
+        })
+        .unwrap();
+    }
+
     pub async fn add_linked_worktree_for_repo(
         &self,
         dot_git: &Path,

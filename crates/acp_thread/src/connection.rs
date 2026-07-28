@@ -164,6 +164,21 @@ pub trait AgentConnection {
         false
     }
 
+    fn supports_live_work_dir_updates(&self) -> bool {
+        false
+    }
+
+    fn update_work_dirs(
+        &self,
+        _session_id: &acp::SessionId,
+        _work_dirs: PathList,
+        _cx: &mut App,
+    ) -> Result<()> {
+        Err(anyhow::Error::msg(
+            "This agent cannot move an existing session to another worktree",
+        ))
+    }
+
     fn auth_methods(&self) -> &[acp::AuthMethod];
 
     fn terminal_auth_task(
@@ -696,6 +711,7 @@ mod test_support {
     //! - `StubAgentConnection` for mocking agent connections in tests
     //! - `create_test_png_base64` for generating test images
 
+    use std::collections::VecDeque;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -759,6 +775,8 @@ mod test_support {
         next_prompt_updates: Arc<Mutex<Vec<acp::SessionUpdate>>>,
         supports_load_session: bool,
         supports_session_additional_directories: bool,
+        work_dir_update_error: Arc<Mutex<Option<String>>>,
+        work_dir_update_results: Arc<Mutex<VecDeque<Option<String>>>>,
         agent_id: AgentId,
         telemetry_id: SharedString,
     }
@@ -782,6 +800,8 @@ mod test_support {
                 sessions: Arc::default(),
                 supports_load_session: false,
                 supports_session_additional_directories: false,
+                work_dir_update_error: Arc::default(),
+                work_dir_update_results: Arc::default(),
                 agent_id: AgentId::new("stub"),
                 telemetry_id: "stub".into(),
             }
@@ -820,6 +840,23 @@ mod test_support {
         pub fn with_telemetry_id(mut self, telemetry_id: SharedString) -> Self {
             self.telemetry_id = telemetry_id;
             self
+        }
+
+        pub fn with_work_dir_update_error(self, error: impl Into<String>) -> Self {
+            *self.work_dir_update_error.lock() = Some(error.into());
+            self
+        }
+
+        pub fn set_work_dir_update_error(&self, error: impl Into<String>) {
+            *self.work_dir_update_error.lock() = Some(error.into());
+        }
+
+        pub fn clear_work_dir_update_error(&self) {
+            *self.work_dir_update_error.lock() = None;
+        }
+
+        pub fn set_work_dir_update_results(&self, results: Vec<Option<String>>) {
+            *self.work_dir_update_results.lock() = results.into();
         }
 
         fn create_session(
@@ -931,6 +968,34 @@ mod test_support {
 
         fn supports_session_additional_directories(&self) -> bool {
             self.supports_session_additional_directories
+        }
+
+        fn supports_live_work_dir_updates(&self) -> bool {
+            true
+        }
+
+        fn update_work_dirs(
+            &self,
+            session_id: &acp::SessionId,
+            work_dirs: PathList,
+            cx: &mut App,
+        ) -> Result<()> {
+            if let Some(result) = self.work_dir_update_results.lock().pop_front()
+                && let Some(error) = result
+            {
+                return Err(anyhow::Error::msg(error));
+            }
+            if let Some(error) = self.work_dir_update_error.lock().clone() {
+                return Err(anyhow::Error::msg(error));
+            }
+            let thread = self
+                .sessions
+                .lock()
+                .get(session_id)
+                .map(|session| session.thread.clone())
+                .ok_or_else(|| anyhow::Error::msg("Agent session is unavailable"))?;
+            thread.update(cx, |thread, cx| thread.set_work_dirs(work_dirs, cx))?;
+            Ok(())
         }
 
         fn load_session(

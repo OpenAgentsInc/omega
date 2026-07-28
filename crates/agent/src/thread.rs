@@ -70,7 +70,9 @@ use std::{
     sync::Arc,
     time::{Duration, Instant},
 };
-use util::{ResultExt, debug_panic, markdown::MarkdownCodeBlock, paths::PathStyle};
+use util::{
+    ResultExt, debug_panic, markdown::MarkdownCodeBlock, path_list::PathList, paths::PathStyle,
+};
 use uuid::Uuid;
 
 const TOOL_CANCELED_MESSAGE: &str = "Tool canceled by user";
@@ -853,6 +855,10 @@ pub trait SubagentHandle {
 }
 
 pub trait ThreadEnvironment {
+    fn work_dirs(&self, _cx: &App) -> Option<PathList> {
+        None
+    }
+
     fn create_terminal(
         &self,
         command: String,

@@ -15828,38 +15828,45 @@ mod tests {
         let panel_path = repository_path(AGENT_PANEL_PATH);
         let panel = std::fs::read_to_string(&panel_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", panel_path.display()));
-        let header =
-            function_body(&panel, "render_zero_base_working_directory").unwrap_or_else(|| {
-                panic!(
-                    "OMEGA-DELTA-0116: {} no longer names the folder the thread \
+        let header = function_body(&panel, "render_thread_identity").unwrap_or_else(|| {
+            panic!(
+                "OMEGA-DELTA-0116: {} no longer names the folder the thread \
                      works in. A coding agent whose project directory is \
                      invisible is a bad surface — the owner had to *ask* one \
                      where it was to discover it was in the wrong place — and \
                      it is a worse one now that a path argument's only effect \
                      is to set that folder.",
-                    panel_path.display()
-                )
-            });
+                panel_path.display()
+            )
+        });
         assert!(
-            uncommented(header).contains("omega_zero_base::is_active()")
-                && uncommented(header).contains("visible_worktrees("),
-            "OMEGA-DELTA-0116: the header in {} no longer reads the folder off \
-             the project. A directory the header believes and the agent's `cwd` \
-             disagree about is worse than no label: it would have confirmed the \
-             wrong answer the owner already had.",
+            uncommented(header).contains("workbench_shell_enabled")
+                && uncommented(header).contains("workbench_shell.identity()"),
+            "OMEGA-DELTA-0116: the header in {} no longer reads the folder from \
+             the same typed workbench identity that routes agent and work-surface \
+             actions. A directory the header believes and the agent's `cwd` \
+             disagree about is worse than no label.",
+            panel_path.display()
+        );
+        let context = function_body(&panel, "workbench_thread_context").unwrap_or_else(|| {
+            panic!(
+                "OMEGA-DELTA-0116: {} no longer resolves the active thread's \
+                 working directories into its header identity.",
+                panel_path.display()
+            )
+        });
+        assert!(
+            uncommented(context).contains("omega_active_acp_thread(")
+                && uncommented(context).contains(".work_dirs()")
+                && uncommented(context).contains("visible_worktrees(")
+                && uncommented(context).contains("omega_workdir::display_for_person("),
+            "OMEGA-DELTA-0116: the identity resolver in {} no longer joins the \
+             active thread's actual working directories to visible project \
+             worktrees and the shared human-readable path formatter.",
             panel_path.display()
         );
         assert!(
-            uncommented(header).contains("omega_workdir::short_display_for_person(")
-                && uncommented(header).contains("omega_workdir::display_for_person("),
-            "OMEGA-DELTA-0116: the header in {} spells the directory itself. \
-             The glance and the whole path are one function each in \
-             `omega_workdir` so that what the label shows and what the tooltip \
-             shows cannot drift into two different directories.",
-            panel_path.display()
-        );
-        assert!(
-            panel.contains(".children(zero_base_working_directory)"),
+            panel.contains(".children(thread_identity)"),
             "OMEGA-DELTA-0116: {} builds the working-directory label and never \
              puts it in the toolbar. An element nothing renders is the same as \
              no element, and this whole half exists because the fact was \
@@ -18969,15 +18976,15 @@ mod tests {
         let panel = without_comments(&read_repository_file(AGENT_PANEL_PATH));
         let header = method_body(
             &panel,
-            "fn render_zero_base_working_directory(",
+            "fn render_thread_identity(",
             &panel_path,
             "The working-folder value and its picker belong together in this \
              one persistent thread-header control.",
         );
         for required in [
-            "visible_worktrees(cx)",
+            "workbench_shell.identity()",
             "\"Choose a folder\"",
-            "Button::new(\"omega-zero-base-working-directory\", glance)",
+            "\"omega.workbench.control.identity.repository\"",
             ".style(ButtonStyle::Subtle)",
             "IconName::ChevronDown",
             "workspace::Open {",

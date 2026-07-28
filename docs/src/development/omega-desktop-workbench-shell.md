@@ -14,25 +14,26 @@ state and proof contracts are documented separately in
 
 ## Scope {#scope}
 
-Issue 128 installs the production rail and dock boundary, normal GPUI actions,
+Issue 128 installed the production rail and dock boundary, normal GPUI actions,
 per-thread reducer integration, retained generic hosts, typed badge plumbing,
-accessibility semantics, and deterministic tests. The generic host currently
+accessibility semantics, and deterministic tests. Issue 133 added the
+authoritative repository, worktree, branch, and Git-state projection described
+below. The generic host currently
 renders a loading, ready, error, or offline placeholder. It does not yet render
 the workspace's native Files, Search, Review, Git, Terminal, or Plan entity.
 
 The remaining work is deliberately split so each native adapter can prove its
 own identity, behavior, and lifecycle:
 
-| Follow-up                                                      | Responsibility                                        |
-| -------------------------------------------------------------- | ----------------------------------------------------- |
-| [Issue 129](https://github.com/OpenAgentsInc/omega/issues/129) | Mount the existing Project Panel as Files             |
-| [Issue 130](https://github.com/OpenAgentsInc/omega/issues/130) | Present the thread's typed plan                       |
-| [Issue 131](https://github.com/OpenAgentsInc/omega/issues/131) | Persist and cold-restore each thread's selection      |
-| [Issue 132](https://github.com/OpenAgentsInc/omega/issues/132) | Mount the existing Git Panel                          |
-| [Issue 133](https://github.com/OpenAgentsInc/omega/issues/133) | Supply authoritative repository and worktree identity |
-| [Issue 134](https://github.com/OpenAgentsInc/omega/issues/134) | Mount an embedded project-search entity               |
-| [Issue 136](https://github.com/OpenAgentsInc/omega/issues/136) | Mount a thread-bound review entity                    |
-| [Issue 137](https://github.com/OpenAgentsInc/omega/issues/137) | Mount the existing Terminal Panel without spawning    |
+| Follow-up                                                      | Responsibility                                     |
+| -------------------------------------------------------------- | -------------------------------------------------- |
+| [Issue 129](https://github.com/OpenAgentsInc/omega/issues/129) | Mount the existing Project Panel as Files          |
+| [Issue 130](https://github.com/OpenAgentsInc/omega/issues/130) | Present the thread's typed plan                    |
+| [Issue 131](https://github.com/OpenAgentsInc/omega/issues/131) | Persist and cold-restore each thread's selection   |
+| [Issue 132](https://github.com/OpenAgentsInc/omega/issues/132) | Mount the existing Git Panel                       |
+| [Issue 134](https://github.com/OpenAgentsInc/omega/issues/134) | Mount an embedded project-search entity            |
+| [Issue 136](https://github.com/OpenAgentsInc/omega/issues/136) | Mount a thread-bound review entity                 |
+| [Issue 137](https://github.com/OpenAgentsInc/omega/issues/137) | Mount the existing Terminal Panel without spawning |
 
 Until those adapters land, the shell is a retained-host foundation rather than
 a replacement for the existing native panels.
@@ -89,12 +90,100 @@ projection. Deterministic fallback is reserved for a previously valid request
 that becomes unavailable because its binding, capability, restore input, or
 reconnect snapshot changed.
 
+### Thread identity projection {#thread-identity-projection}
+
+`ThreadIdentityProjection` is the presentation-side catalog and selection
+authority paired with `WorkbenchProjection`. It resolves the active ACP
+thread's working directories against the Project's visible worktrees and
+`GitStore::repository_ids_for_worktree`. It never chooses
+`visible_worktrees().next()` independently in the header.
+
+Each candidate contains distinct typed fields for project, repository,
+worktree, full worktree path, branch/head state, Git summary, source revision,
+and the exact `RepositoryBinding` used by the reducer. Branch/head state is one
+of named branch, detached HEAD, unborn repository, or no Git. Git summary
+contains changed-file, conflict, ahead, and behind counts from the same
+repository snapshot that feeds the Git rail badge.
+
+The active header, work-surface host key, capability registry, and command
+routing all consume the selected candidate's binding. A repository/worktree
+change applies `ChangeBinding` once with the expected generation; it never
+performs an observable remove-then-bind pair. The transition replaces both
+identifiers, advances generation once, recomputes deterministic fallback, and
+makes completions captured under the old binding stale.
+
+Picker callbacks capture the source thread, binding, and formal generation.
+They revalidate that epoch and resolve the target from the current candidate
+catalog before changing anything. This prevents a picker opened for one thread,
+or before an away-and-back binding change, from retargeting newer state.
+The ConversationView's desired work directories are the preference authority
+while a session is loading, before an `AcpThread` exists, so a restored
+multi-root thread cannot temporarily bind to the lexicographically first root.
+The selected working directory is persisted as its exact main-worktree/folder
+pair; later title, message, Git, and project events do not expand it back to
+every project root.
+
+Live target changes are capability-gated at the agent connection and invoke
+its concrete `update_work_dirs` operation for every idle thread in the
+conversation before one presentation transition is committed. Each thread's
+prior directories are captured independently. A rejected operation attempts
+every required rollback, leaves the reducer binding and generation unchanged,
+and preserves loads already issued under the old binding. Omega's native
+connection and deterministic stub update the connection-owned `AcpThread`.
+If one session accepts the new target, another rejects it, and a rollback also
+fails, the connection reports a typed partial-retarget failure. The identity
+enters `Inconsistent`: repository-bound surfaces, branch changes, and prompt
+submission stop because no single path is authoritative. The repository and
+worktree pickers remain available as recovery controls. Reselecting a target
+forces that directory update through every session, even when it matches the
+last projected path, and clears the inconsistent state only after every
+session accepts it. That successful reconciliation advances the binding
+content epoch so pre-recovery completions cannot publish.
+The native terminal resolver reads those thread directories, uses the single
+selected worktree for `.`, and rejects an explicit cwd in another project
+root. ACP servers whose cwd is fixed when the session starts leave the
+repository/worktree controls disabled and explain that a new thread is
+required. Updating a client-side presentation field alone is not treated as
+proof that an agent session accepted the new target.
+
+Target selection is unavailable while the session-open request is loading,
+while any affected thread is generating or waiting for a permission or
+elicitation response, and while repository identity is stale, offline, or
+reconnecting. This prevents one turn or one fixed-cwd session-open request from
+spanning two targets. Button disabled state, tooltips, picker actions, and the
+mutation entry point all enforce the same predicate. Branch selection uses the
+same session and connection gate at render, keyboard-action, and picker-confirm
+time. A successful checkout applies a deliberate same-binding `ChangeBinding`
+to advance the content generation, so Git or Review loads captured before
+checkout complete as stale. While checkout is pending, the identity projects
+`Loading`, all repository/worktree/branch mutations and repository-bound
+surfaces are disabled, and the composer is read-only. Text already in the
+composer is retained and can be submitted after checkout commits.
+
+Observations are monotonic. An older Git observation cannot replace a newer
+selection. A removed selected worktree becomes `Missing` and preserves its
+last-known accessible labels while removing the actionable binding; it does
+not silently select another worktree. Its repository picker remains available
+as an explicit recovery action and validates the formal `None` source binding
+before committing the replacement target. A failed recovery remains formally
+unbound and cannot revive the removed candidate merely because its last-known
+label is still rendered. Loading, stale, offline, reconnecting, missing,
+operation-error, and inconsistent-session are explicit phases. A thread switch
+changes the active identity state before rendering, so a new thread cannot
+display the previous thread's labels while its own observation loads.
+
+No-Git worktrees retain a real thread target. Files, Search, Terminal, and Plan
+remain available, while Review and Git explain that the selected worktree has
+no Git repository.
+
 ## Surface registry and identity {#surface-registry}
 
 The registry contains exactly six stable surface identities in this order:
 Files, Search, Review, Git, Terminal, and Plan. Files, Search, Review, Git, and
 Terminal require a repository/worktree binding. Plan requires an active thread
-but no repository.
+but no repository or live connection. Plan can therefore open, collapse, and
+reopen while offline; repository-bound surfaces and surface commands remain
+connection-gated.
 
 Each entry supplies:
 
@@ -202,7 +291,8 @@ Switching threads uses the Agent Panel's existing base-view switch boundary.
 The shell opens a reducer thread on first use or switches to its existing
 projection. Each thread retains its requested surface and dock state in memory.
 
-A repository or worktree change reconciles through reducer transitions. If the
+A repository or worktree change reconciles through the atomic `ChangeBinding`
+reducer transition. If the
 previous effective surface is no longer valid while its dock is open, the shell
 collapses the dock and focuses the transcript. It does not guess another
 repository or silently open another surface.
@@ -253,17 +343,25 @@ in for a click or keybinding.
 
 Stable selectors include:
 
-| Target           | Selector                                 |
-| ---------------- | ---------------------------------------- |
-| Workbench root   | `omega.workbench.root`                   |
-| Transcript       | `omega.workbench.transcript`             |
-| Activity rail    | `omega.workbench.activity-rail`          |
-| Rail item        | `omega.workbench.control.rail.<surface>` |
-| Dock             | `omega.workbench.dock`                   |
-| Collapse control | `omega.workbench.control.dock.collapse`  |
-| Resize splitter  | `omega.workbench.control.dock.resize`    |
-| Hosted surface   | `omega.workbench.surface.<surface>`      |
-| Typed badge      | `omega.workbench.badge.<surface>`        |
+| Target           | Selector                                      |
+| ---------------- | --------------------------------------------- |
+| Workbench root   | `omega.workbench.root`                        |
+| Transcript       | `omega.workbench.transcript`                  |
+| Activity rail    | `omega.workbench.activity-rail`               |
+| Rail item        | `omega.workbench.control.rail.<surface>`      |
+| Dock             | `omega.workbench.dock`                        |
+| Collapse control | `omega.workbench.control.dock.collapse`       |
+| Resize splitter  | `omega.workbench.control.dock.resize`         |
+| Hosted surface   | `omega.workbench.surface.<surface>`           |
+| Typed badge      | `omega.workbench.badge.<surface>`             |
+| Identity strip   | `omega.workbench.thread-identity`             |
+| Repository       | `omega.workbench.control.identity.repository` |
+| Worktree         | `omega.workbench.control.identity.worktree`   |
+| Branch           | `omega.workbench.control.identity.branch`     |
+| Repository row   | `omega.workbench.control.repository.<id>`     |
+| Worktree row     | `omega.workbench.control.worktree.<id>`       |
+| Identity status  | `omega.workbench.identity.status`             |
+| Git indicator    | `omega.workbench.identity.indicator.<kind>`   |
 
 For every interaction, assert logical state and rendered semantics:
 
@@ -276,6 +374,20 @@ For every interaction, assert logical state and rendered semantics:
 - independent selections across thread switches;
 - stale completion rejection after thread or binding changes; and
 - host release after thread and window teardown.
+
+Identity tests additionally assert exact picker candidates, one-generation
+binding replacement, full tooltip/accessibility values under visual
+truncation, typed detached/unborn/no-Git states, Git-summary equality with the
+rail badge, connection/error phases, removal-to-missing behavior, and
+branch-picker failures. They also invoke a retained picker after switching
+threads or starting a turn, recover a removed selection through the rendered
+picker, hold session creation pending while checking desired-worktree
+selection, prove branch checkout stales old-generation loads, preserve exact
+linked-worktree metadata through later events, and check long labels at both
+compact and desktop widths. Real FakeFs repositories exercise branch, status,
+conflict, and upstream tracking. The Metal suite
+captures clean, dirty/conflicted, long/narrow, and offline identity strips as
+both whole-window and selector-derived region baselines.
 
 Use `VisualTestContext` actions and selector clicks, GPUI executor timers, fake
 time, and scheduler-seed sweeps. Run the semantic assertions before recording

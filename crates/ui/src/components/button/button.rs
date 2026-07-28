@@ -117,6 +117,11 @@ impl Button {
         }
     }
 
+    pub fn debug_selector(mut self, selector: impl FnOnce() -> String) -> Self {
+        self.base.base = self.base.base.debug_selector(selector);
+        self
+    }
+
     /// Sets the color of the button's label.
     pub fn color(mut self, label_color: impl Into<Option<Color>>) -> Self {
         self.label_color = label_color.into();

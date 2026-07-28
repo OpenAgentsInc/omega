@@ -82,6 +82,7 @@ impl ContextMenuItem {
 pub struct ContextMenuEntry {
     toggle: Option<(IconPosition, bool)>,
     label: SharedString,
+    debug_selector: Option<SharedString>,
     icon: Option<IconName>,
     custom_icon_path: Option<SharedString>,
     custom_icon_svg: Option<SharedString>,
@@ -104,6 +105,7 @@ impl ContextMenuEntry {
         ContextMenuEntry {
             toggle: None,
             label: label.into(),
+            debug_selector: None,
             icon: None,
             custom_icon_path: None,
             custom_icon_svg: None,
@@ -120,6 +122,11 @@ impl ContextMenuEntry {
             end_slot_handler: None,
             show_end_slot_on_hover: false,
         }
+    }
+
+    pub fn debug_selector(mut self, selector: impl Into<SharedString>) -> Self {
+        self.debug_selector = Some(selector.into());
+        self
     }
 
     pub fn toggleable(mut self, toggle_position: IconPosition, toggled: bool) -> Self {
@@ -559,6 +566,7 @@ impl ContextMenu {
         self.items.push(ContextMenuItem::Entry(ContextMenuEntry {
             toggle: None,
             label: label.into(),
+            debug_selector: None,
             handler: Rc::new(move |_, window, cx| handler(window, cx)),
             secondary_handler: None,
             icon: None,
@@ -590,6 +598,7 @@ impl ContextMenu {
         self.items.push(ContextMenuItem::Entry(ContextMenuEntry {
             toggle: None,
             label: label.into(),
+            debug_selector: None,
             handler: Rc::new(move |_, window, cx| handler(window, cx)),
             secondary_handler: None,
             icon: None,
@@ -621,6 +630,7 @@ impl ContextMenu {
         self.items.push(ContextMenuItem::Entry(ContextMenuEntry {
             toggle: None,
             label: label.into(),
+            debug_selector: None,
             handler: Rc::new(move |_, window, cx| handler(window, cx)),
             secondary_handler: None,
             icon: None,
@@ -665,6 +675,7 @@ impl ContextMenu {
         self.items.push(ContextMenuItem::Entry(ContextMenuEntry {
             toggle: Some((position, toggled)),
             label: label.into(),
+            debug_selector: None,
             handler: Rc::new(move |_, window, cx| handler(window, cx)),
             secondary_handler: None,
             icon: None,
@@ -769,6 +780,7 @@ impl ContextMenu {
                 None
             },
             label: label.into(),
+            debug_selector: None,
             action: Some(action.boxed_clone()),
             handler: Rc::new(move |context, window, cx| {
                 if let Some(context) = &context {
@@ -802,6 +814,7 @@ impl ContextMenu {
         self.items.push(ContextMenuItem::Entry(ContextMenuEntry {
             toggle: None,
             label: label.into(),
+            debug_selector: None,
             action: Some(action.boxed_clone()),
             handler: Rc::new(move |context, window, cx| {
                 if let Some(context) = &context {
@@ -839,6 +852,7 @@ impl ContextMenu {
         self.items.push(ContextMenuItem::Entry(ContextMenuEntry {
             toggle: None,
             label: label.into(),
+            debug_selector: None,
             action: Some(action.boxed_clone()),
             handler: Rc::new(move |_, window, cx| {
                 handler(window, cx);
@@ -1823,6 +1837,7 @@ impl ContextMenu {
         let ContextMenuEntry {
             toggle,
             label,
+            debug_selector,
             handler,
             icon,
             custom_icon_path,
@@ -1933,6 +1948,9 @@ impl ContextMenu {
         };
 
         let aside_trigger_bounds = self.aside_trigger_bounds.clone();
+        let debug_selector = debug_selector
+            .clone()
+            .unwrap_or_else(|| format!("MENU_ITEM-{label}").into());
 
         div()
             .id(("context-menu-child", ix))
@@ -1966,6 +1984,7 @@ impl ContextMenu {
             })
             .child(
                 ListItem::new(ix)
+                    .debug_selector(debug_selector)
                     .group_name("label_container")
                     .inset(true)
                     .disabled(*disabled)
@@ -2077,7 +2096,6 @@ impl ContextMenu {
                             .w_full()
                             .justify_between()
                             .child(label_element)
-                            .debug_selector(|| format!("MENU_ITEM-{}", label))
                             .children(action.as_ref().map(|action| {
                                 let binding = self
                                     .action_context

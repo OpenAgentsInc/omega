@@ -37,6 +37,7 @@ visual-tests = [
     "dep:action_log",
     "dep:agent_servers",
     "dep:omega_workbench_harness",
+    "dep:omega_workbench_state",
     "workspace/test-support",
     "project/test-support",
     "editor/test-support",
@@ -107,6 +108,7 @@ workroom_ui.workspace = true
 omega_effectd.workspace = true
 omega_front_door.workspace = true
 omega_workbench_harness = { workspace = true, features = ["gpui-support"], optional = true }
+omega_workbench_state = { workspace = true, optional = true }
 omega_workdir.workspace = true
 omega_zero_base.workspace = true
 dev_container.workspace = true

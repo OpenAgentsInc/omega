@@ -14,8 +14,8 @@ use git::{
         AskPassDelegate, Branch, CommitData, CommitDataReader, CommitDetails, CommitOptions,
         CreateWorktreeTarget, FetchOptions, FileHistoryChangedFileSets, GRAPH_CHUNK_SIZE,
         GitRepository, GitRepositoryCheckpoint, InitialGraphCommitData, LogOrder, LogSource,
-        PushOptions, RefEdit, Remote, RepoPath, ResetMode, SearchCommitArgs, Worktree,
-        commit_hash_search_query,
+        PushOptions, RefEdit, Remote, RepoPath, ResetMode, SearchCommitArgs, Upstream,
+        UpstreamTracking, UpstreamTrackingStatus, Worktree, commit_hash_search_query,
     },
     stash::GitStash,
     status::{
@@ -27,7 +27,12 @@ use gpui::{AsyncApp, BackgroundExecutor, SharedString, Task};
 use ignore::gitignore::GitignoreBuilder;
 use parking_lot::Mutex;
 use rope::Rope;
-use std::{path::PathBuf, sync::Arc, sync::atomic::AtomicBool, time::SystemTime};
+use std::{
+    path::PathBuf,
+    sync::Arc,
+    sync::atomic::AtomicBool,
+    time::{Duration, SystemTime},
+};
 use text::LineEnding;
 use util::{paths::PathStyle, rel_path::RelPath};
 
@@ -68,10 +73,13 @@ pub struct FakeGitRepositoryState {
     pub blames: HashMap<RepoPath, Blame>,
     pub current_branch_name: Option<String>,
     pub branches: HashSet<String>,
+    pub branch_tracking: HashMap<String, UpstreamTrackingStatus>,
     /// List of remotes, keys are names and values are URLs
     pub remotes: HashMap<String, String>,
     pub simulated_index_write_error_message: Option<String>,
     pub simulated_create_worktree_error: Option<String>,
+    pub simulated_change_branch_error_message: Option<String>,
+    pub simulated_change_branch_delay: Option<Duration>,
     pub simulated_graph_error: Option<String>,
     pub branches_requiring_force_delete: HashSet<String>,
     pub worktrees_requiring_force_delete: HashSet<PathBuf>,
@@ -92,8 +100,11 @@ impl FakeGitRepositoryState {
             blames: Default::default(),
             current_branch_name: Default::default(),
             branches: Default::default(),
+            branch_tracking: Default::default(),
             simulated_index_write_error_message: Default::default(),
             simulated_create_worktree_error: Default::default(),
+            simulated_change_branch_error_message: Default::default(),
+            simulated_change_branch_delay: Default::default(),
             simulated_graph_error: None,
             branches_requiring_force_delete: Default::default(),
             worktrees_requiring_force_delete: Default::default(),
@@ -512,7 +523,13 @@ impl GitRepository for FakeGitRepository {
                         is_head: Some(branch_name) == current_branch.as_ref(),
                         ref_name,
                         most_recent_commit: None,
-                        upstream: None,
+                        upstream: state
+                            .branch_tracking
+                            .get(branch_name)
+                            .map(|tracking| Upstream {
+                                ref_name: format!("refs/remotes/origin/{branch_name}").into(),
+                                tracking: UpstreamTracking::Tracked(*tracking),
+                            }),
                     }
                 })
                 .collect::<Vec<_>>();
@@ -904,10 +921,26 @@ impl GitRepository for FakeGitRepository {
     }
 
     fn change_branch(&self, name: String) -> BoxFuture<'_, Result<()>> {
-        self.with_state_async(true, |state| {
-            state.current_branch_name = Some(name);
-            Ok(())
-        })
+        let fs = self.fs.clone();
+        let executor = self.executor.clone();
+        let dot_git_path = self.dot_git_path.clone();
+        async move {
+            executor.simulate_random_delay().await;
+            let delay = fs.with_git_state(&dot_git_path, false, |state| {
+                state.simulated_change_branch_delay
+            })?;
+            if let Some(delay) = delay {
+                executor.timer(delay).await;
+            }
+            fs.with_git_state(&dot_git_path, true, |state| {
+                if let Some(message) = &state.simulated_change_branch_error_message {
+                    bail!("{message}");
+                }
+                state.current_branch_name = Some(name);
+                Ok(())
+            })?
+        }
+        .boxed()
     }
 
     fn create_branch(

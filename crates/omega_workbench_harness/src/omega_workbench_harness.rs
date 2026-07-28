@@ -321,9 +321,18 @@ pub struct ProjectFixture {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorktreeGitStateFixture {
+    NoGit,
+    Unborn,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorktreeFixture {
     pub id: String,
     pub branch: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git_state: Option<WorktreeGitStateFixture>,
     pub dirty_files: u32,
     pub conflicts: u32,
     pub ahead: u32,
@@ -1010,7 +1019,7 @@ impl SceneSpec {
     }
 }
 
-pub const WORKBENCH_SHELL_PIXEL_SCENES: [&str; 7] = [
+pub const WORKBENCH_SHELL_PIXEL_SCENES: [&str; 11] = [
     "omega_workbench_shell_default",
     "omega_workbench_shell_active_dock",
     "omega_workbench_shell_focus_visible",
@@ -1018,11 +1027,21 @@ pub const WORKBENCH_SHELL_PIXEL_SCENES: [&str; 7] = [
     "omega_workbench_shell_unavailable_no_project",
     "omega_workbench_shell_narrow",
     "omega_workbench_shell_collapsed_after_open",
+    "omega_workbench_identity_clean",
+    "omega_workbench_identity_dirty_conflict",
+    "omega_workbench_identity_long_narrow",
+    "omega_workbench_identity_offline_error",
 ];
 
 pub const WORKBENCH_SHELL_REGIONS: &[CaptureRegionSpec] = &[CaptureRegionSpec::selector_union(
     "rail-dock",
     &["omega.workbench.activity-rail", "omega.workbench.dock"],
+    8,
+)];
+
+pub const WORKBENCH_IDENTITY_REGIONS: &[CaptureRegionSpec] = &[CaptureRegionSpec::selector_union(
+    "thread-identity",
+    &["omega.workbench.thread-identity"],
     8,
 )];
 
@@ -1082,6 +1101,38 @@ pub const HERMETIC_SCENES: &[SceneSpec] = &[
         fixture_version: 1,
         pixel_policy: APPLE_SILICON_METAL_POLICY,
         regions: WORKBENCH_SHELL_REGIONS,
+    },
+    SceneSpec {
+        name: "omega_workbench_identity_clean",
+        phase: ScenePhase::Recording,
+        viewport: ViewportFixture::new(1200, 720, 2000),
+        fixture_version: 1,
+        pixel_policy: APPLE_SILICON_METAL_POLICY,
+        regions: WORKBENCH_IDENTITY_REGIONS,
+    },
+    SceneSpec {
+        name: "omega_workbench_identity_dirty_conflict",
+        phase: ScenePhase::Recording,
+        viewport: ViewportFixture::new(1200, 720, 2000),
+        fixture_version: 1,
+        pixel_policy: APPLE_SILICON_METAL_POLICY,
+        regions: WORKBENCH_IDENTITY_REGIONS,
+    },
+    SceneSpec {
+        name: "omega_workbench_identity_long_narrow",
+        phase: ScenePhase::Recording,
+        viewport: ViewportFixture::new(909, 720, 2000),
+        fixture_version: 1,
+        pixel_policy: APPLE_SILICON_METAL_POLICY,
+        regions: WORKBENCH_IDENTITY_REGIONS,
+    },
+    SceneSpec {
+        name: "omega_workbench_identity_offline_error",
+        phase: ScenePhase::Recording,
+        viewport: ViewportFixture::new(1200, 720, 2000),
+        fixture_version: 1,
+        pixel_policy: APPLE_SILICON_METAL_POLICY,
+        regions: WORKBENCH_IDENTITY_REGIONS,
     },
     SceneSpec {
         name: "omega_front_door_no_project",
@@ -2649,6 +2700,21 @@ fn conformance_transition(
                 .map(conformance_surface)
                 .collect(),
         },
+        projection::ProjectionTransition::ChangeBinding {
+            thread_id,
+            generation,
+            binding,
+            available_surfaces,
+        } => conformance::Transition::ChangeBinding {
+            thread_id: conformance::ThreadId(thread_id.clone()),
+            generation: *generation,
+            binding: binding.as_ref().map(conformance_binding),
+            available_surfaces: available_surfaces
+                .iter()
+                .copied()
+                .map(conformance_surface)
+                .collect(),
+        },
         projection::ProjectionTransition::BeginSurfaceLoad {
             request_id,
             thread_id,
@@ -3137,6 +3203,15 @@ mod tests {
             binding: production_binding("worktree-c"),
             available_surfaces: surfaces.clone(),
         });
+        recorder.apply(projection::ProjectionTransition::ChangeBinding {
+            thread_id: "thread-a".into(),
+            generation: 4,
+            binding: Some(
+                projection::RepositoryBinding::new("repository-b", "worktree-d")
+                    .expect("valid replacement binding"),
+            ),
+            available_surfaces: surfaces.clone(),
+        });
         recorder.apply(projection::ProjectionTransition::PersistSelection { revision: 1 });
         recorder.apply(projection::ProjectionTransition::ColdStart);
         recorder.apply(projection::ProjectionTransition::RestoreSelection);
@@ -3211,6 +3286,7 @@ mod tests {
                 WorktreeFixture {
                     id: "worktree-a".to_string(),
                     branch: Some("main".to_string()),
+                    git_state: None,
                     dirty_files: 0,
                     conflicts: 0,
                     ahead: 0,
@@ -3219,6 +3295,7 @@ mod tests {
                 WorktreeFixture {
                     id: "worktree-b".to_string(),
                     branch: Some("feature".to_string()),
+                    git_state: None,
                     dirty_files: 2,
                     conflicts: 1,
                     ahead: 3,

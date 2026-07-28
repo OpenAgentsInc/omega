@@ -2554,6 +2554,20 @@ impl GitStore {
         &self.repositories
     }
 
+    pub fn repository_ids_for_worktree(&self, worktree_id: WorktreeId) -> Vec<RepositoryId> {
+        let mut repository_ids = self
+            .worktree_ids
+            .iter()
+            .filter_map(|(repository_id, worktree_ids)| {
+                worktree_ids
+                    .contains(&worktree_id)
+                    .then_some(*repository_id)
+            })
+            .collect::<Vec<_>>();
+        repository_ids.sort_unstable();
+        repository_ids
+    }
+
     /// Returns the main repository working directory for the given worktree.
     /// For normal checkouts this equals the worktree's own path. For linked
     /// worktrees it points back to the main worktree, if one exists. Linked

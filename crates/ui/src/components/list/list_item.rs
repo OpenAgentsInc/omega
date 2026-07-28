@@ -25,6 +25,7 @@ enum EndSlotVisibility {
 #[derive(IntoElement, RegisterComponent)]
 pub struct ListItem {
     id: ElementId,
+    debug_selector: Option<SharedString>,
     group_name: Option<SharedString>,
     disabled: bool,
     selected: bool,
@@ -64,6 +65,7 @@ impl ListItem {
     pub fn new(id: impl Into<ElementId>) -> Self {
         Self {
             id: id.into(),
+            debug_selector: None,
             group_name: None,
             disabled: false,
             selected: false,
@@ -95,6 +97,11 @@ impl ListItem {
             aria_checked: None,
             aria_active_descendant: false,
         }
+    }
+
+    pub fn debug_selector(mut self, selector: impl Into<SharedString>) -> Self {
+        self.debug_selector = Some(selector.into());
+        self
     }
 
     /// Sets the accessible role reported to assistive technology (e.g.
@@ -325,7 +332,13 @@ impl RenderOnce for ListItem {
             .when_some(self.on_hover, |this, on_hover| this.on_hover(on_hover))
             .child(
                 h_flex()
-                    .id("inner_list_item")
+                    .id(self
+                        .debug_selector
+                        .clone()
+                        .unwrap_or_else(|| "inner_list_item".into()))
+                    .when_some(self.debug_selector, |this, selector| {
+                        this.debug_selector(move || selector.to_string())
+                    })
                     // The accessible role/label live here, alongside the click
                     // handler, so assistive technology reports one actionable
                     // node (e.g. a menu item) rather than an inert container.

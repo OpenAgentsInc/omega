@@ -401,7 +401,9 @@ impl WorkbenchProjection {
             }
             ProjectionTransition::RequestSurface { thread_id, surface } => {
                 self.require_active_thread(&thread_id)?;
-                self.require_online()?;
+                if surface != WorkSurface::Plan {
+                    self.require_online()?;
+                }
                 if !self
                     .thread(&thread_id)?
                     .available_surfaces
@@ -432,7 +434,9 @@ impl WorkbenchProjection {
             }
             ProjectionTransition::ExpandDock { thread_id } => {
                 self.require_active_thread(&thread_id)?;
-                self.require_online()?;
+                if self.thread(&thread_id)?.effective_surface != Some(WorkSurface::Plan) {
+                    self.require_online()?;
+                }
                 let thread = self.thread_mut(&thread_id)?;
                 thread.dock_open = true;
                 thread.normalize();
@@ -493,6 +497,24 @@ impl WorkbenchProjection {
                 }
                 let previous_surface = thread.effective_surface;
                 thread.binding = None;
+                thread.generation = next_revision("thread generation", generation)?;
+                thread.available_surfaces = available_surfaces.into_iter().collect();
+                thread.normalize();
+                Ok(fallback_effect(previous_surface, thread.effective_surface))
+            }
+            ProjectionTransition::ChangeBinding {
+                thread_id,
+                generation,
+                binding,
+                available_surfaces,
+            } => {
+                if let Some(binding) = &binding {
+                    binding.validate()?;
+                }
+                let thread = self.thread_mut(&thread_id)?;
+                require_generation(thread, generation)?;
+                let previous_surface = thread.effective_surface;
+                thread.binding = binding;
                 thread.generation = next_revision("thread generation", generation)?;
                 thread.available_surfaces = available_surfaces.into_iter().collect();
                 thread.normalize();
@@ -909,6 +931,12 @@ pub enum ProjectionTransition {
         generation: u64,
         available_surfaces: Vec<WorkSurface>,
     },
+    ChangeBinding {
+        thread_id: String,
+        generation: u64,
+        binding: Option<RepositoryBinding>,
+        available_surfaces: Vec<WorkSurface>,
+    },
     BeginSurfaceLoad {
         request_id: String,
         thread_id: String,
@@ -1251,6 +1279,99 @@ mod tests {
     }
 
     #[test]
+    fn repository_and_worktree_change_is_one_atomic_generation() {
+        let mut projection = WorkbenchProjection::new();
+        open_thread(&mut projection, "thread-a", "worktree-a");
+        projection
+            .apply(ProjectionTransition::RequestSurface {
+                thread_id: "thread-a".into(),
+                surface: WorkSurface::Git,
+            })
+            .expect("select git");
+        projection
+            .apply(ProjectionTransition::BeginSurfaceLoad {
+                request_id: "request-a".into(),
+                thread_id: "thread-a".into(),
+                surface: WorkSurface::Git,
+                generation: 0,
+                binding: Some(binding("worktree-a")),
+            })
+            .expect("begin load");
+        let replacement =
+            RepositoryBinding::new("repo-b", "worktree-b").expect("replacement binding");
+
+        projection
+            .apply(ProjectionTransition::ChangeBinding {
+                thread_id: "thread-a".into(),
+                generation: 0,
+                binding: Some(replacement.clone()),
+                available_surfaces: vec![WorkSurface::Files, WorkSurface::Plan],
+            })
+            .expect("atomically replace binding");
+
+        let thread = projection.thread("thread-a").expect("thread exists");
+        assert_eq!(thread.binding, Some(replacement));
+        assert_eq!(thread.generation, 1);
+        assert_eq!(thread.effective_surface, Some(WorkSurface::Files));
+        assert_eq!(
+            projection
+                .apply(ProjectionTransition::CompleteSurfaceLoad {
+                    request_id: "request-a".into(),
+                    thread_id: "thread-a".into(),
+                    surface: WorkSurface::Git,
+                    generation: 0,
+                    binding: Some(binding("worktree-a")),
+                })
+                .expect("ignore stale completion"),
+            TransitionEffect::StaleCompletionIgnored
+        );
+    }
+
+    #[test]
+    fn same_binding_change_refreshes_the_content_generation() {
+        let mut projection = WorkbenchProjection::new();
+        open_thread(&mut projection, "thread-a", "worktree-a");
+        projection
+            .apply(ProjectionTransition::BeginSurfaceLoad {
+                request_id: "request-a".into(),
+                thread_id: "thread-a".into(),
+                surface: WorkSurface::Files,
+                generation: 0,
+                binding: Some(binding("worktree-a")),
+            })
+            .expect("begin load before the content epoch changes");
+
+        projection
+            .apply(ProjectionTransition::ChangeBinding {
+                thread_id: "thread-a".into(),
+                generation: 0,
+                binding: Some(binding("worktree-a")),
+                available_surfaces: WorkSurface::FALLBACK_ORDER.into(),
+            })
+            .expect("refresh the same binding after a branch change");
+
+        assert_eq!(
+            projection
+                .thread("thread-a")
+                .expect("thread remains projected")
+                .generation,
+            1
+        );
+        assert_eq!(
+            projection
+                .apply(ProjectionTransition::CompleteSurfaceLoad {
+                    request_id: "request-a".into(),
+                    thread_id: "thread-a".into(),
+                    surface: WorkSurface::Files,
+                    generation: 0,
+                    binding: Some(binding("worktree-a")),
+                })
+                .expect("old-epoch load completion should be handled"),
+            TransitionEffect::StaleCompletionIgnored
+        );
+    }
+
+    #[test]
     fn invalid_surface_uses_documented_fallback() {
         let mut projection = WorkbenchProjection::new();
         open_thread(&mut projection, "thread-a", "worktree-a");
@@ -1344,6 +1465,47 @@ mod tests {
             })
             .expect_err("collapsed surface cannot receive a command");
         assert!(matches!(error, ProjectionError::UnavailableSurface { .. }));
+    }
+
+    #[test]
+    fn offline_plan_can_open_and_expand() {
+        let mut projection = WorkbenchProjection::new();
+        open_thread(&mut projection, "thread-a", "worktree-a");
+        projection
+            .apply(ProjectionTransition::Disconnect)
+            .expect("disconnect");
+        projection
+            .apply(ProjectionTransition::RequestSurface {
+                thread_id: "thread-a".into(),
+                surface: WorkSurface::Plan,
+            })
+            .expect("offline Plan is thread-local");
+        projection
+            .apply(ProjectionTransition::CollapseDock {
+                thread_id: "thread-a".into(),
+            })
+            .expect("collapse Plan");
+        projection
+            .apply(ProjectionTransition::ExpandDock {
+                thread_id: "thread-a".into(),
+            })
+            .expect("expand offline Plan");
+
+        let before = projection.clone();
+        let error = projection
+            .apply(ProjectionTransition::RequestSurface {
+                thread_id: "thread-a".into(),
+                surface: WorkSurface::Git,
+            })
+            .expect_err("repository-bound surfaces require a connection");
+        assert!(matches!(
+            error,
+            ProjectionError::InvalidConnectionTransition {
+                from: ConnectionPhase::Offline,
+                ..
+            }
+        ));
+        assert_eq!(projection, before);
     }
 
     #[test]

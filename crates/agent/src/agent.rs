@@ -2586,13 +2586,38 @@ impl acp_thread::AgentConnection for NativeAgentConnection {
         cx: &mut App,
     ) -> Task<Result<Entity<acp_thread::AcpThread>>> {
         log::debug!("Creating new thread for project at: {work_dirs:?}");
-        Task::ready(Ok(self
+        let thread = self
             .0
-            .update(cx, |agent, cx| agent.new_session(project, cx))))
+            .update(cx, |agent, cx| agent.new_session(project, cx));
+        thread.update(cx, |thread, cx| {
+            thread.set_work_dirs(work_dirs, cx);
+        });
+        Task::ready(Ok(thread))
     }
 
     fn supports_load_session(&self) -> bool {
         true
+    }
+
+    fn supports_live_work_dir_updates(&self) -> bool {
+        true
+    }
+
+    fn update_work_dirs(
+        &self,
+        session_id: &acp::SessionId,
+        work_dirs: PathList,
+        cx: &mut App,
+    ) -> Result<()> {
+        let thread = self
+            .0
+            .read(cx)
+            .sessions
+            .get(session_id)
+            .map(|session| session.acp_thread.clone())
+            .ok_or_else(|| anyhow!("Agent session is unavailable"))?;
+        thread.update(cx, |thread, cx| thread.set_work_dirs(work_dirs, cx));
+        Ok(())
     }
 
     fn load_session(
@@ -3433,6 +3458,13 @@ impl NativeThreadEnvironment {
 }
 
 impl ThreadEnvironment for NativeThreadEnvironment {
+    fn work_dirs(&self, cx: &App) -> Option<PathList> {
+        self.acp_thread
+            .read_with(cx, |thread, _cx| thread.work_dirs().cloned())
+            .ok()
+            .flatten()
+    }
+
     fn create_terminal(
         &self,
         command: String,

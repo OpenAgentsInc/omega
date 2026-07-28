@@ -59,7 +59,16 @@ derive a work surface:
 `visible_projection()` is the only projection a renderer or command router
 should consume. A hidden thread retains its own requested surface, but cannot
 own global focus or receive a visible-surface command. Going offline clears
-global focus ownership without discarding the thread's selection.
+global focus ownership without discarding the thread's selection. Plan is the
+one offline interaction exception: because it is thread-local and does not
+address repository state, it may be requested and its retained dock may be
+collapsed or expanded offline. Repository-bound requests and every surface
+command remain online-only.
+
+Generation is the binding content epoch, not merely a counter for path
+changes. A deliberate `ChangeBinding` to the current repository/worktree is a
+refresh action: branch checkout uses it to invalidate loads that captured the
+same paths under the previous Git state.
 
 The fixed surface fallback order is Files, Search, Review, Git, Terminal, then
 Plan. A missing request remains closed; fallback is used only when a requested
@@ -71,16 +80,16 @@ The checked model lives in `docs/spec/workbench_projection`. The independent
 wire relation lives in `omega_workbench_conformance`. This table is the
 reviewable source-to-model map:
 
-| Model action                                       | Production transition                                          | Trace action                                           |
-| -------------------------------------------------- | -------------------------------------------------------------- | ------------------------------------------------------ |
-| `OpenThread`, `CloseThread`, `SwitchThread`        | `OpenThread`, `CloseThread`, `SwitchThread`                    | `open_thread`, `close_thread`, `switch_thread`         |
-| `RequestSurface`, close, collapse, expand          | `RequestSurface`, `CloseSurface`, `CollapseDock`, `ExpandDock` | the corresponding surface/dock action                  |
-| `BindRepository`, `ChangeWorktree`, remove binding | `BindRepository`, `ChangeWorktree`, `RemoveBinding`            | `bind_repository`, `change_worktree`, `remove_binding` |
-| `BeginLoad`, `CompleteLoad`, `FailLoad`            | `BeginSurfaceLoad`, `CompleteSurfaceLoad`, `FailSurfaceLoad`   | the corresponding surface-load action                  |
-| `Disconnect`, `BeginReconnect`, `ReceiveSnapshot`  | `Disconnect`, `Reconnect`, `ReceiveProjectionSnapshot`         | the corresponding connection action                    |
-| `PersistSelection`, `ColdStart`, `Restore`         | `PersistSelection`, `ColdStart`, `RestoreSelection`            | the corresponding persistence action                   |
-| `InvalidateCapability`                             | `InvalidateCapability`                                         | `invalidate_capability`                                |
-| `RouteCommand`                                     | `DispatchSurfaceCommand`                                       | `dispatch_surface_command`                             |
+| Model action                                                        | Production transition                                                | Trace action                                                             |
+| ------------------------------------------------------------------- | -------------------------------------------------------------------- | ------------------------------------------------------------------------ |
+| `OpenThread`, `CloseThread`, `SwitchThread`                         | `OpenThread`, `CloseThread`, `SwitchThread`                          | `open_thread`, `close_thread`, `switch_thread`                           |
+| `RequestSurface`, close, collapse, expand                           | `RequestSurface`, `CloseSurface`, `CollapseDock`, `ExpandDock`       | the corresponding surface/dock action                                    |
+| `BindRepository`, `ChangeWorktree`, `ChangeBinding`, remove binding | `BindRepository`, `ChangeWorktree`, `ChangeBinding`, `RemoveBinding` | `bind_repository`, `change_worktree`, `change_binding`, `remove_binding` |
+| `BeginLoad`, `CompleteLoad`, `FailLoad`                             | `BeginSurfaceLoad`, `CompleteSurfaceLoad`, `FailSurfaceLoad`         | the corresponding surface-load action                                    |
+| `Disconnect`, `BeginReconnect`, `ReceiveSnapshot`                   | `Disconnect`, `Reconnect`, `ReceiveProjectionSnapshot`               | the corresponding connection action                                      |
+| `PersistSelection`, `ColdStart`, `Restore`                          | `PersistSelection`, `ColdStart`, `RestoreSelection`                  | the corresponding persistence action                                     |
+| `InvalidateCapability`                                              | `InvalidateCapability`                                               | `invalidate_capability`                                                  |
+| `RouteCommand`                                                      | `DispatchSurfaceCommand`                                             | `dispatch_surface_command`                                               |
 
 Search and Review are represented by Files in the TLA+ state space because all
 three have the same binding rules for the checked properties. The production
@@ -136,7 +145,7 @@ The harness generates six named reducer/model conformance scenarios:
 | `valid_restore`            | Persist A/Review, cold start, and restore the exact binding, surface, dock, and focus                                    |
 | `invalid_restore_fallback` | Persist A/Git on worktree A, rehydrate worktree B without Git, choose Files, and rewrite the persisted logical selection |
 
-A separate adapter test drives every one of the 21 critical action kinds
+A separate adapter test drives every one of the 22 critical action kinds
 through the production reducer and the independent checker. Another test proves
 that a rejected production action is recorded and leaves state unchanged.
 
@@ -155,7 +164,7 @@ The base TLC configuration exhausts:
 - at most 1 pending load; and
 - at most 3 non-stuttering transitions.
 
-The current base graph contains 8,737 generated states and 4,091 distinct
+The current base graph contains 12,400 generated states and 5,153 distinct
 states at depth 4. TLC reports no queued states and no property violation. A
 six-step action-scoped configuration checks the longer older-snapshot
 sequence. These are exact finite bounds, not an unbounded proof.

@@ -4,8 +4,8 @@ use agent_servers::{AgentServer, AgentServerDelegate};
 use anyhow::{Context as _, Result, bail};
 use gpui::{
     Action, AnyWindowHandle, App, AppContext as _, Context, DebugRenderSnapshot, Entity, EntityId,
-    EventEmitter, FocusHandle, Focusable, IntoElement, Pixels, Render, Task, TestAppContext,
-    VisualTestContext, Window, div, px, size,
+    EventEmitter, FocusHandle, Focusable, IntoElement, Pixels, Render, SharedString, Task,
+    TestAppContext, VisualTestContext, Window, div, px, size,
 };
 use omega_workbench_harness::{
     ConnectivityFixture, ContentStateFixture, ProofCheck, SemanticProbe, ThemeFixture,
@@ -315,9 +315,14 @@ pub const WORKBENCH_COMPOSER_SELECTOR: &str = "omega.workbench.composer";
 pub const WORKBENCH_ACTIVITY_RAIL_SELECTOR: &str = "omega.workbench.activity-rail";
 pub const WORKBENCH_DOCK_SELECTOR: &str = "omega.workbench.dock";
 pub const WORKBENCH_TRANSCRIPT_SELECTOR: &str = "omega.workbench.transcript";
+pub const WORKBENCH_IDENTITY_SELECTOR: &str = "omega.workbench.thread-identity";
+pub const WORKBENCH_REPOSITORY_SELECTOR: &str = "omega.workbench.control.identity.repository";
+pub const WORKBENCH_WORKTREE_SELECTOR: &str = "omega.workbench.control.identity.worktree";
+pub const WORKBENCH_BRANCH_SELECTOR: &str = "omega.workbench.control.identity.branch";
 
 pub struct AgentWorkbenchFrontDoor {
     scene: WorkbenchScene,
+    fs: std::sync::Arc<fs::FakeFs>,
     window: AnyWindowHandle,
     workspace: Entity<Workspace>,
     panel: Entity<AgentPanel>,
@@ -342,12 +347,115 @@ impl AgentWorkbenchFrontDoor {
             .flat_map(|repository| repository.worktrees.iter())
             .map(|worktree| std::path::PathBuf::from(format!("/{}", worktree.id)))
             .collect::<Vec<_>>();
-        for path in &root_paths {
-            fs.insert_tree(path, serde_json::json!({"README.md": "# Fixture"}))
-                .await;
+        for repository in &scene.repositories {
+            let main_worktree_path = repository
+                .worktrees
+                .first()
+                .map(|worktree| std::path::PathBuf::from(format!("/{}", worktree.id)));
+            for (worktree_index, worktree) in repository.worktrees.iter().enumerate() {
+                let path = std::path::PathBuf::from(format!("/{}", worktree.id));
+                if matches!(
+                    worktree.git_state,
+                    Some(omega_workbench_harness::WorktreeGitStateFixture::NoGit)
+                ) {
+                    fs.insert_tree(&path, serde_json::json!({"README.md": "# Fixture"}))
+                        .await;
+                    continue;
+                }
+
+                if worktree_index == 0 {
+                    fs.insert_tree(
+                        &path,
+                        serde_json::json!({".git": {}, "README.md": "# Fixture"}),
+                    )
+                    .await;
+                } else {
+                    let main_worktree_path = main_worktree_path
+                        .as_ref()
+                        .context("linked worktree fixture has no main worktree")?;
+                    let worktree_git_dir = main_worktree_path
+                        .join(".git")
+                        .join("worktrees")
+                        .join(&worktree.id);
+                    let head = worktree.branch.as_ref().map_or_else(
+                        || "1111111111111111111111111111111111111111".to_string(),
+                        |branch| format!("ref: refs/heads/{branch}"),
+                    );
+                    fs.insert_tree(
+                        &worktree_git_dir,
+                        serde_json::json!({
+                            "HEAD": head,
+                            "commondir": "../..",
+                            "gitdir": path.join(".git").to_string_lossy(),
+                        }),
+                    )
+                    .await;
+                    fs.insert_tree(
+                        &path,
+                        serde_json::json!({
+                            ".git": format!("gitdir: {}", worktree_git_dir.display()),
+                            "README.md": "# Fixture",
+                        }),
+                    )
+                    .await;
+                }
+
+                let dot_git = path.join(".git");
+                fs.insert_branches(&dot_git, &["main", "release"]);
+                fs.set_branch_name(&dot_git, worktree.branch.clone());
+                if let Some(branch) = &worktree.branch {
+                    fs.set_branch_tracking_for_repo(
+                        &dot_git,
+                        branch.clone(),
+                        worktree.ahead,
+                        worktree.behind,
+                    );
+                }
+                if !matches!(
+                    worktree.git_state,
+                    Some(omega_workbench_harness::WorktreeGitStateFixture::Unborn)
+                ) {
+                    fs.set_head_for_repo(
+                        &dot_git,
+                        &[("README.md", "# Fixture".to_string())],
+                        "1111111111111111111111111111111111111111",
+                    );
+                } else {
+                    fs.with_git_state(&dot_git, true, |state| {
+                        state.refs.remove("HEAD");
+                    })?;
+                }
+                let status_count = worktree.dirty_files.max(worktree.conflicts);
+                let mut statuses = Vec::new();
+                for index in 0..status_count {
+                    let relative_path = format!("fixture-status-{index}.txt");
+                    fs.insert_file(&path.join(&relative_path), b"fixture".to_vec())
+                        .await;
+                    let status = if index < worktree.conflicts {
+                        git::status::FileStatus::Unmerged(git::status::UnmergedStatus {
+                            first_head: git::status::UnmergedStatusCode::Updated,
+                            second_head: git::status::UnmergedStatusCode::Updated,
+                        })
+                    } else {
+                        git::status::FileStatus::worktree(git::status::StatusCode::Modified)
+                    };
+                    statuses.push((relative_path, status));
+                }
+                let statuses = statuses
+                    .iter()
+                    .map(|(path, status)| (path.as_str(), *status))
+                    .collect::<Vec<_>>();
+                fs.set_status_for_repo(&dot_git, &statuses);
+            }
         }
-        let project =
-            Project::test(fs, root_paths.iter().map(std::path::PathBuf::as_path), cx).await;
+        let project = Project::test(
+            fs.clone(),
+            root_paths.iter().map(std::path::PathBuf::as_path),
+            cx,
+        )
+        .await;
+        let git_scans_complete = project.update(cx, |project, cx| project.git_scans_complete(cx));
+        git_scans_complete.await;
         let multi_workspace =
             cx.add_window(|window, cx| MultiWorkspace::test_new(project, window, cx));
         let workspace = multi_workspace
@@ -410,6 +518,7 @@ impl AgentWorkbenchFrontDoor {
 
         Ok(Self {
             scene,
+            fs,
             window,
             workspace,
             panel,
@@ -426,6 +535,7 @@ impl AgentWorkbenchFrontDoor {
 
     pub fn snapshot(&self, cx: &TestAppContext) -> DebugRenderSnapshot {
         let mut visual = VisualTestContext::from_window(self.window, cx);
+        visual.run_until_parked();
         visual.debug_render_snapshot()
     }
 
@@ -490,6 +600,51 @@ impl AgentWorkbenchFrontDoor {
         self.panel.read_with(cx, |panel, _cx| {
             panel.workbench_projection_for_tests().clone()
         })
+    }
+
+    pub fn identity(
+        &self,
+        cx: &TestAppContext,
+    ) -> Option<crate::thread_identity::ThreadIdentityState> {
+        self.panel.read_with(cx, |panel, _cx| {
+            panel.workbench_identity_for_tests().cloned()
+        })
+    }
+
+    pub fn capability(
+        &self,
+        surface: omega_workbench_state::WorkSurface,
+        cx: &TestAppContext,
+    ) -> Option<crate::workbench_shell::SurfaceCapability> {
+        self.panel.read_with(cx, |panel, _cx| {
+            panel.workbench_capability_for_tests(surface).cloned()
+        })
+    }
+
+    pub fn set_identity_phase(
+        &self,
+        phase: crate::thread_identity::IdentityPhase,
+        cx: &mut TestAppContext,
+    ) {
+        let mut visual = VisualTestContext::from_window(self.window, cx);
+        self.panel.update_in(&mut visual, |panel, _window, cx| {
+            panel.set_workbench_identity_phase_for_tests(Some(phase), cx);
+        });
+        visual.run_until_parked();
+    }
+
+    pub fn mark_identity_inconsistent(
+        &self,
+        message: impl Into<SharedString>,
+        cx: &mut TestAppContext,
+    ) -> Result<()> {
+        let message = message.into();
+        let mut visual = VisualTestContext::from_window(self.window, cx);
+        self.panel.update_in(&mut visual, |panel, _window, cx| {
+            panel.mark_workbench_identity_inconsistent_for_tests(message, cx)
+        })?;
+        visual.run_until_parked();
+        Ok(())
     }
 
     pub fn fail_next_host_creation(
@@ -565,6 +720,151 @@ impl AgentWorkbenchFrontDoor {
         Ok(())
     }
 
+    pub fn select_identity_picker_row(&self, row_index: usize, cx: &TestAppContext) -> Result<()> {
+        let mut visual = VisualTestContext::from_window(self.window, cx);
+        let repository_selector = self
+            .panel
+            .read_with(&visual, |panel, _cx| {
+                panel
+                    .workbench_identity_for_tests()
+                    .and_then(|identity| identity.candidates.get(row_index))
+                    .map(|candidate| {
+                        format!(
+                            "omega.workbench.control.repository.{}",
+                            candidate.binding.repository_id
+                        )
+                    })
+            })
+            .with_context(|| format!("repository picker has no row {row_index}"))?;
+        visual.simulate_click_selector(WORKBENCH_REPOSITORY_SELECTOR)?;
+        visual.run_until_parked();
+        if !accessibility_expanded(
+            &visual.debug_render_snapshot(),
+            WORKBENCH_REPOSITORY_SELECTOR,
+        )? {
+            bail!("repository picker did not expand");
+        }
+        visual.simulate_click_selector(&repository_selector)?;
+        visual.run_until_parked();
+        Ok(())
+    }
+
+    pub fn select_worktree_picker_row(&self, row_index: usize, cx: &TestAppContext) -> Result<()> {
+        let mut visual = VisualTestContext::from_window(self.window, cx);
+        let candidates = self
+            .panel
+            .read_with(&visual, |panel, _cx| {
+                panel
+                    .workbench_identity_for_tests()
+                    .map(|identity| identity.candidates.clone())
+            })
+            .context("worktree picker has no identity candidates")?;
+        let worktree_selector = candidates
+            .get(row_index)
+            .map(|candidate| {
+                format!(
+                    "omega.workbench.control.worktree.{}",
+                    candidate.binding.worktree_id
+                )
+            })
+            .with_context(|| format!("worktree picker has no row {row_index}"))?;
+        visual.simulate_click_selector(WORKBENCH_WORKTREE_SELECTOR)?;
+        visual.run_until_parked();
+        let snapshot = visual.debug_render_snapshot();
+        if !accessibility_expanded(&snapshot, WORKBENCH_WORKTREE_SELECTOR)? {
+            bail!("worktree picker did not expand");
+        }
+        let mut probe = SemanticProbe::new(&snapshot);
+        let mut previous_y = None;
+        for candidate in &candidates {
+            let selector = format!(
+                "omega.workbench.control.worktree.{}",
+                candidate.binding.worktree_id
+            );
+            let label = format!(
+                "{} — {}",
+                candidate.repository_name, candidate.worktree_path
+            );
+            probe.require_accessible(&selector, "MenuItem", &label)?;
+            let y = snapshot
+                .bounds(&selector)
+                .with_context(|| format!("rendered worktree row {label:?} has no bounds"))?
+                .origin
+                .y;
+            if let Some(previous_y) = previous_y {
+                if y <= previous_y {
+                    bail!("worktree picker rows do not preserve candidate order");
+                }
+            }
+            previous_y = Some(y);
+        }
+        visual.simulate_click_selector(&worktree_selector)?;
+        visual.run_until_parked();
+        Ok(())
+    }
+
+    pub fn remove_worktree(&self, path: &Path, cx: &mut TestAppContext) -> Result<()> {
+        let project = self
+            .workspace
+            .read_with(cx, |workspace, _cx| workspace.project().clone());
+        let worktree_id = project
+            .read_with(cx, |project, cx| {
+                project
+                    .visible_worktrees(cx)
+                    .find(|worktree| worktree.read(cx).abs_path().as_ref() == path)
+                    .map(|worktree| worktree.read(cx).id())
+            })
+            .with_context(|| format!("no visible worktree at {}", path.display()))?;
+        project.update(cx, |project, cx| {
+            project.remove_worktree(worktree_id, cx);
+        });
+        cx.run_until_parked();
+        let mut visual = VisualTestContext::from_window(self.window, cx);
+        self.workspace
+            .update_in(&mut visual, |workspace, window, cx| {
+                workspace.focus_panel::<AgentPanel>(window, cx);
+            });
+        self.panel.update(&mut visual, |_, cx| cx.notify());
+        visual.run_until_parked();
+        Ok(())
+    }
+
+    pub fn fail_next_branch_selection(
+        &self,
+        worktree_path: &Path,
+        message: &str,
+        cx: &TestAppContext,
+    ) -> Result<()> {
+        let dot_git = worktree_path.join(".git");
+        self.fs
+            .set_simulated_change_branch_error(&dot_git, Some(message.to_string()));
+        cx.run_until_parked();
+
+        let mut visual = VisualTestContext::from_window(self.window, cx);
+        visual.simulate_click_selector(WORKBENCH_BRANCH_SELECTOR)?;
+        visual.run_until_parked();
+        if !accessibility_expanded(&visual.debug_render_snapshot(), WORKBENCH_BRANCH_SELECTOR)? {
+            bail!("branch picker did not expand");
+        }
+        visual.dispatch_action(menu::SelectNext);
+        visual.dispatch_action(menu::Confirm);
+        visual.run_until_parked();
+        Ok(())
+    }
+
+    pub fn select_next_branch(&self, cx: &TestAppContext) -> Result<()> {
+        let mut visual = VisualTestContext::from_window(self.window, cx);
+        visual.simulate_click_selector(WORKBENCH_BRANCH_SELECTOR)?;
+        visual.run_until_parked();
+        if !accessibility_expanded(&visual.debug_render_snapshot(), WORKBENCH_BRANCH_SELECTOR)? {
+            bail!("branch picker did not expand");
+        }
+        visual.dispatch_action(menu::SelectNext);
+        visual.dispatch_action(menu::Confirm);
+        visual.run_until_parked();
+        Ok(())
+    }
+
     pub fn prove_scene(
         scene: &WorkbenchScene,
         snapshot: &DebugRenderSnapshot,
@@ -591,9 +891,43 @@ impl AgentWorkbenchFrontDoor {
             probe.require_visible(WORKBENCH_COMPOSER_SELECTOR)?;
             probe.require_inside(WORKBENCH_COMPOSER_SELECTOR, WORKBENCH_ROOT_SELECTOR)?;
             probe.require_visible(WORKBENCH_TRANSCRIPT_SELECTOR)?;
+            probe.require_visible(WORKBENCH_IDENTITY_SELECTOR)?;
+            probe.require_inside(WORKBENCH_IDENTITY_SELECTOR, WORKBENCH_TOOLBAR_SELECTOR)?;
+            probe.require_interactive(WORKBENCH_REPOSITORY_SELECTOR)?;
+            if let Some(repository) = scene.repositories.first()
+                && let Some(worktree) = repository.worktrees.first()
+            {
+                probe.require_accessible(
+                    WORKBENCH_REPOSITORY_SELECTOR,
+                    "Button",
+                    &format!("Repository {}", worktree.id),
+                )?;
+                probe.require_interactive(WORKBENCH_WORKTREE_SELECTOR)?;
+                probe.require_accessible(
+                    WORKBENCH_WORKTREE_SELECTOR,
+                    "Button",
+                    &format!("Worktree {}", worktree.id),
+                )?;
+                if let Some(branch) = &worktree.branch {
+                    probe.require_interactive(WORKBENCH_BRANCH_SELECTOR)?;
+                    probe.require_accessible(
+                        WORKBENCH_BRANCH_SELECTOR,
+                        "Button",
+                        &format!("Branch {branch}"),
+                    )?;
+                }
+            } else {
+                probe.require_accessible(
+                    WORKBENCH_REPOSITORY_SELECTOR,
+                    "Button",
+                    "Choose a repository folder",
+                )?;
+                probe.require_absent(WORKBENCH_WORKTREE_SELECTOR)?;
+            }
         } else {
             probe.require_absent(WORKBENCH_COMPOSER_SELECTOR)?;
             probe.require_absent(WORKBENCH_TRANSCRIPT_SELECTOR)?;
+            probe.require_absent(WORKBENCH_IDENTITY_SELECTOR)?;
         }
 
         for surface in &scene.surfaces {
@@ -649,6 +983,7 @@ impl AgentWorkbenchFrontDoor {
 
         let Self {
             scene: _,
+            fs: _,
             window,
             workspace,
             panel,
@@ -809,7 +1144,55 @@ mod workbench_front_door_tests {
     use super::*;
     use omega_workbench_harness::{
         ProjectFixture, RepositoryFixture, ThreadFixture, ViewportFixture, WorktreeFixture,
+        WorktreeGitStateFixture,
     };
+    use workspace::PathList;
+
+    #[derive(Clone)]
+    struct PendingSessionConnection;
+
+    impl AgentConnection for PendingSessionConnection {
+        fn agent_id(&self) -> AgentId {
+            AgentId::new("pending-session-test")
+        }
+
+        fn telemetry_id(&self) -> gpui::SharedString {
+            "pending-session-test".into()
+        }
+
+        fn new_session(
+            self: Rc<Self>,
+            _project: Entity<Project>,
+            _work_dirs: PathList,
+            cx: &mut App,
+        ) -> Task<Result<Entity<acp_thread::AcpThread>>> {
+            cx.spawn(async move |_cx| {
+                futures::future::pending::<Result<Entity<acp_thread::AcpThread>>>().await
+            })
+        }
+
+        fn auth_methods(&self) -> &[acp::AuthMethod] {
+            &[]
+        }
+
+        fn authenticate(&self, _method: acp::AuthMethodId, _cx: &mut App) -> Task<Result<()>> {
+            Task::ready(Ok(()))
+        }
+
+        fn prompt(
+            &self,
+            _params: acp::PromptRequest,
+            _cx: &mut App,
+        ) -> Task<Result<acp::PromptResponse>> {
+            Task::ready(Ok(acp::PromptResponse::new(acp::StopReason::EndTurn)))
+        }
+
+        fn cancel(&self, _session_id: &acp::SessionId, _cx: &mut App) {}
+
+        fn into_any(self: Rc<Self>) -> Rc<dyn Any> {
+            self
+        }
+    }
 
     fn scene_with_thread(name: &str, width: u32, with_project: bool) -> WorkbenchScene {
         let mut scene = WorkbenchScene::empty(name, ViewportFixture::new(width, 720, 2000));
@@ -831,6 +1214,7 @@ mod workbench_front_door_tests {
                 worktrees: vec![WorktreeFixture {
                     id: "worktree-1".into(),
                     branch: Some("main".into()),
+                    git_state: None,
                     dirty_files: 0,
                     conflicts: 0,
                     ahead: 0,
@@ -891,6 +1275,1396 @@ mod workbench_front_door_tests {
     }
 
     #[gpui::test]
+    async fn thread_identity_uses_real_project_and_git_projection(cx: &mut TestAppContext) {
+        let scene = scene_with_thread("thread_identity_real_git", 1200, true);
+        let front_door = AgentWorkbenchFrontDoor::mount(scene.clone(), cx)
+            .await
+            .expect("Git identity fixture should mount");
+
+        let identity = front_door.identity(cx).expect("active identity");
+        assert_eq!(identity.phase, crate::thread_identity::IdentityPhase::Ready);
+        let selected = identity.selected.expect("selected repository");
+        assert_eq!(selected.repository_name.as_ref(), "worktree-1");
+        assert_eq!(selected.worktree_name.as_ref(), "worktree-1");
+        assert_eq!(
+            selected.branch,
+            crate::thread_identity::BranchIdentity::Branch("main".into())
+        );
+        assert_eq!(
+            front_door
+                .projection(cx)
+                .visible_projection()
+                .and_then(|visible| visible.binding),
+            Some(selected.binding),
+            "header identity and work-surface routing must share one binding"
+        );
+
+        let snapshot = front_door.snapshot(cx);
+        AgentWorkbenchFrontDoor::prove_scene(&scene, &snapshot)
+            .expect("identity scene should satisfy the shared semantic oracle");
+        let mut probe = SemanticProbe::new(&snapshot);
+        probe
+            .require_fully_visible(WORKBENCH_IDENTITY_SELECTOR)
+            .expect("identity strip should stay within the toolbar");
+        probe
+            .require_accessibility_property(
+                WORKBENCH_REPOSITORY_SELECTOR,
+                "description",
+                serde_json::Value::String(
+                    "Project worktree-1, repository worktree-1, worktree worktree-1 at /worktree-1, main"
+                        .into(),
+                ),
+            )
+            .expect("repository accessibility should retain the full identity");
+
+        front_door
+            .teardown(cx)
+            .expect("identity scene should tear down");
+    }
+
+    #[gpui::test]
+    async fn linked_worktrees_share_repository_identity_and_select_independently(
+        cx: &mut TestAppContext,
+    ) {
+        let mut scene = scene_with_thread("thread_identity_linked_worktrees", 1200, true);
+        scene.repositories[0].worktrees.push(WorktreeFixture {
+            id: "worktree-2".into(),
+            branch: Some("main".into()),
+            git_state: None,
+            dirty_files: 0,
+            conflicts: 0,
+            ahead: 0,
+            behind: 0,
+        });
+        let front_door = AgentWorkbenchFrontDoor::mount(scene, cx)
+            .await
+            .expect("linked-worktree fixture should mount");
+        let identity = front_door.identity(cx).expect("linked-worktree identity");
+        assert_eq!(identity.candidates.len(), 2);
+        assert_eq!(
+            identity.candidates[0].binding.repository_id,
+            identity.candidates[1].binding.repository_id,
+            "linked worktrees must project one repository identity"
+        );
+        assert_ne!(
+            identity.candidates[0].binding.worktree_id,
+            identity.candidates[1].binding.worktree_id
+        );
+
+        front_door
+            .select_worktree_picker_row(1, cx)
+            .expect("select the linked worktree through the rendered worktree picker");
+        assert_eq!(
+            front_door
+                .identity(cx)
+                .and_then(|identity| identity.selected)
+                .map(|selected| selected.worktree_name),
+            Some("worktree-2".into())
+        );
+
+        front_door
+            .teardown(cx)
+            .expect("linked-worktree scene should tear down");
+    }
+
+    #[gpui::test]
+    async fn loading_thread_projects_its_desired_worktree_before_session_creation(
+        cx: &mut TestAppContext,
+    ) {
+        let mut scene = scene_with_thread("thread_identity_loading_desired_worktree", 1200, true);
+        scene.repositories[0].worktrees.push(WorktreeFixture {
+            id: "worktree-2".into(),
+            branch: Some("main".into()),
+            git_state: None,
+            dirty_files: 0,
+            conflicts: 0,
+            ahead: 0,
+            behind: 0,
+        });
+        let front_door = AgentWorkbenchFrontDoor::mount(scene, cx)
+            .await
+            .expect("loading worktree fixture should mount");
+        let mut visual = VisualTestContext::from_window(front_door.window, cx);
+        front_door
+            .panel
+            .update_in(&mut visual, |panel, window, cx| {
+                panel.open_external_thread_with_server_and_work_dirs(
+                    Rc::new(StubAgentServer::new(PendingSessionConnection)),
+                    PathList::new(&[std::path::PathBuf::from("/worktree-2")]),
+                    window,
+                    cx,
+                );
+            });
+        visual.run_until_parked();
+
+        assert!(
+            front_door.panel.read_with(&visual, |panel, cx| {
+                panel
+                    .active_thread_view_for_tests()
+                    .is_some_and(|view| view.read(cx).is_loading())
+            }),
+            "the fixture must still be waiting for session creation"
+        );
+        assert_eq!(
+            front_door
+                .identity(cx)
+                .and_then(|identity| identity.selected)
+                .map(|selected| selected.worktree_name),
+            Some("worktree-2".into()),
+            "desired work dirs, not lexicographic project order, must select the loading identity"
+        );
+
+        front_door
+            .teardown(cx)
+            .expect("loading worktree scene should tear down");
+    }
+
+    #[gpui::test]
+    async fn no_git_and_unborn_worktrees_are_projected_from_real_project_scans(
+        cx: &mut TestAppContext,
+    ) {
+        let mut scene = scene_with_thread("thread_identity_no_git_unborn", 1200, true);
+        let no_git = &mut scene.repositories[0].worktrees[0];
+        no_git.branch = None;
+        no_git.git_state = Some(WorktreeGitStateFixture::NoGit);
+        scene.repositories.push(RepositoryFixture {
+            id: "repository-2".into(),
+            project_id: "project-1".into(),
+            worktrees: vec![WorktreeFixture {
+                id: "worktree-2".into(),
+                branch: Some("main".into()),
+                git_state: Some(WorktreeGitStateFixture::Unborn),
+                dirty_files: 0,
+                conflicts: 0,
+                ahead: 0,
+                behind: 0,
+            }],
+        });
+        let front_door = AgentWorkbenchFrontDoor::mount(scene, cx)
+            .await
+            .expect("no-Git and unborn fixture should mount");
+        assert!(matches!(
+            front_door
+                .identity(cx)
+                .and_then(|identity| identity.selected)
+                .map(|selected| selected.branch),
+            Some(crate::thread_identity::BranchIdentity::NoGit)
+        ));
+
+        front_door
+            .select_identity_picker_row(1, cx)
+            .expect("select the unborn repository through the rendered picker");
+        assert!(matches!(
+            front_door
+                .identity(cx)
+                .and_then(|identity| identity.selected)
+                .map(|selected| selected.branch),
+            Some(crate::thread_identity::BranchIdentity::Unborn)
+        ));
+
+        front_door
+            .teardown(cx)
+            .expect("no-Git and unborn scene should tear down");
+    }
+
+    #[gpui::test]
+    async fn detached_head_is_rendered_as_a_typed_branch_state(cx: &mut TestAppContext) {
+        let mut scene = scene_with_thread("thread_identity_detached", 1200, true);
+        scene.repositories[0].worktrees[0].branch = None;
+        let front_door = AgentWorkbenchFrontDoor::mount(scene, cx)
+            .await
+            .expect("detached fixture should mount");
+
+        assert_eq!(
+            front_door
+                .identity(cx)
+                .and_then(|identity| identity.selected)
+                .map(|selected| selected.branch),
+            Some(crate::thread_identity::BranchIdentity::Detached(
+                "11111111".into()
+            ))
+        );
+        let snapshot = front_door.snapshot(cx);
+        let mut probe = SemanticProbe::new(&snapshot);
+        probe
+            .require_accessible(
+                WORKBENCH_BRANCH_SELECTOR,
+                "Button",
+                "Branch Detached at 11111111",
+            )
+            .expect("detached HEAD must be explicit in the rendered header");
+        probe
+            .require_interactive(WORKBENCH_BRANCH_SELECTOR)
+            .expect("detached HEAD should still allow choosing a named branch");
+
+        front_door
+            .teardown(cx)
+            .expect("detached workbench should tear down");
+    }
+
+    #[gpui::test]
+    async fn long_identity_segments_remain_independently_visible_at_desktop_width(
+        cx: &mut TestAppContext,
+    ) {
+        let mut scene = scene_with_thread("thread_identity_long_desktop", 1200, true);
+        let long_worktree_id: String =
+            "worktree-with-a-deliberately-long-name-that-must-not-cover-neighboring-controls"
+                .into();
+        scene.repositories[0].worktrees[0].id = long_worktree_id.clone();
+        scene.threads[0].worktree_id = Some(long_worktree_id);
+        let front_door = AgentWorkbenchFrontDoor::mount(scene, cx)
+            .await
+            .expect("long desktop identity fixture should mount");
+
+        let snapshot = front_door.snapshot(cx);
+        let mut probe = SemanticProbe::new(&snapshot);
+        for selector in [
+            WORKBENCH_REPOSITORY_SELECTOR,
+            WORKBENCH_WORKTREE_SELECTOR,
+            WORKBENCH_BRANCH_SELECTOR,
+        ] {
+            probe
+                .require_fully_visible(selector)
+                .unwrap_or_else(|error| {
+                    panic!("{selector} must remain independently visible: {error:#}")
+                });
+        }
+        let repository_bounds = snapshot
+            .bounds(WORKBENCH_REPOSITORY_SELECTOR)
+            .expect("repository segment bounds");
+        let worktree_bounds = snapshot
+            .bounds(WORKBENCH_WORKTREE_SELECTOR)
+            .expect("worktree segment bounds");
+        let branch_bounds = snapshot
+            .bounds(WORKBENCH_BRANCH_SELECTOR)
+            .expect("branch segment bounds");
+        assert!(
+            repository_bounds.origin.x < worktree_bounds.origin.x
+                && worktree_bounds.origin.x < branch_bounds.origin.x,
+            "identity segments must render in repository, worktree, branch order"
+        );
+        probe
+            .require_accessibility_property(
+                WORKBENCH_WORKTREE_SELECTOR,
+                "description",
+                serde_json::Value::String(
+                    "Worktree path \
+                     /worktree-with-a-deliberately-long-name-that-must-not-cover-neighboring-controls"
+                        .into(),
+                ),
+            )
+            .expect("truncation must preserve the full worktree path for accessibility");
+
+        front_door
+            .teardown(cx)
+            .expect("long desktop identity scene should tear down");
+    }
+
+    #[gpui::test(iterations = 16)]
+    async fn picker_changes_repository_atomically_and_rejects_stale_completion(
+        cx: &mut TestAppContext,
+    ) {
+        let mut scene = scene_with_thread("thread_identity_picker", 1200, true);
+        scene.repositories.push(RepositoryFixture {
+            id: "repository-2".into(),
+            project_id: "project-1".into(),
+            worktrees: vec![WorktreeFixture {
+                id: "worktree-2".into(),
+                branch: Some("main".into()),
+                git_state: None,
+                dirty_files: 0,
+                conflicts: 0,
+                ahead: 0,
+                behind: 0,
+            }],
+        });
+        let front_door = AgentWorkbenchFrontDoor::mount(scene, cx)
+            .await
+            .expect("multi-repository fixture should mount");
+        front_door.dispatch_action(crate::workbench_shell::SelectGit, cx);
+        let before = front_door
+            .projection(cx)
+            .visible_projection()
+            .expect("visible workbench before selection");
+        let load = front_door
+            .begin_surface_load(
+                "identity-switch-load",
+                omega_workbench_state::WorkSurface::Git,
+                cx,
+            )
+            .expect("begin old repository load");
+
+        front_door
+            .select_identity_picker_row(1, cx)
+            .expect("choose the second repository through the rendered picker");
+
+        let after = front_door
+            .projection(cx)
+            .visible_projection()
+            .expect("visible workbench after selection");
+        let identity = front_door.identity(cx).expect("selected identity");
+        assert_ne!(after.binding, before.binding);
+        assert_eq!(after.generation, before.generation + 1);
+        assert_eq!(
+            identity
+                .selected
+                .as_ref()
+                .map(|candidate| candidate.binding.clone()),
+            after.binding,
+            "the picker, header, and downstream routing must commit one binding"
+        );
+        assert_eq!(
+            front_door
+                .complete_surface_load(load, crate::workbench_shell::SurfaceLoadOutcome::Ready, cx,)
+                .expect("complete captured old load"),
+            omega_workbench_state::TransitionEffect::StaleCompletionIgnored
+        );
+
+        front_door
+            .teardown(cx)
+            .expect("multi-repository scene should tear down");
+    }
+
+    #[gpui::test]
+    async fn rejected_agent_retarget_leaves_binding_generation_and_pending_load_unchanged(
+        cx: &mut TestAppContext,
+    ) {
+        let mut scene = scene_with_thread("thread_identity_retarget_rejected", 1200, true);
+        scene.repositories.push(RepositoryFixture {
+            id: "repository-2".into(),
+            project_id: "project-1".into(),
+            worktrees: vec![WorktreeFixture {
+                id: "worktree-2".into(),
+                branch: Some("main".into()),
+                git_state: None,
+                dirty_files: 0,
+                conflicts: 0,
+                ahead: 0,
+                behind: 0,
+            }],
+        });
+        let front_door = AgentWorkbenchFrontDoor::mount(scene, cx)
+            .await
+            .expect("retarget rejection fixture should mount");
+        front_door.open_external_thread(
+            StubAgentConnection::new()
+                .with_work_dir_update_error("server rejected working directory"),
+            cx,
+        );
+        front_door.dispatch_action(crate::workbench_shell::SelectGit, cx);
+        let before = front_door
+            .projection(cx)
+            .visible_projection()
+            .expect("visible workbench before rejected selection");
+        let load = front_door
+            .begin_surface_load(
+                "retarget-rejection-load",
+                omega_workbench_state::WorkSurface::Git,
+                cx,
+            )
+            .expect("begin load under the original binding");
+
+        front_door
+            .select_identity_picker_row(1, cx)
+            .expect("invoke the second repository through the rendered picker");
+
+        let after = front_door
+            .projection(cx)
+            .visible_projection()
+            .expect("visible workbench after rejected selection");
+        assert_eq!(after.binding, before.binding);
+        assert_eq!(after.generation, before.generation);
+        assert!(matches!(
+            front_door.identity(cx).map(|identity| identity.phase),
+            Some(crate::thread_identity::IdentityPhase::Error(_))
+        ));
+        assert_eq!(
+            front_door
+                .complete_surface_load(load, crate::workbench_shell::SurfaceLoadOutcome::Ready, cx)
+                .expect("original-target load should remain valid"),
+            omega_workbench_state::TransitionEffect::Applied
+        );
+
+        front_door
+            .teardown(cx)
+            .expect("retarget rejection scene should tear down");
+    }
+
+    #[gpui::test]
+    async fn reselecting_target_reconciles_inconsistent_sessions_and_advances_epoch(
+        cx: &mut TestAppContext,
+    ) {
+        let scene = scene_with_thread("thread_identity_reconcile_inconsistent", 1200, true);
+        let front_door = AgentWorkbenchFrontDoor::mount(scene, cx)
+            .await
+            .expect("inconsistent reconciliation fixture should mount");
+        front_door.open_external_thread(StubAgentConnection::new(), cx);
+        let before = front_door
+            .projection(cx)
+            .visible_projection()
+            .expect("projection before inconsistency");
+        front_door
+            .mark_identity_inconsistent("Thread working directories disagree", cx)
+            .expect("inject the typed result of a failed rollback");
+
+        let inconsistent = front_door.identity(cx).expect("inconsistent identity");
+        assert_eq!(
+            inconsistent.phase,
+            crate::thread_identity::IdentityPhase::Inconsistent(
+                "Thread working directories disagree".into()
+            )
+        );
+        let snapshot = front_door.snapshot(cx);
+        let mut probe = SemanticProbe::new(&snapshot);
+        probe
+            .require_interactive(WORKBENCH_REPOSITORY_SELECTOR)
+            .expect("target selection is the explicit reconciliation action");
+        for surface in [
+            omega_workbench_state::WorkSurface::Files,
+            omega_workbench_state::WorkSurface::Search,
+            omega_workbench_state::WorkSurface::Review,
+            omega_workbench_state::WorkSurface::Git,
+            omega_workbench_state::WorkSurface::Terminal,
+        ] {
+            assert!(
+                !front_door
+                    .capability(surface, cx)
+                    .expect("registered repository-bound capability")
+                    .availability
+                    .is_available(),
+                "{surface:?} must remain disabled until reconciliation succeeds"
+            );
+        }
+
+        front_door
+            .select_identity_picker_row(0, cx)
+            .expect("reselect the authoritative target");
+        assert_eq!(
+            front_door.identity(cx).map(|identity| identity.phase),
+            Some(crate::thread_identity::IdentityPhase::Ready)
+        );
+        let after = front_door
+            .projection(cx)
+            .visible_projection()
+            .expect("projection after reconciliation");
+        assert_eq!(after.binding, before.binding);
+        assert_eq!(after.generation, before.generation + 1);
+        assert!(
+            front_door
+                .capability(omega_workbench_state::WorkSurface::Git, cx)
+                .expect("Git capability after reconciliation")
+                .availability
+                .is_available()
+        );
+
+        front_door
+            .teardown(cx)
+            .expect("inconsistent reconciliation workbench should tear down");
+    }
+
+    #[gpui::test]
+    async fn partial_retarget_with_failed_rollback_projects_inconsistent_authority(
+        cx: &mut TestAppContext,
+    ) {
+        let mut scene = scene_with_thread("thread_identity_partial_rollback", 1200, true);
+        scene.repositories.push(RepositoryFixture {
+            id: "repository-2".into(),
+            project_id: "project-1".into(),
+            worktrees: vec![WorktreeFixture {
+                id: "worktree-2".into(),
+                branch: Some("main".into()),
+                git_state: None,
+                dirty_files: 0,
+                conflicts: 0,
+                ahead: 0,
+                behind: 0,
+            }],
+        });
+        let front_door = AgentWorkbenchFrontDoor::mount(scene, cx)
+            .await
+            .expect("partial rollback fixture should mount");
+        let first_connection = StubAgentConnection::new();
+        first_connection.set_work_dir_update_results(vec![
+            None,
+            Some("first session rejected rollback".into()),
+        ]);
+        front_door.open_external_thread(first_connection, cx);
+        let before = front_door
+            .projection(cx)
+            .visible_projection()
+            .expect("projection before partial retarget");
+
+        let second_connection = StubAgentConnection::new();
+        second_connection
+            .set_work_dir_update_results(vec![Some("second session rejected target".into())]);
+        let conversation_view = front_door
+            .panel
+            .read_with(cx, |panel, _| panel.active_conversation_view().cloned())
+            .expect("active conversation");
+        let project = front_door
+            .workspace
+            .read_with(cx, |workspace, _| workspace.project().clone());
+        let work_dirs = conversation_view.read_with(cx, |conversation_view, _| {
+            conversation_view.work_dirs().clone()
+        });
+        let second_connection: Rc<dyn AgentConnection> = Rc::new(second_connection);
+        let mut visual = VisualTestContext::from_window(front_door.window, cx);
+        let second_thread = visual
+            .update(|_window, cx| {
+                second_connection
+                    .clone()
+                    .new_session(project, work_dirs, cx)
+            })
+            .await
+            .expect("second session should open");
+        conversation_view
+            .update(&mut visual, |conversation_view, cx| {
+                conversation_view.register_acp_thread_for_tests(second_thread, cx)
+            })
+            .expect("register second session");
+        visual.run_until_parked();
+        drop(visual);
+
+        front_door
+            .select_identity_picker_row(1, cx)
+            .expect("retarget both sessions through the rendered picker");
+        let identity = front_door.identity(cx).expect("inconsistent identity");
+        let crate::thread_identity::IdentityPhase::Inconsistent(message) = identity.phase else {
+            panic!("partial rollback must project an inconsistent identity phase");
+        };
+        assert!(message.contains("second session rejected target"));
+        assert!(message.contains("first session rejected rollback"));
+        let after = front_door
+            .projection(cx)
+            .visible_projection()
+            .expect("projection after partial rollback");
+        assert_eq!(after.binding, before.binding);
+        assert_eq!(after.generation, before.generation);
+        assert!(
+            !front_door
+                .capability(omega_workbench_state::WorkSurface::Terminal, cx)
+                .expect("Terminal capability")
+                .availability
+                .is_available(),
+            "repository-bound actions must stop when sessions disagree"
+        );
+
+        front_door
+            .teardown(cx)
+            .expect("partial rollback workbench should tear down");
+    }
+
+    #[gpui::test]
+    async fn generating_thread_disables_picker_button_and_keyboard_action(cx: &mut TestAppContext) {
+        let mut scene = scene_with_thread("thread_identity_busy_retarget", 1200, true);
+        scene.repositories.push(RepositoryFixture {
+            id: "repository-2".into(),
+            project_id: "project-1".into(),
+            worktrees: vec![WorktreeFixture {
+                id: "worktree-2".into(),
+                branch: Some("main".into()),
+                git_state: None,
+                dirty_files: 0,
+                conflicts: 0,
+                ahead: 0,
+                behind: 0,
+            }],
+        });
+        let front_door = AgentWorkbenchFrontDoor::mount(scene, cx)
+            .await
+            .expect("busy retarget fixture should mount");
+        front_door.open_external_thread(StubAgentConnection::new(), cx);
+        let before = front_door
+            .projection(cx)
+            .visible_projection()
+            .expect("visible workbench before the active turn");
+        let mut visual = VisualTestContext::from_window(front_door.window, cx);
+        send_message(&front_door.panel, &mut visual);
+
+        let snapshot = visual.debug_render_snapshot();
+        let mut probe = SemanticProbe::new(&snapshot);
+        probe
+            .require_accessibility_property(
+                WORKBENCH_REPOSITORY_SELECTOR,
+                "disabled",
+                serde_json::Value::Bool(true),
+            )
+            .expect("repository picker should be disabled during a turn");
+        probe
+            .require_accessibility_property(
+                WORKBENCH_BRANCH_SELECTOR,
+                "disabled",
+                serde_json::Value::Bool(true),
+            )
+            .expect("branch picker should be disabled during a turn");
+        visual.dispatch_action(crate::workbench_shell::ToggleRepositoryPicker);
+        visual.dispatch_action(crate::workbench_shell::ToggleBranchPicker);
+        visual.run_until_parked();
+        assert!(
+            !accessibility_expanded(
+                &visual.debug_render_snapshot(),
+                WORKBENCH_REPOSITORY_SELECTOR,
+            )
+            .expect("read repository picker expansion"),
+            "keyboard action must enforce the same unavailable predicate as the button"
+        );
+        assert!(
+            !accessibility_expanded(&visual.debug_render_snapshot(), WORKBENCH_BRANCH_SELECTOR,)
+                .expect("read branch picker expansion"),
+            "branch keyboard action must enforce the same busy predicate as the button"
+        );
+        let after = front_door
+            .projection(cx)
+            .visible_projection()
+            .expect("visible workbench during the active turn");
+        assert_eq!(after.binding, before.binding);
+        assert_eq!(after.generation, before.generation);
+
+        drop(visual);
+        front_door
+            .teardown(cx)
+            .expect("busy retarget scene should tear down");
+    }
+
+    #[gpui::test(iterations = 16)]
+    async fn branch_picker_opened_while_idle_cannot_checkout_during_a_turn(
+        cx: &mut TestAppContext,
+    ) {
+        let scene = scene_with_thread("thread_identity_busy_branch", 1200, true);
+        let front_door = AgentWorkbenchFrontDoor::mount(scene, cx)
+            .await
+            .expect("busy branch fixture should mount");
+        front_door.open_external_thread(StubAgentConnection::new(), cx);
+        let mut visual = VisualTestContext::from_window(front_door.window, cx);
+        visual
+            .simulate_click_selector(WORKBENCH_BRANCH_SELECTOR)
+            .expect("open branch picker while the thread is idle");
+        visual.run_until_parked();
+        let stale_branch_menu = front_door
+            .panel
+            .read_with(&visual, |panel, _cx| {
+                panel.workbench_branch_menu_for_tests()
+            })
+            .expect("idle branch picker should be deployed");
+        send_message(&front_door.panel, &mut visual);
+
+        stale_branch_menu.update_in(&mut visual, |branch_menu, window, cx| {
+            branch_menu.focus_handle(cx).focus(window, cx);
+            window.dispatch_action(menu::SelectNext.boxed_clone(), cx);
+            window.dispatch_action(menu::Confirm.boxed_clone(), cx);
+        });
+        visual.run_until_parked();
+
+        assert_eq!(
+            front_door
+                .identity(cx)
+                .and_then(|identity| identity.selected)
+                .map(|selected| selected.branch),
+            Some(crate::thread_identity::BranchIdentity::Branch(
+                "main".into()
+            )),
+            "confirm-time busy validation must reject a stale branch menu"
+        );
+
+        front_door
+            .teardown(cx)
+            .expect("busy branch scene should tear down");
+    }
+
+    #[gpui::test(iterations = 16)]
+    async fn pending_branch_checkout_blocks_prompts_and_identity_mutations(
+        cx: &mut TestAppContext,
+    ) {
+        let scene = scene_with_thread("thread_identity_pending_branch", 1200, true);
+        let front_door = AgentWorkbenchFrontDoor::mount(scene, cx)
+            .await
+            .expect("pending branch fixture should mount");
+        front_door.open_external_thread(StubAgentConnection::new(), cx);
+        let worktree_path = front_door
+            .identity(cx)
+            .and_then(|identity| identity.selected)
+            .expect("selected identity")
+            .worktree_abs_path;
+        front_door.fs.set_simulated_change_branch_delay(
+            &worktree_path.join(".git"),
+            Some(Duration::from_secs(1)),
+        );
+        let mut visual = VisualTestContext::from_window(front_door.window, cx);
+        let thread_view = front_door
+            .panel
+            .read_with(&visual, |panel, cx| {
+                panel
+                    .active_conversation_view()
+                    .and_then(|view| view.read(cx).root_thread_view())
+            })
+            .expect("active thread view");
+        let message_editor =
+            thread_view.read_with(&visual, |thread_view, _| thread_view.message_editor.clone());
+        message_editor.update_in(&mut visual, |message_editor, window, cx| {
+            message_editor.set_text("prompt held during checkout", window, cx);
+        });
+
+        visual
+            .simulate_click_selector(WORKBENCH_BRANCH_SELECTOR)
+            .expect("open branch picker");
+        visual.dispatch_action(menu::SelectNext);
+        visual.dispatch_action(menu::Confirm);
+
+        let pending_snapshot = visual.debug_render_snapshot();
+        let mut probe = SemanticProbe::new(&pending_snapshot);
+        for selector in [
+            WORKBENCH_REPOSITORY_SELECTOR,
+            WORKBENCH_WORKTREE_SELECTOR,
+            WORKBENCH_BRANCH_SELECTOR,
+        ] {
+            probe
+                .require_accessibility_property(selector, "disabled", serde_json::Value::Bool(true))
+                .expect("branch checkout must gate every identity mutation");
+        }
+        thread_view.update_in(&mut visual, |thread_view, window, cx| {
+            thread_view.send(window, cx);
+        });
+        assert_eq!(
+            thread_view.read_with(&visual, |thread_view, cx| {
+                thread_view.thread.read(cx).status()
+            }),
+            acp_thread::ThreadStatus::Idle,
+            "a prompt must not start while branch checkout is pending"
+        );
+        assert_eq!(
+            message_editor.read_with(&visual, |message_editor, cx| message_editor.text(cx)),
+            "prompt held during checkout",
+            "the blocked prompt must remain in the composer"
+        );
+
+        visual.executor().advance_clock(Duration::from_secs(1));
+        visual.run_until_parked();
+        front_door
+            .fs
+            .set_simulated_change_branch_delay(&worktree_path.join(".git"), None);
+        assert_eq!(
+            front_door.identity(&visual).map(|identity| identity.phase),
+            Some(crate::thread_identity::IdentityPhase::Ready)
+        );
+        thread_view.update_in(&mut visual, |thread_view, window, cx| {
+            thread_view.send(window, cx);
+        });
+        visual.run_until_parked();
+        assert_ne!(
+            thread_view.read_with(&visual, |thread_view, cx| {
+                thread_view.thread.read(cx).status()
+            }),
+            acp_thread::ThreadStatus::Idle,
+            "the held prompt should send after checkout releases its gate"
+        );
+
+        drop(visual);
+        front_door
+            .teardown(cx)
+            .expect("pending branch workbench should tear down");
+    }
+
+    #[gpui::test]
+    async fn picker_opened_for_another_thread_cannot_retarget_the_active_thread(
+        cx: &mut TestAppContext,
+    ) {
+        let mut scene = scene_with_thread("thread_identity_stale_picker", 1200, true);
+        scene.repositories.push(RepositoryFixture {
+            id: "repository-2".into(),
+            project_id: "project-1".into(),
+            worktrees: vec![WorktreeFixture {
+                id: "worktree-2".into(),
+                branch: Some("main".into()),
+                git_state: None,
+                dirty_files: 0,
+                conflicts: 0,
+                ahead: 0,
+                behind: 0,
+            }],
+        });
+        let front_door = AgentWorkbenchFrontDoor::mount(scene, cx)
+            .await
+            .expect("stale picker fixture should mount");
+        let stale_menu = {
+            let mut visual = VisualTestContext::from_window(front_door.window, cx);
+            visual
+                .simulate_click_selector(WORKBENCH_REPOSITORY_SELECTOR)
+                .expect("open repository picker for thread A");
+            visual.run_until_parked();
+            front_door
+                .panel
+                .read_with(&visual, |panel, _cx| {
+                    panel.workbench_repository_menu_for_tests()
+                })
+                .expect("thread A repository menu")
+        };
+
+        front_door.open_external_thread(StubAgentConnection::new(), cx);
+        let before = front_door
+            .projection(cx)
+            .visible_projection()
+            .expect("thread B projection before stale action");
+        let mut visual = VisualTestContext::from_window(front_door.window, cx);
+        stale_menu.update_in(&mut visual, |menu, window, cx| {
+            menu.select_first(&menu::SelectFirst, window, cx);
+            menu.select_next(&menu::SelectNext, window, cx);
+            menu.confirm(&menu::Confirm, window, cx);
+        });
+        visual.run_until_parked();
+
+        let after = front_door
+            .projection(cx)
+            .visible_projection()
+            .expect("thread B projection after stale action");
+        assert_eq!(after.thread_id, before.thread_id);
+        assert_eq!(after.binding, before.binding);
+        assert_eq!(after.generation, before.generation);
+
+        front_door
+            .teardown(cx)
+            .expect("stale picker scene should tear down");
+    }
+
+    #[gpui::test]
+    async fn git_indicators_and_git_rail_badge_share_one_summary(cx: &mut TestAppContext) {
+        let mut scene = scene_with_thread("thread_identity_git_summary", 1200, true);
+        let worktree = &mut scene.repositories[0].worktrees[0];
+        worktree.dirty_files = 3;
+        worktree.conflicts = 1;
+        worktree.ahead = 2;
+        worktree.behind = 1;
+        scene
+            .surfaces
+            .iter_mut()
+            .find(|surface| surface.id == WorkSurfaceId::Git)
+            .expect("Git surface fixture")
+            .badge = Some(3);
+        let front_door = AgentWorkbenchFrontDoor::mount(scene, cx)
+            .await
+            .expect("Git summary fixture should mount");
+
+        let git = front_door
+            .identity(cx)
+            .and_then(|identity| identity.selected)
+            .expect("selected identity")
+            .git;
+        assert_eq!(git.dirty_files, 3);
+        assert_eq!(git.conflicts, 1);
+        assert_eq!(git.ahead, 2);
+        assert_eq!(git.behind, 1);
+        let capability = front_door
+            .capability(omega_workbench_state::WorkSurface::Git, cx)
+            .expect("Git capability");
+        assert_eq!(
+            capability.badge,
+            Some(crate::workbench_shell::SurfaceBadge::Attention {
+                tone: crate::workbench_shell::BadgeTone::Error,
+                label: "3 changed, 1 conflicted, 2 ahead, 1 behind".into(),
+            })
+        );
+
+        let snapshot = front_door.snapshot(cx);
+        let mut probe = SemanticProbe::new(&snapshot);
+        for selector in [
+            "omega.workbench.identity.indicator.dirty",
+            "omega.workbench.identity.indicator.conflict",
+            "omega.workbench.identity.indicator.ahead",
+            "omega.workbench.identity.indicator.behind",
+            WorkSurfaceId::Git.badge_selector(),
+        ] {
+            probe
+                .require_visible(selector)
+                .unwrap_or_else(|error| panic!("{selector} should be rendered: {error:#}"));
+        }
+
+        front_door
+            .teardown(cx)
+            .expect("Git summary scene should tear down");
+    }
+
+    #[gpui::test]
+    async fn ahead_only_git_badge_reports_commits_instead_of_zero_files(cx: &mut TestAppContext) {
+        let mut scene = scene_with_thread("thread_identity_ahead_only", 1200, true);
+        let worktree = &mut scene.repositories[0].worktrees[0];
+        worktree.ahead = 2;
+        worktree.behind = 1;
+        let front_door = AgentWorkbenchFrontDoor::mount(scene, cx)
+            .await
+            .expect("ahead-only fixture should mount");
+
+        assert_eq!(
+            front_door
+                .capability(omega_workbench_state::WorkSurface::Git, cx)
+                .expect("Git capability")
+                .badge,
+            Some(crate::workbench_shell::SurfaceBadge::Count {
+                count: 3,
+                tone: crate::workbench_shell::BadgeTone::Warning,
+                label: "0 changed, 0 conflicted, 2 ahead, 1 behind".into(),
+            })
+        );
+
+        front_door
+            .teardown(cx)
+            .expect("ahead-only scene should tear down");
+    }
+
+    #[gpui::test]
+    async fn removed_selected_worktree_stays_missing_and_falls_back(cx: &mut TestAppContext) {
+        let mut scene = scene_with_thread("thread_identity_removed", 1200, true);
+        scene.repositories.push(RepositoryFixture {
+            id: "repository-2".into(),
+            project_id: "project-1".into(),
+            worktrees: vec![WorktreeFixture {
+                id: "worktree-2".into(),
+                branch: Some("main".into()),
+                git_state: None,
+                dirty_files: 0,
+                conflicts: 0,
+                ahead: 0,
+                behind: 0,
+            }],
+        });
+        let front_door = AgentWorkbenchFrontDoor::mount(scene, cx)
+            .await
+            .expect("removal fixture should mount");
+        front_door
+            .select_identity_picker_row(1, cx)
+            .expect("select second worktree");
+        let selected = front_door
+            .identity(cx)
+            .and_then(|identity| identity.selected)
+            .expect("selected identity before removal");
+        front_door.dispatch_action(crate::workbench_shell::SelectGit, cx);
+
+        front_door
+            .remove_worktree(&selected.worktree_abs_path, cx)
+            .expect("remove selected worktree");
+
+        let identity = front_door.identity(cx).expect("missing identity state");
+        assert_eq!(
+            identity.phase,
+            crate::thread_identity::IdentityPhase::Missing
+        );
+        assert_eq!(
+            identity
+                .selected
+                .as_ref()
+                .map(|candidate| &candidate.binding),
+            Some(&selected.binding),
+            "the missing state should retain the last-known label and identity"
+        );
+        assert_eq!(identity.binding(), None);
+        let missing_selection_revision = identity.selection_revision;
+        let visible = front_door
+            .projection(cx)
+            .visible_projection()
+            .expect("visible workbench after removal");
+        assert_eq!(visible.binding, None);
+        assert_eq!(
+            visible.effective_surface,
+            Some(omega_workbench_state::WorkSurface::Plan)
+        );
+        assert!(
+            !visible.dock_open,
+            "incompatible selected surface should collapse after removal"
+        );
+        assert_eq!(
+            front_door
+                .capability(omega_workbench_state::WorkSurface::Git, cx)
+                .and_then(|capability| capability.availability.reason().cloned()),
+            Some("The selected worktree is missing".into())
+        );
+        let missing_generation = visible.generation;
+        let snapshot = front_door.snapshot(cx);
+        let identity_after_render = front_door
+            .identity(cx)
+            .expect("missing identity should survive rendering");
+        assert_eq!(
+            identity_after_render.phase,
+            crate::thread_identity::IdentityPhase::Missing
+        );
+        front_door.snapshot(cx);
+        assert_eq!(
+            front_door
+                .identity(cx)
+                .expect("missing identity after repeated render")
+                .selection_revision,
+            missing_selection_revision,
+            "unchanged Missing observations must not manufacture selection revisions"
+        );
+        assert!(
+            identity_after_render.selected.is_some(),
+            "missing identity should keep its last-known selected label"
+        );
+        assert_eq!(
+            front_door
+                .projection(cx)
+                .visible_projection()
+                .and_then(|visible| visible.binding),
+            None
+        );
+        SemanticProbe::new(&snapshot)
+            .require_interactive(WORKBENCH_REPOSITORY_SELECTOR)
+            .expect("the retained identity must expose the repository picker for recovery");
+
+        front_door
+            .select_identity_picker_row(0, cx)
+            .expect("recover the missing identity through the rendered repository picker");
+        let recovered_identity = front_door.identity(cx).expect("recovered identity state");
+        assert_eq!(
+            recovered_identity.phase,
+            crate::thread_identity::IdentityPhase::Ready
+        );
+        let recovered = recovered_identity
+            .selected
+            .expect("replacement identity should be selected");
+        assert_ne!(recovered.binding, selected.binding);
+        let recovered_visible = front_door
+            .projection(cx)
+            .visible_projection()
+            .expect("visible workbench after recovery");
+        assert_eq!(recovered_visible.binding, Some(recovered.binding));
+        assert_eq!(recovered_visible.generation, missing_generation + 1);
+
+        front_door
+            .teardown(cx)
+            .expect("removed-worktree scene should tear down");
+    }
+
+    #[gpui::test]
+    async fn failed_missing_recovery_is_visible_without_reviving_removed_binding(
+        cx: &mut TestAppContext,
+    ) {
+        let mut scene = scene_with_thread("thread_identity_failed_missing_recovery", 1200, true);
+        scene.repositories.push(RepositoryFixture {
+            id: "repository-2".into(),
+            project_id: "project-1".into(),
+            worktrees: vec![WorktreeFixture {
+                id: "worktree-2".into(),
+                branch: Some("main".into()),
+                git_state: None,
+                dirty_files: 0,
+                conflicts: 0,
+                ahead: 0,
+                behind: 0,
+            }],
+        });
+        let front_door = AgentWorkbenchFrontDoor::mount(scene, cx)
+            .await
+            .expect("failed recovery fixture should mount");
+        let connection = StubAgentConnection::new();
+        front_door.open_external_thread(connection.clone(), cx);
+        front_door
+            .select_identity_picker_row(1, cx)
+            .expect("select the worktree that will disappear");
+        let removed = front_door
+            .identity(cx)
+            .and_then(|identity| identity.selected)
+            .expect("selected identity before removal");
+        front_door
+            .remove_worktree(&removed.worktree_abs_path, cx)
+            .expect("remove selected worktree");
+        let missing = front_door
+            .projection(cx)
+            .visible_projection()
+            .expect("missing projection");
+        assert_eq!(missing.binding, None);
+
+        connection.set_work_dir_update_error("server rejected replacement worktree");
+        front_door
+            .select_identity_picker_row(0, cx)
+            .expect("attempt recovery through the rendered picker");
+
+        let identity = front_door.identity(cx).expect("failed recovery identity");
+        assert_eq!(
+            identity.phase,
+            crate::thread_identity::IdentityPhase::Error(
+                "server rejected replacement worktree".into()
+            )
+        );
+        assert_eq!(identity.binding(), None);
+        let visible = front_door
+            .projection(cx)
+            .visible_projection()
+            .expect("projection after failed recovery");
+        assert_eq!(visible.binding, None);
+        assert_eq!(visible.generation, missing.generation);
+        assert_eq!(
+            front_door
+                .projection(cx)
+                .threads
+                .get(&visible.thread_id)
+                .map(|thread| thread.available_surfaces.clone()),
+            Some(std::collections::BTreeSet::from([
+                omega_workbench_state::WorkSurface::Plan
+            ]))
+        );
+        let snapshot = front_door.snapshot(cx);
+        let mut probe = SemanticProbe::new(&snapshot);
+        probe
+            .require_accessible(
+                "omega.workbench.identity.status",
+                "Status",
+                "server rejected replacement worktree",
+            )
+            .expect("failed recovery should be announced");
+        probe
+            .require_interactive(WORKBENCH_REPOSITORY_SELECTOR)
+            .expect("failed recovery must remain retryable");
+        probe
+            .require_absent("omega-workbench-rail-error")
+            .expect("failed recovery should be a typed identity phase, not a shell sync error");
+        connection.clear_work_dir_update_error();
+
+        front_door
+            .teardown(cx)
+            .expect("failed recovery workbench should tear down");
+    }
+
+    #[gpui::test]
+    async fn identity_connection_and_error_phases_are_typed_and_accessible(
+        cx: &mut TestAppContext,
+    ) {
+        let scene = scene_with_thread("thread_identity_phases", 1200, true);
+        let front_door = AgentWorkbenchFrontDoor::mount(scene, cx)
+            .await
+            .expect("identity phase fixture should mount");
+        let phases = [
+            crate::thread_identity::IdentityPhase::Loading,
+            crate::thread_identity::IdentityPhase::Stale,
+            crate::thread_identity::IdentityPhase::Offline,
+            crate::thread_identity::IdentityPhase::Reconnecting,
+            crate::thread_identity::IdentityPhase::Error("Branch operation failed".into()),
+            crate::thread_identity::IdentityPhase::Inconsistent("Thread worktrees disagree".into()),
+        ];
+
+        for phase in phases {
+            let expected_label = phase.label().expect("non-ready phase label");
+            front_door.set_identity_phase(phase.clone(), cx);
+            assert_eq!(
+                front_door.identity(cx).map(|identity| identity.phase),
+                Some(phase.clone())
+            );
+            let snapshot = front_door.snapshot(cx);
+            let mut probe = SemanticProbe::new(&snapshot);
+            probe
+                .require_accessible(
+                    "omega.workbench.identity.status",
+                    "Status",
+                    expected_label.as_ref(),
+                )
+                .unwrap_or_else(|error| panic!("{phase:?} should expose a status node: {error:#}"));
+            let target_selection_disabled = matches!(
+                &phase,
+                crate::thread_identity::IdentityPhase::Loading
+                    | crate::thread_identity::IdentityPhase::Stale
+                    | crate::thread_identity::IdentityPhase::Offline
+                    | crate::thread_identity::IdentityPhase::Reconnecting
+            );
+            probe
+                .require_accessibility_property(
+                    WORKBENCH_REPOSITORY_SELECTOR,
+                    "disabled",
+                    serde_json::Value::Bool(target_selection_disabled),
+                )
+                .unwrap_or_else(|error| {
+                    panic!("{phase:?} repository picker availability is wrong: {error:#}")
+                });
+            if target_selection_disabled {
+                front_door.dispatch_action(crate::workbench_shell::ToggleRepositoryPicker, cx);
+                assert!(
+                    !accessibility_expanded(
+                        &front_door.snapshot(cx),
+                        WORKBENCH_REPOSITORY_SELECTOR
+                    )
+                    .expect("read repository picker expansion"),
+                    "{phase:?} keyboard action must not bypass disabled target selection"
+                );
+            }
+            if matches!(
+                &phase,
+                crate::thread_identity::IdentityPhase::Stale
+                    | crate::thread_identity::IdentityPhase::Offline
+                    | crate::thread_identity::IdentityPhase::Reconnecting
+                    | crate::thread_identity::IdentityPhase::Inconsistent(_)
+            ) {
+                assert!(
+                    !front_door
+                        .capability(omega_workbench_state::WorkSurface::Git, cx)
+                        .expect("Git capability")
+                        .availability
+                        .is_available(),
+                    "{phase:?} must disable repository-bound actions"
+                );
+                probe
+                    .require_accessibility_property(
+                        WorkSurfaceId::Plan.rail_selector(),
+                        "disabled",
+                        serde_json::Value::Bool(false),
+                    )
+                    .unwrap_or_else(|error| {
+                        panic!(
+                            "{phase:?} must keep the thread-local Plan surface enabled: {error:#}"
+                        )
+                    });
+            }
+            if matches!(
+                &phase,
+                crate::thread_identity::IdentityPhase::Inconsistent(_)
+            ) {
+                probe
+                    .require_accessibility_property(
+                        WORKBENCH_BRANCH_SELECTOR,
+                        "disabled",
+                        serde_json::Value::Bool(true),
+                    )
+                    .unwrap_or_else(|error| {
+                        panic!(
+                            "{phase:?} must keep branch selection blocked until reconciliation: {error:#}"
+                        )
+                    });
+            }
+            let expected_connection = match &phase {
+                crate::thread_identity::IdentityPhase::Stale => {
+                    omega_workbench_state::ConnectionPhase::StaleProjection
+                }
+                crate::thread_identity::IdentityPhase::Offline => {
+                    omega_workbench_state::ConnectionPhase::Offline
+                }
+                crate::thread_identity::IdentityPhase::Reconnecting => {
+                    omega_workbench_state::ConnectionPhase::Reconnecting
+                }
+                _ => omega_workbench_state::ConnectionPhase::Online,
+            };
+            assert_eq!(
+                front_door.projection(cx).connection,
+                expected_connection,
+                "identity and workbench projection connection phases must agree"
+            );
+        }
+
+        front_door
+            .teardown(cx)
+            .expect("identity phase scene should tear down");
+    }
+
+    #[gpui::test]
+    async fn branch_picker_failure_projects_a_typed_header_error(cx: &mut TestAppContext) {
+        let scene = scene_with_thread("thread_identity_branch_error", 1200, true);
+        let front_door = AgentWorkbenchFrontDoor::mount(scene, cx)
+            .await
+            .expect("branch error fixture should mount");
+        let worktree_path = front_door
+            .identity(cx)
+            .and_then(|identity| identity.selected)
+            .expect("selected identity")
+            .worktree_abs_path;
+
+        front_door
+            .fail_next_branch_selection(&worktree_path, "simulated branch checkout failure", cx)
+            .expect("exercise the rendered branch picker");
+
+        let identity = front_door.identity(cx).expect("identity after failure");
+        assert_eq!(
+            identity.phase,
+            crate::thread_identity::IdentityPhase::Error(
+                "simulated branch checkout failure".into()
+            )
+        );
+        assert_eq!(
+            identity
+                .selected
+                .as_ref()
+                .map(|candidate| &candidate.branch),
+            Some(&crate::thread_identity::BranchIdentity::Branch(
+                "main".into()
+            )),
+            "failed checkout must preserve the last confirmed branch"
+        );
+        let snapshot = front_door.snapshot(cx);
+        let mut probe = SemanticProbe::new(&snapshot);
+        probe
+            .require_accessible(
+                "omega.workbench.identity.status",
+                "Status",
+                "simulated branch checkout failure",
+            )
+            .expect("branch failure should be announced in the header");
+        probe
+            .require_interactive(WORKBENCH_BRANCH_SELECTOR)
+            .expect("a target-scoped branch failure must leave the branch picker retryable");
+
+        front_door
+            .teardown(cx)
+            .expect("branch error scene should tear down");
+    }
+
+    #[gpui::test(iterations = 16)]
+    async fn branch_checkout_advances_binding_epoch_and_stales_prior_loads(
+        cx: &mut TestAppContext,
+    ) {
+        let scene = scene_with_thread("thread_identity_branch_epoch", 1200, true);
+        let front_door = AgentWorkbenchFrontDoor::mount(scene, cx)
+            .await
+            .expect("branch epoch fixture should mount");
+        front_door.dispatch_action(crate::workbench_shell::SelectGit, cx);
+        let before = front_door
+            .projection(cx)
+            .visible_projection()
+            .expect("visible workbench before checkout");
+        let load = front_door
+            .begin_surface_load(
+                "branch-checkout-load",
+                omega_workbench_state::WorkSurface::Git,
+                cx,
+            )
+            .expect("begin Git load before checkout");
+
+        front_door
+            .select_next_branch(cx)
+            .expect("checkout the next branch through the rendered picker");
+
+        let after = front_door
+            .projection(cx)
+            .visible_projection()
+            .expect("visible workbench after checkout");
+        assert_eq!(after.binding, before.binding);
+        assert_eq!(after.generation, before.generation + 1);
+        let host = front_door
+            .visible_surface_host(cx)
+            .expect("branch refresh should retain the visible Git host");
+        assert_eq!(
+            host.read_with(cx, |host, _| host.content_state().clone()),
+            crate::workbench_shell::SurfaceContentState::Ready,
+            "a content epoch refresh must not strand the retained host in Loading"
+        );
+        assert_eq!(
+            front_door
+                .identity(cx)
+                .and_then(|identity| identity.selected)
+                .map(|selected| selected.branch),
+            Some(crate::thread_identity::BranchIdentity::Branch(
+                "release".into()
+            ))
+        );
+        assert_eq!(
+            front_door
+                .complete_surface_load(load, crate::workbench_shell::SurfaceLoadOutcome::Ready, cx)
+                .expect("complete the old branch load"),
+            omega_workbench_state::TransitionEffect::StaleCompletionIgnored
+        );
+        assert_eq!(
+            host.read_with(cx, |host, _| host.content_state().clone()),
+            crate::workbench_shell::SurfaceContentState::Ready
+        );
+
+        front_door
+            .teardown(cx)
+            .expect("branch epoch scene should tear down");
+    }
+
+    #[gpui::test]
     async fn workbench_rail_wide_selects_every_surface_and_retains_transcript(
         cx: &mut TestAppContext,
     ) {
@@ -902,6 +2676,7 @@ mod workbench_front_door_tests {
         {
             git.badge = Some(3);
         }
+        scene.repositories[0].worktrees[0].dirty_files = 3;
         let front_door = AgentWorkbenchFrontDoor::mount(scene.clone(), cx)
             .await
             .expect("wide workbench fixture should mount");
@@ -1066,6 +2841,66 @@ mod workbench_front_door_tests {
         front_door
             .teardown(cx)
             .expect("keyboard workbench should tear down");
+    }
+
+    #[gpui::test]
+    async fn offline_plan_opens_collapses_and_reuses_one_host(cx: &mut TestAppContext) {
+        let scene = scene_with_thread("workbench_offline_plan", 1200, true);
+        let front_door = AgentWorkbenchFrontDoor::mount(scene, cx)
+            .await
+            .expect("offline Plan scene should mount");
+        front_door.set_identity_phase(crate::thread_identity::IdentityPhase::Offline, cx);
+
+        front_door.dispatch_action(crate::workbench_shell::SelectPlan, cx);
+        let first_host = front_door
+            .surface_host_entity_id(omega_workbench_state::WorkSurface::Plan, cx)
+            .expect("offline Plan should mount");
+        assert_eq!(
+            front_door
+                .panel()
+                .read_with(cx, |panel, _| panel.workbench_host_count_for_tests()),
+            1
+        );
+        front_door.dispatch_action(crate::workbench_shell::SelectPlan, cx);
+        assert!(
+            !front_door
+                .projection(cx)
+                .visible_projection()
+                .expect("offline projection")
+                .dock_open
+        );
+        front_door.dispatch_action(crate::workbench_shell::SelectPlan, cx);
+        assert_eq!(
+            front_door.surface_host_entity_id(omega_workbench_state::WorkSurface::Plan, cx),
+            Some(first_host)
+        );
+        assert_eq!(
+            front_door
+                .panel()
+                .read_with(cx, |panel, _| panel.workbench_host_count_for_tests()),
+            1,
+            "offline reopen must not manufacture a second host"
+        );
+
+        front_door.dispatch_action(crate::workbench_shell::SelectGit, cx);
+        assert_eq!(
+            front_door
+                .panel()
+                .read_with(cx, |panel, _| panel.workbench_host_count_for_tests()),
+            1,
+            "a rejected offline surface request must not orphan a host"
+        );
+        assert_eq!(
+            front_door
+                .projection(cx)
+                .visible_projection()
+                .and_then(|visible| visible.effective_surface),
+            Some(omega_workbench_state::WorkSurface::Plan)
+        );
+
+        front_door
+            .teardown(cx)
+            .expect("offline Plan workbench should tear down");
     }
 
     #[gpui::test]

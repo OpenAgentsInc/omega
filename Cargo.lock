@@ -22535,6 +22535,7 @@ dependencies = [
  "omega_effectd",
  "omega_front_door",
  "omega_workbench_harness",
+ "omega_workbench_state",
  "omega_workdir",
  "omega_zero_base",
  "onboarding",

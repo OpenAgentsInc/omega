@@ -368,6 +368,36 @@ impl ThreadMetadata {
     }
 }
 
+fn worktree_paths_for_work_dirs(
+    existing: Option<&WorktreePaths>,
+    project: &WorktreePaths,
+    work_dirs: Option<&PathList>,
+) -> WorktreePaths {
+    let Some(work_dirs) = work_dirs else {
+        return existing.cloned().unwrap_or_else(|| project.clone());
+    };
+
+    let mut selected = WorktreePaths::default();
+    for folder_path in work_dirs.ordered_paths() {
+        let main_path = existing
+            .and_then(|paths| {
+                paths
+                    .ordered_pairs()
+                    .find(|(_, folder)| *folder == folder_path)
+                    .map(|(main, _)| main)
+            })
+            .or_else(|| {
+                project
+                    .ordered_pairs()
+                    .find(|(_, folder)| *folder == folder_path)
+                    .map(|(main, _)| main)
+            })
+            .unwrap_or(folder_path);
+        selected.add_path(main_path, folder_path);
+    }
+    selected
+}
+
 /// Derives worktree display info from a thread's stored path list.
 ///
 /// For each path in the thread's `folder_paths`, produces a
@@ -1321,7 +1351,12 @@ impl ThreadMetadataStore {
                 )
             } else {
                 let project = thread_ref.project().read(cx);
-                let worktree_paths = project.worktree_paths(cx);
+                let project_worktree_paths = project.worktree_paths(cx);
+                let worktree_paths = worktree_paths_for_work_dirs(
+                    existing_thread.map(|thread| &thread.worktree_paths),
+                    &project_worktree_paths,
+                    thread_ref.work_dirs(),
+                );
                 let remote_connection = project.remote_connection_options(cx);
 
                 (worktree_paths, remote_connection)
@@ -3964,6 +3999,39 @@ mod tests {
             .map(|(m, f)| (Path::new(*m), Path::new(*f)))
             .unzip();
         WorktreePaths::from_path_lists(PathList::new(&mains), PathList::new(&folders)).unwrap()
+    }
+
+    #[test]
+    fn work_dirs_select_one_exact_linked_worktree_pair() {
+        let project = make_worktree_paths(&[
+            ("/projects/omega", "/projects/omega"),
+            ("/projects/omega", "/worktrees/feature/omega"),
+        ]);
+        let work_dirs = PathList::new(&[PathBuf::from("/worktrees/feature/omega")]);
+
+        let selected = worktree_paths_for_work_dirs(None, &project, Some(&work_dirs));
+
+        assert_eq!(
+            selected
+                .ordered_pairs()
+                .map(|(main, folder)| (main.clone(), folder.clone()))
+                .collect::<Vec<_>>(),
+            vec![(
+                PathBuf::from("/projects/omega"),
+                PathBuf::from("/worktrees/feature/omega")
+            )]
+        );
+    }
+
+    #[test]
+    fn missing_selected_worktree_keeps_its_persisted_main_pair() {
+        let existing = make_worktree_paths(&[("/projects/omega", "/worktrees/removed/omega")]);
+        let project = make_worktree_paths(&[("/projects/omega", "/projects/omega")]);
+        let work_dirs = PathList::new(&[PathBuf::from("/worktrees/removed/omega")]);
+
+        let selected = worktree_paths_for_work_dirs(Some(&existing), &project, Some(&work_dirs));
+
+        assert_eq!(selected, existing);
     }
 
     #[test]

@@ -96,6 +96,13 @@ impl<M: ManagedView> PopoverMenuHandle<M> {
             .is_some_and(|state| state.menu.borrow().as_ref().is_some())
     }
 
+    pub fn deployed_menu(&self) -> Option<Entity<M>> {
+        self.0
+            .borrow()
+            .as_ref()
+            .and_then(|state| state.menu.borrow().clone())
+    }
+
     pub fn is_focused(&self, window: &Window, cx: &App) -> bool {
         self.0.borrow().as_ref().is_some_and(|state| {
             state

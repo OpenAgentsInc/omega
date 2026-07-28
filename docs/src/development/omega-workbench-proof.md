@@ -134,6 +134,48 @@ calls and unavailable surfaces.
 SHA-256 digest in the receipt. If two runs claim to use the same fixture, their
 fixture digests must match.
 
+The production Agent Panel adapter materializes repository fixtures in
+`FakeFs`, waits for real Project and GitStore scans to complete, and projects
+the resulting repository/worktree/head/status/tracking data through the same
+thread-identity code used by the desktop header. It does not inject rendered
+labels. Fixtures can create linked worktrees with one common repository,
+folders without Git, unborn branches, named branches, and detached heads.
+Repository- and worktree-picker tests open the retained native `ContextMenu`
+and apply its production selection and confirmation actions. Branch tests open
+the existing Git branch picker, inject a backend checkout failure, retain a
+menu across a newly active turn, and prove a successful checkout advances the
+binding generation so an earlier Git load is stale. A pending-session fixture
+proves restored desired work directories select the correct root before an
+`AcpThread` exists. Removal tests retain the last-known missing label and
+recover through the rendered repository picker. Failed recovery remains
+formally unbound and cannot revive the removed candidate.
+
+Selection tests also inject a connection-level cwd rejection and prove that
+binding, generation, metadata eligibility, and an old-target load are
+unchanged. Busy and connection-phase tests prove both button and keyboard
+actions are disabled, while the native terminal test proves `.` resolves to
+the selected worktree and another project root is rejected. A real
+multi-session partial-retarget test makes one session accept, another reject,
+and the first reject rollback; it then proves the rendered projection is
+`Inconsistent` and repository-bound actions stop. A recovery test reselects
+the target, forces all sessions to reconcile, clears that phase, and advances
+the content epoch.
+
+Branch checkout tests introduce deterministic FakeGit latency. Across seeded
+scheduler runs they prove that the pending checkout disables target controls
+and repository-bound surfaces, makes the composer read-only without discarding
+its text, and permits that held prompt only after checkout completes.
+
+Four registered Metal scenes cover clean identity, dirty/conflicted and
+ahead/behind identity, long labels in a 909-pixel window, and an offline
+identity. Each captures the whole window plus a named `thread-identity` region
+derived from `omega.workbench.thread-identity`. The semantic preflight requires
+distinct interactive repository, worktree, and branch controls when
+applicable, exact picker labels and candidate order, containment within the
+toolbar, the offline status node, and full untruncated accessibility text in
+the narrow scene. The clean identity scene also opens and closes the repository
+picker before capture and requires the repository control to retain focus.
+
 ### Registering a scene {#registering-a-scene}
 
 Add every named scene to `HERMETIC_SCENES`. A `SceneSpec` defines:

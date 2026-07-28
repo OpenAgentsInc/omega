@@ -497,7 +497,8 @@ fn record_workbench_pixel(scene: &str, pixel: PixelProof) {
 fn workbench_fixture_for_scene(name: &str) -> Result<WorkbenchScene> {
     use omega_workbench_harness::{
         ContentStateFixture, EventFixture, EventKindFixture, MessageFixture, MessageRoleFixture,
-        MessageStateFixture, PersistedSceneFixture, ThreadFixture,
+        MessageStateFixture, PersistedSceneFixture, ProjectFixture, RepositoryFixture,
+        ThreadFixture, WorktreeFixture,
     };
 
     let spec =
@@ -513,8 +514,49 @@ fn workbench_fixture_for_scene(name: &str) -> Result<WorkbenchScene> {
     scene.content_state = ContentStateFixture::Ready;
 
     if WORKBENCH_SHELL_PIXEL_SCENES.contains(&name) {
-        for surface in &mut scene.surfaces {
-            surface.available = surface.id == WorkSurfaceId::Plan;
+        let identity_scene = name.starts_with("omega_workbench_identity_");
+        if identity_scene {
+            for surface in &mut scene.surfaces {
+                surface.available = name != "omega_workbench_identity_offline_error"
+                    || surface.id == WorkSurfaceId::Plan;
+            }
+            scene.project = Some(ProjectFixture {
+                id: "visual-project".into(),
+                display_name: "Omega".into(),
+            });
+            scene.repositories.push(RepositoryFixture {
+                id: "visual-repository".into(),
+                project_id: "visual-project".into(),
+                worktrees: vec![WorktreeFixture {
+                    id: "visual-worktree".into(),
+                    branch: Some("main".into()),
+                    git_state: None,
+                    dirty_files: 0,
+                    conflicts: 0,
+                    ahead: 0,
+                    behind: 0,
+                }],
+            });
+            scene.threads[0].project_id = Some("visual-project".into());
+            scene.threads[0].repository_id = Some("visual-repository".into());
+            scene.threads[0].worktree_id = Some("visual-worktree".into());
+            if name == "omega_workbench_identity_dirty_conflict" {
+                let worktree = &mut scene.repositories[0].worktrees[0];
+                worktree.dirty_files = 4;
+                worktree.conflicts = 2;
+                worktree.ahead = 3;
+                worktree.behind = 1;
+                scene
+                    .surfaces
+                    .iter_mut()
+                    .find(|surface| surface.id == WorkSurfaceId::Git)
+                    .context("identity scene has no Git surface")?
+                    .badge = Some(4);
+            }
+        } else {
+            for surface in &mut scene.surfaces {
+                surface.available = surface.id == WorkSurfaceId::Plan;
+            }
         }
         match name {
             "omega_workbench_shell_active_dock" => {
@@ -1325,6 +1367,53 @@ fn verify_workbench_render_preflight(
         if test_name == "omega_workbench_shell_focus_visible" {
             let mut probe = SemanticProbe::new(&snapshot);
             probe.require_focus(WorkSurfaceId::Plan.rail_selector(), true)?;
+            record_workbench_semantic_checks(test_name, probe.into_checks());
+        }
+        if test_name.starts_with("omega_workbench_identity_") {
+            let mut probe = SemanticProbe::new(&snapshot);
+            probe.require_fully_visible("omega.workbench.thread-identity")?;
+            probe.require_inside("omega.workbench.thread-identity", "omega.workbench.toolbar")?;
+            probe.require_interactive("omega.workbench.control.identity.repository")?;
+            probe.require_interactive("omega.workbench.control.identity.worktree")?;
+            if test_name == "omega_workbench_identity_clean" {
+                probe.require_focus("omega.workbench.control.identity.repository", true)?;
+            }
+            if test_name == "omega_workbench_identity_offline_error" {
+                probe.require_accessible(
+                    "omega.workbench.identity.status",
+                    "Status",
+                    "Repository identity is offline",
+                )?;
+                probe.require_accessible(
+                    "omega.workbench.control.identity.branch",
+                    "Button",
+                    "Branch main",
+                )?;
+                probe.require_accessibility_property(
+                    "omega.workbench.control.identity.branch",
+                    "disabled",
+                    serde_json::Value::Bool(true),
+                )?;
+                probe.require_accessibility_property(
+                    "omega.workbench.control.identity.branch",
+                    "description",
+                    serde_json::Value::String(
+                        "Reconnect the project before changing branches".into(),
+                    ),
+                )?;
+            } else {
+                probe.require_interactive("omega.workbench.control.identity.branch")?;
+            }
+            if test_name == "omega_workbench_identity_long_narrow" {
+                probe.require_accessibility_property(
+                    "omega.workbench.control.identity.repository",
+                    "description",
+                    serde_json::Value::String(
+                        "Project OpenAgents, repository openagents-omega-repository-with-a-deliberately-long-name, worktree feature/server-projection-consistency-and-reconnect at /Users/example/work/openagents/omega/worktrees/feature-server-projection-consistency-and-reconnect, feature/server-projection-consistency-and-reconnect"
+                            .into(),
+                    ),
+                )?;
+            }
             record_workbench_semantic_checks(test_name, probe.into_checks());
         }
     }
@@ -3134,6 +3223,27 @@ fn dispatch_workbench_action(
 }
 
 #[cfg(all(target_os = "macos", feature = "visual-tests"))]
+fn focus_workbench_selector(
+    window: gpui::AnyWindowHandle,
+    selector: &str,
+    cx: &mut VisualTestAppContext,
+) -> Result<()> {
+    cx.set_debug_accessibility_active(window, true)?;
+    for _ in 0..128 {
+        let snapshot = cx.debug_render_snapshot(window)?;
+        if SemanticProbe::new(&snapshot)
+            .require_focus(selector, true)
+            .is_ok()
+        {
+            return Ok(());
+        }
+        cx.update_window(window, |_, window, cx| window.focus_next(cx))?;
+        cx.run_until_parked();
+    }
+    anyhow::bail!("could not focus workbench selector {selector:?} through GPUI tab order")
+}
+
+#[cfg(all(target_os = "macos", feature = "visual-tests"))]
 fn configure_workbench_shell_scene(
     scene_name: &str,
     workspace_window: WindowHandle<Workspace>,
@@ -3142,6 +3252,7 @@ fn configure_workbench_shell_scene(
 ) -> Result<()> {
     use agent_ui::workbench_shell::{
         BadgeTone, FocusActivityRail, FocusLastSurface, SelectFiles, SelectPlan, SurfaceBadge,
+        ToggleRepositoryPicker,
     };
 
     let initial_projection = cx.read(|cx| panel.read(cx).workbench_projection_for_tests().clone());
@@ -3242,6 +3353,106 @@ fn configure_workbench_shell_scene(
                     && !visible.dock_open,
                 "activating the selected production surface did not retain selection and collapse"
             );
+        }
+        name if name.starts_with("omega_workbench_identity_") => {
+            use agent_ui::thread_identity::{
+                BranchIdentity, GitIdentitySummary, IdentityPhase, ThreadIdentityCandidate,
+                ThreadIdentityObservation,
+            };
+            let long = name == "omega_workbench_identity_long_narrow";
+            let dirty = name == "omega_workbench_identity_dirty_conflict";
+            let phase = if name == "omega_workbench_identity_offline_error" {
+                IdentityPhase::Offline
+            } else {
+                IdentityPhase::Ready
+            };
+            let repository_name = if long {
+                "openagents-omega-repository-with-a-deliberately-long-name"
+            } else {
+                "omega"
+            };
+            let worktree_name = if long {
+                "feature/server-projection-consistency-and-reconnect"
+            } else {
+                "omega"
+            };
+            let worktree_path = if long {
+                "/Users/example/work/openagents/omega/worktrees/feature-server-projection-consistency-and-reconnect"
+            } else {
+                "/Users/example/work/openagents/omega"
+            };
+            let candidate = ThreadIdentityCandidate {
+                binding: omega_workbench_state::RepositoryBinding::new(
+                    "visual-repository",
+                    "visual-worktree",
+                )
+                .map_err(anyhow::Error::new)?,
+                git_repository_id: None,
+                project_name: "OpenAgents".into(),
+                repository_name: repository_name.into(),
+                worktree_name: worktree_name.into(),
+                worktree_abs_path: std::path::PathBuf::from(worktree_path),
+                worktree_path: worktree_path.into(),
+                branch: BranchIdentity::Branch(
+                    if long {
+                        "feature/server-projection-consistency-and-reconnect"
+                    } else {
+                        "main"
+                    }
+                    .into(),
+                ),
+                git: if dirty {
+                    GitIdentitySummary {
+                        dirty_files: 4,
+                        conflicts: 2,
+                        ahead: 3,
+                        behind: 1,
+                    }
+                } else {
+                    GitIdentitySummary::default()
+                },
+                source_revision: 1,
+            };
+            cx.update_window(workspace_window.into(), |_, _window, cx| {
+                panel.update(cx, |panel, cx| {
+                    panel.set_workbench_identity_observation_for_tests(
+                        Some(ThreadIdentityObservation {
+                            revision: 1,
+                            phase,
+                            candidates: vec![candidate],
+                        }),
+                        cx,
+                    );
+                });
+            })?;
+            cx.run_until_parked();
+            let (identity_binding, workbench_binding) = cx.read(|cx| {
+                let panel = panel.read(cx);
+                (
+                    panel
+                        .workbench_identity_for_tests()
+                        .and_then(|identity| identity.binding())
+                        .cloned(),
+                    panel
+                        .workbench_projection_for_tests()
+                        .visible_projection()
+                        .and_then(|visible| visible.binding),
+                )
+            });
+            anyhow::ensure!(
+                identity_binding == workbench_binding && identity_binding.is_some(),
+                "identity scene did not share one binding with the workbench projection"
+            );
+            if name == "omega_workbench_identity_clean" {
+                let window = workspace_window.into();
+                focus_workbench_selector(
+                    window,
+                    "omega.workbench.control.identity.repository",
+                    cx,
+                )?;
+                dispatch_workbench_action(workspace_window, Box::new(ToggleRepositoryPicker), cx)?;
+                dispatch_workbench_action(workspace_window, Box::new(ToggleRepositoryPicker), cx)?;
+            }
         }
         _ => anyhow::bail!("unsupported workbench shell scene {scene_name:?}"),
     }

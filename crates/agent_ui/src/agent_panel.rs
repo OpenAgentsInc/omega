@@ -45,7 +45,9 @@ use crate::terminal_thread_metadata_store::{
     TerminalThreadMetadata, TerminalThreadMetadataStore, compose_terminal_thread_title,
     terminal_title_without_prefix,
 };
-use crate::thread_metadata_store::{ThreadId, ThreadMetadataStore, ThreadMetadataStoreEvent};
+use crate::thread_metadata_store::{
+    ThreadId, ThreadMetadataStore, ThreadMetadataStoreEvent, WorktreePaths,
+};
 use crate::{
     Agent, AgentInitialContent, AgentThreadSource, ExternalSourcePrompt, NewExternalAgentThread,
     NewNativeAgentThreadFromSummary,
@@ -62,6 +64,10 @@ use crate::{
 };
 use crate::{
     omega_executor_selector, omega_nostr_activity, omega_sidebar, omega_threads_sidebar,
+    thread_identity::{
+        BranchIdentity, GitIdentitySummary, IdentityPhase, ThreadIdentityCandidate,
+        ThreadIdentityObservation,
+    },
     workbench_shell,
 };
 use agent_settings::AgentSettings;
@@ -94,6 +100,7 @@ use settings::TerminalDockPosition;
 use settings::{NotifyWhenAgentWaiting, Settings, update_settings_file};
 
 use search::{BufferSearchBar, buffer_search::Deploy as DeployBufferSearch};
+use sha2::{Digest as _, Sha256};
 use terminal::{Event as TerminalEvent, terminal_settings::TerminalSettings};
 use terminal_view::{TerminalView, terminal_panel::TerminalPanel};
 use text::OffsetRangeExt;
@@ -1237,6 +1244,16 @@ enum DevicePairingSurface {
     Unavailable(SharedString),
 }
 
+#[derive(Clone)]
+struct ThreadIdentityOperationError {
+    source_binding: Option<omega_workbench_state::RepositoryBinding>,
+    attempted_binding: omega_workbench_state::RepositoryBinding,
+    binding_generation: u64,
+    request_id: u64,
+    inconsistent: bool,
+    message: SharedString,
+}
+
 pub struct AgentPanel {
     workspace: WeakEntity<Workspace>,
     /// Workspace id is used as a database key
@@ -1256,8 +1273,17 @@ pub struct AgentPanel {
     pending_terminal_spawn: Option<TerminalId>,
     new_thread_menu_handle: PopoverMenuHandle<ContextMenu>,
     agent_panel_menu_handle: PopoverMenuHandle<ContextMenu>,
+    thread_repository_menu_handle: PopoverMenuHandle<ContextMenu>,
+    thread_worktree_menu_handle: PopoverMenuHandle<ContextMenu>,
+    thread_branch_menu_handle: PopoverMenuHandle<git_ui::branch_picker::BranchList>,
     _extension_subscription: Option<Subscription>,
     _project_subscription: Subscription,
+    _git_store_subscription: Subscription,
+    thread_identity_observation_revision: u64,
+    thread_identity_operation_request: u64,
+    thread_identity_operation_requests: HashMap<String, u64>,
+    thread_identity_pending_operations: HashMap<String, u64>,
+    thread_identity_operation_errors: HashMap<String, ThreadIdentityOperationError>,
     zoomed: bool,
     pending_serialization: Option<Task<Result<()>>>,
     new_user_onboarding: Entity<AgentPanelOnboarding>,
@@ -1330,6 +1356,10 @@ pub struct AgentPanel {
     _engine_capacity_poll: Option<Task<()>>,
     workbench_shell: workbench_shell::WorkbenchShell,
     workbench_shell_enabled: bool,
+    #[cfg(any(test, feature = "test-support"))]
+    workbench_identity_phase_override: Option<IdentityPhase>,
+    #[cfg(any(test, feature = "test-support"))]
+    workbench_identity_observation_override: Option<ThreadIdentityObservation>,
 }
 
 impl AgentPanel {
@@ -1671,13 +1701,30 @@ impl AgentPanel {
                 | project::Event::WorktreeRemoved(_)
                 | project::Event::WorktreeOrderChanged
                 | project::Event::WorktreePathsChanged { .. } => {
+                    this.thread_identity_observation_revision =
+                        this.thread_identity_observation_revision.saturating_add(1);
                     this.ensure_native_agent_connection(cx);
                     this.update_thread_work_dirs(cx);
                     this.persist_all_terminal_metadata(cx);
                     cx.notify();
                 }
+                project::Event::DisconnectedFromHost
+                | project::Event::DisconnectedFromRemote { .. }
+                | project::Event::HostReshared
+                | project::Event::Reshared
+                | project::Event::Rejoined => {
+                    this.thread_identity_observation_revision =
+                        this.thread_identity_observation_revision.saturating_add(1);
+                    cx.notify();
+                }
                 _ => {}
             });
+        let git_store = project.read_with(cx, |project, _cx| project.git_store().clone());
+        let _git_store_subscription = cx.subscribe(&git_store, |this, _git_store, _event, cx| {
+            this.thread_identity_observation_revision =
+                this.thread_identity_observation_revision.saturating_add(1);
+            cx.notify();
+        });
 
         let _thread_metadata_store_subscription = cx.subscribe(
             &ThreadMetadataStore::global(cx),
@@ -1712,9 +1759,18 @@ impl AgentPanel {
             pending_terminal_spawn: None,
             new_thread_menu_handle: PopoverMenuHandle::default(),
             agent_panel_menu_handle: PopoverMenuHandle::default(),
+            thread_repository_menu_handle: PopoverMenuHandle::default(),
+            thread_worktree_menu_handle: PopoverMenuHandle::default(),
+            thread_branch_menu_handle: PopoverMenuHandle::default(),
 
             _extension_subscription: extension_subscription,
             _project_subscription,
+            _git_store_subscription,
+            thread_identity_observation_revision: 0,
+            thread_identity_operation_request: 0,
+            thread_identity_operation_requests: HashMap::default(),
+            thread_identity_pending_operations: HashMap::default(),
+            thread_identity_operation_errors: HashMap::default(),
             zoomed: false,
             pending_serialization: None,
             new_user_onboarding: onboarding,
@@ -1752,6 +1808,10 @@ impl AgentPanel {
             _engine_capacity_poll: None,
             workbench_shell,
             workbench_shell_enabled: omega_zero_base::is_active(),
+            #[cfg(any(test, feature = "test-support"))]
+            workbench_identity_phase_override: None,
+            #[cfg(any(test, feature = "test-support"))]
+            workbench_identity_observation_override: None,
         };
 
         let mut panel = panel;
@@ -4582,7 +4642,11 @@ impl AgentPanel {
         cx: &mut Context<Self>,
     ) {
         self.retained_threads.remove(&id);
-        if let Err(error) = self.workbench_shell.close_thread(&id.to_key_string()) {
+        let thread_key = id.to_key_string();
+        self.thread_identity_operation_requests.remove(&thread_key);
+        self.thread_identity_pending_operations.remove(&thread_key);
+        self.thread_identity_operation_errors.remove(&thread_key);
+        if let Err(error) = self.workbench_shell.close_thread(&thread_key) {
             log::warn!("failed to close workbench projection for thread {id:?}: {error:#}");
             self.workbench_shell.record_error(error.to_string());
         }
@@ -5461,37 +5525,22 @@ impl AgentPanel {
     }
 
     fn update_thread_work_dirs(&self, cx: &mut Context<Self>) {
-        let new_work_dirs = self.project.read(cx).default_path_list(cx);
-        let new_worktree_paths = self.project.read(cx).worktree_paths(cx);
+        let default_work_dirs = self.project.read(cx).default_path_list(cx);
 
         if let Some(conversation_view) = self.active_conversation_view() {
-            conversation_view.update(cx, |conversation_view, cx| {
-                conversation_view.set_work_dirs(new_work_dirs.clone(), cx);
-            });
+            if conversation_view.read(cx).work_dirs().is_empty() {
+                conversation_view.update(cx, |conversation_view, cx| {
+                    conversation_view.set_work_dirs(default_work_dirs.clone(), cx);
+                });
+            }
         }
 
         for conversation_view in self.retained_threads.values() {
-            conversation_view.update(cx, |conversation_view, cx| {
-                conversation_view.set_work_dirs(new_work_dirs.clone(), cx);
-            });
-        }
-
-        if self.project.read(cx).is_via_collab() {
-            return;
-        }
-
-        // Update metadata store so threads' path lists stay in sync with
-        // the project's current worktrees. Without this, threads saved
-        // before a worktree was added would have stale paths and not
-        // appear under the correct sidebar group.
-        let mut thread_ids: Vec<ThreadId> = self.retained_threads.keys().copied().collect();
-        if let Some(active_id) = self.active_thread_id(cx) {
-            thread_ids.push(active_id);
-        }
-        if !thread_ids.is_empty() {
-            ThreadMetadataStore::global(cx).update(cx, |store, cx| {
-                store.update_worktree_paths(&thread_ids, new_worktree_paths, cx);
-            });
+            if conversation_view.read(cx).work_dirs().is_empty() {
+                conversation_view.update(cx, |conversation_view, cx| {
+                    conversation_view.set_work_dirs(default_work_dirs.clone(), cx);
+                });
+            }
         }
     }
 
@@ -7593,7 +7642,7 @@ impl AgentPanel {
                 .into_any_element()
         });
 
-        let zero_base_working_directory = self.render_zero_base_working_directory(cx);
+        let thread_identity = self.render_thread_identity(window, cx);
 
         let toolbar_content = {
             let new_thread_menu = PopoverMenu::new("new_thread_menu")
@@ -7641,7 +7690,7 @@ impl AgentPanel {
                             Some(title) => title,
                             None => self.render_title_view(window, cx),
                         })
-                        .children(zero_base_working_directory),
+                        .children(thread_identity),
                 )
                 .child(
                     h_flex()
@@ -7669,98 +7718,138 @@ impl AgentPanel {
             .child(toolbar_content)
     }
 
-    /// The folder this thread can see, named in the header.
-    ///
-    /// `OMEGA-DELTA-0116`, omega#111. The owner asked an agent which directory
-    /// it was in and got one he did not expect. He was right and the answer was
-    /// right: an external agent is spawned in the project's root, and the
-    /// project was whatever directory the launcher happened to be in. Nothing
-    /// in the window said so, so there was no way to notice before asking, and
-    /// no way to check the answer afterwards.
-    ///
-    /// A coding agent whose folder is invisible is a bad surface, and it is a
-    /// worse one now that `omega <path>` sets that folder rather than opening
-    /// the editor: a command whose only effect is invisible is indistinguishable
-    /// from a command that did nothing.
-    ///
-    /// # Where it goes, and where it must not
-    ///
-    /// The header. The owner has just had the composer's bottom-left emptied
-    /// (`be27475c11`) and asked for it to stay empty, so this is not a second
-    /// attempt at that corner. The header already carries what the thread *is*
-    /// — its agent and its title — and where it runs belongs with those.
-    ///
-    /// OMEGA-DELTA-0140. The label is also the permanent way to change the folder.
-    /// The initial composer warning can get someone out of an empty project,
-    /// but disappears as soon as they choose one. A path rendered as inert text
-    /// leaves no discoverable way to correct that first choice. The header
-    /// remains visible in both states and uses the ordinary workspace folder
-    /// picker on every click.
-    fn render_zero_base_working_directory(&self, cx: &App) -> Option<AnyElement> {
-        if !omega_zero_base::is_active() {
+    fn thread_identity_target_selection_unavailable_reason(
+        &self,
+        cx: &App,
+    ) -> Option<SharedString> {
+        if self.active_thread_id(cx).is_some_and(|thread_id| {
+            self.thread_identity_pending_operations
+                .contains_key(&thread_id.to_key_string())
+        }) {
+            return Some("Wait for the branch checkout to finish".into());
+        }
+        let phase_reason =
+            self.workbench_shell
+                .identity()
+                .and_then(|identity| match identity.phase {
+                    IdentityPhase::Loading => {
+                        Some("Wait for repository identity to finish loading".into())
+                    }
+                    IdentityPhase::Stale => Some(
+                        "Wait for repository identity to refresh before changing its target".into(),
+                    ),
+                    IdentityPhase::Offline => {
+                        Some("Reconnect the project before changing the thread target".into())
+                    }
+                    IdentityPhase::Reconnecting => Some(
+                        "Wait for the project to reconnect before changing the thread target"
+                            .into(),
+                    ),
+                    IdentityPhase::NoProject
+                    | IdentityPhase::Ready
+                    | IdentityPhase::Missing
+                    | IdentityPhase::Error(_)
+                    | IdentityPhase::Inconsistent(_) => None,
+                });
+        phase_reason.or_else(|| {
+            self.active_conversation_view()
+                .and_then(|conversation_view| {
+                    conversation_view
+                        .read(cx)
+                        .work_dir_retarget_unavailable_reason(cx)
+                })
+        })
+    }
+
+    fn thread_identity_branch_selection_unavailable_reason(
+        &self,
+        cx: &App,
+    ) -> Option<SharedString> {
+        if self.active_thread_id(cx).is_some_and(|thread_id| {
+            self.thread_identity_pending_operations
+                .contains_key(&thread_id.to_key_string())
+        }) {
+            return Some("Wait for the branch checkout to finish".into());
+        }
+        let phase_reason =
+            self.workbench_shell
+                .identity()
+                .and_then(|identity| match identity.phase {
+                    IdentityPhase::Loading => {
+                        Some("Wait for repository identity to finish loading".into())
+                    }
+                    IdentityPhase::Stale => Some(
+                        "Wait for repository identity to refresh before changing branches".into(),
+                    ),
+                    IdentityPhase::Offline => {
+                        Some("Reconnect the project before changing branches".into())
+                    }
+                    IdentityPhase::Reconnecting => {
+                        Some("Wait for the project to reconnect before changing branches".into())
+                    }
+                    IdentityPhase::Missing => {
+                        Some("Choose an available repository before changing branches".into())
+                    }
+                    IdentityPhase::NoProject => {
+                        Some("Open a project before changing branches".into())
+                    }
+                    IdentityPhase::Inconsistent(_) => {
+                        Some("Reconnect this thread before changing branches".into())
+                    }
+                    IdentityPhase::Ready | IdentityPhase::Error(_) => None,
+                });
+        phase_reason.or_else(|| {
+            self.active_conversation_view()
+                .and_then(|conversation_view| {
+                    conversation_view
+                        .read(cx)
+                        .identity_mutation_unavailable_reason(cx)
+                })
+        })
+    }
+
+    fn render_thread_identity(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        if !self.workbench_shell_enabled {
             return None;
         }
-        let root = self
-            .project
-            .read(cx)
-            .visible_worktrees(cx)
-            .next()
-            .map(|worktree| worktree.read(cx).abs_path());
-        let home = std::env::var_os("HOME").map(PathBuf::from);
-        let (glance, whole, color) = if let Some(root) = root.as_ref() {
-            (
-                omega_workdir::short_display_for_person(&root, home.as_deref(), 3),
-                omega_workdir::display_for_person(&root, home.as_deref()),
-                Color::Muted,
-            )
-        } else {
-            // Asking is not a fault. A fresh install has no folder yet, and
-            // the owner met two yellow notices before he had done anything
-            // wrong. This is the invitation, in the ordinary colour, and the
-            // control it sits on already opens the picker.
-            (
-                "Choose a folder".to_string(),
-                "Choose a folder".to_string(),
-                Color::Muted,
-            )
+        let Some(identity) = self.workbench_shell.identity().cloned() else {
+            return None;
         };
-        let aria_description = if root.is_some() {
-            "Change the folder this thread can read, search and run in"
-        } else {
-            "Choose the folder this thread can read, search and run in"
-        };
-
-        Some(
-            h_flex()
-                // omega#112. The folder never shrinks; the title does.
-                //
-                // Both were truncatable, so once a thread earned a title the
-                // title took the room and the folder was cut from the *end* —
-                // "~/work/o…", which removes precisely the part that says which
-                // folder it is. The owner watched it happen the moment a chat
-                // was named.
-                //
-                // `short_display_for_person(.., 3)` already bounds this to
-                // three components, so it is short by construction and can
-                // afford to be fixed. A title is a sentence and reads fine
-                // clipped; a path clipped is a different path.
-                .flex_none()
-                .gap_1()
-                .child(Label::new("·").color(Color::Muted).size(LabelSize::Small))
-                .child(
-                    Button::new("omega-zero-base-working-directory", glance)
+        let Some(selected) = identity.selected.clone() else {
+            let status = identity.phase.label();
+            return Some(
+                h_flex()
+                    .id("omega.workbench.thread-identity")
+                    .debug_selector(|| "omega.workbench.thread-identity".into())
+                    .flex_none()
+                    .gap_1()
+                    .child(Label::new("·").color(Color::Muted).size(LabelSize::Small))
+                    .child(
+                        Button::new(
+                            "omega.workbench.control.identity.repository",
+                            "Choose a folder",
+                        )
+                        .debug_selector(|| "omega.workbench.control.identity.repository".into())
                         .style(ButtonStyle::Subtle)
                         .size(ButtonSize::Compact)
                         .label_size(LabelSize::Small)
-                        .color(color)
-                        .end_icon(
-                            Icon::new(IconName::ChevronDown)
-                                .size(IconSize::XSmall)
-                                .color(color),
+                        .color(Color::Muted)
+                        .tab_index(0isize)
+                        .aria_label("Choose a repository folder")
+                        .aria_description(
+                            "Choose the folder this thread can read, search, and run in",
                         )
-                        .aria_description(aria_description)
-                        .tooltip(move |_, cx| {
-                            Tooltip::with_meta(whole.clone(), None, aria_description, cx)
+                        .tooltip(|_, cx| {
+                            Tooltip::with_meta(
+                                "Choose a folder",
+                                None,
+                                "Choose the folder this thread can read, search, and run in",
+                                cx,
+                            )
                         })
                         .on_click(|_, window, cx| {
                             window.dispatch_action(
@@ -7770,7 +7859,551 @@ impl AgentPanel {
                                 cx,
                             );
                         }),
+                    )
+                    .when_some(status, |this, status| {
+                        this.child(
+                            div()
+                                .id("omega.workbench.identity.status")
+                                .debug_selector(|| "omega.workbench.identity.status".into())
+                                .role(gpui::Role::Status)
+                                .aria_label(status.clone())
+                                .child(
+                                    Label::new(status)
+                                        .size(LabelSize::Small)
+                                        .color(Color::Muted),
+                                ),
+                        )
+                    })
+                    .into_any_element(),
+            );
+        };
+
+        let panel = cx.entity().downgrade();
+        let candidates = identity.candidates.clone();
+        let selected_binding = selected.binding.clone();
+        let mut seen_repositories = HashSet::default();
+        let repository_candidates = candidates
+            .iter()
+            .filter(|candidate| seen_repositories.insert(candidate.binding.repository_id.clone()))
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut seen_worktrees = HashSet::default();
+        let worktree_candidates = candidates
+            .iter()
+            .filter(|candidate| {
+                candidate.binding.repository_id == selected_binding.repository_id
+                    && seen_worktrees.insert(candidate.binding.worktree_id.clone())
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let visible = self.workbench_shell.projection().visible_projection()?;
+        if visible.binding.as_ref() != identity.binding() {
+            return None;
+        }
+        let source_thread_id = visible.thread_id;
+        let source_projection_binding = visible.binding;
+        let source_binding_generation = visible.generation;
+        let menu_builder =
+            |candidates: Vec<ThreadIdentityCandidate>,
+             selector_for: fn(&omega_workbench_state::RepositoryBinding) -> String| {
+                let panel = panel.clone();
+                let selected_binding = selected_binding.clone();
+                let source_thread_id = source_thread_id.clone();
+                let source_projection_binding = source_projection_binding.clone();
+                Rc::new(move |window: &mut Window, cx: &mut App| {
+                    let panel = panel.clone();
+                    let selected_binding = selected_binding.clone();
+                    let candidates = candidates.clone();
+                    let source_thread_id = source_thread_id.clone();
+                    let source_projection_binding = source_projection_binding.clone();
+                    Some(ContextMenu::build(
+                        window,
+                        cx,
+                        move |mut menu, _window, _cx| {
+                            for candidate in &candidates {
+                                let binding = candidate.binding.clone();
+                                let label = format!(
+                                    "{} — {}",
+                                    candidate.repository_name, candidate.worktree_path
+                                );
+                                let selector = selector_for(&binding);
+                                let panel = panel.clone();
+                                let source_thread_id = source_thread_id.clone();
+                                let source_projection_binding = source_projection_binding.clone();
+                                menu = menu.item(
+                                    ContextMenuEntry::new(label)
+                                        .debug_selector(selector)
+                                        .icon(if binding == selected_binding {
+                                            IconName::Check
+                                        } else {
+                                            IconName::Folder
+                                        })
+                                        .handler(move |_window, cx| {
+                                            panel
+                                                .update(cx, |panel, cx| {
+                                                    panel.select_thread_identity(
+                                                        &source_thread_id,
+                                                        source_projection_binding.as_ref(),
+                                                        source_binding_generation,
+                                                        binding.clone(),
+                                                        cx,
+                                                    );
+                                                })
+                                                .log_err();
+                                        }),
+                                );
+                            }
+                            menu
+                        },
+                    ))
+                })
+                    as Rc<dyn Fn(&mut Window, &mut App) -> Option<Entity<ContextMenu>> + 'static>
+            };
+        let repository_menu_builder = menu_builder(repository_candidates, |binding| {
+            format!(
+                "omega.workbench.control.repository.{}",
+                binding.repository_id
+            )
+        });
+        let worktree_menu_builder = menu_builder(worktree_candidates, |binding| {
+            format!("omega.workbench.control.worktree.{}", binding.worktree_id)
+        });
+
+        let full_identity = selected.accessible_label();
+        let target_selection_unavailable_reason =
+            self.thread_identity_target_selection_unavailable_reason(cx);
+        let compact = window.viewport_size().width < px(980.);
+        let repository_label = if compact {
+            selected.repository_name.clone()
+        } else {
+            format!("{} / {}", selected.project_name, selected.repository_name).into()
+        };
+        let repository_target_selection_unavailable_reason =
+            target_selection_unavailable_reason.clone();
+        let repository_menu = PopoverMenu::new("omega.workbench.identity.repository-picker")
+            .with_handle(self.thread_repository_menu_handle.clone())
+            .menu({
+                let repository_menu_builder = repository_menu_builder.clone();
+                move |window, cx| repository_menu_builder(window, cx)
+            })
+            .trigger_with_tooltip(
+                Button::new(
+                    "omega.workbench.control.identity.repository",
+                    repository_label,
                 )
+                .debug_selector(|| "omega.workbench.control.identity.repository".into())
+                .width(if compact { rems(7.) } else { rems(12.) })
+                .style(ButtonStyle::Subtle)
+                .size(ButtonSize::Compact)
+                .label_size(LabelSize::Small)
+                .disabled(target_selection_unavailable_reason.is_some())
+                .truncate(true)
+                .tab_index(0isize)
+                .aria_expanded(self.thread_repository_menu_handle.is_deployed())
+                .aria_label(format!("Repository {}", selected.repository_name))
+                .aria_description(full_identity.clone())
+                .end_icon(
+                    Icon::new(IconName::ChevronDown)
+                        .size(IconSize::XSmall)
+                        .color(Color::Muted),
+                ),
+                move |_, cx| {
+                    let description = repository_target_selection_unavailable_reason
+                        .clone()
+                        .unwrap_or_else(|| "Select the repository for this thread".into());
+                    Tooltip::with_meta(
+                        full_identity.clone(),
+                        Some(&workbench_shell::ToggleRepositoryPicker),
+                        description,
+                        cx,
+                    )
+                },
+            )
+            .anchor(Anchor::TopLeft);
+        let worktree_menu = PopoverMenu::new("omega.workbench.identity.worktree-picker")
+            .with_handle(self.thread_worktree_menu_handle.clone())
+            .menu({
+                let worktree_menu_builder = worktree_menu_builder.clone();
+                move |window, cx| worktree_menu_builder(window, cx)
+            })
+            .trigger_with_tooltip(
+                Button::new(
+                    "omega.workbench.control.identity.worktree",
+                    selected.worktree_name.clone(),
+                )
+                .debug_selector(|| "omega.workbench.control.identity.worktree".into())
+                .width(if compact { rems(6.) } else { rems(9.) })
+                .style(ButtonStyle::Subtle)
+                .size(ButtonSize::Compact)
+                .label_size(LabelSize::Small)
+                .disabled(target_selection_unavailable_reason.is_some())
+                .truncate(true)
+                .tab_index(0isize)
+                .aria_expanded(self.thread_worktree_menu_handle.is_deployed())
+                .aria_label(format!("Worktree {}", selected.worktree_name))
+                .aria_description(format!("Worktree path {}", selected.worktree_path))
+                .end_icon(
+                    Icon::new(IconName::ChevronDown)
+                        .size(IconSize::XSmall)
+                        .color(Color::Muted),
+                ),
+                {
+                    let worktree_path = selected.worktree_path.clone();
+                    move |_, cx| {
+                        let description = target_selection_unavailable_reason
+                            .clone()
+                            .unwrap_or_else(|| "Select the worktree for this thread".into());
+                        Tooltip::with_meta(
+                            worktree_path.clone(),
+                            Some(&workbench_shell::ToggleWorktreePicker),
+                            description,
+                            cx,
+                        )
+                    }
+                },
+            )
+            .anchor(Anchor::TopLeft);
+
+        let repository = selected.git_repository_id.and_then(|id| {
+            self.project
+                .read(cx)
+                .git_store()
+                .read(cx)
+                .repositories()
+                .get(&project::git_store::RepositoryId(id))
+                .cloned()
+        });
+        let branch_label = selected.branch.label();
+        let branch_menu_label = branch_label.clone();
+        let branch_selection = {
+            let panel = cx.entity().downgrade();
+            let repository = repository.clone();
+            let conversation_view = self.active_conversation_view().cloned();
+            let expected_thread_id = self.active_thread_id(cx)?;
+            let expected_thread_id = expected_thread_id.to_key_string();
+            let expected_binding = selected.binding.clone();
+            let expected_projection_binding = identity.binding().cloned();
+            let expected_binding_generation = self
+                .workbench_shell
+                .projection()
+                .visible_projection()
+                .map(|visible| visible.generation)
+                .unwrap_or_default();
+            let selected_branch = match &selected.branch {
+                BranchIdentity::Branch(branch) => Some(branch.clone()),
+                _ => None,
+            };
+            let on_select: git_ui::branch_picker::SelectBranchCallback =
+                Arc::new(move |branch, _window, cx| {
+                    let Some(repository) = repository.clone() else {
+                        return;
+                    };
+                    let conversation_view = conversation_view.clone();
+                    let request_id = panel
+                        .update(cx, |panel, cx| {
+                            if !panel.binding_epoch_matches(
+                                &expected_thread_id,
+                                expected_projection_binding.as_ref(),
+                                expected_binding_generation,
+                                true,
+                                cx,
+                            ) || panel
+                                .thread_identity_branch_selection_unavailable_reason(cx)
+                                .is_some()
+                            {
+                                return None;
+                            }
+                            panel.thread_identity_operation_request =
+                                panel.thread_identity_operation_request.saturating_add(1);
+                            let request_id = panel.thread_identity_operation_request;
+                            panel
+                                .thread_identity_operation_requests
+                                .insert(expected_thread_id.clone(), request_id);
+                            panel
+                                .thread_identity_pending_operations
+                                .insert(expected_thread_id.clone(), request_id);
+                            panel
+                                .thread_identity_operation_errors
+                                .remove(&expected_thread_id);
+                            if let Some(conversation_view) = &conversation_view {
+                                conversation_view.update(cx, |conversation_view, cx| {
+                                    conversation_view.set_repository_mutation_pending(true, cx);
+                                });
+                            }
+                            panel.thread_identity_observation_revision =
+                                panel.thread_identity_observation_revision.saturating_add(1);
+                            cx.notify();
+                            Some(request_id)
+                        })
+                        .ok()
+                        .flatten();
+                    let Some(request_id) = request_id else {
+                        return;
+                    };
+                    let panel = panel.clone();
+                    let expected_thread_id = expected_thread_id.clone();
+                    let expected_binding = expected_binding.clone();
+                    let expected_projection_binding = expected_projection_binding.clone();
+                    let conversation_view = conversation_view.clone();
+                    cx.spawn(async move |cx| {
+                        let result: Result<()> = async {
+                            repository
+                                .update(cx, |repository, _cx| {
+                                    repository.change_branch(branch.name().to_string())
+                                })
+                                .await??;
+                            Ok(())
+                        }
+                        .await;
+                        if let Some(conversation_view) = &conversation_view {
+                            conversation_view.update(cx, |conversation_view, cx| {
+                                conversation_view.set_repository_mutation_pending(false, cx);
+                            });
+                        }
+                        panel
+                            .update(cx, |panel, cx| {
+                                if panel
+                                    .thread_identity_pending_operations
+                                    .get(&expected_thread_id)
+                                    == Some(&request_id)
+                                {
+                                    panel
+                                        .thread_identity_pending_operations
+                                        .remove(&expected_thread_id);
+                                }
+                                if panel
+                                    .thread_identity_operation_requests
+                                    .get(&expected_thread_id)
+                                    != Some(&request_id)
+                                    || !panel.binding_epoch_matches(
+                                        &expected_thread_id,
+                                        expected_projection_binding.as_ref(),
+                                        expected_binding_generation,
+                                        false,
+                                        cx,
+                                    )
+                                {
+                                    return;
+                                }
+                                let result = result.and_then(|()| {
+                                    panel.workbench_shell.refresh_binding_epoch(
+                                        &expected_thread_id,
+                                        &expected_binding,
+                                        expected_binding_generation,
+                                        cx,
+                                    )
+                                });
+                                if let Some(error) = result.err() {
+                                    panel.thread_identity_operation_errors.insert(
+                                        expected_thread_id.clone(),
+                                        ThreadIdentityOperationError {
+                                            source_binding: expected_projection_binding.clone(),
+                                            attempted_binding: expected_binding.clone(),
+                                            binding_generation: expected_binding_generation,
+                                            request_id,
+                                            inconsistent: false,
+                                            message: error.to_string().into(),
+                                        },
+                                    );
+                                } else {
+                                    panel
+                                        .thread_identity_operation_requests
+                                        .remove(&expected_thread_id);
+                                    panel
+                                        .thread_identity_operation_errors
+                                        .remove(&expected_thread_id);
+                                }
+                                panel.thread_identity_observation_revision =
+                                    panel.thread_identity_observation_revision.saturating_add(1);
+                                cx.notify();
+                            })
+                            .log_err();
+                    })
+                    .detach();
+                });
+            (selected_branch, on_select)
+        };
+        let branch_selection_unavailable_reason =
+            self.thread_identity_branch_selection_unavailable_reason(cx);
+        let branch_menu = (!matches!(selected.branch, BranchIdentity::NoGit)
+            && matches!(
+                identity.phase,
+                IdentityPhase::Ready | IdentityPhase::Error(_)
+            )
+            && branch_selection_unavailable_reason.is_none())
+        .then(|| {
+            PopoverMenu::new("omega.workbench.identity.branch-picker")
+                .with_handle(self.thread_branch_menu_handle.clone())
+                .menu({
+                    let workspace = self.workspace.clone();
+                    let repository = repository.clone();
+                    let selected_branch = branch_selection.0.clone();
+                    let on_select = branch_selection.1.clone();
+                    move |window, cx| {
+                        Some(git_ui::branch_picker::select_popover(
+                            workspace.clone(),
+                            repository.clone(),
+                            selected_branch.clone(),
+                            on_select.clone(),
+                            window,
+                            cx,
+                        ))
+                    }
+                })
+                .trigger_with_tooltip(
+                    Button::new(
+                        "omega.workbench.control.identity.branch",
+                        branch_menu_label.clone(),
+                    )
+                    .debug_selector(|| "omega.workbench.control.identity.branch".into())
+                    .width(if compact { rems(7.) } else { rems(9.) })
+                    .style(ButtonStyle::Subtle)
+                    .size(ButtonSize::Compact)
+                    .label_size(LabelSize::Small)
+                    .truncate(true)
+                    .tab_index(0isize)
+                    .aria_expanded(self.thread_branch_menu_handle.is_deployed())
+                    .aria_label(format!("Branch {branch_menu_label}"))
+                    .aria_description(format!(
+                        "Git branch state for repository {}",
+                        selected.repository_name
+                    )),
+                    move |_, cx| {
+                        Tooltip::with_meta(
+                            branch_menu_label.clone(),
+                            Some(&workbench_shell::ToggleBranchPicker),
+                            "Switch branch with the Git branch picker",
+                            cx,
+                        )
+                    },
+                )
+                .anchor(Anchor::TopLeft)
+        });
+        let status = identity.phase.label();
+        let branch_unavailable_reason = branch_selection_unavailable_reason
+            .or(status.clone())
+            .unwrap_or_else(|| {
+                if matches!(selected.branch, BranchIdentity::NoGit) {
+                    "The selected worktree has no Git repository".into()
+                } else {
+                    "Branch selection is unavailable".into()
+                }
+            });
+        let git = selected.git;
+
+        Some(
+            h_flex()
+                .id("omega.workbench.thread-identity")
+                .debug_selector(|| "omega.workbench.thread-identity".into())
+                .flex_none()
+                .max_w(if compact { rems(24.) } else { rems(42.) })
+                .overflow_hidden()
+                .gap_0p5()
+                .child(Label::new("·").color(Color::Muted).size(LabelSize::Small))
+                .child(repository_menu)
+                .child(Label::new("/").color(Color::Muted).size(LabelSize::Small))
+                .child(worktree_menu)
+                .child(Label::new("@").color(Color::Muted).size(LabelSize::Small))
+                .child(
+                    branch_menu
+                        .map(IntoElement::into_any_element)
+                        .unwrap_or_else(|| {
+                            let branch_tooltip_label = branch_label.clone();
+                            Button::new(
+                                "omega.workbench.control.identity.branch",
+                                branch_label.clone(),
+                            )
+                            .debug_selector(|| "omega.workbench.control.identity.branch".into())
+                            .width(if compact { rems(7.) } else { rems(9.) })
+                            .style(ButtonStyle::Subtle)
+                            .size(ButtonSize::Compact)
+                            .label_size(LabelSize::Small)
+                            .truncate(true)
+                            .disabled(true)
+                            .tab_index(0isize)
+                            .aria_label(format!("Branch {branch_label}"))
+                            .aria_description(branch_unavailable_reason.clone())
+                            .tooltip(move |_, cx| {
+                                Tooltip::with_meta(
+                                    branch_tooltip_label.clone(),
+                                    None,
+                                    branch_unavailable_reason.clone(),
+                                    cx,
+                                )
+                            })
+                            .into_any_element()
+                        }),
+                )
+                .when(git.dirty_files > 0, |this| {
+                    this.child(
+                        div()
+                            .id("omega.workbench.identity.indicator.dirty")
+                            .debug_selector(|| "omega.workbench.identity.indicator.dirty".into())
+                            .role(gpui::Role::Status)
+                            .aria_label(format!("{} changed files", git.dirty_files))
+                            .child(
+                                Label::new(format!("±{}", git.dirty_files))
+                                    .size(LabelSize::Small)
+                                    .color(Color::Warning),
+                            ),
+                    )
+                })
+                .when(git.conflicts > 0, |this| {
+                    this.child(
+                        div()
+                            .id("omega.workbench.identity.indicator.conflict")
+                            .debug_selector(|| "omega.workbench.identity.indicator.conflict".into())
+                            .role(gpui::Role::Status)
+                            .aria_label(format!("{} conflicted files", git.conflicts))
+                            .child(
+                                Label::new(format!("!{}", git.conflicts))
+                                    .size(LabelSize::Small)
+                                    .color(Color::Error),
+                            ),
+                    )
+                })
+                .when(git.ahead > 0, |this| {
+                    this.child(
+                        div()
+                            .id("omega.workbench.identity.indicator.ahead")
+                            .debug_selector(|| "omega.workbench.identity.indicator.ahead".into())
+                            .role(gpui::Role::Status)
+                            .aria_label(format!("{} commits ahead", git.ahead))
+                            .child(
+                                Label::new(format!("↑{}", git.ahead))
+                                    .size(LabelSize::Small)
+                                    .color(Color::Muted),
+                            ),
+                    )
+                })
+                .when(git.behind > 0, |this| {
+                    this.child(
+                        div()
+                            .id("omega.workbench.identity.indicator.behind")
+                            .debug_selector(|| "omega.workbench.identity.indicator.behind".into())
+                            .role(gpui::Role::Status)
+                            .aria_label(format!("{} commits behind", git.behind))
+                            .child(
+                                Label::new(format!("↓{}", git.behind))
+                                    .size(LabelSize::Small)
+                                    .color(Color::Muted),
+                            ),
+                    )
+                })
+                .when_some(status, |this, status| {
+                    this.child(
+                        div()
+                            .id("omega.workbench.identity.status")
+                            .debug_selector(|| "omega.workbench.identity.status".into())
+                            .role(gpui::Role::Status)
+                            .aria_label(status.clone())
+                            .child(
+                                Label::new(status)
+                                    .size(LabelSize::Small)
+                                    .color(Color::Warning),
+                            ),
+                    )
+                })
                 .into_any_element(),
         )
     }
@@ -8005,40 +8638,509 @@ impl AgentPanel {
     fn workbench_thread_context(
         &self,
         cx: &App,
-    ) -> Result<(
-        Option<String>,
-        Option<omega_workbench_state::RepositoryBinding>,
-    )> {
+    ) -> Result<(Option<String>, ThreadIdentityObservation)> {
+        let revision = self.thread_identity_observation_revision;
         let Some(thread_id) = self.active_thread_id(cx) else {
-            return Ok((None, None));
+            return Ok((
+                None,
+                ThreadIdentityObservation {
+                    revision,
+                    phase: IdentityPhase::NoProject,
+                    candidates: Vec::new(),
+                },
+            ));
         };
-        let worktree = self.project.read(cx).visible_worktrees(cx).next();
-        let binding = match worktree {
-            Some(worktree) => {
-                let repository_id = self
-                    .workspace_id
-                    .map(|workspace_id| format!("workspace-{}", i64::from(workspace_id)))
-                    .unwrap_or_else(|| "workspace-transient".into());
-                let worktree_id = format!("worktree-{}", worktree.read(cx).id());
-                Some(
-                    omega_workbench_state::RepositoryBinding::new(repository_id, worktree_id)
-                        .map_err(anyhow::Error::new)?,
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some(observation) = self.workbench_identity_observation_override.clone() {
+            return Ok((Some(thread_id.to_key_string()), observation));
+        }
+
+        let preferred_paths = self
+            .active_conversation_view()
+            .map(|conversation_view| {
+                conversation_view
+                    .read(cx)
+                    .work_dirs()
+                    .ordered_paths()
+                    .cloned()
+                    .collect::<Vec<_>>()
+            })
+            .or_else(|| {
+                self.omega_active_acp_thread(cx).and_then(|thread| {
+                    thread
+                        .read(cx)
+                        .work_dirs()
+                        .map(|paths| paths.ordered_paths().cloned().collect::<Vec<_>>())
+                })
+            })
+            .unwrap_or_default();
+        let project = self.project.read(cx);
+        let remote_phase = project
+            .remote_connection_state(cx)
+            .and_then(|state| match state {
+                remote::ConnectionState::Connecting | remote::ConnectionState::Reconnecting => {
+                    Some(IdentityPhase::Reconnecting)
+                }
+                remote::ConnectionState::Connected => None,
+                remote::ConnectionState::HeartbeatMissed => Some(IdentityPhase::Stale),
+                remote::ConnectionState::Disconnected => Some(IdentityPhase::Offline),
+            });
+        let initial_scan_completed = project.worktree_store().read(cx).initial_scan_completed();
+        let git_store = project.git_store();
+        let mut worktrees = project.visible_worktrees(cx).collect::<Vec<_>>();
+        worktrees.sort_by(|left, right| {
+            let left_path = left.read(cx).abs_path();
+            let right_path = right.read(cx).abs_path();
+            let left_preference = preferred_paths
+                .iter()
+                .position(|path| path == left_path.as_ref())
+                .unwrap_or(usize::MAX);
+            let right_preference = preferred_paths
+                .iter()
+                .position(|path| path == right_path.as_ref())
+                .unwrap_or(usize::MAX);
+            left_preference
+                .cmp(&right_preference)
+                .then_with(|| left_path.cmp(&right_path))
+        });
+        let home = std::env::var_os("HOME").map(PathBuf::from);
+        let mut candidates = Vec::new();
+        let mut branch_errors = Vec::new();
+        let mut loading_bindings = Vec::new();
+        for worktree in worktrees {
+            let worktree = worktree.read(cx);
+            let worktree_id = worktree.id();
+            let worktree_name: SharedString = worktree.root_name_str().to_string().into();
+            let worktree_path = worktree.abs_path();
+            let worktree_display: SharedString =
+                omega_workdir::display_for_person(&worktree_path, home.as_deref()).into();
+            let repository_ids = git_store.read(cx).repository_ids_for_worktree(worktree_id);
+            if repository_ids.is_empty() {
+                let binding = omega_workbench_state::RepositoryBinding::new(
+                    format!("project-worktree-{worktree_id}"),
+                    format!("worktree-{worktree_id}"),
                 )
+                .map_err(anyhow::Error::new)?;
+                candidates.push(ThreadIdentityCandidate {
+                    binding,
+                    git_repository_id: None,
+                    project_name: worktree_name.clone(),
+                    repository_name: "No Git".into(),
+                    worktree_name,
+                    worktree_abs_path: worktree_path.as_ref().to_path_buf(),
+                    worktree_path: worktree_display,
+                    branch: BranchIdentity::NoGit,
+                    git: GitIdentitySummary::default(),
+                    source_revision: revision,
+                });
+                continue;
             }
-            None => None,
-        };
-        Ok((Some(thread_id.to_key_string()), binding))
+
+            for repository_id in repository_ids {
+                let repository = git_store
+                    .read(cx)
+                    .repositories()
+                    .get(&repository_id)
+                    .cloned()
+                    .ok_or_else(|| {
+                        anyhow!(
+                            "repository {repository_id:?} disappeared while projecting identity"
+                        )
+                    })?;
+                let repository = repository.read(cx);
+                let snapshot = repository.snapshot();
+                let repository_identity_path =
+                    project::git_store::repo_identity_path(&snapshot.common_dir_abs_path);
+                let repository_digest =
+                    Sha256::digest(repository_identity_path.to_string_lossy().as_bytes());
+                let binding = omega_workbench_state::RepositoryBinding::new(
+                    format!("git-repository-{repository_digest:x}"),
+                    format!("worktree-{worktree_id}"),
+                )
+                .map_err(anyhow::Error::new)?;
+                if snapshot.scan_id == 0 {
+                    loading_bindings.push(binding.clone());
+                }
+                if let Some(error) = snapshot.branch_list_error.clone() {
+                    branch_errors.push((binding.clone(), error));
+                }
+                let branch = BranchIdentity::from_git(
+                    snapshot.branch.as_ref().map(|branch| branch.name()),
+                    snapshot
+                        .head_commit
+                        .as_ref()
+                        .map(|commit| commit.sha.as_ref()),
+                );
+                let tracking = snapshot
+                    .branch
+                    .as_ref()
+                    .and_then(|branch| branch.tracking_status());
+                let summary = snapshot.status_summary();
+                candidates.push(ThreadIdentityCandidate {
+                    binding,
+                    git_repository_id: Some(repository_id.0),
+                    project_name: worktree_name.clone(),
+                    repository_name: snapshot.display_name(),
+                    worktree_name: worktree_name.clone(),
+                    worktree_abs_path: worktree_path.as_ref().to_path_buf(),
+                    worktree_path: worktree_display.clone(),
+                    branch,
+                    git: GitIdentitySummary {
+                        dirty_files: summary.count,
+                        conflicts: summary.conflict,
+                        ahead: tracking.map_or(0, |tracking| tracking.ahead as usize),
+                        behind: tracking.map_or(0, |tracking| tracking.behind as usize),
+                    },
+                    source_revision: snapshot.scan_id.max(revision),
+                });
+            }
+        }
+
+        let thread_key = thread_id.to_key_string();
+        let selected_binding = self
+            .workbench_shell
+            .identity_thread_id()
+            .filter(|active_thread_id| *active_thread_id == thread_key)
+            .and_then(|_| self.workbench_shell.identity())
+            .and_then(|identity| identity.selected.as_ref())
+            .map(|selected| &selected.binding)
+            .filter(|binding| {
+                candidates
+                    .iter()
+                    .any(|candidate| &candidate.binding == *binding)
+            })
+            .cloned()
+            .or_else(|| {
+                candidates
+                    .first()
+                    .map(|candidate| candidate.binding.clone())
+            });
+        let operation_error = self
+            .thread_identity_operation_errors
+            .get(&thread_key)
+            .filter(|error| {
+                self.thread_identity_operation_requests.get(&thread_key) == Some(&error.request_id)
+                    && self
+                        .workbench_shell
+                        .projection()
+                        .threads
+                        .get(&thread_key)
+                        .is_some_and(|thread| {
+                            thread.generation == error.binding_generation
+                                && thread.binding == error.source_binding
+                        })
+                    && candidates
+                        .iter()
+                        .any(|candidate| candidate.binding == error.attempted_binding)
+            })
+            .map(|error| (error.inconsistent, error.message.clone()));
+        let operation_pending = self
+            .thread_identity_pending_operations
+            .contains_key(&thread_key);
+        let branch_error = selected_binding.as_ref().and_then(|binding| {
+            branch_errors
+                .iter()
+                .find(|(error_binding, _)| error_binding == binding)
+                .map(|(_, error)| error.clone())
+        });
+        let selected_repository_is_loading = selected_binding
+            .as_ref()
+            .is_some_and(|binding| loading_bindings.contains(binding));
+        let phase = remote_phase.unwrap_or_else(|| {
+            if operation_pending {
+                IdentityPhase::Loading
+            } else if let Some((inconsistent, error)) = operation_error {
+                if inconsistent {
+                    IdentityPhase::Inconsistent(error)
+                } else {
+                    IdentityPhase::Error(error)
+                }
+            } else if let Some(error) = branch_error {
+                IdentityPhase::Error(error)
+            } else if !initial_scan_completed || selected_repository_is_loading {
+                IdentityPhase::Loading
+            } else if candidates.is_empty() {
+                IdentityPhase::NoProject
+            } else {
+                IdentityPhase::Ready
+            }
+        });
+        #[cfg(any(test, feature = "test-support"))]
+        let phase = self
+            .workbench_identity_phase_override
+            .clone()
+            .unwrap_or(phase);
+        Ok((
+            Some(thread_id.to_key_string()),
+            ThreadIdentityObservation {
+                revision,
+                phase,
+                candidates,
+            },
+        ))
     }
 
     fn sync_workbench_shell(&mut self, cx: &mut Context<Self>) {
         let context = self.workbench_thread_context(cx);
         let result = match context {
-            Ok((thread_id, binding)) => self.workbench_shell.sync_active_thread(thread_id, binding),
+            Ok((thread_id, observation)) => self
+                .workbench_shell
+                .sync_active_thread(thread_id, observation),
             Err(error) => Err(error),
         };
         if let Err(error) = result {
             log::warn!("failed to synchronize workbench shell: {error:#}");
             self.workbench_shell.record_error(error.to_string());
+        }
+    }
+
+    fn binding_epoch_matches(
+        &self,
+        expected_thread_id: &str,
+        expected_binding: Option<&omega_workbench_state::RepositoryBinding>,
+        expected_binding_generation: u64,
+        require_active: bool,
+        cx: &App,
+    ) -> bool {
+        let projection = self.workbench_shell.projection();
+        (!require_active
+            || (self
+                .active_thread_id(cx)
+                .is_some_and(|thread_id| thread_id.to_key_string() == expected_thread_id)
+                && projection.active_thread_id.as_deref() == Some(expected_thread_id)))
+            && projection
+                .threads
+                .get(expected_thread_id)
+                .is_some_and(|thread| {
+                    thread.generation == expected_binding_generation
+                        && thread.binding.as_ref() == expected_binding
+                })
+    }
+
+    fn record_thread_identity_operation_error(
+        &mut self,
+        thread_id: &str,
+        source_binding: Option<&omega_workbench_state::RepositoryBinding>,
+        attempted_binding: &omega_workbench_state::RepositoryBinding,
+        binding_generation: u64,
+        inconsistent: bool,
+        message: impl Into<SharedString>,
+    ) {
+        self.thread_identity_operation_request =
+            self.thread_identity_operation_request.saturating_add(1);
+        let request_id = self.thread_identity_operation_request;
+        self.thread_identity_operation_requests
+            .insert(thread_id.to_string(), request_id);
+        self.thread_identity_operation_errors.insert(
+            thread_id.to_string(),
+            ThreadIdentityOperationError {
+                source_binding: source_binding.cloned(),
+                attempted_binding: attempted_binding.clone(),
+                binding_generation,
+                request_id,
+                inconsistent,
+                message: message.into(),
+            },
+        );
+        self.thread_identity_observation_revision =
+            self.thread_identity_observation_revision.saturating_add(1);
+    }
+
+    fn select_thread_identity(
+        &mut self,
+        expected_thread_id: &str,
+        expected_projection_binding: Option<&omega_workbench_state::RepositoryBinding>,
+        expected_binding_generation: u64,
+        binding: omega_workbench_state::RepositoryBinding,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.binding_epoch_matches(
+            expected_thread_id,
+            expected_projection_binding,
+            expected_binding_generation,
+            true,
+            cx,
+        ) {
+            return;
+        }
+        if let Some(reason) = self.thread_identity_target_selection_unavailable_reason(cx) {
+            self.record_thread_identity_operation_error(
+                expected_thread_id,
+                expected_projection_binding,
+                &binding,
+                expected_binding_generation,
+                false,
+                reason,
+            );
+            cx.notify();
+            return;
+        }
+        let Some(observation_revision) = self
+            .workbench_shell
+            .identity()
+            .map(|identity| identity.observation_revision)
+        else {
+            return;
+        };
+        let reconciling_inconsistent = self
+            .workbench_shell
+            .identity()
+            .is_some_and(|identity| matches!(identity.phase, IdentityPhase::Inconsistent(_)));
+        let active_thread_id = self.active_thread_id(cx);
+        let worktree_path = self
+            .workbench_shell
+            .identity()
+            .and_then(|identity| {
+                identity
+                    .candidates
+                    .iter()
+                    .find(|candidate| candidate.binding == binding)
+            })
+            .map(|candidate| candidate.worktree_abs_path.clone());
+        let persisted_worktree_paths = worktree_path.as_ref().map(|selected_path| {
+            let project_paths = self.project.read(cx).worktree_paths(cx);
+            project_paths
+                .ordered_pairs()
+                .find(|(_, folder_path)| folder_path.as_path() == selected_path)
+                .map(|(main_path, folder_path)| {
+                    let mut paths = WorktreePaths::default();
+                    paths.add_path(main_path, folder_path);
+                    paths
+                })
+                .unwrap_or_else(|| {
+                    WorktreePaths::from_folder_paths(&PathList::new(std::slice::from_ref(
+                        selected_path,
+                    )))
+                })
+        });
+        let (Some(worktree_path), Some(persisted_worktree_paths)) =
+            (worktree_path, persisted_worktree_paths)
+        else {
+            self.record_thread_identity_operation_error(
+                expected_thread_id,
+                expected_projection_binding,
+                &binding,
+                expected_binding_generation,
+                false,
+                "The selected worktree path is unavailable",
+            );
+            cx.notify();
+            return;
+        };
+        let Some(conversation_view) = self.active_conversation_view().cloned() else {
+            self.record_thread_identity_operation_error(
+                expected_thread_id,
+                expected_projection_binding,
+                &binding,
+                expected_binding_generation,
+                false,
+                "The active conversation is unavailable",
+            );
+            cx.notify();
+            return;
+        };
+        let previous_work_dirs = conversation_view.read(cx).work_dirs().clone();
+        let work_dirs = PathList::new(&[worktree_path]);
+        if let Err(error) = conversation_view.update(cx, |conversation_view, cx| {
+            if reconciling_inconsistent {
+                conversation_view.reconcile_work_dirs(work_dirs, cx)
+            } else {
+                conversation_view.retarget_work_dirs(work_dirs, cx)
+            }
+        }) {
+            let inconsistent = error
+                .downcast_ref::<crate::conversation_view::InconsistentWorkDirsError>()
+                .is_some();
+            self.record_thread_identity_operation_error(
+                expected_thread_id,
+                expected_projection_binding,
+                &binding,
+                expected_binding_generation,
+                inconsistent,
+                error.to_string(),
+            );
+            cx.notify();
+            return;
+        }
+
+        match self
+            .workbench_shell
+            .select_identity(observation_revision, &binding)
+        {
+            Ok(true) => {
+                self.thread_identity_operation_requests
+                    .remove(expected_thread_id);
+                self.thread_identity_operation_errors
+                    .remove(expected_thread_id);
+                if let Some(thread_id) = active_thread_id {
+                    ThreadMetadataStore::global(cx).update(cx, |store, cx| {
+                        store.update_worktree_paths(&[thread_id], persisted_worktree_paths, cx);
+                    });
+                }
+                self.thread_identity_observation_revision =
+                    self.thread_identity_observation_revision.saturating_add(1);
+                cx.notify();
+            }
+            Ok(false) => {
+                if reconciling_inconsistent
+                    && let Some(binding) = expected_projection_binding
+                    && let Err(error) = self.workbench_shell.refresh_binding_epoch(
+                        expected_thread_id,
+                        binding,
+                        expected_binding_generation,
+                        cx,
+                    )
+                {
+                    self.record_thread_identity_operation_error(
+                        expected_thread_id,
+                        expected_projection_binding,
+                        &binding,
+                        expected_binding_generation,
+                        true,
+                        error.to_string(),
+                    );
+                    cx.notify();
+                    return;
+                }
+                if self
+                    .thread_identity_operation_errors
+                    .remove(expected_thread_id)
+                    .is_some()
+                {
+                    self.thread_identity_observation_revision =
+                        self.thread_identity_observation_revision.saturating_add(1);
+                    cx.notify();
+                }
+            }
+            Err(error) => {
+                let rollback_result = conversation_view.update(cx, |conversation_view, cx| {
+                    conversation_view.retarget_work_dirs(previous_work_dirs, cx)
+                });
+                if let Err(rollback_error) = rollback_result {
+                    self.record_thread_identity_operation_error(
+                        expected_thread_id,
+                        expected_projection_binding,
+                        &binding,
+                        expected_binding_generation,
+                        true,
+                        format!(
+                            "{error}; also failed to restore the previous worktree: {rollback_error}"
+                        ),
+                    );
+                    cx.notify();
+                    return;
+                }
+                log::warn!("failed to change thread repository identity: {error:#}");
+                self.record_thread_identity_operation_error(
+                    expected_thread_id,
+                    expected_projection_binding,
+                    &binding,
+                    expected_binding_generation,
+                    false,
+                    error.to_string(),
+                );
+                cx.notify();
+            }
         }
     }
 
@@ -8179,9 +9281,12 @@ impl AgentPanel {
             .into_iter()
             .map(|surface| {
                 let capability = self.workbench_shell.capability(surface);
-                let available = capability
-                    .is_some_and(|capability| capability.availability.is_available() && !offline);
-                let unavailable_reason = if offline {
+                let connection_unavailable =
+                    offline && surface != omega_workbench_state::WorkSurface::Plan;
+                let available = capability.is_some_and(|capability| {
+                    capability.availability.is_available() && !connection_unavailable
+                });
+                let unavailable_reason = if connection_unavailable {
                     Some(SharedString::from("Work surfaces are unavailable offline"))
                 } else {
                     capability
@@ -8444,6 +9549,36 @@ impl Render for AgentPanel {
             .on_action(cx.listener(|this, _: &ToggleThreadsSidebar, _window, cx| {
                 this.toggle_threads_sidebar(cx);
             }))
+            .on_action(cx.listener(
+                |this, _: &workbench_shell::ToggleRepositoryPicker, window, cx| {
+                    if this
+                        .thread_identity_target_selection_unavailable_reason(cx)
+                        .is_none()
+                    {
+                        this.thread_repository_menu_handle.toggle(window, cx);
+                    }
+                },
+            ))
+            .on_action(cx.listener(
+                |this, _: &workbench_shell::ToggleWorktreePicker, window, cx| {
+                    if this
+                        .thread_identity_target_selection_unavailable_reason(cx)
+                        .is_none()
+                    {
+                        this.thread_worktree_menu_handle.toggle(window, cx);
+                    }
+                },
+            ))
+            .on_action(cx.listener(
+                |this, _: &workbench_shell::ToggleBranchPicker, window, cx| {
+                    if this
+                        .thread_identity_branch_selection_unavailable_reason(cx)
+                        .is_none()
+                    {
+                        this.thread_branch_menu_handle.toggle(window, cx);
+                    }
+                },
+            ))
             .on_action(cx.listener(Self::open_active_thread_as_markdown))
             .on_action(cx.listener(Self::manage_skills))
             .on_action(cx.listener(Self::toggle_options_menu))
@@ -8731,6 +9866,85 @@ impl AgentPanel {
         self.workbench_shell.projection()
     }
 
+    pub fn workbench_identity_for_tests(
+        &self,
+    ) -> Option<&crate::thread_identity::ThreadIdentityState> {
+        self.workbench_shell.identity()
+    }
+
+    pub fn workbench_capability_for_tests(
+        &self,
+        surface: omega_workbench_state::WorkSurface,
+    ) -> Option<&workbench_shell::SurfaceCapability> {
+        self.workbench_shell.capability(surface)
+    }
+
+    pub fn workbench_repository_menu_for_tests(&self) -> Option<Entity<ContextMenu>> {
+        self.thread_repository_menu_handle.deployed_menu()
+    }
+
+    pub fn workbench_branch_menu_for_tests(
+        &self,
+    ) -> Option<Entity<git_ui::branch_picker::BranchList>> {
+        self.thread_branch_menu_handle.deployed_menu()
+    }
+
+    pub fn set_workbench_identity_phase_for_tests(
+        &mut self,
+        phase: Option<IdentityPhase>,
+        cx: &mut Context<Self>,
+    ) {
+        self.workbench_identity_phase_override = phase;
+        self.thread_identity_observation_revision =
+            self.thread_identity_observation_revision.saturating_add(1);
+        cx.notify();
+    }
+
+    pub fn set_workbench_identity_observation_for_tests(
+        &mut self,
+        observation: Option<ThreadIdentityObservation>,
+        cx: &mut Context<Self>,
+    ) {
+        self.workbench_identity_observation_override = observation;
+        cx.notify();
+    }
+
+    pub fn mark_workbench_identity_inconsistent_for_tests(
+        &mut self,
+        message: impl Into<SharedString>,
+        cx: &mut Context<Self>,
+    ) -> Result<()> {
+        let visible = self
+            .workbench_shell
+            .projection()
+            .visible_projection()
+            .ok_or_else(|| anyhow!("workbench has no visible thread"))?;
+        let binding = visible
+            .binding
+            .clone()
+            .ok_or_else(|| anyhow!("workbench thread has no repository binding"))?;
+        self.thread_identity_operation_request =
+            self.thread_identity_operation_request.saturating_add(1);
+        let request_id = self.thread_identity_operation_request;
+        self.thread_identity_operation_requests
+            .insert(visible.thread_id.clone(), request_id);
+        self.thread_identity_operation_errors.insert(
+            visible.thread_id,
+            ThreadIdentityOperationError {
+                source_binding: Some(binding.clone()),
+                attempted_binding: binding,
+                binding_generation: visible.generation,
+                request_id,
+                inconsistent: true,
+                message: message.into(),
+            },
+        );
+        self.thread_identity_observation_revision =
+            self.thread_identity_observation_revision.saturating_add(1);
+        cx.notify();
+        Ok(())
+    }
+
     pub fn workbench_focus_target_for_tests(&self) -> workbench_shell::WorkbenchFocusTarget {
         self.workbench_shell.focus_target()
     }
@@ -8836,6 +10050,31 @@ impl AgentPanel {
             Some(server),
             None,
             None,
+            None,
+            None,
+            None,
+            AgentThreadSource::AgentPanel,
+            window,
+            cx,
+        );
+        self.set_base_view(thread.into(), true, window, cx);
+    }
+
+    pub fn open_external_thread_with_server_and_work_dirs(
+        &mut self,
+        server: Rc<dyn AgentServer>,
+        work_dirs: PathList,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let ext_agent = Agent::Custom {
+            id: server.agent_id(),
+        };
+        let thread = self.create_agent_thread_with_server(
+            ext_agent,
+            Some(server),
+            None,
+            Some(work_dirs),
             None,
             None,
             None,
@@ -13504,7 +14743,9 @@ mod tests {
     }
 
     #[gpui::test]
-    async fn test_work_dirs_update_when_worktrees_change(cx: &mut TestAppContext) {
+    async fn test_existing_thread_work_dirs_do_not_expand_when_worktrees_change(
+        cx: &mut TestAppContext,
+    ) {
         use crate::thread_metadata_store::ThreadMetadataStore;
 
         init_test(cx);
@@ -13592,20 +14833,19 @@ mod tests {
             .await;
         cx.run_until_parked();
 
-        // Verify thread B's (active) work_dirs now include both worktrees.
+        // Existing thread targets remain exact when an unrelated worktree is
+        // added to the project.
         let updated_b_paths = panel.read_with(&cx, |panel, cx| {
             let thread = panel.active_agent_thread(cx).unwrap();
             thread.read(cx).work_dirs().cloned().unwrap()
         });
-        let mut b_paths_sorted = updated_b_paths.ordered_paths().cloned().collect::<Vec<_>>();
-        b_paths_sorted.sort();
         assert_eq!(
-            b_paths_sorted,
-            vec![PathBuf::from("/project_a"), PathBuf::from("/project_b")],
-            "Thread B work_dirs should include both worktrees after adding /project_b"
+            updated_b_paths.ordered_paths().collect::<Vec<_>>(),
+            vec![&PathBuf::from("/project_a")],
+            "Thread B should retain its explicit target after adding /project_b"
         );
 
-        // Verify thread A's (background) work_dirs are also updated.
+        // Retained threads keep their own explicit target as well.
         let updated_a_paths = panel.read_with(&cx, |panel, cx| {
             let bg_view = panel.retained_threads.get(&thread_id_a).unwrap();
             let root_thread = bg_view.read(cx).root_thread_view().unwrap();
@@ -13617,15 +14857,13 @@ mod tests {
                 .cloned()
                 .unwrap()
         });
-        let mut a_paths_sorted = updated_a_paths.ordered_paths().cloned().collect::<Vec<_>>();
-        a_paths_sorted.sort();
         assert_eq!(
-            a_paths_sorted,
-            vec![PathBuf::from("/project_a"), PathBuf::from("/project_b")],
-            "Thread A work_dirs should include both worktrees after adding /project_b"
+            updated_a_paths.ordered_paths().collect::<Vec<_>>(),
+            vec![&PathBuf::from("/project_a")],
+            "Thread A should retain its explicit target after adding /project_b"
         );
 
-        // Verify thread idle C was also updated.
+        // The same rule applies to an idle retained thread.
         let updated_c_paths = panel.read_with(&cx, |panel, cx| {
             let bg_view = panel.retained_threads.get(&thread_id_c).unwrap();
             let root_thread = bg_view.read(cx).root_thread_view().unwrap();
@@ -13637,15 +14875,13 @@ mod tests {
                 .cloned()
                 .unwrap()
         });
-        let mut c_paths_sorted = updated_c_paths.ordered_paths().cloned().collect::<Vec<_>>();
-        c_paths_sorted.sort();
         assert_eq!(
-            c_paths_sorted,
-            vec![PathBuf::from("/project_a"), PathBuf::from("/project_b")],
-            "Thread C (idle background) work_dirs should include both worktrees after adding /project_b"
+            updated_c_paths.ordered_paths().collect::<Vec<_>>(),
+            vec![&PathBuf::from("/project_a")],
+            "Thread C should retain its explicit target after adding /project_b"
         );
 
-        // Verify the metadata store reflects the new paths for running threads only.
+        // Metadata must preserve the same exact target.
         cx.run_until_parked();
         for (label, session_id) in [("thread B", &session_id_b), ("thread A", &session_id_a)] {
             let metadata_paths = metadata_store.read_with(&cx, |store, _cx| {
@@ -13654,16 +14890,14 @@ mod tests {
                     .unwrap_or_else(|| panic!("{label} thread metadata should exist"));
                 metadata.folder_paths().clone()
             });
-            let mut sorted = metadata_paths.ordered_paths().cloned().collect::<Vec<_>>();
-            sorted.sort();
             assert_eq!(
-                sorted,
-                vec![PathBuf::from("/project_a"), PathBuf::from("/project_b")],
-                "{label} thread metadata folder_paths should include both worktrees"
+                metadata_paths.ordered_paths().collect::<Vec<_>>(),
+                vec![&PathBuf::from("/project_a")],
+                "{label} metadata should retain its explicit target"
             );
         }
 
-        // Now remove a worktree and verify work_dirs shrink.
+        // Removing the unrelated worktree does not perturb the target.
         let worktree_b_id = new_tree.read_with(&cx, |tree, _| tree.id());
         project.update(&mut cx, |project, cx| {
             project.remove_worktree(worktree_b_id, cx);

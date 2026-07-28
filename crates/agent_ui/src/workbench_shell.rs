@@ -6,11 +6,18 @@ use gpui::{
     actions, px,
 };
 use omega_workbench_state::{
-    ConnectionPhase, ProjectionTransition, RepositoryBinding, WorkSurface, WorkbenchProjection,
+    ConnectionPhase, ProjectionSnapshot, ProjectionTransition, RepositoryBinding, WorkSurface,
+    WorkbenchProjection,
 };
 use ui::{Color, Icon, IconName, IconSize, Label, LabelSize, prelude::*, v_flex};
 
-use crate::omega_sidebar;
+use crate::{
+    omega_sidebar,
+    thread_identity::{
+        BranchIdentity, IdentityPhase, ThreadIdentityObservation, ThreadIdentityProjection,
+        ThreadIdentityState,
+    },
+};
 
 pub const ACTIVITY_RAIL_WIDTH: Pixels = px(40.);
 pub const DEFAULT_DOCK_WIDTH: Pixels = px(320.);
@@ -49,6 +56,12 @@ actions!(
         CollapseWorkSurfaceDock,
         /// Return focus to the active thread transcript.
         FocusThreadTranscript,
+        /// Open the active thread repository picker.
+        ToggleRepositoryPicker,
+        /// Open the active thread worktree picker.
+        ToggleWorktreePicker,
+        /// Open the active thread branch picker.
+        ToggleBranchPicker,
     ]
 );
 
@@ -308,6 +321,7 @@ impl WorkbenchDockResizeDrag {
 
 pub struct WorkbenchShell {
     projection: WorkbenchProjection,
+    identity: ThreadIdentityProjection,
     capabilities: BTreeMap<WorkSurface, SurfaceCapability>,
     hosts: BTreeMap<SurfaceHostKey, Entity<WorkSurfaceHost>>,
     rail_focus_handles: BTreeMap<WorkSurface, FocusHandle>,
@@ -327,6 +341,7 @@ impl WorkbenchShell {
             .collect();
         Self {
             projection: WorkbenchProjection::new(),
+            identity: ThreadIdentityProjection::default(),
             capabilities: WorkSurface::FALLBACK_ORDER
                 .into_iter()
                 .map(|surface| {
@@ -349,6 +364,14 @@ impl WorkbenchShell {
 
     pub fn projection(&self) -> &WorkbenchProjection {
         &self.projection
+    }
+
+    pub fn identity(&self) -> Option<&ThreadIdentityState> {
+        self.identity.active()
+    }
+
+    pub fn identity_thread_id(&self) -> Option<&str> {
+        self.identity.active_thread_id()
     }
 
     pub fn capabilities(&self) -> &BTreeMap<WorkSurface, SurfaceCapability> {
@@ -402,15 +425,29 @@ impl WorkbenchShell {
     pub fn sync_active_thread(
         &mut self,
         thread_id: Option<String>,
-        binding: Option<RepositoryBinding>,
+        observation: ThreadIdentityObservation,
     ) -> Result<()> {
+        let connection = match observation.phase {
+            IdentityPhase::Offline => ConnectionPhase::Offline,
+            IdentityPhase::Reconnecting => ConnectionPhase::Reconnecting,
+            IdentityPhase::Stale => ConnectionPhase::StaleProjection,
+            _ => ConnectionPhase::Online,
+        };
+        self.set_connection(connection)?;
+        self.identity
+            .sync_active_thread(thread_id.clone(), observation);
         let Some(thread_id) = thread_id else {
             self.capabilities = unavailable_capabilities("Open a thread to use this surface");
             self.focus_target = WorkbenchFocusTarget::Transcript;
             return Ok(());
         };
 
-        let available_surfaces = available_surfaces(binding.is_some());
+        let identity = self
+            .identity
+            .active()
+            .ok_or_else(|| anyhow!("active thread identity disappeared during synchronization"))?;
+        let binding = identity.binding().cloned();
+        let available_surfaces = available_surfaces_for_identity(identity);
         if !self.projection.threads.contains_key(&thread_id) {
             self.projection
                 .apply(ProjectionTransition::OpenThread {
@@ -435,7 +472,7 @@ impl WorkbenchShell {
                 anyhow!("thread {thread_id:?} disappeared during capability sync")
             })?;
         let available_surfaces = thread.available_surfaces.clone();
-        let mut capabilities = capabilities_for_binding(thread.binding.is_some());
+        let mut capabilities = capabilities_for_surfaces(&available_surfaces);
         for (surface, capability) in &mut capabilities {
             if !available_surfaces.contains(surface) {
                 capability.availability = SurfaceAvailability::Unavailable {
@@ -447,6 +484,75 @@ impl WorkbenchShell {
                 .get(surface)
                 .and_then(|previous| previous.badge.clone());
         }
+        if let Some(identity) = self.identity.active() {
+            let phase_reason = match identity.phase {
+                IdentityPhase::NoProject => Some("Open a project to use this surface"),
+                IdentityPhase::Loading => Some("Wait for repository identity to finish loading"),
+                IdentityPhase::Missing => Some("The selected worktree is missing"),
+                IdentityPhase::Inconsistent(_) => {
+                    Some("Reconnect this thread before using repository-bound surfaces")
+                }
+                _ => None,
+            };
+            if let Some(reason) = phase_reason {
+                for (surface, capability) in &mut capabilities {
+                    if *surface != WorkSurface::Plan {
+                        capability.availability = SurfaceAvailability::Unavailable {
+                            reason: reason.into(),
+                        };
+                    }
+                }
+            }
+        }
+        if let Some(identity) = self.identity.active()
+            && matches!(
+                identity.phase,
+                IdentityPhase::Offline | IdentityPhase::Reconnecting | IdentityPhase::Stale
+            )
+        {
+            let reason: SharedString = identity
+                .phase
+                .label()
+                .unwrap_or_else(|| "Repository identity is unavailable".into());
+            for (surface, capability) in &mut capabilities {
+                if *surface != WorkSurface::Plan {
+                    capability.availability = SurfaceAvailability::Unavailable {
+                        reason: reason.clone(),
+                    };
+                }
+            }
+        }
+        if let Some(identity) = self.identity.active()
+            && let Some(selected) = &identity.selected
+        {
+            let git = selected.git;
+            let label: SharedString = format!(
+                "{} changed, {} conflicted, {} ahead, {} behind",
+                git.dirty_files, git.conflicts, git.ahead, git.behind
+            )
+            .into();
+            let badge = if git.conflicts > 0 {
+                Some(SurfaceBadge::Attention {
+                    tone: BadgeTone::Error,
+                    label,
+                })
+            } else if git.dirty_files > 0 || git.ahead > 0 || git.behind > 0 {
+                Some(SurfaceBadge::Count {
+                    count: if git.dirty_files > 0 {
+                        git.dirty_files
+                    } else {
+                        git.ahead.saturating_add(git.behind)
+                    },
+                    tone: BadgeTone::Warning,
+                    label,
+                })
+            } else {
+                None
+            };
+            if let Some(capability) = capabilities.get_mut(&WorkSurface::Git) {
+                capability.badge = badge;
+            }
+        }
         self.capabilities = capabilities;
         if let Some(visible) = self.projection.visible_projection() {
             self.focus_target = if visible.dock_open {
@@ -457,6 +563,90 @@ impl WorkbenchShell {
             } else {
                 WorkbenchFocusTarget::Transcript
             };
+        }
+        Ok(())
+    }
+
+    pub fn select_identity(
+        &mut self,
+        expected_observation_revision: u64,
+        binding: &RepositoryBinding,
+    ) -> Result<bool> {
+        let identity = self
+            .identity
+            .active()
+            .ok_or_else(|| anyhow!("identity selection has no active thread"))?;
+        if identity.observation_revision != expected_observation_revision {
+            bail!(
+                "identity observation changed from revision {expected_observation_revision} to {}",
+                identity.observation_revision
+            );
+        }
+        let candidate = identity
+            .candidates
+            .iter()
+            .find(|candidate| &candidate.binding == binding)
+            .cloned()
+            .ok_or_else(|| anyhow!("selected repository/worktree is unavailable"))?;
+        if identity.selected.as_ref() == Some(&candidate) {
+            return Ok(false);
+        }
+        let thread_id = self
+            .identity
+            .active_thread_id()
+            .ok_or_else(|| anyhow!("identity selection has no active thread"))?
+            .to_string();
+        let available_surfaces = if candidate.branch == BranchIdentity::NoGit {
+            vec![
+                WorkSurface::Files,
+                WorkSurface::Search,
+                WorkSurface::Terminal,
+                WorkSurface::Plan,
+            ]
+        } else {
+            WorkSurface::FALLBACK_ORDER.into()
+        };
+        self.reconcile_binding(&thread_id, Some(candidate.binding), available_surfaces)?;
+        let changed = self
+            .identity
+            .select(expected_observation_revision, binding)?;
+        debug_assert!(changed);
+        Ok(true)
+    }
+
+    pub fn refresh_binding_epoch(
+        &mut self,
+        expected_thread_id: &str,
+        expected_binding: &RepositoryBinding,
+        expected_generation: u64,
+        cx: &mut Context<crate::AgentPanel>,
+    ) -> Result<()> {
+        let thread = self
+            .projection
+            .threads
+            .get(expected_thread_id)
+            .ok_or_else(|| anyhow!("thread {expected_thread_id:?} is unavailable"))?
+            .clone();
+        if thread.generation != expected_generation
+            || thread.binding.as_ref() != Some(expected_binding)
+        {
+            bail!("repository identity changed before its content epoch could be refreshed");
+        }
+        self.projection
+            .apply(ProjectionTransition::ChangeBinding {
+                thread_id: expected_thread_id.into(),
+                generation: expected_generation,
+                binding: thread.binding,
+                available_surfaces: thread.available_surfaces.into_iter().collect(),
+            })
+            .map_err(anyhow::Error::new)?;
+        for (key, host) in &self.hosts {
+            if key.thread_id == expected_thread_id && key.binding.as_ref() == Some(expected_binding)
+            {
+                host.update(cx, |host, cx| {
+                    host.set_content_state(SurfaceContentState::Ready, cx);
+                });
+            }
         }
         Ok(())
     }
@@ -493,61 +683,14 @@ impl WorkbenchShell {
         }
 
         let previous_effective = thread.effective_surface;
-        match (thread.binding, binding) {
-            (None, Some(binding)) => {
-                self.projection
-                    .apply(ProjectionTransition::BindRepository {
-                        thread_id: thread_id.into(),
-                        generation: thread.generation,
-                        binding,
-                        available_surfaces,
-                    })
-                    .map_err(anyhow::Error::new)?;
-            }
-            (Some(previous), Some(binding)) if previous.repository_id == binding.repository_id => {
-                self.projection
-                    .apply(ProjectionTransition::ChangeWorktree {
-                        thread_id: thread_id.into(),
-                        generation: thread.generation,
-                        worktree_id: binding.worktree_id,
-                        available_surfaces,
-                    })
-                    .map_err(anyhow::Error::new)?;
-            }
-            (Some(_), Some(binding)) => {
-                self.projection
-                    .apply(ProjectionTransition::RemoveBinding {
-                        thread_id: thread_id.into(),
-                        generation: thread.generation,
-                        available_surfaces: vec![WorkSurface::Plan],
-                    })
-                    .map_err(anyhow::Error::new)?;
-                let generation = self
-                    .projection
-                    .threads
-                    .get(thread_id)
-                    .map(|thread| thread.generation)
-                    .ok_or_else(|| anyhow!("thread {thread_id:?} disappeared after unbinding"))?;
-                self.projection
-                    .apply(ProjectionTransition::BindRepository {
-                        thread_id: thread_id.into(),
-                        generation,
-                        binding,
-                        available_surfaces,
-                    })
-                    .map_err(anyhow::Error::new)?;
-            }
-            (Some(_), None) => {
-                self.projection
-                    .apply(ProjectionTransition::RemoveBinding {
-                        thread_id: thread_id.into(),
-                        generation: thread.generation,
-                        available_surfaces,
-                    })
-                    .map_err(anyhow::Error::new)?;
-            }
-            (None, None) => {}
-        }
+        self.projection
+            .apply(ProjectionTransition::ChangeBinding {
+                thread_id: thread_id.into(),
+                generation: thread.generation,
+                binding,
+                available_surfaces,
+            })
+            .map_err(anyhow::Error::new)?;
 
         let current = self
             .projection
@@ -570,28 +713,82 @@ impl WorkbenchShell {
     }
 
     pub fn set_connection(&mut self, phase: ConnectionPhase) -> Result<()> {
-        match (self.projection.connection, phase) {
-            (current, requested) if current == requested => {}
-            (
-                ConnectionPhase::Online | ConnectionPhase::StaleProjection,
-                ConnectionPhase::Offline,
-            ) => {
-                self.projection
-                    .apply(ProjectionTransition::Disconnect)
-                    .map_err(anyhow::Error::new)?;
+        if self.projection.connection == phase {
+            return Ok(());
+        }
+
+        if matches!(
+            phase,
+            ConnectionPhase::Offline
+                | ConnectionPhase::Reconnecting
+                | ConnectionPhase::StaleProjection
+        ) && matches!(
+            self.projection.connection,
+            ConnectionPhase::Reconnecting | ConnectionPhase::StaleProjection
+        ) {
+            self.receive_current_projection_snapshot(true)?;
+        }
+        if matches!(
+            phase,
+            ConnectionPhase::Offline
+                | ConnectionPhase::Reconnecting
+                | ConnectionPhase::StaleProjection
+        ) && self.projection.connection == ConnectionPhase::Online
+        {
+            self.projection
+                .apply(ProjectionTransition::Disconnect)
+                .map_err(anyhow::Error::new)?;
+        }
+        if matches!(
+            phase,
+            ConnectionPhase::Reconnecting | ConnectionPhase::StaleProjection
+        ) && self.projection.connection == ConnectionPhase::Offline
+        {
+            self.projection
+                .apply(ProjectionTransition::Reconnect)
+                .map_err(anyhow::Error::new)?;
+        }
+        match phase {
+            ConnectionPhase::Online => {
+                if self.projection.connection == ConnectionPhase::Offline {
+                    self.projection
+                        .apply(ProjectionTransition::Reconnect)
+                        .map_err(anyhow::Error::new)?;
+                }
+                if matches!(
+                    self.projection.connection,
+                    ConnectionPhase::Reconnecting | ConnectionPhase::StaleProjection
+                ) {
+                    self.receive_current_projection_snapshot(true)?;
+                }
             }
-            (ConnectionPhase::Offline, ConnectionPhase::Reconnecting) => {
-                self.projection
-                    .apply(ProjectionTransition::Reconnect)
-                    .map_err(anyhow::Error::new)?;
+            ConnectionPhase::StaleProjection => {
+                self.receive_current_projection_snapshot(false)?;
             }
-            (current, requested) => {
-                bail!("unsupported shell connection transition {current:?} -> {requested:?}");
-            }
+            ConnectionPhase::Offline | ConnectionPhase::Reconnecting => {}
         }
         if phase != ConnectionPhase::Online {
             self.focus_target = WorkbenchFocusTarget::Transcript;
         }
+        Ok(())
+    }
+
+    fn receive_current_projection_snapshot(&mut self, advance_revision: bool) -> Result<()> {
+        let revision = if advance_revision {
+            self.projection.projection_revision.saturating_add(1)
+        } else {
+            self.projection.projection_revision
+        };
+        let snapshot = ProjectionSnapshot {
+            revision,
+            persistence_revision: self.projection.persistence_revision,
+            active_thread_id: self.projection.active_thread_id.clone(),
+            threads: self.projection.threads.clone(),
+            persisted_selection: self.projection.persisted_selection.clone(),
+        };
+        self.projection
+            .apply(ProjectionTransition::ReceiveProjectionSnapshot { snapshot })
+            .map_err(anyhow::Error::new)?;
         Ok(())
     }
 
@@ -625,10 +822,18 @@ impl WorkbenchShell {
             return Ok(SurfaceSelection::Collapsed);
         }
 
-        let host = self.ensure_host(&visible.thread_id, visible.binding.clone(), surface, cx)?;
+        let previous_projection = self.projection.clone();
         self.projection
             .apply(ProjectionTransition::RequestSurface { thread_id, surface })
             .map_err(anyhow::Error::new)?;
+        let host = match self.ensure_host(&visible.thread_id, visible.binding.clone(), surface, cx)
+        {
+            Ok(host) => host,
+            Err(error) => {
+                self.projection = previous_projection;
+                return Err(error);
+            }
+        };
         self.focused_rail_surface = surface;
         self.focus_target = WorkbenchFocusTarget::Surface(surface);
         self.last_error = None;
@@ -956,22 +1161,41 @@ pub fn select_action(surface: WorkSurface) -> Box<dyn Action> {
     }
 }
 
-fn available_surfaces(has_binding: bool) -> Vec<WorkSurface> {
-    if has_binding {
-        WorkSurface::FALLBACK_ORDER.into()
+fn available_surfaces_for_identity(identity: &ThreadIdentityState) -> Vec<WorkSurface> {
+    if identity.binding().is_none() {
+        return vec![WorkSurface::Plan];
+    }
+    let Some(selected) = identity.selected.as_ref() else {
+        return vec![WorkSurface::Plan];
+    };
+    if selected.branch == BranchIdentity::NoGit {
+        vec![
+            WorkSurface::Files,
+            WorkSurface::Search,
+            WorkSurface::Terminal,
+            WorkSurface::Plan,
+        ]
     } else {
-        vec![WorkSurface::Plan]
+        WorkSurface::FALLBACK_ORDER.into()
     }
 }
 
-fn capabilities_for_binding(has_binding: bool) -> BTreeMap<WorkSurface, SurfaceCapability> {
+fn capabilities_for_surfaces(
+    available_surfaces: &std::collections::BTreeSet<WorkSurface>,
+) -> BTreeMap<WorkSurface, SurfaceCapability> {
     WorkSurface::FALLBACK_ORDER
         .into_iter()
         .map(|surface| {
-            let capability = if has_binding || !surface.requires_binding() {
+            let capability = if available_surfaces.contains(&surface) {
                 SurfaceCapability::available()
             } else {
-                SurfaceCapability::unavailable("Open a project to use this surface")
+                SurfaceCapability::unavailable(
+                    if matches!(surface, WorkSurface::Git | WorkSurface::Review) {
+                        "This worktree has no Git repository"
+                    } else {
+                        "Open a project to use this surface"
+                    },
+                )
             };
             (surface, capability)
         })

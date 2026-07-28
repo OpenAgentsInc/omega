@@ -619,6 +619,7 @@ pub struct ThreadView {
     pub turn_fields: TurnFields,
     pub discarded_partial_edits: HashSet<acp::ToolCallId>,
     pub is_loading_contents: bool,
+    repository_mutation_pending: bool,
     pub new_server_version_available: Option<SharedString>,
     pub resumed_without_history: bool,
     pub(crate) permission_selections: HashMap<acp::ToolCallId, PermissionSelection>,
@@ -683,6 +684,18 @@ impl ThreadView {
         } else {
             self.active_editor(cx).focus_handle(cx)
         }
+    }
+
+    pub(crate) fn set_repository_mutation_pending(
+        &mut self,
+        pending: bool,
+        cx: &mut Context<Self>,
+    ) {
+        self.repository_mutation_pending = pending;
+        self.message_editor.update(cx, |message_editor, cx| {
+            message_editor.set_read_only(pending, cx);
+        });
+        cx.notify();
     }
 }
 
@@ -1097,6 +1110,7 @@ impl ThreadView {
             turn_fields: TurnFields::default(),
             discarded_partial_edits: HashSet::default(),
             is_loading_contents: false,
+            repository_mutation_pending: false,
             new_server_version_available: None,
             permission_selections: HashMap::default(),
             elicitation_form_states: HashMap::default(),
@@ -1564,7 +1578,7 @@ impl ThreadView {
     pub fn send(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let thread = &self.thread;
 
-        if self.is_loading_contents {
+        if self.is_loading_contents || self.repository_mutation_pending {
             return;
         }
 
@@ -1715,6 +1729,9 @@ impl ThreadView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.repository_mutation_pending {
+            return;
+        }
         let contents = self.resolve_message_contents(&message_editor, cx);
 
         self.thread_error.take();

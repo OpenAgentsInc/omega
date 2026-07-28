@@ -62,6 +62,50 @@ Files, Search, Review, Git, and Terminal require an active workspace and
 worktree. Plan requires an active agent thread. Unavailable items remain visible
 and explain what is missing instead of opening another surface.
 
+The thread header shows the active project/repository, worktree, and Git branch
+as separate controls. It also shows changed files, conflicts, and upstream
+ahead/behind state when present. These values are the target used by Files,
+Search, Review, Git, and Terminal actions, not a decorative copy of the
+workspace title.
+
+Use the repository or worktree control to choose a different valid target for
+the active thread. The native picker disambiguates worktrees that share the
+same branch name. Use the branch control to open the existing Git branch
+picker. Changing a target updates the thread and its work surfaces together;
+an in-flight result for the previous target is ignored.
+
+Some External Agents fix their working directory when a session starts and do
+not provide a safe live-retarget operation. For those sessions, the repository
+and worktree controls remain visible but disabled, and their tooltip explains
+that you must start a new thread in the other target. Omega does not present a
+client-side path change as if the remote agent had accepted a new cwd.
+Selection is also disabled while the session or repository identity is loading,
+stale, offline, or reconnecting, and while any turn, permission request, or
+elicitation is active. The rendered controls and their keyboard actions use the
+same availability decision. Branch checkout uses that busy-session gate too,
+and invalidates Git and Review results started before the checkout. While the
+checkout is pending, Omega makes the composer read-only and disables every
+repository/worktree/branch mutation so a prompt cannot observe a worktree
+between branches.
+
+Detached HEAD, an unborn repository, and a folder without Git are called out
+explicitly. A no-Git folder can still use Files, Search, Terminal, and Plan.
+Loading, stale, offline, reconnecting, missing-worktree, operation-error, and
+inconsistent-session states appear beside the identity. An inconsistent state
+means one agent session may have accepted a target change that another rejected
+and Omega could not roll every session back. Repository-bound surfaces and
+branch changes stop until you reselect a repository/worktree target or
+reconnect the thread; reselecting forces every session onto that target before
+restoring the controls.
+
+Full names and paths remain available to assistive technology and in tooltips
+when the visible controls compact in a narrow window. A missing worktree
+retains its last-known label and keeps the repository picker available so you
+can explicitly recover to another valid target; a failed recovery reports its
+error without reviving the removed binding. Omega never silently chooses a
+replacement. Plan remains available while offline because it is thread-local;
+repository-bound surfaces still require the live projection.
+
 On a narrow window, Omega collapses the threads sidebar first. If the dock,
 rails, and transcript still do not fit, it collapses the work-surface dock and
 returns focus to the transcript. Widening the window does not reopen the dock;

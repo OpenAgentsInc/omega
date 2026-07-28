@@ -269,6 +269,7 @@ pub enum ActionKind {
     BindRepository,
     ChangeWorktree,
     RemoveBinding,
+    ChangeBinding,
     BeginSurfaceLoad,
     CompleteSurfaceLoad,
     FailSurfaceLoad,
@@ -283,7 +284,7 @@ pub enum ActionKind {
 }
 
 impl ActionKind {
-    pub const ALL: [Self; 21] = [
+    pub const ALL: [Self; 22] = [
         Self::OpenThread,
         Self::CloseThread,
         Self::SwitchThread,
@@ -294,6 +295,7 @@ impl ActionKind {
         Self::BindRepository,
         Self::ChangeWorktree,
         Self::RemoveBinding,
+        Self::ChangeBinding,
         Self::BeginSurfaceLoad,
         Self::CompleteSurfaceLoad,
         Self::FailSurfaceLoad,
@@ -319,6 +321,7 @@ impl ActionKind {
             Self::BindRepository => "bind_repository",
             Self::ChangeWorktree => "change_worktree",
             Self::RemoveBinding => "remove_binding",
+            Self::ChangeBinding => "change_binding",
             Self::BeginSurfaceLoad => "begin_surface_load",
             Self::CompleteSurfaceLoad => "complete_surface_load",
             Self::FailSurfaceLoad => "fail_surface_load",
@@ -383,6 +386,12 @@ pub enum Transition {
         generation: u64,
         available_surfaces: BTreeSet<SurfaceId>,
     },
+    ChangeBinding {
+        thread_id: ThreadId,
+        generation: u64,
+        binding: Option<Binding>,
+        available_surfaces: BTreeSet<SurfaceId>,
+    },
     BeginSurfaceLoad {
         request_id: RequestId,
         thread_id: ThreadId,
@@ -440,6 +449,7 @@ impl Transition {
             Self::BindRepository { .. } => ActionKind::BindRepository,
             Self::ChangeWorktree { .. } => ActionKind::ChangeWorktree,
             Self::RemoveBinding { .. } => ActionKind::RemoveBinding,
+            Self::ChangeBinding { .. } => ActionKind::ChangeBinding,
             Self::BeginSurfaceLoad { .. } => ActionKind::BeginSurfaceLoad,
             Self::CompleteSurfaceLoad { .. } => ActionKind::CompleteSurfaceLoad,
             Self::FailSurfaceLoad { .. } => ActionKind::FailSurfaceLoad,
@@ -880,7 +890,9 @@ fn try_apply_transition(
         }
         Transition::RequestSurface { thread_id, surface } => {
             require_active_thread(state, thread_id)?;
-            require_online(state)?;
+            if *surface != SurfaceId::Plan {
+                require_online(state)?;
+            }
             let thread = require_thread_mut(state, thread_id)?;
             if !thread.available_surfaces.contains(surface) {
                 return rejected(
@@ -912,7 +924,9 @@ fn try_apply_transition(
         }
         Transition::ExpandDock { thread_id } => {
             require_active_thread(state, thread_id)?;
-            require_online(state)?;
+            if require_thread(state, thread_id)?.effective_surface != Some(SurfaceId::Plan) {
+                require_online(state)?;
+            }
             let thread = require_thread_mut(state, thread_id)?;
             reconcile_selection(thread)?;
             if thread.effective_surface.is_some() {
@@ -992,6 +1006,28 @@ fn try_apply_transition(
             thread.binding = None;
             thread.available_surfaces = available_surfaces.clone();
             let previous_selection = thread.effective_surface;
+            reconcile_selection(thread).map_err(as_invalid_binding)?;
+            if thread.effective_surface != previous_selection {
+                TransitionEffect::DeterministicFallback
+            } else {
+                TransitionEffect::Applied
+            }
+        }
+        Transition::ChangeBinding {
+            thread_id,
+            generation,
+            binding,
+            available_surfaces,
+        } => {
+            if let Some(binding) = binding {
+                validate_transition_identifier(validate_binding(binding))?;
+            }
+            let thread = require_thread_mut(state, thread_id)?;
+            require_generation(thread, *generation)?;
+            let previous_selection = thread.effective_surface;
+            thread.binding = binding.clone();
+            thread.generation = next_generation(*generation)?;
+            thread.available_surfaces = available_surfaces.clone();
             reconcile_selection(thread).map_err(as_invalid_binding)?;
             if thread.effective_surface != previous_selection {
                 TransitionEffect::DeterministicFallback
@@ -2372,6 +2408,49 @@ mod tests {
     }
 
     #[test]
+    fn offline_plan_trace_is_accepted_while_repository_surface_is_rejected() {
+        let thread_id = thread("thread-a");
+        let mut state = one_bound_thread_state();
+        state.connection = ConnectionPhase::Offline;
+        let mut trace = ConformanceTrace::new(state.clone());
+
+        push_valid(
+            &mut trace,
+            &mut state,
+            Transition::RequestSurface {
+                thread_id: thread_id.clone(),
+                surface: SurfaceId::Plan,
+            },
+        );
+        push_valid(
+            &mut trace,
+            &mut state,
+            Transition::CollapseDock {
+                thread_id: thread_id.clone(),
+            },
+        );
+        push_valid(
+            &mut trace,
+            &mut state,
+            Transition::ExpandDock {
+                thread_id: thread_id.clone(),
+            },
+        );
+        trace.push_with_effect(
+            Transition::RequestSurface {
+                thread_id,
+                surface: SurfaceId::Git,
+            },
+            TransitionEffect::Rejected {
+                code: RejectCode::InvalidConnectionPhase,
+            },
+            state,
+        );
+
+        assert!(check_trace(&trace).is_ok());
+    }
+
+    #[test]
     fn removing_binding_forces_git_and_terminal_to_deterministic_fallback() {
         let thread_id = thread("thread-a");
         let mut initial = one_bound_thread_state();
@@ -2402,6 +2481,30 @@ mod tests {
             thread.and_then(|thread| thread.focus_owner),
             Some(SurfaceId::Plan)
         );
+    }
+
+    #[test]
+    fn changing_repository_and_worktree_is_one_generation_checked_transition() {
+        let thread_id = thread("thread-a");
+        let initial = one_bound_thread_state();
+        let replacement = Binding::new("repository-b", "worktree-b");
+        let transition = Transition::ChangeBinding {
+            thread_id: thread_id.clone(),
+            generation: 0,
+            binding: Some(replacement.clone()),
+            available_surfaces: surfaces([SurfaceId::Files, SurfaceId::Plan]),
+        };
+
+        let next = replay_transition(&initial, &transition)
+            .unwrap_or_else(|error| panic!("valid atomic binding change was rejected: {error}"));
+        let projected = next
+            .state
+            .threads
+            .get(&thread_id)
+            .expect("thread remains projected");
+        assert_eq!(projected.binding, Some(replacement));
+        assert_eq!(projected.generation, 1);
+        assert_eq!(projected.effective_surface, Some(SurfaceId::Files));
     }
 
     #[test]

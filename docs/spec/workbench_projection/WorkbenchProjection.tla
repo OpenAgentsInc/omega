@@ -506,6 +506,7 @@ RequestSurface(surface) ==
     /\ activeThread \in knownThreads
     /\ surface \in SurfaceValues
     /\ surface \in capabilities[activeThread]
+    /\ connectionPhase = "Online" \/ surface = "Plan"
     /\ LET requestState ==
             [requestedSurface EXCEPT ![activeThread] = surface]
            dockState ==
@@ -547,6 +548,8 @@ CollapseDock ==
 ExpandDock ==
     /\ activeThread \in knownThreads
     /\ ~dockVisible
+    /\ connectionPhase = "Online"
+       \/ requestedSurface[activeThread] = "Plan"
     /\ requestedDock' = [requestedDock EXCEPT ![activeThread] = TRUE]
     /\ requestedSurface' = requestedSurface
     /\ ProjectWith(
@@ -617,6 +620,37 @@ ChangeWorktree(thread, worktree) ==
         <<knownThreads, repositoryOf, capabilities, selectionVars,
           asyncVars, persistenceVars, lifecycleVars, witnessVars,
           commandViolation, quiescing>>
+
+ChangeBinding(thread, repository, worktree) ==
+    /\ thread \in knownThreads
+    /\ repository \in Repositories
+    /\ worktree \in Worktrees
+    /\ generation[thread] < MaxGeneration
+    /\ LET repositoryState ==
+            [repositoryOf EXCEPT ![thread] = repository]
+           worktreeState ==
+            [worktreeOf EXCEPT ![thread] = worktree]
+           generationState ==
+            [generation EXCEPT ![thread] = @ + 1]
+       IN
+        /\ repositoryOf' = repositoryState
+        /\ worktreeOf' = worktreeState
+        /\ generation' = generationState
+        /\ IF activeThread = thread
+           THEN ProjectWith(
+                thread,
+                knownThreads,
+                repositoryState,
+                worktreeState,
+                capabilities,
+                requestedSurface,
+                requestedDock,
+                generationState)
+           ELSE UNCHANGED <<projectionIdentityVars, projectionPhase>>
+    /\ UNCHANGED
+        <<knownThreads, capabilities, selectionVars, asyncVars,
+          persistenceVars, lifecycleVars, witnessVars, commandViolation,
+          quiescing>>
 
 RemoveWorktree(thread) ==
     /\ thread \in knownThreads
@@ -993,6 +1027,7 @@ Restore(thread) ==
 
 RouteCommand ==
     /\ focusOwners # {}
+    /\ connectionPhase = "Online"
     /\ commandViolation' =
         (commandViolation
          \/ ~dockVisible
@@ -1102,6 +1137,9 @@ FullExternalNext ==
         BindRepository(thread, repository)
     \/ \E thread \in Threads, worktree \in Worktrees :
         ChangeWorktree(thread, worktree)
+    \/ \E thread \in Threads, repository \in Repositories,
+          worktree \in Worktrees :
+        ChangeBinding(thread, repository, worktree)
     \/ \E thread \in Threads : RemoveWorktree(thread)
     \/ \E thread \in Threads : RemoveRepository(thread)
     \/ \E thread \in Threads, surface \in Surfaces :
@@ -1135,8 +1173,9 @@ ExternalNext ==
                 InvalidateCapability(thread, surface)
       [] Scenario = "StaleCompletion" ->
             \/ BeginLoad
-            \/ \E thread \in Threads, worktree \in Worktrees :
-                ChangeWorktree(thread, worktree)
+            \/ \E thread \in Threads, repository \in Repositories,
+                  worktree \in Worktrees :
+                ChangeBinding(thread, repository, worktree)
             \/ CompleteLoad
       [] Scenario = "HiddenCompletion" ->
             \/ BeginLoad

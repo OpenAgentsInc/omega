@@ -107,6 +107,53 @@ const STOPWATCH_THRESHOLD: Duration = Duration::from_secs(30);
 const TOKEN_THRESHOLD: u64 = 250;
 
 pub(crate) const DRAFT_PROMPT_PERSIST_DEBOUNCE: Duration = Duration::from_millis(250);
+
+#[derive(Debug)]
+pub(crate) struct InconsistentWorkDirsError {
+    message: String,
+}
+
+impl InconsistentWorkDirsError {
+    fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
+}
+
+impl std::fmt::Display for InconsistentWorkDirsError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for InconsistentWorkDirsError {}
+
+fn apply_work_dir_transaction<T>(
+    updates: &[T],
+    mut update: impl FnMut(&T, bool) -> Result<()>,
+) -> Result<()> {
+    for (index, item) in updates.iter().enumerate() {
+        if let Err(error) = update(item, false) {
+            let rollback_errors = updates[..index]
+                .iter()
+                .rev()
+                .filter_map(|updated| update(updated, true).err().map(|error| error.to_string()))
+                .collect::<Vec<_>>();
+            if !rollback_errors.is_empty() {
+                return Err(InconsistentWorkDirsError::new(format!(
+                    "{error}; thread working directories are inconsistent because rollback \
+                     failed: {}. Reselect a repository target or reconnect this thread before \
+                     continuing",
+                    rollback_errors.join("; ")
+                ))
+                .into());
+            }
+            return Err(error);
+        }
+    }
+    Ok(())
+}
 /// The composer shown while an executor connects looks like the real one.
 ///
 /// omega#112. It used to say "Type while the executor connects — what you
@@ -601,6 +648,7 @@ pub struct ConversationView {
     thread_store: Option<Entity<ThreadStore>>,
     pub(crate) thread_id: ThreadId,
     pub(crate) root_session_id: Option<acp::SessionId>,
+    desired_work_dirs: PathList,
     server_state: ServerState,
     focus_handle: FocusHandle,
     notifications: Vec<WindowHandle<AgentNotification>>,
@@ -730,11 +778,195 @@ impl ConversationView {
     }
 
     pub fn set_work_dirs(&mut self, work_dirs: PathList, cx: &mut Context<Self>) {
+        self.desired_work_dirs = work_dirs.clone();
         if let Some(connected) = self.as_connected() {
             connected.conversation.update(cx, |conversation, cx| {
                 conversation.set_work_dirs(work_dirs.clone(), cx);
             });
         }
+    }
+
+    pub fn work_dirs(&self) -> &PathList {
+        &self.desired_work_dirs
+    }
+
+    pub fn identity_mutation_unavailable_reason(&self, cx: &App) -> Option<SharedString> {
+        match &self.server_state {
+            ServerState::Loading { .. } => Some(
+                "Wait for the agent session to finish loading before changing repository identity"
+                    .into(),
+            ),
+            ServerState::LoadError { .. } => {
+                Some("Reconnect the agent session before changing repository identity".into())
+            }
+            ServerState::Connected(connected) => {
+                let threads = connected.conversation.read(cx).threads.values();
+                if threads.len() == 0 {
+                    return Some("The active agent session is unavailable".into());
+                }
+                if threads.clone().any(|thread| {
+                    thread.read(cx).status() != acp_thread::ThreadStatus::Idle
+                        || thread.read(cx).is_waiting_for_confirmation()
+                }) {
+                    return Some(
+                        "Wait for the current agent turn or confirmation to finish before changing \
+                         its target"
+                            .into(),
+                    );
+                }
+                None
+            }
+        }
+    }
+
+    pub fn work_dir_retarget_unavailable_reason(&self, cx: &App) -> Option<SharedString> {
+        self.identity_mutation_unavailable_reason(cx)
+            .or_else(|| {
+                match &self.server_state {
+                ServerState::Connected(connected)
+                    if connected.conversation.read(cx).threads.values().any(
+                        |thread| {
+                            !thread
+                                .read(cx)
+                                .connection()
+                                .supports_live_work_dir_updates()
+                        },
+                    ) =>
+                {
+                    Some(
+                        "This agent fixes its working directory when a session starts; start a new \
+                         thread to choose another target"
+                            .into(),
+                    )
+                }
+                _ => None,
+            }
+            })
+    }
+
+    pub fn retarget_work_dirs(
+        &mut self,
+        work_dirs: PathList,
+        cx: &mut Context<Self>,
+    ) -> Result<()> {
+        self.retarget_work_dirs_impl(work_dirs, false, cx)
+    }
+
+    pub fn reconcile_work_dirs(
+        &mut self,
+        work_dirs: PathList,
+        cx: &mut Context<Self>,
+    ) -> Result<()> {
+        self.retarget_work_dirs_impl(work_dirs, true, cx)
+    }
+
+    pub fn set_repository_mutation_pending(&mut self, pending: bool, cx: &mut Context<Self>) {
+        let ServerState::Connected(connected) = &self.server_state else {
+            return;
+        };
+        for thread_view in connected.threads.values() {
+            thread_view.update(cx, |thread_view, cx| {
+                thread_view.set_repository_mutation_pending(pending, cx);
+            });
+        }
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn register_acp_thread_for_tests(
+        &mut self,
+        thread: Entity<AcpThread>,
+        cx: &mut Context<Self>,
+    ) -> Result<()> {
+        let ServerState::Connected(connected) = &self.server_state else {
+            anyhow::bail!("conversation is not connected");
+        };
+        connected.conversation.update(cx, |conversation, cx| {
+            conversation.register_thread(thread, cx);
+        });
+        Ok(())
+    }
+
+    fn retarget_work_dirs_impl(
+        &mut self,
+        work_dirs: PathList,
+        force: bool,
+        cx: &mut Context<Self>,
+    ) -> Result<()> {
+        if !force && self.desired_work_dirs == work_dirs {
+            return Ok(());
+        }
+        match &self.server_state {
+            ServerState::Loading { .. } => {
+                anyhow::bail!(
+                    "Wait for the agent session to finish loading before changing worktrees"
+                );
+            }
+            ServerState::LoadError { .. } => {
+                anyhow::bail!("The agent session must reconnect before changing worktrees");
+            }
+            ServerState::Connected(connected) => {
+                let threads = connected
+                    .conversation
+                    .read(cx)
+                    .threads
+                    .values()
+                    .cloned()
+                    .collect::<Vec<_>>();
+                let mut threads = threads;
+                threads.sort_by(|left, right| {
+                    left.read(cx)
+                        .session_id()
+                        .0
+                        .cmp(&right.read(cx).session_id().0)
+                });
+                if threads.is_empty() {
+                    anyhow::bail!("The active agent session is unavailable");
+                }
+                for thread in &threads {
+                    let thread = thread.read(cx);
+                    if !thread.connection().supports_live_work_dir_updates() {
+                        anyhow::bail!(
+                            "This agent cannot move an existing session to another worktree"
+                        );
+                    }
+                    if thread.status() != acp_thread::ThreadStatus::Idle
+                        || thread.is_waiting_for_confirmation()
+                    {
+                        anyhow::bail!(
+                            "Wait for the current agent turn or confirmation to finish before \
+                             changing worktrees"
+                        );
+                    }
+                }
+                let updates = threads
+                    .iter()
+                    .map(|thread| {
+                        let thread = thread.read(cx);
+                        let connection = thread.connection().clone();
+                        let session_id = thread.session_id().clone();
+                        let previous_work_dirs = thread
+                            .work_dirs()
+                            .cloned()
+                            .unwrap_or_else(|| self.desired_work_dirs.clone());
+                        (connection, session_id, previous_work_dirs)
+                    })
+                    .collect::<Vec<_>>();
+                apply_work_dir_transaction(&updates, |update, rollback| {
+                    let (connection, session_id, previous_work_dirs) = update;
+                    let target = if rollback {
+                        previous_work_dirs.clone()
+                    } else {
+                        work_dirs.clone()
+                    };
+                    connection.update_work_dirs(session_id, target, cx)
+                })?;
+                self.desired_work_dirs = work_dirs.clone();
+                connected.conversation.update(cx, |conversation, cx| {
+                    conversation.set_work_dirs(work_dirs, cx);
+                });
+            }
+        }
+        Ok(())
     }
 }
 
@@ -890,6 +1122,7 @@ impl ConversationView {
         // audience keeps it.
         let reattached_to_a_persisted_record = thread_id.is_some();
         let thread_id = thread_id.unwrap_or_else(ThreadId::new);
+        let desired_work_dirs = work_dirs.unwrap_or_else(|| project.read(cx).default_path_list(cx));
         crate::omega_audience_control::record_thread_opening(
             thread_id,
             if reattached_to_a_persisted_record || resume_session_id.is_some() {
@@ -910,12 +1143,13 @@ impl ConversationView {
             thread_store,
             thread_id,
             root_session_id: resume_session_id.clone(),
+            desired_work_dirs: desired_work_dirs.clone(),
             server_state: Self::initial_state(
                 agent.clone(),
                 connection_store,
                 connection_key,
                 resume_session_id,
-                work_dirs,
+                Some(desired_work_dirs),
                 title,
                 project,
                 initial_content,
@@ -1376,7 +1610,7 @@ impl ConversationView {
                 ),
             };
         }
-        let session_work_dirs = work_dirs.unwrap_or_else(|| project.read(cx).default_path_list(cx));
+        let initial_work_dirs = work_dirs.unwrap_or_else(|| project.read(cx).default_path_list(cx));
 
         let connection_entry = connection_store.update(cx, |store, cx| {
             store.request_connection(connection_key, agent.clone(), cx)
@@ -1440,6 +1674,17 @@ impl ConversationView {
                 thread_location = thread_location
             );
 
+            let session_work_dirs =
+                match this.read_with(cx, |this, _cx| this.desired_work_dirs.clone()) {
+                    Ok(work_dirs) => work_dirs,
+                    Err(error) => {
+                        log::warn!(
+                            "conversation disappeared while resolving its working directory: \
+                             {error:#}"
+                        );
+                        initial_work_dirs.clone()
+                    }
+                };
             let mut resumed_without_history = false;
             let result = if let Some(session_id) = resume_session_id.clone() {
                 cx.update(|_, cx| {
@@ -1497,6 +1742,10 @@ impl ConversationView {
             this.update_in(cx, |this, window, cx| {
                 match result {
                     Ok(thread) => {
+                        let desired_work_dirs = this.desired_work_dirs.clone();
+                        thread.update(cx, |thread, cx| {
+                            thread.set_work_dirs(desired_work_dirs, cx);
+                        });
                         this.clear_resolved_request_elicitations_for_connection(&connection, cx);
                         let root_session_id = thread.read(cx).session_id().clone();
 
@@ -4376,6 +4625,28 @@ pub(crate) mod tests {
             matches!(error, ThreadError::DataRetentionConsentRequired),
             "expected ThreadError::DataRetentionConsentRequired, got: {error:?}"
         );
+    }
+
+    #[test]
+    fn work_dir_transaction_reports_partial_success_with_failed_rollback_as_inconsistent() {
+        let mut operations = Vec::new();
+        let error = apply_work_dir_transaction(&[0, 1], |session, rollback| {
+            operations.push((*session, rollback));
+            match (*session, rollback) {
+                (0, false) => Ok(()),
+                (1, false) => Err(anyhow!("second session rejected the target")),
+                (0, true) => Err(anyhow!("first session rejected rollback")),
+                _ => Ok(()),
+            }
+        })
+        .expect_err("a failed rollback must poison the transaction");
+
+        assert!(
+            error.downcast_ref::<InconsistentWorkDirsError>().is_some(),
+            "callers need a typed signal that displayed identity is no longer authoritative"
+        );
+        assert_eq!(operations, vec![(0, false), (1, false), (0, true)]);
+        assert!(error.to_string().contains("Reselect a repository target"));
     }
 
     #[gpui::test]

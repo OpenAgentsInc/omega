@@ -13,6 +13,7 @@ use std::{
     sync::Arc,
     time::Duration,
 };
+use util::path_list::PathList;
 
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 use crate::SandboxFallbackDecision;
@@ -751,8 +752,9 @@ async fn run_terminal_tool(
 
     let (working_dir, authorize, sandboxing, is_local_project, wsl_zed_release) =
         cx.update(|cx| {
-            let working_dir =
-                working_dir(&input.cd, &project, cx).map_err(|err| err.to_string())?;
+            let work_dirs = environment.work_dirs(cx);
+            let working_dir = working_dir(&input.cd, work_dirs.as_ref(), &project, cx)
+                .map_err(|err| err.to_string())?;
             let context =
                 crate::ToolPermissionContext::new(TerminalTool::NAME, vec![input.command.clone()]);
             let authorize =
@@ -1624,36 +1626,62 @@ fn process_content(
     content
 }
 
-fn working_dir(cd: &str, project: &Entity<Project>, cx: &mut App) -> Result<Option<PathBuf>> {
+fn working_dir(
+    cd: &str,
+    work_dirs: Option<&PathList>,
+    project: &Entity<Project>,
+    cx: &mut App,
+) -> Result<Option<PathBuf>> {
     let project = project.read(cx);
+    let selected_paths = work_dirs
+        .filter(|paths| !paths.is_empty())
+        .map(PathList::paths);
 
     if cd == "." || cd.is_empty() {
-        let mut worktrees = project.worktrees(cx);
-
-        match worktrees.next() {
-            Some(worktree) => {
-                anyhow::ensure!(
-                    worktrees.next().is_none(),
-                    "'.' is ambiguous in multi-root workspaces. Please specify a root directory explicitly.",
-                );
-                Ok(Some(worktree.read(cx).abs_path().to_path_buf()))
-            }
-            None => Ok(None),
+        if let Some(selected_paths) = selected_paths {
+            anyhow::ensure!(
+                selected_paths.len() == 1,
+                "'.' is ambiguous because this thread has multiple working directories.",
+            );
+            return Ok(selected_paths.first().cloned());
         }
+
+        let worktree_paths = project
+            .worktrees(cx)
+            .map(|worktree| worktree.read(cx).abs_path().to_path_buf())
+            .collect::<Vec<_>>();
+        anyhow::ensure!(
+            worktree_paths.len() <= 1,
+            "'.' is ambiguous in multi-root workspaces. Please specify a root directory explicitly.",
+        );
+        return Ok(worktree_paths.into_iter().next());
+    }
+
+    let input_path = Path::new(cd);
+    let resolved_path = if input_path.is_absolute() {
+        project
+            .worktrees(cx)
+            .any(|worktree| input_path.starts_with(&worktree.read(cx).abs_path()))
+            .then(|| input_path.to_path_buf())
     } else {
-        let input_path = Path::new(cd);
+        project
+            .worktree_for_root_name(cd, cx)
+            .map(|worktree| worktree.read(cx).abs_path().to_path_buf())
+    };
 
-        if input_path.is_absolute() {
-            if project
-                .worktrees(cx)
-                .any(|worktree| input_path.starts_with(&worktree.read(cx).abs_path()))
-            {
-                return Ok(Some(input_path.into()));
-            }
-        } else if let Some(worktree) = project.worktree_for_root_name(cd, cx) {
-            return Ok(Some(worktree.read(cx).abs_path().to_path_buf()));
-        }
+    if let Some(resolved_path) = resolved_path
+        && selected_paths.is_none_or(|paths| {
+            paths
+                .iter()
+                .any(|selected_path| resolved_path.starts_with(selected_path))
+        })
+    {
+        return Ok(Some(resolved_path));
+    }
 
+    if selected_paths.is_some() {
+        anyhow::bail!("`cd` directory {cd:?} was not in this thread's selected worktree.");
+    } else {
         anyhow::bail!("`cd` directory {cd:?} was not in any of the project's worktrees.");
     }
 }
@@ -1700,6 +1728,32 @@ mod tests {
             value.get("decision").and_then(serde_json::Value::as_str),
             Some("deny")
         );
+    }
+
+    #[gpui::test]
+    async fn terminal_working_directory_is_scoped_to_the_threads_selected_worktree(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        crate::tests::init_test(cx);
+        let fs = fs::FakeFs::new(cx.executor());
+        fs.insert_tree("/root-a", serde_json::json!({ "a.txt": "" }))
+            .await;
+        fs.insert_tree("/root-b", serde_json::json!({ "b.txt": "" }))
+            .await;
+        let project =
+            project::Project::test(fs, ["/root-a".as_ref(), "/root-b".as_ref()], cx).await;
+        let selected = PathList::new(&[Path::new("/root-b")]);
+
+        cx.update(|cx| {
+            assert_eq!(
+                working_dir(".", Some(&selected), &project, cx)
+                    .expect("selected worktree should resolve"),
+                Some(PathBuf::from("/root-b"))
+            );
+            let error = working_dir("/root-a", Some(&selected), &project, cx)
+                .expect_err("another project root must not route this thread's terminal");
+            assert!(error.to_string().contains("thread's selected worktree"));
+        });
     }
 
     #[gpui::test]
