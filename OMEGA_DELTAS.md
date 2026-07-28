@@ -1422,7 +1422,13 @@ cargo test -p omega_deltas
   renaming the `.git/info/exclude` marker without reading the old one back
   would have stranded an inherited-marker block in the user's repository, still
   excluding files from git with nothing left that knew how to remove it, so
-  `GitExcludeOverride` now cleans up both.
+  `GitExcludeOverride` cleaned up both. Upstream deleted that struct on
+  2026-07-26, because agent checkpointing no longer writes to
+  `.git/info/exclude` at all, and the 2026-07-27 sync took the deletion: it has
+  no callers left. Nothing writes either marker now, and nothing removes a
+  block an older build left behind. Upstream carries the same gap for its own
+  marker. A one-shot cleanup for an inherited block is a product decision, not
+  a merge decision.
 - **References deliberately kept**, each with a class and a reason in the
   policy: Zed's hosted service, account, plans, billing and servers
   (`Zed Pro Plan`, `Business Plan - Zed models enabled`, `Signs in to Zed
@@ -1431,9 +1437,8 @@ cargo test -p omega_deltas
   Linux and Windows troubleshooting copy); Zed's authorship of the inherited
   One/Ayu/Gruvbox themes and the Windows Performance Recorder profile; the
   `Zed Plex Sans` / `Zed Plex Mono` family names recorded inside the shipped
-  font files; the retired `.git/info/exclude` marker, read back for cleanup;
-  and Omega-authored copy that names Zed in order to say how Omega differs from
-  it. `Enable Fast Mode for Zed?` was the one genuinely ambiguous case — it
+  font files; and Omega-authored copy that names Zed in order to say how Omega
+  differs from it. `Enable Fast Mode for Zed?` was the one genuinely ambiguous case — it
   read as the application — and became `Enable Fast Mode for Zed AI?`, naming
   the service the toggle and its billing actually belong to. We are removing
   Zed **as our identity**, not erasing that Zed exists.

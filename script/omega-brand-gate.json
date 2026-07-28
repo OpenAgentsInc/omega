@@ -415,14 +415,6 @@
         "class": "zed_authorship",
         "reason": "Authorship field of the inherited Windows Performance Recorder profile. Not shown in the product; written into a .wprp handed to Microsoft's tooling."
       },
-      "\\n\\n# ====== Auto-added by Zed: =======\\n": {
-        "class": "fork_seam",
-        "reason": "The marker Omega wrote into .git/info/exclude before this rename. It is read back so a block an earlier build left behind is still found and removed; it is never written again. A marker is how the block is located, not only how it is labelled."
-      },
-      "\\n# ====== End of auto-added by Zed =======\\n": {
-        "class": "fork_seam",
-        "reason": "Closing half of the inherited marker above, same reason."
-      },
       "Zed Plex Sans": {
         "class": "fork_seam",
         "reason": "Family name recorded inside the shipped font files themselves. Renaming it is a font-asset change, not a prose change, and a name that does not match the font's own family name resolves to nothing."

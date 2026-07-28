@@ -1625,6 +1625,7 @@ impl MessageEditor {
                 anchor..anchor,
                 self.editor.downgrade(),
                 self.mention_set.downgrade(),
+                self.workspace.clone(),
                 Some(selection),
             )
         else {
@@ -2059,7 +2060,7 @@ pub(crate) fn composer_editor_style(cx: &App) -> EditorStyle {
         local_player: cx.theme().players().local(),
         text: TextStyle {
             color: cx.theme().colors().text,
-            font_family: settings.buffer_font.family.clone(),
+            font_family: settings.agent_buffer_font_family().clone(),
             font_fallbacks: settings.buffer_font.fallbacks.clone(),
             font_features: settings.buffer_font.features.clone(),
             font_size: settings.agent_buffer_font_size(cx).into(),

@@ -659,7 +659,6 @@ fn maybe_propagate_worktree_trust(
         }
     })
     .ok();
-
 }
 
 /// Handles the `CreateWorktree` action generically, without any agent panel involvement.
@@ -1359,7 +1358,7 @@ async fn open_worktree_workspace(
                 if activate && let Some(dock_position) = focused_dock {
                     let dock = workspace.dock_at_position(dock_position);
                     if let Some(panel) = dock.read(cx).active_panel() {
-                        panel.panel_focus_handle(cx).focus(window, cx);
+                        panel.activation_focus_handle(cx).focus(window, cx);
                     }
                 }
             });

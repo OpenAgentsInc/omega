@@ -559,7 +559,14 @@ impl<T: PromptCompletionProviderDelegate> PromptCompletionProvider<T> {
                     AgentContextSource::from_active(workspace, cx)?
                         .read_selection(workspace, false, cx)
                 });
-                Self::completion_for_action(action, source_range, editor, mention_set, selection)
+                Self::completion_for_action(
+                    action,
+                    source_range,
+                    editor,
+                    mention_set,
+                    workspace.downgrade(),
+                    selection,
+                )
             }
         }
     }
@@ -866,6 +873,7 @@ impl<T: PromptCompletionProviderDelegate> PromptCompletionProvider<T> {
         source_range: Range<Anchor>,
         editor: WeakEntity<Editor>,
         mention_set: WeakEntity<MentionSet>,
+        workspace: WeakEntity<Workspace>,
         selection: Option<AgentContextSelection>,
     ) -> Option<Completion> {
         let (new_text, on_action) = match action {
@@ -875,6 +883,7 @@ impl<T: PromptCompletionProviderDelegate> PromptCompletionProvider<T> {
                         source_range.clone(),
                         editor,
                         mention_set,
+                        workspace,
                         editor_selections,
                     )
                 }
@@ -2756,6 +2765,7 @@ fn completion_text_for_editor_selections(
     source_range: Range<Anchor>,
     editor: WeakEntity<Editor>,
     mention_set: WeakEntity<MentionSet>,
+    workspace: WeakEntity<Workspace>,
     editor_selections: Vec<(Entity<Buffer>, Range<text::Anchor>)>,
 ) -> (String, ConfirmCallback) {
     const EDITOR_PLACEHOLDER: &str = "selection ";
@@ -2779,6 +2789,7 @@ fn completion_text_for_editor_selections(
             let editor = editor.clone();
             let selections = selections.clone();
             let mention_set = mention_set.clone();
+            let workspace = workspace.clone();
             let source_range = source_range.clone();
             window.defer(cx, move |window, cx| {
                 if let Some(editor) = editor.upgrade()
@@ -2790,6 +2801,7 @@ fn completion_text_for_editor_selections(
                                 source_range.clone(),
                                 selections,
                                 editor.clone(),
+                                workspace,
                                 window,
                                 cx,
                             )
@@ -2847,6 +2859,8 @@ fn completion_text_for_terminal_selections(
                     let crease = crate::mention_set::crease_for_mention(
                         mention_uri.name().into(),
                         mention_uri.icon_path(cx),
+                        None,
+                        None,
                         None,
                         range,
                         editor.downgrade(),
