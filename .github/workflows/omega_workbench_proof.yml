@@ -19,13 +19,16 @@ concurrency:
 
 env:
   CARGO_INCREMENTAL: "0"
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_PROFILE_RELEASE_DEBUG: "0"
+  CARGO_PROFILE_TEST_DEBUG: "0"
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: "1"
 
 jobs:
   portable_semantics:
     name: Portable semantics
-    runs-on: namespace-profile-8x16-ubuntu-2204
+    runs-on: ubuntu-22.04
     timeout-minutes: 60
     steps:
       - name: Check out Omega
@@ -37,12 +40,6 @@ jobs:
         run: |
           mkdir -p ../.cargo
           cp .cargo/ci-config.toml ../.cargo/config.toml
-
-      - name: Cache Rust dependencies
-        uses: namespacelabs/nscloud-cache-action@a90bb5d4b27522ce881c6e98eebd7d7e6d1653f9
-        with:
-          cache: rust
-          path: ~/.rustup
 
       - name: Install Linux dependencies
         run: ./script/linux
@@ -72,7 +69,7 @@ jobs:
 
   metal_pixels:
     name: Metal pixels (shard ${{ matrix.shard_index }})
-    runs-on: namespace-profile-mac-large
+    runs-on: macos-15
     timeout-minutes: 120
     strategy:
       fail-fast: false
@@ -98,12 +95,6 @@ jobs:
         run: |
           mkdir -p ../.cargo
           cp .cargo/ci-config.toml ../.cargo/config.toml
-
-      - name: Cache Rust dependencies
-        uses: namespacelabs/nscloud-cache-action@a90bb5d4b27522ce881c6e98eebd7d7e6d1653f9
-        with:
-          cache: rust
-          path: ~/.rustup
 
       - name: Run the deterministic Metal proof shard
         env:
@@ -135,7 +126,7 @@ jobs:
     needs:
       - portable_semantics
       - metal_pixels
-    runs-on: namespace-profile-2x4-ubuntu-2404
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - name: Require every workbench proof lane

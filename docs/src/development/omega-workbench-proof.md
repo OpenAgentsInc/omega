@@ -447,17 +447,22 @@ out-of-range shard.
 `.github/workflows/omega_workbench_proof.yml` runs on pull requests, merge
 groups, pushes to `main`, and manual dispatches. Its jobs are:
 
-- **Portable semantics** on
-  `namespace-profile-8x16-ubuntu-2204`. It runs the
+- **Portable semantics** on GitHub-hosted `ubuntu-22.04`. It runs the
   `omega_workbench_harness` tests, the production Agent UI scene adapter, a
   16-iteration GPUI `debug_render_snapshot` seed sweep starting at seed `0`,
   and the deliberate pending-task and retained-entity failure probes.
-- **Metal pixels** on `namespace-profile-mac-large`. A two-shard matrix verifies
-  that the runner is `arm64`, then runs the pixel lane at seed `0`. The output
-  for shard `<n>` is `target/omega-workbench-proof/shard-<n>`.
-- **Required** on `namespace-profile-2x4-ubuntu-2404`. It fails unless both the
-  portable and Metal jobs succeeded, including when an upstream job was
-  cancelled or skipped.
+- **Metal pixels** on GitHub-hosted `macos-15`, the pinned Apple Silicon runner
+  image for these baselines. A two-shard matrix verifies that the runner is
+  `arm64`, then runs the pixel lane at seed `0`. The output for shard `<n>` is
+  `target/omega-workbench-proof/shard-<n>`.
+- **Required** on GitHub-hosted `ubuntu-24.04`. It fails unless both the portable
+  and Metal jobs succeeded, including when an upstream job was cancelled or
+  skipped.
+
+The workflow disables Cargo debug information for its dev, test, and release
+profiles. The proof does not inspect debug symbols, and omitting them keeps the
+independent Rust build products inside the standard hosted runners' disk
+budget. Local developer profiles are unchanged.
 
 The Metal job attempts to upload each failed shard's output folder as
 `omega-workbench-proof-shard-<n>` for 14 days. Receipts, current images, and
