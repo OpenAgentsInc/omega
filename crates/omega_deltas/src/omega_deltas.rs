@@ -16640,6 +16640,35 @@ mod tests {
             panel_path.display()
         );
 
+        // 5b. The row says it before the click, and does not shout it after.
+        //
+        // OMEGA-DELTA-0118 amended, omega#131. The refusal above was the whole
+        // answer, and it arrives too late: the owner opened a fresh install
+        // without Codex, clicked several rows in a row, and got a yellow
+        // paragraph each time — *"You're showing me histories I click on and
+        // it's a yellow warning."* Every one of those rows already held the
+        // reason; nothing on them said so until they were clicked.
+        let recent = body_of(&panel, "render_recent_threads_section");
+        assert!(
+            recent.contains("row.unavailable_note"),
+            "OMEGA-DELTA-0118: `render_recent_threads_section` in {} no longer \
+             draws the row's `unavailable_note`. A row that will refuse is then \
+             identical to one that opens, and the list becomes dead ends that \
+             announce themselves one click at a time — on a fresh install, most \
+             of it.",
+            panel_path.display()
+        );
+        assert!(
+            !recent.contains(".color(Color::Warning)"),
+            "OMEGA-DELTA-0118: `render_recent_threads_section` in {} warns \
+             again. Once the row is marked, the sentence a click produces is \
+             the long form of a fact the person was already shown, and nothing \
+             they did caused it. `OMEGA-DELTA-0054` was moved off \
+             `Color::Warning` for the same reason: a warning colour for an \
+             ordinary state is how a person learns to read past warnings.",
+            panel_path.display()
+        );
+
         // 6. The rows: ordered, aged, bounded, and refusing by name.
         let rows_path = repository_path(THREADS_SIDEBAR_PATH);
         let rows_source = read_repository_file(THREADS_SIDEBAR_PATH);
@@ -16685,6 +16714,13 @@ mod tests {
                 "!thread.archived",
                 "archiving is the act of saying \"not in the list\"",
             ),
+            (
+                "unavailable_note",
+                "a row that will refuse has to say so unclicked, and it has to \
+                 come from the same call as the refusal — computed apart they \
+                 drift, and a row marked live that refuses is worse than the \
+                 unmarked one it replaced",
+            ),
         ] {
             assert!(
                 rows.contains(token),
@@ -16718,6 +16754,15 @@ mod tests {
             "OMEGA-DELTA-0118: `reopen_refusal` in {} spells a reason of its \
              own. Those belong to `unavailable` in the executor selector, and \
              two copies drift.",
+            rows_path.display()
+        );
+        assert!(
+            refusal.contains("{name} — {reason}"),
+            "OMEGA-DELTA-0118: `reopen_refusal` in {} no longer marks the row \
+             in the composer selector's own `name — reason` form. That menu \
+             greys a name it cannot offer and appends the reason with an em \
+             dash; a row stating the same fact in a shape of its own makes one \
+             window look like two.",
             rows_path.display()
         );
 

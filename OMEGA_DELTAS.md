@@ -5473,6 +5473,39 @@ than merely stated.
   sidebar. The refusal is rendered where the person is already looking rather
   than as a toast, which is the same judgement the bullet above records about
   notifications in a sealed window.
+- **Amended, omega#131: the row says it unclicked, and the sentence stops
+  shouting.** The refusal above was the whole answer and it arrived too late.
+  The owner opened a fresh install with no Codex, clicked several rows in a row,
+  and got the same yellow paragraph each time: *"You're showing me histories I
+  click on and it's a yellow warning."* Every one of those rows already held the
+  reason — `rows` was handed `OMEGA-DELTA-0123`'s list and used it — and nothing
+  on the row said so. A list whose dead rows are indistinguishable from its live
+  ones is a list of dead ends found one click at a time, and on a fresh install
+  most of the list is dead. So a row that will refuse now carries
+  `Codex — not installed` where a row that opens carries `Codex`, and the
+  refusal renders in `Color::Muted`.
+- **The mark is the composer selector's treatment, not a second one.** That menu
+  greys out a name it cannot offer and appends the reason after an em dash;
+  `OMEGA-DELTA-0123` records why the reason is in the label there rather than in
+  an aside. The row does the same thing with the same reason from the same list,
+  so the two places a person meets this fact look like one window. It uses
+  `SelectableExecutor::name` rather than `selector_name` because the row's own
+  executor label and the refusal sentence already spell `Claude` — a row reading
+  `Claude Code` above a sentence reading `Claude` would be a third answer
+  invented by the shorter of the two. No icon: the menu draws none on a disabled
+  entry, for the reason `OMEGA-DELTA-0123` gives about affordances with nothing
+  behind them.
+- **Both halves come out of one call.** `reopen_refusal` returns the mark and
+  the sentence together, because they are one fact told at two lengths. Computed
+  apart they could disagree, and a row marked live that refuses — or marked dead
+  that opens — is worse than the unmarked row either was meant to repair.
+- **The colour, and why it is not a warning.** A machine that does not have
+  Codex is not a fault, and the person did not cause it; once the row states the
+  case, the click produces the long form of something already read. `53fa7902`
+  moved two first-run notices off `Color::Warning` for exactly this, and its
+  sentence holds here: a warning colour for an ordinary state is how a person
+  learns to read past warnings. The rows are not hidden. Hiding somebody's
+  history to avoid marking it answers the question by deleting it.
 - **The reason in that sentence is `OMEGA-DELTA-0123`'s, not a second one.**
   That delta had just made the composer's selector explain every name it cannot
   offer — `Codex — not installed`, `installed; Omega hosts no adapter for it`,
@@ -5491,11 +5524,22 @@ than merely stated.
   more likely, not less. Closing is the same action again, `cmd-alt-j`, or the
   close control in the sidebar's own header.
 - **Enforced by:** `zero_bases_threads_sidebar_is_its_own_and_reopens_by_executor`
-  in `crates/omega_deltas/`, and nine unit tests in
+  in `crates/omega_deltas/`, and ten unit tests in
   `crates/agent_ui/src/omega_threads_sidebar.rs` covering the order, the age, the
-  draft and archive exclusions, the executor naming, the bound, and both
-  refusals — including that the sidebar spells no reason of its own. Each assertion in the delta check was watched failing against the
-  source with the corresponding edit reverted.
+  draft and archive exclusions, the executor naming, the bound, both refusals,
+  and the mark each refusing row carries before it is clicked — including that
+  the sidebar spells no reason of its own. Each assertion in the delta check was
+  watched failing against the source with the corresponding edit reverted.
+- **The amendment's test found the fixtures were testing the wrong thing.**
+  `a_row_that_cannot_be_reopened_is_marked_before_it_is_clicked` asserts that a
+  native row carries no mark, and it failed with
+  `omega — not registered in this window`. Every fixture in the module spelled
+  the native agent id `"omega"`, and `Agent::from` recognises
+  `agent::OMEGA_AGENT_ID`, which is `"Omega Agent"` — so what those tests called
+  a native thread was an unregistered foreign adapter that happened to answer
+  `None` to the only question any of them asked it, including
+  `omega_is_not_named_on_a_row_and_another_executor_is`, whose whole subject is
+  that Omega is not named. The fixtures now read the constant.
 - **What this does not cover.** **No window has been opened.** Nothing in this
   repository starts the binary, so the drawing is unproved: the overlay's width
   against a narrow dock, the rows against a long title, and the refusal line's

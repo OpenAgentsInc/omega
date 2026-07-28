@@ -3887,7 +3887,13 @@ impl AgentPanel {
             .enumerate()
             .fold(v_flex().w_full().pb_1(), |list, (index, row)| {
                 let reopenable = row.is_reopenable();
-                let executor = row.executor.clone();
+                // A row that will refuse says so unclicked. It already knew, and
+                // a list whose dead rows look exactly like its live ones asks a
+                // person to find them one click at a time. The note names the
+                // executor itself, in the composer selector's `name — reason`
+                // form, so it stands in place of the bare name rather than
+                // beside it.
+                let executor = row.unavailable_note.clone().or(row.executor.clone());
                 let age = row.age.clone();
                 let title = row.title.clone();
                 list.child(
@@ -3934,10 +3940,16 @@ impl AgentPanel {
                 // `OMEGA-DELTA-0053` records that a zero-base window is where a
                 // notification is least likely to be where somebody is looking,
                 // and omega#119 records what happened when refusals did toast.
+                // In the ordinary colour, because the row now says this before
+                // the click and nothing has gone wrong when somebody reads the
+                // long version of a fact they were already shown. A warning
+                // colour for a machine that simply does not have Codex is how a
+                // person learns to read past warnings, which is why
+                // `OMEGA-DELTA-0054`'s two first-run notices left it too.
                 div().w_full().px_2().py_1().child(
                     Label::new(refusal)
                         .size(LabelSize::XSmall)
-                        .color(Color::Warning),
+                        .color(Color::Muted),
                 )
             }))
             .into_any_element()

@@ -70,10 +70,20 @@ pub struct ThreadRow {
     pub executor: Option<SharedString>,
     /// The folders the thread was opened against, for reopening it in them.
     pub folder_paths: PathList,
+    /// The mark a row that cannot be reopened here carries, before it is
+    /// clicked: `Codex — not installed`.
+    ///
+    /// Present exactly when [`refusal`](Self::refusal) is, and drawn in place
+    /// of [`executor`](Self::executor), which it already names. A list whose
+    /// dead rows are identical to its live ones is a list of dead ends that
+    /// only announce themselves one click at a time, and on a fresh install
+    /// that is most of it.
+    pub unavailable_note: Option<SharedString>,
     /// Why this row cannot be reopened on this machine, if it cannot.
     ///
-    /// Present means the row is drawn muted and clicking it says this sentence
-    /// instead of opening anything.
+    /// Present means the row is drawn muted, carries
+    /// [`unavailable_note`](Self::unavailable_note), and clicking it says this
+    /// sentence instead of opening anything.
     pub refusal: Option<SharedString>,
 }
 
@@ -135,6 +145,8 @@ pub fn rows<'a>(
         .take(MAX_ROWS)
         .map(|thread| {
             let executor = recorded_executor(&thread.agent_id);
+            let unreopenable =
+                reopen_refusal(executor, &thread.agent_id, unavailable, registered_agents);
             ThreadRow {
                 thread_id: thread.thread_id,
                 agent_id: thread.agent_id.clone(),
@@ -144,7 +156,10 @@ pub fn rows<'a>(
                     .filter(|executor| *executor != SelectableExecutor::Omega)
                     .map(|executor| SharedString::new_static(executor.name())),
                 folder_paths: thread.folder_paths().clone(),
-                refusal: reopen_refusal(executor, &thread.agent_id, unavailable, registered_agents),
+                unavailable_note: unreopenable
+                    .as_ref()
+                    .map(|unreopenable| unreopenable.note.clone()),
+                refusal: unreopenable.map(|unreopenable| unreopenable.refusal),
             }
         })
         .collect()
@@ -162,6 +177,19 @@ pub fn recorded_executor(agent_id: &AgentId) -> Option<SelectableExecutor> {
         return Some(SelectableExecutor::Omega);
     }
     SelectableExecutor::of(ExecutorClass::ExternalAcp, agent_id.as_ref())
+}
+
+/// What a row that cannot be reopened here says, before and after the click.
+///
+/// One value with both halves because they are one fact told at two lengths.
+/// Computed separately they could disagree, and a row marked live that refuses
+/// — or marked dead that opens — is worse than the defect either was meant to
+/// repair.
+struct Unreopenable {
+    /// On the row, unclicked: `Codex — not installed`.
+    note: SharedString,
+    /// After the click: the same reason, and what follows from it.
+    refusal: SharedString,
 }
 
 /// Why this thread cannot be reopened here, if it cannot.
@@ -190,27 +218,38 @@ pub fn recorded_executor(agent_id: &AgentId) -> Option<SelectableExecutor> {
 /// adapter for it" would send somebody to install what they already have. What
 /// this adds is the consequence, which the menu has no reason to know: the
 /// transcript is inside that executor, so no other one can produce it.
+///
+/// **The note is that menu's form as well as its reason.** A disabled entry
+/// there reads `name — reason`; so does the row, so the two places a person
+/// meets the same fact look like the same fact. The name is
+/// [`SelectableExecutor::name`] rather than `selector_name`, because the row is
+/// already labelled by `name` and the refusal sentence already spells it — a
+/// row reading `Claude Code` above a sentence reading `Claude` would be a third
+/// answer invented by the shorter of the two.
 fn reopen_refusal(
     executor: Option<SelectableExecutor>,
     agent_id: &AgentId,
     unavailable: &[(SelectableExecutor, &'static str)],
     registered_agents: &[AgentId],
-) -> Option<SharedString> {
+) -> Option<Unreopenable> {
+    let consequence = "A thread's session belongs to the executor that made it, so opening it \
+                       on a different one finds no transcript.";
+
     let Some(executor) = executor else {
         // Somebody else's adapter: not one of the four, so `unavailable` has no
         // opinion about it. The registry is the only honest test available.
         if registered_agents.iter().any(|known| known == agent_id) {
             return None;
         }
-        return Some(
-            format!(
+        let agent_id = agent_id.as_ref();
+        return Some(Unreopenable {
+            note: format!("{agent_id} — not registered in this window").into(),
+            refusal: format!(
                 "This thread ran on the agent `{agent_id}`, which is not registered in \
-                 this window. A thread's session belongs to the executor that made it, \
-                 so opening it on a different one finds no transcript.",
-                agent_id = agent_id.as_ref()
+                 this window. {consequence}"
             )
             .into(),
-        );
+        });
     };
 
     let (_, reason) = unavailable
@@ -218,14 +257,13 @@ fn reopen_refusal(
         .find(|(candidate, _)| *candidate == executor)?;
     let name = executor.name();
 
-    Some(
-        format!(
-            "This thread ran on {name}, which cannot run here: {reason}. A thread's \
-             session belongs to the executor that made it, so opening it on a \
-             different one finds no transcript."
+    Some(Unreopenable {
+        note: format!("{name} — {reason}").into(),
+        refusal: format!(
+            "This thread ran on {name}, which cannot run here: {reason}. {consequence}"
         )
         .into(),
-    )
+    })
 }
 
 /// A short age, for sitting beside a thread title.
@@ -264,6 +302,18 @@ mod tests {
     /// it: `OMEGA-DELTA-0123`'s `unavailable` list, with nothing in it.
     const ALL_READY: &[(SelectableExecutor, &'static str)] = &[];
 
+    /// The native loop's own agent id.
+    ///
+    /// `"omega"` is not it. `Agent::from` recognises `agent::OMEGA_AGENT_ID`,
+    /// which is `"Omega Agent"`, and every fixture here spelled the short word
+    /// — so what these tests called a native thread was an unregistered
+    /// adapter that happened to answer `None` to the only question they asked
+    /// it. Found when `a_row_that_cannot_be_reopened_is_marked_before_it_is_clicked`
+    /// asked a second question and got `omega — not registered in this window`.
+    fn omega() -> &'static str {
+        agent::OMEGA_AGENT_ID.as_ref()
+    }
+
     fn thread(
         title: &str,
         agent: &str,
@@ -295,8 +345,8 @@ mod tests {
     fn rows_are_newest_first_and_carry_an_age() {
         let now = at(10);
         let entries = [
-            thread("older", "omega", at(0), true),
-            thread("newer", "omega", at(9), true),
+            thread("older", omega(), at(0), true),
+            thread("newer", omega(), at(9), true),
         ];
         let rows = rows(entries.iter(), now, ALL_READY, &[]);
 
@@ -311,8 +361,8 @@ mod tests {
     fn a_draft_is_not_a_historical_chat() {
         let now = at(10);
         let entries = [
-            thread("sent", "omega", at(9), true),
-            thread("never sent", "omega", at(9), false),
+            thread("sent", omega(), at(9), true),
+            thread("never sent", omega(), at(9), false),
         ];
         let rows = rows(entries.iter(), now, ALL_READY, &[]);
 
@@ -323,7 +373,7 @@ mod tests {
     #[test]
     fn an_archived_thread_is_not_listed() {
         let now = at(10);
-        let mut archived = thread("archived", "omega", at(9), true);
+        let mut archived = thread("archived", omega(), at(9), true);
         archived.archived = true;
         let entries = [archived];
         let rows = rows(entries.iter(), now, ALL_READY, &[]);
@@ -335,7 +385,7 @@ mod tests {
     fn omega_is_not_named_on_a_row_and_another_executor_is() {
         let now = at(10);
         let entries = [
-            thread("native", "omega", at(9), true),
+            thread("native", omega(), at(9), true),
             thread("codex", agent_servers::CODEX_ID, at(8), true),
         ];
         let rows = rows(entries.iter(), now, ALL_READY, &[]);
@@ -383,6 +433,54 @@ mod tests {
         );
     }
 
+    /// The row says it before it is clicked, not after.
+    ///
+    /// The owner met this list on a machine without Codex, clicked several rows
+    /// in a row, and got the refusal each time: *"You're showing me histories I
+    /// click on and it's a yellow warning."* Every one of those rows already
+    /// knew. What it did not do was say so, so the mark and the reason are
+    /// asserted on the unclicked row here.
+    #[test]
+    fn a_row_that_cannot_be_reopened_is_marked_before_it_is_clicked() {
+        let now = at(10);
+        let entries = [
+            thread("codex", agent_servers::CODEX_ID, at(9), true),
+            thread("native", omega(), at(8), true),
+        ];
+        let rows = rows(
+            entries.iter(),
+            now,
+            &[(SelectableExecutor::Codex, "not installed")],
+            &[],
+        );
+
+        let note = rows[0]
+            .unavailable_note
+            .as_ref()
+            .expect("a row that will refuse must say so before the click");
+        assert_eq!(
+            note.as_ref(),
+            "Codex — not installed",
+            "the mark is the composer selector's form and the composer \
+             selector's reason, so one window gives one answer"
+        );
+        assert!(
+            rows[0]
+                .refusal
+                .as_ref()
+                .is_some_and(|refusal| refusal.contains("not installed")),
+            "the mark and the sentence are one fact, so neither may exist \
+             without the other: {:?}",
+            rows[0].refusal
+        );
+
+        assert!(
+            rows[1].unavailable_note.is_none() && rows[1].is_reopenable(),
+            "a row that opens carries no mark, or the mark means nothing: {:?}",
+            rows[1].unavailable_note
+        );
+    }
+
     #[test]
     fn an_unknown_adapter_is_reopenable_only_while_it_is_registered() {
         let now = at(10);
@@ -397,17 +495,24 @@ mod tests {
             "{:?}",
             refused[0].refusal
         );
+        assert_eq!(
+            refused[0].unavailable_note.as_deref(),
+            Some("somebody-elses-agent — not registered in this window"),
+            "an adapter that is not one of the four is still a dead row, and a \
+             dead row that looks live is the whole defect"
+        );
 
         let registered = [AgentId::new("somebody-elses-agent")];
         let admitted = rows(entries.iter(), now, ALL_READY, &registered);
         assert!(admitted[0].is_reopenable(), "{:?}", admitted[0].refusal);
+        assert!(admitted[0].unavailable_note.is_none());
     }
 
     #[test]
     fn the_list_is_bounded() {
         let now = at(10_000);
         let entries: Vec<ThreadMetadata> = (0..MAX_ROWS + 50)
-            .map(|index| thread("thread", "omega", at(index as i64), true))
+            .map(|index| thread("thread", omega(), at(index as i64), true))
             .collect();
         let rows = rows(entries.iter(), now, ALL_READY, &[]);
 
