@@ -94,8 +94,11 @@ The successful response contains the existing managed voice ticket and:
 ```
 
 Omega stores that bearer through the existing OpenAgents credential provider.
-Later sessions use the normal bearer path. Disconnect and session verification
-retain their existing behavior.
+The Nostr-issued credential record does not store `ownerRef` or another mapped
+account identifier. Normal bearer verification resolves the owner in memory
+when a later voice request needs it. Existing legacy bearer credentials keep
+their compatible owner binding. Disconnect and session verification retain
+their existing behavior.
 
 ## Voice session and WebSocket
 
