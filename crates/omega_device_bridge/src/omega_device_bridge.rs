@@ -85,8 +85,28 @@ impl PairingBootstrap {
         Ok(())
     }
 
+    /// The wire payload a scanning phone decodes.
+    ///
+    /// This is the phone's contract, not this struct. The QR used to serialize
+    /// `PairingBootstrap` itself, and the mobile schema has required
+    /// `{endpoint, hostPublicKeyHex, pairingSecret, expiresAt}` since it
+    /// shipped — so every real phone scan failed with "the desktop pairing
+    /// code is invalid" while the simulator, fed through the development
+    /// bootstrap side door in the right shape, paired happily. Serializing the
+    /// host's internal struct onto the wire is how the two drifted without
+    /// either side noticing.
+    pub fn wire_payload(&self) -> Result<Vec<u8>, BridgeError> {
+        let payload = serde_json::json!({
+            "endpoint": format!("ws://{}:{}", self.magic_dns_name, self.port),
+            "hostPublicKeyHex": self.host_public_key_hex,
+            "pairingSecret": self.pairing_secret,
+            "expiresAt": self.expires_at,
+        });
+        Ok(serde_json::to_vec(&payload)?)
+    }
+
     pub fn qr(&self) -> Result<PairingQr, BridgeError> {
-        let payload = serde_json::to_vec(self)?;
+        let payload = self.wire_payload()?;
         let code = QrCode::new(payload).map_err(|_| BridgeError::PairingQrTooLarge)?;
         Ok(PairingQr {
             width: code.width(),
@@ -1262,6 +1282,45 @@ mod tests {
         let mut expired = bootstrap;
         expired.expires_at = 1_000;
         assert!(expired.validate(1_000).is_err());
+    }
+
+    /// The QR carries the PHONE's contract, not this crate's struct. The
+    /// shipped mobile schema is exactly `{endpoint, hostPublicKeyHex,
+    /// pairingSecret, expiresAt}` with a ws(s) endpoint URL, and serializing
+    /// `PairingBootstrap` itself put nine differently-named fields on the wire
+    /// instead: every real phone scan failed as "invalid" while the simulator,
+    /// bootstrapped through the development side door, paired.
+    #[test]
+    fn the_qr_wire_payload_is_what_the_shipped_phone_decodes() {
+        let bootstrap = PairingBootstrap {
+            schema: PAIRING_BOOTSTRAP_SCHEMA.into(),
+            magic_dns_name: "omega-primary.tail1234.ts.net".into(),
+            port: 4317,
+            protocol: PROTOCOL.into(),
+            host_public_key_hex: "1".repeat(64),
+            pairing_secret: "2".repeat(64),
+            generation: 7,
+            issued_at: 1_000,
+            expires_at: 301_000,
+        };
+        let payload: serde_json::Value =
+            serde_json::from_slice(&bootstrap.wire_payload().expect("payload")).expect("json");
+        let object = payload.as_object().expect("object");
+        let mut keys: Vec<&str> = object.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            ["endpoint", "expiresAt", "hostPublicKeyHex", "pairingSecret"],
+            "the wire payload grew or lost a field; the shipped phone schema \
+             rejects unknown shapes, so this is a pairing outage, not a detail"
+        );
+        assert_eq!(
+            payload["endpoint"],
+            "ws://omega-primary.tail1234.ts.net:4317"
+        );
+        assert_eq!(payload["hostPublicKeyHex"], "1".repeat(64));
+        assert_eq!(payload["pairingSecret"], "2".repeat(64));
+        assert_eq!(payload["expiresAt"], 301_000);
     }
 
     #[test]
