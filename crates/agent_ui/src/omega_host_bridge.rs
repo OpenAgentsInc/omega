@@ -48,7 +48,12 @@ const DEVICE_SNAPSHOT_FRAME_RESERVE_BYTES: usize = 1_024;
 const DEVICE_TRANSCRIPT_PUBLISH_INTERVAL: Duration = Duration::from_millis(250);
 const ISSUE31_AGENT_COMMAND_POLL_INTERVAL: Duration = Duration::from_millis(500);
 /// omega#124. How often the panel's own threads are re-projected for the mirror.
-const PANEL_PROJECTION_INTERVAL: Duration = Duration::from_millis(1_000);
+///
+/// A second was long enough that a person typing on the desktop watched the
+/// phone lag behind them. The work is a diff against what was already
+/// published, so an idle desktop publishes nothing and the cost of asking more
+/// often is a comparison.
+const PANEL_PROJECTION_INTERVAL: Duration = Duration::from_millis(150);
 const CORRELATION_SCHEMA: &str = "openagents.omega.full_auto_host_correlation.v1";
 const CORRELATION_FILE: &str = "full-auto-host-correlation.json";
 
@@ -1106,6 +1111,23 @@ fn device_loaded_thread(
     }
 }
 
+/// Remove the speaker heading that Zed's Markdown export writes.
+///
+/// `AgentThreadEntry::to_markdown` opens every entry with `## User` or
+/// `## Assistant`, because a flat Markdown transcript has no other place to
+/// name the speaker. The mirror carries the speaker in the typed `role` field
+/// and the phone renders it as its own label, so the heading arrives as a
+/// duplicate title above the same turn.
+fn without_role_heading(text: &str) -> &str {
+    const HEADINGS: [&str; 3] = ["## User (checkpoint)", "## Assistant", "## User"];
+    for heading in HEADINGS {
+        if let Some(rest) = text.strip_prefix(heading) {
+            return rest.trim_start_matches(['\r', '\n']);
+        }
+    }
+    text
+}
+
 fn device_transcript(
     thread_ref: &str,
     entries: &[AgentThreadEntry],
@@ -1135,7 +1157,8 @@ fn device_transcript(
             if !full_auto_ui::issue31_device_mirror_text_is_safe(&text) {
                 return None;
             }
-            let preview = device_transcript_preview(&text);
+            let text = without_role_heading(&text);
+            let preview = device_transcript_preview(text);
             let text = full_auto_ui::issue31_device_mirror_text(
                 &preview,
                 MAX_DEVICE_TRANSCRIPT_TEXT_BYTES,

@@ -298,7 +298,19 @@ impl GoogleLanguageModel {
             let extra_headers = GoogleLanguageModelProvider::settings(cx)
                 .custom_headers
                 .clone();
-            (state.api_key_state.key(&api_url), api_url, extra_headers)
+            // Zero base returns early from `authenticate`, because the hosted
+            // broker signs the owner in rather than a stored key. That leaves
+            // `api_key_state` empty, which made the direct fallback below
+            // unreachable: with the broker unavailable the owner could not
+            // send a message at all, even with `GEMINI_API_KEY` exported.
+            // Read the environment directly so the fallback is real.
+            let api_key = state.api_key_state.key(&api_url).or_else(|| {
+                API_KEY_ENV_VAR
+                    .value
+                    .as_deref()
+                    .map(std::sync::Arc::<str>::from)
+            });
+            (api_key, api_url, extra_headers)
         });
 
         async move {
@@ -345,7 +357,8 @@ impl GoogleLanguageModel {
             }
 
             Err(LanguageModelCompletionError::Other(anyhow::anyhow!(
-                "OpenAgents sign-in was not completed. Send the message again to connect hosted Omega."
+                "OpenAgents sign-in was not completed. Send the message again to connect hosted Omega, \
+                 or set {GEMINI_API_KEY_VAR_NAME} to send through a direct key."
             )))
         }
         .boxed()
