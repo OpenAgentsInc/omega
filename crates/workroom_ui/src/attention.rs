@@ -304,10 +304,7 @@ pub fn proactive_turn_as_transcript_row(
 }
 
 /// Honest empty-room check when the autonomous tick is off: no synthetic rows.
-pub fn empty_room_is_honest(
-    transcript: &TranscriptProjection,
-    tick_enabled: bool,
-) -> bool {
+pub fn empty_room_is_honest(transcript: &TranscriptProjection, tick_enabled: bool) -> bool {
     if tick_enabled {
         // When enabled, emptiness is still allowed; honesty is "no fake rows".
         return !transcript_has_synthetic_tick_filler(transcript);
@@ -408,7 +405,11 @@ mod tests {
         let mut t = page(vec![confirmed_owner("m1", "status?"), row]);
         t.push_bounded(answer);
         assert_eq!(t.rows.len(), 3);
-        assert!(t.rows.iter().all(|r| r.role == "owner" || r.role == "sarah"));
+        assert!(
+            t.rows
+                .iter()
+                .all(|r| r.role == "owner" || r.role == "sarah")
+        );
     }
 
     #[test]

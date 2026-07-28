@@ -5075,8 +5075,10 @@ than merely stated.
   and move the loading indicator to inside the input bar like bottom left"*.
 - **Omega now:** `ConversationView` draws its own composer for the whole of
   `Loading` — same box, same place, same type, focused, typable. The loading
-  indicator is its status line, bottom-left. Send is disabled. What is typed is
-  moved into the real composer, caret included, the moment one exists.
+  indicator is its status line, bottom-left. What is typed and not sent is
+  moved into the real composer, caret included, the moment one exists. What is
+  typed and *sent* is `OMEGA-DELTA-0170`'s: Enter always accepts, and the
+  message queues as a visible pending turn that dispatches on connect.
 - **The handover is the point, not the field.** A field whose contents are
   discarded when the thing it was waiting for arrives is *worse* than no field:
   a wait is a wait, but a lost sentence is a lost sentence, and the sentence
@@ -5085,20 +5087,20 @@ than merely stated.
   restores the caret offset, and never clears the destination: if the real
   composer already carries a restored draft, the typed text goes after it rather
   than over it. Untidy, and correct — both texts are somebody's.
-- **Send is disabled, and refusing is visible.** The owner, earlier the same
-  session: *"if something needs initalization, just disable the submit button in
-  the input box until its ready"*. There is no session, no thread and no queue,
-  so a live button would lie about what a press does. A `Chat` that arrives here
-  is refused and the status line changes to say the message was not sent and to
-  press Enter again once it clears — because a key press that appears to do
-  nothing is the exact silence a disabled button exists to replace.
-- **It does not auto-send on connect.** Queue-and-fire was the other defensible
-  answer and it is not defensible *here*, for a reason particular to how a
-  person reaches this state: they reached it by **switching executor**. A
-  message composed while Codex was tearing down and fired the instant Claude
-  attaches goes to a runtime nobody watched it go to, with the window that would
-  have shown them already gone. So it waits for a second, explicit press. Both
-  behaviours are stated on screen rather than left to be discovered.
+- **SUPERSEDED (2026-07-28): Send is live, and it auto-sends on connect.**
+  This entry originally held that Send was disabled while connecting, that a
+  `Chat` was refused with *"Not sent — still connecting. Press Enter again
+  when this clears."*, and that nothing auto-sent on connect because a person
+  who reached the wait by switching executor never watched the message go. The
+  owner overruled both halves on a live build — he typed "hi" into a
+  brand-new thread, pressed Enter, read the refusal, and said: *"refactor this
+  'not sent' bullshit. never block user from hitting enter, if not connected
+  just show a loading thing in the chat."* The replacement contract — Enter
+  always accepts, the message becomes a visible pending turn naming the
+  executor it will go to, and it dispatches automatically, in order, exactly
+  once, on connect — is `OMEGA-DELTA-0170`. The visibility of the pending turn
+  is what answers the switched-executor worry this entry used to answer with a
+  second press.
 - **A bare `Editor`, wearing the real composer's face.** Almost everything that
   makes `MessageEditor` the real composer — `@` mentions, `/` commands, skills,
   the queue — is a question asked of a session that does not exist yet. A
@@ -5112,8 +5114,8 @@ than merely stated.
   *only* while connecting. `OMEGA-DELTA-0150` later removed external provider
   controls from the zero-base row. The row carries
   `flex_wrap` for the same reason the real one does: unwrapped, a narrow window
-  pushes Send off the edge, and a disabled control nobody can see is
-  indistinguishable from one that was never built.
+  pushes Send off the edge, and a control nobody can see is indistinguishable
+  from one that was never built.
 - **Neither gate is weakened.** `OMEGA-DELTA-0052` is untouched — this adds no
   dock, no status bar and no way out of zero base. `OMEGA-DELTA-0040` is
   untouched — the identity gate runs before any window opens, so a composer
@@ -5125,9 +5127,10 @@ than merely stated.
   a deleted `render_loading_composer`, a composer built and never drawn, a label
   where the editor should be, a deleted handover, a handover that is never
   called, a handover that restores text but not the caret, a handover that
-  clears the destination first, a Send button left live, a refusal that records
-  nothing, a handover that sends, the indicator moved to the right of Send, an
-  unwrapped row, and the shared style un-shared.
+  clears the destination first, a handover that sends, the indicator moved to
+  the right of Send, an unwrapped row, and the shared style un-shared. The
+  disabled-Send and refusal assertions were removed with the 2026-07-28
+  supersession; their replacements live in `OMEGA-DELTA-0170`'s check.
 - **What this does not cover.** **No window has been opened.** Nothing here
   proves what a person sees: that the loading composer is the same size and in
   the same place as the real one, that focus lands in it without a click, that
@@ -7477,3 +7480,76 @@ current image build does not decode it inline.
   `stale_identity_durable_state_is_archived_and_rederived_instead_of_bricking_pairing`
   in `omega_effectd`, which writes state under one identity, loads it under
   another, and requires a fresh start with the stale file archived beside it.
+
+### OMEGA-DELTA-0170 — Enter while connecting queues the message
+
+- **Upstream Zed:** there is no composer while an agent connects, so there is
+  no Enter to honour or refuse. The question only exists because
+  `OMEGA-DELTA-0122` put a typable composer into the wait.
+- **Omega, before this:** a `Chat` during `Loading` was refused. The text
+  stayed in the composer and the status line read *"Not sent — still
+  connecting. Press Enter again when this clears."* The refusal was 0122's
+  deliberate answer to the switched-executor case, and it made every first
+  message of every new thread cost a second keystroke whenever the executor
+  was still warming. The owner, on a live build, having typed "hi" into a
+  brand-new thread and pressed Enter: *"refactor this 'not sent' bullshit.
+  never block user from hitting enter, if not connected just show a loading
+  thing in the chat."*
+- **Omega now:** Enter always accepts. `submit_while_connecting` moves the
+  composer's text into `pending_connect_messages` on the `ConversationView`,
+  the composer clears, and the message is drawn in the chat as a pending turn
+  — the app's own `TodoProgress` spinner, plus a line naming the executor it
+  will go to. Several Enters queue several turns, in order. The Send button
+  does the same thing, because a dead button beside a live Enter would make
+  two claims about one state.
+- **On connect it dispatches itself, in order, exactly once.**
+  `dispatch_pending_connect_messages` runs where the thread view is built. It
+  `std::mem::take`s the pending list — taken before anything is enqueued, so
+  no later state churn can dispatch a message twice — and feeds every message
+  into the thread's ordinary `MessageQueue`: the first is fast-tracked exactly
+  the way Enter on an empty composer fast-tracks a queued follow-up, and the
+  rest auto-dispatch as turns stop. Ordering, exactly-once, and the subagent
+  fence (`43219aacd1` — a delegated subagent finishing must not spend the root
+  queue) are that queue's existing promises; a parallel send path would
+  re-earn its bugs one at a time.
+- **The visibility is what answers 0122's worry.** The old refusal existed
+  because a person who reaches the wait by switching executor would have a
+  message fired at a runtime nobody watched it go to. The pending turn is the
+  watching: it sits in the chat naming the executor it is waiting for, and
+  cancelling is deleting the text in front of you before the connection lands
+  — the same control a queued follow-up gives.
+- **A terminal failure never eats the message.** The pending list lives on the
+  view, not on `ServerState::Loading`, so `handle_load_error` inherits it
+  untouched. In `LoadError` the same turns render marked unsent — text intact,
+  `Not sent — {executor} failed to connect` — with a **Retry Connection**
+  button that calls `reset`, re-entering `Loading` with the list intact; a
+  retry that connects dispatches the preserved messages. This repository just
+  finished paying for silently dropped queued text; this delta does not
+  reintroduce the class.
+- **The draft handover is untouched.** Text a person typed but did not submit
+  still crosses via `hand_loading_draft_over`, caret and all, and the handover
+  still never sends: pressing Enter is what submits, and only submitted text
+  rides the pending queue.
+- **Enforced by:**
+  `enter_while_connecting_queues_the_message_and_never_loses_it` in
+  `crates/omega_deltas`, plus two GPUI regression tests in
+  `crates/agent_ui/src/conversation_view.rs`:
+  `a_message_sent_while_connecting_dispatches_once_on_connect` (submit two
+  messages while `Loading`, connect, prove the first dispatches exactly once
+  with the exact text, the second waits in the ordinary queue and dispatches
+  when the turn stops) and
+  `a_message_sent_while_connecting_survives_a_terminal_failure` (submit,
+  terminally fail, prove the text is preserved and the retry dispatches it
+  exactly once). Each was watched failing against the fix broken one piece at
+  a time: the dispatch call removed (both GPUI tests failed on "connecting
+  must dispatch" / "a retry that connects must dispatch"),
+  `handle_load_error` made to clear the pending list (the survival test failed
+  on "must preserve the submitted text"), and the delta check run against the
+  pre-change source shape.
+- **What this does not cover.** No window has been opened by the checks, so
+  nothing here proves what a person sees: that the pending turn is where the
+  transcript will be, that the spinner spins, or that the failed turn's retry
+  is reachable in a narrow panel. The auth-required state renders the pending
+  turns and a successful sign-in rebuilds the session through the same
+  dispatch path, but no automated check walks that flow end to end.
+

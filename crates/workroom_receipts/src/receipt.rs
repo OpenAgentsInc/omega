@@ -6,7 +6,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::public_ref::{is_public_safe_ref, sanitize_public_ref, PublicRef};
+use crate::public_ref::{PublicRef, is_public_safe_ref, sanitize_public_ref};
 
 /// Cap on bounded result references kept on one inspector row.
 pub const MAX_BOUNDED_RESULT_REFS: usize = 8;
@@ -55,7 +55,9 @@ pub enum RefusalReasonClass {
     ProfileInvalid,
     AuthorityRefused,
     /// Public-safe unknown class string after sanitization.
-    Other { reason_class: PublicRef },
+    Other {
+        reason_class: PublicRef,
+    },
 }
 
 impl RefusalReasonClass {
@@ -187,17 +189,14 @@ impl AuthorityReceiptDetail {
                 .reserved_category
                 .and_then(sanitize_public_ref)
                 .or_else(|| {
-                    input
-                        .result_refs
-                        .iter()
-                        .find_map(|r| {
-                            let s = r.trim();
-                            if s.starts_with("reserved.") {
-                                sanitize_public_ref(s)
-                            } else {
-                                None
-                            }
-                        })
+                    input.result_refs.iter().find_map(|r| {
+                        let s = r.trim();
+                        if s.starts_with("reserved.") {
+                            sanitize_public_ref(s)
+                        } else {
+                            None
+                        }
+                    })
                 });
             Some(RefusalDetail::new(reason_class, reserved_category))
         };
@@ -249,11 +248,7 @@ pub struct AuthorityBlockJson {
     pub decision_ref: Option<String>,
     #[serde(default, alias = "result_refs", alias = "resultRefs")]
     pub result_refs: Vec<String>,
-    #[serde(
-        default,
-        alias = "bounded_result_ref",
-        alias = "boundedResultRef"
-    )]
+    #[serde(default, alias = "bounded_result_ref", alias = "boundedResultRef")]
     pub bounded_result_ref: Option<String>,
     #[serde(
         default,
@@ -262,11 +257,7 @@ pub struct AuthorityBlockJson {
         alias = "reason"
     )]
     pub refusal_reason: Option<String>,
-    #[serde(
-        default,
-        alias = "reserved_category",
-        alias = "reservedCategory"
-    )]
+    #[serde(default, alias = "reserved_category", alias = "reservedCategory")]
     pub reserved_category: Option<String>,
     // Unknown keys (content, token, rawOutput, paths, etc.) are ignored by
     // serde's default and never become inspector fields.

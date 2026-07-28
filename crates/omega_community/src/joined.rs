@@ -71,11 +71,10 @@ impl JoinedRoom {
     /// What a person reads for this room.
     #[must_use]
     pub fn name(&self) -> String {
-        self.repository
-            .audience()
-            .map_or_else(|_| self.repository.repository_ref().to_string(), |audience| {
-                audience.name().to_string()
-            })
+        self.repository.audience().map_or_else(
+            |_| self.repository.repository_ref().to_string(),
+            |audience| audience.name().to_string(),
+        )
     }
 }
 
@@ -284,7 +283,9 @@ mod tests {
 
     fn joined() -> JoinedRooms {
         let mut rooms = JoinedRooms::new();
-        rooms.join(invitation(), 1_800_000_000).expect("a member joins");
+        rooms
+            .join(invitation(), 1_800_000_000)
+            .expect("a member joins");
         rooms
     }
 
@@ -369,7 +370,10 @@ mod tests {
 
         let room = rooms.rooms().next().expect("the one room");
         assert_eq!(room.membership.role_refs, vec![RoleRef::Viewer]);
-        assert_eq!(room.joined_at, 1_800_000_000, "joining did not happen twice");
+        assert_eq!(
+            room.joined_at, 1_800_000_000,
+            "joining did not happen twice"
+        );
         assert_eq!(room.membership_as_of(), 1_800_000_500);
         assert_eq!(rooms.len(), 1);
     }
@@ -396,9 +400,10 @@ mod tests {
     #[test]
     fn an_invitation_naming_a_room_that_cannot_exist_is_refused() {
         let mut rooms = JoinedRooms::new();
-        let mismatched =
-            Invitation::parse(&omega_invitation_text().replace("repository=omega", "repository=vortex"))
-                .expect("the fields are well formed");
+        let mismatched = Invitation::parse(
+            &omega_invitation_text().replace("repository=omega", "repository=vortex"),
+        )
+        .expect("the fields are well formed");
 
         assert_eq!(
             rooms.join(mismatched, 1_800_000_000).err(),
@@ -447,7 +452,10 @@ mod tests {
             .expect("an identity");
 
         assert!(rooms.leave(&community));
-        assert!(!rooms.leave(&community), "and leaving twice is not a success");
+        assert!(
+            !rooms.leave(&community),
+            "and leaving twice is not a success"
+        );
         assert_eq!(rooms.roster().len(), 1);
 
         let described = rooms.roster().describe(&community);

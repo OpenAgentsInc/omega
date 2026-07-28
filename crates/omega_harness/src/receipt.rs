@@ -323,7 +323,10 @@ pub fn decide_maintenance<'a>(
 /// anything on its own. `the_prefilter_never_admits_what_the_gate_refuses`
 /// holds both halves.
 #[must_use]
-pub fn admits_version(pin_state: PinState<'_>, candidate_version: &str) -> Option<MaintenanceRefusal> {
+pub fn admits_version(
+    pin_state: PinState<'_>,
+    candidate_version: &str,
+) -> Option<MaintenanceRefusal> {
     match pin_state {
         PinState::Unreadable => Some(MaintenanceRefusal::PinLedgerUnreadable),
         PinState::Unpinned => None,
@@ -750,7 +753,9 @@ pub fn decode_harness_maintenance_record(
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ProvenanceVerdict {
     /// A receipt this Omega can read binds the bytes now on disk.
-    Verified { digest: String },
+    Verified {
+        digest: String,
+    },
     Refused(ProvenanceGap),
 }
 
@@ -898,7 +903,11 @@ mod tests {
 
     fn pinned_ledger() -> HarnessPinLedger {
         let mut ledger = HarnessPinLedger::empty();
-        ledger.set_pin("codex-acp", "0.9.4", &MeasuredDigest::measure(RELEASE_0_9_4));
+        ledger.set_pin(
+            "codex-acp",
+            "0.9.4",
+            &MeasuredDigest::measure(RELEASE_0_9_4),
+        );
         ledger
     }
 
@@ -983,8 +992,10 @@ mod tests {
     #[test]
     fn bytes_the_host_could_not_read_are_refused_even_with_no_pin() {
         for pin_state in [PinState::Unpinned, PinState::Unreadable] {
-            let decision =
-                decide_maintenance(pin_state, CandidateArtifact::Unmeasured { version: "0.9.5" });
+            let decision = decide_maintenance(
+                pin_state,
+                CandidateArtifact::Unmeasured { version: "0.9.5" },
+            );
             assert!(!decision.is_permitted(), "{pin_state:?}");
         }
     }
@@ -1093,7 +1104,10 @@ mod tests {
             "a refusal class exists that the receipt contract does not admit"
         );
         for class in ADMITTED_REASON_CLASSES {
-            assert!(classes.contains(class), "{class} has no refusal that means it");
+            assert!(
+                classes.contains(class),
+                "{class} has no refusal that means it"
+            );
         }
     }
 
@@ -1123,10 +1137,8 @@ mod tests {
 
         for (pin_state, version, digest) in cases {
             let prefiltered = admits_version(pin_state, version);
-            let decided = decide_maintenance(
-                pin_state,
-                CandidateArtifact::Measured { version, digest },
-            );
+            let decided =
+                decide_maintenance(pin_state, CandidateArtifact::Measured { version, digest });
             match (&prefiltered, &decided) {
                 (Some(refusal), MaintenanceDecision::Refused(gate)) => {
                     assert_eq!(
@@ -1157,7 +1169,9 @@ mod tests {
         );
         let affordance = update_affordance(&decision);
         assert!(!affordance.is_enabled());
-        let reason = affordance.reason().expect("a disabled control carries a reason");
+        let reason = affordance
+            .reason()
+            .expect("a disabled control carries a reason");
         assert!(reason.contains("0.9.4"), "{reason:?}");
         assert!(reason.contains("0.9.5"), "{reason:?}");
     }
@@ -1176,8 +1190,9 @@ mod tests {
                 digest: &digest,
             },
         );
-        let receipt = receipt_for_decision(HOST, "codex-acp", NOW, MaintenanceAction::Update, &decision)
-            .expect("a permitted update writes a receipt");
+        let receipt =
+            receipt_for_decision(HOST, "codex-acp", NOW, MaintenanceAction::Update, &decision)
+                .expect("a permitted update writes a receipt");
         assert_eq!(receipt.harness_ref, "harness.codex-acp");
         assert_eq!(receipt.action, MaintenanceAction::Update);
         assert_eq!(receipt.observed_at_ms, NOW);
@@ -1466,7 +1481,10 @@ mod tests {
             &InstallationProvenance::Unattested,
             &MeasuredDigest::measure(RELEASE_0_9_4),
         );
-        assert_eq!(verdict, ProvenanceVerdict::Refused(ProvenanceGap::Unattested));
+        assert_eq!(
+            verdict,
+            ProvenanceVerdict::Refused(ProvenanceGap::Unattested)
+        );
         assert!(ProvenanceGap::Unattested.reason().contains("provenance"));
     }
 

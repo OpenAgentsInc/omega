@@ -98,10 +98,7 @@ pub fn render_receipt_detail(detail: &AuthorityReceiptDetail) -> ReceiptInspecto
             refusal.reason_class.as_label(),
         ));
         if let Some(category) = &refusal.reserved_category {
-            fields.push(InspectorField::new(
-                "reserved_category",
-                category.as_str(),
-            ));
+            fields.push(InspectorField::new("reserved_category", category.as_str()));
         }
     }
 
@@ -122,10 +119,7 @@ pub fn render_room_header_authority(header: &RoomAuthorityHeader) -> RoomHeaderA
                 "authority_profile_ref",
                 header.authority_profile_ref.as_str(),
             ),
-            InspectorField::new(
-                "authority_revision",
-                header.authority_revision.to_string(),
-            ),
+            InspectorField::new("authority_revision", header.authority_revision.to_string()),
         ],
     }
 }
@@ -135,7 +129,7 @@ mod tests {
     use super::*;
     use crate::public_ref::PublicRef;
     use crate::receipt::{
-        AuthorityReceiptDetail, RefusalDetail, RefusalReasonClass, RawAuthorityBlock,
+        AuthorityReceiptDetail, RawAuthorityBlock, RefusalDetail, RefusalReasonClass,
     };
     use crate::room_header::RoomAuthorityHeader;
 

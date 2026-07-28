@@ -67,15 +67,7 @@ const ROLES: &str = "roles";
 /// or the Forge's answer about a person, and a default for either is a guess
 /// presented as a fact.
 pub const INVITATION_FIELDS: &[&str] = &[
-    TENANT,
-    REPOSITORY,
-    COORDINATE,
-    RELAYS,
-    NAME,
-    BINDING,
-    ACTOR,
-    STATE,
-    ROLES,
+    TENANT, REPOSITORY, COORDINATE, RELAYS, NAME, BINDING, ACTOR, STATE, ROLES,
 ];
 
 /// Why an invitation was not read.
@@ -198,8 +190,8 @@ impl Invitation {
 
         let tenant_ref = field(TENANT)?;
         let repository_ref = field(REPOSITORY)?;
-        let coordinate =
-            RepositoryCoordinate::parse(&field(COORDINATE)?).map_err(InvitationRefused::Repository)?;
+        let coordinate = RepositoryCoordinate::parse(&field(COORDINATE)?)
+            .map_err(InvitationRefused::Repository)?;
         let relays: Vec<String> = field(RELAYS)?
             .split(LIST)
             .map(|relay| relay.trim().to_string())
@@ -312,8 +304,8 @@ impl Invitation {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use crate::tests::{OMEGA_COORDINATE, membership};
     use crate::MembershipRefused;
+    use crate::tests::{OMEGA_COORDINATE, membership};
 
     /// The invitation the owner would send for omega's own room. Written here,
     /// in a test, because the crate ships the ability to join a Forge
@@ -514,9 +506,13 @@ pub(crate) mod tests {
             MembershipState::Tombstoned
         );
         assert_eq!(
-            invitation
-                .membership
-                .admits_reading(&invitation.descriptor.clone().into_repository().expect("a room")),
+            invitation.membership.admits_reading(
+                &invitation
+                    .descriptor
+                    .clone()
+                    .into_repository()
+                    .expect("a room")
+            ),
             Err(MembershipRefused::Tombstoned)
         );
     }

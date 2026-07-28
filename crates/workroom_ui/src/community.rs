@@ -12,8 +12,8 @@
 //! be labeled "earnings". Member-written content is untrusted data.
 
 use crate::projections::{
-    Freshness, GapState, MessageAck, ProjectionMeta, TranscriptProjection, TranscriptRow,
-    WorkroomProjection, MAX_ACTIVITY_ROWS, MAX_TRANSCRIPT_ROWS,
+    Freshness, GapState, MAX_ACTIVITY_ROWS, MAX_TRANSCRIPT_ROWS, MessageAck, ProjectionMeta,
+    TranscriptProjection, TranscriptRow, WorkroomProjection,
 };
 
 /// Conversation header when the owner-private Sarah room is active.
@@ -385,11 +385,7 @@ v1 awards experience points, not money. This total is not earnings."
 
     /// Recompute total from the visible award page (awards win over rank).
     pub fn recompute_total_from_awards(&mut self) {
-        self.total_experience = self
-            .recent_awards
-            .iter()
-            .map(|a| u64::from(a.points))
-            .sum();
+        self.total_experience = self.recent_awards.iter().map(|a| u64::from(a.points)).sum();
     }
 
     pub fn summary_line(&self) -> String {
@@ -518,17 +514,13 @@ No durable pane state. Separate from owner-private Sarah."
         self.connection_detail = Some(detail.clone());
         self.room.meta = ProjectionMeta::unavailable(community_sources::GROUP, &detail);
         self.room.detail = Some(detail.clone());
-        self.membership.meta =
-            ProjectionMeta::unavailable(community_sources::MEMBERSHIP, &detail);
+        self.membership.meta = ProjectionMeta::unavailable(community_sources::MEMBERSHIP, &detail);
         self.membership.detail = Some(detail.clone());
-        self.work_units.meta =
-            ProjectionMeta::unavailable(community_sources::WORK_UNITS, &detail);
+        self.work_units.meta = ProjectionMeta::unavailable(community_sources::WORK_UNITS, &detail);
         self.work_units.detail = Some(detail.clone());
-        self.experience.meta =
-            ProjectionMeta::unavailable(community_sources::EXPERIENCE, &detail);
+        self.experience.meta = ProjectionMeta::unavailable(community_sources::EXPERIENCE, &detail);
         self.experience.detail = Some(detail.clone());
-        self.transcript.meta =
-            ProjectionMeta::unavailable(community_sources::TRANSCRIPT, &detail);
+        self.transcript.meta = ProjectionMeta::unavailable(community_sources::TRANSCRIPT, &detail);
     }
 
     /// Tag every community transcript row as untrusted member content.
@@ -709,9 +701,11 @@ mod tests {
         assert!(copy_forbids_payment(V1_NO_PAY_FIRST_RUN_COPY));
         assert!(V1_NO_PAY_ROOM_DESCRIPTION.contains("experience"));
         assert!(V1_NO_PAY_ROOM_DESCRIPTION.contains("not money"));
-        assert!(!V1_NO_PAY_ROOM_DESCRIPTION
-            .to_ascii_lowercase()
-            .contains("earnings"));
+        assert!(
+            !V1_NO_PAY_ROOM_DESCRIPTION
+                .to_ascii_lowercase()
+                .contains("earnings")
+        );
         assert!(V1_NO_PAY_FIRST_RUN_COPY.contains("does not pay"));
 
         let c = CommunityRoomProjection::honest_unsubscribed();
@@ -727,16 +721,18 @@ mod tests {
     fn two_rooms_never_share_membership_or_history() {
         let mut surface = WorkroomSurface::honest_unsubscribed();
         surface.owner_private.room.thread_ref = Some("thread.sarah.owner.1".into());
-        surface.owner_private.transcript.push_bounded(TranscriptRow {
-            message_ref: "msg.private.1".into(),
-            role: "owner".into(),
-            text: "private".into(),
-            ack: MessageAck::Confirmed,
-        });
+        surface
+            .owner_private
+            .transcript
+            .push_bounded(TranscriptRow {
+                message_ref: "msg.private.1".into(),
+                role: "owner".into(),
+                text: "private".into(),
+                ack: MessageAck::Confirmed,
+            });
         surface.community.room.group_ref = Some("nip29.group.community.1".into());
         surface.community.membership.group_ref = Some("nip29.group.community.1".into());
-        surface.community.membership.meta =
-            ProjectionMeta::fresh(community_sources::MEMBERSHIP);
+        surface.community.membership.meta = ProjectionMeta::fresh(community_sources::MEMBERSHIP);
         surface.community.membership.push_member(MemberRosterRow {
             member_ref: "npub.member.1".into(),
             display_name: Some("dev".into()),

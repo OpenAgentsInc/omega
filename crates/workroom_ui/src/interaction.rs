@@ -106,9 +106,9 @@ impl TerminalOutcome {
     pub fn reason(&self) -> Option<&str> {
         match self {
             Self::None => None,
-            Self::Finished { reason }
-            | Self::Interrupted { reason }
-            | Self::Error { reason } => Some(reason.as_str()),
+            Self::Finished { reason } | Self::Interrupted { reason } | Self::Error { reason } => {
+                Some(reason.as_str())
+            }
         }
     }
 
@@ -130,9 +130,15 @@ impl TerminalOutcome {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum InteractionEvent {
     /// Durable claim: turn is running.
-    TurnQueued { turn_ref: String },
-    TurnStarted { turn_ref: String },
-    TurnRunning { turn_ref: String },
+    TurnQueued {
+        turn_ref: String,
+    },
+    TurnStarted {
+        turn_ref: String,
+    },
+    TurnRunning {
+        turn_ref: String,
+    },
     ToolCall {
         event_ref: String,
         turn_ref: Option<String>,
@@ -377,7 +383,8 @@ impl InteractionState {
                 self.run.meta = ProjectionMeta::fresh(sources::RUN_STATE);
                 self.clear_turn_progress_if_new_turn();
             }
-            InteractionEvent::TurnStarted { turn_ref } | InteractionEvent::TurnRunning { turn_ref } => {
+            InteractionEvent::TurnStarted { turn_ref }
+            | InteractionEvent::TurnRunning { turn_ref } => {
                 self.run.phase = RunPhase::Running;
                 self.run.turn_ref = Some(turn_ref);
                 self.run.reason = None;
@@ -405,7 +412,13 @@ impl InteractionState {
                 tool_ref,
                 summary,
             } => {
-                self.push_tool(ToolLadderKind::Result, event_ref, turn_ref, tool_ref, summary);
+                self.push_tool(
+                    ToolLadderKind::Result,
+                    event_ref,
+                    turn_ref,
+                    tool_ref,
+                    summary,
+                );
                 self.ensure_running_from_ladder();
             }
             InteractionEvent::ToolError {
@@ -414,7 +427,13 @@ impl InteractionState {
                 tool_ref,
                 summary,
             } => {
-                self.push_tool(ToolLadderKind::Error, event_ref, turn_ref, tool_ref, summary);
+                self.push_tool(
+                    ToolLadderKind::Error,
+                    event_ref,
+                    turn_ref,
+                    tool_ref,
+                    summary,
+                );
                 self.ensure_running_from_ladder();
             }
             InteractionEvent::TextDelta {
@@ -439,12 +458,11 @@ impl InteractionState {
                     ack: MessageAck::Confirmed,
                 });
             }
-            InteractionEvent::TextCompleted { event_ref, turn_ref } => {
-                let text = self
-                    .answer
-                    .text()
-                    .map(str::to_string)
-                    .unwrap_or_default();
+            InteractionEvent::TextCompleted {
+                event_ref,
+                turn_ref,
+            } => {
+                let text = self.answer.text().map(str::to_string).unwrap_or_default();
                 self.answer = AnswerState::Completed { text: text.clone() };
                 if let Some(tr) = turn_ref {
                     self.run.turn_ref = Some(tr);
@@ -475,7 +493,8 @@ impl InteractionState {
                 // Finished is not interrupt-applied.
             }
             InteractionEvent::TurnInterrupted { turn_ref, reason } => {
-                self.run.apply_terminal_interrupted(turn_ref, Some(reason.clone()));
+                self.run
+                    .apply_terminal_interrupted(turn_ref, Some(reason.clone()));
                 self.terminal = TerminalOutcome::Interrupted { reason };
             }
             InteractionEvent::MessageConfirmed {
@@ -853,15 +872,10 @@ mod tests {
             other => panic!("unexpected {other:?}"),
         }
 
-        assert!(InteractionEvent::from_runtime_kind(
-            "usage.recorded",
-            "e3",
-            None,
-            "",
-            None,
-            None
-        )
-        .is_none());
+        assert!(
+            InteractionEvent::from_runtime_kind("usage.recorded", "e3", None, "", None, None)
+                .is_none()
+        );
     }
 
     #[test]

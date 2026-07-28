@@ -665,9 +665,16 @@ pub struct ConversationView {
     /// omega#117. Holding the task is what makes this a debounce: assigning a
     /// new one drops the old, and dropping a GPUI task cancels it.
     pending_executor_rebuild: Option<Task<()>>,
-    /// Whether Send has been asked for while it was disabled, so the status
-    /// line can say the message was not sent rather than nothing at all.
-    loading_send_refused: bool,
+    /// Messages a person sent while the executor was still connecting.
+    ///
+    /// `OMEGA-DELTA-0170`. Enter always accepts: each press moves the
+    /// composer's text here, in order, and the pending turns are drawn in the
+    /// chat with a spinner. The whole list is dispatched — exactly once, via
+    /// [`ConversationView::dispatch_pending_connect_messages`] — the moment a
+    /// session exists. It deliberately lives on this view rather than on
+    /// `ServerState::Loading`, so a connection that terminally fails carries
+    /// the text into `LoadError` instead of dropping it with the state.
+    pending_connect_messages: Vec<String>,
     /// When settings change, use this to see if the theme has changed (which
     /// causes mermaid diagrams to re-render).
     last_theme_id: Option<String>,
@@ -1163,7 +1170,7 @@ impl ConversationView {
             loading_status: None,
             loading_composer: None,
             pending_executor_rebuild: None,
-            loading_send_refused: false,
+            pending_connect_messages: Vec::new(),
             last_theme_id: Some(cx.theme().id.clone()),
             draft_prompt_persist_task: None,
             code_span_resolver,
@@ -1339,7 +1346,6 @@ impl ConversationView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.loading_send_refused = false;
         let Some(loading_composer) = self.loading_composer.take() else {
             return;
         };
@@ -1365,6 +1371,85 @@ impl ConversationView {
                 message_editor.set_cursor_offset(usize::MAX, window, cx);
                 message_editor.insert_text(&format!("\n\n{text}"), window, cx);
             }
+        });
+    }
+
+    /// The executor the pending turns are waiting on, named the way the
+    /// loading composer's placeholder names it: the one the person just chose,
+    /// falling back to the router's display name on a first launch where
+    /// nothing has been chosen yet.
+    fn connecting_executor_name(&self, cx: &App) -> SharedString {
+        crate::omega_executor_selector::selected()
+            .map(|executor| SharedString::from(executor.name()))
+            .unwrap_or_else(|| {
+                self.agent_server_store
+                    .read(cx)
+                    .agent_display_name(&self.agent.agent_id())
+                    .unwrap_or_else(|| self.agent.agent_id().0.to_string().into())
+            })
+    }
+
+    /// `Chat` while the executor is still connecting.
+    ///
+    /// `OMEGA-DELTA-0170`, superseding the refusal half of
+    /// `OMEGA-DELTA-0122`. Enter always accepts: the composer's text moves to
+    /// [`Self::pending_connect_messages`] and is drawn in the chat as a
+    /// pending turn, and the composer clears so the next sentence — and the
+    /// next Enter — behave exactly as they would in a connected thread. The
+    /// owner, on the refusal this replaces: "never block user from hitting
+    /// enter, if not connected just show a loading thing in the chat."
+    fn submit_while_connecting(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let loading_composer = self.loading_composer(window, cx);
+        let text = loading_composer.read(cx).text(cx);
+        if text.trim().is_empty() {
+            return;
+        }
+        loading_composer.update(cx, |editor, cx| {
+            editor.set_text("", window, cx);
+        });
+        self.pending_connect_messages.push(text);
+        cx.notify();
+    }
+
+    /// Send everything a person submitted while the executor was connecting,
+    /// in order, now that a thread exists.
+    ///
+    /// `OMEGA-DELTA-0170`. The list is taken — `std::mem::take` — before
+    /// anything is enqueued, so a pending message can dispatch at most once no
+    /// matter how the connection state churns afterwards. The messages ride
+    /// the thread's ordinary `MessageQueue`: the first is fast-tracked the
+    /// way Enter on an empty composer fast-tracks a queued message, and the
+    /// rest auto-dispatch as each turn stops, which is the exact machinery —
+    /// and the exact ordering promise — follow-ups typed during generation
+    /// already have.
+    ///
+    /// Deferred, because this runs while the `ConversationView` is mutably
+    /// borrowed and dispatching reaches back through the thread view
+    /// (omega#116 is the crash class a second lease produces).
+    fn dispatch_pending_connect_messages(
+        &mut self,
+        thread_view: &Entity<ThreadView>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.pending_connect_messages.is_empty() {
+            return;
+        }
+        let pending = std::mem::take(&mut self.pending_connect_messages);
+        let thread_view = thread_view.downgrade();
+        window.defer(cx, move |window, cx| {
+            thread_view
+                .update(cx, |thread_view, cx| {
+                    for text in pending {
+                        let content = vec![acp::ContentBlock::Text(acp::TextContent::new(text))];
+                        thread_view.add_to_queue(content, Vec::new(), window, cx);
+                    }
+                    let is_generating = thread_view.thread.read(cx).status() != ThreadStatus::Idle;
+                    if let Some(entry) = thread_view.message_queue.try_fast_track(is_generating) {
+                        thread_view.dispatch_queued_entry(entry, window, cx);
+                    }
+                })
+                .ok();
         });
     }
 
@@ -1783,13 +1868,14 @@ impl ConversationView {
                                 connection,
                                 auth_state: AuthState::Ok,
                                 active_id: Some(root_session_id.clone()),
-                                threads: HashMap::from_iter([(root_session_id, current)]),
+                                threads: HashMap::from_iter([(root_session_id, current.clone())]),
                                 conversation,
                                 _connection_entry_subscription: connection_entry_subscription,
                                 _request_elicitation_subscription: request_elicitation_subscription,
                             }),
                             cx,
                         );
+                        this.dispatch_pending_connect_messages(&current, window, cx);
                     }
                     Err(err) => {
                         this.handle_load_error(
@@ -3371,26 +3457,21 @@ impl ConversationView {
 
     /// The composer, while the executor is connecting.
     ///
-    /// `OMEGA-DELTA-0122`. Same box, same place, same type — see
-    /// [`Self::loading_composer`] for why it exists and
-    /// [`Self::hand_loading_draft_over`] for what becomes of what is typed
-    /// into it.
+    /// `OMEGA-DELTA-0122`, amended by `OMEGA-DELTA-0170`. Same box, same
+    /// place, same type — see [`Self::loading_composer`] for why it exists and
+    /// [`Self::hand_loading_draft_over`] for what becomes of a draft left in
+    /// it.
     ///
-    /// # Send is off, and says so
+    /// # Enter always accepts
     ///
-    /// The owner, on initialization generally: "if something needs
-    /// initalization, just disable the submit button in the input box until its
-    /// ready". There is nothing to send to — no session, no thread, no queue —
-    /// so the button is disabled rather than fake.
-    ///
-    /// It does not auto-send. A `Chat` that arrives here is refused, and the
-    /// status line says the message was not sent, because the alternative is a
-    /// key press that appears to do nothing. Firing on connect was the other
-    /// defensible answer and this is not it, for a reason particular to how a
-    /// person gets here: they got here by *switching executor*. A message
-    /// queued against the old one and fired at the new one would be sent to
-    /// somebody they did not choose to send it to, with the window that would
-    /// have shown them so already gone.
+    /// The owner, on the refusal this replaces: "never block user from
+    /// hitting enter, if not connected just show a loading thing in the
+    /// chat." A `Chat` here does what a `Chat` does in a connected thread: the
+    /// message leaves the composer. It becomes a pending turn drawn above the
+    /// box — [`Self::render_pending_connect_messages`] — and dispatches, in
+    /// order, the moment the session exists. Send is the same press with a
+    /// mouse, so it is live too; a dead button beside a live Enter would make
+    /// the two claims about one state.
     ///
     /// # The indicator is in the bar, bottom left
     ///
@@ -3405,24 +3486,22 @@ impl ConversationView {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let editor = self.loading_composer(window, cx);
-        let status = if self.loading_send_refused {
-            SharedString::from("Not sent — still connecting. Press Enter again when this clears.")
-        } else {
-            self.loading_status
-                .clone()
-                .unwrap_or_else(|| "Connecting…".into())
-        };
+        let status = self
+            .loading_status
+            .clone()
+            .unwrap_or_else(|| "Connecting…".into());
         let max_content_width = AgentSettings::get_global(cx).max_content_width;
+        let pending_turns = self.render_pending_connect_messages(false, cx);
 
         v_flex()
             .key_context("AcpThread")
             .flex_1()
             .size_full()
             .justify_end()
-            .on_action(cx.listener(|this, _: &Chat, _window, cx| {
-                this.loading_send_refused = true;
-                cx.notify();
+            .on_action(cx.listener(|this, _: &Chat, window, cx| {
+                this.submit_while_connecting(window, cx);
             }))
+            .children(pending_turns)
             .child(
                 h_flex().pb_2().px_2().justify_center().child(
                     v_flex()
@@ -3454,9 +3533,9 @@ impl ConversationView {
                         .child(
                             // `flex_wrap` for the same reason the real bar
                             // has it: in a narrow window an unwrapped row
-                            // pushes Send off the edge, and a disabled
-                            // control a person cannot see is
-                            // indistinguishable from one that is missing.
+                            // pushes Send off the edge, and a control a
+                            // person cannot see is indistinguishable from
+                            // one that is missing.
                             h_flex()
                                 .w_full()
                                 .min_w_0()
@@ -3482,18 +3561,118 @@ impl ConversationView {
                                     h_flex().min_w_0().child(
                                         IconButton::new("send-message", IconName::Send)
                                             .style(ButtonStyle::Filled)
-                                            .disabled(true)
-                                            .icon_color(Color::Muted)
                                             .tooltip(Tooltip::text(
-                                                "Send is available once the executor is \
-                                                     connected — what you type is kept",
-                                            )),
+                                                "Sends when the executor connects — the \
+                                                     message shows in the chat until then",
+                                            ))
+                                            .on_click(cx.listener(|this, _, window, cx| {
+                                                this.submit_while_connecting(window, cx);
+                                            })),
                                     ),
                                 ),
                         ),
                 ),
             )
             .into_any()
+    }
+
+    /// The turns a person sent before the executor finished connecting.
+    ///
+    /// `OMEGA-DELTA-0170`. The owner: "if not connected just show a loading
+    /// thing in the chat." Each pending message is drawn where the transcript
+    /// will be, wearing the spinner the rest of the app uses for work in
+    /// progress, and naming the executor it will go to — the visibility that
+    /// makes auto-dispatch on connect honest for a person who reached this
+    /// state by switching executor.
+    ///
+    /// With `connection_failed`, the same turns say plainly that they were not
+    /// sent, keep the text on screen, and offer the one action that moves them
+    /// forward: retrying the connection, which re-enters `Loading` with the
+    /// pending list intact.
+    fn render_pending_connect_messages(
+        &self,
+        connection_failed: bool,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        if self.pending_connect_messages.is_empty() {
+            return None;
+        }
+        let executor_name = self.connecting_executor_name(cx);
+        let max_content_width = AgentSettings::get_global(cx).max_content_width;
+
+        Some(
+            h_flex()
+                .pb_2()
+                .px_2()
+                .justify_center()
+                .child(
+                    v_flex()
+                        .when_some(max_content_width, |this, max_w| this.flex_basis(max_w))
+                        .when(max_content_width.is_none(), |this| this.w_full())
+                        .min_w_0()
+                        .gap_2()
+                        .children(self.pending_connect_messages.iter().map(|message| {
+                            let text = SharedString::from(message.trim().to_string());
+                            v_flex()
+                                .w_full()
+                                .min_w_0()
+                                .p_2()
+                                .gap_1()
+                                .bg(cx.theme().colors().editor_background)
+                                .border_1()
+                                .border_color(cx.theme().colors().border)
+                                .rounded_lg()
+                                .child(div().w_full().min_w_0().child(Label::new(text)))
+                                .child(if connection_failed {
+                                    h_flex()
+                                        .gap_1p5()
+                                        .min_w_0()
+                                        .child(
+                                            Icon::new(IconName::XCircleFilled)
+                                                .size(IconSize::Small)
+                                                .color(Color::Error),
+                                        )
+                                        .child(
+                                            Label::new(format!(
+                                                "Not sent — {executor_name} failed to connect. \
+                                                 Your message is kept."
+                                            ))
+                                            .size(LabelSize::Small)
+                                            .color(Color::Error),
+                                        )
+                                } else {
+                                    h_flex()
+                                        .gap_1p5()
+                                        .min_w_0()
+                                        .child(
+                                            Icon::new(IconName::TodoProgress)
+                                                .size(IconSize::Small)
+                                                .color(Color::Accent)
+                                                .with_rotate_animation(2),
+                                        )
+                                        .child(
+                                            Label::new(format!(
+                                                "Sending to {executor_name} once it connects…"
+                                            ))
+                                            .size(LabelSize::Small)
+                                            .color(Color::Muted),
+                                        )
+                                })
+                        }))
+                        .when(connection_failed, |this| {
+                            this.child(
+                                h_flex().justify_end().child(
+                                    Button::new("retry-pending-connect", "Retry Connection")
+                                        .style(ButtonStyle::Filled)
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.reset(window, cx);
+                                        })),
+                                ),
+                            )
+                        }),
+                )
+                .into_any(),
+        )
     }
 
     fn render_load_error(
@@ -4285,6 +4464,10 @@ impl Render for ConversationView {
                 .size_full()
                 .items_center()
                 .justify_end()
+                // `OMEGA-DELTA-0170`. Turns sent while connecting outlive the
+                // connection that failed: the text stays on screen, marked
+                // unsent, with a retry — never silently dropped.
+                .children(self.render_pending_connect_messages(true, cx))
                 .child(self.render_load_error(e, window, cx))
                 .into_any(),
             ServerState::Connected(ConnectedServerState {
@@ -4299,6 +4482,10 @@ impl Render for ConversationView {
                 .flex_1()
                 .size_full()
                 .justify_end()
+                // `OMEGA-DELTA-0170`. Pending turns stay visible while the
+                // executor waits on sign-in; a successful authentication
+                // rebuilds the session and dispatches them.
+                .children(self.render_pending_connect_messages(false, cx))
                 .child(self.render_auth_required_state(
                     connection,
                     description.as_ref(),
@@ -6765,6 +6952,28 @@ pub(crate) mod tests {
         initial_content: Option<AgentInitialContent>,
         cx: &mut TestAppContext,
     ) -> (Entity<ConversationView>, &mut VisualTestContext) {
+        let (conversation_view, cx) =
+            setup_conversation_view_without_settling(agent, initial_content, cx).await;
+        cx.run_until_parked();
+        (conversation_view, cx)
+    }
+
+    /// Like [`setup_conversation_view`], but stops before the executor's
+    /// connect task has been polled, so the view is still in
+    /// `ServerState::Loading` — the state a person is in when they type into
+    /// a brand-new thread and press Enter before the executor is warm.
+    async fn setup_conversation_view_still_connecting(
+        agent: impl AgentServer + 'static,
+        cx: &mut TestAppContext,
+    ) -> (Entity<ConversationView>, &mut VisualTestContext) {
+        setup_conversation_view_without_settling(agent, None, cx).await
+    }
+
+    async fn setup_conversation_view_without_settling(
+        agent: impl AgentServer + 'static,
+        initial_content: Option<AgentInitialContent>,
+        cx: &mut TestAppContext,
+    ) -> (Entity<ConversationView>, &mut VisualTestContext) {
         let fs = FakeFs::new(cx.executor());
         // A project with no worktrees names the home directory as its working
         // directory (`Project::default_path_list`), and a session now opens
@@ -6803,9 +7012,152 @@ pub(crate) mod tests {
                 )
             })
         });
-        cx.run_until_parked();
 
         (conversation_view, cx)
+    }
+
+    fn user_message_markdown(thread_view: &Entity<ThreadView>, cx: &TestAppContext) -> Vec<String> {
+        thread_view.read_with(cx, |view, cx| {
+            view.thread
+                .read(cx)
+                .entries()
+                .iter()
+                .filter(|entry| matches!(entry, AgentThreadEntry::UserMessage(_)))
+                .map(|entry| entry.to_markdown(cx))
+                .collect()
+        })
+    }
+
+    /// `OMEGA-DELTA-0170`, the core promise. Enter while the executor is
+    /// still connecting accepts the message; when the connection lands, every
+    /// pending message dispatches automatically, in order, exactly once, with
+    /// exactly the text that was typed.
+    #[gpui::test]
+    async fn a_message_sent_while_connecting_dispatches_once_on_connect(cx: &mut TestAppContext) {
+        init_test(cx);
+
+        let connection = StubAgentConnection::new();
+        let (conversation_view, cx) =
+            setup_conversation_view_still_connecting(StubAgentServer::new(connection.clone()), cx)
+                .await;
+
+        conversation_view.update_in(cx, |this, window, cx| {
+            assert!(
+                matches!(this.server_state, ServerState::Loading { .. }),
+                "the executor must still be connecting for this test to mean anything"
+            );
+            let editor = this.loading_composer(window, cx);
+            editor.update(cx, |editor, cx| editor.set_text("hi", window, cx));
+            this.submit_while_connecting(window, cx);
+
+            let editor = this.loading_composer(window, cx);
+            assert_eq!(
+                editor.read(cx).text(cx),
+                "",
+                "Enter must accept the message: it leaves the composer instead of \
+                 staying behind a refusal"
+            );
+            assert_eq!(
+                this.pending_connect_messages,
+                vec!["hi".to_string()],
+                "the accepted message must be held as a pending turn"
+            );
+
+            editor.update(cx, |editor, cx| {
+                editor.set_text("and a second one", window, cx)
+            });
+            this.submit_while_connecting(window, cx);
+            assert_eq!(
+                this.pending_connect_messages,
+                vec!["hi".to_string(), "and a second one".to_string()],
+                "several Enters while connecting must queue in order"
+            );
+        });
+
+        cx.run_until_parked();
+
+        let thread_view = active_thread(&conversation_view, cx);
+        assert_eq!(
+            user_message_markdown(&thread_view, cx),
+            vec!["## User\n\nhi\n\n".to_string()],
+            "connecting must dispatch the first pending message automatically, \
+             exactly once, with the exact text"
+        );
+        thread_view.read_with(cx, |view, _| {
+            assert_eq!(
+                view.message_queue.len(),
+                1,
+                "the second pending message must wait its turn in the ordinary queue"
+            );
+        });
+        conversation_view.read_with(cx, |this, _| {
+            assert!(
+                this.pending_connect_messages.is_empty(),
+                "dispatch must take the pending list so nothing can dispatch twice"
+            );
+        });
+
+        let session_id =
+            thread_view.read_with(cx, |view, cx| view.thread.read(cx).session_id().clone());
+        connection.end_turn(session_id, acp::StopReason::EndTurn);
+        cx.run_until_parked();
+
+        assert_eq!(
+            user_message_markdown(&thread_view, cx),
+            vec![
+                "## User\n\nhi\n\n".to_string(),
+                "## User\n\nand a second one\n\n".to_string(),
+            ],
+            "when the first turn stops, the queue must auto-dispatch the second \
+             pending message, in order, exactly once"
+        );
+    }
+
+    /// `OMEGA-DELTA-0170`, the failure half. A message sent while connecting
+    /// survives a terminal connection failure — the text is preserved and
+    /// surfaced, never dropped — and a retry that succeeds dispatches it.
+    #[gpui::test]
+    async fn a_message_sent_while_connecting_survives_a_terminal_failure(cx: &mut TestAppContext) {
+        init_test(cx);
+
+        let (agent, fail) = FlakyAgentServer::new(StubAgentConnection::new());
+        let (conversation_view, cx) = setup_conversation_view_still_connecting(agent, cx).await;
+
+        conversation_view.update_in(cx, |this, window, cx| {
+            let editor = this.loading_composer(window, cx);
+            editor.update(cx, |editor, cx| {
+                editor.set_text("the task statement", window, cx)
+            });
+            this.submit_while_connecting(window, cx);
+        });
+
+        cx.run_until_parked();
+
+        conversation_view.read_with(cx, |this, _| {
+            assert!(
+                matches!(this.server_state, ServerState::LoadError { .. }),
+                "the connection must have terminally failed for this test to mean anything"
+            );
+            assert_eq!(
+                this.pending_connect_messages,
+                vec!["the task statement".to_string()],
+                "a terminal connection failure must preserve the submitted text, \
+                 not drop it with the connection"
+            );
+        });
+
+        // The Retry Connection button calls `reset`; the executor is
+        // reachable this time.
+        fail.store(false, std::sync::atomic::Ordering::SeqCst);
+        conversation_view.update_in(cx, |this, window, cx| this.reset(window, cx));
+        cx.run_until_parked();
+
+        let thread_view = active_thread(&conversation_view, cx);
+        assert_eq!(
+            user_message_markdown(&thread_view, cx),
+            vec!["## User\n\nthe task statement\n\n".to_string()],
+            "a retry that connects must dispatch the preserved message exactly once"
+        );
     }
 
     fn add_to_workspace(conversation_view: Entity<ConversationView>, cx: &mut VisualTestContext) {

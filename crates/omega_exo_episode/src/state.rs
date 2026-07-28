@@ -633,8 +633,9 @@ mod tests {
     /// Reading that as "there is more" refuses every complete read there is.
     #[test]
     fn a_cursor_is_not_a_second_page() {
-        let state = EpisodeState::read_events_response(2, &a_live_shaped_page(2), PageBound::WholeLog)
-            .expect("a read with no limit is the whole log, whatever the cursor says");
+        let state =
+            EpisodeState::read_events_response(2, &a_live_shaped_page(2), PageBound::WholeLog)
+                .expect("a read with no limit is the whole log, whatever the cursor says");
         assert_eq!(state.len(), 3);
         assert_eq!(
             EpisodeState::read_cursor(&a_live_shaped_page(2)).as_deref(),
@@ -664,8 +665,9 @@ mod tests {
 
     #[test]
     fn a_named_check_reads_the_events_that_were_compared() {
-        let state = EpisodeState::read_events_response(2, &a_live_shaped_page(2), PageBound::WholeLog)
-            .expect("a page");
+        let state =
+            EpisodeState::read_events_response(2, &a_live_shaped_page(2), PageBound::WholeLog)
+                .expect("a page");
         assert_eq!(state.events().len(), state.len());
         for event in state.events() {
             // The three names are written out rather than read from

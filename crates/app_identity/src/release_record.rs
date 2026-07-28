@@ -73,8 +73,8 @@ struct PublicationSection {
 }
 
 fn load_fixture() -> ReleaseRecord {
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("fixtures/release_record_v1.json");
+    let path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/release_record_v1.json");
     let text = std::fs::read_to_string(&path)
         .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
     serde_json::from_str(&text).unwrap_or_else(|error| panic!("parse fixture: {error}"))

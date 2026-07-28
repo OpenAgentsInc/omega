@@ -318,10 +318,22 @@ mod tests {
             &attested(OTHER_TREE),
         );
 
-        let reason = state.launch.reason().expect("a disabled launch has a reason");
-        assert!(reason.contains("0.9.4"), "names the pinned version: {reason}");
-        assert!(reason.contains("0.9.5"), "names the offered version: {reason}");
-        assert!(reason.contains("remove the pin"), "says what to do: {reason}");
+        let reason = state
+            .launch
+            .reason()
+            .expect("a disabled launch has a reason");
+        assert!(
+            reason.contains("0.9.4"),
+            "names the pinned version: {reason}"
+        );
+        assert!(
+            reason.contains("0.9.5"),
+            "names the offered version: {reason}"
+        );
+        assert!(
+            reason.contains("remove the pin"),
+            "says what to do: {reason}"
+        );
         assert_eq!(
             state.pin_control,
             PinControl::Remove {

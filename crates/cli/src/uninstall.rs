@@ -35,7 +35,9 @@ pub fn installation_root(path: &Path) -> PathBuf {
         {
             root = Some(candidate);
         }
-        cursor = candidate.parent().filter(|parent| !parent.as_os_str().is_empty());
+        cursor = candidate
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty());
     }
     root.unwrap_or(path).to_path_buf()
 }
@@ -102,7 +104,8 @@ impl UninstallRoots {
         let platform_paths = if cfg!(target_os = "macos") {
             vec![
                 home.join("Library/HTTPStorages").join(app_id),
-                home.join("Library/Preferences").join(format!("{app_id}.plist")),
+                home.join("Library/Preferences")
+                    .join(format!("{app_id}.plist")),
                 home.join("Library/Saved Application State")
                     .join(format!("{app_id}.savedState")),
             ]
@@ -403,7 +406,14 @@ mod tests {
         } = &roots;
         let occupied: Vec<&PathBuf> = app_root
             .iter()
-            .chain([data_dir, config_dir, logs_dir, temp_dir, state_dir, cli_symlink])
+            .chain([
+                data_dir,
+                config_dir,
+                logs_dir,
+                temp_dir,
+                state_dir,
+                cli_symlink,
+            ])
             .chain(platform_paths.iter())
             .collect();
         for path in occupied {

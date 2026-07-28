@@ -280,7 +280,6 @@ pub fn init(cx: &mut App) {
                     }
                 }
             });
-
     })
     .detach();
 }

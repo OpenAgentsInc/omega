@@ -596,10 +596,7 @@ mod tests {
         assert!(p.run_state.reason.is_some());
         // OMEGA-SW-06: empty + tick off → no attention, no synthetic activity.
         assert_eq!(p.attention.unread_count, 0);
-        assert_eq!(
-            p.attention.marker,
-            crate::attention::AttentionMarker::None
-        );
+        assert_eq!(p.attention.marker, crate::attention::AttentionMarker::None);
         assert!(crate::attention::empty_room_is_honest(
             &p.transcript,
             crate::attention::OMEGA_AUTONOMOUS_TICK_ENABLED
@@ -716,10 +713,7 @@ mod tests {
     #[test]
     fn run_phase_from_turn_events() {
         assert_eq!(RunPhase::from_event_kind("turn.queued"), RunPhase::Queued);
-        assert_eq!(
-            RunPhase::from_event_kind("turn.running"),
-            RunPhase::Running
-        );
+        assert_eq!(RunPhase::from_event_kind("turn.running"), RunPhase::Running);
         assert_eq!(
             RunPhase::from_event_kind("turn.interrupted"),
             RunPhase::Interrupted

@@ -38,11 +38,11 @@ pub use pins::{
 };
 pub use receipt::{
     ADMITTED_MAINTENANCE_ACTIONS, CandidateArtifact, HARNESS_MAINTENANCE_LOG_FILE_NAME,
-    HARNESS_MAINTENANCE_RECEIPT_SCHEMA, HarnessMaintenanceReceipt,
-    HarnessMaintenanceReceiptError, HarnessMaintenanceRecord, InstallationProvenance,
-    MAX_HARNESS_REF_LEN, MAX_HARNESS_TIMESTAMP_MS, MaintenanceAction, MaintenanceAffordance,
-    MaintenanceDecision, MaintenanceOutcome, MaintenanceOutcomeInput, MaintenanceRefusal,
-    PinState, ProvenanceGap, ProvenanceVerdict, admits_package_manager_launch, admits_version,
+    HARNESS_MAINTENANCE_RECEIPT_SCHEMA, HarnessMaintenanceReceipt, HarnessMaintenanceReceiptError,
+    HarnessMaintenanceRecord, InstallationProvenance, MAX_HARNESS_REF_LEN,
+    MAX_HARNESS_TIMESTAMP_MS, MaintenanceAction, MaintenanceAffordance, MaintenanceDecision,
+    MaintenanceOutcome, MaintenanceOutcomeInput, MaintenanceRefusal, PinState, ProvenanceGap,
+    ProvenanceVerdict, admits_package_manager_launch, admits_version,
     build_harness_maintenance_receipt, decide_maintenance, decode_harness_maintenance_receipt,
     decode_harness_maintenance_record, receipt_for_decision, update_affordance,
     verify_installation,
@@ -388,7 +388,10 @@ mod tests {
             ),
         );
         assert_eq!(
-            verify_installation(&latest_record_for(&read_log(&log_path), "codex-acp"), &installed),
+            verify_installation(
+                &latest_record_for(&read_log(&log_path), "codex-acp"),
+                &installed
+            ),
             ProvenanceVerdict::Verified {
                 digest: installed.as_str().to_string()
             }
@@ -407,12 +410,21 @@ mod tests {
         append(
             &log_path,
             receipt_log_line(
-                &receipt_for_decision(HOST, "codex-acp", NOW + 1, MaintenanceAction::Update, &decision)
-                    .expect("an update writes a receipt"),
+                &receipt_for_decision(
+                    HOST,
+                    "codex-acp",
+                    NOW + 1,
+                    MaintenanceAction::Update,
+                    &decision,
+                )
+                .expect("an update writes a receipt"),
             ),
         );
         assert_eq!(
-            verify_installation(&latest_record_for(&read_log(&log_path), "codex-acp"), &updated),
+            verify_installation(
+                &latest_record_for(&read_log(&log_path), "codex-acp"),
+                &updated
+            ),
             ProvenanceVerdict::Verified {
                 digest: updated.as_str().to_string()
             }
@@ -421,8 +433,11 @@ mod tests {
         // The owner pins what is installed.
         let mut ledger = HarnessPinLedger::empty();
         ledger.set_pin("codex-acp", "0.9.5", &updated);
-        std::fs::write(&ledger_path, encode_harness_pin_ledger(&ledger).expect("encodes"))
-            .expect("the ledger is written");
+        std::fs::write(
+            &ledger_path,
+            encode_harness_pin_ledger(&ledger).expect("encodes"),
+        )
+        .expect("the ledger is written");
 
         // The registry now offers 0.9.6. The pin blocks it, visibly.
         let unwanted = measured(b"codex-acp 0.9.6 tree");
@@ -436,12 +451,21 @@ mod tests {
         assert!(!decision.is_permitted());
         let affordance = update_affordance(&decision);
         let reason = affordance.reason().expect("a blocked update says why");
-        assert!(reason.contains("0.9.5") && reason.contains("0.9.6"), "{reason:?}");
+        assert!(
+            reason.contains("0.9.5") && reason.contains("0.9.6"),
+            "{reason:?}"
+        );
         append(
             &log_path,
             receipt_log_line(
-                &receipt_for_decision(HOST, "codex-acp", NOW + 2, MaintenanceAction::Update, &decision)
-                    .expect("a refusal writes a receipt too"),
+                &receipt_for_decision(
+                    HOST,
+                    "codex-acp",
+                    NOW + 2,
+                    MaintenanceAction::Update,
+                    &decision,
+                )
+                .expect("a refusal writes a receipt too"),
             ),
         );
 
@@ -453,7 +477,11 @@ mod tests {
             verify_installation(&latest_record_for(&log, "codex-acp"), &updated),
             ProvenanceVerdict::Refused(ProvenanceGap::LastActionRefused)
         );
-        assert_eq!(log.lines().count(), 3, "every action left exactly one record");
+        assert_eq!(
+            log.lines().count(),
+            3,
+            "every action left exactly one record"
+        );
 
         std::fs::remove_dir_all(&dir).ok();
     }

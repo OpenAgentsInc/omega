@@ -65,8 +65,8 @@ use std::time::Duration;
 use omega_exo_episode::{
     AgentId, CheckOutcome, ConversationId, Divergence, EpisodeRequest, EpisodeSession,
     EpisodeShape, EpisodeState, EventId, ExoRoots, FALSIFICATION_LOOP, ForkSlug,
-    ForkedConversation, PageBound, ProbeOutcome, SandboxScopeKind, SnapshotEvidence, Step,
-    Verdict, admit_filesystem_reset, verdict,
+    ForkedConversation, PageBound, ProbeOutcome, SandboxScopeKind, SnapshotEvidence, Step, Verdict,
+    admit_filesystem_reset, verdict,
 };
 use omega_exo_lane::LoopbackEndpoint;
 
@@ -100,8 +100,8 @@ fn run() -> Result<(), String> {
         return Err("usage: live_episode <exo-root> <agent-id> <conversation-id> <run-tag>".into());
     };
     let agent = AgentId::parse(&agent).map_err(|error| format!("agent id: {error}"))?;
-    let conversation =
-        ConversationId::parse(&conversation).map_err(|error| format!("conversation id: {error}"))?;
+    let conversation = ConversationId::parse(&conversation)
+        .map_err(|error| format!("conversation id: {error}"))?;
     let tag = ForkSlug::parse(&tag).map_err(|error| format!("run tag: {error}"))?;
 
     let address = std::env::var("EXO_EXOHARNESS_URL")
@@ -167,7 +167,9 @@ fn run() -> Result<(), String> {
         control_before.len()
     );
     if start != Divergence::Identical {
-        return Err(format!("two forks of one event did not start identical: {start}"));
+        return Err(format!(
+            "two forks of one event did not start identical: {start}"
+        ));
     }
     if candidate_before.digest() != control_before.digest() {
         return Err("the diff says identical and the digests disagree".into());
@@ -249,7 +251,10 @@ fn run() -> Result<(), String> {
             "this run took {taken:?}, which is not the declared loop {FALSIFICATION_LOOP:?}"
         ));
     }
-    println!("loop       {} steps, in FALSIFICATION_LOOP order", taken.len());
+    println!(
+        "loop       {} steps, in FALSIFICATION_LOOP order",
+        taken.len()
+    );
 
     // The source, again. Nothing in this run may have reached it.
     let (source_after, _) = read_episode(&mut session, &agent, &conversation)?;
@@ -309,9 +314,11 @@ fn run() -> Result<(), String> {
 fn every_started_turn_is_ended(state: &EpisodeState) -> CheckOutcome {
     let mut open = 0i64;
     for event in state.events() {
-        match event.get("data").and_then(|data| data.get("type")).and_then(
-            serde_json::Value::as_str,
-        ) {
+        match event
+            .get("data")
+            .and_then(|data| data.get("type"))
+            .and_then(serde_json::Value::as_str)
+        {
             Some("turn_started") => open += 1,
             Some("turn_ended") => open -= 1,
             _ => {}
@@ -400,7 +407,9 @@ fn show(
     let (id, body) = session.prepare(&request);
     let reply = post(session, &body)?;
     if reply.get("id").and_then(serde_json::Value::as_u64) != Some(id) {
-        return Err(format!("a conversation read answered request {id} with somebody else's"));
+        return Err(format!(
+            "a conversation read answered request {id} with somebody else's"
+        ));
     }
     if reply.get("ok").and_then(serde_json::Value::as_bool) != Some(true) {
         return Err(format!(
@@ -479,8 +488,9 @@ fn read_episode(
         };
         let (resume_id, resume_body) = session.prepare(&resume);
         let resume_reply = post(session, &resume_body)?;
-        let tail = EpisodeState::read_events_response(resume_id, &resume_reply, PageBound::WholeLog)
-            .map_err(|error| error.to_string())?;
+        let tail =
+            EpisodeState::read_events_response(resume_id, &resume_reply, PageBound::WholeLog)
+                .map_err(|error| error.to_string())?;
         if !tail.is_empty() {
             return Err(format!(
                 "the read stopped short: {} more events after {cursor}, so the state \
@@ -516,7 +526,9 @@ fn post(session: &EpisodeSession, body: &serde_json::Value) -> Result<serde_json
         .next()
         .ok_or_else(|| format!("{authority} resolved to nothing"))?;
     if !address.ip().is_loopback() {
-        return Err(format!("{authority} resolved to {address}, which is not this machine"));
+        return Err(format!(
+            "{authority} resolved to {address}, which is not this machine"
+        ));
     }
 
     let mut stream = TcpStream::connect_timeout(&address, TIMEOUT)

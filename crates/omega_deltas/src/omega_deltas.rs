@@ -158,6 +158,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0167",
     "OMEGA-DELTA-0168",
     "OMEGA-DELTA-0169",
+    "OMEGA-DELTA-0170",
 ];
 
 pub const GOOGLE_PROVIDER_PATH: &str = "crates/language_models/src/provider/google.rs";
@@ -16156,39 +16157,15 @@ mod tests {
             view_path.display()
         );
 
-        // 3. Send is off, and 4. it stays off — the handover moves text, and
-        //    that is all it does.
-        assert!(
-            composer.contains(".disabled(true)"),
-            "OMEGA-DELTA-0122: the Send control in {} is no longer disabled \
-             while connecting. There is no session to send to, so a live \
-             button is a button that lies about what a press will do.",
-            view_path.display()
-        );
-        assert!(
-            composer.contains("this.loading_send_refused = true;"),
-            "OMEGA-DELTA-0122: {} no longer records a Send asked for while \
-             connecting. Enter then does nothing and says nothing, which is the \
-             silence the disabled button was supposed to replace.",
-            view_path.display()
-        );
-        assert!(
-            view.contains("Not sent — still connecting."),
-            "OMEGA-DELTA-0122: {} no longer says the message was not sent. \
-             The refusal has to be a sentence a person reads, not a state a \
-             field holds.",
-            view_path.display()
-        );
+        // The handover moves draft text, and that is all it does. Submitted
+        // messages have their own dispatch path (`OMEGA-DELTA-0170`); a draft
+        // nobody pressed Enter on must never be sent by the handover itself.
         assert!(
             !handover.contains(".send(")
                 && !handover.contains("send_impl(")
                 && !handover.contains("queue_message(")
                 && !handover.contains("Chat"),
-            "OMEGA-DELTA-0122: the handover in {} sends. A person reaches this \
-             state by switching executor, so a message queued against the old \
-             one and fired at the new one is sent to a runtime they never \
-             watched it go to — and the window that would have shown them is \
-             already gone.",
+            "OMEGA-DELTA-0122: the handover in {} sends. It carries a draft              the person has not submitted — pressing Enter is what submits,              and submitted text travels through the pending-connect queue              instead.",
             view_path.display()
         );
 
@@ -20860,6 +20837,195 @@ mod tests {
             "OMEGA-DELTA-0169: a validation failure of persisted device \
              mirror state is surfaced as an error again. That bricked the \
              Pair phone popover until someone deleted the state file by hand."
+        );
+    }
+    // ------ OMEGA-DELTA-0170 — Enter while connecting queues the message
+
+    /// OMEGA-DELTA-0170. Enter never refuses. A message sent while the
+    /// executor is still connecting leaves the composer, shows in the chat as
+    /// a pending turn with the app's own spinner, dispatches automatically —
+    /// in order, exactly once — the moment the connection lands, and survives
+    /// a terminal connection failure visibly, with a retry.
+    ///
+    /// This supersedes the refusal half of `OMEGA-DELTA-0122`. The owner
+    /// typed "hi" into a brand-new thread while the executor was warming,
+    /// pressed Enter, and was told *"Not sent — still connecting. Press Enter
+    /// again when this clears."* His verdict, verbatim: "refactor this 'not
+    /// sent' bullshit. never block user from hitting enter, if not connected
+    /// just show a loading thing in the chat." A press that has to be made
+    /// twice is a press the machine refused once; the machine has no business
+    /// refusing it when it can hold the message and send it itself.
+    ///
+    /// The two behavioural halves are GPUI tests beside the code —
+    /// `a_message_sent_while_connecting_dispatches_once_on_connect` and
+    /// `a_message_sent_while_connecting_survives_a_terminal_failure` in
+    /// `crates/agent_ui/src/conversation_view.rs` — this check pins the shape
+    /// a behaviour test cannot see: which sentence is gone, which path the
+    /// dispatch rides, and that no branch of the state machine throws the
+    /// pending text away.
+    #[test]
+    fn enter_while_connecting_queues_the_message_and_never_loses_it() {
+        let view_path = repository_path(CONVERSATION_VIEW_PATH);
+        let view_source = std::fs::read_to_string(&view_path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", view_path.display()));
+        // Not `production_source`: it cuts at the first `#[cfg(test)]`, and in
+        // this file that is a test-only `use` on line 12, which would leave
+        // every scan below looking at the imports.
+        let production = view_source
+            .split_once("\n#[cfg(test)]\npub(crate) mod tests {")
+            .map_or(view_source.as_str(), |(before, _)| before);
+        let view = uncommented(production);
+
+        // The refusal sentence is gone, from the whole file, not moved.
+        assert!(
+            !view.contains("Not sent — still connecting") && !view.contains("Press Enter again"),
+            "OMEGA-DELTA-0170: {} still refuses a Send while connecting. The \
+             owner: \"never block user from hitting enter, if not connected \
+             just show a loading thing in the chat.\"",
+            view_path.display()
+        );
+
+        // Enter — and the Send button, which is the same press with a mouse —
+        // accepts the message.
+        let composer = method_body(
+            &view,
+            "fn render_loading_composer(",
+            &view_path,
+            "Then there is no loading composer at all, which is OMEGA-DELTA-0122's \
+             defect returned.",
+        );
+        assert!(
+            composer
+                .matches("this.submit_while_connecting(window, cx);")
+                .count()
+                >= 2,
+            "OMEGA-DELTA-0170: the loading composer in {} no longer routes both \
+             `Chat` and the Send click into `submit_while_connecting`. Enter \
+             must always accept, and a live Enter beside a dead button makes \
+             two claims about one state.",
+            view_path.display()
+        );
+        assert!(
+            !composer.contains(".disabled(true)"),
+            "OMEGA-DELTA-0170: the Send control in {} is disabled while \
+             connecting again. The press is accepted now — the message queues \
+             and shows in the chat — so a disabled button would lie the other \
+             way.",
+            view_path.display()
+        );
+
+        // Accepting means: out of the composer, into the pending queue.
+        let submit = method_body(
+            &view,
+            "fn submit_while_connecting(",
+            &view_path,
+            "Then Enter while connecting has nowhere to put the message.",
+        );
+        assert!(
+            submit.contains("self.pending_connect_messages.push(text);")
+                && submit.contains("editor.set_text(\"\", window, cx);"),
+            "OMEGA-DELTA-0170: `submit_while_connecting` in {} no longer moves \
+             the text out of the composer and into the pending queue. Either \
+             half missing is a lost or duplicated message.",
+            view_path.display()
+        );
+
+        // The pending turn is a loading thing in the chat: the spinner the
+        // rest of the app uses for work in progress, naming the executor.
+        let pending = method_body(
+            &view,
+            "fn render_pending_connect_messages(",
+            &view_path,
+            "Then an accepted message is invisible until the connection lands, \
+             which is a silent queue — the exact opposite of what was asked.",
+        );
+        assert!(
+            pending.contains("IconName::TodoProgress")
+                && pending.contains(".with_rotate_animation(2)"),
+            "OMEGA-DELTA-0170: the pending turn in {} no longer wears the \
+             app's own in-progress spinner. \"just show a loading thing in \
+             the chat\" is the whole request.",
+            view_path.display()
+        );
+
+        // When the connection lands, the pending list dispatches — through the
+        // thread's ordinary message queue, so ordering and exactly-once are
+        // the queue's existing promises rather than a second law.
+        assert!(
+            view.contains("this.dispatch_pending_connect_messages(&current, window, cx);"),
+            "OMEGA-DELTA-0170: {} no longer dispatches the pending messages \
+             where the thread view is built. A queue nothing drains is the \
+             refusal again, with better manners.",
+            view_path.display()
+        );
+        let dispatch = method_body(
+            &view,
+            "fn dispatch_pending_connect_messages(",
+            &view_path,
+            "Then connecting cannot send what was accepted while connecting.",
+        );
+        assert!(
+            dispatch.contains("std::mem::take(&mut self.pending_connect_messages)"),
+            "OMEGA-DELTA-0170: the dispatch in {} no longer takes the pending \
+             list before enqueueing. Anything less than a take is a path to \
+             dispatching the same message twice.",
+            view_path.display()
+        );
+        assert!(
+            dispatch.contains("add_to_queue(")
+                && dispatch.contains("try_fast_track(")
+                && dispatch.contains("dispatch_queued_entry("),
+            "OMEGA-DELTA-0170: the dispatch in {} no longer rides the thread's \
+             ordinary message queue. That queue is where ordering, \
+             exactly-once, and the subagent fence (43219aacd1) already live; a \
+             parallel send path re-earns those bugs one by one.",
+            view_path.display()
+        );
+
+        // A terminal failure keeps the turns on screen — marked unsent, text
+        // intact, with a retry — and no state transition throws them away.
+        assert!(
+            view.contains("self.render_pending_connect_messages(true, cx)"),
+            "OMEGA-DELTA-0170: the LoadError state in {} no longer draws the \
+             pending turns. A message that vanishes when the connection dies \
+             is silently dropped typed text, the defect class this repository \
+             just finished paying for.",
+            view_path.display()
+        );
+        assert!(
+            pending.contains("Not sent — ") && pending.contains("this.reset(window, cx);"),
+            "OMEGA-DELTA-0170: the failed pending turn in {} no longer says it \
+             was not sent, or no longer offers the retry that re-enters \
+             Loading with the list intact.",
+            view_path.display()
+        );
+        let load_error = method_body(
+            &view,
+            "fn handle_load_error(",
+            &view_path,
+            "Then there is no terminal-failure path to keep honest.",
+        );
+        assert!(
+            !load_error.contains("pending_connect_messages"),
+            "OMEGA-DELTA-0170: `handle_load_error` in {} touches the pending \
+             messages. The failure state must inherit them untouched — that \
+             is the whole reason they live on the view instead of on \
+             `ServerState::Loading`.",
+            view_path.display()
+        );
+
+        // The behavioural halves exist where the code lives.
+        assert!(
+            view_source
+                .contains("async fn a_message_sent_while_connecting_dispatches_once_on_connect(")
+                && view_source.contains(
+                    "async fn a_message_sent_while_connecting_survives_a_terminal_failure("
+                ),
+            "OMEGA-DELTA-0170: the GPUI regression tests for this delta are \
+             gone from {}. The source shape above proves wiring, only the \
+             tests prove the message actually arrives once and survives \
+             failure.",
+            view_path.display()
         );
     }
 }

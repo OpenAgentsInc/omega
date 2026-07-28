@@ -323,9 +323,11 @@ mod tests {
     /// The help and the refusal quote the same string, so they cannot drift.
     #[test]
     fn the_help_is_written_once() {
-        assert!(CommandRefused::UnknownVerb("x".to_string())
-            .to_string()
-            .contains(COMMAND_HELP));
+        assert!(
+            CommandRefused::UnknownVerb("x".to_string())
+                .to_string()
+                .contains(COMMAND_HELP)
+        );
         for verb in COMMAND_VERBS {
             assert!(
                 COMMAND_HELP.contains(&format!("{COMMAND_PREFIX} {verb}")),

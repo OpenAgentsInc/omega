@@ -96,8 +96,7 @@ pub use request::{EpisodeRequest, ForkReadError, ForkSlug, ForkedConversation};
 pub use reset::{
     CheckOutcome, EpisodeShape, FALSIFICATION_LOOP, FilesystemReset, ProbeOutcome, ResetRefusal,
     SandboxScopeKind, SnapshotEvidence, SnapshotReach, Step, Verdict, admit_filesystem_reset,
-    snapshot_reach,
-    verdict,
+    snapshot_reach, verdict,
 };
 pub use root::{ExoRoots, RootClaim, RootRefusal};
 pub use state::{Divergence, EpisodeState, IDENTITY_FIELDS, PageBound, StateReadError};

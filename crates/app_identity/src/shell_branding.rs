@@ -15,7 +15,10 @@ fn shell_branding_strings_are_omega_and_openagents() {
     assert_eq!(PRODUCT_NAME, "Omega");
     assert_eq!(PUBLISHER_NAME, "OpenAgents");
     assert_eq!(PRODUCT_TAGLINE, "Your last IDE.");
-    assert_eq!(PRODUCT_REPOSITORY_URL, "https://github.com/OpenAgentsInc/omega");
+    assert_eq!(
+        PRODUCT_REPOSITORY_URL,
+        "https://github.com/OpenAgentsInc/omega"
+    );
     assert!(PRODUCT_DOCS_URL.contains("OpenAgentsInc/omega"));
     assert!(PRODUCT_BUG_REPORT_URL.contains("OpenAgentsInc/omega"));
     assert!(PRODUCT_FEATURE_REQUEST_URL.contains("OpenAgentsInc/omega"));

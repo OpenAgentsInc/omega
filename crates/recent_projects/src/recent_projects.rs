@@ -537,7 +537,6 @@ pub fn init(cx: &mut App) {
             });
         });
     });
-
 }
 
 #[cfg(target_os = "windows")]

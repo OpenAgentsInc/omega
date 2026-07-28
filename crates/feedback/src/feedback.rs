@@ -1,6 +1,4 @@
-use app_identity::{
-    PRODUCT_BUG_REPORT_URL, PRODUCT_FEATURE_REQUEST_URL, PRODUCT_REPOSITORY_URL,
-};
+use app_identity::{PRODUCT_BUG_REPORT_URL, PRODUCT_FEATURE_REQUEST_URL, PRODUCT_REPOSITORY_URL};
 use client::telemetry;
 use extension_host::ExtensionStore;
 use gpui::{App, ClipboardItem, PromptLevel, actions};

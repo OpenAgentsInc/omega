@@ -74,7 +74,10 @@ pub fn sanitize_public_ref(raw: &str) -> Option<PublicRef> {
     // Unbounded prose often lacks separators; public refs use dotted segments.
     // Allow short identifiers without dots (tool names, reason classes) up to
     // a modest length; longer undotted strings are treated as opaque dumps.
-    if !trimmed.contains('.') && !trimmed.contains(':') && !trimmed.contains('_') && trimmed.len() > 64
+    if !trimmed.contains('.')
+        && !trimmed.contains(':')
+        && !trimmed.contains('_')
+        && trimmed.len() > 64
     {
         return None;
     }
@@ -132,9 +135,9 @@ fn looks_like_secret_or_token(value: &str) -> bool {
     // Long base64-ish blobs without ref structure are tokens, not refs.
     if value.len() >= 40
         && !value.contains('.')
-        && value
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '/' || c == '=' || c == '-' || c == '_')
+        && value.chars().all(|c| {
+            c.is_ascii_alphanumeric() || c == '+' || c == '/' || c == '=' || c == '-' || c == '_'
+        })
     {
         // Still allow dotted public refs; this branch is undotted/opaque.
         if !value.contains(':') {
@@ -162,7 +165,9 @@ mod tests {
 
     #[test]
     fn rejects_private_paths() {
-        assert!(!is_public_safe_ref("/Users/christopherdavid/.codex/auth.json"));
+        assert!(!is_public_safe_ref(
+            "/Users/christopherdavid/.codex/auth.json"
+        ));
         assert!(!is_public_safe_ref("~/work/openagents/secrets"));
         assert!(!is_public_safe_ref("C:\\Users\\owner\\token.txt"));
         assert!(!is_public_safe_ref("/home/owner/.ssh/id_rsa"));

@@ -6,7 +6,7 @@
 
 mod panel;
 
-pub use panel::{init, AgentComputerPanel};
+pub use panel::{AgentComputerPanel, init};
 
 pub const DEFAULT_CONTROL_PLANE_BASE_URL: &str = "https://openagents.com";
 pub const DEFAULT_REPO_REF: &str = "OpenAgentsInc/openagents";

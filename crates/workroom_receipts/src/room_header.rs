@@ -5,7 +5,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::public_ref::{sanitize_public_ref, PublicRef};
+use crate::public_ref::{PublicRef, sanitize_public_ref};
 
 /// Default profile ref from `@openagentsinc/sarah` / SARAH_AUTHORITY.md.
 ///
@@ -63,8 +63,8 @@ mod tests {
 
     #[test]
     fn accepts_live_profile() {
-        let header = RoomAuthorityHeader::from_raw("openagents.sarah-owner-orchestrator", 6)
-            .expect("valid");
+        let header =
+            RoomAuthorityHeader::from_raw("openagents.sarah-owner-orchestrator", 6).expect("valid");
         assert_eq!(
             header.authority_profile_ref.as_str(),
             "openagents.sarah-owner-orchestrator"

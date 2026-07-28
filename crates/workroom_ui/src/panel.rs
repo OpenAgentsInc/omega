@@ -1076,7 +1076,11 @@ impl SarahWorkroomPanel {
             let result = {
                 let mut guard = supervisor.lock().await;
                 match guard.ensure_started().await {
-                    Ok(()) => guard.sarah_readmit_device(&grant_ref, &idempotency_ref).await,
+                    Ok(()) => {
+                        guard
+                            .sarah_readmit_device(&grant_ref, &idempotency_ref)
+                            .await
+                    }
                     Err(error) => Err(omega_effectd::SupervisorError::Anyhow(error)),
                 }
             };

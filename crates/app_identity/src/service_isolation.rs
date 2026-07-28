@@ -111,7 +111,10 @@ fn default_settings_enable_registry_acp_without_enabling_zed_production() {
     // tidy them away; the delta cites these exact assertions, and
     // `the_service_isolation_test_still_asserts_the_registered_defaults` in
     // `crates/omega_deltas` fails if they go.
-    assert_eq!(settings["server_url"], "https://services.openagents.invalid");
+    assert_eq!(
+        settings["server_url"],
+        "https://services.openagents.invalid"
+    );
     assert_eq!(settings["auto_update"], false);
     assert_eq!(settings["edit_predictions"]["provider"], "none");
     assert_eq!(settings["auto_install_extensions"], serde_json::json!({}));

@@ -45,7 +45,9 @@ async fn write_pin(fs: &Arc<FakeFs>, version: &str, digest: &MeasuredDigest) {
         .expect("ledger directory");
     fs.write(
         &path,
-        encode_harness_pin_ledger(&ledger).expect("encodes").as_bytes(),
+        encode_harness_pin_ledger(&ledger)
+            .expect("encodes")
+            .as_bytes(),
     )
     .await
     .expect("the ledger is written");
@@ -119,7 +121,10 @@ async fn an_install_on_a_clean_machine_produces_a_receipt(cx: &mut TestAppContex
 
     let log = receipt_log(&fs).await;
     assert_eq!(log.lines().count(), 1, "one action, one record");
-    assert!(log.contains(digest.as_str()), "the receipt binds the digest");
+    assert!(
+        log.contains(digest.as_str()),
+        "the receipt binds the digest"
+    );
     assert!(log.contains("\"action\":\"install\""));
     assert!(!log.contains("/Users/"), "a receipt carries no path");
 
@@ -198,7 +203,10 @@ async fn a_pin_blocks_the_fetch_of_a_different_version(cx: &mut TestAppContext) 
         .await
         .expect_err("a pinned harness does not fetch a different version");
     let reason = error.to_string();
-    assert!(reason.contains("0.9.4") && reason.contains("0.9.5"), "{reason:?}");
+    assert!(
+        reason.contains("0.9.4") && reason.contains("0.9.5"),
+        "{reason:?}"
+    );
 
     authorize_version_fetch(fs.clone(), HARNESS, "0.9.4", 1_784_894_400_001)
         .await
@@ -267,9 +275,12 @@ async fn a_corrupt_ledger_refuses_rather_than_reading_as_unpinned(cx: &mut TestA
     fs.create_dir(path.parent().expect("parent"))
         .await
         .expect("directory");
-    fs.write(&path, b"{ \"schema\": \"openagents.omega.harness.pins.v1\", \"pins\": [")
-        .await
-        .expect("written");
+    fs.write(
+        &path,
+        b"{ \"schema\": \"openagents.omega.harness.pins.v1\", \"pins\": [",
+    )
+    .await
+    .expect("written");
 
     assert_eq!(
         load_pin_ledger(fs.as_ref(), &path).await.pin_state(HARNESS),
@@ -310,9 +321,15 @@ async fn a_pin_taken_from_the_front_door_blocks_the_next_version(cx: &mut TestAp
     let fs = FakeFs::new(cx.executor());
     install(&fs, b"binary v0.9.4").await;
 
-    pin_installed_harness(fs.clone(), HARNESS, "0.9.4", &install_dir(), 1_784_894_400_000)
-        .await
-        .expect("a measurable tree can be pinned");
+    pin_installed_harness(
+        fs.clone(),
+        HARNESS,
+        "0.9.4",
+        &install_dir(),
+        1_784_894_400_000,
+    )
+    .await
+    .expect("a measurable tree can be pinned");
 
     // The pin the control wrote is the pin the gate reads: same file, same
     // reader, no shared process state.
@@ -346,9 +363,15 @@ async fn taking_a_pin_writes_a_receipt_for_the_measurement_that_authorised_it(
     let fs = FakeFs::new(cx.executor());
     install(&fs, b"binary v0.9.4").await;
 
-    pin_installed_harness(fs.clone(), HARNESS, "0.9.4", &install_dir(), 1_784_894_400_000)
-        .await
-        .expect("pinned");
+    pin_installed_harness(
+        fs.clone(),
+        HARNESS,
+        "0.9.4",
+        &install_dir(),
+        1_784_894_400_000,
+    )
+    .await
+    .expect("pinned");
 
     let log = receipt_log(&fs).await;
     assert!(
@@ -388,13 +411,25 @@ async fn a_tree_that_cannot_be_measured_cannot_be_pinned(cx: &mut TestAppContext
 async fn a_pin_is_not_silently_moved_onto_a_different_release(cx: &mut TestAppContext) {
     let fs = FakeFs::new(cx.executor());
     install(&fs, b"binary v0.9.4").await;
-    pin_installed_harness(fs.clone(), HARNESS, "0.9.4", &install_dir(), 1_784_894_400_000)
-        .await
-        .expect("pinned");
+    pin_installed_harness(
+        fs.clone(),
+        HARNESS,
+        "0.9.4",
+        &install_dir(),
+        1_784_894_400_000,
+    )
+    .await
+    .expect("pinned");
 
-    let error = pin_installed_harness(fs.clone(), HARNESS, "0.9.5", &install_dir(), 1_784_894_400_001)
-        .await
-        .expect_err("a second pin is refused");
+    let error = pin_installed_harness(
+        fs.clone(),
+        HARNESS,
+        "0.9.5",
+        &install_dir(),
+        1_784_894_400_001,
+    )
+    .await
+    .expect_err("a second pin is refused");
     assert!(error.to_string().contains("already pinned"), "{error}");
     let ledger = load_pin_ledger(fs.as_ref(), &pin_ledger_path()).await;
     let PinState::Pinned(pin) = ledger.pin_state(HARNESS) else {
@@ -407,9 +442,15 @@ async fn a_pin_is_not_silently_moved_onto_a_different_release(cx: &mut TestAppCo
 async fn removing_a_pin_lets_the_blocked_version_through(cx: &mut TestAppContext) {
     let fs = FakeFs::new(cx.executor());
     install(&fs, b"binary v0.9.4").await;
-    pin_installed_harness(fs.clone(), HARNESS, "0.9.4", &install_dir(), 1_784_894_400_000)
-        .await
-        .expect("pinned");
+    pin_installed_harness(
+        fs.clone(),
+        HARNESS,
+        "0.9.4",
+        &install_dir(),
+        1_784_894_400_000,
+    )
+    .await
+    .expect("pinned");
     authorize_version_fetch(fs.clone(), HARNESS, "0.9.5", 1_784_894_400_001)
         .await
         .expect_err("blocked while pinned");
@@ -436,14 +477,23 @@ async fn neither_control_rewrites_a_ledger_it_cannot_read(cx: &mut TestAppContex
     fs.write(&path, b"{ not a ledger").await.expect("written");
 
     for error in [
-        pin_installed_harness(fs.clone(), HARNESS, "0.9.4", &install_dir(), 1_784_894_400_000)
-            .await
-            .expect_err("pin refuses"),
+        pin_installed_harness(
+            fs.clone(),
+            HARNESS,
+            "0.9.4",
+            &install_dir(),
+            1_784_894_400_000,
+        )
+        .await
+        .expect_err("pin refuses"),
         unpin_harness(fs.clone(), HARNESS)
             .await
             .expect_err("unpin refuses"),
     ] {
-        assert!(error.to_string().contains("cannot read the pin ledger"), "{error}");
+        assert!(
+            error.to_string().contains("cannot read the pin ledger"),
+            "{error}"
+        );
     }
     assert_eq!(
         fs.load(&path).await.expect("still there"),
@@ -463,9 +513,15 @@ async fn neither_control_rewrites_a_ledger_it_cannot_read(cx: &mut TestAppContex
 async fn a_pinned_package_manager_harness_refuses_to_launch(cx: &mut TestAppContext) {
     let fs = FakeFs::new(cx.executor());
     install(&fs, b"binary v0.9.4").await;
-    pin_installed_harness(fs.clone(), HARNESS, "0.9.4", &install_dir(), 1_784_894_400_000)
-        .await
-        .expect("pinned");
+    pin_installed_harness(
+        fs.clone(),
+        HARNESS,
+        "0.9.4",
+        &install_dir(),
+        1_784_894_400_000,
+    )
+    .await
+    .expect("pinned");
 
     let error =
         authorize_package_manager_launch(fs.clone(), HARNESS, NPX_RESOLVER, 1_784_894_400_001)
@@ -501,9 +557,15 @@ async fn an_unpinned_package_manager_harness_still_launches(cx: &mut TestAppCont
 async fn a_frozen_harness_is_not_offered_the_version_it_would_refuse(cx: &mut TestAppContext) {
     let fs = FakeFs::new(cx.executor());
     install(&fs, b"binary v0.9.4").await;
-    pin_installed_harness(fs.clone(), HARNESS, "0.9.4", &install_dir(), 1_784_894_400_000)
-        .await
-        .expect("pinned");
+    pin_installed_harness(
+        fs.clone(),
+        HARNESS,
+        "0.9.4",
+        &install_dir(),
+        1_784_894_400_000,
+    )
+    .await
+    .expect("pinned");
 
     let refusal = resolve_channel(fs.clone(), HARNESS, "0.9.5", 1_784_894_400_001)
         .await
@@ -548,9 +610,15 @@ async fn the_front_door_reads_the_state_the_gate_would_enforce(cx: &mut TestAppC
     assert!(before.launch.is_enabled());
     assert!(matches!(before.pin_control, PinControl::Take { .. }));
 
-    pin_installed_harness(fs.clone(), HARNESS, "0.9.4", &install_dir(), 1_784_894_400_000)
-        .await
-        .expect("pinned");
+    pin_installed_harness(
+        fs.clone(),
+        HARNESS,
+        "0.9.4",
+        &install_dir(),
+        1_784_894_400_000,
+    )
+    .await
+    .expect("pinned");
 
     let pinned = read_front_door_state(
         fs.as_ref(),
@@ -561,8 +629,14 @@ async fn the_front_door_reads_the_state_the_gate_would_enforce(cx: &mut TestAppC
     )
     .await;
     assert!(!pinned.launch.is_enabled(), "a pin did not reach the row");
-    let reason = pinned.launch.reason().expect("a disabled row has a sentence");
-    assert!(reason.contains("0.9.4") && reason.contains("0.9.5"), "{reason}");
+    let reason = pinned
+        .launch
+        .reason()
+        .expect("a disabled row has a sentence");
+    assert!(
+        reason.contains("0.9.4") && reason.contains("0.9.5"),
+        "{reason}"
+    );
     assert_eq!(
         pinned.pin_control,
         PinControl::Remove {
@@ -590,9 +664,15 @@ async fn the_row_reports_provenance_and_notices_a_swap(cx: &mut TestAppContext) 
     let fs = FakeFs::new(cx.executor());
     install(&fs, b"binary v0.9.4").await;
 
-    reprobe_installed_harness(fs.clone(), HARNESS, "0.9.4", &install_dir(), 1_784_894_400_000)
-        .await
-        .expect("measured");
+    reprobe_installed_harness(
+        fs.clone(),
+        HARNESS,
+        "0.9.4",
+        &install_dir(),
+        1_784_894_400_000,
+    )
+    .await
+    .expect("measured");
 
     let verified = read_front_door_state(
         fs.as_ref(),
@@ -793,14 +873,9 @@ async fn live_a_real_registry_install_produces_a_receipt_and_a_pin_blocks_the_ne
 
     // And the pin blocks an unwanted update with a sentence that names both
     // versions — the acceptance sentence of omega#81, on a real machine.
-    let refusal = authorize_version_fetch(
-        fs.clone(),
-        &harness.id,
-        "99.99.99",
-        1_784_894_400_003,
-    )
-    .await
-    .expect_err("a pinned harness refuses the version the registry would offer");
+    let refusal = authorize_version_fetch(fs.clone(), &harness.id, "99.99.99", 1_784_894_400_003)
+        .await
+        .expect_err("a pinned harness refuses the version the registry would offer");
     assert!(refusal.to_string().contains(&harness.version), "{refusal}");
     assert!(refusal.to_string().contains("99.99.99"), "{refusal}");
 

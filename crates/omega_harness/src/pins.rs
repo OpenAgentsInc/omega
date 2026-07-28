@@ -307,8 +307,8 @@ mod tests {
                 })
             })
             .collect();
-        let file = serde_json::json!({ "schema": HARNESS_PIN_LEDGER_SCHEMA, "pins": pins })
-            .to_string();
+        let file =
+            serde_json::json!({ "schema": HARNESS_PIN_LEDGER_SCHEMA, "pins": pins }).to_string();
         assert_eq!(
             decode_harness_pin_ledger(&file),
             Err(HarnessPinLedgerError::PinBoundExceeded)

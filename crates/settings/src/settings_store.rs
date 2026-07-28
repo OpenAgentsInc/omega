@@ -1850,9 +1850,7 @@ mod tests {
         // change the value it inherits, or the layering proves nothing.
         assert_eq!(
             store.get::<AutoUpdateSetting>(None),
-            &AutoUpdateSetting {
-                auto_update: false
-            }
+            &AutoUpdateSetting { auto_update: false }
         );
         assert_eq!(
             store.get::<ItemSettings>(None).close_position,

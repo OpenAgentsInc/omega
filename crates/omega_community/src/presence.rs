@@ -119,12 +119,10 @@ impl RoomPresence {
         });
 
         Self {
-            room: repository
-                .audience()
-                .map_or_else(
-                    |_| repository.repository_ref().to_string(),
-                    |audience| audience.name().to_string(),
-                ),
+            room: repository.audience().map_or_else(
+                |_| repository.repository_ref().to_string(),
+                |audience| audience.name().to_string(),
+            ),
             you,
             your_roles: membership
                 .role_refs
