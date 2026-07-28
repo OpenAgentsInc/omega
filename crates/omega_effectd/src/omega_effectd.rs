@@ -182,6 +182,15 @@ pub fn configure_device_pairing(
     });
 }
 
+/// Whether this process can already issue a direct device pairing bootstrap.
+///
+/// omega#124. The pairing control asks this before it asks for a bootstrap, so
+/// a mode that has not yet started the transport can start it instead of
+/// refusing the press.
+pub fn has_device_pairing(cx: &App) -> bool {
+    cx.has_global::<DevicePairingRuntime>()
+}
+
 pub fn issue_device_pairing_bootstrap(cx: &App) -> Result<PairingBootstrap> {
     let runtime = cx
         .try_global::<DevicePairingRuntime>()

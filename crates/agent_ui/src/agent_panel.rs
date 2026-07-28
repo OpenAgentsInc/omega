@@ -3481,15 +3481,26 @@ impl AgentPanel {
     }
 
     fn open_device_pairing(&mut self, cx: &mut Context<Self>) {
-        self.device_pairing_surface = Some(
-            match omega_effectd::issue_device_pairing_bootstrap(cx)
-                .and_then(|bootstrap| bootstrap.qr().map(|qr| (bootstrap, qr)).map_err(Into::into))
-            {
-                Ok((bootstrap, qr)) => DevicePairingSurface::Ready { bootstrap, qr },
-                Err(error) => DevicePairingSurface::Unavailable(error.to_string().into()),
-            },
-        );
-        cx.notify();
+        // omega#124. Zero base is the default mode and loads no workroom panel,
+        // so no Sarah host request had ever started the transport here and this
+        // control refused every press. Start the transport on the press, then
+        // issue the bootstrap, so the mode a person actually gets can pair.
+        cx.spawn(async move |this, cx| {
+            let started = crate::omega_host_bridge::ensure_device_pairing_runtime(cx).await;
+            this.update(cx, |this, cx| {
+                this.device_pairing_surface = Some(match started {
+                    Err(error) => DevicePairingSurface::Unavailable(error.to_string().into()),
+                    Ok(()) => match omega_effectd::issue_device_pairing_bootstrap(cx).and_then(
+                        |bootstrap| bootstrap.qr().map(|qr| (bootstrap, qr)).map_err(Into::into),
+                    ) {
+                        Ok((bootstrap, qr)) => DevicePairingSurface::Ready { bootstrap, qr },
+                        Err(error) => DevicePairingSurface::Unavailable(error.to_string().into()),
+                    },
+                });
+                cx.notify();
+            })
+        })
+        .detach();
     }
 
     fn render_device_pairing_surface(&self, cx: &mut Context<Self>) -> Option<AnyElement> {

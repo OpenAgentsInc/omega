@@ -47,6 +47,8 @@ const MAX_DEVICE_LABEL_BYTES: usize = 256;
 const DEVICE_SNAPSHOT_FRAME_RESERVE_BYTES: usize = 1_024;
 const DEVICE_TRANSCRIPT_PUBLISH_INTERVAL: Duration = Duration::from_millis(250);
 const ISSUE31_AGENT_COMMAND_POLL_INTERVAL: Duration = Duration::from_millis(500);
+/// omega#124. How often the panel's own threads are re-projected for the mirror.
+const PANEL_PROJECTION_INTERVAL: Duration = Duration::from_millis(1_000);
 const CORRELATION_SCHEMA: &str = "openagents.omega.full_auto_host_correlation.v1";
 const CORRELATION_FILE: &str = "full-auto-host-correlation.json";
 
@@ -331,6 +333,67 @@ struct AppendSystemNoteParams {
     text: String,
 }
 
+thread_local! {
+    /// The live host-bridge state, so a surface outside the engine callback can
+    /// reach the same threads, journal, and conversation the callback owns.
+    ///
+    /// omega#124. Zero base renders the pairing control but loads no workroom
+    /// panel, so no Sarah host request ever arrives and the pairing runtime was
+    /// never installed. The control then refused every press with "Direct phone
+    /// pairing is not available on this host", which made the default mode the
+    /// one mode that could not pair. This handle lets the control start the
+    /// same transport the callback starts, against the same state, so the
+    /// mirror a paired phone reads is the mirror this window publishes.
+    static HOST_BRIDGE_STATE: RefCell<Option<Rc<RefCell<HostBridgeState>>>> =
+        const { RefCell::new(None) };
+}
+
+/// Install the device-pairing runtime if no Sarah host request has installed it.
+///
+/// omega#124. Returns once the runtime is available, or with the reason it is
+/// not. The work is idempotent: a second call with the runtime already present
+/// does nothing, and the conversation and bridge are created at most once.
+pub async fn ensure_device_pairing_runtime(cx: &mut AsyncApp) -> anyhow::Result<()> {
+    if cx.update(|cx| omega_effectd::has_device_pairing(cx)) {
+        return Ok(());
+    }
+    let state = HOST_BRIDGE_STATE
+        .with(|slot| slot.borrow().clone())
+        .ok_or_else(|| anyhow::anyhow!("the Omega engine host bridge is not installed"))?;
+    if state.borrow().sarah_conversation.is_some() {
+        return Ok(());
+    }
+    let conversation =
+        production_sarah_conversation().map_err(|error| anyhow::anyhow!("{}", error.message))?;
+    let device_bridge = start_device_bridge(&conversation, &state, cx)
+        .map_err(|error| anyhow::anyhow!("{}", error.message))?;
+    let Some((handle, engine, endpoint, host_public_key_hex, generation, scopes, journal)) =
+        device_bridge
+    else {
+        anyhow::bail!("this host advertises no direct device endpoint");
+    };
+    cx.update(|cx| {
+        omega_effectd::configure_device_pairing(
+            engine,
+            endpoint,
+            host_public_key_hex,
+            generation,
+            scopes,
+            cx,
+        );
+    });
+    let conversation = Arc::new(Mutex::new(conversation));
+    {
+        let mut state = state.borrow_mut();
+        state.sarah_conversation = Some(conversation.clone());
+        state.device_bridge = Some(handle);
+        state.device_projection = Some(journal);
+    }
+    start_issue31_agent_command_pump(conversation, state.clone(), cx);
+    start_panel_thread_projection(state, cx);
+    Ok(())
+}
+
 pub fn omega_effectd_host_handler(cx: &App) -> OmegaEffectdHostHandler {
     let async_cx = cx.to_async();
     let openagents_session = omega_effectd::openagents_session(cx);
@@ -348,6 +411,9 @@ pub fn omega_effectd_host_handler(cx: &App) -> OmegaEffectdHostHandler {
         device_bridge: None,
         device_projection: None,
     }));
+    HOST_BRIDGE_STATE.with(|slot| {
+        *slot.borrow_mut() = Some(state.clone());
+    });
     Rc::new(move |request| {
         let async_cx = async_cx.clone();
         let state = state.clone();
@@ -536,6 +602,82 @@ async fn sarah_request(
             .map_err(sarah_host_error)
     })
     .await
+}
+
+/// Project the Agent Panel's own threads into the device mirror.
+///
+/// omega#124. Every existing publisher writes engine-lane threads the host
+/// bridge tracks, so a paired phone saw an empty feed while the person typed in
+/// a thread on the desktop. The mirror's stated contract is the desktop's
+/// active and recent threads, so the panel's threads belong in it. This reads
+/// the panel and publishes an upsert whenever a thread's projection changes.
+fn start_panel_thread_projection(state: Rc<RefCell<HostBridgeState>>, cx: &mut AsyncApp) {
+    cx.spawn(async move |cx| {
+        let mut published: StdHashMap<String, omega_effectd::MirrorThread> = StdHashMap::new();
+        loop {
+            cx.background_executor()
+                .timer(PANEL_PROJECTION_INTERVAL)
+                .await;
+            let Some(journal) = state.borrow().device_projection.clone() else {
+                continue;
+            };
+            let projected = cx.update(|cx| panel_mirror_threads(&state, cx));
+            for thread in projected {
+                let changed = published
+                    .get(&thread.thread_ref)
+                    .is_none_or(|previous| previous != &thread);
+                if !changed {
+                    continue;
+                }
+                if journal
+                    .publish(omega_effectd::MirrorChange::ThreadUpsert {
+                        thread: thread.clone(),
+                    })
+                    .is_ok()
+                {
+                    published.insert(thread.thread_ref.clone(), thread);
+                }
+            }
+        }
+    })
+    .detach();
+}
+
+/// The panel's loaded conversations, projected for the mirror.
+fn panel_mirror_threads(
+    state: &Rc<RefCell<HostBridgeState>>,
+    cx: &mut App,
+) -> Vec<omega_effectd::MirrorThread> {
+    // The engine binds a workspace only when it dispatches a run. A person who
+    // paired a phone and typed in a thread has no such binding, so the mirror
+    // finds the open workspace itself and falls back to the binding when the
+    // engine did establish one (omega#124).
+    let bound = state.borrow().workspace.clone();
+    let located = match bound {
+        Some(binding) => binding.workspace.upgrade().map(|w| (binding.window, w)),
+        None => AppState::global(cx)
+            .workspace_store
+            .read(cx)
+            .workspaces_with_windows()
+            .find_map(|(window, workspace)| Some((window, workspace.upgrade()?))),
+    };
+    let Some((window, workspace)) = located else {
+        return Vec::new();
+    };
+    let projected_at = current_unix_millis();
+    window
+        .update(cx, |_root, _window, cx| {
+            let Some(panel) = workspace.read(cx).panel::<AgentPanel>(cx) else {
+                return Vec::new();
+            };
+            panel
+                .read(cx)
+                .conversation_views()
+                .into_iter()
+                .map(|conversation| device_loaded_thread(&conversation, projected_at, cx))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default()
 }
 
 fn start_issue31_agent_command_pump(
