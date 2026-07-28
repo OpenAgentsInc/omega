@@ -450,11 +450,23 @@ const DEFAULT_SARAH_PUBLIC_KEY_HEX: &str =
 const DEFAULT_DEVICE_SCOPES: &[omega_effectd::Issue31PairingScope] =
     &[omega_effectd::Issue31PairingScope::ObserveIssue31];
 
-/// Loopback. The QR a phone scans carries this endpoint, and this exact
-/// combination is the one proven to pair.
+/// Fallback when Tailscale is absent. A phone cannot dial `localhost` — that
+/// is only useful for a simulator on the same machine. When Tailscale is up
+/// the live MagicDNS name and CGNAT bind replace these (see
+/// [`live_tailnet_endpoint`]).
 const DEFAULT_DEVICE_BRIDGE_MAGIC_DNS: &str = "localhost";
 const DEFAULT_DEVICE_BRIDGE_PORT: u16 = 4317;
 const DEFAULT_DEVICE_BRIDGE_BIND_ADDRESS: &str = "127.0.0.1";
+
+/// What a live Tailscale status contributes to the pairing endpoint.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LiveTailnetEndpoint {
+    /// MagicDNS name without a trailing dot — e.g. `mac.tailnet.ts.net`.
+    magic_dns_name: String,
+    /// First Tailscale IPv4 in 100.64.0.0/10. The bridge binds here so a phone
+    /// on the same tailnet can reach it; loopback would never answer a phone.
+    bind_address: String,
+}
 
 /// How an override is read. Production reads the environment; a test supplies
 /// its own map, so the defaults can be proven without mutating process state
@@ -529,9 +541,85 @@ fn resolve_approved_device_scopes(
     }
 }
 
-fn resolve_bind_address(overrides: PairingOverrides<'_>) -> String {
-    resolved_override(overrides, "OPENAGENTS_OMEGA_DEVICE_BRIDGE_BIND_ADDRESS")
+/// Ask the local Tailscale daemon who we are on the tailnet.
+///
+/// The QR a phone scans has to name a host the phone can dial. `localhost`
+/// and `127.0.0.1` only ever answer on the machine that printed the code, so
+/// a real phone always fails with "Could not connect to ws://localhost:4317".
+/// When Tailscale is up we take the MagicDNS name and the CGNAT IPv4 from
+/// `tailscale status --json` and use those as the product default — no owner
+/// configuration, no environment variables. When Tailscale is down or the
+/// binary is missing we fall back to loopback so a same-machine simulator
+/// still pairs.
+fn discover_live_tailnet() -> Option<LiveTailnetEndpoint> {
+    let output = std::process::Command::new("tailscale")
+        .args(["status", "--json"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    live_tailnet_from_status_json(&output.stdout)
+}
+
+/// Parse the subset of `tailscale status --json` the pairing defaults need.
+/// Kept pure so a unit test can pin the shape without a live daemon.
+fn live_tailnet_from_status_json(bytes: &[u8]) -> Option<LiveTailnetEndpoint> {
+    let status: serde_json::Value = serde_json::from_slice(bytes).ok()?;
+    let self_node = status.get("Self")?;
+    let magic_dns_name = self_node
+        .get("DNSName")
+        .and_then(Value::as_str)
+        .map(|name| name.trim_end_matches('.').to_owned())
+        .filter(|name| !name.is_empty() && !name.contains("://") && !name.contains('/'))?;
+    let bind_address = self_node
+        .get("TailscaleIPs")
+        .and_then(Value::as_array)?
+        .iter()
+        .filter_map(Value::as_str)
+        .find(|ip| {
+            ip.parse::<std::net::Ipv4Addr>().ok().is_some_and(|addr| {
+                let bits = u32::from(addr);
+                bits & 0xffc0_0000 == u32::from(std::net::Ipv4Addr::new(100, 64, 0, 0))
+            })
+        })?
+        .to_owned();
+    Some(LiveTailnetEndpoint {
+        magic_dns_name,
+        bind_address,
+    })
+}
+
+/// Process-wide live Tailscale view. Discovered once; a missing daemon is
+/// remembered as `None` so a crash-loop of `tailscale status` is not the
+/// cost of every Pair-phone click.
+fn live_tailnet_endpoint() -> Option<&'static LiveTailnetEndpoint> {
+    static LIVE: LazyLock<Option<LiveTailnetEndpoint>> = LazyLock::new(discover_live_tailnet);
+    LIVE.as_ref()
+}
+
+/// Loopback when no tailnet is available; the live MagicDNS name when one is.
+fn default_magic_dns_name(live: Option<&LiveTailnetEndpoint>) -> String {
+    live.map(|endpoint| endpoint.magic_dns_name.clone())
+        .unwrap_or_else(|| DEFAULT_DEVICE_BRIDGE_MAGIC_DNS.to_owned())
+}
+
+/// Loopback when no tailnet is available; the live CGNAT IPv4 when one is.
+fn default_bind_address(live: Option<&LiveTailnetEndpoint>) -> String {
+    live.map(|endpoint| endpoint.bind_address.clone())
         .unwrap_or_else(|| DEFAULT_DEVICE_BRIDGE_BIND_ADDRESS.to_owned())
+}
+
+fn resolve_bind_address(overrides: PairingOverrides<'_>) -> String {
+    resolve_bind_address_with(overrides, live_tailnet_endpoint())
+}
+
+fn resolve_bind_address_with(
+    overrides: PairingOverrides<'_>,
+    live: Option<&LiveTailnetEndpoint>,
+) -> String {
+    resolved_override(overrides, "OPENAGENTS_OMEGA_DEVICE_BRIDGE_BIND_ADDRESS")
+        .unwrap_or_else(|| default_bind_address(live))
 }
 
 /// Where the direct device bridge advertises itself.
@@ -539,25 +627,34 @@ fn resolve_bind_address(overrides: PairingOverrides<'_>) -> String {
 /// The MagicDNS name and the port describe one endpoint, so supplying one
 /// without the other yields a host a phone can discover and cannot reach. That
 /// stays refused, but the refusal now names which half is missing and what
-/// unsetting both restores.
+/// unsetting both restores. With no overrides the live tailnet (when present)
+/// is preferred over loopback — a phone cannot dial `localhost`.
 fn resolve_direct_device_endpoint(
     overrides: PairingOverrides<'_>,
+) -> Result<omega_effectd::Issue31DirectEndpoint, HostResponseError> {
+    resolve_direct_device_endpoint_with(overrides, live_tailnet_endpoint())
+}
+
+fn resolve_direct_device_endpoint_with(
+    overrides: PairingOverrides<'_>,
+    live: Option<&LiveTailnetEndpoint>,
 ) -> Result<omega_effectd::Issue31DirectEndpoint, HostResponseError> {
     let magic_dns_override =
         resolved_override(overrides, "OPENAGENTS_OMEGA_DEVICE_BRIDGE_MAGIC_DNS");
     let port_override = resolved_override(overrides, "OPENAGENTS_OMEGA_DEVICE_BRIDGE_PORT");
+    let built_in = format!(
+        "{}:{}",
+        default_magic_dns_name(live),
+        DEFAULT_DEVICE_BRIDGE_PORT
+    );
     let (magic_dns_name, port) = match (magic_dns_override, port_override) {
-        (None, None) => (
-            DEFAULT_DEVICE_BRIDGE_MAGIC_DNS.to_owned(),
-            DEFAULT_DEVICE_BRIDGE_PORT,
-        ),
+        (None, None) => (default_magic_dns_name(live), DEFAULT_DEVICE_BRIDGE_PORT),
         (Some(magic_dns_name), Some(port)) => {
             let parsed = port.parse::<u16>().ok().filter(|port| *port != 0).ok_or_else(|| {
                 unavailable(format!(
                     "OPENAGENTS_OMEGA_DEVICE_BRIDGE_PORT is \"{port}\", which is not a TCP port \
                      between 1 and 65535. Unset it and \
-                     OPENAGENTS_OMEGA_DEVICE_BRIDGE_MAGIC_DNS to use the built-in \
-                     {DEFAULT_DEVICE_BRIDGE_MAGIC_DNS}:{DEFAULT_DEVICE_BRIDGE_PORT}."
+                     OPENAGENTS_OMEGA_DEVICE_BRIDGE_MAGIC_DNS to use the built-in {built_in}."
                 ))
             })?;
             (magic_dns_name, parsed)
@@ -566,16 +663,14 @@ fn resolve_direct_device_endpoint(
             return Err(unavailable(format!(
                 "OPENAGENTS_OMEGA_DEVICE_BRIDGE_MAGIC_DNS is set but \
                  OPENAGENTS_OMEGA_DEVICE_BRIDGE_PORT is not, so this host would advertise a name \
-                 with no port. Set both, or unset both to use the built-in \
-                 {DEFAULT_DEVICE_BRIDGE_MAGIC_DNS}:{DEFAULT_DEVICE_BRIDGE_PORT}."
+                 with no port. Set both, or unset both to use the built-in {built_in}."
             )));
         }
         (None, Some(_)) => {
             return Err(unavailable(format!(
                 "OPENAGENTS_OMEGA_DEVICE_BRIDGE_PORT is set but \
                  OPENAGENTS_OMEGA_DEVICE_BRIDGE_MAGIC_DNS is not, so this host would advertise a \
-                 port with no name. Set both, or unset both to use the built-in \
-                 {DEFAULT_DEVICE_BRIDGE_MAGIC_DNS}:{DEFAULT_DEVICE_BRIDGE_PORT}."
+                 port with no name. Set both, or unset both to use the built-in {built_in}."
             )));
         }
     };
@@ -3351,8 +3446,10 @@ mod tests {
             resolve_sarah_public_key_hex(&lookup),
             "bcf86577b45042c960c99fe4ac1380a3ef0565ccbdd5c81e3f20f0919fe4fd14"
         );
-        assert_eq!(resolve_bind_address(&lookup), "127.0.0.1");
-        let endpoint = resolve_direct_device_endpoint(&lookup)
+        // Pin the "no Tailscale" path so a live daemon on the developer machine
+        // cannot make this test advertise a real MagicDNS name.
+        assert_eq!(resolve_bind_address_with(&lookup, None), "127.0.0.1");
+        let endpoint = resolve_direct_device_endpoint_with(&lookup, None)
             .expect("an empty environment resolves the loopback endpoint");
         assert_eq!(endpoint.magic_dns_name, "localhost");
         assert_eq!(endpoint.port, 4317);
@@ -3361,8 +3458,61 @@ mod tests {
             omega_effectd::DEVICE_BRIDGE_PROTOCOL.to_string()
         );
         assert!(
-            omega_effectd::BridgeBindHost::new(&resolve_bind_address(&lookup)).is_ok(),
+            omega_effectd::BridgeBindHost::new(&resolve_bind_address_with(&lookup, None)).is_ok(),
             "the default bind address must satisfy the OMEGA-DELTA-0154 bind rule"
+        );
+    }
+
+    /// A phone cannot dial `localhost`. When Tailscale reports a MagicDNS
+    /// name and a CGNAT IPv4, those become the product default so Pair phone
+    /// works with zero environment variables on a machine that is already
+    /// on the tailnet.
+    #[test]
+    fn a_live_tailnet_becomes_the_default_pairing_endpoint() {
+        let lookup = no_overrides();
+        let live = LiveTailnetEndpoint {
+            magic_dns_name: "macbook-pro-m5.tailaeab8f.ts.net".into(),
+            bind_address: "100.127.107.31".into(),
+        };
+        assert_eq!(
+            resolve_bind_address_with(&lookup, Some(&live)),
+            "100.127.107.31"
+        );
+        let endpoint = resolve_direct_device_endpoint_with(&lookup, Some(&live))
+            .expect("a live tailnet resolves the phone-reachable endpoint");
+        assert_eq!(endpoint.magic_dns_name, "macbook-pro-m5.tailaeab8f.ts.net");
+        assert_eq!(endpoint.port, 4317);
+        assert!(
+            omega_effectd::BridgeBindHost::new(&resolve_bind_address_with(&lookup, Some(&live)))
+                .is_ok(),
+            "the live CGNAT bind must satisfy the OMEGA-DELTA-0154 bind rule"
+        );
+    }
+
+    #[test]
+    fn live_tailnet_is_parsed_from_tailscale_status_json() {
+        let json = br#"{
+            "Self": {
+                "DNSName": "macbook-pro-m5.tailaeab8f.ts.net.",
+                "TailscaleIPs": ["100.127.107.31", "fd7a:115c:a1e0::4837:6b1f"]
+            }
+        }"#;
+        assert_eq!(
+            live_tailnet_from_status_json(json),
+            Some(LiveTailnetEndpoint {
+                magic_dns_name: "macbook-pro-m5.tailaeab8f.ts.net".into(),
+                bind_address: "100.127.107.31".into(),
+            })
+        );
+        assert_eq!(
+            live_tailnet_from_status_json(br#"{"Self":{"DNSName":"x.ts.net.","TailscaleIPs":[]}}"#),
+            None,
+            "no IPv4 CGNAT address means no phone-reachable bind"
+        );
+        assert_eq!(
+            live_tailnet_from_status_json(br#"{}"#),
+            None,
+            "a missing Self node is not a host to advertise"
         );
     }
 
@@ -3462,10 +3612,14 @@ mod tests {
 
     #[test]
     fn half_an_endpoint_override_names_the_missing_half() {
-        let magic_dns_only = resolve_direct_device_endpoint(&overrides(&[(
-            "OPENAGENTS_OMEGA_DEVICE_BRIDGE_MAGIC_DNS",
-            "desk.tailnet.ts.net",
-        )]))
+        // Pin no-live-tailnet so the refusal names the loopback built-in.
+        let magic_dns_only = resolve_direct_device_endpoint_with(
+            &overrides(&[(
+                "OPENAGENTS_OMEGA_DEVICE_BRIDGE_MAGIC_DNS",
+                "desk.tailnet.ts.net",
+            )]),
+            None,
+        )
         .expect_err("advertising a name with no port is refused");
         assert!(
             magic_dns_only
@@ -3476,10 +3630,10 @@ mod tests {
             magic_dns_only.message
         );
 
-        let port_only = resolve_direct_device_endpoint(&overrides(&[(
-            "OPENAGENTS_OMEGA_DEVICE_BRIDGE_PORT",
-            "5900",
-        )]))
+        let port_only = resolve_direct_device_endpoint_with(
+            &overrides(&[("OPENAGENTS_OMEGA_DEVICE_BRIDGE_PORT", "5900")]),
+            None,
+        )
         .expect_err("advertising a port with no name is refused");
         assert!(
             port_only
@@ -3490,13 +3644,16 @@ mod tests {
         );
 
         for bad_port in ["0", "not-a-port", "99999"] {
-            let refusal = resolve_direct_device_endpoint(&overrides(&[
-                (
-                    "OPENAGENTS_OMEGA_DEVICE_BRIDGE_MAGIC_DNS",
-                    "desk.tailnet.ts.net",
-                ),
-                ("OPENAGENTS_OMEGA_DEVICE_BRIDGE_PORT", bad_port),
-            ]))
+            let refusal = resolve_direct_device_endpoint_with(
+                &overrides(&[
+                    (
+                        "OPENAGENTS_OMEGA_DEVICE_BRIDGE_MAGIC_DNS",
+                        "desk.tailnet.ts.net",
+                    ),
+                    ("OPENAGENTS_OMEGA_DEVICE_BRIDGE_PORT", bad_port),
+                ]),
+                None,
+            )
             .expect_err("an unusable port is refused");
             assert!(
                 refusal.message.contains(bad_port),

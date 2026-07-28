@@ -159,6 +159,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0168",
     "OMEGA-DELTA-0169",
     "OMEGA-DELTA-0170",
+    "OMEGA-DELTA-0171",
 ];
 
 pub const GOOGLE_PROVIDER_PATH: &str = "crates/language_models/src/provider/google.rs";
@@ -20662,6 +20663,42 @@ mod tests {
              the host controller again. A fresh install has admitted no phone, \
              and applying the empty set both fails the one-to-32 policy check and \
              overwrites the admissions restored from durable state."
+        );
+    }
+
+    /// OMEGA-DELTA-0171. The QR a phone scans must name a host the phone can
+    /// dial. `localhost` / `127.0.0.1` only ever answer on the machine that
+    /// printed the code. When Tailscale is up the live MagicDNS name and CGNAT
+    /// IPv4 replace those loopback fallbacks.
+    #[test]
+    fn phone_pairing_prefers_the_live_tailnet() {
+        let bridge = without_comments(&read_repository_file(HOST_BRIDGE_PATH));
+        let shipped = bridge
+            .split_once("#[cfg(test)]")
+            .map(|(shipped, _)| shipped)
+            .expect("the host bridge has executable tests");
+        for required in [
+            "fn discover_live_tailnet(",
+            "fn live_tailnet_from_status_json(",
+            "fn live_tailnet_endpoint(",
+            "fn default_magic_dns_name(",
+            "fn default_bind_address(",
+            "tailscale",
+            "status",
+            "--json",
+            "DNSName",
+            "TailscaleIPs",
+        ] {
+            assert!(
+                shipped.contains(required),
+                "OMEGA-DELTA-0171: the host bridge lost `{required}`. Without                  live Tailscale discovery a real phone is handed                  ws://localhost:4317 and can never connect."
+            );
+        }
+        assert!(
+            shipped.contains("resolve_direct_device_endpoint_with(")
+                && shipped.contains("resolve_bind_address_with(")
+                && shipped.contains("live_tailnet_endpoint()"),
+            "OMEGA-DELTA-0171: production resolution no longer consults the              live tailnet. Environment overrides alone leave every Finder              launch on localhost."
         );
     }
 

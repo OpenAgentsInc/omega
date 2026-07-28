@@ -7373,9 +7373,11 @@ current image build does not decode it inline.
 - **Omega now:** every one of those has a built-in default. The relay is
   `wss://relay.openagents.com`, Sarah's public key is the production bridge
   identity, the scope set is `observe_issue31` alone, the allowlist starts
-  empty, and the direct bridge advertises `localhost:4317` bound to
-  `127.0.0.1`. Each environment variable survives only as a development
-  override, and a blank value counts as unset.
+  empty, and the direct bridge defaults to the live Tailscale MagicDNS name
+  bound on the CGNAT IPv4 when Tailscale is up, or `localhost:4317` on
+  `127.0.0.1` when it is not (so a same-machine simulator still pairs). Each
+  environment variable survives only as a development override, and a blank
+  value counts as unset.
 - **Why:** an installed app is launched from Finder, which passes on no shell
   environment. A value the pairing runtime refuses to start without therefore
   cannot live in an environment variable, because it is guaranteed absent in
@@ -7552,4 +7554,24 @@ current image build does not decode it inline.
   is reachable in a narrow panel. The auth-required state renders the pending
   turns and a successful sign-in rebuilds the session through the same
   dispatch path, but no automated check walks that flow end to end.
+
+### OMEGA-DELTA-0171 — Pairing defaults to the live tailnet, not localhost
+
+- **Upstream Zed:** has no phone pairing.
+- **Omega before:** `OMEGA-DELTA-0167` gave every pairing input a built-in
+  default so Finder launches could pair without a shell environment. The
+  direct bridge defaults were `localhost:4317` bound to `127.0.0.1` — correct
+  for a same-machine simulator, fatal for a real phone. A phone that scanned
+  the QR dialed `ws://localhost:4317` and saw its own loopback answer nothing.
+- **Omega now:** when `tailscale status --json` reports a MagicDNS name and a
+  CGNAT IPv4, those become the product default for the QR endpoint and the
+  bind address. When Tailscale is down or the binary is missing, the loopback
+  fallback remains. Environment overrides still win. Discovery runs once per
+  process.
+- **Why:** the owner, on a live phone after a successful decode: *"Could not
+  connect to ws://localhost:4317"* and *"should that be a tailnet URL?"* Yes.
+  A default a phone cannot reach is not a default.
+- **Enforced by:** `a_live_tailnet_becomes_the_default_pairing_endpoint` and
+  `live_tailnet_is_parsed_from_tailscale_status_json` in `agent_ui`, plus
+  `phone_pairing_prefers_the_live_tailnet` in `crates/omega_deltas`.
 
