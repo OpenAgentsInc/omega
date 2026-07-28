@@ -19827,14 +19827,23 @@ mod tests {
             "SigningPurpose::NostrEvent",
             "kind: NIP98_KIND",
             "\"method\".to_string(), \"POST\".to_string()",
-            "\"payload\".to_string(), empty_payload_hash",
-            "format!(\"Nostr {authorization}\")",
+            "\"payload\".to_string(), payload_hash",
+            "format!(\"Nostr {}\"",
         ] {
             assert!(
                 without_whitespace(&proof).contains(&without_whitespace(required)),
                 "OMEGA-DELTA-0153: the background proof lost `{required}`."
             );
         }
+        let mint = function_body(&proof, "mint_openagents_nostr_session")
+            .expect("OMEGA-DELTA-0153: the standard hosted-session mint is gone");
+        assert!(
+            without_whitespace(mint).contains(&without_whitespace(
+                "sign_nip98_post(OPENAGENTS_NOSTR_SESSION_URL, &[], &identity)"
+            )),
+            "OMEGA-DELTA-0153: the standard hosted-session proof no longer binds \
+             the explicitly empty request body."
+        );
     }
 
     /// OMEGA-DELTA-0154. The mobile bridge socket is confined to loopback and
@@ -20048,25 +20057,30 @@ mod tests {
         );
     }
 
-    /// OMEGA-DELTA-0159. The hosted lane provisions the identity it signs
-    /// with, and every refusal is logged and named.
+    /// OMEGA-DELTA-0159. Automatic hosted sign-in only uses an identity the
+    /// owner has already made ready, and every refusal is logged and named.
     #[test]
-    fn hosted_sign_in_provisions_its_identity_and_names_every_refusal() {
+    fn hosted_sign_in_respects_identity_consent_and_names_every_refusal() {
         let proof = read_repository_file("crates/omega_effectd/src/openagents_nostr_auth.rs");
         let mint = function_body(&proof, "mint_openagents_nostr_session")
             .expect("OMEGA-DELTA-0159: the background proof is gone");
-        let provision = mint.find("provision_unattended").expect(
-            "OMEGA-DELTA-0159: hosted sign-in no longer provisions custody, so a \
-                    brand-new install can never present a signed proof",
-        );
-        let signing = mint
-            .find("identity_service")
-            .and_then(|_| mint.find(".sign(&AdmittedSigningRequest"))
+        let identity = function_body(&proof, "ready_local_identity")
+            .expect("OMEGA-DELTA-0159: the consent-aware identity boundary is gone");
+        let inspection = identity
+            .find(".inspect()")
+            .expect("OMEGA-DELTA-0159: hosted sign-in stopped inspecting custody");
+        let signing = function_body(&proof, "sign_nip98_post")
             .expect("OMEGA-DELTA-0159: the signing step is gone");
         assert!(
-            provision < signing,
-            "OMEGA-DELTA-0159: {} signs before it provisions custody, which \
-             fails on every install that has no identity yet.",
+            inspection < identity.len()
+                && mint.contains("ready_local_identity()")
+                && mint.contains("sign_nip98_post")
+                && signing.contains(".sign(&AdmittedSigningRequest")
+                && !identity.contains("provision_unattended")
+                && !identity.contains(".create(")
+                && !identity.contains(".adopt"),
+            "OMEGA-DELTA-0159: {} can create, adopt, or replace an identity \
+             while performing automatic hosted sign-in.",
             repository_path("crates/omega_effectd/src/openagents_nostr_auth.rs").display()
         );
         assert!(

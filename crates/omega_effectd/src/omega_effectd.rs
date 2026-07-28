@@ -8,6 +8,7 @@ mod issue31_provider_handoff;
 mod nostr_websocket_relay;
 mod openagents_binding;
 mod openagents_nostr_auth;
+mod openagents_sarah_voice;
 mod openagents_session;
 mod protocol;
 mod sarah_conversation;
@@ -47,6 +48,10 @@ pub use omega_device_bridge::{
     ServerHandle as DeviceBridgeServerHandle, ThreadState,
 };
 pub use openagents_nostr_auth::HostedSessionBlocker;
+pub use openagents_sarah_voice::{
+    ManagedSarahVoiceSession, SARAH_VOICE_DEVICE_HEADER, SARAH_VOICE_SESSION_HEADER,
+    SARAH_VOICE_TICKET_HEADER,
+};
 pub use openagents_session::{
     OpenAgentsSession, OpenAgentsSessionPhase, VerifiedOpenAgentsSession, init_openagents_session,
     openagents_session,

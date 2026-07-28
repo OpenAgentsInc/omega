@@ -6,7 +6,8 @@ use std::{
 use base64::Engine as _;
 use http_client::{AsyncBody, HttpClient, Method, Request};
 use omega_identity::{
-    AdmittedSigningRequest, IdentityService, ReceiptRef, SigningPurpose, UnsignedEventTemplate,
+    AdmittedSigningRequest, CustodyState, IdentityService, PublicIdentity, ReceiptRef,
+    SigningPurpose, UnsignedEventTemplate,
 };
 use serde::Deserialize;
 use sha2::{Digest as _, Sha256};
@@ -14,10 +15,6 @@ use smol::io::AsyncReadExt as _;
 use thiserror::Error;
 
 pub const OPENAGENTS_NOSTR_SESSION_URL: &str = "https://openagents.com/api/omega/auth/session";
-
-/// Stable so a retried provision resumes the same durable create transaction
-/// instead of opening a second one and landing custody in `Conflict`.
-const PROVISION_RECEIPT_REF: &str = "omega-hosted-session-provision-v1";
 
 const MAX_HTTP_BODY_BYTES: u64 = 64 * 1024;
 const MAX_ACCESS_TOKEN_BYTES: usize = 16 * 1024;
@@ -34,8 +31,17 @@ const NIP98_KIND: u16 = 27_235;
 #[derive(Clone, Debug, Eq, PartialEq, Error)]
 pub enum HostedSessionBlocker {
     #[error(
-        "this installation has no signing identity Omega can use ({custody_state}). \
-         Open Omega's onboarding to create or recover one."
+        "OpenAgents needs Omega's local identity. Finish identity setup in Omega, then try again."
+    )]
+    IdentityMissing,
+    #[error(
+        "OpenAgents found a protected local identity that this Omega profile has not adopted. \
+         Review and adopt it in Omega's identity setup, then try again."
+    )]
+    IdentityAdoptionRequired,
+    #[error(
+        "Omega's local identity is unavailable ({custody_state}). \
+         Open identity setup to unlock, recover, or resolve it."
     )]
     IdentityUnavailable { custody_state: String },
     #[error("Omega could not sign the hosted sign-in proof ({reason}).")]
@@ -43,10 +49,18 @@ pub enum HostedSessionBlocker {
     #[error("OpenAgents could not be reached to sign in.")]
     ServiceUnreachable,
     #[error(
+        "OpenAgents is temporarily limiting Sarah sign-in challenges. Wait briefly, then retry."
+    )]
+    ChallengeRateLimited,
+    #[error(
         "OpenAgents rejected this installation's sign-in proof (HTTP {status}). \
          Retrying will not change the answer: this identity is not admitted for hosted Omega."
     )]
     ProofRejected { status: u16 },
+    #[error(
+        "The one-use Sarah sign-in proof was already used or expired. Retry to obtain a fresh challenge."
+    )]
+    VoiceProofExpired,
     /// Google Frontend returns 411 when a POST is missing `Content-Length`.
     /// That is a client framing bug, not an identity refusal — naming it as
     /// "not admitted" sent the owner looking for an allowlist that does not
@@ -58,6 +72,11 @@ pub enum HostedSessionBlocker {
     RequestFramingRejected,
     #[error("OpenAgents could not issue a session right now (HTTP {status}).")]
     ServiceUnavailable { status: u16 },
+    #[error(
+        "OpenAgents rejected the Sarah voice session request (HTTP {status}). \
+         Check voice access and credits in your OpenAgents account."
+    )]
+    VoiceSessionRejected { status: u16 },
     #[error("OpenAgents returned a sign-in response Omega could not use.")]
     ResponseInvalid,
     #[error("OpenAgents did not accept the session it had just issued.")]
@@ -81,10 +100,108 @@ impl HostedSessionBlocker {
         matches!(
             self,
             Self::ServiceUnreachable
+                | Self::ChallengeRateLimited
+                | Self::VoiceProofExpired
                 | Self::ServiceUnavailable { .. }
+                | Self::VoiceSessionRejected { status: 409 | 429 }
                 | Self::SessionNotVerified
                 | Self::CredentialStorageFailed
         )
+    }
+}
+
+fn identity_blocker(state: CustodyState) -> Option<HostedSessionBlocker> {
+    match state {
+        CustodyState::Ready => None,
+        CustodyState::Absent => Some(HostedSessionBlocker::IdentityMissing),
+        CustodyState::Unadopted => Some(HostedSessionBlocker::IdentityAdoptionRequired),
+        state => Some(HostedSessionBlocker::IdentityUnavailable {
+            custody_state: format!("{state:?}"),
+        }),
+    }
+}
+
+pub(crate) fn ready_local_identity() -> Result<PublicIdentity, HostedSessionBlocker> {
+    let identity_service = IdentityService::system(*app_identity::CHANNEL);
+    let channel_name = app_identity::CHANNEL.display_name();
+    let custody = identity_service.inspect().map_err(|error| {
+        log::error!(
+            "hosted OpenAgents sign-in: {} identity is not usable: {error}",
+            channel_name
+        );
+        HostedSessionBlocker::IdentityUnavailable {
+            custody_state: error.to_string(),
+        }
+    })?;
+    if let Some(blocker) = identity_blocker(custody.state) {
+        return Err(blocker);
+    }
+    custody
+        .identity
+        .ok_or_else(|| HostedSessionBlocker::IdentityUnavailable {
+            custody_state: "no public identity was resolved".to_string(),
+        })
+}
+
+pub(crate) fn sign_nip98_post(
+    url: &str,
+    payload: &[u8],
+    identity: &PublicIdentity,
+) -> Result<String, HostedSessionBlocker> {
+    let identity_service = IdentityService::system(*app_identity::CHANNEL);
+    let created_at = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| HostedSessionBlocker::ProofSigningFailed {
+            reason: "the system clock is before the Unix epoch".to_string(),
+        })?
+        .as_secs();
+    let payload_hash = format!("{:x}", Sha256::digest(payload));
+    let event = nip98_post_event(url, payload_hash.clone(), created_at);
+    let semantic_binding = serde_json::to_vec(&serde_json::json!({
+        "url": url,
+        "method": "POST",
+        "payload": payload_hash,
+        "createdAt": created_at,
+        "publicKey": identity.public_key_hex().as_str(),
+    }))
+    .map_err(|error| HostedSessionBlocker::ProofSigningFailed {
+        reason: error.to_string(),
+    })?;
+    let digest = format!("{:x}", Sha256::digest(semantic_binding));
+    let request_ref = ReceiptRef::new(format!("nip98.{}", &digest[..32])).map_err(|error| {
+        HostedSessionBlocker::ProofSigningFailed {
+            reason: error.to_string(),
+        }
+    })?;
+    let signed = identity_service
+        .sign(&AdmittedSigningRequest {
+            request_ref,
+            identity_ref: identity.identity_ref().clone(),
+            purpose: SigningPurpose::NostrEvent,
+            event,
+        })
+        .map_err(|error| {
+            log::error!("hosted OpenAgents sign-in: signing the proof failed: {error}");
+            HostedSessionBlocker::ProofSigningFailed {
+                reason: error.to_string(),
+            }
+        })?;
+    Ok(format!(
+        "Nostr {}",
+        base64::engine::general_purpose::STANDARD.encode(signed.signed_event_json.as_bytes())
+    ))
+}
+
+fn nip98_post_event(url: &str, payload_hash: String, created_at: u64) -> UnsignedEventTemplate {
+    UnsignedEventTemplate {
+        created_at,
+        kind: NIP98_KIND,
+        tags: vec![
+            vec!["u".to_string(), url.to_string()],
+            vec!["method".to_string(), "POST".to_string()],
+            vec!["payload".to_string(), payload_hash],
+        ],
+        content: String::new(),
     }
 }
 
@@ -105,85 +222,15 @@ pub struct MintedOpenAgentsUser {
 pub async fn mint_openagents_nostr_session(
     http_client: &Arc<dyn HttpClient>,
 ) -> std::result::Result<MintedOpenAgentsSession, HostedSessionBlocker> {
-    let identity_service = IdentityService::system(*app_identity::CHANNEL);
     let channel_name = app_identity::CHANNEL.display_name();
-    let receipt_ref = ReceiptRef::new(PROVISION_RECEIPT_REF).map_err(|error| {
-        HostedSessionBlocker::ProofSigningFailed {
-            reason: error.to_string(),
-        }
-    })?;
-    // A fresh install has no identity and nothing else creates one: the
-    // startup onboarding gate is dormant, so without this the hosted lane is
-    // unreachable on every new machine.
-    let custody = identity_service
-        .provision_unattended(receipt_ref)
-        .map_err(|error| {
-            log::error!(
-                "hosted OpenAgents sign-in: {} identity is not usable: {error}",
-                channel_name
-            );
-            HostedSessionBlocker::IdentityUnavailable {
-                custody_state: error.to_string(),
-            }
-        })?;
-    let identity = custody
-        .identity
-        .ok_or_else(|| HostedSessionBlocker::IdentityUnavailable {
-            custody_state: "no public identity was resolved".to_string(),
-        })?;
+    let identity = ready_local_identity()?;
     log::info!(
         "hosted OpenAgents sign-in: signing as {} identity {}",
         channel_name,
         identity.public_key_hex().as_str()
     );
 
-    let created_at = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|_| HostedSessionBlocker::ProofSigningFailed {
-            reason: "the system clock is before the Unix epoch".to_string(),
-        })?
-        .as_secs();
-    let empty_payload_hash = format!("{:x}", Sha256::digest([]));
-    let semantic_binding = serde_json::to_vec(&serde_json::json!({
-        "url": OPENAGENTS_NOSTR_SESSION_URL,
-        "method": "POST",
-        "payload": empty_payload_hash,
-        "createdAt": created_at,
-        "publicKey": identity.public_key_hex().as_str(),
-    }))
-    .map_err(|error| HostedSessionBlocker::ProofSigningFailed {
-        reason: error.to_string(),
-    })?;
-    let digest = format!("{:x}", Sha256::digest(semantic_binding));
-    let request_ref = ReceiptRef::new(format!("nip98.{}", &digest[..32])).map_err(|error| {
-        HostedSessionBlocker::ProofSigningFailed {
-            reason: error.to_string(),
-        }
-    })?;
-    let signed = identity_service
-        .sign(&AdmittedSigningRequest {
-            request_ref,
-            identity_ref: identity.identity_ref().clone(),
-            purpose: SigningPurpose::NostrEvent,
-            event: UnsignedEventTemplate {
-                created_at,
-                kind: NIP98_KIND,
-                tags: vec![
-                    vec!["u".to_string(), OPENAGENTS_NOSTR_SESSION_URL.to_string()],
-                    vec!["method".to_string(), "POST".to_string()],
-                    vec!["payload".to_string(), empty_payload_hash],
-                ],
-                content: String::new(),
-            },
-        })
-        .map_err(|error| {
-            log::error!("hosted OpenAgents sign-in: signing the proof failed: {error}");
-            HostedSessionBlocker::ProofSigningFailed {
-                reason: error.to_string(),
-            }
-        })?;
-    let authorization =
-        base64::engine::general_purpose::STANDARD.encode(signed.signed_event_json.as_bytes());
+    let authorization = sign_nip98_post(OPENAGENTS_NOSTR_SESSION_URL, &[], &identity)?;
     // Empty body on purpose: the NIP-98 `payload` tag is the SHA-256 of the
     // empty byte string. Google Frontend (HTTP/1.1) answers 411 Length Required
     // when a POST has a Content-Type and no Content-Length — which is how
@@ -193,7 +240,7 @@ pub async fn mint_openagents_nostr_session(
     let request = Request::builder()
         .method(Method::POST)
         .uri(OPENAGENTS_NOSTR_SESSION_URL)
-        .header("authorization", format!("Nostr {authorization}"))
+        .header("authorization", authorization)
         .header("content-type", "application/octet-stream")
         .header("content-length", "0")
         .body(AsyncBody::empty())
@@ -317,6 +364,8 @@ mod tests {
     #[test]
     fn no_blocker_summary_can_carry_credential_material() {
         for blocker in [
+            HostedSessionBlocker::IdentityMissing,
+            HostedSessionBlocker::IdentityAdoptionRequired,
             HostedSessionBlocker::IdentityUnavailable {
                 custody_state: "state".to_string(),
             },
@@ -324,9 +373,12 @@ mod tests {
                 reason: "reason".to_string(),
             },
             HostedSessionBlocker::ServiceUnreachable,
+            HostedSessionBlocker::ChallengeRateLimited,
             HostedSessionBlocker::ProofRejected { status: 401 },
+            HostedSessionBlocker::VoiceProofExpired,
             HostedSessionBlocker::RequestFramingRejected,
             HostedSessionBlocker::ServiceUnavailable { status: 503 },
+            HostedSessionBlocker::VoiceSessionRejected { status: 402 },
             HostedSessionBlocker::ResponseInvalid,
             HostedSessionBlocker::SessionNotVerified,
             HostedSessionBlocker::CredentialStorageFailed,
@@ -339,6 +391,48 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn automatic_sign_in_never_creates_or_adopts_an_identity() {
+        assert_eq!(
+            identity_blocker(CustodyState::Absent),
+            Some(HostedSessionBlocker::IdentityMissing)
+        );
+        assert_eq!(
+            identity_blocker(CustodyState::Unadopted),
+            Some(HostedSessionBlocker::IdentityAdoptionRequired)
+        );
+        assert_eq!(identity_blocker(CustodyState::Ready), None);
+        assert!(matches!(
+            identity_blocker(CustodyState::Conflict),
+            Some(HostedSessionBlocker::IdentityUnavailable { custody_state })
+                if custody_state == "Conflict"
+        ));
+    }
+
+    #[test]
+    fn nip98_post_has_only_the_exact_url_method_and_payload_tags() {
+        let payload_hash = format!("{:x}", Sha256::digest(b"exact request bytes"));
+        let event = nip98_post_event(
+            "https://openagents.com/api/omega/sarah/voice/session",
+            payload_hash.clone(),
+            1_700_000_000,
+        );
+        assert_eq!(event.kind, 27_235);
+        assert_eq!(event.created_at, 1_700_000_000);
+        assert!(event.content.is_empty());
+        assert_eq!(
+            event.tags,
+            vec![
+                vec![
+                    "u".to_string(),
+                    "https://openagents.com/api/omega/sarah/voice/session".to_string()
+                ],
+                vec!["method".to_string(), "POST".to_string()],
+                vec!["payload".to_string(), payload_hash],
+            ]
+        );
     }
 
     /// HTTP 411 is Google Frontend rejecting a POST with no Content-Length.
