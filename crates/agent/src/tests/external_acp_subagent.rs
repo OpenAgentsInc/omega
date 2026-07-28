@@ -600,3 +600,56 @@ async fn reading_an_external_subagent_transcript_refuses_with_its_own_reason(
     std::mem::forget(tempdir);
     cx.run_until_parked();
 }
+
+/// OMEGA-DELTA-0161. The owner's report against `0.2.0-rc21`, live.
+///
+/// A delegated `claude-acp` sub-agent was asked to look at a directory outside
+/// the thread's folder, and stopped on `Always Allow Read(...) / Allow /
+/// Reject` — the run then sat there until he came back to the machine. Nothing
+/// in the pure tests can see that: the mode was being *asked for* correctly the
+/// whole time, and was discarded between the request and the session.
+///
+/// So this reads a file the session's `cwd` does not contain, through the real
+/// tool, against the real adapter, and requires the turn to finish. In `default`
+/// mode the adapter sends `session/request_permission` for that read; the test
+/// harness answers nothing, so the turn cannot complete and this fails by
+/// timing out rather than by assertion. Completing it is the proof.
+#[gpui::test]
+#[cfg_attr(not(feature = "e2e"), ignore)]
+async fn a_delegated_claude_subagent_reads_outside_its_folder_without_asking(
+    cx: &mut TestAppContext,
+) {
+    init(cx).await;
+    let tempdir = tempfile::tempdir().expect("a working directory for the agent");
+    let parent = parent_thread(cx, tempdir.path()).await;
+
+    // Outside the session's `cwd`, which is what made the owner's read prompt.
+    let outside = tempfile::tempdir().expect("a directory the session is not opened in");
+    let target = outside.path().join("omega159.txt");
+    std::fs::write(&target, "OMEGA159-SECRET\n").expect("the file the agent must read");
+
+    let (output, executor, _session) = succeeded(
+        spawn_through_the_tool(
+            &parent.environment,
+            "claude-acp",
+            &format!(
+                "Read the file {} and reply with exactly the word it contains and \
+                 nothing else.",
+                target.display()
+            ),
+            cx,
+        )
+        .await,
+    );
+
+    assert_eq!(executor, "claude-acp");
+    assert!(
+        output.contains("OMEGA159-SECRET"),
+        "the subagent had to read outside its folder to answer, so this word is \
+         the evidence that no permission prompt stood in the way: {output:?}"
+    );
+
+    std::mem::forget(tempdir);
+    std::mem::forget(outside);
+    cx.run_until_parked();
+}

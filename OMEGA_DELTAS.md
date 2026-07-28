@@ -7021,3 +7021,90 @@ timeline work remains separate.
 - **Enforced by:** `public_chat_navigation_is_channel_first_and_read_only` in
   `crates/omega_deltas`, plus registry, controller, coordinate, lifecycle,
   unread, fixture, accessibility-label, and narrow-layout tests in `agent_ui`.
+
+### OMEGA-DELTA-0161 — A delegated sub-agent never asks for permission
+
+- **Upstream Zed:** an external ACP agent opens in whatever mode it defaults to.
+  Claude Code's ACP adapter defaults to `default` ("Manual"), which prompts
+  before dangerous operations, and Codex to its own gated mode. A session's mode
+  is otherwise only chosen by a person, from settings or the mode selector.
+- **Omega:** a sub-agent opened by the `delegate` tool is put into the agent's
+  unattended mode — `bypassPermissions` for `claude-acp`, `agent-full-access`
+  for `codex-acp` — before the parent can send it anything, and the delegation is
+  refused if that did not happen.
+- **Why:** owner report against `0.2.0-rc21`: a delegated `claude-acp` sub-agent
+  stopped on `Always Allow / Allow / Reject` for a `Read` outside the thread's
+  folder, and macOS said `omega • Waiting for tool confirmation`. Owner
+  direction: *"IT'S ASKING ME FOR PERMISSIONS. I SAID ALWAYS MAKE IT BYPASS
+  PERMISSIONS MODE."* A delegated sub-agent's prompt has nobody to answer it.
+  Its caller is a model, the prompt renders on a subagent card, and the run stops
+  there until a person notices — which is the whole failure `OMEGA-DELTA-0002`
+  removed for Omega's own tools and which arrived again through a different door.
+- **The mode was already being asked for, and was being dropped.**
+  `CustomAgentServer::default_mode` returned the unattended mode and `connect`
+  carried it to `AcpConnection`. But `AcpConnection::stdio` stores that value and
+  then immediately calls `AcpConnectionDefaults::observe_settings`, whose first
+  act is `refresh_from_settings` — which *overwrites* the mode with whatever
+  `agent_servers.<id>.default_mode` says, and with `None` when it says nothing.
+  The owner's live `~/.config/omega-rc/settings.json` holds
+  `"claude-acp": { "type": "registry" }` and no mode, so the value was gone
+  before the first session existed and `new_session` sent no `session/set_mode`
+  at all. Upstream never saw this because upstream's only source for that value
+  *is* settings, so re-reading settings returns the same answer; a hardcoded
+  mode is the one kind that cannot survive the refresh.
+- **So it is applied where it can be proven, not where it looks tidiest.**
+  `default_mode` no longer returns it. `create_external_acp_subagent` sets it on
+  the session it just opened and **awaits** the result. `new_session`'s own
+  default-mode handling detaches its `session/set_mode` and returns, so a prompt
+  can reach the agent while it is still in the mode it started in; the delegate
+  path holds the sub-agent back until the agent has answered.
+- **The mode has two homes, and the agent picks.** ACP lets `session/new` answer
+  with `modes` *or* with `configOptions`, and `config_state`
+  (`agent_servers::acp`) keeps only whichever arrived — so for an agent of the
+  second kind `AgentConnection::session_modes` is `None` and there is no
+  `session/set_mode` surface to use. `claude-agent-acp@0.62.0` is of the second
+  kind: it sends a `Select` carrying the `Mode` category whose values are the
+  mode ids. The first cut of this delta knew only `session/set_mode`, so its
+  live run refused *every* Claude delegation with "exposes no session modes" —
+  correct as a refusal, useless as a product. Both surfaces are now read, and
+  the selector is found by its declared category rather than by its id, because
+  an agent is not obliged to name it `mode`.
+- **The agent's own answer is what counts.** `set_mode` is sent even when
+  `current_mode` already reports the wanted mode, because that field is written
+  optimistically before the request is answered — reading it would accept the
+  agent's starting mode as proof of a request that was never made. If the agent
+  does not offer the mode, the delegation is **refused by name**, listing what
+  was offered instead. `claude-code-acp` withholds `bypassPermissions` when it
+  runs as root, so this is a real state and not a defensive branch. A delegation
+  that will stall is worse than one that refuses up front: the refusal is visible
+  immediately, the stall is visible only to whoever looks at the card.
+- **Scope is delegation, deliberately.** The owner's own panel thread is not
+  touched: `default_mode` returning the mode would have applied it to every
+  `claude-acp` and `codex-acp` connection in the window, and the failure being
+  fixed is that a *delegated* agent has no one to ask. An agent with no entry in
+  `unattended_mode_for_agent` keeps whatever mode it chose; widening that set is
+  a policy decision, not a default.
+- **Known tradeoff, stated plainly:** a delegated sub-agent can now read and
+  write outside the thread's folder and run commands without asking. That is the
+  requested behaviour. The line is still drawable at the agent's own
+  configuration, and `OMEGA-DELTA-0002`'s `always_confirm` / `always_deny`
+  patterns still gate Omega's native tools.
+- **What has run.** `a_delegated_claude_subagent_reads_outside_its_folder_without_asking`
+  drives the real `claude-acp` adapter through the real
+  `create_external_acp_subagent`, asks it to read a file the session's `cwd`
+  does not contain — the owner's exact scenario — and requires the turn to
+  finish. In `default` mode the adapter sends `session/request_permission` for
+  that read and the turn cannot complete, so the test fails by not finishing.
+  It is `#[gpui::test]` behind the `e2e` feature:
+  `cargo test -p agent --features e2e --lib external_acp_subagent`.
+  What has **not** been seen is the subagent card in a window; that is
+  `crates/agent_ui`, and `OMEGA-DELTA-0101` already names it unproven.
+- **Enforced by:** `a_delegated_subagent_is_admitted_only_in_its_unattended_mode`
+  in `crates/omega_deltas`, plus
+  `routed_subagents_are_unattended_without_locking_other_cards`; and
+  `a_delegated_claude_subagent_is_put_in_bypass_permissions`,
+  `a_delegated_subagent_mode_is_set_through_config_options_when_that_is_the_surface`,
+  `an_unlisted_delegate_executor_is_left_on_its_own_mode`,
+  `a_delegation_is_refused_when_the_mode_is_not_on_offer` and the live
+  `a_delegated_claude_subagent_reads_outside_its_folder_without_asking` in
+  `crates/agent`.

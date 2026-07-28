@@ -95,10 +95,17 @@ impl AgentServer for CustomAgentServer {
         IconName::Terminal
     }
 
+    // OMEGA-DELTA-0161. The unattended mode is deliberately *not* returned from
+    // here. This value is only a connect-time suggestion: `AcpConnection` stores
+    // it and then immediately re-derives its default from settings
+    // (`AcpConnectionDefaults::observe_settings`), so a mode that is not written
+    // in settings is discarded before the first session is opened, and
+    // `new_session` sends no `session/set_mode` at all. Returning it here
+    // therefore did nothing — and if the clobber were ever fixed it would apply
+    // bypass to the owner's own panel thread, which is wider than the delegation
+    // this policy is about. The mode is applied where it can be awaited and
+    // checked instead: `create_external_acp_subagent`.
     fn default_mode(&self, cx: &App) -> Option<acp::SessionModeId> {
-        if let Some(mode) = unattended_mode_for_agent(self.agent_id().as_ref()) {
-            return Some(acp::SessionModeId::new(mode));
-        }
         let settings = cx.read_global(|settings: &SettingsStore, _| {
             settings
                 .get::<AllAgentServersSettings>(None)
@@ -344,7 +351,17 @@ impl AgentServer for CustomAgentServer {
     }
 }
 
-fn unattended_mode_for_agent(agent_id: &str) -> Option<&'static str> {
+/// The session mode a delegated coding agent has to be in to run unattended.
+///
+/// OMEGA-DELTA-0161. A delegated sub-agent's permission prompt has nobody to
+/// answer it: the parent is a model, the prompt renders on a subagent card, and
+/// the run stops there until a person notices. Agents not listed here are left
+/// on whatever mode they choose, because widening this set is a policy decision
+/// and not a default.
+///
+/// This is the only place the mapping lives. It is the caller's job to apply it
+/// and to prove it took effect — see `create_external_acp_subagent`.
+pub fn unattended_mode_for_agent(agent_id: &str) -> Option<&'static str> {
     match agent_id {
         CODEX_ID => Some("agent-full-access"),
         CLAUDE_AGENT_ID => Some("bypassPermissions"),

@@ -3316,6 +3316,56 @@ impl NativeThreadEnvironment {
                 session_id
             });
 
+            // OMEGA-DELTA-0161. Put the session in its unattended mode before
+            // the parent is given anything it can prompt, and refuse the
+            // delegation if that did not happen.
+            //
+            // Awaited, not detached: `new_session`'s own default-mode handling
+            // spawns the `session/set_mode` request and returns, so the first
+            // prompt can reach the agent while it is still in the mode it
+            // started in. A delegated sub-agent that stops on a confirmation
+            // has nobody to answer it.
+            //
+            // `set_mode` is sent even though `current_mode` may already report
+            // the wanted mode: that field is set optimistically before the
+            // request is answered, so reading it would accept the agent's
+            // starting mode as proof of a request that was never made.
+            let (modes, config_options) = cx.update(|cx| {
+                (
+                    connection.session_modes(&session_id, cx),
+                    connection.session_config_options(&session_id, cx),
+                )
+            });
+            let unattended = unattended_mode_for_subagent(
+                &agent_id,
+                &agent_name,
+                modes.as_deref(),
+                config_options.as_deref(),
+            )?;
+            match unattended {
+                None => {}
+                Some(UnattendedMode::Mode(mode)) => {
+                    let modes =
+                        modes.context("the session's modes went away between check and set")?;
+                    cx.update(|cx| modes.set_mode(mode.clone(), cx))
+                        .await
+                        .with_context(|| refused_unattended_mode(&agent_id, &agent_name, &mode))?;
+                }
+                Some(UnattendedMode::ConfigOption(config_id, value)) => {
+                    let config_options = config_options
+                        .context("the session's config options went away between check and set")?;
+                    cx.update(|cx| {
+                        config_options.set_config_option(
+                            config_id,
+                            acp::SessionConfigOptionValue::value_id(value.clone()),
+                            cx,
+                        )
+                    })
+                    .await
+                    .with_context(|| refused_unattended_mode(&agent_id, &agent_name, &value))?;
+                }
+            }
+
             Ok(Rc::new(ExternalAcpSubagentHandle::new(
                 session_id, acp_thread, agent_id, agent_name, connection,
             )) as Rc<dyn SubagentHandle>)
@@ -4316,6 +4366,119 @@ fn apply_skill_overrides(skills: &[Skill]) -> Vec<Skill> {
     result
 }
 
+/// OMEGA-DELTA-0161. Said once, so the two surfaces refuse in the same words.
+fn refused_unattended_mode(
+    agent_id: &str,
+    agent_name: &str,
+    mode: &impl std::fmt::Display,
+) -> String {
+    format!(
+        "The {agent_name} (`{agent_id}`) agent refused to enter `{mode}`. A delegated \
+         sub-agent that is not in that mode stops for tool confirmations nobody is there to \
+         answer, so this delegation is refused instead of started"
+    )
+}
+
+/// How a delegated sub-agent's unattended mode is actually put into effect.
+///
+/// OMEGA-DELTA-0161. There are two surfaces because ACP has two. An agent that
+/// answers `session/new` with `modes` gets `session/set_mode`; one that answers
+/// with `configOptions` gets `session/set_config_option`, because Zed keeps only
+/// whichever of the two the agent sent (`config_state` in `agent_servers::acp`)
+/// and `AgentConnection::session_modes` is `None` for the second kind.
+/// `claude-agent-acp` is the second kind, which is why "set the mode" and "the
+/// mode is set" were different statements.
+#[derive(Debug, PartialEq, Eq)]
+enum UnattendedMode {
+    Mode(acp::SessionModeId),
+    ConfigOption(acp::SessionConfigId, acp::SessionConfigValueId),
+}
+
+/// The mode a delegated sub-agent must be put into, or a refusal naming why it
+/// cannot be.
+///
+/// OMEGA-DELTA-0161. Every outcome is either "set this" or "do not start this
+/// delegation", and deliberately not "start it and hope". The mode is not
+/// cosmetic: without it the agent stops on its first confirmation request, and
+/// the only thing that can answer is the owner — which is the behaviour this
+/// exists to remove. A delegation that will stall is worse than one that refuses
+/// up front, because the refusal is visible immediately and the stall is only
+/// visible to whoever happens to look at the card.
+///
+/// The config-option surface is found by its declared `Mode` category rather
+/// than by an id string, so this reads the agent's own statement about which
+/// selector is the permission mode instead of assuming every agent spells it
+/// `mode`.
+fn unattended_mode_for_subagent(
+    agent_id: &str,
+    agent_name: &str,
+    modes: Option<&dyn acp_thread::AgentSessionModes>,
+    config_options: Option<&dyn acp_thread::AgentSessionConfigOptions>,
+) -> Result<Option<UnattendedMode>> {
+    let Some(wanted) = agent_servers::unattended_mode_for_agent(agent_id) else {
+        return Ok(None);
+    };
+
+    let mut offered = Vec::new();
+
+    if let Some(modes) = modes {
+        for mode in modes.all_modes() {
+            if &*mode.id.0 == wanted {
+                return Ok(Some(UnattendedMode::Mode(mode.id)));
+            }
+            offered.push(format!("`{}`", mode.id));
+        }
+    }
+
+    if let Some(config_options) = config_options {
+        for option in config_options.config_options() {
+            if option.category != Some(acp::SessionConfigOptionCategory::Mode) {
+                continue;
+            }
+            let acp::SessionConfigKind::Select(select) = &option.kind else {
+                continue;
+            };
+            // Grouping is presentation. A mode in a group is still on offer, so
+            // both shapes are read rather than only the flat one.
+            let values: Vec<&acp::SessionConfigSelectOption> = match &select.options {
+                acp::SessionConfigSelectOptions::Ungrouped(values) => values.iter().collect(),
+                acp::SessionConfigSelectOptions::Grouped(groups) => groups
+                    .iter()
+                    .flat_map(|group| group.options.iter())
+                    .collect(),
+                // The protocol may add a third shape. Reading nothing from one
+                // Omega does not understand refuses the delegation below, which
+                // is the safe direction: the alternative is starting a
+                // sub-agent whose mode was never established.
+                _ => Vec::new(),
+            };
+            for value in values {
+                if &*value.value.0 == wanted {
+                    return Ok(Some(UnattendedMode::ConfigOption(
+                        option.id.clone(),
+                        value.value.clone(),
+                    )));
+                }
+                offered.push(format!("`{}`", value.value));
+            }
+        }
+    }
+
+    if offered.is_empty() {
+        anyhow::bail!(
+            "The {agent_name} (`{agent_id}`) agent exposes no permission modes, so it cannot be \
+             put in `{wanted}`. A delegated sub-agent would stop for tool confirmations nobody \
+             is there to answer, so this delegation is refused instead of started"
+        );
+    }
+    let offered = offered.join(", ");
+    anyhow::bail!(
+        "The {agent_name} (`{agent_id}`) agent does not offer `{wanted}`; it offers {offered}. \
+         A delegated sub-agent in any other mode stops for tool confirmations nobody is there \
+         to answer, so this delegation is refused instead of started"
+    )
+}
+
 #[cfg(test)]
 mod internal_tests {
     use std::path::Path;
@@ -4334,6 +4497,188 @@ mod internal_tests {
     use serde_json::json;
     use settings::SettingsStore;
     use util::{path, rel_path::rel_path};
+
+    /// OMEGA-DELTA-0161. The `session/modes` surface: a fixed list of modes.
+    struct StubSessionModes(Vec<&'static str>);
+
+    impl acp_thread::AgentSessionModes for StubSessionModes {
+        fn current_mode(&self) -> acp::SessionModeId {
+            acp::SessionModeId::new(self.0.first().copied().unwrap_or("default"))
+        }
+
+        fn all_modes(&self) -> Vec<acp::SessionMode> {
+            self.0
+                .iter()
+                .map(|id| acp::SessionMode::new(acp::SessionModeId::new(*id), *id))
+                .collect()
+        }
+
+        fn set_mode(&self, _mode: acp::SessionModeId, _cx: &mut App) -> Task<Result<()>> {
+            Task::ready(Ok(()))
+        }
+    }
+
+    /// OMEGA-DELTA-0161. The `configOptions` surface, which is the one
+    /// `claude-agent-acp` actually answers `session/new` with: the permission
+    /// mode arrives as a `Select` carrying the `Mode` category, and
+    /// `AgentConnection::session_modes` is `None`.
+    ///
+    /// `category` is what is matched, not the id, so this deliberately spells
+    /// the id something other than `mode` — an agent is not obliged to name it
+    /// the way this one does.
+    struct StubConfigOptions(Vec<acp::SessionConfigOption>);
+
+    impl StubConfigOptions {
+        fn with_modes(values: Vec<&'static str>) -> Self {
+            let select = acp::SessionConfigSelect::new(
+                acp::SessionConfigValueId::new(values.first().copied().unwrap_or("default")),
+                values
+                    .iter()
+                    .map(|value| {
+                        acp::SessionConfigSelectOption::new(
+                            acp::SessionConfigValueId::new(*value),
+                            *value,
+                        )
+                    })
+                    .collect::<Vec<_>>(),
+            );
+            Self(vec![
+                acp::SessionConfigOption::new(
+                    acp::SessionConfigId::new("model"),
+                    "Model",
+                    acp::SessionConfigKind::Select(acp::SessionConfigSelect::new(
+                        acp::SessionConfigValueId::new("sonnet"),
+                        vec![acp::SessionConfigSelectOption::new(
+                            acp::SessionConfigValueId::new("sonnet"),
+                            "Sonnet",
+                        )],
+                    )),
+                )
+                .category(acp::SessionConfigOptionCategory::Model),
+                acp::SessionConfigOption::new(
+                    acp::SessionConfigId::new("permission-mode"),
+                    "Mode",
+                    acp::SessionConfigKind::Select(select),
+                )
+                .category(acp::SessionConfigOptionCategory::Mode),
+            ])
+        }
+    }
+
+    impl acp_thread::AgentSessionConfigOptions for StubConfigOptions {
+        fn config_options(&self) -> Vec<acp::SessionConfigOption> {
+            self.0.clone()
+        }
+
+        fn set_config_option(
+            &self,
+            _config_id: acp::SessionConfigId,
+            _value: acp::SessionConfigOptionValue,
+            _cx: &mut App,
+        ) -> Task<Result<Vec<acp::SessionConfigOption>>> {
+            Task::ready(Ok(self.0.clone()))
+        }
+    }
+
+    /// This is the owner's report against `0.2.0-rc21`, mechanised: a delegated
+    /// `claude-acp` sub-agent stopped on "Always Allow / Allow / Reject" while
+    /// he was away. The mode it needed was being asked for, and dropped.
+    #[test]
+    fn a_delegated_claude_subagent_is_put_in_bypass_permissions() {
+        let modes = StubSessionModes(vec![
+            "default",
+            "acceptEdits",
+            "plan",
+            "dontAsk",
+            "bypassPermissions",
+        ]);
+        assert_eq!(
+            unattended_mode_for_subagent("claude-acp", "Claude Code", Some(&modes), None)
+                .expect("bypassPermissions is on offer, so it is admitted"),
+            Some(UnattendedMode::Mode(acp::SessionModeId::new(
+                "bypassPermissions"
+            ))),
+        );
+
+        let modes = StubSessionModes(vec!["read-only", "agent", "agent-full-access"]);
+        assert_eq!(
+            unattended_mode_for_subagent("codex-acp", "Codex", Some(&modes), None)
+                .expect("agent-full-access is on offer, so it is admitted"),
+            Some(UnattendedMode::Mode(acp::SessionModeId::new(
+                "agent-full-access"
+            ))),
+        );
+    }
+
+    /// The live failure this was found by. `claude-agent-acp@0.62.0` answers
+    /// `session/new` with `configOptions` and no `modes`, and Zed keeps only one
+    /// of the two — so an implementation that reached for `session/set_mode`
+    /// alone found nothing to set and refused every real Claude delegation.
+    #[test]
+    fn a_delegated_subagent_mode_is_set_through_config_options_when_that_is_the_surface() {
+        let config_options = StubConfigOptions::with_modes(vec![
+            "default",
+            "acceptEdits",
+            "plan",
+            "dontAsk",
+            "bypassPermissions",
+        ]);
+        assert_eq!(
+            unattended_mode_for_subagent("claude-acp", "Claude Code", None, Some(&config_options))
+                .expect("the mode selector carries bypassPermissions, so it is admitted"),
+            Some(UnattendedMode::ConfigOption(
+                acp::SessionConfigId::new("permission-mode"),
+                acp::SessionConfigValueId::new("bypassPermissions"),
+            )),
+        );
+    }
+
+    /// An agent Omega has no unattended mode for keeps whatever mode it chose.
+    /// Widening the set is a policy decision, not a default.
+    #[test]
+    fn an_unlisted_delegate_executor_is_left_on_its_own_mode() {
+        let modes = StubSessionModes(vec!["default"]);
+        assert_eq!(
+            unattended_mode_for_subagent("gemini", "Gemini", Some(&modes), None)
+                .expect("an unlisted agent is not a refusal"),
+            None,
+        );
+    }
+
+    /// The peer decides what it offers. `claude-code-acp` withholds
+    /// `bypassPermissions` when it is running as root, and a mode nobody
+    /// accepted must not be reported as applied — a delegation that will stall
+    /// is worse than one that refuses up front.
+    #[test]
+    fn a_delegation_is_refused_when_the_mode_is_not_on_offer() {
+        let modes = StubSessionModes(vec!["default", "acceptEdits", "plan", "dontAsk"]);
+        let error = unattended_mode_for_subagent("claude-acp", "Claude Code", Some(&modes), None)
+            .expect_err("a mode the agent never offered cannot be assumed");
+        let error = error.to_string();
+        assert!(error.contains("bypassPermissions"), "{error}");
+        assert!(error.contains("`dontAsk`"), "{error}");
+        assert!(error.contains("refused instead of started"), "{error}");
+
+        // The same refusal on the other surface: a mode selector that does not
+        // carry it is not a reason to start anyway.
+        let config_options =
+            StubConfigOptions::with_modes(vec!["default", "acceptEdits", "plan", "dontAsk"]);
+        let error =
+            unattended_mode_for_subagent("claude-acp", "Claude Code", None, Some(&config_options))
+                .expect_err("a value the selector never offered cannot be assumed");
+        let error = error.to_string();
+        assert!(error.contains("bypassPermissions"), "{error}");
+        assert!(error.contains("`dontAsk`"), "{error}");
+        // The model selector is not a permission mode, and must not be read as
+        // one just because it is also a `Select`.
+        assert!(!error.contains("`sonnet`"), "{error}");
+
+        let error = unattended_mode_for_subagent("claude-acp", "Claude Code", None, None)
+            .expect_err("an agent with neither surface cannot be put in a mode");
+        let error = error.to_string();
+        assert!(error.contains("no permission modes"), "{error}");
+        assert!(error.contains("bypassPermissions"), "{error}");
+    }
 
     fn make_global_skill(name: &str, description: &str) -> Skill {
         Skill {

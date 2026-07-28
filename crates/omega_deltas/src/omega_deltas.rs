@@ -149,6 +149,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0158",
     "OMEGA-DELTA-0159",
     "OMEGA-DELTA-0160",
+    "OMEGA-DELTA-0161",
 ];
 
 pub const GOOGLE_PROVIDER_PATH: &str = "crates/language_models/src/provider/google.rs";
@@ -19173,6 +19174,126 @@ mod tests {
                 "The macOS platform regained Security.framework credential call `{forbidden}`."
             );
         }
+    }
+
+    /// OMEGA-DELTA-0161. The unattended mode has to reach the agent, and the
+    /// agent has to have answered, before a delegated sub-agent is handed back.
+    ///
+    /// The first cut of this policy set the mode in `CustomAgentServer::
+    /// default_mode` and looked correct at every point a reader would check:
+    /// the mapping was there, a test asserted it, and `connect` carried the
+    /// value. It never took effect. `AcpConnection` re-derives its default from
+    /// `agent_servers.<id>.default_mode` the moment it is built, so a mode that
+    /// is not written in settings is `None` before the first session exists and
+    /// `new_session` sends no `session/set_mode` at all. The owner found it the
+    /// only way it could be found: a delegated Claude sub-agent stopped on
+    /// `Always Allow / Allow / Reject` while he was away from the machine.
+    ///
+    /// So this asserts the two things that failure needed, rather than the
+    /// mapping alone, which is what `routed_subagents_are_unattended_without_
+    /// locking_other_cards` already covers:
+    ///
+    /// 1. `default_mode` does not carry it, because that is the path where it
+    ///    is silently discarded — and where, if the discard were ever repaired,
+    ///    it would apply to the owner's own panel thread as well.
+    /// 2. The delegate path sets it and **awaits** the agent's answer. A
+    ///    detached request races the first prompt, and a `set_mode` whose result
+    ///    is dropped reports success for a mode that was refused.
+    #[test]
+    fn a_delegated_subagent_is_admitted_only_in_its_unattended_mode() {
+        let servers = without_comments(&read_repository_file("crates/agent_servers/src/custom.rs"));
+        let default_mode = method_body(
+            &servers,
+            "fn default_mode(&self, cx: &App)",
+            &repository_path("crates/agent_servers/src/custom.rs"),
+            "The unattended mode must not be reintroduced on the connection default.",
+        );
+        assert!(
+            !default_mode.contains("unattended_mode_for_agent"),
+            "OMEGA-DELTA-0161: `default_mode` returns the unattended mode again. \
+             The connection overwrites that value from settings before the first \
+             session opens, so it does nothing except read as though it works — \
+             and repairing the overwrite would widen bypass to the owner's own \
+             thread. Set it on the delegated session, where it can be awaited."
+        );
+
+        let agent = without_comments(&read_repository_file("crates/agent/src/agent.rs"));
+        assert!(
+            agent.contains("unattended_mode_for_subagent"),
+            "OMEGA-DELTA-0161: the delegate path no longer decides an unattended \
+             mode, so a delegated sub-agent opens in whatever mode the agent \
+             defaults to and stops for tool confirmations nobody can answer."
+        );
+        let admission = agent
+            .split_once("fn unattended_mode_for_subagent")
+            .map(|(_, rest)| rest)
+            .and_then(|rest| rest.split_once("\n}\n"))
+            .map(|(body, _)| body)
+            .expect("OMEGA-DELTA-0161: `unattended_mode_for_subagent` is unreadable");
+        assert!(
+            admission.contains("anyhow::bail!"),
+            "OMEGA-DELTA-0161: a mode the agent does not offer no longer refuses \
+             the delegation. A sub-agent that will stall is worse than one that \
+             refuses up front: the refusal is seen at once, the stall only by \
+             whoever looks at the card."
+        );
+
+        let spawn = agent
+            .split_once("fn create_external_acp_subagent")
+            .map(|(_, rest)| rest)
+            .and_then(|rest| rest.split_once("\n    }\n"))
+            .map(|(body, _)| body)
+            .expect("OMEGA-DELTA-0161: `create_external_acp_subagent` is unreadable");
+        assert!(
+            spawn.contains("unattended_mode_for_subagent"),
+            "OMEGA-DELTA-0161: the delegated session is opened without being put \
+             in its unattended mode."
+        );
+
+        // Both surfaces, because ACP has two and the agent chooses. Live,
+        // `claude-agent-acp` answers `session/new` with `configOptions` and no
+        // `modes`, so a delegate path that only knows `session/set_mode`
+        // refuses every real Claude delegation — which is how the first cut of
+        // this delta was caught.
+        //
+        // The `.await` window is the statement each call sits in, not the rest
+        // of the function, so a later unrelated `.await` cannot satisfy it.
+        for call in ["set_mode", "set_config_option"] {
+            assert!(
+                spawn.contains(call),
+                "OMEGA-DELTA-0161: the delegate path no longer sets the mode \
+                 through `{call}`. An agent that expresses its permission mode \
+                 on that surface would be left in whatever mode it started in."
+            );
+            // Up to the statement's own terminator, not `?;`: a call that
+            // dropped its result would have no `?` left to find, and the check
+            // would report an unreadable call rather than the missing `.await`
+            // it is actually looking at.
+            let statement = spawn
+                .split_once(call)
+                .map(|(_, rest)| rest)
+                .and_then(|rest| rest.split_once(';'))
+                .map(|(statement, _)| statement)
+                .unwrap_or_else(|| panic!("OMEGA-DELTA-0161: the `{call}` call is unreadable"));
+            assert!(
+                statement.contains(".await"),
+                "OMEGA-DELTA-0161: the delegated session's `{call}` result is \
+                 not awaited. A detached request races the parent's first \
+                 prompt, and a dropped result reports success for a mode the \
+                 agent refused."
+            );
+        }
+
+        // Found by the agent's own declared category rather than by an id
+        // string, so this reads the agent's statement about which selector is
+        // the permission mode instead of assuming every agent spells it `mode`.
+        assert!(
+            admission.contains("SessionConfigOptionCategory::Mode"),
+            "OMEGA-DELTA-0161: the mode selector is no longer identified by its \
+             declared category. Matching an id string instead would find the \
+             wrong selector on an agent that names it something else, and none \
+             on an agent that names it nothing."
+        );
     }
 
     #[test]
