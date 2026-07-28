@@ -3644,14 +3644,13 @@ impl AgentPanel {
     fn render_sidebar(
         &self,
         layout: omega_sidebar::Layout,
-        window: &Window,
+        _window: &Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         if !omega_zero_base::is_active() && !self.workbench_shell_enabled {
             return None;
         }
 
-        let traffic_lights = cfg!(target_os = "macos") && !window.is_fullscreen();
         let (background, border) = {
             let colors = cx.theme().colors();
             (colors.panel_background, colors.border)
@@ -3674,8 +3673,7 @@ impl AgentPanel {
                 column
                     .id("omega-sidebar-rail")
                     .items_center()
-                    .when(traffic_lights, |this| this.pt(Tab::container_height(cx)))
-                    .when(!traffic_lights, |this| this.pt_1p5())
+                    .pt_1p5()
                     .child(
                         IconButton::new("expand-omega-sidebar", IconName::ChevronRight)
                             .icon_size(IconSize::Small)
@@ -3726,9 +3724,6 @@ impl AgentPanel {
                         .h(Tab::container_height(cx))
                         .flex_shrink_0()
                         .px_2()
-                        .when(traffic_lights, |this| {
-                            this.pl(px(ui::utils::TRAFFIC_LIGHT_PADDING))
-                        })
                         .justify_between()
                         .bg(cx.theme().colors().tab_bar_background)
                         .border_b_1()
@@ -9815,8 +9810,11 @@ impl Render for AgentPanel {
                         this.focus_thread_transcript(window, cx);
                     },
                 ))
-                .children(self.render_sidebar(layout.sidebar, window, cx))
+                // The activity rail hugs the window's left edge, with the
+                // threads sidebar beside it and the dock and content after —
+                // an icon rail floating between two panels reads as broken.
                 .child(self.render_activity_rail(window, cx))
+                .children(self.render_sidebar(layout.sidebar, window, cx))
                 .children(self.render_work_surface_dock(layout, window, cx))
                 .child(v_flex().flex_1().min_w_0().h_full().child(content))
                 .into_any_element()

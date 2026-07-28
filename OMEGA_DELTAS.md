@@ -6271,10 +6271,14 @@ for that stretch is three `OMEGA-DELTA-0115: a person chose …` lines, each
 followed a second later by an ACP connection and by nothing else — no
 `OMEGA-DELTA-0095` attach, no Exo lane, because the router never ran.
 
-The sidebar header is part of the same truthful labeling contract. On macOS it
-reserves the platform traffic-light safe area before drawing **Omega**, rather
-than placing the label behind the close, minimize and zoom controls. When the
-sidebar is collapsed, its expand control starts below that title-bar row.
+The sidebar header is part of the same truthful labeling contract. It used to
+reserve the macOS traffic-light safe area before drawing **Omega**, because at
+the time nothing else stood between the header and the window controls. Then
+`OMEGA-DELTA-0157` installed the platform titlebar, which spans the window
+above this header and owns that safe area, so the reservation became a wide
+blank strip in front of the label with no control in it. The header now draws
+**Omega** flush left with the same padding as the rows under it, and the
+collapsed rail's expand control starts at the top of the column.
 
 **So in zero base a new thread is built on Omega's router and nothing else.**
 The router implements all four executors; sitting directly on one of them is

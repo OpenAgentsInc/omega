@@ -18284,10 +18284,13 @@ mod tests {
              toolbar's `border` right next to it."
         );
         assert!(
-            sidebar_header.contains("ui::utils::TRAFFIC_LIGHT_PADDING"),
-            "OMEGA-DELTA-0131: the sidebar header no longer reserves the macOS \
-             traffic-light safe area, so its Omega label is hidden behind the \
-             close, minimize and zoom controls."
+            !sidebar_header.contains("TRAFFIC_LIGHT_PADDING"),
+            "OMEGA-DELTA-0131: the sidebar header reserves the macOS \
+             traffic-light safe area again. `OMEGA-DELTA-0157` installed the \
+             platform titlebar, which spans the window above this header and \
+             owns that safe area, so padding the header too pushes the Omega \
+             label into the middle of the sidebar for no control that is \
+             actually there."
         );
     }
 
