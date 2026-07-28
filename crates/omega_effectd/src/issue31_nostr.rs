@@ -51,9 +51,9 @@ pub const SARAH_REMINDER_KIND: u16 = 30_300;
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum Issue31NostrError {
-    #[error("invalid Issue 31 record: {0}")]
+    #[error("invalid device mirror record: {0}")]
     Invalid(String),
-    #[error("Issue 31 record decoding failed: {0}")]
+    #[error("device mirror record decoding failed: {0}")]
     Decode(String),
 }
 
@@ -339,7 +339,7 @@ impl Issue31PairingScope {
             "request_provider_handoff" => Ok(Self::RequestProviderHandoff),
             "act_in_community" => Ok(Self::ActInCommunity),
             _ => Err(Issue31NostrError::Invalid(
-                "unknown Issue 31 pairing scope".into(),
+                "unknown device pairing scope".into(),
             )),
         }
     }
@@ -773,7 +773,7 @@ pub fn fold_issue31_grant(
         if let Some(prior) = unique_events.get(event.event_id.as_str()) {
             if **prior != event.record {
                 return Err(Issue31NostrError::Invalid(format!(
-                    "Issue 31 event {} has conflicting records",
+                    "device mirror event {} has conflicting records",
                     event.event_id
                 )));
             }
@@ -823,7 +823,7 @@ pub fn fold_issue31_grant(
         )
     }) {
         return Err(Issue31NostrError::Invalid(format!(
-            "Issue 31 grant {grant_ref} has an identity fork"
+            "device pairing grant {grant_ref} has an identity fork"
         )));
     }
 
@@ -876,7 +876,7 @@ pub fn fold_issue31_grant(
             .is_some_and(|first| records.iter().skip(1).any(|record| *record != *first))
         {
             return Err(Issue31NostrError::Invalid(format!(
-                "Issue 31 grant {grant_ref} forks at generation {generation}"
+                "device pairing grant {grant_ref} forks at generation {generation}"
             )));
         }
     }
@@ -952,17 +952,17 @@ pub fn fold_issue31_grant(
             }
             (None, Issue31PairingRecord::GrantRenewal { .. }) => {
                 return Err(Issue31NostrError::Invalid(format!(
-                    "Issue 31 grant {grant_ref} renewal has no initial grant"
+                    "device pairing grant {grant_ref} renewal has no initial grant"
                 )));
             }
             (Some(_), Issue31PairingRecord::GrantRenewal { .. }) => {
                 return Err(Issue31NostrError::Invalid(format!(
-                    "Issue 31 grant {grant_ref} renewal lineage is invalid"
+                    "device pairing grant {grant_ref} renewal lineage is invalid"
                 )));
             }
             (Some(_), Issue31PairingRecord::ScopedGrant { .. }) => {
                 return Err(Issue31NostrError::Invalid(format!(
-                    "Issue 31 grant {grant_ref} has more than one initial grant"
+                    "device pairing grant {grant_ref} has more than one initial grant"
                 )));
             }
             (_, Issue31PairingRecord::GrantRevocation { .. }) => {}
@@ -1012,7 +1012,7 @@ fn validate_scoped_grant_pairing_chain(
         .copied()
     else {
         return Err(Issue31NostrError::Invalid(
-            "Issue 31 scoped grant has no pairing response".into(),
+            "device pairing grant has no pairing response".into(),
         ));
     };
     let Some(Issue31PairingRecord::PairingChallenge {
@@ -1028,7 +1028,7 @@ fn validate_scoped_grant_pairing_chain(
         .copied()
     else {
         return Err(Issue31NostrError::Invalid(
-            "Issue 31 pairing response has no challenge".into(),
+            "device pairing response has no challenge".into(),
         ));
     };
     let Some(Issue31PairingRecord::PairingRequest {
@@ -1043,7 +1043,7 @@ fn validate_scoped_grant_pairing_chain(
         .copied()
     else {
         return Err(Issue31NostrError::Invalid(
-            "Issue 31 pairing challenge has no request".into(),
+            "device pairing challenge has no request".into(),
         ));
     };
     for (candidate_host_ref, candidate_host_key, candidate_device_key) in [
@@ -1056,18 +1056,18 @@ fn validate_scoped_grant_pairing_chain(
             || candidate_device_key != device_public_key_hex
         {
             return Err(Issue31NostrError::Invalid(
-                "Issue 31 pairing chain changes host or device identity".into(),
+                "device pairing chain changes host or device identity".into(),
             ));
         }
     }
     if response_challenge != challenge {
         return Err(Issue31NostrError::Invalid(
-            "Issue 31 pairing response does not answer its challenge".into(),
+            "device pairing response does not answer its challenge".into(),
         ));
     }
     if scopes.iter().any(|scope| !requested_scopes.contains(scope)) {
         return Err(Issue31NostrError::Invalid(
-            "Issue 31 scoped grant exceeds requested scopes".into(),
+            "device pairing grant exceeds requested scopes".into(),
         ));
     }
     if request_issued_at > challenge_issued_at
@@ -1075,7 +1075,7 @@ fn validate_scoped_grant_pairing_chain(
         || response_issued_at > grant_issued_at
     {
         return Err(Issue31NostrError::Invalid(
-            "Issue 31 pairing chain time order is invalid".into(),
+            "device pairing chain time order is invalid".into(),
         ));
     }
     Ok(())
@@ -1472,7 +1472,7 @@ impl Issue31CommandArguments {
                 reminder_id,
             } if action_ref == ISSUE31_ACTION_CANCEL_REMINDER && valid_hex32(reminder_id) => Ok(()),
             _ => Err(Issue31NostrError::Invalid(
-                "Issue 31 command arguments violate their action contract".into(),
+                "device mirror command arguments violate their action contract".into(),
             )),
         }
     }
@@ -2472,7 +2472,7 @@ impl Issue31HostController {
         if self.configuration.conversation.is_empty() {
             if !valid_conversation_tag(conversation) {
                 return Err(Issue31NostrError::Invalid(
-                    "invalid Issue 31 migration conversation".into(),
+                    "invalid device mirror migration conversation".into(),
                 ));
             }
             self.configuration.conversation = conversation.into();
@@ -2492,14 +2492,14 @@ impl Issue31HostController {
                 .any(|public_key| !valid_hex64(public_key))
         {
             return Err(Issue31NostrError::Invalid(
-                "Issue 31 device allowlist must contain one to 32 lowercase public keys".into(),
+                "paired-device allowlist must contain one to 32 lowercase public keys".into(),
             ));
         }
         let public_key_count = public_keys.len();
         let admitted = public_keys.into_iter().collect::<BTreeSet<_>>();
         if admitted.len() != public_key_count {
             return Err(Issue31NostrError::Invalid(
-                "Issue 31 device allowlist contains duplicates".into(),
+                "paired-device allowlist contains duplicates".into(),
             ));
         }
         validate_scopes(&approved_scopes, "owner-approved scopes")?;
@@ -2624,7 +2624,7 @@ impl Issue31HostController {
     ) -> Result<Vec<String>, Issue31NostrError> {
         if !valid_hex64(device_public_key_hex) {
             return Err(Issue31NostrError::Invalid(
-                "Issue 31 device public key is invalid".into(),
+                "paired-device public key is invalid".into(),
             ));
         }
         let outstanding = self.outstanding_device_revocations(device_public_key_hex);
@@ -2632,7 +2632,7 @@ impl Issue31HostController {
             > MAX_ISSUE31_PROCESSED_EVENTS
         {
             return Err(Issue31NostrError::Invalid(
-                "Issue 31 cleared revocation bound is exhausted".into(),
+                "device mirror cleared revocation bound is exhausted".into(),
             ));
         }
         for event_id in &outstanding {
@@ -2678,7 +2678,7 @@ impl Issue31HostController {
                 > MAX_ISSUE31_PROJECTED_SOURCE_EVENTS
         {
             return Err(Issue31NostrError::Invalid(
-                "persisted Issue 31 host state exceeds its bounds".into(),
+                "persisted device mirror host state exceeds its bounds".into(),
             ));
         }
         for event in &self.pairing_events {
@@ -3147,7 +3147,7 @@ impl Issue31HostController {
     {
         if !valid_hex64(&event.event_id) {
             return Err(Issue31NostrError::Invalid(
-                "Issue 31 command event id is invalid".into(),
+                "device mirror command event id is invalid".into(),
             ));
         }
         if self.processed_command_event_ids.contains(&event.event_id) {
@@ -3156,7 +3156,7 @@ impl Issue31HostController {
         event.record.validate()?;
         if self.processed_command_event_ids.len() >= MAX_ISSUE31_PROCESSED_EVENTS {
             return Err(Issue31NostrError::Invalid(
-                "Issue 31 processed command event bound is exhausted".into(),
+                "device mirror processed command event bound is exhausted".into(),
             ));
         }
         let Issue31CommandRecord::CommandIntent {
@@ -3187,7 +3187,7 @@ impl Issue31HostController {
         }
         if self.command_results.len() >= MAX_ISSUE31_COMMAND_RESULTS {
             return Err(Issue31NostrError::Invalid(
-                "Issue 31 command result bound is exhausted".into(),
+                "device mirror command result bound is exhausted".into(),
             ));
         }
 
@@ -3264,7 +3264,7 @@ impl Issue31HostController {
     {
         if !valid_hex64(&event_id) {
             return Err(Issue31NostrError::Invalid(
-                "Issue 31 command v2 event id is invalid".into(),
+                "device mirror command v2 event id is invalid".into(),
             ));
         }
         if self.processed_command_event_ids.contains(&event_id) {
@@ -3273,7 +3273,7 @@ impl Issue31HostController {
         record.validate()?;
         if self.processed_command_event_ids.len() >= MAX_ISSUE31_PROCESSED_EVENTS {
             return Err(Issue31NostrError::Invalid(
-                "Issue 31 processed command event bound is exhausted".into(),
+                "device mirror processed command event bound is exhausted".into(),
             ));
         }
         let Issue31CommandRecordV2::CommandIntent {
@@ -3303,7 +3303,7 @@ impl Issue31HostController {
         }
         if self.command_results_v2.len() >= MAX_ISSUE31_COMMAND_RESULTS {
             return Err(Issue31NostrError::Invalid(
-                "Issue 31 command v2 result bound is exhausted".into(),
+                "device mirror command v2 result bound is exhausted".into(),
             ));
         }
 
@@ -3429,7 +3429,7 @@ impl Issue31HostController {
             && !self.source_was_projected(&grant_ref, generation, &source_event_id)
         {
             return Err(Issue31NostrError::Invalid(
-                "Issue 31 projected source event bound is exhausted".into(),
+                "device mirror projected source event bound is exhausted".into(),
             ));
         }
         self.projected_source_event_ids
@@ -3445,7 +3445,7 @@ impl Issue31HostController {
     ) -> Result<(), Issue31NostrError> {
         if !valid_hex64(&event.event_id) {
             return Err(Issue31NostrError::Invalid(
-                "Issue 31 pairing event id is invalid".into(),
+                "device pairing event id is invalid".into(),
             ));
         }
         if let Some(prior) = self
@@ -3455,7 +3455,7 @@ impl Issue31HostController {
         {
             if prior.record != event.record {
                 return Err(Issue31NostrError::Invalid(format!(
-                    "Issue 31 event {} has conflicting records",
+                    "device mirror event {} has conflicting records",
                     event.event_id
                 )));
             }
@@ -3465,7 +3465,7 @@ impl Issue31HostController {
             || self.processed_pairing_event_ids.len() >= MAX_ISSUE31_PROCESSED_EVENTS
         {
             return Err(Issue31NostrError::Invalid(
-                "Issue 31 pairing event bound is exhausted".into(),
+                "device pairing event bound is exhausted".into(),
             ));
         }
         self.processed_pairing_event_ids
@@ -3752,7 +3752,7 @@ fn validate_reminder_arguments(
         || expiration.is_some_and(|expiration| expiration <= not_before)
     {
         return Err(Issue31NostrError::Invalid(
-            "invalid Issue 31 reminder arguments".into(),
+            "invalid device mirror reminder arguments".into(),
         ));
     }
     Ok(())
@@ -3783,7 +3783,7 @@ fn validate_authority_projection(
         || (outcome.state != "pending" && outcome.outcome_ref.is_none())
     {
         return Err(Issue31NostrError::Invalid(
-            "invalid Issue 31 authority receipt projection".into(),
+            "invalid device mirror authority receipt projection".into(),
         ));
     }
     Ok(())

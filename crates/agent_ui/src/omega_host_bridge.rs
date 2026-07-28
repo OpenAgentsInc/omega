@@ -521,7 +521,9 @@ fn resolve_approved_device_scopes(
             .map(|scope| omega_effectd::Issue31PairingScope::parse(scope))
             .collect::<Result<Vec<_>, _>>()
             .map_err(|error| {
-                unavailable(format!("Issue 31 device scope policy is invalid: {error}"))
+                unavailable(format!(
+                    "The device mirror scope policy is invalid: {error}"
+                ))
             }),
         None => Ok(DEFAULT_DEVICE_SCOPES.to_vec()),
     }
@@ -843,7 +845,7 @@ fn start_issue31_agent_command_pump(
             let pending = match pending {
                 Ok(pending) => pending,
                 Err(error) => {
-                    log::warn!("Issue31 mobile command sync failed: {error:#}");
+                    log::warn!("Device mirror command sync failed: {error:#}");
                     continue;
                 }
             };
@@ -869,7 +871,7 @@ fn start_issue31_agent_command_pump(
                         Ok(false) => continue,
                         Err(error) => {
                             log::error!(
-                                "Issue31 mobile command {} could not reserve durable admission: {error:#}",
+                                "Device mirror command {} could not reserve durable admission: {error:#}",
                                 command.idempotency_ref
                             );
                             continue;
@@ -897,12 +899,12 @@ fn start_issue31_agent_command_pump(
                             .await;
                         if let Err(retry_error) = retry_result {
                             log::error!(
-                                "Issue31 mobile command {} was not admitted and its durable retry could not be restored: {retry_error:#}",
+                                "Device mirror command {} was not admitted and its durable retry could not be restored: {retry_error:#}",
                                 command.idempotency_ref
                             );
                         } else {
                             log::warn!(
-                                "Issue31 mobile command {} is waiting for its thread: {error:#}",
+                                "Device mirror command {} is waiting for its thread: {error:#}",
                                 command.idempotency_ref
                             );
                         }
@@ -923,7 +925,7 @@ fn start_issue31_agent_command_pump(
                     .await
                 {
                     log::error!(
-                        "Issue31 mobile command {} was admitted but not durably completed: {error:#}",
+                        "Device mirror command {} was admitted but not durably completed: {error:#}",
                         command.idempotency_ref
                     );
                 }
@@ -976,7 +978,7 @@ fn admit_issue31_agent_thread_command(
                 .map_err(anyhow::Error::msg)?;
             if let Err(error) = publish_device_thread(state, &command.thread_ref, cx) {
                 log::warn!(
-                    "Issue31 mobile command {} was admitted but its mirror refresh failed: {error:#}",
+                    "Device mirror command {} was admitted but its mirror refresh failed: {error:#}",
                     command.idempotency_ref
                 );
             }

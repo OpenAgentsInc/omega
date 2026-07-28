@@ -1544,7 +1544,9 @@ impl SarahConversationClient {
             SARAH_METHOD_DEVICE_GRANTS => {
                 self.sync_issue31_host()?;
                 let controller = self.issue31_host.as_ref().ok_or_else(|| {
-                    SarahConversationError::InvalidRequest("Issue 31 host is not configured".into())
+                    SarahConversationError::InvalidRequest(
+                        "device mirror host is not configured".into(),
+                    )
                 })?;
                 let grants = controller
                     .grant_projections(unix_now())
@@ -1821,7 +1823,7 @@ impl SarahConversationClient {
         self.ensure_connected()?;
         self.ensure_command_result_capacity(&idempotency_ref)?;
         let mut controller = self.issue31_host.take().ok_or_else(|| {
-            SarahConversationError::InvalidRequest("Issue 31 host is not configured".into())
+            SarahConversationError::InvalidRequest("device mirror host is not configured".into())
         })?;
         let result = (|| {
             let record = controller
@@ -1863,7 +1865,7 @@ impl SarahConversationClient {
         self.ensure_connected()?;
         self.ensure_command_result_capacity(&idempotency_ref)?;
         let mut controller = self.issue31_host.take().ok_or_else(|| {
-            SarahConversationError::InvalidRequest("Issue 31 host is not configured".into())
+            SarahConversationError::InvalidRequest("device mirror host is not configured".into())
         })?;
         let result = (|| {
             let record = controller
@@ -1908,7 +1910,7 @@ impl SarahConversationClient {
         self.ensure_connected()?;
         self.ensure_command_result_capacity(&idempotency_ref)?;
         let controller = self.issue31_host.take().ok_or_else(|| {
-            SarahConversationError::InvalidRequest("Issue 31 host is not configured".into())
+            SarahConversationError::InvalidRequest("device mirror host is not configured".into())
         })?;
         // Mutate a candidate so a refused or unpersistable re-admission cannot
         // leave a cleared revocation behind in the live controller.
@@ -2253,17 +2255,17 @@ impl SarahConversationClient {
                 return Ok(());
             }
             return Err(SarahConversationError::Internal(
-                "Issue 31 quarantine reason changed for the same event".into(),
+                "device mirror quarantine reason changed for the same event".into(),
             ));
         }
         if self.issue31_quarantined_events.len() >= MAX_QUARANTINED_ISSUE31_EVENTS {
             return Err(SarahConversationError::Internal(
-                "Issue 31 quarantine bound is exhausted".into(),
+                "device mirror quarantine bound is exhausted".into(),
             ));
         }
         if !is_lower_hex_64(event_id) || !crate::is_issue31_public_ref(reason_ref) {
             return Err(SarahConversationError::Internal(
-                "Issue 31 quarantine record is invalid".into(),
+                "device mirror quarantine record is invalid".into(),
             ));
         }
         self.issue31_quarantined_events
@@ -2285,7 +2287,7 @@ impl SarahConversationClient {
             ["d", discovery.host_ref()],
             ["k", "1059"],
             ["t", "omega-issue31-host"],
-            ["alt", "Omega Issue 31 Nostr host discovery"],
+            ["alt", "Omega device mirror host discovery"],
         ]
         .into_iter()
         .map(|tag| {
@@ -2471,7 +2473,7 @@ impl SarahConversationClient {
         }
         let controller = self.issue31_host.as_ref().ok_or_else(|| {
             SarahConversationError::Internal(
-                "Issue 31 controller was absent during durable commit".into(),
+                "device mirror controller was absent during durable commit".into(),
             )
         })?;
         self.persist_issue31_host_state_with_controller(controller)
@@ -2486,7 +2488,7 @@ impl SarahConversationClient {
             if remaining == 0 {
                 self.issue31_fail_commit_after.set(None);
                 return Err(SarahConversationError::Internal(
-                    "injected Issue 31 durable commit failure".into(),
+                    "injected device mirror durable commit failure".into(),
                 ));
             }
             self.issue31_fail_commit_after
@@ -3009,7 +3011,7 @@ impl SarahConversationClient {
         let source = self.load_issue31_source_event(source_event_id)?;
         if source.pubkey != self.config.identity.owner_public_key_hex {
             return Err(SarahConversationError::InvalidRequest(
-                "Issue 31 projection source is not owner-authored".into(),
+                "device mirror projection source is not owner-authored".into(),
             ));
         }
         let emission = emit_issue31_owner_projection(Issue31OwnerProjectionInput {
@@ -3057,7 +3059,7 @@ impl SarahConversationClient {
             cursor = Some(next_cursor);
         }
         Err(SarahConversationError::Relay(
-            "confirmed Issue 31 source event was not observable after publish".into(),
+            "confirmed device mirror source event was not observable after publish".into(),
         ))
     }
 
@@ -3241,11 +3243,11 @@ impl SarahConversationClient {
         grant: &Issue31GrantState,
     ) -> Result<Value, SarahConversationError> {
         let object = document.as_object().ok_or_else(|| {
-            SarahConversationError::Internal("Issue 31 adjunct is not a record".into())
+            SarahConversationError::Internal("device mirror adjunct is not a record".into())
         })?;
         if object.get("schema").and_then(Value::as_str) != Some(schema) {
             return Err(SarahConversationError::Internal(
-                "Issue 31 adjunct does not carry its own schema".into(),
+                "device mirror adjunct does not carry its own schema".into(),
             ));
         }
         // The seal proves who signed; it cannot prove which host the body
@@ -3254,7 +3256,7 @@ impl SarahConversationClient {
         // would bind another machine's state to this pairing.
         if object.get("hostRef").and_then(Value::as_str) != Some(grant.host_ref.as_str()) {
             return Err(SarahConversationError::Internal(
-                "Issue 31 adjunct describes a host this grant does not name".into(),
+                "device mirror adjunct describes a host this grant does not name".into(),
             ));
         }
         if ISSUE31_ADJUNCT_DELIVERY_KEYS
@@ -3262,7 +3264,7 @@ impl SarahConversationClient {
             .any(|key| object.contains_key(*key))
         {
             return Err(SarahConversationError::Internal(
-                "Issue 31 adjunct arrived already claiming a delivery binding".into(),
+                "device mirror adjunct arrived already claiming a delivery binding".into(),
             ));
         }
         let mut addressed = object.clone();
@@ -3345,7 +3347,7 @@ impl SarahConversationClient {
             // would publish a refusal rather than a projection.
             if host.get("snapshotRef") != detail.get("snapshotRef") {
                 return Err(SarahConversationError::Internal(
-                    "Issue 31 Full Auto detail is not bound to the snapshot beside it".into(),
+                    "device mirror Full Auto detail is not bound to the snapshot beside it".into(),
                 ));
             }
             let host_content = serde_json::to_string(&host)
@@ -4281,9 +4283,11 @@ fn finish_durable_operation<T>(
         (Ok(value), Ok(())) => Ok(value),
         (Err(error), Ok(())) => Err(error),
         (Ok(_), Err(error)) => Err(error),
-        (Err(operation_error), Err(persistence_error)) => Err(SarahConversationError::Internal(
-            format!("{operation_error}; durable Issue 31 commit also failed: {persistence_error}"),
-        )),
+        (Err(operation_error), Err(persistence_error)) => {
+            Err(SarahConversationError::Internal(format!(
+                "{operation_error}; durable device mirror commit also failed: {persistence_error}"
+            )))
+        }
     }
 }
 
@@ -4292,7 +4296,7 @@ fn durable_private_outbox_into_runtime(
 ) -> Result<BTreeMap<String, PendingIssue31PrivatePublish>, SarahConversationError> {
     if durable.len() > MAX_PRIVATE_OUTBOX_ITEMS {
         return Err(SarahConversationError::Internal(
-            "durable Issue 31 outbox exceeds its item bound".into(),
+            "durable device mirror outbox exceeds its item bound".into(),
         ));
     }
     durable
@@ -4304,7 +4308,7 @@ fn durable_private_outbox_into_runtime(
                 || pending.gift_wrap_event_json.len() > 8
             {
                 return Err(SarahConversationError::Internal(
-                    "durable Issue 31 outbox item is invalid".into(),
+                    "durable device mirror outbox item is invalid".into(),
                 ));
             }
             let gift_wraps = pending
@@ -4315,7 +4319,7 @@ fn durable_private_outbox_into_runtime(
                         .map_err(|error| SarahConversationError::Internal(error.to_string()))?;
                     if event.kind != Kind::GiftWrap || event.verify().is_err() {
                         return Err(SarahConversationError::Internal(
-                            "durable Issue 31 outbox has an invalid gift wrap".into(),
+                            "durable device mirror outbox has an invalid gift wrap".into(),
                         ));
                     }
                     Ok(event)
@@ -4332,6 +4336,48 @@ fn durable_private_outbox_into_runtime(
         .collect()
 }
 
+/// Set a stale durable device mirror state file aside and start fresh.
+///
+/// A refusal here used to be a dead end: after an identity reset or a relay
+/// reconfiguration the persisted file could never match again, "Pair phone"
+/// showed only an error, and recovery meant deleting the file by hand. Stale
+/// or unreadable state is not the person's fault, so it is archived beside
+/// itself for inspection and the host derives fresh state. The honest cost,
+/// stated in the log line: the archive carries any previously admitted phone
+/// pairings, pending phone commands, and command idempotency records with it,
+/// so a previously paired phone pairs again by scanning a new QR code.
+fn archive_stale_issue31_host_state(
+    path: &Path,
+    reason: &str,
+) -> Result<(), SarahConversationError> {
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| {
+            SarahConversationError::Internal("device mirror state filename is invalid".into())
+        })?;
+    let parent = path.parent().ok_or_else(|| {
+        SarahConversationError::Internal("device mirror state path has no parent".into())
+    })?;
+    let archive_path = parent.join(format!(
+        "{file_name}.stale-{:016x}.bak",
+        rand::random::<u64>()
+    ));
+    fs::rename(path, &archive_path).map_err(|error| {
+        SarahConversationError::Internal(format!(
+            "previous device mirror state could not be set aside: {error}"
+        ))
+    })?;
+    log::warn!(
+        "device mirror host state at {} was set aside to {} because {reason}; \
+         starting fresh, and any previously paired phone must pair again by \
+         scanning a new QR code",
+        path.display(),
+        archive_path.display()
+    );
+    Ok(())
+}
+
 fn load_issue31_host_state(
     path: &Path,
     expected_configuration: &Issue31HostConfiguration,
@@ -4341,13 +4387,16 @@ fn load_issue31_host_state(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(SarahConversationError::Internal(error.to_string())),
     };
-    if !metadata.file_type().is_file()
-        || metadata.file_type().is_symlink()
-        || metadata.len() > ISSUE31_DURABLE_STATE_MAX_BYTES
-    {
+    if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
+        // Not this host's file. Renaming a path someone else planted is not
+        // ours to do, so this one class stays a refusal.
         return Err(SarahConversationError::Internal(
-            "durable Issue 31 host state is unsafe or oversized".into(),
+            "the device mirror state path is not a regular file".into(),
         ));
+    }
+    if metadata.len() > ISSUE31_DURABLE_STATE_MAX_BYTES {
+        archive_stale_issue31_host_state(path, "it exceeds the device mirror state byte bound")?;
+        return Ok(None);
     }
     let file = OpenOptions::new()
         .read(true)
@@ -4358,21 +4407,50 @@ fn load_issue31_host_state(
         .read_to_end(&mut bytes)
         .map_err(|error| SarahConversationError::Internal(error.to_string()))?;
     if bytes.len() as u64 > ISSUE31_DURABLE_STATE_MAX_BYTES {
-        return Err(SarahConversationError::Internal(
-            "durable Issue 31 host state exceeds its byte bound".into(),
-        ));
+        archive_stale_issue31_host_state(path, "it exceeds the device mirror state byte bound")?;
+        return Ok(None);
     }
-    let mut state: DurableIssue31HostState = serde_json::from_slice(&bytes)
-        .map_err(|error| SarahConversationError::Internal(error.to_string()))?;
+    match validated_issue31_host_state(&bytes, expected_configuration) {
+        Ok(state) => Ok(Some(state)),
+        Err(reason) => {
+            archive_stale_issue31_host_state(path, &reason)?;
+            Ok(None)
+        }
+    }
+}
+
+/// Judge persisted device mirror state against the live configuration.
+///
+/// `Err` carries the reason the bytes cannot be used — a schema from another
+/// app version, a different identity or relay configuration, or a failed
+/// integrity bound. Every one of these is permanent for this file: retrying
+/// the same bytes can never succeed, which is why the caller archives the
+/// file and re-derives fresh state instead of refusing to pair.
+fn validated_issue31_host_state(
+    bytes: &[u8],
+    expected_configuration: &Issue31HostConfiguration,
+) -> Result<DurableIssue31HostState, String> {
+    let mut state: DurableIssue31HostState = serde_json::from_slice(bytes)
+        .map_err(|error| format!("it does not parse as device mirror host state: {error}"))?;
     state
         .controller
         .adopt_conversation_if_missing(&expected_configuration.conversation)
-        .map_err(issue31_error)?;
-    if state.schema != ISSUE31_DURABLE_STATE_SCHEMA
-        || !state
-            .controller
-            .matches_configuration(expected_configuration)
-        || state.discovery_generation.is_some() != state.discovery_expires_at.is_some()
+        .map_err(|error| format!("it binds another conversation: {error}"))?;
+    if state.schema != ISSUE31_DURABLE_STATE_SCHEMA {
+        return Err(format!(
+            "a different app version wrote it (schema `{}`)",
+            state.schema
+        ));
+    }
+    if !state
+        .controller
+        .matches_configuration(expected_configuration)
+    {
+        return Err(
+            "it was written under a different desktop identity or relay configuration".into(),
+        );
+    }
+    if state.discovery_generation.is_some() != state.discovery_expires_at.is_some()
         || state.command_results.len() > MAX_COMMAND_RESULTS
         || state.pending_agent_thread_commands.len() > MAX_COMMAND_RESULTS
         || state.relay_acknowledgements.len() > MAX_RELAY_ACKNOWLEDGEMENTS
@@ -4392,15 +4470,12 @@ fn load_issue31_host_state(
             .is_some_and(|turn_ref| !crate::is_issue31_public_ref(turn_ref))
         || !valid_run_state(&state.run_state)
     {
-        return Err(SarahConversationError::Internal(
-            "durable Issue 31 host state does not match this identity or relay configuration"
-                .into(),
-        ));
+        return Err("it fails its device mirror integrity bounds".into());
     }
     state
         .controller
         .validate_persisted_state()
-        .map_err(issue31_error)?;
+        .map_err(|error| format!("its controller state is invalid: {error}"))?;
     if state
         .quarantined_events
         .iter()
@@ -4408,9 +4483,7 @@ fn load_issue31_host_state(
             !is_lower_hex_64(event_id) || !crate::is_issue31_public_ref(reason_ref)
         })
     {
-        return Err(SarahConversationError::Internal(
-            "durable Issue 31 quarantine contains an invalid record".into(),
-        ));
+        return Err("its quarantine ledger contains an invalid record".into());
     }
     if state
         .relay_acknowledgements
@@ -4426,24 +4499,22 @@ fn load_issue31_host_state(
                     .any(|relay_url| !expected_configuration.relay_urls.contains(relay_url))
         })
     {
-        return Err(SarahConversationError::Internal(
-            "durable Issue 31 relay acknowledgements are invalid".into(),
-        ));
+        return Err("its relay acknowledgements are invalid".into());
     }
     if let Some(event_json) = state.discovery_event_json.clone() {
         let event = Event::from_json(&event_json)
-            .map_err(|error| SarahConversationError::Internal(error.to_string()))?;
+            .map_err(|error| format!("its published discovery record is unreadable: {error}"))?;
         let value = serde_json::from_str::<Value>(&event.content)
-            .map_err(|error| SarahConversationError::Internal(error.to_string()))?;
+            .map_err(|error| format!("its published discovery record is unreadable: {error}"))?;
         let schema = value.get("schema").and_then(Value::as_str);
         let (generation, expires_at, host_ref, host_key, sarah_key, display_name, relay_urls) =
             if schema == Some(crate::ISSUE31_HOST_DISCOVERY_SCHEMA_V3) {
-                let discovery = Issue31HostDiscoveryV3::decode(event.content.as_bytes())
-                    .map_err(issue31_error)?;
+                let discovery =
+                    Issue31HostDiscoveryV3::decode(event.content.as_bytes()).map_err(|error| {
+                        format!("its published discovery record is invalid: {error}")
+                    })?;
                 if discovery.conversation != expected_configuration.conversation {
-                    return Err(SarahConversationError::Internal(
-                        "durable Issue 31 discovery binds another conversation".into(),
-                    ));
+                    return Err("its published discovery record binds another conversation".into());
                 }
                 (
                     discovery.generation,
@@ -4455,12 +4526,12 @@ fn load_issue31_host_state(
                     discovery.relay_urls,
                 )
             } else if schema == Some(crate::ISSUE31_HOST_DISCOVERY_SCHEMA_V2) {
-                let discovery = Issue31HostDiscoveryV2::decode(event.content.as_bytes())
-                    .map_err(issue31_error)?;
+                let discovery =
+                    Issue31HostDiscoveryV2::decode(event.content.as_bytes()).map_err(|error| {
+                        format!("its published discovery record is invalid: {error}")
+                    })?;
                 if discovery.conversation != expected_configuration.conversation {
-                    return Err(SarahConversationError::Internal(
-                        "durable Issue 31 discovery binds another conversation".into(),
-                    ));
+                    return Err("its published discovery record binds another conversation".into());
                 }
                 (
                     discovery.generation,
@@ -4472,8 +4543,10 @@ fn load_issue31_host_state(
                     discovery.relay_urls,
                 )
             } else {
-                let discovery = Issue31HostDiscovery::decode(event.content.as_bytes())
-                    .map_err(issue31_error)?;
+                let discovery =
+                    Issue31HostDiscovery::decode(event.content.as_bytes()).map_err(|error| {
+                        format!("its published discovery record is invalid: {error}")
+                    })?;
                 (
                     discovery.generation,
                     discovery.expires_at,
@@ -4496,9 +4569,11 @@ fn load_issue31_host_state(
             || relay_urls != expected_configuration.relay_urls
             || generation != expected_configuration.generation
         {
-            return Err(SarahConversationError::Internal(
-                "durable Issue 31 discovery outbox event is invalid".into(),
-            ));
+            return Err(
+                "its published discovery record does not match this identity or relay \
+                 configuration"
+                    .into(),
+            );
         }
         if schema != Some(crate::ISSUE31_HOST_DISCOVERY_SCHEMA_V2)
             && schema != Some(crate::ISSUE31_HOST_DISCOVERY_SCHEMA_V3)
@@ -4523,8 +4598,9 @@ fn load_issue31_host_state(
                 )
             })
             .collect(),
-    )?;
-    Ok(Some(state))
+    )
+    .map_err(|error| format!("its private outbox is invalid: {error}"))?;
+    Ok(state)
 }
 
 fn write_issue31_host_state(
@@ -4535,11 +4611,11 @@ fn write_issue31_host_state(
         .map_err(|error| SarahConversationError::Internal(error.to_string()))?;
     if bytes.len() as u64 > ISSUE31_DURABLE_STATE_MAX_BYTES {
         return Err(SarahConversationError::Internal(
-            "durable Issue 31 host state exceeds its byte bound".into(),
+            "durable device mirror host state exceeds its byte bound".into(),
         ));
     }
     let parent = path.parent().ok_or_else(|| {
-        SarahConversationError::Internal("Issue 31 state path has no parent".into())
+        SarahConversationError::Internal("device mirror state path has no parent".into())
     })?;
     fs::create_dir_all(parent)
         .map_err(|error| SarahConversationError::Internal(error.to_string()))?;
@@ -4553,7 +4629,7 @@ fn write_issue31_host_state(
         .file_name()
         .and_then(|name| name.to_str())
         .ok_or_else(|| {
-            SarahConversationError::Internal("Issue 31 state filename is invalid".into())
+            SarahConversationError::Internal("device mirror state filename is invalid".into())
         })?;
     let temporary_path = parent.join(format!(".{file_name}.{}.tmp", rand::random::<u64>()));
     let mut options = OpenOptions::new();
@@ -4757,7 +4833,7 @@ fn command_binding(
 fn validate_command_ref(value: &str, field: &str) -> Result<(), SarahConversationError> {
     if !crate::is_issue31_public_ref(value) {
         return Err(SarahConversationError::InvalidRequest(format!(
-            "{field} must match the bounded Issue 31 PublicRef grammar"
+            "{field} must match the bounded device mirror PublicRef grammar"
         )));
     }
     Ok(())
@@ -6979,7 +7055,7 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("injected Issue 31 durable commit failure")
+                .contains("injected device mirror durable commit failure")
         );
         assert!(client.issue31_private_outbox.is_empty());
         assert!(
@@ -7118,6 +7194,82 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    /// OMEGA-DELTA-0169. Durable state written under one identity loads under
+    /// another as a fresh start: the stale file is archived beside itself and
+    /// pairing proceeds, instead of a refusal a person cannot act on. The
+    /// archive keeps the admitted-device grants for inspection; the honest
+    /// consequence is that previously paired phones must scan a new QR code.
+    #[test]
+    fn stale_identity_durable_state_is_archived_and_rederived_instead_of_bricking_pairing() {
+        let temporary = tempfile::tempdir().expect("tempdir");
+        let state_path = temporary.path().join("owner").join("issue31-state.json");
+        let (configuration, controller, _device_public_key_hex, _grant_ref) =
+            crate::issue31_nostr::restart_fixture();
+        let durable_state = |controller: Issue31HostController| DurableIssue31HostState {
+            schema: ISSUE31_DURABLE_STATE_SCHEMA.into(),
+            controller,
+            discovery_generation: None,
+            discovery_expires_at: None,
+            discovery_event_json: None,
+            private_outbox: BTreeMap::new(),
+            relay_acknowledgements: BTreeMap::new(),
+            control_cursor: None,
+            projection_cursor: None,
+            quarantined_events: BTreeMap::new(),
+            host_adjunct_emissions: BTreeMap::new(),
+            provider_handoffs: Issue31ProviderHandoffLedger::default(),
+            pending_agent_thread_commands: BTreeMap::new(),
+            command_results: BTreeMap::new(),
+            active_turn_ref: None,
+            run_state: "running".into(),
+            message_seq: 0,
+        };
+        write_issue31_host_state(&state_path, &durable_state(controller))
+            .expect("write identity A state");
+
+        // The same host after an identity reset: the host key differs, so the
+        // persisted controller can never match this configuration again.
+        let mut reset_identity = configuration;
+        reset_identity.host_public_key_hex = "a".repeat(64);
+
+        let reloaded = load_issue31_host_state(&state_path, &reset_identity)
+            .expect("a stale identity is a fresh start, not a refusal");
+        assert!(
+            reloaded.is_none(),
+            "stale state was adopted across identities"
+        );
+        assert!(
+            !state_path.exists(),
+            "the stale file still occupies the state path"
+        );
+        let archives = fs::read_dir(state_path.parent().expect("parent"))
+            .expect("read state directory")
+            .flatten()
+            .filter(|entry| {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                name.starts_with("issue31-state.json.stale-") && name.ends_with(".bak")
+            })
+            .count();
+        assert_eq!(
+            archives, 1,
+            "the stale file was not archived for inspection"
+        );
+
+        // Pairing proceeds exactly as on a first run: fresh state derives,
+        // persists to the same path, and reloads under the new identity.
+        let fresh_controller =
+            Issue31HostController::new(reset_identity.clone()).expect("fresh controller");
+        write_issue31_host_state(&state_path, &durable_state(fresh_controller))
+            .expect("persist fresh state");
+        let resumed = load_issue31_host_state(&state_path, &reset_identity)
+            .expect("load fresh state")
+            .expect("fresh state persists");
+        assert!(
+            resumed.controller.matches_configuration(&reset_identity),
+            "the re-derived state does not serve the live identity"
+        );
     }
 
     // ---------------------------------------------------------------------

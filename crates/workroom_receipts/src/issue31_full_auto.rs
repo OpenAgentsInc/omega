@@ -380,23 +380,27 @@ pub enum Issue31FullAutoAdjunctError {
 impl std::fmt::Display for Issue31FullAutoAdjunctError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let message = match self {
-            Self::InvalidJson => "issue 31 full auto adjunct is not valid contract JSON",
-            Self::InvalidSchema => "issue 31 full auto adjunct schema is not supported",
-            Self::UnsafeReference => "issue 31 full auto adjunct contains an unsafe reference",
-            Self::UnsafeText => "issue 31 full auto adjunct contains unsafe text",
-            Self::BoundExceeded => "issue 31 full auto adjunct bound was exceeded",
-            Self::DuplicateReference => "issue 31 full auto adjunct contains a duplicate reference",
-            Self::InvalidTimestamp => "issue 31 full auto adjunct timestamp order is invalid",
-            Self::InvalidRunState => "issue 31 full auto adjunct run state is invalid",
+            Self::InvalidJson => "device mirror full auto adjunct is not valid contract JSON",
+            Self::InvalidSchema => "device mirror full auto adjunct schema is not supported",
+            Self::UnsafeReference => "device mirror full auto adjunct contains an unsafe reference",
+            Self::UnsafeText => "device mirror full auto adjunct contains unsafe text",
+            Self::BoundExceeded => "device mirror full auto adjunct bound was exceeded",
+            Self::DuplicateReference => {
+                "device mirror full auto adjunct contains a duplicate reference"
+            }
+            Self::InvalidTimestamp => "device mirror full auto adjunct timestamp order is invalid",
+            Self::InvalidRunState => "device mirror full auto adjunct run state is invalid",
             Self::InvalidControlBinding => {
-                "issue 31 full auto adjunct binds a control to a stale run generation"
+                "device mirror full auto adjunct binds a control to a stale run generation"
             }
             Self::InvalidAccountState => {
-                "issue 31 full auto adjunct confuses a lane with an account"
+                "device mirror full auto adjunct confuses a lane with an account"
             }
-            Self::InvalidHandoffState => "issue 31 full auto adjunct handoff state is invalid",
-            Self::InvalidEvidenceChain => "issue 31 full auto adjunct evidence chain is invalid",
-            Self::UnknownReference => "issue 31 full auto adjunct points at an unknown record",
+            Self::InvalidHandoffState => "device mirror full auto adjunct handoff state is invalid",
+            Self::InvalidEvidenceChain => {
+                "device mirror full auto adjunct evidence chain is invalid"
+            }
+            Self::UnknownReference => "device mirror full auto adjunct points at an unknown record",
         };
         formatter.write_str(message)
     }
@@ -811,8 +815,8 @@ mod tests {
 
     #[test]
     fn decodes_every_host_produced_handoff_lifecycle() {
-        let adjunct =
-            decode_issue31_full_auto_adjunct(HOST_PRODUCED_HANDOFFS).expect("host-produced decodes");
+        let adjunct = decode_issue31_full_auto_adjunct(HOST_PRODUCED_HANDOFFS)
+            .expect("host-produced decodes");
         let states: Vec<Issue31ProviderHandoffState> = adjunct
             .handoffs
             .iter()
@@ -1454,7 +1458,7 @@ mod emitter_tests {
         json!({"runs": [
             {
                 "runRef": "run.full-auto.run-01",
-                "objective": "Finish the issue 31 mobile workroom.",
+                "objective": "Finish the device mirror mobile workroom.",
                 "lane": "lane.codex-local",
                 "state": "running",
                 "generation": 7,

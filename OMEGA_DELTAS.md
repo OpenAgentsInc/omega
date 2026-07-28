@@ -7406,3 +7406,74 @@ current image build does not decode it inline.
   `the_environment_still_overrides_every_default`,
   `a_blank_override_falls_back_to_the_default`, and
   `half_an_endpoint_override_names_the_missing_half` in `agent_ui`.
+
+### OMEGA-DELTA-0168 — An internal issue number never renders to a person
+
+- **Upstream Zed:** not applicable; this records a divergence from Omega's own
+  earlier wording.
+- **Omega before:** the device-mirror feature grew under the internal codename
+  "Issue 31", and the codename saturated its runtime prose: pairing errors
+  ("Issue 31 pairing response has no challenge"), scope-policy refusals
+  ("Issue 31 device scope policy is invalid"), durable-state refusals
+  ("durable Issue 31 host state does not match this identity or relay
+  configuration"), receipt-validator reasons ("issue 31 host adjunct …"), and
+  host-bridge log lines ("Issue31 mobile command …"). Any of these could reach
+  the **Pair phone** popover through
+  `DevicePairingSurface::Unavailable(error.to_string())`, a refusal notice, or
+  a log-derived surface — and one did, on the owner's machine.
+- **Omega now:** every string literal that reads as prose names the product —
+  device mirror, device pairing, phone pairing, desktop mirror — never the
+  issue number. Internal Rust symbols (`issue31_*` functions, `Issue31…`
+  types, module and file names) stay: they are invisible. Machine tokens stay
+  in their exact wire form: the grant scope `observe_issue31` is validated
+  byte-for-byte by the shipped mobile client (TestFlight build 126), and the
+  `openagents.omega.issue31.*` schema ids, `action.issue31.*` /
+  `idempotency.issue31.*` refs, `snapshot.omega.issue31.*` refs, the
+  `omega-issue31-host` discovery `t` tag, and the `issue31-*.json` state
+  filenames are contract or durable-state identifiers. None of them may be
+  displayed raw; a surface that shows a scope shows a product description of
+  it instead.
+- **Why:** the owner, on a live build, from the **Pair phone** popover:
+  *"FIX IT NOW AND NEVER EVER SHOW ISSUE 31."* An internal issue number on a
+  consent screen or an error popover tells a person nothing and tells them we
+  forgot they were there. Wire compatibility is the one reason a codename
+  survives at all, and it survives only below the display boundary.
+- **Enforced by:** `internal_issue_references_never_render` in
+  `crates/omega_deltas`, which extracts every string literal in `crates/`
+  (excluding the deltas crate itself, whose literals quote internal symbols by
+  design) and fails on the prose forms `issue 31` and `issue31 `.
+
+### OMEGA-DELTA-0169 — Stale device mirror state is archived, not a dead end
+
+- **Upstream Zed:** has no phone pairing and no durable device mirror state.
+- **Omega before:** `load_issue31_host_state` hard-refused when the persisted
+  state file could not be used — a schema from another build, an identity or
+  relay configuration that no longer matched the stored controller, a failed
+  integrity bound, or unparseable JSON. After an identity reset the refusal
+  was permanent: **Pair phone** answered
+  `durable Issue 31 host state does not match this identity or relay
+  configuration`, nothing said what to do, and pairing stayed bricked until
+  someone deleted the file by hand. Deleting the file by hand and pressing the
+  button again rendered the QR immediately, which proved a fresh re-derive is
+  both safe and sufficient.
+- **Omega now:** a state file that can never match again is set aside beside
+  itself (`issue31-nostr-host-state.json.stale-<nonce>.bak`), one log line
+  names exactly what mismatched, fresh state is derived, and pairing proceeds.
+  The archive is a rename, not a delete, because the file carries the
+  admitted-device grants, pending phone commands, command idempotency
+  records, and unpublished outbox items someone may want to inspect. Every
+  recoverable class re-derives: wrong schema version, identity or relay
+  mismatch, failed integrity bounds, invalid quarantine or acknowledgement
+  ledgers, a stale published discovery record, unparseable JSON, and an
+  oversized regular file. One class still refuses: a path that is not a
+  regular file (a symlink or directory), because renaming something another
+  actor planted is not this host's call.
+- **The honest cost, stated where it happens:** archiving drops previously
+  admitted phone pairings on this host — and with them the command
+  idempotency ledger — so paired devices pair again by scanning a new QR
+  code. The log line says so. A bricked pairing flow is worse.
+- **Enforced by:** `stale_device_mirror_state_archives_and_rederives` in
+  `crates/omega_deltas`, and
+  `stale_identity_durable_state_is_archived_and_rederived_instead_of_bricking_pairing`
+  in `omega_effectd`, which writes state under one identity, loads it under
+  another, and requires a fresh start with the stale file archived beside it.

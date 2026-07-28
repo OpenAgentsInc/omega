@@ -1004,7 +1004,7 @@ impl WebSocketRelayAdapter {
                 || tag_value(&tags, "d").as_deref() != Some(host_ref.as_str())
                 || tag_value(&tags, "k").as_deref() != Some("1059")
                 || tag_value(&tags, "t").as_deref() != Some("omega-issue31-host")
-                || tag_value(&tags, "alt").as_deref() != Some("Omega Issue 31 Nostr host discovery")
+                || tag_value(&tags, "alt").as_deref() != Some("Omega device mirror host discovery")
             {
                 return Ok(None);
             }
@@ -1607,7 +1607,7 @@ fn private_record_kind(
             Ok("pairing")
         }
         Some(schema) if schema.starts_with("openagents.omega.issue31.") => Err(
-            SarahConversationError::InvalidRequest("unknown Issue 31 private schema".into()),
+            SarahConversationError::InvalidRequest("unknown device mirror private schema".into()),
         ),
         _ => Ok("message"),
     }
@@ -1624,7 +1624,7 @@ fn require_single_private_recipient(
         .collect();
     if recipients != [recipient_public_key_hex] {
         return Err(SarahConversationError::InvalidRequest(
-            "Issue 31 private rumor must have exactly one local p tag".into(),
+            "device mirror private rumor must have exactly one local p tag".into(),
         ));
     }
     Ok(())
@@ -1672,7 +1672,7 @@ fn require_conversation_recipients(
     participants.sort_unstable();
     if named != participants {
         return Err(SarahConversationError::InvalidRequest(
-            "Issue 31 conversation rumor must name exactly the owner and Sarah".into(),
+            "device mirror conversation rumor must name exactly the owner and Sarah".into(),
         ));
     }
     Ok(())

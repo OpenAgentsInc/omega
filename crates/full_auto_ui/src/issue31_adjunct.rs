@@ -483,7 +483,7 @@ mod tests {
         json!({
             "runRef": "run.full-auto.run-01",
             "title": "Mobile workroom",
-            "objective": "Finish the issue 31 mobile workroom.",
+            "objective": "Finish the device mirror mobile workroom.",
             "doneCondition": "Every exit holds with evidence.",
             "lane": "codex-local",
             "state": "running",

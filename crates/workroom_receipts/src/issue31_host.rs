@@ -171,17 +171,23 @@ pub enum Issue31HostAdjunctError {
 impl std::fmt::Display for Issue31HostAdjunctError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let message = match self {
-            Self::InvalidJson => "issue 31 host adjunct is not valid contract JSON",
-            Self::InvalidSchema => "issue 31 host adjunct schema is not supported",
-            Self::UnsafeReference => "issue 31 host adjunct contains an unsafe reference",
-            Self::ReferenceBoundExceeded => "issue 31 host adjunct reference bound was exceeded",
-            Self::DuplicateReference => "issue 31 host adjunct contains a duplicate reference",
-            Self::MissingCapability => "issue 31 host adjunct is missing a required capability",
-            Self::DuplicateCapability => "issue 31 host adjunct repeats a capability",
-            Self::InvalidTimestamp => "issue 31 host adjunct timestamp order is invalid",
-            Self::InvalidProjectionState => "issue 31 host adjunct projection state is invalid",
-            Self::InvalidRoleState => "issue 31 host adjunct role state is invalid",
-            Self::InvalidCommandState => "issue 31 host adjunct command state is invalid",
+            Self::InvalidJson => "device mirror host adjunct is not valid contract JSON",
+            Self::InvalidSchema => "device mirror host adjunct schema is not supported",
+            Self::UnsafeReference => "device mirror host adjunct contains an unsafe reference",
+            Self::ReferenceBoundExceeded => {
+                "device mirror host adjunct reference bound was exceeded"
+            }
+            Self::DuplicateReference => "device mirror host adjunct contains a duplicate reference",
+            Self::MissingCapability => {
+                "device mirror host adjunct is missing a required capability"
+            }
+            Self::DuplicateCapability => "device mirror host adjunct repeats a capability",
+            Self::InvalidTimestamp => "device mirror host adjunct timestamp order is invalid",
+            Self::InvalidProjectionState => {
+                "device mirror host adjunct projection state is invalid"
+            }
+            Self::InvalidRoleState => "device mirror host adjunct role state is invalid",
+            Self::InvalidCommandState => "device mirror host adjunct command state is invalid",
         };
         formatter.write_str(message)
     }
@@ -496,9 +502,7 @@ pub enum Issue31RoleInput<'a> {
         grant_ref: &'a str,
     },
     /// No grant is known. A role nobody granted cannot cite one.
-    Unknown {
-        kind: Issue31RoleKind,
-    },
+    Unknown { kind: Issue31RoleKind },
 }
 
 /// The state of the reader's most recent command against one capability.
@@ -991,8 +995,9 @@ mod tests {
         }
     }
 
-    fn build(sources: &Issue31HostSources<'_>) -> Result<Issue31HostAdjunct, Issue31HostAdjunctError>
-    {
+    fn build(
+        sources: &Issue31HostSources<'_>,
+    ) -> Result<Issue31HostAdjunct, Issue31HostAdjunctError> {
         build_issue31_host_adjunct(HOST, SNAPSHOT, GENERATED_AT, sources)
     }
 
@@ -1019,7 +1024,11 @@ mod tests {
         for capability in Issue31ProjectionCapability::ALL {
             let before = seen.len();
             seen.retain(|value| *value != capability);
-            assert_eq!(before - seen.len(), 1, "{capability:?} appears exactly once");
+            assert_eq!(
+                before - seen.len(),
+                1,
+                "{capability:?} appears exactly once"
+            );
         }
         assert!(seen.is_empty());
     }
@@ -1107,7 +1116,10 @@ mod tests {
             permitted_action_refs: &["action.provider.request-connect-handoff"],
             command_state: Issue31CommandStateInput::Idle,
         };
-        assert_eq!(build(&sources), Err(Issue31HostAdjunctError::InvalidRoleState));
+        assert_eq!(
+            build(&sources),
+            Err(Issue31HostAdjunctError::InvalidRoleState)
+        );
     }
 
     #[test]
@@ -1123,7 +1135,10 @@ mod tests {
             permitted_action_refs: &[],
             command_state: Issue31CommandStateInput::Idle,
         };
-        assert_eq!(build(&sources), Err(Issue31HostAdjunctError::InvalidTimestamp));
+        assert_eq!(
+            build(&sources),
+            Err(Issue31HostAdjunctError::InvalidTimestamp)
+        );
     }
 
     #[test]

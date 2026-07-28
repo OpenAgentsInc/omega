@@ -156,6 +156,8 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0165",
     "OMEGA-DELTA-0166",
     "OMEGA-DELTA-0167",
+    "OMEGA-DELTA-0168",
+    "OMEGA-DELTA-0169",
 ];
 
 pub const GOOGLE_PROVIDER_PATH: &str = "crates/language_models/src/provider/google.rs";
@@ -19934,7 +19936,7 @@ mod tests {
         ] {
             assert!(
                 issue31.contains(required),
-                "OMEGA-DELTA-0155: Issue 31 discovery or grant authority lost `{required}`."
+                "OMEGA-DELTA-0155: device mirror discovery or grant authority lost `{required}`."
             );
         }
 
@@ -20683,6 +20685,181 @@ mod tests {
              the host controller again. A fresh install has admitted no phone, \
              and applying the empty set both fails the one-to-32 policy check and \
              overwrites the admissions restored from durable state."
+        );
+    }
+
+    /// The contents of every double-quoted and raw string literal in `source`,
+    /// concatenated with newlines between literals. A minimal Rust scanner:
+    /// it tracks line and block comments, character literals (without being
+    /// fooled by lifetimes), escapes, and `r#""#` raw strings, because the
+    /// check below must judge only text that can become a runtime string.
+    fn string_literal_contents(source: &str) -> String {
+        let bytes = source.as_bytes();
+        let mut literals = String::new();
+        let mut index = 0;
+        while index < bytes.len() {
+            match bytes[index] {
+                b'/' if bytes.get(index + 1) == Some(&b'/') => {
+                    while index < bytes.len() && bytes[index] != b'\n' {
+                        index += 1;
+                    }
+                }
+                b'/' if bytes.get(index + 1) == Some(&b'*') => {
+                    let mut depth = 1;
+                    index += 2;
+                    while index < bytes.len() && depth > 0 {
+                        if bytes[index] == b'/' && bytes.get(index + 1) == Some(&b'*') {
+                            depth += 1;
+                            index += 2;
+                        } else if bytes[index] == b'*' && bytes.get(index + 1) == Some(&b'/') {
+                            depth -= 1;
+                            index += 2;
+                        } else {
+                            index += 1;
+                        }
+                    }
+                }
+                b'\'' => {
+                    // A char literal closes; a lifetime does not. Escaped
+                    // chars ('\n', '\''), single chars ('a'), and lifetimes
+                    // ('a as in &'a str) must all pass through untangled.
+                    if bytes.get(index + 1) == Some(&b'\\') {
+                        index += 3;
+                        while index < bytes.len() && bytes[index] != b'\'' {
+                            index += 1;
+                        }
+                        index += 1;
+                    } else if bytes.get(index + 2) == Some(&b'\'') {
+                        index += 3;
+                    } else {
+                        index += 1;
+                    }
+                }
+                b'r' if bytes.get(index + 1) == Some(&b'"')
+                    || (bytes.get(index + 1) == Some(&b'#')
+                        && matches!(bytes.get(index + 2), Some(&b'#') | Some(&b'"'))) =>
+                {
+                    let mut hashes = 0;
+                    let mut cursor = index + 1;
+                    while bytes.get(cursor) == Some(&b'#') {
+                        hashes += 1;
+                        cursor += 1;
+                    }
+                    if bytes.get(cursor) == Some(&b'"') {
+                        cursor += 1;
+                        let start = cursor;
+                        let closer = format!("\"{}", "#".repeat(hashes));
+                        let end = source[cursor..]
+                            .find(&closer)
+                            .map_or(bytes.len(), |at| cursor + at);
+                        literals.push_str(&source[start..end]);
+                        literals.push('\n');
+                        index = end + closer.len();
+                    } else {
+                        index += 1;
+                    }
+                }
+                b'"' => {
+                    index += 1;
+                    let start = index;
+                    while index < bytes.len() {
+                        match bytes[index] {
+                            b'\\' => index += 2,
+                            b'"' => break,
+                            _ => index += 1,
+                        }
+                    }
+                    literals.push_str(&source[start..index.min(bytes.len())]);
+                    literals.push('\n');
+                    index += 1;
+                }
+                _ => index += 1,
+            }
+        }
+        literals
+    }
+
+    /// OMEGA-DELTA-0168. An internal issue number never renders to a person.
+    #[test]
+    fn internal_issue_references_never_render() {
+        fn rust_sources(directory: &std::path::Path, found: &mut Vec<std::path::PathBuf>) {
+            let Ok(entries) = std::fs::read_dir(directory) else {
+                return;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    // The deltas crate quotes internal symbol names inside its
+                    // own check literals by design; nothing in it renders.
+                    if path.file_name().is_some_and(|name| name == "omega_deltas") {
+                        continue;
+                    }
+                    rust_sources(&path, found);
+                } else if path.extension().is_some_and(|extension| extension == "rs") {
+                    found.push(path);
+                }
+            }
+        }
+
+        let mut sources = Vec::new();
+        rust_sources(&repository_path("crates"), &mut sources);
+        assert!(
+            sources.len() > 100,
+            "OMEGA-DELTA-0168: the source walk found almost nothing, so the \
+             check is scanning the wrong directory rather than proving anything."
+        );
+
+        let mut offending = Vec::new();
+        for path in sources {
+            let source = std::fs::read_to_string(&path)
+                .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
+            let literals = string_literal_contents(&source).to_lowercase();
+            // `issue 31` is the prose form and `issue31 ` is the prose form
+            // missing its space; both read as an issue number to a person.
+            // Machine tokens (`issue31_`, `issue31.`, `issue31-`, `observe_issue31`)
+            // stay: they are wire values and symbols no screen displays.
+            if literals.contains("issue 31") || literals.contains("issue31 ") {
+                offending.push(path.display().to_string());
+            }
+        }
+        assert!(
+            offending.is_empty(),
+            "OMEGA-DELTA-0168: a string literal spells out the internal issue \
+             number (`issue 31` / `issue31 ` prose form) in: {offending:?}. \
+             String literals are one rename away from a popover, toast, \
+             notification, or log line a person reads. Say what the feature is \
+             — device mirror, phone pairing, desktop mirror — never the issue \
+             number. Wire tokens such as `observe_issue31` and schema ids keep \
+             their exact machine form but must be mapped to product words \
+             before display."
+        );
+    }
+
+    /// OMEGA-DELTA-0169. Stale durable device mirror state archives and
+    /// re-derives instead of bricking phone pairing.
+    #[test]
+    fn stale_device_mirror_state_archives_and_rederives() {
+        let conversation = without_comments(&read_repository_file(SARAH_CONVERSATION_PATH));
+        for required in [
+            "fn archive_stale_issue31_host_state(",
+            "fn validated_issue31_host_state(",
+            "archive_stale_issue31_host_state(path, &reason)?",
+            ".stale-",
+        ] {
+            assert!(
+                conversation.contains(required),
+                "OMEGA-DELTA-0169: the stale-state recovery lost `{required}`. \
+                 A durable state file that can never match again — an identity \
+                 reset, a relay change, an older schema, a failed integrity \
+                 bound — must be set aside beside itself and re-derived, never \
+                 surfaced as a refusal the person cannot act on."
+            );
+        }
+        assert!(
+            !conversation.contains("Err(SarahConversationError::Internal(reason))"),
+            "OMEGA-DELTA-0169: a validation failure of persisted device \
+             mirror state is surfaced as an error again. That bricked the \
+             Pair phone popover until someone deleted the state file by hand."
         );
     }
 }
