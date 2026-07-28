@@ -1250,6 +1250,7 @@ fn device_mirror_thread(
         .and_then(WeakEntity::upgrade)
         .and_then(|conversation| {
             let thread_view = conversation.read(cx).root_thread_view()?;
+            let error_text = thread_view.read(cx).device_mirror_error_text(cx);
             let disclosure = thread_view.read(cx).executor_disclosure(cx);
             let root_thread = conversation.read(cx).root_thread(cx)?;
             let root_thread = root_thread.read(cx);
@@ -1257,11 +1258,14 @@ fn device_mirror_thread(
                 .title()
                 .map_or_else(|| thread.operation_ref.clone(), |title| title.to_string());
             let state = device_thread_state(root_thread.status(), thread);
-            let transcript = device_transcript(
-                &thread.thread_id.to_key_string(),
-                root_thread.entries(),
+            let thread_ref = thread.thread_id.to_key_string();
+            let mut transcript =
+                device_transcript(&thread_ref, root_thread.entries(), projected_at, cx);
+            append_device_error_message(
+                &mut transcript,
+                &thread_ref,
+                error_text.as_deref(),
                 projected_at,
-                cx,
             );
             Some((
                 device_public_label(&title, &thread.operation_ref),
@@ -1314,6 +1318,7 @@ fn device_loaded_thread(
             updated_at: projected_at,
         };
     };
+    let error_text = thread_view.read(cx).device_mirror_error_text(cx);
     let disclosure = thread_view.read(cx).executor_disclosure(cx);
     let Some(thread) = conversation.root_thread(cx) else {
         return omega_effectd::MirrorThread {
@@ -1326,6 +1331,13 @@ fn device_loaded_thread(
         };
     };
     let thread = thread.read(cx);
+    let mut transcript = device_transcript(&thread_ref, thread.entries(), projected_at, cx);
+    append_device_error_message(
+        &mut transcript,
+        &thread_ref,
+        error_text.as_deref(),
+        projected_at,
+    );
     omega_effectd::MirrorThread {
         thread_ref: thread_ref.clone(),
         title: thread.title().map_or_else(
@@ -1335,14 +1347,55 @@ fn device_loaded_thread(
         executor: device_executor_disclosure(&disclosure),
         state: if thread.status() == ThreadStatus::Generating {
             omega_effectd::ThreadState::Running
-        } else if thread.had_error() {
+        } else if thread.had_error() || error_text.is_some() {
             omega_effectd::ThreadState::Failed
         } else {
             omega_effectd::ThreadState::Idle
         },
-        transcript: device_transcript(&thread_ref, thread.entries(), projected_at, cx),
+        transcript,
         updated_at: projected_at,
     }
+}
+
+/// Put the desktop callout's reason into the transcript the phone reads.
+///
+/// Thread failures used to project only `state: failed` with no body: the
+/// phone's subtitle said "failed" and the thread view showed the person's
+/// message alone, while the desktop held the full callout. Appending a
+/// system turn with the same public-safe sentence means both surfaces show
+/// the same reason without a second protocol field.
+fn append_device_error_message(
+    transcript: &mut Vec<omega_effectd::MirrorMessage>,
+    thread_ref: &str,
+    error_text: Option<&str>,
+    projected_at: u64,
+) {
+    let Some(error_text) = error_text.map(str::trim).filter(|text| !text.is_empty()) else {
+        return;
+    };
+    if !full_auto_ui::issue31_device_mirror_text_is_safe(error_text) {
+        return;
+    }
+    let Some(text) =
+        full_auto_ui::issue31_device_mirror_text(error_text, MAX_DEVICE_TRANSCRIPT_TEXT_BYTES)
+    else {
+        return;
+    };
+    // Replace a previous error turn rather than stacking one per refresh.
+    if let Some(last) = transcript.last_mut()
+        && last.role == omega_effectd::MessageRole::System
+        && last.message_ref.ends_with(".error")
+    {
+        last.text = text;
+        last.created_at = projected_at;
+        return;
+    }
+    transcript.push(omega_effectd::MirrorMessage {
+        message_ref: format!("{thread_ref}.error"),
+        role: omega_effectd::MessageRole::System,
+        text,
+        created_at: projected_at,
+    });
 }
 
 /// Remove the speaker heading that Zed's Markdown export writes.

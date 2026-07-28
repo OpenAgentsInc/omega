@@ -2008,6 +2008,17 @@ impl ThreadView {
         cx.notify();
     }
 
+    /// The public-safe error sentence a paired phone should show, if any.
+    ///
+    /// Empty when the thread has not failed, or when the failure has been
+    /// cleared by a retry. Used by the device mirror so both surfaces carry
+    /// the same reason the desktop callout already shows.
+    pub(crate) fn device_mirror_error_text(&self, cx: &App) -> Option<SharedString> {
+        let error = self.thread_error.as_ref()?;
+        let model_or_agent_name = self.current_model_name(cx);
+        Some(error.device_mirror_text(model_or_agent_name.as_ref()))
+    }
+
     fn emit_thread_error_telemetry(&self, error: &ThreadError, cx: &mut Context<Self>) {
         let (error_kind, acp_error_code, message): (&str, Option<SharedString>, SharedString) =
             match error {

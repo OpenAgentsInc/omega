@@ -219,6 +219,63 @@ pub(crate) enum ThreadError {
     },
 }
 
+impl ThreadError {
+    /// The public-safe sentence a phone should show for this error.
+    ///
+    /// Desktop already renders this in a callout the person can read. The
+    /// device mirror used to project only `state: failed` with no body, so a
+    /// phone showed "failed" and nothing else while the desktop held the
+    /// whole reason. The text here is the same family of wording the desktop
+    /// callout uses — never a stack trace, never a secret.
+    pub(crate) fn device_mirror_text(&self, model_or_agent_name: &str) -> SharedString {
+        match self {
+            Self::PaymentRequired => {
+                "You reached a usage limit. Hosted Omega AI plans are not available in this build."
+                    .into()
+            }
+            Self::Refusal => format!(
+                "{model_or_agent_name} refused to respond to this prompt. Rephrasing it can sometimes address the issue."
+            )
+            .into(),
+            Self::DataRetentionConsentRequired => {
+                format!("{model_or_agent_name} is not available with Zero Data Retention.").into()
+            }
+            Self::AuthenticationRequired(message) => message.clone(),
+            Self::RateLimitExceeded { provider } => {
+                format!("{provider}'s rate limit was reached.").into()
+            }
+            Self::ServerOverloaded { provider } => {
+                format!("{provider}'s servers are temporarily unavailable.").into()
+            }
+            Self::PromptTooLarge => "Context too large for the model's context window.".into(),
+            Self::NoCredentials { provider } => {
+                format!("No credentials are configured for {provider}.").into()
+            }
+            Self::StreamError { provider } => {
+                format!("The connection to {provider}'s API was interrupted.").into()
+            }
+            Self::AuthenticationFailed { provider } => {
+                format!("Authentication with {provider} failed.").into()
+            }
+            Self::PermissionDenied { provider, message } => message.clone().unwrap_or_else(|| {
+                format!(
+                    "{provider}'s API rejected the request due to insufficient permissions."
+                )
+                .into()
+            }),
+            Self::RequestFailed => {
+                "The request could not be completed after multiple attempts.".into()
+            }
+            Self::MaxOutputTokens => "The model reached its maximum output length.".into(),
+            Self::NoModelSelected => "No model is selected.".into(),
+            Self::ApiError { provider } => {
+                format!("{provider}'s API returned an unexpected error.").into()
+            }
+            Self::Other { message, .. } => message.clone(),
+        }
+    }
+}
+
 impl From<anyhow::Error> for ThreadError {
     fn from(error: anyhow::Error) -> Self {
         if error.is::<MaxOutputTokensError>() {
