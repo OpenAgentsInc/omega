@@ -1251,6 +1251,15 @@ pub trait StatefulInteractiveElement: InteractiveElement {
         self
     }
 
+    /// Set whether this element is unavailable for interaction.
+    ///
+    /// This only reports state to assistive technology. Callers must still
+    /// suppress pointer and keyboard handlers when `disabled` is true.
+    fn aria_disabled(mut self, disabled: bool) -> Self {
+        self.interactivity().aria.disabled = Some(disabled);
+        self
+    }
+
     /// Report this element as the focused node in the accessibility tree,
     /// overriding the element that holds real keyboard focus — but only while
     /// one of its ancestors actually holds focus.
@@ -1925,6 +1934,7 @@ pub(crate) struct AriaProperties {
     pub(crate) label: Option<SharedString>,
     pub(crate) description: Option<SharedString>,
     pub(crate) keyshortcuts: Option<SharedString>,
+    pub(crate) disabled: Option<bool>,
     pub(crate) selected: Option<bool>,
     pub(crate) expanded: Option<bool>,
     pub(crate) toggled: Option<accesskit::Toggled>,
@@ -3309,6 +3319,13 @@ impl Interactivity {
         }
         if let Some(keyshortcuts) = &self.aria.keyshortcuts {
             node.set_keyboard_shortcut(keyshortcuts.to_string());
+        }
+        if let Some(disabled) = self.aria.disabled {
+            if disabled {
+                node.set_disabled();
+            } else {
+                node.clear_disabled();
+            }
         }
         if let Some(selected) = self.aria.selected {
             node.set_selected(selected);

@@ -236,6 +236,7 @@
   - [Omega slim-agent proof](./development/omega-slim-agent-proof.md)
   - [Deterministic Omega workbench proofs](./development/omega-workbench-proof.md)
   - [Workbench projection consistency](./development/workbench-consistency.md)
+  - [Omega desktop workbench shell](./development/omega-desktop-workbench-shell.md)
   - [macOS](./development/macos.md)
   - [Linux](./development/linux.md)
   - [Windows](./development/windows.md)

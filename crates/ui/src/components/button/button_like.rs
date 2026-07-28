@@ -762,6 +762,7 @@ impl RenderOnce for ButtonLike {
             .when_some(self.aria_keyshortcuts, |this, keyshortcuts| {
                 this.aria_keyshortcuts(keyshortcuts)
             })
+            .aria_disabled(self.disabled)
             .when_some(self.aria_description, |this, description| {
                 this.aria_description(description)
             })

@@ -60,7 +60,10 @@ use crate::{
     },
     ui::{AgentNotification, AgentNotificationEvent},
 };
-use crate::{omega_executor_selector, omega_nostr_activity, omega_sidebar, omega_threads_sidebar};
+use crate::{
+    omega_executor_selector, omega_nostr_activity, omega_sidebar, omega_threads_sidebar,
+    workbench_shell,
+};
 use agent_settings::AgentSettings;
 use ai_onboarding::AgentPanelOnboarding;
 use anyhow::{Context as _, Result, anyhow};
@@ -1325,6 +1328,8 @@ pub struct AgentPanel {
     /// this only lets the router know whether an engine-lane pin is honourable
     /// before it decides.
     _engine_capacity_poll: Option<Task<()>>,
+    workbench_shell: workbench_shell::WorkbenchShell,
+    workbench_shell_enabled: bool,
 }
 
 impl AgentPanel {
@@ -1689,6 +1694,7 @@ impl AgentPanel {
         })
         .detach();
 
+        let workbench_shell = workbench_shell::WorkbenchShell::new(cx);
         let panel = Self {
             workspace_id,
             base_view,
@@ -1744,6 +1750,8 @@ impl AgentPanel {
             threads_sidebar_refusal: None,
             device_pairing_surface: None,
             _engine_capacity_poll: None,
+            workbench_shell,
+            workbench_shell_enabled: omega_zero_base::is_active(),
         };
 
         let mut panel = panel;
@@ -3562,25 +3570,27 @@ impl AgentPanel {
     /// "It happens not to overlap" is not a property of a layout; it is a
     /// property of today's widths.
     ///
-    /// So the sidebar is a real column and it **yields**:
-    /// [`omega_sidebar::layout`] gives it its width only while the content
-    /// column can still keep [`omega_sidebar::MIN_CONTENT_WIDTH`], and draws a
-    /// rail otherwise. The person's preference is untouched by that, so a
-    /// window dragged wide again shows the sidebar they asked for. The composer
-    /// is never covered, and never narrowed past the floor.
+    /// So the sidebar is a real column and it **yields**. The shared
+    /// [`workbench_shell::WorkbenchLayout`] allocator gives it its width only
+    /// while the transcript can still keep
+    /// [`omega_sidebar::MIN_CONTENT_WIDTH`], and draws a rail otherwise. The
+    /// person's preference is untouched by that, so a window dragged wide
+    /// again shows the sidebar they asked for.
     ///
     /// `None` outside zero base. The editor has its own workspace sidebar
     /// there, and `OMEGA-DELTA-0118`'s menu entry already names one action per
-    /// mode for exactly that reason.
-    fn render_sidebar(&self, window: &Window, cx: &mut Context<Self>) -> Option<AnyElement> {
-        if !omega_zero_base::is_active() {
+    /// mode for exactly that reason. The workbench test seam also enables it so
+    /// deterministic shell scenes exercise the production column allocation.
+    fn render_sidebar(
+        &self,
+        layout: omega_sidebar::Layout,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        if !omega_zero_base::is_active() && !self.workbench_shell_enabled {
             return None;
         }
 
-        // The panel is the window in zero base — `OMEGA-DELTA-0052` removed the
-        // docks, so there is nothing beside it to subtract. `thread_view` reads
-        // the viewport the same way to decide when its Exo controls go compact.
-        let layout = omega_sidebar::layout(window.viewport_size().width, self.sidebar.open);
         let traffic_lights = cfg!(target_os = "macos") && !window.is_fullscreen();
         let (background, border) = {
             let colors = cx.theme().colors();
@@ -4572,6 +4582,10 @@ impl AgentPanel {
         cx: &mut Context<Self>,
     ) {
         self.retained_threads.remove(&id);
+        if let Err(error) = self.workbench_shell.close_thread(&id.to_key_string()) {
+            log::warn!("failed to close workbench projection for thread {id:?}: {error:#}");
+            self.workbench_shell.record_error(error.to_string());
+        }
         ThreadMetadataStore::global(cx).update(cx, |store, cx| {
             store.delete(id, cx);
         });
@@ -5581,9 +5595,18 @@ impl AgentPanel {
         }
 
         self.refresh_base_view_subscriptions(window, cx);
+        self.sync_workbench_shell(cx);
 
         if focus {
-            self.activation_focus_handle(cx).focus(window, cx);
+            if matches!(
+                self.workbench_shell.focus_target(),
+                workbench_shell::WorkbenchFocusTarget::Surface(_)
+            ) && let Some(host) = self.workbench_shell.visible_host()
+            {
+                host.focus_handle(cx).focus(window, cx);
+            } else {
+                self.activation_focus_handle(cx).focus(window, cx);
+            }
         }
         cx.emit(AgentPanelEvent::ActiveViewChanged);
     }
@@ -7978,10 +8001,423 @@ impl AgentPanel {
         }
         key_context
     }
+
+    fn workbench_thread_context(
+        &self,
+        cx: &App,
+    ) -> Result<(
+        Option<String>,
+        Option<omega_workbench_state::RepositoryBinding>,
+    )> {
+        let Some(thread_id) = self.active_thread_id(cx) else {
+            return Ok((None, None));
+        };
+        let worktree = self.project.read(cx).visible_worktrees(cx).next();
+        let binding = match worktree {
+            Some(worktree) => {
+                let repository_id = self
+                    .workspace_id
+                    .map(|workspace_id| format!("workspace-{}", i64::from(workspace_id)))
+                    .unwrap_or_else(|| "workspace-transient".into());
+                let worktree_id = format!("worktree-{}", worktree.read(cx).id());
+                Some(
+                    omega_workbench_state::RepositoryBinding::new(repository_id, worktree_id)
+                        .map_err(anyhow::Error::new)?,
+                )
+            }
+            None => None,
+        };
+        Ok((Some(thread_id.to_key_string()), binding))
+    }
+
+    fn sync_workbench_shell(&mut self, cx: &mut Context<Self>) {
+        let context = self.workbench_thread_context(cx);
+        let result = match context {
+            Ok((thread_id, binding)) => self.workbench_shell.sync_active_thread(thread_id, binding),
+            Err(error) => Err(error),
+        };
+        if let Err(error) = result {
+            log::warn!("failed to synchronize workbench shell: {error:#}");
+            self.workbench_shell.record_error(error.to_string());
+        }
+    }
+
+    fn focus_thread_transcript(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.workbench_shell.return_to_transcript();
+        if let Some(thread_view) = self.active_thread_view(cx) {
+            thread_view
+                .read(cx)
+                .activation_focus_handle(cx)
+                .focus(window, cx);
+        } else {
+            self.focus_handle.focus(window, cx);
+        }
+        cx.notify();
+    }
+
+    fn select_work_surface(
+        &mut self,
+        surface: omega_workbench_state::WorkSurface,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match self.workbench_shell.select_surface(surface, cx) {
+            Ok(workbench_shell::SurfaceSelection::Collapsed) => {
+                self.focus_thread_transcript(window, cx);
+            }
+            Ok(workbench_shell::SurfaceSelection::Opened(host)) => {
+                host.focus_handle(cx).focus(window, cx);
+                cx.notify();
+            }
+            Err(error) => {
+                log::warn!(
+                    "could not select the {} work surface: {error:#}",
+                    workbench_shell::WorkSurfaceExt::label(surface)
+                );
+                self.workbench_shell.record_error(error.to_string());
+                cx.notify();
+            }
+        }
+    }
+
+    fn focus_activity_rail(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let surface = self.workbench_shell.focus_rail();
+        if let Some(focus_handle) = self.workbench_shell.rail_focus_handle(surface).cloned() {
+            focus_handle.focus(window, cx);
+        }
+        cx.notify();
+    }
+
+    fn move_activity_rail_focus(
+        &mut self,
+        movement: workbench_shell::RailFocusMovement,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let surface = self.workbench_shell.move_rail_focus(movement);
+        if let Some(focus_handle) = self.workbench_shell.rail_focus_handle(surface).cloned() {
+            focus_handle.focus(window, cx);
+        }
+        cx.notify();
+    }
+
+    fn activate_focused_work_surface(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let surface = self.workbench_shell.focused_rail_surface();
+        self.select_work_surface(surface, window, cx);
+    }
+
+    fn collapse_work_surface_dock(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        match self.workbench_shell.collapse_dock() {
+            Ok(true) => self.focus_thread_transcript(window, cx),
+            Ok(false) => {}
+            Err(error) => {
+                log::warn!("failed to collapse work-surface dock: {error:#}");
+                self.workbench_shell.record_error(error.to_string());
+                cx.notify();
+            }
+        }
+    }
+
+    fn render_surface_badge(
+        surface: omega_workbench_state::WorkSurface,
+        badge: &workbench_shell::SurfaceBadge,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let selector = format!(
+            "omega.workbench.badge.{}",
+            workbench_shell::WorkSurfaceExt::label(surface).to_ascii_lowercase()
+        );
+        let (tone, label, text) = match badge {
+            workbench_shell::SurfaceBadge::Count { count, tone, label } => {
+                (*tone, label.clone(), Some((*count).min(99).to_string()))
+            }
+            workbench_shell::SurfaceBadge::Attention { tone, label } => {
+                (*tone, label.clone(), None)
+            }
+        };
+        let background = match tone {
+            workbench_shell::BadgeTone::Neutral => cx.theme().colors().element_selected,
+            workbench_shell::BadgeTone::Accent => cx.theme().colors().icon_accent,
+            workbench_shell::BadgeTone::Warning => cx.theme().status().warning,
+            workbench_shell::BadgeTone::Error => cx.theme().status().error,
+        };
+        div()
+            .id(SharedString::from(selector.clone()))
+            .debug_selector(move || selector)
+            .absolute()
+            .top_0()
+            .right_0()
+            .min_w_2()
+            .h_2()
+            .px_px()
+            .rounded_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(background)
+            .role(gpui::Role::Status)
+            .aria_label(label)
+            .when_some(text, |this, text| {
+                this.min_w_3p5().h_3p5().text_xs().child(text)
+            })
+            .into_any_element()
+    }
+
+    fn render_activity_rail(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        use omega_workbench_state::WorkSurface;
+        use workbench_shell::WorkSurfaceExt as _;
+
+        let visible = self.workbench_shell.projection().visible_projection();
+        let active_surface = visible
+            .as_ref()
+            .filter(|visible| visible.dock_open)
+            .and_then(|visible| visible.effective_surface);
+        let offline = self.workbench_shell.projection().connection
+            != omega_workbench_state::ConnectionPhase::Online;
+
+        let items = WorkSurface::FALLBACK_ORDER
+            .into_iter()
+            .map(|surface| {
+                let capability = self.workbench_shell.capability(surface);
+                let available = capability
+                    .is_some_and(|capability| capability.availability.is_available() && !offline);
+                let unavailable_reason = if offline {
+                    Some(SharedString::from("Work surfaces are unavailable offline"))
+                } else {
+                    capability
+                        .and_then(|capability| capability.availability.reason())
+                        .cloned()
+                };
+                let focus_handle = self.workbench_shell.rail_focus_handle(surface).cloned();
+                let action = workbench_shell::select_action(surface);
+                let key_binding = focus_handle.as_ref().map(|focus_handle| {
+                    KeyBinding::for_action_in(action.as_ref(), focus_handle, cx)
+                });
+                let shortcut = key_binding
+                    .as_ref()
+                    .and_then(|key_binding| key_binding.keyboard_shortcut_text(window, cx));
+                let label = surface.label();
+                let active = active_surface == Some(surface);
+                let tab_index = if self.workbench_shell.focused_rail_surface() == surface {
+                    0isize
+                } else {
+                    -1isize
+                };
+
+                let mut button = IconButton::new(surface.rail_element_id(), surface.icon())
+                    .debug_selector(move || surface.rail_element_id().into())
+                    .shape(ui::IconButtonShape::Wide)
+                    .width(px(28.))
+                    .size(ButtonSize::Medium)
+                    .icon_size(IconSize::Small)
+                    .style(ButtonStyle::Subtle)
+                    .selected_style(ButtonStyle::Tinted(ui::TintColor::Accent))
+                    .toggle_state(active)
+                    .aria_label(label)
+                    .aria_expanded(active)
+                    .disabled(!available)
+                    .tab_index(tab_index);
+                if let Some(focus_handle) = focus_handle.as_ref() {
+                    button = button.track_focus(focus_handle);
+                }
+                if let Some(shortcut) = shortcut {
+                    button = button.aria_keyshortcuts(shortcut);
+                }
+                if let Some(reason) = unavailable_reason {
+                    button = button
+                        .aria_description(reason.clone())
+                        .tooltip(move |_, cx| Tooltip::with_meta(label, None, reason.clone(), cx));
+                } else if let Some(focus_handle) = focus_handle.as_ref() {
+                    button = button.tooltip(Tooltip::for_action_title_in(
+                        label,
+                        action.as_ref(),
+                        focus_handle,
+                    ));
+                }
+                let action = workbench_shell::select_action(surface);
+                button = button.on_click(move |_, window, cx| {
+                    window.dispatch_action(action.boxed_clone(), cx);
+                });
+
+                let badge = capability.and_then(|capability| capability.badge.as_ref());
+                div()
+                    .relative()
+                    .size_8()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(button)
+                    .children(badge.map(|badge| Self::render_surface_badge(surface, badge, cx)))
+            })
+            .collect::<Vec<_>>();
+
+        v_flex()
+            .id("omega.workbench.activity-rail")
+            .debug_selector(|| "omega.workbench.activity-rail".into())
+            .key_context("WorkbenchRail")
+            .w(workbench_shell::ACTIVITY_RAIL_WIDTH)
+            .h_full()
+            .flex_shrink_0()
+            .items_center()
+            .gap_1()
+            .pt_2()
+            .bg(cx.theme().colors().panel_background)
+            .border_r_1()
+            .border_color(cx.theme().colors().border)
+            .role(gpui::Role::Toolbar)
+            .aria_label("Work surfaces")
+            .aria_orientation(gpui::accesskit::Orientation::Vertical)
+            .children(items)
+            .child(div().flex_1())
+            .children(self.workbench_shell.last_error().map(|error| {
+                div()
+                    .id("omega-workbench-rail-error")
+                    .debug_selector(|| "omega-workbench-rail-error".into())
+                    .mb_2()
+                    .role(gpui::Role::Status)
+                    .aria_label(error.clone())
+                    .tooltip(Tooltip::text(error.clone()))
+                    .child(
+                        Icon::new(IconName::Warning)
+                            .size(IconSize::Small)
+                            .color(Color::Warning),
+                    )
+            }))
+            .into_any_element()
+    }
+
+    fn render_work_surface_dock(
+        &mut self,
+        layout: workbench_shell::WorkbenchLayout,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        use workbench_shell::WorkSurfaceExt as _;
+
+        if !layout.dock_visible {
+            return None;
+        }
+        let visible = self.workbench_shell.projection().visible_projection()?;
+        if !visible.dock_open {
+            return None;
+        }
+        let surface = visible.effective_surface?;
+        let host = self.workbench_shell.visible_host()?.clone();
+        let resize_drag = workbench_shell::WorkbenchDockResizeDrag::new(layout.dock_width);
+        let maximum_dock_width = workbench_shell::WorkbenchLayout::clamp_dock_width(
+            window.viewport_size().width,
+            workbench_shell::MAX_DOCK_WIDTH,
+        )
+        .unwrap_or(layout.dock_width);
+        Some(
+            v_flex()
+                .id("omega-workbench-dock")
+                .debug_selector(|| "omega.workbench.dock".into())
+                .relative()
+                .w(layout.dock_width)
+                .h_full()
+                .flex_shrink_0()
+                .overflow_hidden()
+                .bg(cx.theme().colors().panel_background)
+                .border_r_1()
+                .border_color(cx.theme().colors().border)
+                .role(gpui::Role::Complementary)
+                .aria_label(format!("{} work surface", surface.label()))
+                .child(
+                    h_flex()
+                        .h(Tab::container_height(cx))
+                        .w_full()
+                        .flex_shrink_0()
+                        .px_2()
+                        .justify_between()
+                        .border_b_1()
+                        .border_color(cx.theme().colors().border)
+                        .child(Label::new(surface.label()).size(LabelSize::Small))
+                        .child(
+                            IconButton::new(
+                                "omega.workbench.control.dock.collapse",
+                                IconName::Close,
+                            )
+                            .debug_selector(|| "omega.workbench.control.dock.collapse".into())
+                            .icon_size(IconSize::Small)
+                            .tab_index(0isize)
+                            .aria_label("Collapse work surface")
+                            .tooltip(|_, cx| {
+                                Tooltip::for_action(
+                                    "Collapse work surface",
+                                    &workbench_shell::CollapseWorkSurfaceDock,
+                                    cx,
+                                )
+                            })
+                            .on_click(|_, window, cx| {
+                                window.dispatch_action(
+                                    workbench_shell::CollapseWorkSurfaceDock.boxed_clone(),
+                                    cx,
+                                );
+                            }),
+                        ),
+                )
+                .child(v_flex().flex_1().min_h_0().child(host))
+                .child(
+                    div()
+                        .id("omega.workbench.control.dock.resize")
+                        .debug_selector(|| "omega.workbench.control.dock.resize".into())
+                        .absolute()
+                        .right(px(0.))
+                        .top(px(0.))
+                        .h_full()
+                        .w(workbench_shell::RESIZE_HANDLE_WIDTH)
+                        .cursor_col_resize()
+                        .block_mouse_except_scroll()
+                        .role(gpui::Role::Splitter)
+                        .aria_label("Resize work surface")
+                        .aria_orientation(gpui::accesskit::Orientation::Vertical)
+                        .aria_numeric_value(layout.dock_width.as_f32() as f64)
+                        .aria_min_numeric_value(workbench_shell::MIN_DOCK_WIDTH.as_f32() as f64)
+                        .aria_max_numeric_value(maximum_dock_width.as_f32() as f64)
+                        .tooltip(Tooltip::text("Drag to resize; double-click to reset"))
+                        .on_drag(resize_drag, |drag, _, window, cx| {
+                            drag.begin(window.mouse_position().x);
+                            cx.new(|_| gpui::Empty)
+                        })
+                        .on_drag_move::<workbench_shell::WorkbenchDockResizeDrag>(cx.listener(
+                            |this,
+                             event: &gpui::DragMoveEvent<
+                                workbench_shell::WorkbenchDockResizeDrag,
+                            >,
+                             window,
+                             cx| {
+                                let requested_width =
+                                    event.drag(cx).requested_width(event.event.position.x);
+                                if this
+                                    .workbench_shell
+                                    .resize_dock(requested_width, window.viewport_size().width)
+                                {
+                                    cx.notify();
+                                }
+                            },
+                        ))
+                        .on_click(cx.listener(|this, event: &gpui::ClickEvent, window, cx| {
+                            if event.click_count() >= 2
+                                && this.workbench_shell.resize_dock(
+                                    workbench_shell::DEFAULT_DOCK_WIDTH,
+                                    window.viewport_size().width,
+                                )
+                            {
+                                cx.notify();
+                            }
+                            cx.stop_propagation();
+                        })),
+                )
+                .into_any_element(),
+        )
+    }
 }
 
 impl Render for AgentPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.sync_workbench_shell(cx);
+
         // WARNING: Changes to this element hierarchy can have
         // non-obvious implications to the layout of children.
         //
@@ -7992,7 +8428,6 @@ impl Render for AgentPanel {
         // - Scrolling in all views works as expected
         // - Files can be dropped into the panel
         let content = v_flex()
-            .debug_selector(|| "omega.workbench.root".into())
             .key_context(self.key_context())
             .relative()
             .size_full()
@@ -8056,7 +8491,14 @@ impl Render for AgentPanel {
                     }
                     VisibleSurface::Uninitialized => parent,
                     VisibleSurface::AgentThread(conversation_view) => parent
-                        .child(conversation_view.clone())
+                        .child(
+                            v_flex()
+                                .id("omega-workbench-transcript")
+                                .debug_selector(|| "omega.workbench.transcript".into())
+                                .flex_1()
+                                .min_h_0()
+                                .child(conversation_view.clone()),
+                        )
                         .child(self.render_drag_target(cx)),
                     VisibleSurface::Terminal(terminal_view) => {
                         let search_bar = self
@@ -8089,23 +8531,162 @@ impl Render for AgentPanel {
                 }
             });
 
-        // OMEGA-DELTA-0130. The sidebar is a column beside this one, not an
-        // overlay on top of it. `OMEGA-DELTA-0118` drew it absolutely so it
-        // could not narrow the composer; a *persistent* sidebar cannot make
-        // that promise, so it makes a stronger one instead — `render_sidebar`
-        // yields to a rail before the content column drops below the width a
-        // composer needs, and the composer is therefore neither covered nor
-        // squeezed. `min_w_0` is what lets the content column actually shrink
-        // to the space left rather than overflowing the window.
-        let content = match self.render_sidebar(window, cx) {
-            Some(sidebar) => h_flex()
+        let content = if self.workbench_shell_enabled {
+            let mut layout = workbench_shell::WorkbenchLayout::allocate(
+                window.viewport_size().width,
+                self.sidebar.open,
+                self.workbench_shell
+                    .projection()
+                    .visible_projection()
+                    .is_some_and(|visible| visible.dock_open),
+                self.workbench_shell.dock_width(),
+            );
+            if !layout.dock_visible {
+                match self.workbench_shell.collapse_for_layout(layout) {
+                    Ok(true) => self.focus_thread_transcript(window, cx),
+                    Ok(false) => {}
+                    Err(error) => {
+                        log::warn!(
+                            "failed to collapse work-surface dock for narrow layout: {error:#}"
+                        );
+                        self.workbench_shell.record_error(error.to_string());
+                    }
+                }
+            }
+            layout = workbench_shell::WorkbenchLayout::allocate(
+                window.viewport_size().width,
+                self.sidebar.open,
+                self.workbench_shell
+                    .projection()
+                    .visible_projection()
+                    .is_some_and(|visible| visible.dock_open),
+                self.workbench_shell.dock_width(),
+            );
+
+            h_flex()
+                .id("omega-workbench-shell")
+                .debug_selector(|| "omega.workbench.root".into())
+                .key_context(self.key_context())
                 .size_full()
                 .items_stretch()
                 .bg(cx.theme().colors().panel_background)
-                .child(sidebar)
+                .on_action(cx.listener(
+                    |this, _: &workbench_shell::FocusActivityRail, window, cx| {
+                        this.focus_activity_rail(window, cx);
+                    },
+                ))
+                .on_action(
+                    cx.listener(|this, _: &workbench_shell::SelectFiles, window, cx| {
+                        this.select_work_surface(
+                            omega_workbench_state::WorkSurface::Files,
+                            window,
+                            cx,
+                        );
+                    }),
+                )
+                .on_action(
+                    cx.listener(|this, _: &workbench_shell::SelectSearch, window, cx| {
+                        this.select_work_surface(
+                            omega_workbench_state::WorkSurface::Search,
+                            window,
+                            cx,
+                        );
+                    }),
+                )
+                .on_action(
+                    cx.listener(|this, _: &workbench_shell::SelectReview, window, cx| {
+                        this.select_work_surface(
+                            omega_workbench_state::WorkSurface::Review,
+                            window,
+                            cx,
+                        );
+                    }),
+                )
+                .on_action(
+                    cx.listener(|this, _: &workbench_shell::SelectGit, window, cx| {
+                        this.select_work_surface(
+                            omega_workbench_state::WorkSurface::Git,
+                            window,
+                            cx,
+                        );
+                    }),
+                )
+                .on_action(
+                    cx.listener(|this, _: &workbench_shell::SelectTerminal, window, cx| {
+                        this.select_work_surface(
+                            omega_workbench_state::WorkSurface::Terminal,
+                            window,
+                            cx,
+                        );
+                    }),
+                )
+                .on_action(
+                    cx.listener(|this, _: &workbench_shell::SelectPlan, window, cx| {
+                        this.select_work_surface(
+                            omega_workbench_state::WorkSurface::Plan,
+                            window,
+                            cx,
+                        );
+                    }),
+                )
+                .on_action(cx.listener(
+                    |this, _: &workbench_shell::FocusNextSurface, window, cx| {
+                        this.move_activity_rail_focus(
+                            workbench_shell::RailFocusMovement::Next,
+                            window,
+                            cx,
+                        );
+                    },
+                ))
+                .on_action(cx.listener(
+                    |this, _: &workbench_shell::FocusPreviousSurface, window, cx| {
+                        this.move_activity_rail_focus(
+                            workbench_shell::RailFocusMovement::Previous,
+                            window,
+                            cx,
+                        );
+                    },
+                ))
+                .on_action(cx.listener(
+                    |this, _: &workbench_shell::FocusFirstSurface, window, cx| {
+                        this.move_activity_rail_focus(
+                            workbench_shell::RailFocusMovement::First,
+                            window,
+                            cx,
+                        );
+                    },
+                ))
+                .on_action(cx.listener(
+                    |this, _: &workbench_shell::FocusLastSurface, window, cx| {
+                        this.move_activity_rail_focus(
+                            workbench_shell::RailFocusMovement::Last,
+                            window,
+                            cx,
+                        );
+                    },
+                ))
+                .on_action(cx.listener(
+                    |this, _: &workbench_shell::ActivateFocusedSurface, window, cx| {
+                        this.activate_focused_work_surface(window, cx);
+                    },
+                ))
+                .on_action(cx.listener(
+                    |this, _: &workbench_shell::CollapseWorkSurfaceDock, window, cx| {
+                        this.collapse_work_surface_dock(window, cx);
+                    },
+                ))
+                .on_action(cx.listener(
+                    |this, _: &workbench_shell::FocusThreadTranscript, window, cx| {
+                        this.focus_thread_transcript(window, cx);
+                    },
+                ))
+                .children(self.render_sidebar(layout.sidebar, window, cx))
+                .child(self.render_activity_rail(window, cx))
+                .children(self.render_work_surface_dock(layout, window, cx))
                 .child(v_flex().flex_1().min_w_0().h_full().child(content))
-                .into_any_element(),
-            None => content.into_any_element(),
+                .into_any_element()
+        } else {
+            content.into_any_element()
         };
 
         match self.visible_font_size() {
@@ -8139,6 +8720,94 @@ impl Dismissable for TrialEndUpsell {
 impl AgentPanel {
     pub fn test_new(workspace: &Workspace, window: &mut Window, cx: &mut Context<Self>) -> Self {
         Self::new(workspace, window, cx)
+    }
+
+    pub fn enable_workbench_shell_for_tests(&mut self, cx: &mut Context<Self>) {
+        self.workbench_shell_enabled = true;
+        cx.notify();
+    }
+
+    pub fn workbench_projection_for_tests(&self) -> &omega_workbench_state::WorkbenchProjection {
+        self.workbench_shell.projection()
+    }
+
+    pub fn workbench_focus_target_for_tests(&self) -> workbench_shell::WorkbenchFocusTarget {
+        self.workbench_shell.focus_target()
+    }
+
+    pub fn workbench_host_entity_id_for_tests(
+        &self,
+        surface: omega_workbench_state::WorkSurface,
+        cx: &App,
+    ) -> Option<gpui::EntityId> {
+        let host = self.workbench_shell.visible_host()?;
+        (host.read(cx).key().surface == surface).then(|| host.entity_id())
+    }
+
+    pub fn visible_workbench_host_for_tests(
+        &self,
+    ) -> Option<Entity<workbench_shell::WorkSurfaceHost>> {
+        self.workbench_shell.visible_host().cloned()
+    }
+
+    pub fn workbench_host_count_for_tests(&self) -> usize {
+        self.workbench_shell.host_count()
+    }
+
+    pub fn set_workbench_badge_for_tests(
+        &mut self,
+        surface: omega_workbench_state::WorkSurface,
+        badge: Option<workbench_shell::SurfaceBadge>,
+        cx: &mut Context<Self>,
+    ) {
+        self.workbench_shell.set_badge(surface, badge);
+        cx.notify();
+    }
+
+    pub fn fail_next_workbench_host_creation_for_tests(
+        &mut self,
+        surface: omega_workbench_state::WorkSurface,
+    ) {
+        self.workbench_shell.fail_next_host_creation(surface);
+    }
+
+    pub fn begin_workbench_surface_load_for_tests(
+        &mut self,
+        request_id: impl Into<String>,
+        surface: omega_workbench_state::WorkSurface,
+        cx: &mut Context<Self>,
+    ) -> Result<workbench_shell::SurfaceLoadContext> {
+        self.workbench_shell
+            .begin_surface_load(request_id, surface, cx)
+    }
+
+    pub fn complete_workbench_surface_load_for_tests(
+        &mut self,
+        load: workbench_shell::SurfaceLoadContext,
+        outcome: workbench_shell::SurfaceLoadOutcome,
+        cx: &mut Context<Self>,
+    ) -> Result<omega_workbench_state::TransitionEffect> {
+        let effect = self
+            .workbench_shell
+            .complete_surface_load(load, outcome, cx)?;
+        cx.notify();
+        Ok(effect)
+    }
+
+    pub fn invalidate_workbench_surface_for_tests(
+        &mut self,
+        surface: omega_workbench_state::WorkSurface,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<omega_workbench_state::TransitionEffect> {
+        let effect = self.workbench_shell.invalidate_surface(surface)?;
+        if self.workbench_shell.focus_target() == workbench_shell::WorkbenchFocusTarget::Transcript
+        {
+            self.focus_thread_transcript(window, cx);
+        } else {
+            cx.notify();
+        }
+        Ok(effect)
     }
 
     /// Drops a thread's `ConversationView` from `retained_threads` without

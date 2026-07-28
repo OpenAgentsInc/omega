@@ -18,8 +18,10 @@ test-support = [
     "eval_utils",
     "gpui/test-support",
     "language/test-support",
+    "language_model/test-support",
     "dep:omega_workbench_harness",
     "reqwest_client",
+    "remote_connection/test-support",
     "workspace/test-support",
     "agent/test-support",
 ]
@@ -94,6 +96,7 @@ omega_exo_log.workspace = true
 omega_front_door.workspace = true
 omega_harness.workspace = true
 omega_workbench_harness = { workspace = true, features = ["gpui-support"], optional = true }
+omega_workbench_state.workspace = true
 omega_agent_detect.workspace = true
 omega_audience.workspace = true
 omega_community.workspace = true

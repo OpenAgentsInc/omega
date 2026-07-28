@@ -85,12 +85,27 @@ jobs:
       - name: Test workbench fixtures, selection, pixels, and receipts
         run: cargo test -p omega_workbench_harness --features gpui-support -- --nocapture
 
-      - name: Test the production Agent UI scene adapter
+      - name: Test the production Agent UI workbench front door
         run: >-
           cargo test -p agent_ui --features test-support
-          typed_fixture_drives_rendered_front_door_semantics -- --nocapture
+          workbench_front_door_tests -- --nocapture
 
-      - name: Sweep deterministic GPUI semantic-probe seeds
+      - name: Sweep production workbench keyboard and actions across 16 seeds
+        env:
+          ITERATIONS: "16"
+          SEED: "0"
+        run: >-
+          cargo test -p agent_ui --features test-support
+          workbench_keyboard_actions_route_focus -- --nocapture
+
+      - name: Prove production surface hosts release with the window
+        env:
+          LEAK_BACKTRACE: "1"
+        run: >-
+          cargo test -p agent_ui --features test-support
+          workbench_surface_hosts_release_with_window -- --nocapture
+
+      - name: Sweep deterministic GPUI semantic-probe self-tests
         env:
           ITERATIONS: "16"
           SEED: "0"

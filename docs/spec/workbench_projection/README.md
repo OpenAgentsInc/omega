@@ -27,9 +27,10 @@ The checked-in Rust reducer has two additional binding-required surfaces,
 generation)`. A command is legal only when its action binding equals that
   visible tuple.
 - Binding-required surfaces are unavailable unless both a repository and
-  worktree exist. An unavailable request falls back in the fixed order `Files`,
-  `Git`, `Terminal`, `Plan` for the modeled subset of
-  `WorkSurface::FALLBACK_ORDER`.
+  worktree exist. A direct request for an unavailable surface is rejected
+  without changing selection. A surface that becomes unavailable after it was
+  selected falls back in the fixed order `Files`, `Git`, `Terminal`, `Plan`
+  for the modeled subset of `WorkSurface::FALLBACK_ORDER`.
 - Repository/worktree and capability changes advance the owning thread's
   generation before recomputing its projection.
 - A load captures its thread, repository, worktree, surface, and generation.
@@ -62,8 +63,10 @@ generation)`. A command is legal only when its action binding equals that
   projection and durable selection to converge.
 
 The model keeps `requestedSurface` separate from `effectiveSurface`. That
-distinction is necessary to preserve user intent while making an invalid
-request render a deterministic, currently available fallback.
+distinction preserves prior user intent when a capability, repository, or
+worktree disappears while projecting a deterministic, currently available
+fallback. A new invalid request is rejected instead of opening an unrelated
+surface.
 
 ## Actions
 
@@ -110,7 +113,7 @@ They establish reachability of:
 
 - cold start followed by restore;
 - disconnect, reconnect, and snapshot application;
-- invalid requested-surface fallback;
+- fallback after an active surface loses its capability or worktree;
 - stale async completion;
 - successful completion for a load whose owning thread is hidden.
 
@@ -133,7 +136,7 @@ With TLC 2.19, four workers, and the checked-in base configuration, the full
 graph completed in about one second:
 
 ```text
-10,044 states generated, 4,657 distinct states found, 0 states left on queue.
+8,737 states generated, 4,091 distinct states found, 0 states left on queue.
 The depth of the complete state graph search is 4.
 Model checking completed. No error has been found.
 ```

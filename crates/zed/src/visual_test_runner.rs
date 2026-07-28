@@ -191,8 +191,9 @@ use {
     },
     omega_workbench_harness::{
         CheckStatus, HERMETIC_SCENES, PixelProof, PixelStatus, ProofCheck, ProofLane, ProofOutcome,
-        ProofReceipt, RegionPixelProof, ScenePhase, WorkbenchScene,
-        compare_images as compare_workbench_images, scene_spec, select_scenes,
+        ProofReceipt, RegionPixelProof, ScenePhase, SemanticProbe, WORKBENCH_SHELL_PIXEL_SCENES,
+        WorkSurfaceId, WorkbenchScene, compare_images as compare_workbench_images, scene_spec,
+        select_scenes,
     },
     project::{AgentId, Project},
     project_panel::ProjectPanel,
@@ -463,6 +464,25 @@ fn record_workbench_semantic_failure(scene: &str, check: &str, detail: impl Into
 }
 
 #[cfg(target_os = "macos")]
+fn record_workbench_semantic_checks(scene: &str, checks: Vec<ProofCheck>) {
+    if !workbench_should_run_scene(scene) {
+        return;
+    }
+    WORKBENCH_PROOF_SESSION.with(|session| {
+        let mut session = session.borrow_mut();
+        let Some(session) = session.as_mut() else {
+            return;
+        };
+        session
+            .evidence
+            .entry(scene.to_string())
+            .or_default()
+            .semantic_checks
+            .extend(checks);
+    });
+}
+
+#[cfg(target_os = "macos")]
 fn record_workbench_pixel(scene: &str, pixel: PixelProof) {
     WORKBENCH_PROOF_SESSION.with(|session| {
         let mut session = session.borrow_mut();
@@ -491,6 +511,30 @@ fn workbench_fixture_for_scene(name: &str) -> Result<WorkbenchScene> {
     });
     scene.active_thread_id = Some("active-thread".to_string());
     scene.content_state = ContentStateFixture::Ready;
+
+    if WORKBENCH_SHELL_PIXEL_SCENES.contains(&name) {
+        for surface in &mut scene.surfaces {
+            surface.available = surface.id == WorkSurfaceId::Plan;
+        }
+        match name {
+            "omega_workbench_shell_active_dock" => {
+                scene.active_surface = Some(WorkSurfaceId::Plan);
+                scene.dock_open = true;
+            }
+            "omega_workbench_shell_typed_badge" => {
+                let plan = scene
+                    .surfaces
+                    .iter_mut()
+                    .find(|surface| surface.id == WorkSurfaceId::Plan)
+                    .context("workbench scene has no Plan surface fixture")?;
+                plan.badge = Some(3);
+            }
+            "omega_workbench_shell_narrow" | "omega_workbench_shell_collapsed_after_open" => {
+                scene.active_surface = Some(WorkSurfaceId::Plan);
+            }
+            _ => {}
+        }
+    }
 
     if name == "omega_front_door_typing" {
         scene.messages.push(MessageFixture {
@@ -907,8 +951,8 @@ fn run_visual_tests(project_path: PathBuf, update_baseline: bool) -> Result<()> 
             println!("\n--- Omega: executor disclosure after a restart ---");
             run_omega_restart_visual_tests(app_state.clone(), &mut cx, update_baseline)
         } else {
-            println!("\n--- Omega: front door, executor disclosure, route pin ---");
-            run_omega_agent_visual_tests(app_state.clone(), &mut cx, update_baseline)
+            println!("\n--- Omega: deterministic recording scenes ---");
+            run_omega_recording_visual_tests(app_state.clone(), &mut cx, update_baseline)
         };
         // The shared window this function opened above is torn down here as
         // well as at the end of the full run. Returning early without it left
@@ -1272,6 +1316,19 @@ fn verify_workbench_render_preflight(
     );
     record_workbench_semantic_check(test_name, "workbench-selectors-unique");
 
+    if WORKBENCH_SHELL_PIXEL_SCENES.contains(&test_name) {
+        let scene = workbench_fixture_for_scene(test_name)?;
+        let checks = omega_workbench_harness::prove_workbench_shell(&scene, &snapshot)
+            .with_context(|| format!("proving rendered workbench shell scene {test_name:?}"))?;
+        record_workbench_semantic_checks(test_name, checks);
+
+        if test_name == "omega_workbench_shell_focus_visible" {
+            let mut probe = SemanticProbe::new(&snapshot);
+            probe.require_focus(WorkSurfaceId::Plan.rail_selector(), true)?;
+            record_workbench_semantic_checks(test_name, probe.into_checks());
+        }
+    }
+
     let accessibility_tree = snapshot
         .accessibility_tree_json()
         .ok_or_else(|| anyhow::anyhow!("accessibility tree was not produced"))?;
@@ -1300,13 +1357,6 @@ fn verify_workbench_render_preflight(
         .selectors()
         .filter(|(selector, _)| is_workbench_control_selector(selector))
     {
-        anyhow::ensure!(
-            snapshot
-                .occurrences(selector)
-                .iter()
-                .any(|occurrence| occurrence.hit_testable),
-            "workbench control selector {selector:?} is not hit-testable"
-        );
         let matching_nodes: Vec<_> = nodes
             .values()
             .filter(|node| {
@@ -1336,6 +1386,26 @@ fn verify_workbench_render_preflight(
                     .is_some_and(|label| !label.trim().is_empty()),
             "interactive workbench selector {selector:?} needs a role and non-empty label"
         );
+        let disabled = aria
+            .get("disabled")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        if disabled {
+            anyhow::ensure!(
+                aria.get("description")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|description| !description.trim().is_empty()),
+                "disabled workbench selector {selector:?} needs a non-empty reason"
+            );
+        } else {
+            anyhow::ensure!(
+                snapshot
+                    .occurrences(selector)
+                    .iter()
+                    .any(|occurrence| occurrence.hit_testable),
+                "enabled workbench control selector {selector:?} is not hit-testable"
+            );
+        }
     }
     record_workbench_semantic_check(test_name, "workbench-controls-accessible");
     Ok(())
@@ -1374,11 +1444,18 @@ fn run_visual_test(
             );
             return Err(error);
         }
-        record_workbench_semantic_check(test_name, "typed-state-preflight");
+        workbench_fixture_for_scene(test_name)?.validate()?;
+        record_workbench_semantic_check(test_name, "fixture-schema-preflight");
         if workbench_semantic_only() {
             return Ok(TestResult::Passed);
         }
     }
+
+    let region_snapshot = if registered_scene.is_some_and(|scene| !scene.regions.is_empty()) {
+        Some(cx.debug_render_snapshot(window)?)
+    } else {
+        None
+    };
 
     // Capture the screenshot using direct texture capture
     let screenshot = cx.capture_screenshot(window)?;
@@ -1401,6 +1478,21 @@ fn run_visual_test(
             expected_height
         );
     }
+    let resolved_regions = match (registered_scene, region_snapshot.as_ref()) {
+        (Some(scene), Some(snapshot)) => scene
+            .regions
+            .iter()
+            .map(|region| {
+                region.resolve(
+                    snapshot,
+                    scene.viewport,
+                    screenshot.width(),
+                    screenshot.height(),
+                )
+            })
+            .collect::<Result<Vec<_>>>()?,
+        _ => Vec::new(),
+    };
 
     let baseline_path = get_baseline_path(test_name);
     let proof_output_root = workbench_output_root();
@@ -1439,52 +1531,48 @@ fn run_visual_test(
         }
         println!("  Baseline updated: {}", baseline_path.display());
         let mut regions = Vec::new();
-        if let Some(scene) = registered_scene {
-            for region_spec in scene.regions {
-                let region = region_spec.capture();
-                let current_region = region.crop(&screenshot)?;
-                let baseline_region_path =
-                    get_baseline_path(&format!("{test_name}__{}", region.name));
-                if let Some(parent) = baseline_region_path.parent() {
+        for region in &resolved_regions {
+            let current_region = region.crop(&screenshot)?;
+            let baseline_region_path = get_baseline_path(&format!("{test_name}__{}", region.name));
+            if let Some(parent) = baseline_region_path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            current_region.save(&baseline_region_path)?;
+            let current_region_relative = PathBuf::from("scenes")
+                .join(test_name)
+                .join("regions")
+                .join(format!("{}.png", region.name));
+            let baseline_region_relative = PathBuf::from("scenes")
+                .join(test_name)
+                .join("regions")
+                .join(format!("{}_baseline.png", region.name));
+            if let Some(output_root) = &proof_output_root {
+                let current_region_path = output_root.join(&current_region_relative);
+                if let Some(parent) = current_region_path.parent() {
                     std::fs::create_dir_all(parent)?;
                 }
-                current_region.save(&baseline_region_path)?;
-                let current_region_relative = PathBuf::from("scenes")
-                    .join(test_name)
-                    .join("regions")
-                    .join(format!("{}.png", region.name));
-                let baseline_region_relative = PathBuf::from("scenes")
-                    .join(test_name)
-                    .join("regions")
-                    .join(format!("{}_baseline.png", region.name));
-                if let Some(output_root) = &proof_output_root {
-                    let current_region_path = output_root.join(&current_region_relative);
-                    if let Some(parent) = current_region_path.parent() {
-                        std::fs::create_dir_all(parent)?;
-                    }
-                    current_region.save(&current_region_path)?;
-                    let proof_baseline_region_path = output_root.join(&baseline_region_relative);
-                    current_region.save(proof_baseline_region_path)?;
-                }
-                println!(
-                    "  Region baseline updated: {}",
-                    baseline_region_path.display()
-                );
-                regions.push(RegionPixelProof {
-                    name: region.name,
-                    status: PixelStatus::Passed,
-                    match_percentage: Some(1.0),
-                    different_pixels: Some(0),
-                    total_pixels: Some(
-                        current_region
-                            .width()
-                            .saturating_mul(current_region.height()),
-                    ),
-                    baseline: baseline_region_relative,
-                    current: current_region_relative,
-                    diff: None,
-                });
+                current_region.save(&current_region_path)?;
+                let proof_baseline_region_path = output_root.join(&baseline_region_relative);
+                current_region.save(proof_baseline_region_path)?;
             }
+            println!(
+                "  Region baseline updated: {}",
+                baseline_region_path.display()
+            );
+            regions.push(RegionPixelProof {
+                name: region.name.clone(),
+                status: PixelStatus::Passed,
+                match_percentage: Some(1.0),
+                different_pixels: Some(0),
+                total_pixels: Some(
+                    current_region
+                        .width()
+                        .saturating_mul(current_region.height()),
+                ),
+                baseline: baseline_region_relative,
+                current: current_region_relative,
+                diff: None,
+            });
         }
         if workbench_proof_active() {
             record_workbench_pixel(
@@ -1564,84 +1652,80 @@ fn run_visual_test(
 
     let mut regions = Vec::new();
     let mut regions_passed = true;
-    if let Some(scene) = registered_scene {
-        for region_spec in scene.regions {
-            let region = region_spec.capture();
-            let current_region = region.crop(&screenshot)?;
-            let baseline_region_path = get_baseline_path(&format!("{test_name}__{}", region.name));
-            let current_region_relative = PathBuf::from("scenes")
-                .join(test_name)
-                .join("regions")
-                .join(format!("{}.png", region.name));
-            let baseline_region_relative = PathBuf::from("scenes")
-                .join(test_name)
-                .join("regions")
-                .join(format!("{}_baseline.png", region.name));
-            let diff_region_relative = PathBuf::from("scenes")
-                .join(test_name)
-                .join("regions")
-                .join(format!("{}_diff.png", region.name));
-            let current_region_path = proof_output_root
-                .as_ref()
-                .map(|root| root.join(&current_region_relative))
-                .unwrap_or_else(|| {
-                    output_path.with_file_name(format!("{test_name}__{}.png", region.name))
-                });
-            if let Some(parent) = current_region_path.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-            current_region.save(&current_region_path)?;
-
-            let mut region_proof = RegionPixelProof {
-                name: region.name.clone(),
-                status: PixelStatus::Failed,
-                match_percentage: None,
-                different_pixels: None,
-                total_pixels: None,
-                baseline: baseline_region_relative.clone(),
-                current: current_region_relative,
-                diff: None,
-            };
-            if baseline_region_path.exists() {
-                if let Some(output_root) = &proof_output_root {
-                    let proof_baseline_region_path = output_root.join(&baseline_region_relative);
-                    if let Some(parent) = proof_baseline_region_path.parent() {
-                        std::fs::create_dir_all(parent)?;
-                    }
-                    std::fs::copy(&baseline_region_path, proof_baseline_region_path)?;
-                }
-                let baseline_region = image::open(&baseline_region_path)?.to_rgba8();
-                let region_comparison = compare_workbench_images(
-                    &current_region,
-                    &baseline_region,
-                    policy.channel_tolerance,
-                );
-                let passed = region_comparison.match_percentage >= policy.minimum_match;
-                region_proof.status = if passed {
-                    PixelStatus::Passed
-                } else {
-                    PixelStatus::Failed
-                };
-                region_proof.match_percentage = Some(region_comparison.match_percentage);
-                region_proof.different_pixels = Some(region_comparison.different_pixels);
-                region_proof.total_pixels = Some(region_comparison.total_pixels);
-                if !passed {
-                    regions_passed = false;
-                    let region_diff_path = proof_output_root
-                        .as_ref()
-                        .map(|root| root.join(&diff_region_relative))
-                        .unwrap_or_else(|| {
-                            output_path
-                                .with_file_name(format!("{test_name}__{}_diff.png", region.name))
-                        });
-                    region_comparison.diff_image.save(&region_diff_path)?;
-                    region_proof.diff = Some(diff_region_relative);
-                }
-            } else {
-                regions_passed = false;
-            }
-            regions.push(region_proof);
+    for region in &resolved_regions {
+        let current_region = region.crop(&screenshot)?;
+        let baseline_region_path = get_baseline_path(&format!("{test_name}__{}", region.name));
+        let current_region_relative = PathBuf::from("scenes")
+            .join(test_name)
+            .join("regions")
+            .join(format!("{}.png", region.name));
+        let baseline_region_relative = PathBuf::from("scenes")
+            .join(test_name)
+            .join("regions")
+            .join(format!("{}_baseline.png", region.name));
+        let diff_region_relative = PathBuf::from("scenes")
+            .join(test_name)
+            .join("regions")
+            .join(format!("{}_diff.png", region.name));
+        let current_region_path = proof_output_root
+            .as_ref()
+            .map(|root| root.join(&current_region_relative))
+            .unwrap_or_else(|| {
+                output_path.with_file_name(format!("{test_name}__{}.png", region.name))
+            });
+        if let Some(parent) = current_region_path.parent() {
+            std::fs::create_dir_all(parent)?;
         }
+        current_region.save(&current_region_path)?;
+
+        let mut region_proof = RegionPixelProof {
+            name: region.name.clone(),
+            status: PixelStatus::Failed,
+            match_percentage: None,
+            different_pixels: None,
+            total_pixels: None,
+            baseline: baseline_region_relative.clone(),
+            current: current_region_relative,
+            diff: None,
+        };
+        if baseline_region_path.exists() {
+            if let Some(output_root) = &proof_output_root {
+                let proof_baseline_region_path = output_root.join(&baseline_region_relative);
+                if let Some(parent) = proof_baseline_region_path.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                std::fs::copy(&baseline_region_path, proof_baseline_region_path)?;
+            }
+            let baseline_region = image::open(&baseline_region_path)?.to_rgba8();
+            let region_comparison = compare_workbench_images(
+                &current_region,
+                &baseline_region,
+                policy.channel_tolerance,
+            );
+            let passed = region_comparison.match_percentage >= policy.minimum_match;
+            region_proof.status = if passed {
+                PixelStatus::Passed
+            } else {
+                PixelStatus::Failed
+            };
+            region_proof.match_percentage = Some(region_comparison.match_percentage);
+            region_proof.different_pixels = Some(region_comparison.different_pixels);
+            region_proof.total_pixels = Some(region_comparison.total_pixels);
+            if !passed {
+                regions_passed = false;
+                let region_diff_path = proof_output_root
+                    .as_ref()
+                    .map(|root| root.join(&diff_region_relative))
+                    .unwrap_or_else(|| {
+                        output_path.with_file_name(format!("{test_name}__{}_diff.png", region.name))
+                    });
+                region_comparison.diff_image.save(&region_diff_path)?;
+                region_proof.diff = Some(diff_region_relative);
+            }
+        } else {
+            regions_passed = false;
+        }
+        regions.push(region_proof);
     }
 
     if workbench_proof_active() {
@@ -2861,6 +2945,307 @@ import { AiPaneTabContext } from 'context';
             TestResult::BaselineUpdated(p) => TestResult::BaselineUpdated(p.clone()),
         });
     Ok(result)
+}
+
+#[cfg(all(target_os = "macos", feature = "visual-tests"))]
+const OMEGA_AGENT_PROOF_SCENES: &[&str] = &[
+    "omega_front_door_no_project",
+    "omega_front_door_typing",
+    "omega_executor_disclosure_native",
+    "omega_route_pin_honoured",
+    "omega_route_pin_not_honoured",
+    "omega_executor_disclosure_external_acp",
+    "omega_executor_disclosure_engine_lane",
+    "omega_executor_disclosure_external_acp_after_restart",
+    "omega_executor_disclosure_engine_lane_after_restart",
+];
+
+#[cfg(all(target_os = "macos", feature = "visual-tests"))]
+fn run_omega_recording_visual_tests(
+    app_state: Arc<AppState>,
+    cx: &mut VisualTestAppContext,
+    update_baseline: bool,
+) -> Result<TestResult> {
+    let mut results = Vec::new();
+    if workbench_any_selected(OMEGA_AGENT_PROOF_SCENES) {
+        results.push(run_omega_agent_visual_tests(
+            app_state.clone(),
+            cx,
+            update_baseline,
+        )?);
+    }
+    if workbench_any_selected(&WORKBENCH_SHELL_PIXEL_SCENES) {
+        results.push(run_omega_workbench_shell_visual_tests(
+            app_state,
+            cx,
+            update_baseline,
+        )?);
+    }
+
+    Ok(results
+        .into_iter()
+        .find(|result| matches!(result, TestResult::BaselineUpdated(_)))
+        .unwrap_or(TestResult::Passed))
+}
+
+#[cfg(all(target_os = "macos", feature = "visual-tests"))]
+fn run_omega_workbench_shell_visual_tests(
+    app_state: Arc<AppState>,
+    cx: &mut VisualTestAppContext,
+    update_baseline: bool,
+) -> Result<TestResult> {
+    let mut results = Vec::new();
+    for scene_name in WORKBENCH_SHELL_PIXEL_SCENES {
+        if !workbench_any_selected(&[scene_name]) {
+            continue;
+        }
+        results.push(run_omega_workbench_shell_visual_capture(
+            app_state.clone(),
+            cx,
+            scene_name,
+            update_baseline,
+        )?);
+    }
+
+    Ok(results
+        .into_iter()
+        .find(|result| matches!(result, TestResult::BaselineUpdated(_)))
+        .unwrap_or(TestResult::Passed))
+}
+
+#[cfg(all(target_os = "macos", feature = "visual-tests"))]
+fn run_omega_workbench_shell_visual_capture(
+    app_state: Arc<AppState>,
+    cx: &mut VisualTestAppContext,
+    scene_name: &str,
+    update_baseline: bool,
+) -> Result<TestResult> {
+    let scene = scene_spec(scene_name)
+        .ok_or_else(|| anyhow::anyhow!("unknown workbench shell scene {scene_name:?}"))?;
+    let project = cx.update(|cx| {
+        project::Project::local(
+            app_state.client.clone(),
+            app_state.node_runtime.clone(),
+            app_state.user_store.clone(),
+            app_state.languages.clone(),
+            app_state.fs.clone(),
+            None,
+            project::LocalProjectFlags {
+                init_worktree_trust: false,
+                ..Default::default()
+            },
+            cx,
+        )
+    });
+    let bounds = Bounds {
+        origin: point(px(0.), px(0.)),
+        size: size(
+            px(scene.viewport.width as f32),
+            px(scene.viewport.height as f32),
+        ),
+    };
+    let workspace_window: WindowHandle<Workspace> = cx
+        .update(|cx| {
+            cx.open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(bounds)),
+                    focus: false,
+                    show: false,
+                    ..Default::default()
+                },
+                |window, cx| {
+                    cx.new(|cx| {
+                        Workspace::new(None, project.clone(), app_state.clone(), window, cx)
+                    })
+                },
+            )
+        })
+        .with_context(|| format!("opening workbench shell scene {scene_name:?}"))?;
+    cx.run_until_parked();
+
+    let result = run_omega_workbench_shell_visual_capture_in_window(
+        workspace_window,
+        cx,
+        scene_name,
+        update_baseline,
+    );
+    cx.update_window(workspace_window.into(), |_, window, _cx| {
+        window.remove_window();
+    })
+    .log_err();
+    cx.run_until_parked();
+    result
+}
+
+#[cfg(all(target_os = "macos", feature = "visual-tests"))]
+fn run_omega_workbench_shell_visual_capture_in_window(
+    workspace_window: WindowHandle<Workspace>,
+    cx: &mut VisualTestAppContext,
+    scene_name: &str,
+    update_baseline: bool,
+) -> Result<TestResult> {
+    use agent_ui::AgentPanel;
+    use workspace::dock::Panel as _;
+
+    let (weak_workspace, async_window_context) = workspace_window
+        .update(cx, |workspace, window, cx| {
+            (workspace.weak_handle(), window.to_async(cx))
+        })
+        .context("getting workbench shell workspace handle")?;
+    cx.background_executor.allow_parking();
+    let panel = cx
+        .foreground_executor
+        .block_test(AgentPanel::load(weak_workspace, async_window_context))
+        .context("loading AgentPanel for workbench shell scene")?;
+    cx.background_executor.forbid_parking();
+
+    workspace_window
+        .update(cx, |workspace, window, cx| {
+            panel.update(cx, |panel, cx| {
+                panel.enable_workbench_shell_for_tests(cx);
+                panel.set_zoomed(true, window, cx);
+            });
+            workspace.add_panel(panel.clone(), window, cx);
+            workspace.open_panel::<AgentPanel>(window, cx);
+            AgentPanel::open_front_door(window, cx);
+        })
+        .context("mounting production AgentPanel workbench shell")?;
+    cx.run_until_parked();
+
+    anyhow::ensure!(
+        cx.read(|cx| panel.read(cx).active_thread_id(cx).is_some()),
+        "workbench shell scene {scene_name:?} has no active production thread"
+    );
+    configure_workbench_shell_scene(scene_name, workspace_window, &panel, cx)?;
+    run_visual_test(scene_name, workspace_window.into(), cx, update_baseline)
+}
+
+#[cfg(all(target_os = "macos", feature = "visual-tests"))]
+fn dispatch_workbench_action(
+    workspace_window: WindowHandle<Workspace>,
+    action: Box<dyn gpui::Action>,
+    cx: &mut VisualTestAppContext,
+) -> Result<()> {
+    cx.update_window(workspace_window.into(), move |_, window, cx| {
+        window.dispatch_action(action, cx)
+    })?;
+    cx.run_until_parked();
+    Ok(())
+}
+
+#[cfg(all(target_os = "macos", feature = "visual-tests"))]
+fn configure_workbench_shell_scene(
+    scene_name: &str,
+    workspace_window: WindowHandle<Workspace>,
+    panel: &Entity<agent_ui::AgentPanel>,
+    cx: &mut VisualTestAppContext,
+) -> Result<()> {
+    use agent_ui::workbench_shell::{
+        BadgeTone, FocusActivityRail, FocusLastSurface, SelectFiles, SelectPlan, SurfaceBadge,
+    };
+
+    let initial_projection = cx.read(|cx| panel.read(cx).workbench_projection_for_tests().clone());
+    let active_thread_id = initial_projection
+        .active_thread_id
+        .as_ref()
+        .context("workbench projection has no active thread")?;
+    let active_thread = initial_projection
+        .threads
+        .get(active_thread_id)
+        .context("workbench projection has no active thread state")?;
+    let plan_surface = active_thread
+        .available_surfaces
+        .iter()
+        .copied()
+        .find(|surface| !surface.requires_binding())
+        .context("workbench projection has no unbound surface")?;
+    anyhow::ensure!(
+        active_thread.binding.is_none() && active_thread.available_surfaces.len() == 1,
+        "workbench shell scene must use the real no-project capability projection"
+    );
+
+    match scene_name {
+        "omega_workbench_shell_default" => {}
+        "omega_workbench_shell_active_dock" => {
+            dispatch_workbench_action(workspace_window, Box::new(SelectPlan), cx)?;
+            let projection = cx.read(|cx| panel.read(cx).workbench_projection_for_tests().clone());
+            let visible = projection
+                .visible_projection()
+                .context("active-dock scene has no visible projection")?;
+            anyhow::ensure!(
+                visible.requested_surface == Some(plan_surface)
+                    && visible.effective_surface == Some(plan_surface)
+                    && visible.dock_open,
+                "SelectPlan did not open the production Plan surface"
+            );
+        }
+        "omega_workbench_shell_focus_visible" => {
+            dispatch_workbench_action(workspace_window, Box::new(FocusActivityRail), cx)?;
+            dispatch_workbench_action(workspace_window, Box::new(FocusLastSurface), cx)?;
+        }
+        "omega_workbench_shell_typed_badge" => {
+            cx.update_window(workspace_window.into(), |_, _window, cx| {
+                panel.update(cx, |panel, cx| {
+                    panel.set_workbench_badge_for_tests(
+                        plan_surface,
+                        Some(SurfaceBadge::Count {
+                            count: 3,
+                            tone: BadgeTone::Warning,
+                            label: "3 Plan updates".into(),
+                        }),
+                        cx,
+                    );
+                });
+            })?;
+            cx.run_until_parked();
+        }
+        "omega_workbench_shell_unavailable_no_project" => {
+            dispatch_workbench_action(workspace_window, Box::new(SelectFiles), cx)?;
+            let after = cx.read(|cx| panel.read(cx).workbench_projection_for_tests().clone());
+            anyhow::ensure!(
+                after == initial_projection,
+                "selecting unavailable Files mutated the production projection"
+            );
+        }
+        "omega_workbench_shell_narrow" => {
+            dispatch_workbench_action(workspace_window, Box::new(SelectPlan), cx)?;
+            let projection = cx.read(|cx| panel.read(cx).workbench_projection_for_tests().clone());
+            let visible = projection
+                .visible_projection()
+                .context("narrow scene has no visible projection")?;
+            anyhow::ensure!(
+                visible.requested_surface == Some(plan_surface)
+                    && visible.effective_surface == Some(plan_surface)
+                    && !visible.dock_open,
+                "narrow layout did not deterministically suppress the dock"
+            );
+        }
+        "omega_workbench_shell_collapsed_after_open" => {
+            dispatch_workbench_action(workspace_window, Box::new(SelectPlan), cx)?;
+            let open_projection =
+                cx.read(|cx| panel.read(cx).workbench_projection_for_tests().clone());
+            anyhow::ensure!(
+                open_projection
+                    .visible_projection()
+                    .is_some_and(|visible| visible.dock_open),
+                "collapsed scene never opened the production dock"
+            );
+            dispatch_workbench_action(workspace_window, Box::new(SelectPlan), cx)?;
+            let collapsed_projection =
+                cx.read(|cx| panel.read(cx).workbench_projection_for_tests().clone());
+            let visible = collapsed_projection
+                .visible_projection()
+                .context("collapsed scene has no visible projection")?;
+            anyhow::ensure!(
+                visible.requested_surface == Some(plan_surface)
+                    && visible.effective_surface == Some(plan_surface)
+                    && !visible.dock_open,
+                "activating the selected production surface did not retain selection and collapse"
+            );
+        }
+        _ => anyhow::bail!("unsupported workbench shell scene {scene_name:?}"),
+    }
+    Ok(())
 }
 
 /// Omega's own rendered proofs. `OMEGA-DELTA-0034`, `OMEGA-DELTA-0035`,

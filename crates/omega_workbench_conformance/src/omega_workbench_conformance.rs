@@ -882,17 +882,19 @@ fn try_apply_transition(
             require_active_thread(state, thread_id)?;
             require_online(state)?;
             let thread = require_thread_mut(state, thread_id)?;
-            thread.requested_surface = Some(*surface);
-            if thread.available_surfaces.contains(surface) {
-                thread.effective_surface = Some(*surface);
-                thread.dock_visible = true;
-                TransitionEffect::Applied
-            } else {
-                let fallback = fallback_surface(&thread.available_surfaces);
-                thread.effective_surface = fallback;
-                thread.dock_visible = fallback.is_some();
-                TransitionEffect::DeterministicFallback
+            if !thread.available_surfaces.contains(surface) {
+                return rejected(
+                    RejectCode::UnavailableSurface,
+                    format!(
+                        "surface {surface:?} is unavailable for thread {:?}",
+                        thread_id.0
+                    ),
+                );
             }
+            thread.requested_surface = Some(*surface);
+            thread.effective_surface = Some(*surface);
+            thread.dock_visible = true;
+            TransitionEffect::Applied
         }
         Transition::CloseSurface { thread_id } => {
             require_active_thread(state, thread_id)?;
@@ -2451,7 +2453,7 @@ mod tests {
     }
 
     #[test]
-    fn unavailable_request_preserves_intent_and_projects_fixed_fallback() {
+    fn unavailable_request_is_rejected_without_changing_selection() {
         let thread_id = thread("thread-a");
         let mut initial = one_bound_thread_state();
         if let Some(thread) = initial.threads.get_mut(&thread_id) {
@@ -2460,27 +2462,19 @@ mod tests {
         if let Err(error) = normalize_state(&mut initial) {
             panic!("fallback test state failed to normalize: {error}");
         }
-        let outcome = replay_ok(
-            &initial,
-            &Transition::RequestSurface {
-                thread_id: thread_id.clone(),
-                surface: SurfaceId::Terminal,
-            },
-        );
-        assert_eq!(outcome.effect, TransitionEffect::DeterministicFallback);
-        let projected = outcome.state.threads.get(&thread_id);
+        let transition = Transition::RequestSurface {
+            thread_id: thread_id.clone(),
+            surface: SurfaceId::Terminal,
+        };
+        let outcome = replay_transition(&initial, &transition)
+            .unwrap_or_else(|error| panic!("unavailable request replay failed: {error}"));
         assert_eq!(
-            projected.and_then(|thread| thread.requested_surface),
-            Some(SurfaceId::Terminal)
+            outcome.effect,
+            TransitionEffect::Rejected {
+                code: RejectCode::UnavailableSurface
+            }
         );
-        assert_eq!(
-            projected.and_then(|thread| thread.effective_surface),
-            Some(SurfaceId::Files)
-        );
-        assert_eq!(
-            projected.and_then(|thread| thread.focus_owner),
-            Some(SurfaceId::Files)
-        );
+        assert_eq!(outcome.state, initial);
     }
 
     #[test]

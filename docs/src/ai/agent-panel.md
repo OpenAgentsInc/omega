@@ -29,6 +29,52 @@ The sections below cover what you can do from here.
 > Note that some Agent Panel features may not be available for every External Agent. Restoring threads from history, checkpoints, token usage display, and similar features depend on the agent integration.
 > Their availability varies depending on the agent.
 
+### Desktop Work Surfaces {#desktop-work-surfaces}
+
+Omega desktop keeps the active thread transcript in the center and places a
+vertical work-surface rail beside it. The rail contains Files, Search, Review,
+Git, Terminal, and Plan.
+
+Select an inactive item to open its dock. Select the active item again to
+collapse the dock and return focus to the thread. Reopening a collapsed surface
+retains its host instead of recreating the transcript or surface state.
+Drag the dock's right edge to resize it, or double-click the edge to restore
+the default width.
+
+Use these default actions:
+
+| Task                   | Action                                         |
+| ---------------------- | ---------------------------------------------- |
+| Focus the rail         | {#kb omega_workbench::FocusActivityRail}       |
+| Open Files             | {#kb omega_workbench::SelectFiles}             |
+| Open Search            | {#kb omega_workbench::SelectSearch}            |
+| Open Review            | {#kb omega_workbench::SelectReview}            |
+| Open Git               | {#kb omega_workbench::SelectGit}               |
+| Open Terminal          | {#kb omega_workbench::SelectTerminal}          |
+| Open Plan              | {#kb omega_workbench::SelectPlan}              |
+| Collapse the open dock | {#kb omega_workbench::CollapseWorkSurfaceDock} |
+
+While the rail is focused, use Up and Down to move between items, Home and End
+to move to the first or last item, Enter or Space to activate the item, and
+Escape to return focus to the thread.
+
+Files, Search, Review, Git, and Terminal require an active workspace and
+worktree. Plan requires an active agent thread. Unavailable items remain visible
+and explain what is missing instead of opening another surface.
+
+On a narrow window, Omega collapses the threads sidebar first. If the dock,
+rails, and transcript still do not fit, it collapses the work-surface dock and
+returns focus to the transcript. Widening the window does not reopen the dock;
+select the rail item again.
+
+> **Note:** The current desktop foundation provides the rail, actions,
+> responsive dock, and retained generic hosts. Native Files, Search, Review,
+> Git, Terminal, and Plan content is being mounted in follow-up work. Until
+> those adapters land, use the existing native panels for the corresponding
+> task. See
+> [Omega desktop workbench shell](../development/omega-desktop-workbench-shell.md)
+> for implementation scope.
+
 ### Creating New Threads {#new-thread}
 
 By default, the Agent Panel uses Omega Agent, Omega's first-party agent.

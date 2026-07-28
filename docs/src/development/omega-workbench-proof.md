@@ -79,7 +79,10 @@ runtime trace checker. See
 [Workbench projection consistency](./workbench-consistency.md) for the exact
 claims, bounds, trace schema, and reducer-to-model mapping. Those checks prove
 neither GPUI semantics nor pixels; this harness attaches those remaining proof
-layers.
+layers. See
+[Omega desktop workbench shell](./omega-desktop-workbench-shell.md) for the
+rail, dock, focus, lifecycle, and native-adapter contracts those layers must
+exercise.
 
 ## Typed scenes {#typed-scenes}
 

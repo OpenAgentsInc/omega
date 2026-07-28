@@ -276,6 +276,27 @@
     "use_key_equivalents": true,
     "bindings": {
       "cmd-alt-j": "agent::ToggleThreadsSidebar",
+      "cmd-alt-0": "omega_workbench::FocusActivityRail",
+      "cmd-alt-1": "omega_workbench::SelectFiles",
+      "cmd-alt-2": "omega_workbench::SelectSearch",
+      "cmd-alt-3": "omega_workbench::SelectReview",
+      "cmd-alt-4": "omega_workbench::SelectGit",
+      "cmd-alt-5": "omega_workbench::SelectTerminal",
+      "cmd-alt-6": "omega_workbench::SelectPlan",
+      "cmd-alt-[": "omega_workbench::CollapseWorkSurfaceDock",
+    },
+  },
+  {
+    "context": "WorkbenchRail",
+    "use_key_equivalents": true,
+    "bindings": {
+      "up": "omega_workbench::FocusPreviousSurface",
+      "down": "omega_workbench::FocusNextSurface",
+      "home": "omega_workbench::FocusFirstSurface",
+      "end": "omega_workbench::FocusLastSurface",
+      "enter": "omega_workbench::ActivateFocusedSurface",
+      "space": "omega_workbench::ActivateFocusedSurface",
+      "escape": "omega_workbench::FocusThreadTranscript",
     },
   },
   {

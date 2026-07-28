@@ -119,10 +119,62 @@ impl WorkSurfaceId {
             Self::Plan => "plan",
         }
     }
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Files => "Files",
+            Self::Search => "Search",
+            Self::Review => "Review",
+            Self::Git => "Git",
+            Self::Terminal => "Terminal",
+            Self::Plan => "Plan",
+        }
+    }
+
+    pub const fn rail_selector(self) -> &'static str {
+        match self {
+            Self::Files => "omega.workbench.control.rail.files",
+            Self::Search => "omega.workbench.control.rail.search",
+            Self::Review => "omega.workbench.control.rail.review",
+            Self::Git => "omega.workbench.control.rail.git",
+            Self::Terminal => "omega.workbench.control.rail.terminal",
+            Self::Plan => "omega.workbench.control.rail.plan",
+        }
+    }
+
+    pub const fn surface_selector(self) -> &'static str {
+        match self {
+            Self::Files => "omega.workbench.surface.files",
+            Self::Search => "omega.workbench.surface.search",
+            Self::Review => "omega.workbench.surface.review",
+            Self::Git => "omega.workbench.surface.git",
+            Self::Terminal => "omega.workbench.surface.terminal",
+            Self::Plan => "omega.workbench.surface.plan",
+        }
+    }
+
+    pub const fn badge_selector(self) -> &'static str {
+        match self {
+            Self::Files => "omega.workbench.badge.files",
+            Self::Search => "omega.workbench.badge.search",
+            Self::Review => "omega.workbench.badge.review",
+            Self::Git => "omega.workbench.badge.git",
+            Self::Terminal => "omega.workbench.badge.terminal",
+            Self::Plan => "omega.workbench.badge.plan",
+        }
+    }
+
+    pub const fn requires_binding(self) -> bool {
+        matches!(
+            self,
+            Self::Files | Self::Search | Self::Review | Self::Git | Self::Terminal
+        )
+    }
 }
 
 pub const DOCK_OPEN_CONTROL: &str = "omega.workbench.control.dock.open";
 pub const DOCK_COLLAPSE_CONTROL: &str = "omega.workbench.control.dock.collapse";
+pub const DOCK_RESIZE_CONTROL: &str = "omega.workbench.control.dock.resize";
 
 pub trait WorkbenchInteractionBackend {
     fn activate_selector(&mut self, selector: &str) -> Result<()>;
@@ -140,10 +192,7 @@ impl<Backend: WorkbenchInteractionBackend> WorkbenchInteractionDriver<Backend> {
     }
 
     pub fn select_rail_item(&mut self, surface: WorkSurfaceId) -> Result<()> {
-        self.backend.activate_selector(&format!(
-            "omega.workbench.control.rail.{}",
-            surface.as_str()
-        ))
+        self.backend.activate_selector(surface.rail_selector())
     }
 
     pub fn open_dock(&mut self) -> Result<()> {
@@ -169,8 +218,7 @@ impl<Backend: WorkbenchInteractionBackend> WorkbenchInteractionDriver<Backend> {
     }
 
     pub fn focus_surface(&mut self, surface: WorkSurfaceId) -> Result<()> {
-        self.backend
-            .activate_selector(&format!("omega.workbench.surface.{}", surface.as_str()))
+        self.backend.activate_selector(surface.surface_selector())
     }
 
     pub fn restart(&mut self) -> Result<()> {
@@ -392,6 +440,23 @@ pub struct SurfaceFixture {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkbenchBindingFixture {
+    pub repository_id: String,
+    pub worktree_id: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ThreadWorkbenchFixture {
+    pub thread_id: String,
+    pub generation: u64,
+    pub binding: Option<WorkbenchBindingFixture>,
+    pub requested_surface: Option<WorkSurfaceId>,
+    pub effective_surface: Option<WorkSurfaceId>,
+    pub dock_open: bool,
+    pub surfaces: Vec<SurfaceFixture>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PersistedSceneFixture {
     pub requested_surface: Option<WorkSurfaceId>,
     pub dock_open: bool,
@@ -432,6 +497,8 @@ pub struct WorkbenchScene {
     pub surfaces: Vec<SurfaceFixture>,
     pub active_surface: Option<WorkSurfaceId>,
     pub dock_open: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub thread_workbenches: Vec<ThreadWorkbenchFixture>,
     pub persisted: Option<PersistedSceneFixture>,
 }
 
@@ -464,6 +531,7 @@ impl WorkbenchScene {
                 .collect(),
             active_surface: None,
             dock_open: false,
+            thread_workbenches: Vec::new(),
             persisted: None,
         }
     }
@@ -472,8 +540,8 @@ impl WorkbenchScene {
         if self.name.trim().is_empty() {
             bail!("scene name must not be empty");
         }
-        if self.fixture_version == 0 {
-            bail!("scene fixture version must be non-zero");
+        if !matches!(self.fixture_version, 1 | 2) {
+            bail!("unsupported scene fixture version {}", self.fixture_version);
         }
         self.viewport.validate()?;
 
@@ -655,6 +723,7 @@ impl WorkbenchScene {
                 ),
             }
         }
+        self.validate_thread_workbenches()?;
 
         for artifact in &self.artifacts {
             if let Some(worktree_id) = &artifact.worktree_id
@@ -688,6 +757,132 @@ impl WorkbenchScene {
             }
         }
 
+        Ok(())
+    }
+
+    pub fn active_thread_workbench(&self) -> Option<&ThreadWorkbenchFixture> {
+        let active_thread_id = self.active_thread_id.as_deref()?;
+        self.thread_workbenches
+            .iter()
+            .find(|workbench| workbench.thread_id == active_thread_id)
+    }
+
+    fn validate_thread_workbenches(&self) -> Result<()> {
+        match self.fixture_version {
+            1 => {
+                if !self.thread_workbenches.is_empty() {
+                    bail!("version 1 scenes cannot contain per-thread workbench fixtures");
+                }
+            }
+            2 => {
+                unique_ids(
+                    "thread workbench",
+                    self.thread_workbenches
+                        .iter()
+                        .map(|workbench| workbench.thread_id.as_str()),
+                )?;
+                if self.thread_workbenches.len() != self.threads.len() {
+                    bail!("version 2 scenes must contain exactly one workbench fixture per thread");
+                }
+
+                for thread in &self.threads {
+                    let workbench = self
+                        .thread_workbenches
+                        .iter()
+                        .find(|workbench| workbench.thread_id == thread.id)
+                        .ok_or_else(|| {
+                            anyhow!(
+                                "version 2 scene has no workbench fixture for thread {:?}",
+                                thread.id
+                            )
+                        })?;
+                    validate_surface_fixtures(
+                        &format!("thread {:?} workbench", thread.id),
+                        &workbench.surfaces,
+                    )?;
+
+                    match (
+                        &workbench.binding,
+                        thread.repository_id.as_deref(),
+                        thread.worktree_id.as_deref(),
+                    ) {
+                        (None, None, None) => {}
+                        (Some(binding), Some(repository_id), Some(worktree_id))
+                            if binding.repository_id == repository_id
+                                && binding.worktree_id == worktree_id => {}
+                        _ => bail!(
+                            "thread {:?} workbench binding does not match its thread fixture",
+                            thread.id
+                        ),
+                    }
+
+                    if workbench.binding.is_none()
+                        && workbench
+                            .surfaces
+                            .iter()
+                            .any(|surface| surface.available && surface.id.requires_binding())
+                    {
+                        bail!(
+                            "unbound thread {:?} advertises a repository-bound surface",
+                            thread.id
+                        );
+                    }
+
+                    let expected_surface =
+                        deterministic_surface(workbench.requested_surface, &workbench.surfaces);
+                    if workbench.effective_surface != expected_surface {
+                        bail!(
+                            "thread {:?} effective surface {:?} does not match deterministic projection {expected_surface:?}",
+                            thread.id,
+                            workbench.effective_surface
+                        );
+                    }
+                    if workbench.dock_open && workbench.effective_surface.is_none() {
+                        bail!(
+                            "thread {:?} has an open dock without an effective surface",
+                            thread.id
+                        );
+                    }
+                }
+
+                match self.active_thread_workbench() {
+                    Some(workbench) => {
+                        for surface_id in WorkSurfaceId::ALL {
+                            let visible_surface = surface_fixture(&self.surfaces, surface_id)?;
+                            let thread_surface = surface_fixture(&workbench.surfaces, surface_id)?;
+                            if visible_surface != thread_surface {
+                                bail!(
+                                    "visible surface {surface_id:?} does not match active thread {:?}",
+                                    workbench.thread_id
+                                );
+                            }
+                        }
+                        if self.active_surface != workbench.effective_surface {
+                            bail!(
+                                "visible active surface does not match active thread {:?}",
+                                workbench.thread_id
+                            );
+                        }
+                        if self.dock_open != workbench.dock_open {
+                            bail!(
+                                "visible dock state does not match active thread {:?}",
+                                workbench.thread_id
+                            );
+                        }
+                    }
+                    None if self.active_thread_id.is_some() => {
+                        bail!("active thread has no version 2 workbench fixture");
+                    }
+                    None if self.active_surface.is_some() || self.dock_open => {
+                        bail!(
+                            "version 2 scene without an active thread has visible workbench state"
+                        );
+                    }
+                    None => {}
+                }
+            }
+            version => bail!("unsupported scene fixture version {version}"),
+        }
         Ok(())
     }
 
@@ -742,6 +937,48 @@ impl WorkbenchScene {
     }
 }
 
+fn validate_surface_fixtures(kind: &str, surfaces: &[SurfaceFixture]) -> Result<()> {
+    let surface_ids: BTreeSet<_> = surfaces.iter().map(|surface| surface.id).collect();
+    if surface_ids.len() != surfaces.len() {
+        bail!("{kind} contains duplicate surface fixtures");
+    }
+    if surface_ids != WorkSurfaceId::ALL.into_iter().collect() {
+        bail!("{kind} must describe every native work surface");
+    }
+    Ok(())
+}
+
+fn surface_fixture(
+    surfaces: &[SurfaceFixture],
+    surface_id: WorkSurfaceId,
+) -> Result<&SurfaceFixture> {
+    surfaces
+        .iter()
+        .find(|surface| surface.id == surface_id)
+        .ok_or_else(|| anyhow!("surface {surface_id:?} has no fixture"))
+}
+
+fn deterministic_surface(
+    requested_surface: Option<WorkSurfaceId>,
+    surfaces: &[SurfaceFixture],
+) -> Option<WorkSurfaceId> {
+    match requested_surface {
+        None => None,
+        Some(requested_surface)
+            if surfaces
+                .iter()
+                .any(|surface| surface.id == requested_surface && surface.available) =>
+        {
+            Some(requested_surface)
+        }
+        Some(_) => WorkSurfaceId::ALL.into_iter().find(|surface_id| {
+            surfaces
+                .iter()
+                .any(|surface| surface.id == *surface_id && surface.available)
+        }),
+    }
+}
+
 fn unique_ids<'a>(kind: &str, ids: impl Iterator<Item = &'a str>) -> Result<()> {
     let mut seen = BTreeSet::new();
     for id in ids {
@@ -773,7 +1010,79 @@ impl SceneSpec {
     }
 }
 
+pub const WORKBENCH_SHELL_PIXEL_SCENES: [&str; 7] = [
+    "omega_workbench_shell_default",
+    "omega_workbench_shell_active_dock",
+    "omega_workbench_shell_focus_visible",
+    "omega_workbench_shell_typed_badge",
+    "omega_workbench_shell_unavailable_no_project",
+    "omega_workbench_shell_narrow",
+    "omega_workbench_shell_collapsed_after_open",
+];
+
+pub const WORKBENCH_SHELL_REGIONS: &[CaptureRegionSpec] = &[CaptureRegionSpec::selector_union(
+    "rail-dock",
+    &["omega.workbench.activity-rail", "omega.workbench.dock"],
+    8,
+)];
+
 pub const HERMETIC_SCENES: &[SceneSpec] = &[
+    SceneSpec {
+        name: "omega_workbench_shell_default",
+        phase: ScenePhase::Recording,
+        viewport: ViewportFixture::new(1200, 720, 2000),
+        fixture_version: 1,
+        pixel_policy: APPLE_SILICON_METAL_POLICY,
+        regions: WORKBENCH_SHELL_REGIONS,
+    },
+    SceneSpec {
+        name: "omega_workbench_shell_active_dock",
+        phase: ScenePhase::Recording,
+        viewport: ViewportFixture::new(1200, 720, 2000),
+        fixture_version: 1,
+        pixel_policy: APPLE_SILICON_METAL_POLICY,
+        regions: WORKBENCH_SHELL_REGIONS,
+    },
+    SceneSpec {
+        name: "omega_workbench_shell_focus_visible",
+        phase: ScenePhase::Recording,
+        viewport: ViewportFixture::new(1200, 720, 2000),
+        fixture_version: 1,
+        pixel_policy: APPLE_SILICON_METAL_POLICY,
+        regions: WORKBENCH_SHELL_REGIONS,
+    },
+    SceneSpec {
+        name: "omega_workbench_shell_typed_badge",
+        phase: ScenePhase::Recording,
+        viewport: ViewportFixture::new(1200, 720, 2000),
+        fixture_version: 1,
+        pixel_policy: APPLE_SILICON_METAL_POLICY,
+        regions: WORKBENCH_SHELL_REGIONS,
+    },
+    SceneSpec {
+        name: "omega_workbench_shell_unavailable_no_project",
+        phase: ScenePhase::Recording,
+        viewport: ViewportFixture::new(1200, 720, 2000),
+        fixture_version: 1,
+        pixel_policy: APPLE_SILICON_METAL_POLICY,
+        regions: WORKBENCH_SHELL_REGIONS,
+    },
+    SceneSpec {
+        name: "omega_workbench_shell_narrow",
+        phase: ScenePhase::Recording,
+        viewport: ViewportFixture::new(909, 720, 2000),
+        fixture_version: 1,
+        pixel_policy: APPLE_SILICON_METAL_POLICY,
+        regions: WORKBENCH_SHELL_REGIONS,
+    },
+    SceneSpec {
+        name: "omega_workbench_shell_collapsed_after_open",
+        phase: ScenePhase::Recording,
+        viewport: ViewportFixture::new(1200, 720, 2000),
+        fixture_version: 1,
+        pixel_policy: APPLE_SILICON_METAL_POLICY,
+        regions: WORKBENCH_SHELL_REGIONS,
+    },
     SceneSpec {
         name: "omega_front_door_no_project",
         phase: ScenePhase::Recording,
@@ -860,6 +1169,17 @@ pub fn validate_scene_catalog() -> Result<()> {
         }
         scene.pixel_policy.validate()?;
         scene.fixture().validate()?;
+        let mut region_names = BTreeSet::new();
+        for region in scene.regions {
+            region.validate()?;
+            if !region_names.insert(region.name) {
+                bail!(
+                    "scene {:?} contains duplicate capture region {:?}",
+                    scene.name,
+                    region.name
+                );
+            }
+        }
     }
     Ok(())
 }
@@ -1215,6 +1535,26 @@ impl<'a> SemanticProbe<'a> {
         Ok(bounds)
     }
 
+    pub fn require_fully_visible(&mut self, selector: &str) -> Result<Bounds<Pixels>> {
+        let bounds = self.require_unique(selector)?;
+        let occurrence = self
+            .snapshot
+            .occurrences(selector)
+            .first()
+            .ok_or_else(|| anyhow!("{selector:?}: selector count had no occurrence"))?;
+        if occurrence.visibility != gpui::DebugVisibility::Visible {
+            let detail = format!("target visibility is {:?}", occurrence.visibility);
+            self.checks.push(ProofCheck::failed(
+                format!("fully-visible:{selector}"),
+                &detail,
+            ));
+            bail!("{selector:?}: {detail}");
+        }
+        self.checks
+            .push(ProofCheck::passed(format!("fully-visible:{selector}")));
+        Ok(bounds)
+    }
+
     pub fn require_interactive(&mut self, selector: &str) -> Result<Bounds<Pixels>> {
         let bounds = self.require_visible(selector)?;
         let occurrence = self
@@ -1257,6 +1597,69 @@ impl<'a> SemanticProbe<'a> {
         self.checks
             .push(ProofCheck::passed(format!("focus:{selector}")));
         Ok(())
+    }
+
+    pub fn require_contains_focus(&mut self, selector: &str, contains_focus: bool) -> Result<()> {
+        self.require_unique(selector)?;
+        let occurrence = self
+            .snapshot
+            .occurrences(selector)
+            .first()
+            .ok_or_else(|| anyhow!("{selector:?}: selector count had no occurrence"))?;
+        if occurrence.contains_focus != contains_focus {
+            let detail = format!(
+                "expected contains_focus={contains_focus}, rendered contains_focus={}",
+                occurrence.contains_focus
+            );
+            self.checks.push(ProofCheck::failed(
+                format!("contains-focus:{selector}"),
+                &detail,
+            ));
+            bail!("{selector:?}: {detail}");
+        }
+        self.checks
+            .push(ProofCheck::passed(format!("contains-focus:{selector}")));
+        Ok(())
+    }
+
+    pub fn require_not_hit_testable(&mut self, selector: &str) -> Result<()> {
+        self.require_visible(selector)?;
+        let occurrence = self
+            .snapshot
+            .occurrences(selector)
+            .first()
+            .ok_or_else(|| anyhow!("{selector:?}: selector count had no occurrence"))?;
+        if occurrence.hit_testable {
+            let detail = "expected target not to receive pointer input";
+            self.checks.push(ProofCheck::failed(
+                format!("not-hit-testable:{selector}"),
+                detail,
+            ));
+            bail!("{selector:?}: {detail}");
+        }
+        self.checks
+            .push(ProofCheck::passed(format!("not-hit-testable:{selector}")));
+        Ok(())
+    }
+
+    pub fn require_hit_testable(&mut self, selector: &str) -> Result<Bounds<Pixels>> {
+        let bounds = self.require_visible(selector)?;
+        let occurrence = self
+            .snapshot
+            .occurrences(selector)
+            .first()
+            .ok_or_else(|| anyhow!("{selector:?}: selector count had no occurrence"))?;
+        if !occurrence.hit_testable {
+            let detail = "expected target to receive pointer input";
+            self.checks.push(ProofCheck::failed(
+                format!("hit-testable:{selector}"),
+                detail,
+            ));
+            bail!("{selector:?}: {detail}");
+        }
+        self.checks
+            .push(ProofCheck::passed(format!("hit-testable:{selector}")));
+        Ok(bounds)
     }
 
     pub fn require_inside(&mut self, child: &str, parent: &str) -> Result<()> {
@@ -1356,9 +1759,121 @@ impl<'a> SemanticProbe<'a> {
         Ok(())
     }
 
+    pub fn require_accessibility_property(
+        &mut self,
+        element_id: &str,
+        property: &str,
+        expected: serde_json::Value,
+    ) -> Result<()> {
+        let tree = self
+            .snapshot
+            .accessibility_tree_json()
+            .ok_or_else(|| anyhow!("accessibility tree was not active"))?;
+        let value: serde_json::Value =
+            serde_json::from_str(tree).context("parsing accessibility tree")?;
+        let nodes = value
+            .get("nodes")
+            .and_then(serde_json::Value::as_object)
+            .ok_or_else(|| anyhow!("accessibility tree has no nodes object"))?;
+        let matching: Vec<_> = nodes
+            .values()
+            .filter(|node| {
+                node.get("element_id").and_then(serde_json::Value::as_str) == Some(element_id)
+            })
+            .collect();
+        if matching.len() != 1 {
+            bail!(
+                "expected one accessibility node for {element_id:?}, found {}",
+                matching.len()
+            );
+        }
+        let actual = matching[0]
+            .get("aria")
+            .and_then(|aria| aria.get(property))
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
+        if actual != expected {
+            let detail =
+                format!("expected accessibility property {property:?}={expected}, got {actual}");
+            self.checks.push(ProofCheck::failed(
+                format!("accessibility-property:{element_id}:{property}"),
+                &detail,
+            ));
+            bail!("{element_id:?}: {detail}");
+        }
+        self.checks.push(ProofCheck::passed(format!(
+            "accessibility-property:{element_id}:{property}"
+        )));
+        Ok(())
+    }
+
     pub fn into_checks(self) -> Vec<ProofCheck> {
         self.checks
     }
+}
+
+#[cfg(feature = "gpui-support")]
+pub fn prove_workbench_shell(
+    scene: &WorkbenchScene,
+    snapshot: &DebugRenderSnapshot,
+) -> Result<Vec<ProofCheck>> {
+    scene.validate()?;
+    let mut probe = SemanticProbe::new(snapshot);
+    probe.require_fully_visible("omega.workbench.activity-rail")?;
+    probe.require_accessible("omega.workbench.activity-rail", "Toolbar", "Work surfaces")?;
+    probe.require_accessibility_property(
+        "omega.workbench.activity-rail",
+        "orientation",
+        serde_json::Value::String("Vertical".into()),
+    )?;
+
+    for surface in &scene.surfaces {
+        let selector = surface.id.rail_selector();
+        probe.require_accessible(selector, "Button", surface.id.label())?;
+        probe.require_accessibility_property(
+            selector,
+            "disabled",
+            serde_json::Value::Bool(!surface.available),
+        )?;
+        probe.require_accessibility_property(
+            selector,
+            "expanded",
+            serde_json::Value::Bool(scene.dock_open && scene.active_surface == Some(surface.id)),
+        )?;
+        if surface.available {
+            probe.require_interactive(selector)?;
+        } else {
+            probe.require_visible(selector)?;
+        }
+        if surface.badge.is_some() {
+            probe.require_visible(surface.id.badge_selector())?;
+        } else {
+            probe.require_absent(surface.id.badge_selector())?;
+        }
+    }
+
+    if scene.dock_open {
+        let surface = scene
+            .active_surface
+            .context("an open dock requires an active surface")?;
+        probe.require_visible("omega.workbench.dock")?;
+        probe.require_visible(surface.surface_selector())?;
+        probe.require_inside(surface.surface_selector(), "omega.workbench.dock")?;
+        probe.require_accessible(DOCK_COLLAPSE_CONTROL, "Button", "Collapse work surface")?;
+        probe.require_interactive(DOCK_COLLAPSE_CONTROL)?;
+        probe.require_inside(DOCK_COLLAPSE_CONTROL, "omega.workbench.dock")?;
+        probe.require_accessible(DOCK_RESIZE_CONTROL, "Splitter", "Resize work surface")?;
+        probe.require_accessibility_property(
+            DOCK_RESIZE_CONTROL,
+            "orientation",
+            serde_json::Value::String("Vertical".into()),
+        )?;
+        probe.require_hit_testable(DOCK_RESIZE_CONTROL)?;
+        probe.require_inside(DOCK_RESIZE_CONTROL, "omega.workbench.dock")?;
+    } else {
+        probe.require_absent("omega.workbench.dock")?;
+    }
+    Ok(probe.into_checks())
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1373,22 +1888,188 @@ pub struct CaptureRegion {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CaptureRegionSpec {
     pub name: &'static str,
-    pub x: u32,
-    pub y: u32,
-    pub width: u32,
-    pub height: u32,
+    pub source: CaptureRegionSource,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CaptureRegionSource {
+    Pixels {
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+    },
+    SelectorUnion {
+        selectors: &'static [&'static str],
+        padding: u32,
+    },
 }
 
 impl CaptureRegionSpec {
-    pub fn capture(self) -> CaptureRegion {
-        CaptureRegion {
-            name: self.name.to_string(),
-            x: self.x,
-            y: self.y,
-            width: self.width,
-            height: self.height,
+    pub const fn pixels(name: &'static str, x: u32, y: u32, width: u32, height: u32) -> Self {
+        Self {
+            name,
+            source: CaptureRegionSource::Pixels {
+                x,
+                y,
+                width,
+                height,
+            },
         }
     }
+
+    pub const fn selector_union(
+        name: &'static str,
+        selectors: &'static [&'static str],
+        padding: u32,
+    ) -> Self {
+        Self {
+            name,
+            source: CaptureRegionSource::SelectorUnion { selectors, padding },
+        }
+    }
+
+    fn validate(self) -> Result<()> {
+        if self.name.trim().is_empty() {
+            bail!("capture region name must not be empty");
+        }
+        match self.source {
+            CaptureRegionSource::Pixels { width, height, .. } => {
+                if width == 0 || height == 0 {
+                    bail!("fixed capture region dimensions must be non-zero");
+                }
+            }
+            CaptureRegionSource::SelectorUnion { selectors, .. } => {
+                if selectors.is_empty() {
+                    bail!("selector capture region must name at least one selector");
+                }
+                let mut unique_selectors = BTreeSet::new();
+                for selector in selectors {
+                    if selector.trim().is_empty() || !unique_selectors.insert(selector) {
+                        bail!("selector capture region contains an empty or duplicate selector");
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "gpui-support")]
+    pub fn resolve(
+        self,
+        snapshot: &DebugRenderSnapshot,
+        viewport: ViewportFixture,
+        image_width: u32,
+        image_height: u32,
+    ) -> Result<CaptureRegion> {
+        self.validate()?;
+        match self.source {
+            CaptureRegionSource::Pixels {
+                x,
+                y,
+                width,
+                height,
+            } => Ok(CaptureRegion {
+                name: self.name.to_string(),
+                x,
+                y,
+                width,
+                height,
+            }),
+            CaptureRegionSource::SelectorUnion { selectors, padding } => {
+                let logical_bounds = selectors.iter().filter_map(|selector| {
+                    snapshot.bounds(selector).map(|bounds| {
+                        (
+                            bounds.origin.x.as_f32(),
+                            bounds.origin.y.as_f32(),
+                            bounds.size.width.as_f32(),
+                            bounds.size.height.as_f32(),
+                        )
+                    })
+                });
+                resolve_selector_region(
+                    self.name,
+                    logical_bounds,
+                    padding,
+                    viewport,
+                    image_width,
+                    image_height,
+                )
+            }
+        }
+    }
+}
+
+fn resolve_selector_region(
+    name: &str,
+    logical_bounds: impl IntoIterator<Item = (f32, f32, f32, f32)>,
+    padding: u32,
+    viewport: ViewportFixture,
+    image_width: u32,
+    image_height: u32,
+) -> Result<CaptureRegion> {
+    if name.trim().is_empty() {
+        bail!("capture region name must not be empty");
+    }
+    viewport.validate()?;
+    if image_width == 0 || image_height == 0 {
+        bail!("capture image dimensions must be non-zero");
+    }
+
+    let mut union: Option<(f32, f32, f32, f32)> = None;
+    for (x, y, width, height) in logical_bounds {
+        if !x.is_finite()
+            || !y.is_finite()
+            || !width.is_finite()
+            || !height.is_finite()
+            || width <= 0.0
+            || height <= 0.0
+        {
+            bail!("capture selector bounds must be finite and non-zero");
+        }
+        let right = x + width;
+        let bottom = y + height;
+        if !right.is_finite() || !bottom.is_finite() {
+            bail!("capture selector bounds must not overflow");
+        }
+        union = Some(match union {
+            Some((left, top, union_right, union_bottom)) => (
+                left.min(x),
+                top.min(y),
+                union_right.max(right),
+                union_bottom.max(bottom),
+            ),
+            None => (x, y, right, bottom),
+        });
+    }
+    let (left, top, right, bottom) =
+        union.ok_or_else(|| anyhow!("capture region {name:?} has no rendered selector bounds"))?;
+    let scale = viewport.scale_milli as f64 / 1000.0;
+    let padding = (padding as f64 * scale).ceil();
+    let left = ((left as f64 * scale).floor() - padding)
+        .max(0.0)
+        .min(image_width as f64) as u32;
+    let top = ((top as f64 * scale).floor() - padding)
+        .max(0.0)
+        .min(image_height as f64) as u32;
+    let right = ((right as f64 * scale).ceil() + padding)
+        .max(left as f64)
+        .min(image_width as f64) as u32;
+    let bottom = ((bottom as f64 * scale).ceil() + padding)
+        .max(top as f64)
+        .min(image_height as f64) as u32;
+    let width = right.saturating_sub(left);
+    let height = bottom.saturating_sub(top);
+    if width == 0 || height == 0 {
+        bail!("capture region {name:?} is empty after clamping");
+    }
+    Ok(CaptureRegion {
+        name: name.to_string(),
+        x: left,
+        y: top,
+        width,
+        height,
+    })
 }
 
 impl CaptureRegion {
@@ -2552,6 +3233,194 @@ mod tests {
         scene
     }
 
+    fn valid_v2_scene() -> WorkbenchScene {
+        let mut scene = valid_scene();
+        scene.fixture_version = 2;
+        scene.thread_workbenches.push(ThreadWorkbenchFixture {
+            thread_id: "thread-a".to_string(),
+            generation: 7,
+            binding: Some(WorkbenchBindingFixture {
+                repository_id: "repo-a".to_string(),
+                worktree_id: "worktree-a".to_string(),
+            }),
+            requested_surface: Some(WorkSurfaceId::Files),
+            effective_surface: Some(WorkSurfaceId::Files),
+            dock_open: true,
+            surfaces: scene.surfaces.clone(),
+        });
+        scene
+    }
+
+    #[test]
+    fn version_1_fixture_encoding_remains_backward_compatible() {
+        let scene = valid_scene();
+        let encoded = serde_json::to_value(&scene).expect("encode version 1 scene");
+        assert!(encoded.get("thread_workbenches").is_none());
+
+        let decoded: WorkbenchScene =
+            serde_json::from_value(encoded).expect("decode version 1 scene without new field");
+        assert_eq!(decoded, scene);
+        decoded.validate().expect("version 1 scene remains valid");
+    }
+
+    #[test]
+    fn version_2_fixture_tracks_independent_thread_workbenches() {
+        let mut scene = valid_v2_scene();
+        scene.threads.push(ThreadFixture {
+            id: "thread-b".to_string(),
+            project_id: Some("project-a".to_string()),
+            repository_id: Some("repo-a".to_string()),
+            worktree_id: Some("worktree-b".to_string()),
+        });
+        let mut thread_b_surfaces = WorkSurfaceId::ALL
+            .into_iter()
+            .map(|id| SurfaceFixture {
+                id,
+                available: false,
+                badge: None,
+            })
+            .collect::<Vec<_>>();
+        let terminal = thread_b_surfaces
+            .iter_mut()
+            .find(|surface| surface.id == WorkSurfaceId::Terminal)
+            .expect("terminal fixture");
+        terminal.available = true;
+        terminal.badge = Some(3);
+        scene.thread_workbenches.push(ThreadWorkbenchFixture {
+            thread_id: "thread-b".to_string(),
+            generation: 11,
+            binding: Some(WorkbenchBindingFixture {
+                repository_id: "repo-a".to_string(),
+                worktree_id: "worktree-b".to_string(),
+            }),
+            requested_surface: Some(WorkSurfaceId::Terminal),
+            effective_surface: Some(WorkSurfaceId::Terminal),
+            dock_open: false,
+            surfaces: thread_b_surfaces,
+        });
+
+        scene.validate().expect("valid version 2 scene");
+        let active = scene
+            .active_thread_workbench()
+            .expect("active workbench projection");
+        assert_eq!(active.thread_id, "thread-a");
+        assert_eq!(active.generation, 7);
+        assert_eq!(active.surfaces[0].badge, None);
+        let inactive = &scene.thread_workbenches[1];
+        assert_eq!(inactive.thread_id, "thread-b");
+        assert_eq!(inactive.generation, 11);
+        assert_eq!(
+            inactive
+                .surfaces
+                .iter()
+                .find(|surface| surface.id == WorkSurfaceId::Terminal)
+                .and_then(|surface| surface.badge),
+            Some(3)
+        );
+
+        let encoded = serde_json::to_vec(&scene).expect("encode version 2 scene");
+        let decoded: WorkbenchScene =
+            serde_json::from_slice(&encoded).expect("decode version 2 scene");
+        assert_eq!(decoded, scene);
+    }
+
+    #[test]
+    fn version_2_fixture_requires_exactly_one_projection_per_thread() {
+        let mut missing = valid_v2_scene();
+        missing.thread_workbenches.clear();
+        assert!(
+            missing
+                .validate()
+                .expect_err("missing projection must fail")
+                .to_string()
+                .contains("exactly one workbench fixture per thread")
+        );
+
+        let mut duplicate = valid_v2_scene();
+        duplicate
+            .thread_workbenches
+            .push(duplicate.thread_workbenches[0].clone());
+        assert!(
+            duplicate
+                .validate()
+                .expect_err("duplicate projection must fail")
+                .to_string()
+                .contains("duplicate thread workbench")
+        );
+
+        let mut foreign = valid_v2_scene();
+        foreign.thread_workbenches[0].thread_id = "missing".to_string();
+        assert!(
+            foreign
+                .validate()
+                .expect_err("foreign projection must fail")
+                .to_string()
+                .contains("no workbench fixture for thread")
+        );
+    }
+
+    #[test]
+    fn version_2_fixture_validates_binding_and_visible_projection() {
+        let mut binding_mismatch = valid_v2_scene();
+        binding_mismatch.thread_workbenches[0]
+            .binding
+            .as_mut()
+            .expect("bound workbench")
+            .worktree_id = "worktree-b".to_string();
+        assert!(
+            binding_mismatch
+                .validate()
+                .expect_err("binding mismatch must fail")
+                .to_string()
+                .contains("binding does not match")
+        );
+
+        let mut visible_mismatch = valid_v2_scene();
+        visible_mismatch.dock_open = false;
+        assert!(
+            visible_mismatch
+                .validate()
+                .expect_err("visible dock mismatch must fail")
+                .to_string()
+                .contains("visible dock state")
+        );
+
+        let mut unbound = valid_v2_scene();
+        unbound.threads[0].project_id = None;
+        unbound.threads[0].repository_id = None;
+        unbound.threads[0].worktree_id = None;
+        unbound.thread_workbenches[0].binding = None;
+        assert!(
+            unbound
+                .validate()
+                .expect_err("unbound repository capability must fail")
+                .to_string()
+                .contains("repository-bound surface")
+        );
+    }
+
+    #[test]
+    fn version_2_fixture_validates_deterministic_surface_fallback() {
+        let mut scene = valid_v2_scene();
+        let workbench = &mut scene.thread_workbenches[0];
+        workbench.surfaces[0].available = false;
+        workbench.surfaces[1].available = true;
+        workbench.requested_surface = Some(WorkSurfaceId::Files);
+        workbench.effective_surface = Some(WorkSurfaceId::Search);
+        scene.surfaces = workbench.surfaces.clone();
+        scene.active_surface = workbench.effective_surface;
+        scene.validate().expect("deterministic fallback is valid");
+
+        scene.thread_workbenches[0].effective_surface = Some(WorkSurfaceId::Plan);
+        assert!(
+            scene
+                .validate()
+                .expect_err("non-deterministic fallback must fail")
+                .to_string()
+                .contains("deterministic projection")
+        );
+    }
+
     #[test]
     fn fixture_digest_is_deterministic_and_state_sensitive() {
         let scene = valid_scene();
@@ -2674,7 +3543,14 @@ mod tests {
     #[test]
     fn catalog_rejects_unknown_and_empty_shards() {
         assert!(select_scenes(Some("missing"), None, None).is_err());
-        assert!(select_scenes(None, Some(9), Some(10)).is_err());
+        assert!(
+            select_scenes(
+                None,
+                Some(HERMETIC_SCENES.len()),
+                Some(HERMETIC_SCENES.len() + 1)
+            )
+            .is_err()
+        );
         assert!(select_scenes(None, Some(0), None).is_err());
     }
 
@@ -2710,6 +3586,89 @@ mod tests {
         assert_eq!(region.crop(&image).unwrap().dimensions(), (4, 5));
         let invalid = CaptureRegion { x: 9, ..region };
         assert!(invalid.crop(&image).is_err());
+    }
+
+    #[test]
+    fn selector_region_unions_scales_and_pads_logical_bounds() {
+        let region = resolve_selector_region(
+            "rail-dock",
+            [(40.0, 20.0, 40.0, 600.0), (80.0, 20.0, 320.0, 600.0)],
+            8,
+            ViewportFixture::new(1200, 720, 2000),
+            2400,
+            1440,
+        )
+        .expect("selector region should resolve");
+        assert_eq!(
+            region,
+            CaptureRegion {
+                name: "rail-dock".to_string(),
+                x: 64,
+                y: 24,
+                width: 752,
+                height: 1232,
+            }
+        );
+    }
+
+    #[test]
+    fn selector_region_clamps_padding_to_the_captured_frame() {
+        let region = resolve_selector_region(
+            "rail-dock",
+            [(0.0, 0.0, 40.0, 720.0)],
+            8,
+            ViewportFixture::new(909, 720, 2000),
+            1818,
+            1440,
+        )
+        .expect("rail-only region should resolve");
+        assert_eq!(
+            region,
+            CaptureRegion {
+                name: "rail-dock".to_string(),
+                x: 0,
+                y: 0,
+                width: 96,
+                height: 1440,
+            }
+        );
+    }
+
+    #[test]
+    fn selector_region_rejects_missing_or_invalid_bounds() {
+        assert!(
+            resolve_selector_region(
+                "rail-dock",
+                [],
+                8,
+                ViewportFixture::new(1200, 720, 2000),
+                2400,
+                1440,
+            )
+            .is_err()
+        );
+        assert!(
+            resolve_selector_region(
+                "rail-dock",
+                [(0.0, 0.0, 0.0, 10.0)],
+                8,
+                ViewportFixture::new(1200, 720, 2000),
+                2400,
+                1440,
+            )
+            .is_err()
+        );
+        assert!(
+            resolve_selector_region(
+                "rail-dock",
+                [(f32::MAX, 0.0, f32::MAX, 10.0)],
+                8,
+                ViewportFixture::new(1200, 720, 2000),
+                2400,
+                1440,
+            )
+            .is_err()
+        );
     }
 
     #[test]

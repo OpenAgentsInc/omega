@@ -67,6 +67,18 @@ impl IconButton {
         self
     }
 
+    /// Sets the keyboard shortcut announced by assistive technology.
+    pub fn aria_keyshortcuts(mut self, keyshortcuts: impl Into<SharedString>) -> Self {
+        self.base = self.base.aria_keyshortcuts(keyshortcuts);
+        self
+    }
+
+    /// Sets the supplementary description announced by assistive technology.
+    pub fn aria_description(mut self, description: impl Into<SharedString>) -> Self {
+        self.base = self.base.aria_description(description);
+        self
+    }
+
     /// Sets the expanded state reported to assistive technology, for buttons
     /// that control a popup (e.g. dropdown or disclosure triggers).
     pub fn aria_expanded(mut self, expanded: bool) -> Self {

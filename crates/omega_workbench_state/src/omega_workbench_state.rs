@@ -402,15 +402,18 @@ impl WorkbenchProjection {
             ProjectionTransition::RequestSurface { thread_id, surface } => {
                 self.require_active_thread(&thread_id)?;
                 self.require_online()?;
+                if !self
+                    .thread(&thread_id)?
+                    .available_surfaces
+                    .contains(&surface)
+                {
+                    return Err(ProjectionError::UnavailableSurface { thread_id, surface });
+                }
                 let thread = self.thread_mut(&thread_id)?;
                 thread.requested_surface = Some(surface);
                 thread.dock_open = true;
                 thread.normalize();
-                Ok(if thread.requested_surface == thread.effective_surface {
-                    TransitionEffect::Applied
-                } else {
-                    TransitionEffect::DeterministicFallback
-                })
+                Ok(TransitionEffect::Applied)
             }
             ProjectionTransition::CloseSurface { thread_id } => {
                 self.require_active_thread(&thread_id)?;
@@ -1105,6 +1108,7 @@ fn validate_focus_owners(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
     fn binding(name: &str) -> RepositoryBinding {
         RepositoryBinding::new("repo", name).expect("valid test binding")
@@ -1122,6 +1126,52 @@ mod tests {
                 available_surfaces: repository_surfaces(),
             })
             .expect("open thread");
+    }
+
+    proptest! {
+        #[test]
+        fn generated_surface_sequences_preserve_projection_invariants(
+            actions in proptest::collection::vec(0u8..=15, 0..128)
+        ) {
+            let mut projection = WorkbenchProjection::new();
+            open_thread(&mut projection, "thread-a", "worktree-a");
+            open_thread(&mut projection, "thread-b", "worktree-b");
+
+            for action in actions {
+                let active_thread_id = if action & 1 == 0 {
+                    "thread-a"
+                } else {
+                    "thread-b"
+                };
+                let transition = match action % 8 {
+                    0 => ProjectionTransition::SwitchThread {
+                        thread_id: active_thread_id.into(),
+                    },
+                    1..=6 => {
+                        let surface = WorkSurface::FALLBACK_ORDER[(action as usize - 1) % 6];
+                        ProjectionTransition::RequestSurface {
+                            thread_id: active_thread_id.into(),
+                            surface,
+                        }
+                    }
+                    _ => ProjectionTransition::CollapseDock {
+                        thread_id: active_thread_id.into(),
+                    },
+                };
+                let before = projection.clone();
+                let result = projection.apply(transition);
+                if result.is_err() {
+                    prop_assert_eq!(&projection, &before);
+                }
+                prop_assert!(projection.validate().is_ok());
+                let focused_threads = projection
+                    .threads
+                    .values()
+                    .filter(|thread| thread.focus_owner.is_some())
+                    .count();
+                prop_assert!(focused_threads <= 1);
+            }
+        }
     }
 
     #[test]
@@ -1228,6 +1278,34 @@ mod tests {
                 .effective_surface,
             Some(WorkSurface::Files)
         );
+    }
+
+    #[test]
+    fn unavailable_surface_request_is_rejected_atomically() {
+        let mut projection = WorkbenchProjection::new();
+        projection
+            .apply(ProjectionTransition::OpenThread {
+                thread_id: "thread-a".into(),
+                binding: None,
+                available_surfaces: vec![WorkSurface::Plan],
+            })
+            .expect("open unbound thread");
+        let before = projection.clone();
+
+        let error = projection
+            .apply(ProjectionTransition::RequestSurface {
+                thread_id: "thread-a".into(),
+                surface: WorkSurface::Files,
+            })
+            .expect_err("files should be unavailable without a binding");
+        assert!(matches!(
+            error,
+            ProjectionError::UnavailableSurface {
+                surface: WorkSurface::Files,
+                ..
+            }
+        ));
+        assert_eq!(projection, before);
     }
 
     #[test]

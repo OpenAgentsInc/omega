@@ -505,10 +505,11 @@ CloseThread(thread) ==
 RequestSurface(surface) ==
     /\ activeThread \in knownThreads
     /\ surface \in SurfaceValues
+    /\ surface \in capabilities[activeThread]
     /\ LET requestState ==
             [requestedSurface EXCEPT ![activeThread] = surface]
            dockState ==
-            [requestedDock EXCEPT ![activeThread] = surface # NoSurface]
+            [requestedDock EXCEPT ![activeThread] = TRUE]
        IN
         /\ requestedSurface' = requestState
         /\ requestedDock' = dockState

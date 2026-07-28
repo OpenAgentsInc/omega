@@ -102,6 +102,7 @@ static SEALED: AtomicBool = AtomicBool::new(false);
 /// - `menu`, `picker` and `command_palette` are how the palette opens and how a
 ///   person moves inside it.
 /// - `markdown` is copying out of the transcript.
+/// - `omega_workbench` owns the desktop activity rail and work-surface dock.
 ///
 /// `OMEGA-DELTA-0052` removed `omega_zero_base` from this list. That namespace
 /// held one action, `Leave`, and there is no leaving now. An admitted namespace
@@ -112,6 +113,7 @@ pub const ADMITTED_NAMESPACES: &[&str] = &[
     "editor",
     "markdown",
     "menu",
+    "omega_workbench",
     "picker",
 ];
 
@@ -311,6 +313,8 @@ mod tests {
             "editor::Backspace",
             "menu::Confirm",
             "command_palette::Toggle",
+            "omega_workbench::SelectFiles",
+            "omega_workbench::CollapseWorkSurfaceDock",
             "omega::Quit",
             "omega::OpenSettings",
             "omega::OpenLegacySettings",

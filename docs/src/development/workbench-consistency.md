@@ -155,7 +155,7 @@ The base TLC configuration exhausts:
 - at most 1 pending load; and
 - at most 3 non-stuttering transitions.
 
-The current base graph contains 10,044 generated states and 4,657 distinct
+The current base graph contains 8,737 generated states and 4,091 distinct
 states at depth 4. TLC reports no queued states and no property violation. A
 six-step action-scoped configuration checks the longer older-snapshot
 sequence. These are exact finite bounds, not an unbounded proof.
@@ -214,11 +214,17 @@ Do not derive fallback, restore validity, command ownership, or stale-request
 acceptance again in a view. Renderers should consume the reducer's visible
 projection so the model, trace, and UI all describe the same decision.
 
+The production activity rail and retained host boundary are described in
+[Omega desktop workbench shell](./omega-desktop-workbench-shell.md). That shell
+tracks actual GPUI focus separately from the projection's logical action owner
+and must prove both at the semantic layer.
+
 ## Limits
 
 The model abstracts native entity lifetimes, filesystem and Git behavior,
 server payload delivery, layout, and content. The checker covers only recorded
 executions. The six current traces exercise the logical reducer before the full
-surface UI exists. The GPUI and Metal layers remain responsible for proving
-that a later production entity actually dispatches through this seam and
-renders the projected state.
+native surface UI exists. The retained generic shell proves the common rail,
+dock, focus-transfer, responsive-layout, and host-lifecycle boundary. The GPUI
+and Metal layers remain responsible for proving that each later native entity
+actually dispatches through this seam and renders the projected state.

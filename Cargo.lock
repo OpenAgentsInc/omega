@@ -562,6 +562,7 @@ dependencies = [
  "omega_harness",
  "omega_identity",
  "omega_workbench_harness",
+ "omega_workbench_state",
  "omega_workdir",
  "omega_zero_base",
  "ordered-float 2.10.1",
@@ -12135,6 +12136,7 @@ dependencies = [
 name = "omega_workbench_state"
 version = "0.1.0"
 dependencies = [
+ "proptest",
  "serde",
  "thiserror 2.0.17",
 ]

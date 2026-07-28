@@ -231,6 +231,26 @@
     "context": "AgentPanel && ZeroBase",
     "bindings": {
       "ctrl-alt-j": "agent::ToggleThreadsSidebar",
+      "ctrl-alt-0": "omega_workbench::FocusActivityRail",
+      "ctrl-alt-1": "omega_workbench::SelectFiles",
+      "ctrl-alt-2": "omega_workbench::SelectSearch",
+      "ctrl-alt-3": "omega_workbench::SelectReview",
+      "ctrl-alt-4": "omega_workbench::SelectGit",
+      "ctrl-alt-5": "omega_workbench::SelectTerminal",
+      "ctrl-alt-6": "omega_workbench::SelectPlan",
+      "ctrl-alt-[": "omega_workbench::CollapseWorkSurfaceDock",
+    },
+  },
+  {
+    "context": "WorkbenchRail",
+    "bindings": {
+      "up": "omega_workbench::FocusPreviousSurface",
+      "down": "omega_workbench::FocusNextSurface",
+      "home": "omega_workbench::FocusFirstSurface",
+      "end": "omega_workbench::FocusLastSurface",
+      "enter": "omega_workbench::ActivateFocusedSurface",
+      "space": "omega_workbench::ActivateFocusedSurface",
+      "escape": "omega_workbench::FocusThreadTranscript",
     },
   },
   {
