@@ -62,8 +62,8 @@ pub use projections::{
     TranscriptRow, WorkroomProjection, sources,
 };
 pub use voice::{
-    ApprovedEditorAction, CommandConfirmation, CommandResultStatus, ManagedSarahVoiceClient,
-    SARAH_AUDIO_SAMPLE_RATE, SARAH_VOICE_GATEWAY_PATH, SARAH_VOICE_MODEL,
+    AgentThreadPresentation, ApprovedEditorAction, CommandConfirmation, CommandResultStatus,
+    ManagedSarahVoiceClient, SARAH_AUDIO_SAMPLE_RATE, SARAH_VOICE_GATEWAY_PATH, SARAH_VOICE_MODEL,
     SARAH_VOICE_PROTOCOL_VERSION, SarahEditorCommand, SarahVoiceConnection, SarahVoiceControl,
     SarahVoiceEvent, SarahVoiceState, VoiceCommandRequest, VoiceCommandResult, VoiceParticipant,
     VoiceTranscriptItem, voice_gateway_url,

@@ -4600,6 +4600,38 @@ impl AgentPanel {
         thread_id
     }
 
+    /// Creates an Omega Agent thread and submits `message` through the normal
+    /// message-editor send path. When `reveal` is false, the new thread stays
+    /// retained without changing the panel's active view.
+    pub fn create_omega_thread_with_message(
+        &mut self,
+        message: String,
+        reveal: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<ThreadId> {
+        if !self.has_open_project(cx) {
+            return None;
+        }
+        let thread_id = self.create_thread_with_options(
+            CreateThreadOptions {
+                initial_content: Some(AgentInitialContent::ContentBlock {
+                    blocks: vec![acp::ContentBlock::Text(acp::TextContent::new(message))],
+                    auto_submit: true,
+                }),
+                agent: Some(Agent::NativeAgent),
+                ..CreateThreadOptions::default()
+            },
+            AgentThreadSource::AgentPanel,
+            window,
+            cx,
+        );
+        if reveal {
+            self.activate_retained_thread(thread_id, true, window, cx);
+        }
+        Some(thread_id)
+    }
+
     pub fn activate_retained_thread(
         &mut self,
         id: ThreadId,
@@ -4625,6 +4657,37 @@ impl AgentPanel {
             window,
             cx,
         );
+    }
+
+    pub fn reveal_omega_thread(
+        &mut self,
+        id: ThreadId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.active_thread_id(cx) == Some(id) {
+            return true;
+        }
+        if self.retained_threads.contains_key(&id) {
+            self.activate_retained_thread(id, true, window, cx);
+            return self.active_thread_id(cx) == Some(id);
+        }
+        let exists = ThreadMetadataStore::try_global(cx)
+            .is_some_and(|store| store.read(cx).entry(id).is_some());
+        if !exists {
+            return false;
+        }
+        self.load_agent_thread(
+            Agent::NativeAgent,
+            id,
+            None,
+            None,
+            true,
+            AgentThreadSource::AgentPanel,
+            window,
+            cx,
+        );
+        self.active_thread_id(cx) == Some(id)
     }
 
     pub fn active_thread_id(&self, cx: &App) -> Option<ThreadId> {
@@ -17754,6 +17817,68 @@ mod tests {
                 Agent::Stub,
                 "selected_agent should be restored to the original after an agent override"
             );
+        });
+    }
+
+    #[gpui::test]
+    async fn test_create_omega_thread_with_message_preserves_background_view_and_can_reveal(
+        cx: &mut TestAppContext,
+    ) {
+        let (panel, mut cx) = setup_panel(cx).await;
+        let _stub_connection =
+            crate::test_support::set_stub_agent_connection(StubAgentConnection::new());
+        panel.update_in(&mut cx, |panel, window, cx| {
+            panel.selected_agent = Agent::Stub;
+            panel.activate_new_thread(false, AgentThreadSource::AgentPanel, window, cx);
+        });
+        let active_before = panel.read_with(&cx, |panel, cx| panel.active_thread_id(cx));
+
+        let background_id = panel
+            .update_in(&mut cx, |panel, window, cx| {
+                panel.create_omega_thread_with_message(
+                    "Run in the background".into(),
+                    false,
+                    window,
+                    cx,
+                )
+            })
+            .expect("project-backed thread should be created");
+
+        panel.read_with(&cx, |panel, cx| {
+            assert_eq!(panel.active_thread_id(cx), active_before);
+            assert!(panel.retained_threads.contains_key(&background_id));
+            assert_eq!(panel.selected_agent, Agent::Stub);
+        });
+        cx.run_until_parked();
+        panel.read_with(&cx, |panel, cx| {
+            let background = panel
+                .retained_threads
+                .get(&background_id)
+                .expect("background thread should remain retained");
+            assert!(background.read(cx).has_user_submitted_prompt(cx));
+        });
+        assert!(panel.update_in(&mut cx, |panel, window, cx| {
+            panel.reveal_omega_thread(background_id, window, cx)
+        }));
+        panel.read_with(&cx, |panel, cx| {
+            assert_eq!(panel.active_thread_id(cx), Some(background_id));
+        });
+
+        let foreground_id = panel
+            .update_in(&mut cx, |panel, window, cx| {
+                panel.create_omega_thread_with_message(
+                    "Reveal this thread".into(),
+                    true,
+                    window,
+                    cx,
+                )
+            })
+            .expect("project-backed thread should be created");
+
+        panel.read_with(&cx, |panel, cx| {
+            assert_eq!(panel.active_thread_id(cx), Some(foreground_id));
+            assert!(!panel.retained_threads.contains_key(&foreground_id));
+            assert_eq!(panel.selected_agent, Agent::Stub);
         });
     }
 }

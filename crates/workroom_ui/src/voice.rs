@@ -29,6 +29,7 @@ pub const SARAH_VOICE_GATEWAY_PATH: &str = "/api/sarah/realtime";
 pub const SARAH_AUDIO_SAMPLE_RATE: u32 = 24_000;
 const MICROPHONE_CHUNK_SAMPLES: usize = 480;
 const MAX_EDITOR_TEXT_BYTES: usize = 64 * 1024;
+const MAX_AGENT_MESSAGE_BYTES: usize = 16 * 1024;
 const MAX_CONTEXT_CHARS: u32 = 16 * 1024;
 const MAX_GATEWAY_FRAME_BYTES: usize = 256 * 1024;
 const MAX_PROTOCOL_ID_BYTES: usize = 256;
@@ -129,6 +130,17 @@ pub enum SarahEditorCommand {
     Action {
         action: ApprovedEditorAction,
     },
+    StartAgentThread {
+        message: String,
+        presentation: AgentThreadPresentation,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentThreadPresentation {
+    Foreground,
+    Background,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -158,7 +170,8 @@ impl SarahEditorCommand {
             } => CommandConfirmation::Destructive,
             Self::Action {
                 action: ApprovedEditorAction::SaveActiveFile,
-            } => CommandConfirmation::ExternalEffect,
+            }
+            | Self::StartAgentThread { .. } => CommandConfirmation::ExternalEffect,
         }
     }
 
@@ -176,6 +189,16 @@ impl SarahEditorCommand {
             Self::Insert { text } | Self::ReplaceSelection { text } => {
                 if text.len() > MAX_EDITOR_TEXT_BYTES {
                     bail!("editor text exceeds the {MAX_EDITOR_TEXT_BYTES}-byte limit");
+                }
+            }
+            Self::StartAgentThread { message, .. } => {
+                if message.trim().is_empty() {
+                    bail!("the Omega Agent message must not be empty");
+                }
+                if message.len() > MAX_AGENT_MESSAGE_BYTES {
+                    bail!(
+                        "the Omega Agent message exceeds the {MAX_AGENT_MESSAGE_BYTES}-byte limit"
+                    );
                 }
             }
             Self::Navigate { .. } | Self::Action { .. } => {}
@@ -199,9 +222,24 @@ impl SarahEditorCommand {
             Self::Action {
                 action: ApprovedEditorAction::SaveActiveFile,
             } => "Save the active file to disk?".into(),
+            Self::StartAgentThread { presentation, .. } => match presentation {
+                AgentThreadPresentation::Foreground => {
+                    "Create an Omega Agent thread, submit this message, and open it now?".into()
+                }
+                AgentThreadPresentation::Background => {
+                    "Create an Omega Agent thread and submit this message in the background?".into()
+                }
+            },
             Self::ReadContext { .. } | Self::Navigate { .. } | Self::Insert { .. } => {
                 "Run this Sarah editor command?".into()
             }
+        }
+    }
+
+    pub fn confirmation_detail(&self) -> Option<&str> {
+        match self {
+            Self::StartAgentThread { message, .. } => Some(message),
+            _ => None,
         }
     }
 }
@@ -317,7 +355,7 @@ impl Default for AudioFormat {
 #[serde(rename_all = "camelCase")]
 struct EditorBridgeCapabilities {
     protocol_version: u16,
-    commands: [&'static str; 5],
+    commands: [&'static str; 6],
     approved_actions: [&'static str; 3],
     confirmation_required_for: [&'static str; 2],
 }
@@ -332,6 +370,7 @@ impl Default for EditorBridgeCapabilities {
                 "insert",
                 "replace_selection",
                 "action",
+                "start_agent_thread",
             ],
             approved_actions: ["undo", "redo", "save_active_file"],
             confirmation_required_for: ["destructive", "external_effect"],
@@ -945,6 +984,14 @@ mod tests {
             .confirmation(),
             CommandConfirmation::ExternalEffect
         );
+        assert_eq!(
+            SarahEditorCommand::StartAgentThread {
+                message: "Investigate the test failure".into(),
+                presentation: AgentThreadPresentation::Background,
+            }
+            .confirmation(),
+            CommandConfirmation::ExternalEffect
+        );
     }
 
     #[test]
@@ -965,6 +1012,30 @@ mod tests {
     }
 
     #[test]
+    fn agent_thread_command_is_bounded_and_cannot_select_an_agent_or_model() {
+        let empty = SarahEditorCommand::StartAgentThread {
+            message: "   ".into(),
+            presentation: AgentThreadPresentation::Foreground,
+        };
+        assert!(empty.validate().is_err());
+
+        let oversized = SarahEditorCommand::StartAgentThread {
+            message: "x".repeat(MAX_AGENT_MESSAGE_BYTES + 1),
+            presentation: AgentThreadPresentation::Background,
+        };
+        assert!(oversized.validate().is_err());
+
+        let arbitrary_dispatch = serde_json::from_value::<SarahEditorCommand>(json!({
+            "name": "start_agent_thread",
+            "message": "Do the work",
+            "presentation": "background",
+            "agent": "some-arbitrary-agent",
+            "model": "some-arbitrary-model"
+        }));
+        assert!(arbitrary_dispatch.is_err());
+    }
+
+    #[test]
     fn command_contract_uses_camel_case_fields_and_snake_case_names() {
         let command = serde_json::to_value(SarahEditorCommand::ReadContext {
             max_chars: Some(1024),
@@ -981,6 +1052,22 @@ mod tests {
         .expect("serialize command result");
         assert_eq!(result["requestId"], "command.fixture");
         assert!(result.get("request_id").is_none());
+
+        let command = serde_json::to_value(SarahEditorCommand::StartAgentThread {
+            message: "Explain this code".into(),
+            presentation: AgentThreadPresentation::Foreground,
+        })
+        .expect("serialize agent-thread command");
+        assert_eq!(command["name"], "start_agent_thread");
+        assert_eq!(command["presentation"], "foreground");
+        assert_eq!(
+            SarahEditorCommand::StartAgentThread {
+                message: "Explain this code".into(),
+                presentation: AgentThreadPresentation::Foreground,
+            }
+            .confirmation_detail(),
+            Some("Explain this code")
+        );
     }
 
     #[test]
@@ -1016,5 +1103,10 @@ mod tests {
         assert_eq!(value["type"], "session.start");
         assert_eq!(value["model"], "gpt-realtime-2.1");
         assert_eq!(value["editorBridge"]["protocolVersion"], 1);
+        assert!(
+            value["editorBridge"]["commands"]
+                .as_array()
+                .is_some_and(|commands| commands.contains(&json!("start_agent_thread")))
+        );
     }
 }

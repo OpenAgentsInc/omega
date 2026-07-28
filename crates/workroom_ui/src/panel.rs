@@ -19,6 +19,7 @@
 
 use std::time::Duration;
 
+use agent_ui::{AgentPanel, ThreadId};
 use anyhow::{Context as _, Result};
 use audio::AudioSettings;
 use editor::{Editor, SelectionEffects, actions as editor_actions, scroll::Autoscroll};
@@ -62,9 +63,9 @@ use crate::projections::{
     TranscriptProjection, TranscriptRow, WorkroomProjection, sources,
 };
 use crate::voice::{
-    ApprovedEditorAction, CommandConfirmation, ManagedSarahVoiceClient, SarahEditorCommand,
-    SarahVoiceControl, SarahVoiceEvent, SarahVoiceState, VoiceCommandRequest, VoiceCommandResult,
-    VoiceParticipant, VoiceTranscriptItem,
+    AgentThreadPresentation, ApprovedEditorAction, CommandConfirmation, ManagedSarahVoiceClient,
+    SarahEditorCommand, SarahVoiceControl, SarahVoiceEvent, SarahVoiceState, VoiceCommandRequest,
+    VoiceCommandResult, VoiceParticipant, VoiceTranscriptItem,
 };
 
 const PANEL_KEY: &str = "SarahWorkroomPanel";
@@ -106,6 +107,13 @@ impl NostrRecordsProjection {
     }
 }
 
+#[derive(Clone)]
+struct SarahCreatedAgentThread {
+    thread_id: ThreadId,
+    presentation: AgentThreadPresentation,
+    status: SharedString,
+}
+
 pub struct SarahWorkroomPanel {
     workspace: WeakEntity<Workspace>,
     focus_handle: FocusHandle,
@@ -139,6 +147,7 @@ pub struct SarahWorkroomPanel {
     voice_session_id: Option<String>,
     voice_transcript: Vec<VoiceTranscriptItem>,
     pending_voice_command: Option<VoiceCommandRequest>,
+    created_agent_thread: Option<SarahCreatedAgentThread>,
     voice_controls: Option<async_channel::Sender<SarahVoiceControl>>,
     voice_task: Option<Task<()>>,
     public_demo: bool,
@@ -275,6 +284,7 @@ impl SarahWorkroomPanel {
             voice_session_id: None,
             voice_transcript: Vec::new(),
             pending_voice_command: None,
+            created_agent_thread: None,
             voice_controls: None,
             voice_task: None,
             public_demo,
@@ -1575,7 +1585,7 @@ impl SarahWorkroomPanel {
         self.send_voice_control(SarahVoiceControl::CommandResult(
             VoiceCommandResult::rejected(request.request_id, "The user declined this command."),
         ));
-        self.voice_status = "Sarah's editor command was declined.".into();
+        self.voice_status = "Sarah's command was declined.".into();
         cx.notify();
     }
 
@@ -1586,120 +1596,221 @@ impl SarahWorkroomPanel {
         cx: &mut Context<Self>,
     ) -> VoiceCommandResult {
         let request_id = request.request_id;
+        let is_agent_thread_command = matches!(
+            &request.command,
+            SarahEditorCommand::StartAgentThread { .. }
+        );
+        let result = match self.workspace.upgrade() {
+            Some(workspace) => match request.command {
+                SarahEditorCommand::StartAgentThread {
+                    message,
+                    presentation,
+                } => self.start_agent_thread(workspace, message, presentation, window, cx),
+                command => Self::execute_editor_command(workspace, command, window, cx),
+            },
+            None => Err(anyhow::anyhow!("the workspace is no longer available")),
+        };
+
+        match result {
+            Ok(output) => {
+                if !is_agent_thread_command {
+                    self.voice_status = "Sarah's editor command completed.".into();
+                }
+                VoiceCommandResult::completed(request_id, Some(output))
+            }
+            Err(error) => {
+                self.voice_status = format!("Sarah's command failed: {error:#}").into();
+                VoiceCommandResult::failed(request_id, format!("{error:#}"))
+            }
+        }
+    }
+
+    fn execute_editor_command(
+        workspace: Entity<Workspace>,
+        command: SarahEditorCommand,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<Value> {
+        let (editor, project_path) = {
+            let workspace = workspace.read(cx);
+            (
+                workspace.active_item_as::<Editor>(cx),
+                workspace
+                    .active_item(cx)
+                    .and_then(|item| item.project_path(cx)),
+            )
+        };
+        let editor = editor.context("open an editor before asking Sarah to edit")?;
+        match command {
+            SarahEditorCommand::ReadContext { max_chars } => editor.update(cx, |editor, cx| {
+                let display_snapshot = editor.display_snapshot(cx);
+                let selection = editor.selections.newest::<Point>(&display_snapshot);
+                let cursor = selection.head();
+                let buffer_snapshot = editor.buffer().read(cx).snapshot(cx);
+                let selected_text = buffer_snapshot
+                    .text_for_range(selection.range())
+                    .collect::<String>();
+                let start = buffer_snapshot
+                    .clip_point(Point::new(cursor.row.saturating_sub(80), 0), Bias::Left);
+                let end = buffer_snapshot.clip_point(
+                    Point::new(cursor.row.saturating_add(80), u32::MAX),
+                    Bias::Right,
+                );
+                let max_chars = max_chars.unwrap_or(8 * 1024) as usize;
+                let context = truncate_chars(
+                    buffer_snapshot
+                        .text_for_range(start..end)
+                        .collect::<String>(),
+                    max_chars,
+                );
+                Ok(json!({
+                    "file": project_path
+                        .as_ref()
+                        .map(|path| path.path.as_ref().as_unix_str()),
+                    "title": editor.title(cx),
+                    "cursor": { "line": cursor.row, "column": cursor.column },
+                    "selection": truncate_chars(selected_text, max_chars),
+                    "context": context,
+                }))
+            }),
+            SarahEditorCommand::Navigate { line, column } => {
+                let point = editor.update(cx, |editor, cx| {
+                    let snapshot = editor.buffer().read(cx).snapshot(cx);
+                    let point = snapshot.clip_point(Point::new(line, column), Bias::Left);
+                    editor.change_selections(
+                        SelectionEffects::scroll(Autoscroll::center()),
+                        window,
+                        cx,
+                        |selections| selections.select_ranges([point..point]),
+                    );
+                    point
+                });
+                Ok(json!({ "line": point.row, "column": point.column }))
+            }
+            SarahEditorCommand::Insert { text } => {
+                let inserted_chars = text.chars().count();
+                editor.update(cx, |editor, cx| {
+                    let display_snapshot = editor.display_snapshot(cx);
+                    let cursor = editor.selections.newest::<Point>(&display_snapshot).head();
+                    editor.change_selections(
+                        SelectionEffects::scroll(Autoscroll::fit()),
+                        window,
+                        cx,
+                        |selections| selections.select_ranges([cursor..cursor]),
+                    );
+                    editor.insert(&text, window, cx);
+                });
+                Ok(json!({ "insertedChars": inserted_chars }))
+            }
+            SarahEditorCommand::ReplaceSelection { text } => {
+                let replacement_chars = text.chars().count();
+                editor.update(cx, |editor, cx| editor.insert(&text, window, cx));
+                Ok(json!({ "replacementChars": replacement_chars }))
+            }
+            SarahEditorCommand::Action { action } => {
+                match action {
+                    ApprovedEditorAction::Undo => {
+                        editor.update(cx, |editor, cx| {
+                            editor.undo(&editor_actions::Undo, window, cx)
+                        });
+                    }
+                    ApprovedEditorAction::Redo => {
+                        editor.update(cx, |editor, cx| {
+                            editor.redo(&editor_actions::Redo, window, cx)
+                        });
+                    }
+                    ApprovedEditorAction::SaveActiveFile => {
+                        window.dispatch_action(Box::new(Save { save_intent: None }), cx);
+                    }
+                }
+                Ok(json!({ "action": action }))
+            }
+            SarahEditorCommand::StartAgentThread { .. } => {
+                anyhow::bail!("agent-thread commands must use the Agent panel bridge")
+            }
+        }
+    }
+
+    fn start_agent_thread(
+        &mut self,
+        workspace: Entity<Workspace>,
+        message: String,
+        presentation: AgentThreadPresentation,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<Value> {
+        let agent_panel = workspace
+            .read(cx)
+            .panel::<AgentPanel>(cx)
+            .context("the Omega Agent panel is unavailable")?;
+        let reveal = presentation == AgentThreadPresentation::Foreground;
+        let thread_id = agent_panel
+            .update(cx, |agent_panel, cx| {
+                agent_panel.create_omega_thread_with_message(message, reveal, window, cx)
+            })
+            .context("open a project before asking Sarah to start an Agent thread")?;
+
+        if reveal {
+            workspace.update(cx, |workspace, cx| {
+                workspace.focus_panel::<AgentPanel>(window, cx);
+            });
+        }
+
+        let status: SharedString = match presentation {
+            AgentThreadPresentation::Foreground => {
+                "Message submitted to a new Omega Agent thread and opened.".into()
+            }
+            AgentThreadPresentation::Background => {
+                "Message submitted to a new Omega Agent thread in the background.".into()
+            }
+        };
+        self.voice_status = status.clone();
+        self.created_agent_thread = Some(SarahCreatedAgentThread {
+            thread_id,
+            presentation,
+            status,
+        });
+        Ok(json!({
+            "threadId": thread_id.to_key_string(),
+            "presentation": presentation,
+            "status": "submitted",
+        }))
+    }
+
+    fn open_created_agent_thread(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(created) = self.created_agent_thread.clone() else {
+            return;
+        };
         let result = self
             .workspace
             .upgrade()
             .context("the workspace is no longer available")
             .and_then(|workspace| {
-                let (editor, project_path) = {
-                    let workspace = workspace.read(cx);
-                    (
-                        workspace.active_item_as::<Editor>(cx),
-                        workspace
-                            .active_item(cx)
-                            .and_then(|item| item.project_path(cx)),
-                    )
-                };
-                let editor = editor.context("open an editor before asking Sarah to edit")?;
-                match request.command {
-                    SarahEditorCommand::ReadContext { max_chars } => {
-                        editor.update(cx, |editor, cx| {
-                            let display_snapshot = editor.display_snapshot(cx);
-                            let selection = editor.selections.newest::<Point>(&display_snapshot);
-                            let cursor = selection.head();
-                            let buffer_snapshot = editor.buffer().read(cx).snapshot(cx);
-                            let selected_text = buffer_snapshot
-                                .text_for_range(selection.range())
-                                .collect::<String>();
-                            let start = buffer_snapshot.clip_point(
-                                Point::new(cursor.row.saturating_sub(80), 0),
-                                Bias::Left,
-                            );
-                            let end = buffer_snapshot.clip_point(
-                                Point::new(cursor.row.saturating_add(80), u32::MAX),
-                                Bias::Right,
-                            );
-                            let max_chars = max_chars.unwrap_or(8 * 1024) as usize;
-                            let context = truncate_chars(
-                                buffer_snapshot
-                                    .text_for_range(start..end)
-                                    .collect::<String>(),
-                                max_chars,
-                            );
-                            Ok(json!({
-                                "file": project_path
-                                    .as_ref()
-                                    .map(|path| path.path.as_ref().as_unix_str()),
-                                "title": editor.title(cx),
-                                "cursor": { "line": cursor.row, "column": cursor.column },
-                                "selection": truncate_chars(selected_text, max_chars),
-                                "context": context,
-                            }))
-                        })
-                    }
-                    SarahEditorCommand::Navigate { line, column } => {
-                        editor.update(cx, |editor, cx| {
-                            let snapshot = editor.buffer().read(cx).snapshot(cx);
-                            let point = snapshot.clip_point(Point::new(line, column), Bias::Left);
-                            editor.change_selections(
-                                SelectionEffects::scroll(Autoscroll::center()),
-                                window,
-                                cx,
-                                |selections| selections.select_ranges([point..point]),
-                            );
-                        });
-                        Ok(json!({ "line": line, "column": column }))
-                    }
-                    SarahEditorCommand::Insert { text } => {
-                        let inserted_chars = text.chars().count();
-                        editor.update(cx, |editor, cx| {
-                            let display_snapshot = editor.display_snapshot(cx);
-                            let cursor =
-                                editor.selections.newest::<Point>(&display_snapshot).head();
-                            editor.change_selections(
-                                SelectionEffects::scroll(Autoscroll::fit()),
-                                window,
-                                cx,
-                                |selections| selections.select_ranges([cursor..cursor]),
-                            );
-                            editor.insert(&text, window, cx);
-                        });
-                        Ok(json!({ "insertedChars": inserted_chars }))
-                    }
-                    SarahEditorCommand::ReplaceSelection { text } => {
-                        let replacement_chars = text.chars().count();
-                        editor.update(cx, |editor, cx| editor.insert(&text, window, cx));
-                        Ok(json!({ "replacementChars": replacement_chars }))
-                    }
-                    SarahEditorCommand::Action { action } => {
-                        match action {
-                            ApprovedEditorAction::Undo => {
-                                editor.update(cx, |editor, cx| {
-                                    editor.undo(&editor_actions::Undo, window, cx)
-                                });
-                            }
-                            ApprovedEditorAction::Redo => {
-                                editor.update(cx, |editor, cx| {
-                                    editor.redo(&editor_actions::Redo, window, cx)
-                                });
-                            }
-                            ApprovedEditorAction::SaveActiveFile => {
-                                window.dispatch_action(Box::new(Save { save_intent: None }), cx);
-                            }
-                        }
-                        Ok(json!({ "action": action }))
-                    }
-                }
+                let agent_panel = workspace
+                    .read(cx)
+                    .panel::<AgentPanel>(cx)
+                    .context("the Omega Agent panel is unavailable")?;
+                let opened = agent_panel.update(cx, |agent_panel, cx| {
+                    agent_panel.reveal_omega_thread(created.thread_id, window, cx)
+                });
+                anyhow::ensure!(opened, "the created Agent thread is no longer available");
+                workspace.update(cx, |workspace, cx| {
+                    workspace.focus_panel::<AgentPanel>(window, cx);
+                });
+                Ok(())
             });
-
         match result {
-            Ok(output) => {
-                self.voice_status = "Sarah's editor command completed.".into();
-                VoiceCommandResult::completed(request_id, Some(output))
+            Ok(()) => {
+                let status: SharedString = "Agent thread opened in the Agent panel.".into();
+                self.voice_status = status.clone();
+                if let Some(created) = &mut self.created_agent_thread {
+                    created.status = status;
+                }
+                cx.notify();
             }
             Err(error) => {
-                self.voice_status = format!("Sarah's editor command failed: {error:#}").into();
-                VoiceCommandResult::failed(request_id, format!("{error:#}"))
+                self.voice_status = format!("Could not open the Agent thread: {error:#}").into();
+                cx.notify();
             }
         }
     }
@@ -1967,6 +2078,7 @@ impl Render for SarahWorkroomPanel {
         let voice_state_label = self.voice_state.label();
         let voice_session_id = self.voice_session_id.clone();
         let pending_voice_command = self.pending_voice_command.clone();
+        let created_agent_thread = self.created_agent_thread.clone();
         let voice_section = v_flex()
             .id("sarah-managed-voice")
             .gap_2()
@@ -2068,6 +2180,27 @@ impl Render for SarahWorkroomPanel {
                         .p_2()
                         .child(Label::new("Sarah requests confirmation").color(Color::Warning))
                         .child(Label::new(request.command.confirmation_copy()))
+                        .when_some(
+                            request.command.confirmation_detail().map(ToOwned::to_owned),
+                            |this, message| {
+                                this.child(
+                                    v_flex()
+                                        .id("sarah-agent-message-confirmation")
+                                        .max_h(px(160.))
+                                        .overflow_y_scroll()
+                                        .border_1()
+                                        .border_color(cx.theme().colors().border)
+                                        .rounded_md()
+                                        .p_2()
+                                        .child(
+                                            Label::new("Message to submit")
+                                                .color(Color::Muted)
+                                                .size(LabelSize::Small),
+                                        )
+                                        .child(Label::new(message)),
+                                )
+                            },
+                        )
                         .child(
                             h_flex()
                                 .gap_1()
@@ -2085,6 +2218,38 @@ impl Render for SarahWorkroomPanel {
                                             this.reject_voice_command(cx);
                                         })),
                                 ),
+                        ),
+                )
+            })
+            .when_some(created_agent_thread, |this, created| {
+                let presentation = match created.presentation {
+                    AgentThreadPresentation::Foreground => "Foreground · opened in Agent panel",
+                    AgentThreadPresentation::Background => {
+                        "Background · active view and focus were preserved"
+                    }
+                };
+                this.child(
+                    v_flex()
+                        .id("sarah-created-agent-thread")
+                        .gap_1()
+                        .border_1()
+                        .border_color(cx.theme().colors().border)
+                        .rounded_md()
+                        .p_2()
+                        .child(Label::new("Omega Agent thread").color(Color::Accent))
+                        .child(
+                            Label::new(created.thread_id.to_key_string())
+                                .color(Color::Muted)
+                                .size(LabelSize::Small),
+                        )
+                        .child(Label::new(presentation).size(LabelSize::Small))
+                        .child(Label::new(created.status))
+                        .child(
+                            Button::new("sarah-open-created-agent-thread", "Open Agent thread")
+                                .style(ButtonStyle::Filled)
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.open_created_agent_thread(window, cx);
+                                })),
                         ),
                 )
             })

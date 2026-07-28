@@ -48,7 +48,8 @@ The first client text frame is:
       "navigate",
       "insert",
       "replace_selection",
-      "action"
+      "action",
+      "start_agent_thread"
     ],
     "approvedActions": ["undo", "redo", "save_active_file"],
     "confirmationRequiredFor": ["destructive", "external_effect"]
@@ -120,7 +121,7 @@ The gateway can send:
 Omega deserializes `command` into a closed enum. Unknown names, unknown fields,
 oversized text, and invalid context limits are rejected without execution.
 There is no shell command, URL opener, generic action name, or arbitrary action
-dispatch in this protocol.
+or agent dispatch in this protocol.
 
 Allowed commands:
 
@@ -131,11 +132,56 @@ Allowed commands:
 | `insert` | `text` up to 64 KiB | Collapses any selection and inserts at the cursor | No |
 | `replace_selection` | `text` up to 64 KiB | Replaces the current selection | Yes, destructive |
 | `action` | `action` | Runs one approved action | Depends on action |
+| `start_agent_thread` | `message`, `presentation` | Creates an Omega Agent thread and submits the message through the normal Agent composer/send path | Yes, external effect |
 
 Approved actions are `undo`, `redo`, and `save_active_file`. Undo and redo
 require destructive confirmation. Saving requires external-effect
 confirmation. Each confirmation is one-shot and visible in the Sarah panel;
 the gateway cannot pre-approve it.
+
+`start_agent_thread` accepts a non-empty message of at most 16 KiB and exactly
+one of two presentation values:
+
+- `foreground`: create and select the thread, reveal the normal Omega Agent
+  panel, and focus it.
+- `background`: create and submit a retained thread without changing the active
+  Agent thread, showing or switching panels, or moving focus.
+
+The command does not accept an agent ID, model, tool list, action, worktree, or
+other dispatch target. Omega always uses its native Omega Agent route and the
+existing Agent authorization. Before either presentation mode runs, the Sarah
+panel shows the complete bounded message and requires **Allow once**. After
+creation, the Sarah panel retains the thread ID, submission status, presentation
+mode, and an explicit **Open Agent thread** button.
+
+Example foreground request:
+
+```json
+{
+  "type": "command.request",
+  "requestId": "command.agent.ref",
+  "command": {
+    "name": "start_agent_thread",
+    "message": "Investigate the failing test and propose a fix.",
+    "presentation": "foreground"
+  }
+}
+```
+
+A completed result identifies the thread without exposing internal credentials:
+
+```json
+{
+  "type": "command.result",
+  "requestId": "command.agent.ref",
+  "status": "completed",
+  "output": {
+    "threadId": "00000000-0000-0000-0000-000000000000",
+    "presentation": "foreground",
+    "status": "submitted"
+  }
+}
+```
 
 Omega replies:
 
@@ -168,11 +214,19 @@ completed `read_context`.
 8. Ask Sarah to navigate and insert text. Verify those allowlisted operations
    run without a prompt. Ask Sarah to replace selected text, undo, redo, or save
    and verify the one-shot Allow/Decline card appears before execution.
-9. Have a test gateway send an unknown command such as `run_shell`; verify the
+9. Ask Sarah to start an Agent thread in `background` mode. Verify the full
+   message is visible before approval, decline once and confirm no thread is
+   created, then approve and confirm the Sarah panel remains visible and focused.
+   Verify the created-thread card reports `submitted`, then use **Open Agent
+   thread** and confirm the message appears in the normal Agent UI.
+10. Repeat with `foreground` and verify approval creates, selects, and reveals
+    the new Agent thread. Add `agent` or `model` to a gateway fixture and verify
+    the request is rejected rather than dispatched.
+11. Have a test gateway send an unknown command such as `run_shell`; verify the
    editor is unchanged and the gateway receives a rejected command result.
-10. Choose **End voice** and verify the mic indicator and playback stop. Disable
+12. Choose **End voice** and verify the mic indicator and playback stop. Disable
     networking during another session, verify reconnect-required appears, then
     restore networking and use **Retry**.
-11. Deny Omega microphone permission (or select a missing device) and verify the
+13. Deny Omega microphone permission (or select a missing device) and verify the
     panel offers actionable permission/device guidance and a link to
     Collaboration settings.
