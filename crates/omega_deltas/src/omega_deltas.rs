@@ -19827,14 +19827,23 @@ mod tests {
             "SigningPurpose::NostrEvent",
             "kind: NIP98_KIND",
             "\"method\".to_string(), \"POST\".to_string()",
-            "\"payload\".to_string(), empty_payload_hash",
-            "format!(\"Nostr {authorization}\")",
+            "\"payload\".to_string(), payload_hash",
+            "format!(\"Nostr {}\"",
         ] {
             assert!(
                 without_whitespace(&proof).contains(&without_whitespace(required)),
                 "OMEGA-DELTA-0153: the background proof lost `{required}`."
             );
         }
+        let mint = function_body(&proof, "mint_openagents_nostr_session")
+            .expect("OMEGA-DELTA-0153: the standard hosted-session mint is gone");
+        assert!(
+            without_whitespace(mint).contains(&without_whitespace(
+                "sign_nip98_post(OPENAGENTS_NOSTR_SESSION_URL, &[], &identity)"
+            )),
+            "OMEGA-DELTA-0153: the standard hosted-session proof no longer binds \
+             the explicitly empty request body."
+        );
     }
 
     /// OMEGA-DELTA-0154. The mobile bridge socket is confined to loopback and

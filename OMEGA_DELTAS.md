@@ -6820,9 +6820,10 @@ resolution therefore cannot silently become three different inventories.
 Connecting Omega to its owner-scoped OpenAgents services no longer opens a web
 browser or starts a loopback callback server. Omega signs a fresh NIP-98 event
 with its built-in Nostr identity and sends the proof directly to the exact
-OpenAgents session endpoint. The proof binds the HTTPS URL, POST method, empty
-payload, and current timestamp; the server admits only its configured owner
-public key and consumes each proof once.
+OpenAgents session endpoint. The shared signer binds the HTTPS URL, POST method,
+exact payload hash, and current timestamp. The ordinary hosted-session request
+signs an empty payload; managed Sarah voice signs the exact serialized session
+JSON. The server resolves the configured owner and consumes each proof once.
 
 The resulting access token is short-lived and remains in Omega's isolated
 credential store. Existing OAuth credentials remain readable for migration,
