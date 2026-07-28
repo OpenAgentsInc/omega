@@ -151,6 +151,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0160",
     "OMEGA-DELTA-0161",
     "OMEGA-DELTA-0162",
+    "OMEGA-DELTA-0163",
 ];
 
 pub const GOOGLE_PROVIDER_PATH: &str = "crates/language_models/src/provider/google.rs";
@@ -2827,6 +2828,11 @@ pub const NOSTR_ACTIVITY_PATH: &str = "crates/agent_ui/src/omega_nostr_activity.
 
 /// OMEGA-DELTA-0160. The versioned registry and per-channel snapshot owner.
 pub const PUBLIC_CHANNELS_PATH: &str = "crates/agent_ui/src/omega_public_channels.rs";
+pub const PUBLIC_CHANNEL_RELAY_PATH: &str = "crates/agent_ui/src/omega_public_channel_relay.rs";
+pub const PUBLIC_CHANNEL_TIMELINE_PATH: &str =
+    "crates/agent_ui/src/omega_public_channel_timeline.rs";
+pub const PUBLIC_CHANNEL_MEDIA_PATH: &str = "crates/agent_ui/src/omega_public_channel_media.rs";
+pub const PUBLIC_CHANNEL_VIEW_PATH: &str = "crates/agent_ui/src/omega_public_channel_view.rs";
 
 /// OMEGA-DELTA-0048, 0053. Where panels are added, where zero base skips them,
 /// and where the mode seals the window after the identity gate.
@@ -20340,5 +20346,134 @@ mod tests {
              cannot cancel — see above — so a key that does nothing leaves one \
              unlabelled button as the only way out."
         );
+    }
+
+    /// OMEGA-DELTA-0163. A selected public channel has one read-only,
+    /// generation-fenced relay session and a gated verified-media boundary.
+    #[test]
+    fn public_channel_timeline_is_live_verified_and_read_only() {
+        let relay_path = repository_path(PUBLIC_CHANNEL_RELAY_PATH);
+        let relay_source = read_repository_file(PUBLIC_CHANNEL_RELAY_PATH);
+        let relay = outside_the_tests(&relay_source);
+        for required in [
+            "pub async fn run_relay_session",
+            "pub enum RelayIntent",
+            "LoadOlder",
+            "Close",
+            "RECONNECT_DELAY_MS: u64 = 1_000",
+            "RelayLifecycle::Replaying",
+            "RelayLifecycle::Current",
+            "RelayLifecycle::Stale",
+            "Message::Ping",
+            "Message::Pong",
+        ] {
+            assert!(
+                relay.contains(required),
+                "OMEGA-DELTA-0163: {} lost `{required}`.",
+                relay_path.display()
+            );
+        }
+        for forbidden in ["SecretKey", "sign_event", "nsec", "Nip42"] {
+            assert!(
+                !relay.contains(forbidden),
+                "OMEGA-DELTA-0163: the read-only relay lane in {} gained \
+                 signing or secret-key capability `{forbidden}`.",
+                relay_path.display()
+            );
+        }
+
+        let timeline_path = repository_path(PUBLIC_CHANNEL_TIMELINE_PATH);
+        let timeline_source = read_repository_file(PUBLIC_CHANNEL_TIMELINE_PATH);
+        let timeline = outside_the_tests(&timeline_source);
+        for required in [
+            "3d7c49d4fdc3215802707088242e709dbe902932",
+            "33a55a30e444ed7f05d65d581ccafeaa7d082314b4a95f4ea5f016040a782595",
+            "pub fn project_timeline",
+            "matches!(event.kind, 9 | 1337)",
+            "event.kind == 9005",
+            "current_relay_state(&events, 39001",
+            "current_relay_state(&events, 39005",
+            "pub fn event_facts",
+        ] {
+            assert!(
+                timeline.contains(required),
+                "OMEGA-DELTA-0163: {} lost `{required}`.",
+                timeline_path.display()
+            );
+        }
+
+        let media_path = repository_path(PUBLIC_CHANNEL_MEDIA_PATH);
+        let media_source = read_repository_file(PUBLIC_CHANNEL_MEDIA_PATH);
+        let media = outside_the_tests(&media_source);
+        for required in [
+            "pub fn begin_load",
+            "pub async fn fetch_public_channel_media",
+            "RedirectPolicy::NoFollow",
+            "MAX_MEDIA_REDIRECTS",
+            "Sha256::digest",
+            "PublicChannelMediaState::Mismatch",
+            "PublicChannelMediaIntent::OpenWithSystem",
+            "PublicChannelMediaIntent::SaveAs",
+        ] {
+            assert!(
+                media.contains(required),
+                "OMEGA-DELTA-0163: {} lost `{required}`.",
+                media_path.display()
+            );
+        }
+        assert!(
+            !media.contains("header::AUTHORIZATION")
+                && !media.contains("header::COOKIE")
+                && !media.contains("header::REFERER"),
+            "OMEGA-DELTA-0163: the public media loader in {} can send a \
+             credential or referrer header.",
+            media_path.display()
+        );
+
+        let view_path = repository_path(PUBLIC_CHANNEL_VIEW_PATH);
+        let view_source = read_repository_file(PUBLIC_CHANNEL_VIEW_PATH);
+        let view = outside_the_tests(&view_source);
+        for required in [
+            "generation: u64",
+            "this.generation == generation",
+            "this.generation != generation",
+            "pub fn pause",
+            "ListState::new",
+            "FollowMode::Tail",
+            "Load older",
+            "Jump to latest",
+            "Show content",
+            "Load media",
+            "Event facts",
+        ] {
+            assert!(
+                view.contains(required),
+                "OMEGA-DELTA-0163: {} lost `{required}`.",
+                view_path.display()
+            );
+        }
+        for forbidden in ["Message::Text", "SecretKey", "sign_event", "Composer"] {
+            assert!(
+                !view.contains(forbidden),
+                "OMEGA-DELTA-0163: the selected-channel view in {} gained \
+                 publish or signing capability `{forbidden}`.",
+                view_path.display()
+            );
+        }
+
+        let panel_source = read_repository_file(AGENT_PANEL_PATH);
+        let panel = outside_the_tests(&panel_source);
+        for required in [
+            "PublicChannelView::new",
+            "view.resume(cx)",
+            "view.pause(cx)",
+            "PublicChannelViewEvent::SnapshotChanged",
+        ] {
+            assert!(
+                panel.contains(required),
+                "OMEGA-DELTA-0163: the Agent panel lost selected-channel \
+                 lifecycle wiring `{required}`."
+            );
+        }
     }
 }

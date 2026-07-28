@@ -7195,3 +7195,66 @@ timeline work remains separate.
   subagent's view has always done — a person can no longer type directly into a
   delegated thread from the panel, and that consequence has not been rendered
   either.
+
+### OMEGA-DELTA-0163 — A selected public channel owns a live verified timeline
+
+The `#agent-chat` destination now opens a read-only live Nostr timeline. The
+selected channel owns the socket. Switching channels closes the old
+subscriptions and starts or resumes the new channel. Each retained view keeps
+its verified rows, cursor, lifecycle, unread calculation, event-detail state,
+and media state separate from all other relay-qualified channel coordinates.
+A generation and coordinate fence refuses a relay or media completion from a
+channel that is no longer selected.
+
+The relay lane follows the OpenAgents
+`openagents.agent_chat_parity_fixture.v1` contract at revision
+`3d7c49d4fdc3215802707088242e709dbe902932`. It requests 50-event history
+pages, waits for the required history and relay-state `EOSE` frames, accepts
+the relay's three-element `EOSE`, and moves through connecting, replaying,
+current, stale, and reconnecting states without removing valid rows. A
+reconnect asks from one second before the newest retained event and removes
+duplicates by event ID. This deliberately preserves the web contract's current
+profile-influenced reconnect cursor until both clients revise that contract
+together.
+
+Only verified events for the selected `h` group enter the projection. It
+renders kind 9 messages, kind 1337 code messages, kind 0 profile facts, kind 5
+author tombstones, authorized kind 9005 moderator tombstones, kind 7 reaction
+counts, and the newest verified relay-self kind 39005 pin state. The current
+kind 39001 administrator set replaces older sets; it is not a historical
+union. A malformed frame, rejected event, profile failure, or media failure
+sets a bounded visible gap and leaves valid signed messages in place. When no
+relay-self key is pinned, messages remain readable and group metadata is
+explicitly untrusted.
+
+The main view uses a virtual tail-follow list. A reader who scrolls away from
+the tail is not pulled back; **Jump to latest** restores follow mode. **Load
+older** issues one bounded page request and keeps same-second boundary events.
+Content warnings hide content and media controls until the reader reveals the
+message. Tombstones always win and never expose deleted content. Only projected
+HTTP(S) links open. Nostr references stay inert pending a reviewed desktop
+handler. **Inspect** opens bounded event facts instead of raw relay JSON.
+
+Remote media never loads because an event arrived or because a row rendered.
+The reader must select **Load media**. The loader sends no credentials or
+referrer, revalidates redirects and public hosts, caps response bytes, checks
+the signed MIME type, and calculates SHA-256 before decode or storage. A digest
+mismatch never reaches an image or native viewer. Verified static raster images
+render from memory. Verified audio and video use a second native-open action;
+other verified files use a save action. The signed message stays visible for
+all mismatch and unavailable states.
+
+This slice adds no composer, signer, NIP-42 response, publish event, join,
+leave, identity change, or moderation control. The global HTTP client can
+resolve a validated DNS name again after the media host check, so a DNS
+rebinding time-of-check/time-of-use gap remains until Omega has a pin-aware
+HTTP transport. AVIF is verified and offered to the native viewer because the
+current image build does not decode it inline.
+
+- **Enforced by:** `public_channel_timeline_is_live_verified_and_read_only` in
+  `crates/omega_deltas`; the exact fixture projection, lifecycle, reconnect,
+  pagination, invalid-input, AUTH-inert, and close tests in
+  `omega_public_channel_relay` and `omega_public_channel_timeline`; the gated
+  fetch, redirect, digest, MIME, image-bound, native-open, and failure tests in
+  `omega_public_channel_media`; and channel isolation tests in
+  `omega_public_channels` and `omega_public_channel_view`.
