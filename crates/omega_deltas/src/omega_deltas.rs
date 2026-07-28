@@ -20088,6 +20088,15 @@ mod tests {
             "OMEGA-DELTA-0159: hosted sign-in stopped logging its failures \
              with the status that explains them."
         );
+        let session = read_repository_file("crates/omega_effectd/src/openagents_session.rs");
+        let sarah_session = function_body(&session, "create_sarah_voice_session")
+            .expect("OMEGA-DELTA-0159: the Sarah session boundary is gone");
+        assert!(
+            sarah_session.contains("owner_user_id: None")
+                && !sarah_session.contains("owner_user_id: issued.voice.owner_ref"),
+            "OMEGA-DELTA-0159: Sarah persisted the server-returned account mapping \
+             in its Nostr-issued bearer credential."
+        );
 
         // Pairing reaches identity custody before hosted sign-in ever runs: a
         // person can click "Pair phone" without sending a message. If only the

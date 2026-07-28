@@ -6968,6 +6968,12 @@ or adopt a protected identity for a new profile. It inspects custody and signs
 only when the state is already `Ready`. An `Absent` or `Unadopted` state returns
 an actionable blocker that directs the owner to the existing identity setup.
 
+Sarah's challenge response can carry a server-side account mapping that Omega
+does not know in advance. Omega copies that `ownerRef` into the exact signed
+voice-session body but does not persist it in the Nostr-issued bearer
+credential. Normal bearer verification resolves the owner in memory. Existing
+legacy credentials retain their stored owner binding for compatibility.
+
 Phone pairing is different because the owner explicitly starts that operation.
 It can use the narrow unattended provisioning transaction after that visible
 action. A state the profile cannot sign for still refuses by name.

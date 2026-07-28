@@ -16,6 +16,7 @@ pub const OPENAGENTS_SESSION_KEY: &str = "omega://openagents/native-session/v1";
 pub const OPENAGENTS_DEVICE_KEY: &str = "omega://openagents/device-binding/v1";
 
 const OPENAGENTS_REFRESH_HEADER: &str = "x-openagents-refresh-token";
+const OPENAGENTS_CREDENTIAL_USERNAME: &str = "omega";
 const MAX_HTTP_BODY_BYTES: u64 = 64 * 1024;
 const MAX_ACCESS_TOKEN_BYTES: usize = 16 * 1024;
 
@@ -67,11 +68,12 @@ pub struct OpenAgentsSession {
 struct OpenAgentsSessionGlobal(OpenAgentsSession);
 impl Global for OpenAgentsSessionGlobal {}
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct StoredCredential {
     schema_version: u8,
-    owner_user_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    owner_user_id: Option<String>,
     access_token: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     refresh_token: Option<String>,
@@ -114,7 +116,10 @@ struct RevokedSessionResponse {
 }
 
 enum VerificationResult {
-    Verified(StoredCredential),
+    Verified {
+        credential: StoredCredential,
+        owner_user_id: String,
+    },
     Denied,
     Unavailable,
 }
@@ -215,9 +220,12 @@ impl OpenAgentsSession {
             }
         };
         match self.verify_credential(&credential).await {
-            VerificationResult::Verified(verified) => {
-                if verified.access_token.len() > MAX_ACCESS_TOKEN_BYTES
-                    || self.save_credential(&verified, cx).await.is_err()
+            VerificationResult::Verified {
+                credential,
+                owner_user_id,
+            } => {
+                if credential.access_token.len() > MAX_ACCESS_TOKEN_BYTES
+                    || self.save_credential(&credential, cx).await.is_err()
                 {
                     self.record_blocker(Some(HostedSessionBlocker::CredentialStorageFailed));
                     self.set_phase(OpenAgentsSessionPhase::Unavailable);
@@ -227,8 +235,8 @@ impl OpenAgentsSession {
                 self.set_phase(OpenAgentsSessionPhase::Ready);
                 Some(VerifiedOpenAgentsSession {
                     base_url: OPENAGENTS_BASE_URL.to_string(),
-                    owner_user_id: verified.owner_user_id,
-                    access_token: verified.access_token,
+                    owner_user_id,
+                    access_token: credential.access_token,
                 })
             }
             VerificationResult::Denied => {
@@ -303,7 +311,7 @@ impl OpenAgentsSession {
             .ok_or(HostedSessionBlocker::ResponseInvalid)?;
         let credential = StoredCredential {
             schema_version: 1,
-            owner_user_id: issued.voice.owner_ref.clone(),
+            owner_user_id: None,
             access_token,
             refresh_token: None,
         };
@@ -323,12 +331,12 @@ impl OpenAgentsSession {
             super::openagents_nostr_auth::mint_openagents_nostr_session(&self.http_client).await?;
         let credential = StoredCredential {
             schema_version: 1,
-            owner_user_id: session.user.user_id,
+            owner_user_id: Some(session.user.user_id),
             access_token: session.access_token.trim().to_string(),
             refresh_token: None,
         };
         match self.verify_credential(&credential).await {
-            VerificationResult::Verified(credential) => Ok(credential),
+            VerificationResult::Verified { credential, .. } => Ok(credential),
             VerificationResult::Denied | VerificationResult::Unavailable => {
                 Err(HostedSessionBlocker::SessionNotVerified)
             }
@@ -368,16 +376,14 @@ impl OpenAgentsSession {
         let owner_user_id = session.user.user_id.trim();
         if !session.authenticated
             || owner_user_id.is_empty()
-            || (!credential.owner_user_id.is_empty() && credential.owner_user_id != owner_user_id)
+            || credential
+                .owner_user_id
+                .as_deref()
+                .is_some_and(|expected| expected != owner_user_id)
         {
             return VerificationResult::Denied;
         }
-        let mut verified = StoredCredential {
-            schema_version: 1,
-            owner_user_id: owner_user_id.to_string(),
-            access_token: credential.access_token.clone(),
-            refresh_token: credential.refresh_token.clone(),
-        };
+        let mut verified = credential.clone();
         if let Some(tokens) = session.tokens {
             if tokens.access.trim().is_empty()
                 || tokens.refresh.trim().is_empty()
@@ -390,7 +396,10 @@ impl OpenAgentsSession {
             verified.access_token = tokens.access.trim().to_string();
             verified.refresh_token = Some(tokens.refresh.trim().to_string());
         }
-        VerificationResult::Verified(verified)
+        VerificationResult::Verified {
+            credential: verified,
+            owner_user_id: owner_user_id.to_string(),
+        }
     }
 
     async fn revoke_credential(&self, credential: &StoredCredential) -> Result<bool> {
@@ -417,8 +426,7 @@ impl OpenAgentsSession {
         let credential: StoredCredential =
             serde_json::from_slice(&secret).context("OpenAgents stored credential was invalid")?;
         if credential.schema_version != 1
-            || credential.owner_user_id != username
-            || credential.owner_user_id.trim().is_empty()
+            || !credential_owner_matches_username(&credential, &username)
             || credential.access_token.trim().is_empty()
             || credential
                 .refresh_token
@@ -432,7 +440,10 @@ impl OpenAgentsSession {
     }
 
     async fn save_credential(&self, credential: &StoredCredential, cx: &AsyncApp) -> Result<()> {
-        if credential.owner_user_id.trim().is_empty()
+        if credential
+            .owner_user_id
+            .as_ref()
+            .is_some_and(|owner_user_id| owner_user_id.trim().is_empty())
             || credential.access_token.trim().is_empty()
             || credential
                 .refresh_token
@@ -445,7 +456,7 @@ impl OpenAgentsSession {
         self.credentials
             .write_credentials(
                 OPENAGENTS_SESSION_KEY,
-                &credential.owner_user_id,
+                credential_username(credential),
                 &secret,
                 cx,
             )
@@ -483,6 +494,20 @@ impl OpenAgentsSession {
             .write_credentials(OPENAGENTS_DEVICE_KEY, "omega", &secret, cx)
             .await?;
         Ok(device_ref)
+    }
+}
+
+fn credential_username(credential: &StoredCredential) -> &str {
+    credential
+        .owner_user_id
+        .as_deref()
+        .unwrap_or(OPENAGENTS_CREDENTIAL_USERNAME)
+}
+
+fn credential_owner_matches_username(credential: &StoredCredential, username: &str) -> bool {
+    match credential.owner_user_id.as_deref() {
+        Some(owner_user_id) => !owner_user_id.is_empty() && owner_user_id == username,
+        None => username == OPENAGENTS_CREDENTIAL_USERNAME,
     }
 }
 
@@ -573,7 +598,8 @@ mod tests {
             "accessToken": "short-lived-session"
         }))
         .expect("legacy bearer credential");
-        assert_eq!(credential.owner_user_id, "owner.fixture");
+        assert_eq!(credential.owner_user_id.as_deref(), Some("owner.fixture"));
+        assert_eq!(credential_username(&credential), "owner.fixture");
         assert_eq!(credential.refresh_token, None);
 
         let binding = StoredDeviceBinding {
@@ -582,6 +608,30 @@ mod tests {
         };
         assert!(valid_device_ref(&binding.device_ref));
         assert!(!valid_device_ref("contains a space"));
+    }
+
+    #[test]
+    fn nostr_issued_bearer_does_not_persist_the_server_owner_mapping() {
+        let credential = StoredCredential {
+            schema_version: 1,
+            owner_user_id: None,
+            access_token: "short-lived-session".into(),
+            refresh_token: None,
+        };
+        let stored = serde_json::to_value(&credential).expect("serialize credential");
+        assert!(stored.get("ownerUserId").is_none());
+        assert_eq!(
+            credential_username(&credential),
+            OPENAGENTS_CREDENTIAL_USERNAME
+        );
+        assert!(credential_owner_matches_username(
+            &credential,
+            OPENAGENTS_CREDENTIAL_USERNAME
+        ));
+        assert!(!credential_owner_matches_username(
+            &credential,
+            "mapped-owner"
+        ));
     }
 
     #[test]
