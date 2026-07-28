@@ -885,7 +885,17 @@ pub mod workroom {
             /// Sends the composer text as an owner message (pending until confirmed).
             SendMessage,
             /// Sends a typed interrupt intent for the active Sarah turn.
-            InterruptTurn
+            InterruptTurn,
+            /// Starts Sarah's managed Realtime voice session.
+            StartVoice,
+            /// Mutes or unmutes Sarah's microphone capture.
+            ToggleVoiceMute,
+            /// Interrupts Sarah's current spoken response.
+            InterruptVoice,
+            /// Ends Sarah's managed Realtime voice session.
+            EndVoice,
+            /// Retries Sarah's managed Realtime voice session after a failure.
+            RetryVoice
         ]
     );
 }

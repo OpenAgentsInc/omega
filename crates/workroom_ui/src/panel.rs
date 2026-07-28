@@ -19,8 +19,9 @@
 
 use std::time::Duration;
 
-use anyhow::Result;
-use editor::Editor;
+use anyhow::{Context as _, Result};
+use audio::AudioSettings;
+use editor::{Editor, SelectionEffects, actions as editor_actions, scroll::Autoscroll};
 use gpui::{
     App, AsyncWindowContext, Context, Entity, EventEmitter, FocusHandle, Focusable,
     InteractiveElement, IntoElement, ParentElement, Render, SharedString, Styled, Task, WeakEntity,
@@ -31,14 +32,22 @@ use omega_effectd::{
     SharedOmegaEffectdSupervisor, shared_supervisor, try_openagents_binding,
 };
 use serde_json::{Value, json};
+use settings::Settings;
+use text::{Bias, Point};
 use ui::{Button, ButtonStyle, Label, LabelSize, prelude::*};
 use util::ResultExt as _;
 use uuid::Uuid;
 use workspace::{
-    Workspace,
+    Save, Workspace,
     dock::{DockPosition, Panel, PanelEvent},
 };
-use zed_actions::workroom::{FocusComposer, InterruptTurn, OpenPanel, SendMessage};
+use zed_actions::{
+    OpenSettingsPage,
+    workroom::{
+        EndVoice, FocusComposer, InterruptTurn, InterruptVoice, OpenPanel, RetryVoice, SendMessage,
+        StartVoice, ToggleVoiceMute,
+    },
+};
 
 use crate::attention::{AttentionMarker, OMEGA_AUTONOMOUS_TICK_ENABLED, empty_room_is_honest};
 use crate::community::{
@@ -52,9 +61,15 @@ use crate::projections::{
     ProjectionMeta, ReceiptRow, ReceiptsProjection, RoomProjection, RunPhase, RunStateProjection,
     TranscriptProjection, TranscriptRow, WorkroomProjection, sources,
 };
+use crate::voice::{
+    ApprovedEditorAction, CommandConfirmation, ManagedSarahVoiceClient, SarahEditorCommand,
+    SarahVoiceControl, SarahVoiceEvent, SarahVoiceState, VoiceCommandRequest, VoiceCommandResult,
+    VoiceParticipant, VoiceTranscriptItem,
+};
 
 const PANEL_KEY: &str = "SarahWorkroomPanel";
 const MAX_NOSTR_RECORD_ROWS: usize = 64;
+const MAX_VOICE_TRANSCRIPT_CHARS: usize = 16 * 1024;
 
 #[derive(Clone, Debug)]
 struct NostrRecordRow {
@@ -92,7 +107,7 @@ impl NostrRecordsProjection {
 }
 
 pub struct SarahWorkroomPanel {
-    _workspace: WeakEntity<Workspace>,
+    workspace: WeakEntity<Workspace>,
     focus_handle: FocusHandle,
     composer: Entity<Editor>,
     projection: WorkroomProjection,
@@ -117,6 +132,15 @@ pub struct SarahWorkroomPanel {
     nostr_records: NostrRecordsProjection,
     grant_busy: Option<String>,
     _refresh: Option<Task<()>>,
+    voice_state: SarahVoiceState,
+    voice_status: SharedString,
+    voice_muted: bool,
+    voice_retryable: bool,
+    voice_session_id: Option<String>,
+    voice_transcript: Vec<VoiceTranscriptItem>,
+    pending_voice_command: Option<VoiceCommandRequest>,
+    voice_controls: Option<async_channel::Sender<SarahVoiceControl>>,
+    voice_task: Option<Task<()>>,
     public_demo: bool,
 }
 
@@ -145,6 +169,36 @@ pub fn init(cx: &mut App) {
             .register_action(|workspace, _: &InterruptTurn, window, cx| {
                 if let Some(panel) = workspace.panel::<SarahWorkroomPanel>(cx) {
                     panel.update(cx, |panel, cx| panel.interrupt_turn(cx));
+                }
+                workspace.focus_panel::<SarahWorkroomPanel>(window, cx);
+            })
+            .register_action(|workspace, _: &StartVoice, window, cx| {
+                if let Some(panel) = workspace.panel::<SarahWorkroomPanel>(cx) {
+                    panel.update(cx, |panel, cx| panel.start_voice(window, cx));
+                }
+                workspace.focus_panel::<SarahWorkroomPanel>(window, cx);
+            })
+            .register_action(|workspace, _: &ToggleVoiceMute, window, cx| {
+                if let Some(panel) = workspace.panel::<SarahWorkroomPanel>(cx) {
+                    panel.update(cx, |panel, cx| panel.toggle_voice_mute(cx));
+                }
+                workspace.focus_panel::<SarahWorkroomPanel>(window, cx);
+            })
+            .register_action(|workspace, _: &InterruptVoice, window, cx| {
+                if let Some(panel) = workspace.panel::<SarahWorkroomPanel>(cx) {
+                    panel.update(cx, |panel, cx| panel.interrupt_voice(cx));
+                }
+                workspace.focus_panel::<SarahWorkroomPanel>(window, cx);
+            })
+            .register_action(|workspace, _: &EndVoice, window, cx| {
+                if let Some(panel) = workspace.panel::<SarahWorkroomPanel>(cx) {
+                    panel.update(cx, |panel, cx| panel.end_voice(cx));
+                }
+                workspace.focus_panel::<SarahWorkroomPanel>(window, cx);
+            })
+            .register_action(|workspace, _: &RetryVoice, window, cx| {
+                if let Some(panel) = workspace.panel::<SarahWorkroomPanel>(cx) {
+                    panel.update(cx, |panel, cx| panel.retry_voice(window, cx));
                 }
                 workspace.focus_panel::<SarahWorkroomPanel>(window, cx);
             });
@@ -182,7 +236,7 @@ impl SarahWorkroomPanel {
             .map(|binding| binding.load_projection())
             .unwrap_or_else(BindingProjection::unbound);
         let mut panel = Self {
-            _workspace: workspace,
+            workspace,
             focus_handle: cx.focus_handle(),
             composer,
             projection: if public_demo {
@@ -214,6 +268,15 @@ impl SarahWorkroomPanel {
             ),
             grant_busy: None,
             _refresh: None,
+            voice_state: SarahVoiceState::Idle,
+            voice_status: "Managed voice is ready to start.".into(),
+            voice_muted: false,
+            voice_retryable: false,
+            voice_session_id: None,
+            voice_transcript: Vec::new(),
+            pending_voice_command: None,
+            voice_controls: None,
+            voice_task: None,
             public_demo,
         };
         if !public_demo {
@@ -1194,6 +1257,463 @@ impl SarahWorkroomPanel {
         .detach();
     }
 
+    fn start_voice(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.public_demo || self.active_room.is_community() || self.voice_state.is_active() {
+            return;
+        }
+
+        self.voice_task.take();
+        self.voice_controls.take();
+        self.pending_voice_command = None;
+        self.voice_retryable = false;
+        self.voice_state = SarahVoiceState::Authenticating;
+        self.voice_status =
+            "Checking the existing OpenAgents session. No OpenAI API key is used.".into();
+        let openagents_session = omega_effectd::openagents_session(cx);
+        let audio_settings = AudioSettings::get_global(cx);
+        let input_device_id = audio_settings.input_audio_device.clone();
+        let output_device_id = audio_settings.output_audio_device.clone();
+        cx.notify();
+
+        let voice_task = cx.spawn_in(window, async move |this, cx| {
+            let mut verified = openagents_session.resolve_verified(cx).await;
+            if verified.is_none() {
+                openagents_session.connect(cx).await;
+                verified = openagents_session.resolve_verified(cx).await;
+            }
+            let Some(verified) = verified else {
+                this.update(cx, |panel, cx| {
+                    panel.voice_state = SarahVoiceState::Error;
+                    panel.voice_retryable = true;
+                    panel.voice_status =
+                        "Connect an OpenAgents account, then retry Sarah voice.".into();
+                    cx.notify();
+                })?;
+                return anyhow::Ok(());
+            };
+
+            let client = match ManagedSarahVoiceClient::from_verified_session(
+                verified,
+                input_device_id,
+                output_device_id,
+            ) {
+                Ok(client) => client,
+                Err(error) => {
+                    this.update(cx, |panel, cx| {
+                        panel.voice_state = SarahVoiceState::Error;
+                        panel.voice_retryable = true;
+                        panel.voice_status =
+                            format!("Sarah voice could not start: {error:#}").into();
+                        cx.notify();
+                    })?;
+                    return anyhow::Ok(());
+                }
+            };
+            let connection = client.connect();
+            let controls = connection.controls;
+            let events = connection.events;
+            this.update(cx, |panel, cx| {
+                panel.voice_controls = Some(controls);
+                panel.voice_state = SarahVoiceState::RequestingMicrophone;
+                panel.voice_status = panel.voice_state.label().into();
+                cx.notify();
+            })?;
+
+            while let Ok(event) = events.recv().await {
+                let ended = matches!(event, SarahVoiceEvent::Ended { .. });
+                this.update_in(cx, |panel, window, cx| {
+                    panel.handle_voice_event(event, window, cx);
+                })?;
+                if ended {
+                    break;
+                }
+            }
+            this.update(cx, |panel, cx| {
+                panel.voice_controls = None;
+                if panel.voice_state.is_active() {
+                    panel.voice_state = SarahVoiceState::Reconnecting;
+                    panel.voice_retryable = true;
+                    panel.voice_status =
+                        "The Sarah voice connection ended. Retry to reconnect cleanly.".into();
+                }
+                cx.notify();
+            })?;
+            anyhow::Ok(())
+        });
+        self.voice_task = Some(cx.spawn(async move |_, _| {
+            if let Err(error) = voice_task.await {
+                log::error!("Sarah voice UI task failed: {error:#}");
+            }
+        }));
+    }
+
+    fn toggle_voice_mute(&mut self, cx: &mut Context<Self>) {
+        if self.voice_controls.is_none()
+            || !self.voice_state.is_active()
+            || self.voice_state == SarahVoiceState::Reconnecting
+        {
+            return;
+        }
+        self.voice_muted = !self.voice_muted;
+        self.send_voice_control(SarahVoiceControl::SetMuted(self.voice_muted));
+        self.voice_status = if self.voice_muted {
+            "Microphone muted. Sarah cannot hear new audio.".into()
+        } else {
+            "Microphone unmuted. Sarah is listening.".into()
+        };
+        cx.notify();
+    }
+
+    fn interrupt_voice(&mut self, cx: &mut Context<Self>) {
+        if self.voice_controls.is_none()
+            || !self.voice_state.is_active()
+            || self.voice_state == SarahVoiceState::Reconnecting
+        {
+            return;
+        }
+        self.send_voice_control(SarahVoiceControl::Interrupt);
+        self.voice_state = SarahVoiceState::Listening;
+        self.voice_status = "Sarah's spoken response was interrupted.".into();
+        cx.notify();
+    }
+
+    fn end_voice(&mut self, cx: &mut Context<Self>) {
+        if self.voice_controls.is_none() {
+            self.cleanup_voice();
+            cx.notify();
+            return;
+        }
+        self.voice_state = SarahVoiceState::Ending;
+        self.voice_status = self.voice_state.label().into();
+        self.send_voice_control(SarahVoiceControl::Close);
+        cx.notify();
+    }
+
+    fn retry_voice(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.cleanup_voice();
+        self.start_voice(window, cx);
+    }
+
+    fn cleanup_voice(&mut self) {
+        if let Some(controls) = self.voice_controls.take()
+            && controls.try_send(SarahVoiceControl::Close).is_err()
+        {
+            log::debug!("Sarah voice control channel was already closed during cleanup");
+        }
+        self.voice_task.take();
+        self.pending_voice_command = None;
+        self.voice_session_id = None;
+        self.voice_muted = false;
+        self.voice_retryable = false;
+        self.voice_state = SarahVoiceState::Idle;
+        self.voice_status = "Managed voice is ready to start.".into();
+    }
+
+    fn send_voice_control(&mut self, control: SarahVoiceControl) {
+        let Some(controls) = &self.voice_controls else {
+            return;
+        };
+        if controls.try_send(control).is_err() {
+            self.voice_state = SarahVoiceState::Reconnecting;
+            self.voice_retryable = true;
+            self.voice_status =
+                "The Sarah voice connection is no longer writable. Retry to reconnect.".into();
+        }
+    }
+
+    fn handle_voice_event(
+        &mut self,
+        event: SarahVoiceEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match event {
+            SarahVoiceEvent::State(state) => {
+                self.voice_state = state;
+                self.voice_status = state.label().into();
+            }
+            SarahVoiceEvent::Ready { session_id } => {
+                self.voice_session_id = Some(session_id);
+                self.voice_state = SarahVoiceState::Listening;
+                self.voice_status =
+                    "Connected through the managed OpenAgents Sarah voice service.".into();
+            }
+            SarahVoiceEvent::TranscriptDelta {
+                item_id,
+                participant,
+                delta,
+            } => {
+                self.append_voice_transcript_delta(item_id, participant, delta);
+            }
+            SarahVoiceEvent::TranscriptCompleted {
+                item_id,
+                participant,
+                text,
+            } => {
+                self.complete_voice_transcript(item_id, participant, text);
+            }
+            SarahVoiceEvent::CommandRequest(request) => {
+                if request.command.confirmation() == CommandConfirmation::None {
+                    let result = self.execute_voice_command(request, window, cx);
+                    self.send_voice_control(SarahVoiceControl::CommandResult(result));
+                } else if self.pending_voice_command.is_some() {
+                    self.send_voice_control(SarahVoiceControl::CommandResult(
+                        VoiceCommandResult::rejected(
+                            request.request_id,
+                            "Another Sarah command is already awaiting confirmation.",
+                        ),
+                    ));
+                } else {
+                    self.voice_status = request.command.confirmation_copy().into();
+                    self.pending_voice_command = Some(request);
+                }
+            }
+            SarahVoiceEvent::Error {
+                message,
+                retryable,
+                action,
+            } => {
+                self.voice_state = SarahVoiceState::Error;
+                self.voice_retryable = retryable;
+                self.voice_status = match action {
+                    Some(action) => format!("{message} {action}").into(),
+                    None => message.into(),
+                };
+            }
+            SarahVoiceEvent::Ended { reason } => {
+                self.voice_controls = None;
+                self.pending_voice_command = None;
+                self.voice_session_id = None;
+                if reason.as_deref() == Some("ended_by_user") {
+                    self.voice_state = SarahVoiceState::Idle;
+                    self.voice_retryable = false;
+                    self.voice_status = "Voice session ended.".into();
+                } else {
+                    self.voice_state = SarahVoiceState::Reconnecting;
+                    self.voice_retryable = true;
+                    self.voice_status = format!(
+                        "Sarah voice disconnected{}. Retry to reconnect.",
+                        reason
+                            .filter(|reason| !reason.is_empty())
+                            .map(|reason| format!(" ({reason})"))
+                            .unwrap_or_default()
+                    )
+                    .into();
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    fn append_voice_transcript_delta(
+        &mut self,
+        item_id: String,
+        participant: VoiceParticipant,
+        delta: String,
+    ) {
+        if let Some(item) = self
+            .voice_transcript
+            .iter_mut()
+            .find(|item| item.item_id == item_id)
+        {
+            item.text.push_str(&delta);
+            item.text = truncate_chars(std::mem::take(&mut item.text), MAX_VOICE_TRANSCRIPT_CHARS);
+            item.complete = false;
+            return;
+        }
+        self.voice_transcript.push(VoiceTranscriptItem {
+            item_id,
+            participant,
+            text: truncate_chars(delta, MAX_VOICE_TRANSCRIPT_CHARS),
+            complete: false,
+        });
+        if self.voice_transcript.len() > 100 {
+            self.voice_transcript.remove(0);
+        }
+    }
+
+    fn complete_voice_transcript(
+        &mut self,
+        item_id: String,
+        participant: VoiceParticipant,
+        text: String,
+    ) {
+        if let Some(item) = self
+            .voice_transcript
+            .iter_mut()
+            .find(|item| item.item_id == item_id)
+        {
+            item.participant = participant;
+            item.text = truncate_chars(text, MAX_VOICE_TRANSCRIPT_CHARS);
+            item.complete = true;
+            return;
+        }
+        self.voice_transcript.push(VoiceTranscriptItem {
+            item_id,
+            participant,
+            text: truncate_chars(text, MAX_VOICE_TRANSCRIPT_CHARS),
+            complete: true,
+        });
+        if self.voice_transcript.len() > 100 {
+            self.voice_transcript.remove(0);
+        }
+    }
+
+    fn approve_voice_command(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(request) = self.pending_voice_command.take() else {
+            return;
+        };
+        let result = self.execute_voice_command(request, window, cx);
+        self.send_voice_control(SarahVoiceControl::CommandResult(result));
+        cx.notify();
+    }
+
+    fn reject_voice_command(&mut self, cx: &mut Context<Self>) {
+        let Some(request) = self.pending_voice_command.take() else {
+            return;
+        };
+        self.send_voice_control(SarahVoiceControl::CommandResult(
+            VoiceCommandResult::rejected(request.request_id, "The user declined this command."),
+        ));
+        self.voice_status = "Sarah's editor command was declined.".into();
+        cx.notify();
+    }
+
+    fn execute_voice_command(
+        &mut self,
+        request: VoiceCommandRequest,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> VoiceCommandResult {
+        let request_id = request.request_id;
+        let result = self
+            .workspace
+            .upgrade()
+            .context("the workspace is no longer available")
+            .and_then(|workspace| {
+                let (editor, project_path) = {
+                    let workspace = workspace.read(cx);
+                    (
+                        workspace.active_item_as::<Editor>(cx),
+                        workspace
+                            .active_item(cx)
+                            .and_then(|item| item.project_path(cx)),
+                    )
+                };
+                let editor = editor.context("open an editor before asking Sarah to edit")?;
+                match request.command {
+                    SarahEditorCommand::ReadContext { max_chars } => {
+                        editor.update(cx, |editor, cx| {
+                            let display_snapshot = editor.display_snapshot(cx);
+                            let selection = editor.selections.newest::<Point>(&display_snapshot);
+                            let cursor = selection.head();
+                            let buffer_snapshot = editor.buffer().read(cx).snapshot(cx);
+                            let selected_text = buffer_snapshot
+                                .text_for_range(selection.range())
+                                .collect::<String>();
+                            let start = buffer_snapshot.clip_point(
+                                Point::new(cursor.row.saturating_sub(80), 0),
+                                Bias::Left,
+                            );
+                            let end = buffer_snapshot.clip_point(
+                                Point::new(cursor.row.saturating_add(80), u32::MAX),
+                                Bias::Right,
+                            );
+                            let max_chars = max_chars.unwrap_or(8 * 1024) as usize;
+                            let context = truncate_chars(
+                                buffer_snapshot
+                                    .text_for_range(start..end)
+                                    .collect::<String>(),
+                                max_chars,
+                            );
+                            Ok(json!({
+                                "file": project_path
+                                    .as_ref()
+                                    .map(|path| path.path.as_ref().as_unix_str()),
+                                "title": editor.title(cx),
+                                "cursor": { "line": cursor.row, "column": cursor.column },
+                                "selection": truncate_chars(selected_text, max_chars),
+                                "context": context,
+                            }))
+                        })
+                    }
+                    SarahEditorCommand::Navigate { line, column } => {
+                        editor.update(cx, |editor, cx| {
+                            let snapshot = editor.buffer().read(cx).snapshot(cx);
+                            let point = snapshot.clip_point(Point::new(line, column), Bias::Left);
+                            editor.change_selections(
+                                SelectionEffects::scroll(Autoscroll::center()),
+                                window,
+                                cx,
+                                |selections| selections.select_ranges([point..point]),
+                            );
+                        });
+                        Ok(json!({ "line": line, "column": column }))
+                    }
+                    SarahEditorCommand::Insert { text } => {
+                        let inserted_chars = text.chars().count();
+                        editor.update(cx, |editor, cx| {
+                            let display_snapshot = editor.display_snapshot(cx);
+                            let cursor =
+                                editor.selections.newest::<Point>(&display_snapshot).head();
+                            editor.change_selections(
+                                SelectionEffects::scroll(Autoscroll::fit()),
+                                window,
+                                cx,
+                                |selections| selections.select_ranges([cursor..cursor]),
+                            );
+                            editor.insert(&text, window, cx);
+                        });
+                        Ok(json!({ "insertedChars": inserted_chars }))
+                    }
+                    SarahEditorCommand::ReplaceSelection { text } => {
+                        let replacement_chars = text.chars().count();
+                        editor.update(cx, |editor, cx| editor.insert(&text, window, cx));
+                        Ok(json!({ "replacementChars": replacement_chars }))
+                    }
+                    SarahEditorCommand::Action { action } => {
+                        match action {
+                            ApprovedEditorAction::Undo => {
+                                editor.update(cx, |editor, cx| {
+                                    editor.undo(&editor_actions::Undo, window, cx)
+                                });
+                            }
+                            ApprovedEditorAction::Redo => {
+                                editor.update(cx, |editor, cx| {
+                                    editor.redo(&editor_actions::Redo, window, cx)
+                                });
+                            }
+                            ApprovedEditorAction::SaveActiveFile => {
+                                window.dispatch_action(Box::new(Save { save_intent: None }), cx);
+                            }
+                        }
+                        Ok(json!({ "action": action }))
+                    }
+                }
+            });
+
+        match result {
+            Ok(output) => {
+                self.voice_status = "Sarah's editor command completed.".into();
+                VoiceCommandResult::completed(request_id, Some(output))
+            }
+            Err(error) => {
+                self.voice_status = format!("Sarah's editor command failed: {error:#}").into();
+                VoiceCommandResult::failed(request_id, format!("{error:#}"))
+            }
+        }
+    }
+
+    fn open_audio_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        window.dispatch_action(
+            Box::new(OpenSettingsPage {
+                page: "Collaboration".into(),
+                target: None,
+            }),
+            cx,
+        );
+    }
+
     /// Test / inspection helper: current in-memory projection (not durable).
     pub fn projection(&self) -> &WorkroomProjection {
         &self.projection
@@ -1291,7 +1811,25 @@ fn string_field(value: Option<&Value>, keys: &[&str]) -> Option<String> {
     None
 }
 
+fn truncate_chars(text: String, max_chars: usize) -> String {
+    let Some((byte_offset, _)) = text.char_indices().nth(max_chars) else {
+        return text;
+    };
+    text[..byte_offset].to_string()
+}
+
 impl EventEmitter<PanelEvent> for SarahWorkroomPanel {}
+
+impl Drop for SarahWorkroomPanel {
+    fn drop(&mut self) {
+        if let Some(controls) = self.voice_controls.take()
+            && controls.try_send(SarahVoiceControl::Close).is_err()
+        {
+            log::debug!("Sarah voice control channel was already closed while dropping the panel");
+        }
+        self.voice_task.take();
+    }
+}
 
 impl Focusable for SarahWorkroomPanel {
     fn focus_handle(&self, _: &App) -> FocusHandle {
@@ -1418,6 +1956,150 @@ impl Render for SarahWorkroomPanel {
             self.grant_busy.as_deref(),
             cx,
         );
+        let voice_is_active = self.voice_state.is_active();
+        let voice_can_control_audio = self.voice_controls.is_some()
+            && voice_is_active
+            && self.voice_state != SarahVoiceState::Reconnecting;
+        let voice_can_end = self.voice_controls.is_some()
+            || voice_is_active
+            || self.voice_state == SarahVoiceState::Ending;
+        let voice_status = self.voice_status.clone();
+        let voice_state_label = self.voice_state.label();
+        let voice_session_id = self.voice_session_id.clone();
+        let pending_voice_command = self.pending_voice_command.clone();
+        let voice_section = v_flex()
+            .id("sarah-managed-voice")
+            .gap_2()
+            .border_1()
+            .border_color(cx.theme().colors().border)
+            .rounded_md()
+            .p_2()
+            .child(
+                h_flex()
+                    .justify_between()
+                    .child(Label::new("Live voice").size(LabelSize::Large))
+                    .child(
+                        Label::new(voice_state_label)
+                            .color(if self.voice_state == SarahVoiceState::Error {
+                                Color::Error
+                            } else if voice_is_active {
+                                Color::Accent
+                            } else {
+                                Color::Muted
+                            })
+                            .size(LabelSize::Small),
+                    ),
+            )
+            .child(Label::new(voice_status).color(Color::Muted))
+            .child(
+                Label::new("Managed by OpenAgents · OpenAI Realtime gpt-realtime-2.1 · no API key")
+                    .color(Color::Muted)
+                    .size(LabelSize::Small),
+            )
+            .when_some(voice_session_id, |this, session_id| {
+                this.child(
+                    Label::new(format!("session={session_id}"))
+                        .color(Color::Muted)
+                        .size(LabelSize::Small),
+                )
+            })
+            .child(
+                h_flex()
+                    .gap_1()
+                    .flex_wrap()
+                    .child(
+                        Button::new("sarah-voice-start", "Start voice")
+                            .style(ButtonStyle::Filled)
+                            .disabled(
+                                voice_is_active
+                                    || self.voice_state == SarahVoiceState::Authenticating
+                                    || self.voice_state == SarahVoiceState::Ending,
+                            )
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.start_voice(window, cx);
+                            })),
+                    )
+                    .child(
+                        Button::new(
+                            "sarah-voice-mute",
+                            if self.voice_muted { "Unmute" } else { "Mute" },
+                        )
+                        .style(ButtonStyle::Subtle)
+                        .disabled(!voice_can_control_audio)
+                        .on_click(cx.listener(|this, _, _, cx| this.toggle_voice_mute(cx))),
+                    )
+                    .child(
+                        Button::new("sarah-voice-interrupt", "Interrupt speech")
+                            .style(ButtonStyle::Subtle)
+                            .disabled(!voice_can_control_audio)
+                            .on_click(cx.listener(|this, _, _, cx| this.interrupt_voice(cx))),
+                    )
+                    .child(
+                        Button::new("sarah-voice-end", "End voice")
+                            .style(ButtonStyle::Subtle)
+                            .disabled(!voice_can_end)
+                            .on_click(cx.listener(|this, _, _, cx| this.end_voice(cx))),
+                    )
+                    .when(self.voice_retryable, |this| {
+                        this.child(
+                            Button::new("sarah-voice-retry", "Retry")
+                                .style(ButtonStyle::Filled)
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.retry_voice(window, cx);
+                                })),
+                        )
+                    })
+                    .child(
+                        Button::new("sarah-voice-audio-settings", "Audio settings")
+                            .style(ButtonStyle::Subtle)
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.open_audio_settings(window, cx);
+                            })),
+                    ),
+            )
+            .when_some(pending_voice_command, |this, request| {
+                this.child(
+                    v_flex()
+                        .id("sarah-voice-command-confirmation")
+                        .gap_1()
+                        .border_1()
+                        .border_color(cx.theme().colors().border)
+                        .rounded_md()
+                        .p_2()
+                        .child(Label::new("Sarah requests confirmation").color(Color::Warning))
+                        .child(Label::new(request.command.confirmation_copy()))
+                        .child(
+                            h_flex()
+                                .gap_1()
+                                .child(
+                                    Button::new("sarah-voice-command-approve", "Allow once")
+                                        .style(ButtonStyle::Filled)
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.approve_voice_command(window, cx);
+                                        })),
+                                )
+                                .child(
+                                    Button::new("sarah-voice-command-reject", "Decline")
+                                        .style(ButtonStyle::Subtle)
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.reject_voice_command(cx);
+                                        })),
+                                ),
+                        ),
+                )
+            })
+            .child(Label::new("Voice transcript").color(Color::Muted))
+            .child(
+                v_flex()
+                    .id("sarah-voice-transcript")
+                    .max_h(px(160.))
+                    .overflow_y_scroll()
+                    .border_1()
+                    .border_color(cx.theme().colors().border)
+                    .rounded_md()
+                    .p_2()
+                    .child(voice_transcript_body(&self.voice_transcript)),
+            );
 
         v_flex()
             .id("sarah-workroom-panel")
@@ -1527,6 +2209,7 @@ impl Render for SarahWorkroomPanel {
             // --- Owner-private Sarah room ---
             .when(!showing_community, |this| {
                 this.child(attention_body(&p.attention))
+                    .child(voice_section)
                     .child(section_header("Room", &p.room.meta))
                     .child(room_body(&p.room))
                     .child(section_header("Transcript", &p.transcript.meta))
@@ -2045,6 +2728,27 @@ fn transcript_body(transcript: &TranscriptProjection) -> impl IntoElement {
     col
 }
 
+fn voice_transcript_body(transcript: &[VoiceTranscriptItem]) -> impl IntoElement {
+    if transcript.is_empty() {
+        return v_flex().child(
+            Label::new("Start voice to see live speech transcripts here.")
+                .color(Color::Muted)
+                .size(LabelSize::Small),
+        );
+    }
+    let mut column = v_flex().gap_1();
+    for item in transcript {
+        let suffix = if item.complete { "" } else { " …" };
+        column = column.child(Label::new(format!(
+            "{}: {}{}",
+            item.participant.label(),
+            item.text,
+            suffix
+        )));
+    }
+    column
+}
+
 fn activity_body(activity: &ActivityProjection) -> impl IntoElement {
     if activity.rows.is_empty() {
         return v_flex().child(
@@ -2318,11 +3022,16 @@ mod panel_logic_tests {
     }
 
     #[test]
-    fn open_focus_send_interrupt_actions_are_registered_names() {
+    fn workroom_and_voice_actions_are_registered_names() {
         let _open = OpenPanel;
         let _focus = FocusComposer;
         let _send = SendMessage;
         let _interrupt = InterruptTurn;
+        let _start_voice = StartVoice;
+        let _toggle_voice_mute = ToggleVoiceMute;
+        let _interrupt_voice = InterruptVoice;
+        let _end_voice = EndVoice;
+        let _retry_voice = RetryVoice;
         assert_eq!(WorkroomProjection::header(), "Sarah");
         assert_eq!(PANEL_KEY, "SarahWorkroomPanel");
     }

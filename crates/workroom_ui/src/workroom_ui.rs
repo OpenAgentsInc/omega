@@ -3,8 +3,9 @@
 //!
 //! Dock panel + Agent menu entry + open / focus-composer / send / interrupt
 //! actions. Renders the five §7 projections with source, freshness, and gap
-//! labels. GPUI is projection-only: no durable thread, receipt, or turn store
-//! here. Framed requests go to supervised `omega-effectd` only.
+//! labels. GPUI owns no durable thread, receipt, or turn store. Durable room
+//! requests go to supervised `omega-effectd`; the owner-private room also has
+//! an isolated, ephemeral managed voice connection to OpenAgents.
 //!
 //! - **OMEGA-SW-04**: interaction states (pending send, tool ladder, answer
 //!   block, terminal reason, interrupt pending→applied). Transport is
@@ -24,6 +25,7 @@ mod full_auto;
 mod interaction;
 mod panel;
 mod projections;
+mod voice;
 
 pub const PUBLIC_DEMO_ENV: &str = "OMEGA_PUBLIC_DEMO";
 
@@ -58,6 +60,13 @@ pub use projections::{
     MAX_RECEIPT_ROWS, MAX_TRANSCRIPT_ROWS, MessageAck, PANE_HEADER, ProjectionMeta, ReceiptRow,
     ReceiptsProjection, RoomProjection, RunPhase, RunStateProjection, TranscriptProjection,
     TranscriptRow, WorkroomProjection, sources,
+};
+pub use voice::{
+    ApprovedEditorAction, CommandConfirmation, CommandResultStatus, ManagedSarahVoiceClient,
+    SARAH_AUDIO_SAMPLE_RATE, SARAH_VOICE_GATEWAY_PATH, SARAH_VOICE_MODEL,
+    SARAH_VOICE_PROTOCOL_VERSION, SarahEditorCommand, SarahVoiceConnection, SarahVoiceControl,
+    SarahVoiceEvent, SarahVoiceState, VoiceCommandRequest, VoiceCommandResult, VoiceParticipant,
+    VoiceTranscriptItem, voice_gateway_url,
 };
 
 #[cfg(test)]
