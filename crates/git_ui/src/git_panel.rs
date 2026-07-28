@@ -62,7 +62,7 @@ use notifications::status_toast::StatusToast;
 use panel::PanelHeader;
 use project::git_store::GitAccess;
 use project::{
-    Fs, Project, ProjectPath,
+    Fs, Project, ProjectPath, WorktreeId,
     git_store::{
         CommitDataState, GitStoreEvent, Repository, RepositoryEvent, RepositoryId, pending_op,
     },
@@ -202,6 +202,7 @@ fn git_panel_context_menu(
     has_unstaged_changes: bool,
     has_new_changes: bool,
     has_stash_items: bool,
+    repository_scoped: bool,
     focus_handle: FocusHandle,
     window: &mut Window,
     cx: &mut App,
@@ -223,7 +224,11 @@ fn git_panel_context_menu(
                 StashAll.boxed_clone(),
             )
             .action_disabled_when(!has_stash_items, "Stash Pop", StashPop.boxed_clone())
-            .action("View Stash", zed_actions::git::ViewStash.boxed_clone())
+            .action_disabled_when(
+                repository_scoped,
+                "View Stash",
+                zed_actions::git::ViewStash.boxed_clone(),
+            )
             .separator()
             .action_disabled_when(
                 !has_tracked_changes,
@@ -367,11 +372,18 @@ fn git_panel_view_options_menu(
 
 // We only allow a single remote operation at a time to avoid concurrent
 // credential prompts and competing ref/working-tree updates.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum RemoteOperationKind {
     Fetch,
     Pull,
     Push,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PendingRemoteOperation {
+    kind: RemoteOperationKind,
+    transition_generation: u64,
+    repository_id: RepositoryId,
 }
 
 pub fn register(workspace: &mut Workspace) {
@@ -468,6 +480,18 @@ enum Section {
     New,
     Staged,
     Unstaged,
+}
+
+impl From<Section> for GitPanelStatusSection {
+    fn from(section: Section) -> Self {
+        match section {
+            Section::Conflict => Self::Conflict,
+            Section::Tracked => Self::Tracked,
+            Section::New => Self::New,
+            Section::Staged => Self::Staged,
+            Section::Unstaged => Self::Unstaged,
+        }
+    }
 }
 
 #[derive(Debug, PartialEq, Eq, Clone)]
@@ -907,6 +931,11 @@ struct GitPanelContextMenu {
 
 pub struct GitPanel {
     pub(crate) active_repository: Option<Entity<Repository>>,
+    repository_scope: Option<GitPanelRepositoryScope>,
+    repository_scope_available: bool,
+    repository_transition_generation: u64,
+    repository_view_states: HashMap<RepositoryId, GitPanelRepositoryViewState>,
+    pending_selection_restore: Option<(RepoPath, Option<Section>)>,
     pub(crate) commit_editor: Entity<Editor>,
     /// Whether the commit editor should fill the vertical height of the panel.
     commit_editor_expanded: bool,
@@ -914,6 +943,7 @@ pub struct GitPanel {
     conflicted_staged_count: usize,
     add_coauthors: bool,
     generate_commit_message_task: Option<Task<Option<()>>>,
+    generate_commit_message_generation: Option<u64>,
     entries: Vec<GitListEntry>,
     view_mode: GitPanelViewMode,
     tree_expanded_dirs: HashMap<TreeKey, bool>,
@@ -928,7 +958,8 @@ pub struct GitPanel {
     diff_stat_total: DiffStat,
     new_staged_count: usize,
     pending_commit: Option<Task<()>>,
-    pending_remote_operation: Option<RemoteOperationKind>,
+    pending_commit_generation: Option<u64>,
+    pending_remote_operation: Option<PendingRemoteOperation>,
     amend_pending: bool,
     original_commit_message: Option<String>,
     pending_commit_message_restores: BTreeMap<String, SerializedCommitMessage>,
@@ -969,10 +1000,115 @@ pub struct GitPanel {
     remote_action_menu_handle: PopoverMenuHandle<ContextMenu>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GitPanelRepositoryScope {
+    pub repository_id: RepositoryId,
+    pub worktree_id: WorktreeId,
+    pub generation: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum GitPanelHeadState {
+    Branch(SharedString),
+    Detached,
+    Unborn { branch: Option<SharedString> },
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct GitPanelTrackingSnapshot {
+    pub ahead: u32,
+    pub behind: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GitPanelStatusSection {
+    Conflict,
+    Tracked,
+    New,
+    Staged,
+    Unstaged,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GitPanelStatusEntrySnapshot {
+    pub list_index: usize,
+    pub repo_path: RepoPath,
+    pub status: FileStatus,
+    pub staging: StageStatus,
+    pub conflicted: bool,
+    pub section: Option<GitPanelStatusSection>,
+    pub diff_stat: Option<DiffStat>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct GitPanelCountsSnapshot {
+    pub entries: usize,
+    pub changes: usize,
+    pub tracked: usize,
+    pub tracked_staged: usize,
+    pub new: usize,
+    pub new_staged: usize,
+    pub conflicted: usize,
+    pub conflicted_staged: usize,
+    pub added_lines: u32,
+    pub deleted_lines: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GitPanelSelectionSnapshot {
+    pub list_index: usize,
+    pub repo_path: Option<RepoPath>,
+    pub section: Option<GitPanelStatusSection>,
+    pub is_directory: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GitPanelRemoteOperationSnapshot {
+    Fetch,
+    Pull,
+    Push,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct GitPanelPendingOperationSnapshot {
+    pub commit: bool,
+    pub generating_commit_message: bool,
+    pub remote: Option<GitPanelRemoteOperationSnapshot>,
+    pub staging_paths: Vec<RepoPath>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GitPanelCommitButtonSnapshot {
+    pub enabled: bool,
+    pub title: &'static str,
+    pub tooltip: &'static str,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GitPanelStateSnapshot {
+    pub repository_scope: Option<GitPanelRepositoryScope>,
+    pub repository_scope_available: bool,
+    pub repository_id: Option<RepositoryId>,
+    pub repository_label: Option<SharedString>,
+    pub head: Option<GitPanelHeadState>,
+    pub tracking: Option<GitPanelTrackingSnapshot>,
+    pub status_entries: Vec<GitPanelStatusEntrySnapshot>,
+    pub counts: GitPanelCountsSnapshot,
+    pub selection: Option<GitPanelSelectionSnapshot>,
+    pub pending_operation: GitPanelPendingOperationSnapshot,
+    pub commit_button: GitPanelCommitButtonSnapshot,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct BulkStaging {
     repo_id: RepositoryId,
     anchor: RepoPath,
+}
+
+#[derive(Clone)]
+struct GitPanelRepositoryViewState {
+    selection: Option<(RepoPath, Option<Section>)>,
+    scroll_handle: UniformListScrollHandle,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1180,21 +1316,59 @@ impl GitPanel {
                 window,
                 move |this, _git_store, event, window, cx| match event {
                     GitStoreEvent::RepositoryUpdated(
-                        _,
+                        repository_id,
                         RepositoryEvent::StatusesChanged | RepositoryEvent::HeadChanged,
-                        true,
-                    )
-                    | GitStoreEvent::RepositoryAdded
-                    | GitStoreEvent::RepositoryRemoved(_)
-                    | GitStoreEvent::ActiveRepositoryChanged(_) => {
+                        is_active,
+                    ) => {
+                        if this
+                            .repository_scope
+                            .map_or(*is_active, |scope| scope.repository_id == *repository_id)
+                        {
+                            this.schedule_update(window, cx);
+                        }
+                    }
+                    GitStoreEvent::RepositoryAdded => {
                         this.schedule_update(window, cx);
                     }
+                    GitStoreEvent::RepositoryRemoved(repository_id) => {
+                        let active_repository_id = this
+                            .active_repository
+                            .as_ref()
+                            .map(|repository| repository.read(cx).id);
+                        if this
+                            .repository_scope
+                            .is_some_and(|scope| scope.repository_id == *repository_id)
+                            || (this.repository_scope.is_none()
+                                && active_repository_id == Some(*repository_id))
+                        {
+                            if this
+                                .repository_scope
+                                .is_some_and(|scope| scope.repository_id == *repository_id)
+                            {
+                                this.repository_scope_available = false;
+                            }
+                            this.schedule_update(window, cx);
+                        }
+                    }
+                    GitStoreEvent::ActiveRepositoryChanged(_) => {
+                        if this.repository_scope.is_none() {
+                            this.schedule_update(window, cx);
+                        }
+                    }
                     GitStoreEvent::RepositoryUpdated(
-                        _,
+                        repository_id,
                         RepositoryEvent::GitDirectoryChanged,
-                        true,
-                    )
-                    | GitStoreEvent::GlobalConfigurationUpdated => {
+                        is_active,
+                    ) => {
+                        if this
+                            .repository_scope
+                            .map_or(*is_active, |scope| scope.repository_id == *repository_id)
+                        {
+                            this.git_access = None;
+                            this.schedule_update(window, cx);
+                        }
+                    }
+                    GitStoreEvent::GlobalConfigurationUpdated => {
                         this.git_access = None;
                         this.schedule_update(window, cx);
                     }
@@ -1211,14 +1385,34 @@ impl GitPanel {
             )
             .detach();
 
+            cx.subscribe_in(&project, window, |this, _project, event, window, cx| {
+                if matches!(
+                    (event, this.repository_scope),
+                    (project::Event::WorktreeRemoved(removed), Some(scope))
+                        if *removed == scope.worktree_id
+                ) {
+                    this.repository_scope_available = false;
+                    cx.defer_in(window, |this, window, cx| {
+                        this.schedule_update(window, cx);
+                    });
+                }
+            })
+            .detach();
+
             let mut this = Self {
                 active_repository,
+                repository_scope: None,
+                repository_scope_available: true,
+                repository_transition_generation: 0,
+                repository_view_states: HashMap::default(),
+                pending_selection_restore: None,
                 commit_editor,
                 commit_editor_expanded: false,
                 conflicted_count: 0,
                 conflicted_staged_count: 0,
                 add_coauthors: true,
                 generate_commit_message_task: None,
+                generate_commit_message_generation: None,
                 entries: Vec::new(),
                 view_mode: GitPanelViewMode::from_settings(cx),
                 tree_expanded_dirs: HashMap::default(),
@@ -1230,6 +1424,7 @@ impl GitPanel {
                 changes_count: 0,
                 diff_stat_total: DiffStat::default(),
                 pending_commit: None,
+                pending_commit_generation: None,
                 pending_remote_operation: None,
                 amend_pending,
                 original_commit_message,
@@ -1901,6 +2096,39 @@ impl GitPanel {
             let target =
                 Self::diff_target_for_section(self.section_for_entry_index(selected_index));
 
+            if self.repository_scope.is_some() {
+                self.workspace
+                    .update(cx, |workspace, cx| {
+                        match target {
+                            DiffTarget::Uncommitted => ProjectDiff::deploy_at_repository(
+                                workspace,
+                                git_repo.clone(),
+                                Some(entry.clone()),
+                                window,
+                                cx,
+                            ),
+                            DiffTarget::Staged => StagedDiff::deploy_at_repository(
+                                workspace,
+                                git_repo.clone(),
+                                Some(entry.clone()),
+                                window,
+                                cx,
+                            ),
+                            DiffTarget::Unstaged => UnstagedDiff::deploy_at_repository(
+                                workspace,
+                                git_repo.clone(),
+                                Some(entry.clone()),
+                                window,
+                                cx,
+                            ),
+                        }
+                        workspace.reveal_zero_base_center(window, cx);
+                    })
+                    .log_err()?;
+                self.focus_handle.focus(window, cx);
+                return None;
+            }
+
             if target == DiffTarget::Uncommitted
                 && let Some(project_diff) = workspace.read(cx).active_item_as::<ProjectDiff>(cx)
                 && let Some(project_path) = project_diff.read(cx).active_project_path(cx)
@@ -1916,18 +2144,21 @@ impl GitPanel {
             };
 
             self.workspace
-                .update(cx, |workspace, cx| match target {
-                    DiffTarget::Uncommitted => {
-                        ProjectDiff::deploy_at(workspace, Some(entry.clone()), window, cx);
+                .update(cx, |workspace, cx| {
+                    match target {
+                        DiffTarget::Uncommitted => {
+                            ProjectDiff::deploy_at(workspace, Some(entry.clone()), window, cx);
+                        }
+                        DiffTarget::Staged => {
+                            StagedDiff::deploy_at(workspace, Some(entry.clone()), window, cx);
+                        }
+                        DiffTarget::Unstaged => {
+                            UnstagedDiff::deploy_at(workspace, Some(entry.clone()), window, cx);
+                        }
                     }
-                    DiffTarget::Staged => {
-                        StagedDiff::deploy_at(workspace, Some(entry.clone()), window, cx);
-                    }
-                    DiffTarget::Unstaged => {
-                        UnstagedDiff::deploy_at(workspace, Some(entry.clone()), window, cx);
-                    }
+                    workspace.reveal_zero_base_center(window, cx);
                 })
-                .ok();
+                .log_err();
             self.focus_handle.focus(window, cx);
 
             Some(())
@@ -1948,6 +2179,11 @@ impl GitPanel {
                 .clone();
             let repository = self.active_repository.clone()?;
 
+            self.workspace
+                .update(cx, |workspace, cx| {
+                    workspace.reveal_zero_base_center(window, cx);
+                })
+                .log_err()?;
             SoloDiffView::open_or_focus(entry, repository, self.workspace.clone(), window, cx)
                 .detach_and_notify_err(self.workspace.clone(), window, cx);
 
@@ -1966,11 +2202,12 @@ impl GitPanel {
 
             self.workspace
                 .update(cx, |workspace, cx| {
+                    workspace.reveal_zero_base_center(window, cx);
                     workspace
                         .open_path_preview(project_path, None, false, false, true, window, cx)
                         .detach_and_log_err(cx);
                 })
-                .ok()?;
+                .log_err()?;
 
             Some(())
         });
@@ -2847,12 +3084,27 @@ impl GitPanel {
         let Some(head_commit) = self.head_commit(cx) else {
             return;
         };
+        let Some(repository_id) = self
+            .active_repository
+            .as_ref()
+            .map(|repository| repository.read(cx).id)
+        else {
+            return;
+        };
+        let repository_transition_generation = self.repository_transition_generation;
 
         let recent_sha = head_commit.sha.to_string();
         let detail_task = self.load_commit_details(recent_sha, cx);
         cx.spawn(async move |this, cx| {
             if let Ok(message) = detail_task.await.map(|detail| detail.message) {
                 this.update(cx, |this, cx| {
+                    if !this.repository_transition_is_current(
+                        repository_transition_generation,
+                        repository_id,
+                        cx,
+                    ) {
+                        return;
+                    }
                     this.commit_message_buffer(cx).update(cx, |buffer, cx| {
                         let start = buffer.anchor_before(0);
                         let end = buffer.anchor_after(buffer.len());
@@ -2936,6 +3188,8 @@ impl GitPanel {
         let Some(active_repository) = self.active_repository.clone() else {
             return;
         };
+        let repository_id = active_repository.read(cx).id;
+        let repository_transition_generation = self.repository_transition_generation;
         let error_spawn = |message, window: &mut Window, cx: &mut App| {
             let prompt = window.prompt(PromptLevel::Warning, message, None, &["OK"], cx);
             cx.spawn(async move |_| {
@@ -2999,7 +3253,16 @@ impl GitPanel {
         let task = cx.spawn_in(window, async move |this, cx| {
             let result = task.await;
             this.update_in(cx, |this, window, cx| {
+                if !this.repository_transition_is_current(
+                    repository_transition_generation,
+                    repository_id,
+                    cx,
+                ) || this.pending_commit_generation != Some(repository_transition_generation)
+                {
+                    return;
+                }
                 this.pending_commit.take();
+                this.pending_commit_generation = None;
 
                 match result {
                     Ok(()) => {
@@ -3020,12 +3283,15 @@ impl GitPanel {
         });
 
         self.pending_commit = Some(task);
+        self.pending_commit_generation = Some(repository_transition_generation);
     }
 
     pub(crate) fn uncommit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(repo) = self.active_repository.clone() else {
             return;
         };
+        let repository_id = repo.read(cx).id;
+        let repository_transition_generation = self.repository_transition_generation;
         telemetry::event!("Git Uncommitted");
 
         let confirmation = self.check_for_pushed_commits(window, cx);
@@ -3049,7 +3315,16 @@ impl GitPanel {
             .await;
 
             this.update_in(cx, |this, window, cx| {
+                if !this.repository_transition_is_current(
+                    repository_transition_generation,
+                    repository_id,
+                    cx,
+                ) || this.pending_commit_generation != Some(repository_transition_generation)
+                {
+                    return;
+                }
                 this.pending_commit.take();
+                this.pending_commit_generation = None;
                 match result {
                     Ok(None) => {}
                     Ok(Some(prior_commit)) => {
@@ -3064,6 +3339,7 @@ impl GitPanel {
         });
 
         self.pending_commit = Some(task);
+        self.pending_commit_generation = Some(repository_transition_generation);
     }
 
     fn check_for_pushed_commits(
@@ -3348,6 +3624,8 @@ impl GitPanel {
         let Some(repo) = self.active_repository.as_ref() else {
             return;
         };
+        let repository_id = repo.read(cx).id;
+        let repository_transition_generation = self.repository_transition_generation;
 
         telemetry::event!("Git Commit Message Generated");
 
@@ -3370,10 +3648,16 @@ impl GitPanel {
         let project = self.project.clone();
         let repo_work_dir = repo.read(cx).work_directory_abs_path.clone();
 
+        self.generate_commit_message_generation = Some(repository_transition_generation);
         self.generate_commit_message_task = Some(cx.spawn(async move |this, mut cx| {
             async move {
-                let _defer = cx.on_drop(&this, |this, _cx| {
-                    this.generate_commit_message_task.take();
+                let _defer = cx.on_drop(&this, move |this, _cx| {
+                    if this.generate_commit_message_generation
+                        == Some(repository_transition_generation)
+                    {
+                        this.generate_commit_message_task.take();
+                        this.generate_commit_message_generation = None;
+                    }
                 });
 
                 if let Some(task) = cx.update(|cx| {
@@ -3420,14 +3704,24 @@ impl GitPanel {
                 let prompt = include_str!("../src/commit_message_prompt.txt");
 
                 let subject = this.update(cx, |this, cx| {
-                    this.commit_editor
-                        .read(cx)
-                        .text(cx)
-                        .lines()
-                        .next()
-                        .map(ToOwned::to_owned)
-                        .unwrap_or_default()
+                    this.repository_transition_is_current(
+                        repository_transition_generation,
+                        repository_id,
+                        cx,
+                    )
+                    .then(|| {
+                        this.commit_editor
+                            .read(cx)
+                            .text(cx)
+                            .lines()
+                            .next()
+                            .map(ToOwned::to_owned)
+                            .unwrap_or_default()
+                    })
                 })?;
+                let Some(subject) = subject else {
+                    return anyhow::Ok(());
+                };
 
                 let text_empty = subject.trim().is_empty();
 
@@ -3464,7 +3758,14 @@ impl GitPanel {
                 match stream.await {
                     Ok(mut messages) => {
                         if !text_empty {
-                            this.update(cx, |this, cx| {
+                            let is_current = this.update(cx, |this, cx| {
+                                if !this.repository_transition_is_current(
+                                    repository_transition_generation,
+                                    repository_id,
+                                    cx,
+                                ) {
+                                    return false;
+                                }
                                 this.commit_message_buffer(cx).update(cx, |buffer, cx| {
                                     let insert_position = buffer.anchor_before(buffer.len());
                                     buffer.edit(
@@ -3473,13 +3774,24 @@ impl GitPanel {
                                         cx,
                                     )
                                 });
+                                true
                             })?;
+                            if !is_current {
+                                return anyhow::Ok(());
+                            }
                         }
 
                         while let Some(message) = messages.stream.next().await {
                             match message {
                                 Ok(text) => {
-                                    this.update(cx, |this, cx| {
+                                    let is_current = this.update(cx, |this, cx| {
+                                        if !this.repository_transition_is_current(
+                                            repository_transition_generation,
+                                            repository_id,
+                                            cx,
+                                        ) {
+                                            return false;
+                                        }
                                         this.commit_message_buffer(cx).update(cx, |buffer, cx| {
                                             let insert_position =
                                                 buffer.anchor_before(buffer.len());
@@ -3489,7 +3801,11 @@ impl GitPanel {
                                                 cx,
                                             );
                                         });
+                                        true
                                     })?;
+                                    if !is_current {
+                                        return anyhow::Ok(());
+                                    }
                                 }
                                 Err(e) => {
                                     Self::show_commit_message_error(&this, &e, cx);
@@ -3559,9 +3875,11 @@ impl GitPanel {
         let Some(repo) = self.active_repository.clone() else {
             return;
         };
-        if !self.start_remote_operation(RemoteOperationKind::Fetch, cx) {
+        let Some(pending_remote_operation) =
+            self.start_remote_operation(RemoteOperationKind::Fetch, cx)
+        else {
             return;
-        }
+        };
 
         telemetry::event!("Git Fetched");
         let askpass = self.askpass_delegate("git fetch", window, cx);
@@ -3575,19 +3893,27 @@ impl GitPanel {
 
         window
             .spawn(cx, async move |cx| {
-                let _clear_pending_remote_operation = cx.on_drop(&this, |this, cx| {
-                    this.clear_remote_operation(cx);
+                let _clear_pending_remote_operation = cx.on_drop(&this, move |this, cx| {
+                    this.clear_remote_operation(pending_remote_operation, cx);
                 });
 
                 let Some(fetch_options) = fetch_options.await else {
                     return Ok(());
                 };
+                if !this.update(cx, |this, cx| {
+                    this.remote_operation_is_current(pending_remote_operation, cx)
+                })? {
+                    return Ok(());
+                }
                 let fetch = repo.update(cx, |repo, cx| {
                     repo.fetch(fetch_options.clone(), askpass, cx)
                 });
 
                 let remote_message = fetch.await?;
                 this.update(cx, |this, cx| {
+                    if !this.remote_operation_is_current(pending_remote_operation, cx) {
+                        return anyhow::Ok(());
+                    }
                     let action = match fetch_options {
                         FetchOptions::All => RemoteAction::Fetch(None),
                         FetchOptions::Remote(remote) => RemoteAction::Fetch(Some(remote)),
@@ -3601,8 +3927,7 @@ impl GitPanel {
                     }
 
                     anyhow::Ok(())
-                })
-                .ok();
+                })??;
                 anyhow::Ok(())
             })
             .detach_and_log_err(cx);
@@ -3712,15 +4037,17 @@ impl GitPanel {
         let Some(branch) = repo.read(cx).branch.clone() else {
             return;
         };
-        if !self.start_remote_operation(RemoteOperationKind::Pull, cx) {
+        let Some(pending_remote_operation) =
+            self.start_remote_operation(RemoteOperationKind::Pull, cx)
+        else {
             return;
-        }
+        };
 
         telemetry::event!("Git Pulled");
         let remote = self.get_remote(false, false, window, cx);
         cx.spawn_in(window, async move |this, cx| {
-            let _clear_pending_remote_operation = cx.on_drop(&this, |this, cx| {
-                this.clear_remote_operation(cx);
+            let _clear_pending_remote_operation = cx.on_drop(&this, move |this, cx| {
+                this.clear_remote_operation(pending_remote_operation, cx);
             });
 
             let remote = match remote.await {
@@ -3730,12 +4057,21 @@ impl GitPanel {
                 }
                 Err(e) => {
                     log::error!("Failed to get current remote: {}", e);
-                    this.update(cx, |this, cx| this.show_error_toast("pull", e, cx))
-                        .ok();
+                    this.update(cx, |this, cx| {
+                        if this.remote_operation_is_current(pending_remote_operation, cx) {
+                            this.show_error_toast("pull", e, cx);
+                        }
+                    })
+                    .log_err();
                     return Ok(());
                 }
             };
 
+            if !this.update(cx, |this, cx| {
+                this.remote_operation_is_current(pending_remote_operation, cx)
+            })? {
+                return Ok(());
+            }
             let askpass = this.update_in(cx, |this, window, cx| {
                 this.askpass_delegate(format!("git pull {}", remote.name), window, cx)
             })?;
@@ -3752,14 +4088,19 @@ impl GitPanel {
             let remote_message = pull.await?;
 
             let action = RemoteAction::Pull(remote);
-            this.update(cx, |this, cx| match remote_message {
-                Ok(remote_message) => this.show_remote_output(action, remote_message, cx),
-                Err(e) => {
-                    log::error!("Error while pulling {:?}", e);
-                    this.show_error_toast(action.name(), e, cx)
+            this.update(cx, |this, cx| {
+                if !this.remote_operation_is_current(pending_remote_operation, cx) {
+                    return;
+                }
+                match remote_message {
+                    Ok(remote_message) => this.show_remote_output(action, remote_message, cx),
+                    Err(e) => {
+                        log::error!("Error while pulling {:?}", e);
+                        this.show_error_toast(action.name(), e, cx)
+                    }
                 }
             })
-            .ok();
+            .log_err();
 
             anyhow::Ok(())
         })
@@ -3782,9 +4123,11 @@ impl GitPanel {
         let Some(branch) = repo.read(cx).branch.clone() else {
             return;
         };
-        if !self.start_remote_operation(RemoteOperationKind::Push, cx) {
+        let Some(pending_remote_operation) =
+            self.start_remote_operation(RemoteOperationKind::Push, cx)
+        else {
             return;
-        }
+        };
 
         telemetry::event!("Git Pushed");
 
@@ -3803,31 +4146,42 @@ impl GitPanel {
         let remote = self.get_remote(select_remote, true, window, cx);
 
         cx.spawn_in(window, async move |this, cx| {
-            let _clear_pending_remote_operation = cx.on_drop(&this, |this, cx| {
-                this.clear_remote_operation(cx);
+            let _clear_pending_remote_operation = cx.on_drop(&this, move |this, cx| {
+                this.clear_remote_operation(pending_remote_operation, cx);
             });
 
             let remote = match remote.await {
                 Ok(Some(remote)) => remote,
                 Ok(None) => {
                     this.update(cx, |this, cx| {
-                        this.show_error_toast(
-                            "push",
-                            anyhow::anyhow!("No remote available to push to. Add a remote to be able to publish changes."),
-                            cx,
-                        )
+                        if this.remote_operation_is_current(pending_remote_operation, cx) {
+                            this.show_error_toast(
+                                "push",
+                                anyhow::anyhow!("No remote available to push to. Add a remote to be able to publish changes."),
+                                cx,
+                            );
+                        }
                     })
-                    .ok();
+                    .log_err();
                     return Ok(());
                 }
                 Err(e) => {
                     log::error!("Failed to get current remote: {}", e);
-                    this.update(cx, |this, cx| this.show_error_toast("push", e, cx))
-                        .ok();
+                    this.update(cx, |this, cx| {
+                        if this.remote_operation_is_current(pending_remote_operation, cx) {
+                            this.show_error_toast("push", e, cx);
+                        }
+                    })
+                    .log_err();
                     return Ok(());
                 }
             };
 
+            if !this.update(cx, |this, cx| {
+                this.remote_operation_is_current(pending_remote_operation, cx)
+            })? {
+                return Ok(());
+            }
             let askpass_delegate = this.update_in(cx, |this, window, cx| {
                 this.askpass_delegate(format!("git push {}", remote.name), window, cx)
             })?;
@@ -3853,11 +4207,16 @@ impl GitPanel {
             let remote_output = push.await?;
 
             let action = RemoteAction::Push(branch.name().to_owned().into(), remote);
-            this.update(cx, |this, cx| match remote_output {
-                Ok(remote_message) => this.show_remote_output(action, remote_message, cx),
-                Err(e) => {
-                    log::error!("Error while pushing {:?}", e);
-                    this.show_error_toast(action.name(), e, cx)
+            this.update(cx, |this, cx| {
+                if !this.remote_operation_is_current(pending_remote_operation, cx) {
+                    return;
+                }
+                match remote_output {
+                    Ok(remote_message) => this.show_remote_output(action, remote_message, cx),
+                    Err(e) => {
+                        log::error!("Error while pushing {:?}", e);
+                        this.show_error_toast(action.name(), e, cx)
+                    }
                 }
             })?;
 
@@ -3987,19 +4346,40 @@ impl GitPanel {
         &mut self,
         kind: RemoteOperationKind,
         cx: &mut Context<Self>,
-    ) -> bool {
+    ) -> Option<PendingRemoteOperation> {
         if self.pending_remote_operation.is_some() {
-            return false;
+            return None;
         }
 
-        self.pending_remote_operation = Some(kind);
+        let repository_id = self.active_repository.as_ref()?.read(cx).id;
+        let operation = PendingRemoteOperation {
+            kind,
+            transition_generation: self.repository_transition_generation,
+            repository_id,
+        };
+        self.pending_remote_operation = Some(operation);
         cx.notify();
-        true
+        Some(operation)
     }
 
-    fn clear_remote_operation(&mut self, cx: &mut Context<Self>) {
-        self.pending_remote_operation.take();
-        cx.notify();
+    fn clear_remote_operation(
+        &mut self,
+        operation: PendingRemoteOperation,
+        cx: &mut Context<Self>,
+    ) {
+        if self.pending_remote_operation == Some(operation) {
+            self.pending_remote_operation = None;
+            cx.notify();
+        }
+    }
+
+    fn remote_operation_is_current(&self, operation: PendingRemoteOperation, cx: &App) -> bool {
+        self.pending_remote_operation == Some(operation)
+            && self.repository_transition_is_current(
+                operation.transition_generation,
+                operation.repository_id,
+                cx,
+            )
     }
 
     fn get_remote(
@@ -4361,10 +4741,28 @@ impl GitPanel {
 
     fn schedule_update(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let handle = cx.entity().downgrade();
-        let new_active_repository = self.project.read(cx).active_repository(cx);
+        let new_active_repository = self.resolve_repository(cx);
         let active_repository_changed = self.active_repository.as_ref().map(Entity::entity_id)
             != new_active_repository.as_ref().map(Entity::entity_id);
         if active_repository_changed {
+            self.advance_repository_transition();
+            if let Some(repository_id) = self
+                .active_repository
+                .as_ref()
+                .map(|repository| repository.read(cx).id)
+            {
+                let selection = self.selected_entry.and_then(|index| {
+                    let entry = self.entries.get(index)?.status_entry()?;
+                    Some((entry.repo_path.clone(), self.section_for_entry_index(index)))
+                });
+                self.repository_view_states.insert(
+                    repository_id,
+                    GitPanelRepositoryViewState {
+                        selection,
+                        scroll_handle: self.scroll_handle.clone(),
+                    },
+                );
+            }
             self.set_skip_hooks_enabled(false, cx);
             if self.amend_pending {
                 // Leaving a repository with a pending amend: undo it so the amend
@@ -4376,26 +4774,305 @@ impl GitPanel {
             }
             self.git_access = None;
             self._repo_subscriptions.clear();
+            self.clear_repository_projection();
             if self.active_tab == GitPanelTab::History {
                 self.set_commit_history(CommitHistory::Loading, cx);
             }
+            if let Some(repository_id) = new_active_repository
+                .as_ref()
+                .map(|repository| repository.read(cx).id)
+            {
+                if let Some(view_state) = self.repository_view_states.get(&repository_id) {
+                    self.pending_selection_restore = view_state.selection.clone();
+                    self.scroll_handle = view_state.scroll_handle.clone();
+                } else {
+                    self.pending_selection_restore = None;
+                    self.scroll_handle = UniformListScrollHandle::new();
+                }
+            } else {
+                self.pending_selection_restore = None;
+                self.scroll_handle = UniformListScrollHandle::new();
+            }
+            self.selected_entry = None;
         }
         self.active_repository = new_active_repository;
+        if active_repository_changed {
+            cx.notify();
+        }
         self.reopen_commit_buffer(window, cx);
         self.preload_commit_history(cx);
         if self.active_tab == GitPanelTab::History {
             self.load_commit_history(cx);
         }
+        let repository_transition_generation = self.repository_transition_generation;
         self.update_visible_entries_task = cx.spawn_in(window, async move |_, cx| {
             cx.background_executor().timer(UPDATE_DEBOUNCE).await;
             if let Some(git_panel) = handle.upgrade() {
                 git_panel
                     .update_in(cx, |git_panel, window, cx| {
-                        git_panel.update_visible_entries(window, cx);
+                        if git_panel.repository_transition_generation
+                            == repository_transition_generation
+                        {
+                            git_panel.update_visible_entries(window, cx);
+                        }
                     })
-                    .ok();
+                    .log_err();
             }
         });
+    }
+
+    fn clear_repository_projection(&mut self) {
+        self.entries.clear();
+        self.projected_entries_by_path.clear();
+        self.single_staged_entry = None;
+        self.single_tracked_entry = None;
+        self.conflicted_count = 0;
+        self.conflicted_staged_count = 0;
+        self.new_count = 0;
+        self.new_staged_count = 0;
+        self.tracked_count = 0;
+        self.tracked_staged_count = 0;
+        self.entry_count = 0;
+        self.changes_count = 0;
+        self.diff_stat_total = DiffStat::default();
+        self.selected_entry = None;
+        self.marked_entries.clear();
+        self.max_width_item_index = None;
+        self.bulk_staging = None;
+        self.stash_entries = GitStash::default();
+        self.show_placeholders = false;
+        self.commit_template = None;
+        if let Some(tree_state) = self.view_mode.tree_state_mut() {
+            tree_state.logical_indices.clear();
+            tree_state.directory_descendants.clear();
+        }
+    }
+
+    fn advance_repository_transition(&mut self) {
+        self.repository_transition_generation =
+            self.repository_transition_generation.wrapping_add(1);
+        if let Some(pending_commit) = self.pending_commit.take() {
+            pending_commit.detach();
+        }
+        self.pending_commit_generation = None;
+        self.generate_commit_message_task.take();
+        self.generate_commit_message_generation = None;
+        self.pending_remote_operation = None;
+    }
+
+    fn resolve_repository(&self, cx: &App) -> Option<Entity<Repository>> {
+        let project = self.project.read(cx);
+        let Some(scope) = self.repository_scope else {
+            return project.active_repository(cx);
+        };
+        if !self.repository_scope_available {
+            return None;
+        }
+        let git_store = project.git_store().read(cx);
+        if !git_store
+            .repository_ids_for_worktree(scope.worktree_id)
+            .contains(&scope.repository_id)
+        {
+            return None;
+        }
+        git_store.repositories().get(&scope.repository_id).cloned()
+    }
+
+    pub fn set_repository_scope(
+        &mut self,
+        repository_scope: Option<GitPanelRepositoryScope>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> anyhow::Result<()> {
+        if self.repository_scope == repository_scope && self.repository_scope_available {
+            return Ok(());
+        }
+        if let Some(scope) = repository_scope {
+            let project = self.project.read(cx);
+            let git_store = project.git_store().read(cx);
+            let repository_matches_worktree = git_store
+                .repository_ids_for_worktree(scope.worktree_id)
+                .contains(&scope.repository_id);
+            if !repository_matches_worktree
+                || !git_store.repositories().contains_key(&scope.repository_id)
+            {
+                return Err(anyhow::anyhow!(
+                    "repository {} is not available for worktree {}",
+                    scope.repository_id.0,
+                    scope.worktree_id.to_proto()
+                ));
+            }
+        }
+        self.repository_scope = repository_scope;
+        self.repository_scope_available = true;
+        self.advance_repository_transition();
+        self.schedule_update(window, cx);
+        Ok(())
+    }
+
+    pub fn set_repository_scope_unavailable(
+        &mut self,
+        repository_scope: GitPanelRepositoryScope,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.repository_scope == Some(repository_scope) && !self.repository_scope_available {
+            return;
+        }
+        self.repository_scope = Some(repository_scope);
+        self.repository_scope_available = false;
+        self.advance_repository_transition();
+        self.schedule_update(window, cx);
+    }
+
+    pub fn repository_scope(&self) -> Option<GitPanelRepositoryScope> {
+        self.repository_scope
+    }
+
+    pub fn repository_scope_is_available(&self, cx: &App) -> bool {
+        self.repository_scope.is_none() || self.resolve_repository(cx).is_some()
+    }
+
+    pub fn has_pending_operation(&self, cx: &App) -> bool {
+        self.pending_commit.is_some()
+            || self.generate_commit_message_task.is_some()
+            || self.pending_remote_operation.is_some()
+            || self.bulk_staging.is_some()
+            || self.active_repository.as_ref().is_some_and(|repository| {
+                repository.read(cx).pending_ops().any(|pending_operations| {
+                    pending_operations
+                        .ops
+                        .iter()
+                        .any(|operation| !operation.finished())
+                })
+            })
+    }
+
+    pub fn open_selected_diff(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_diff(&menu::Confirm, window, cx);
+    }
+
+    pub fn state_snapshot(&self, cx: &mut Context<Self>) -> GitPanelStateSnapshot {
+        let repository = self
+            .active_repository
+            .as_ref()
+            .map(|repository| repository.read(cx));
+        let repository_id = repository.as_ref().map(|repository| repository.id);
+        let repository_label = repository.as_ref().map(|repository| {
+            SharedString::from(Arc::from(repository.display_name().trim_end_matches("/")))
+        });
+        let head = repository.as_ref().map(|repository| {
+            if repository.head_commit.is_none() {
+                GitPanelHeadState::Unborn {
+                    branch: repository
+                        .branch
+                        .as_ref()
+                        .map(|branch| SharedString::from(branch.name().to_string())),
+                }
+            } else if let Some(branch) = repository.branch.as_ref() {
+                GitPanelHeadState::Branch(SharedString::from(branch.name().to_string()))
+            } else {
+                GitPanelHeadState::Detached
+            }
+        });
+        let tracking = repository
+            .as_ref()
+            .and_then(|repository| repository.branch.as_ref())
+            .and_then(Branch::tracking_status)
+            .map(|tracking| GitPanelTrackingSnapshot {
+                ahead: tracking.ahead,
+                behind: tracking.behind,
+            });
+        let status_entries = self
+            .entries
+            .iter()
+            .enumerate()
+            .filter_map(|(list_index, entry)| {
+                let status_entry = entry.status_entry()?;
+                Some(GitPanelStatusEntrySnapshot {
+                    list_index,
+                    repo_path: status_entry.repo_path.clone(),
+                    status: status_entry.status,
+                    staging: repository
+                        .as_ref()
+                        .map_or(status_entry.staging, |repository| {
+                            Self::stage_status_for_entry(status_entry, repository)
+                        }),
+                    conflicted: repository.as_ref().is_some_and(|repository| {
+                        repository.had_conflict_on_last_merge_head_change(&status_entry.repo_path)
+                    }) || status_entry.status.is_conflicted(),
+                    section: self.section_for_entry_index(list_index).map(Into::into),
+                    diff_stat: status_entry.diff_stat,
+                })
+            })
+            .collect();
+        let selection = self.selected_entry.and_then(|list_index| {
+            let entry = self.entries.get(list_index)?;
+            Some(GitPanelSelectionSnapshot {
+                list_index,
+                repo_path: entry
+                    .status_entry()
+                    .map(|entry| entry.repo_path.clone())
+                    .or_else(|| entry.directory_entry().map(|entry| entry.key.path.clone())),
+                section: self.section_for_entry_index(list_index).map(Into::into),
+                is_directory: entry.directory_entry().is_some(),
+            })
+        });
+        let mut staging_paths = repository
+            .as_ref()
+            .into_iter()
+            .flat_map(|repository| repository.pending_ops())
+            .filter(|pending_operations| {
+                pending_operations
+                    .ops
+                    .iter()
+                    .any(|operation| !operation.finished())
+            })
+            .map(|pending_operations| pending_operations.repo_path)
+            .collect::<Vec<_>>();
+        staging_paths.sort();
+        let pending_operation = GitPanelPendingOperationSnapshot {
+            commit: self.pending_commit.is_some(),
+            generating_commit_message: self.generate_commit_message_task.is_some(),
+            remote: self
+                .pending_remote_operation
+                .map(|operation| match operation.kind {
+                    RemoteOperationKind::Fetch => GitPanelRemoteOperationSnapshot::Fetch,
+                    RemoteOperationKind::Pull => GitPanelRemoteOperationSnapshot::Pull,
+                    RemoteOperationKind::Push => GitPanelRemoteOperationSnapshot::Push,
+                }),
+            staging_paths,
+        };
+        let (commit_enabled, commit_tooltip) = self.configure_commit_button(cx);
+
+        GitPanelStateSnapshot {
+            repository_scope: self.repository_scope,
+            repository_scope_available: self.repository_scope_is_available(cx),
+            repository_id,
+            repository_label,
+            head,
+            tracking,
+            status_entries,
+            counts: GitPanelCountsSnapshot {
+                entries: self.entry_count,
+                changes: self.changes_count,
+                tracked: self.tracked_count,
+                tracked_staged: self.tracked_staged_count,
+                new: self.new_count,
+                new_staged: self.new_staged_count,
+                conflicted: self.conflicted_count,
+                conflicted_staged: self.conflicted_staged_count,
+                added_lines: self.diff_stat_total.added,
+                deleted_lines: self.diff_stat_total.deleted,
+            },
+            selection,
+            pending_operation,
+            commit_button: GitPanelCommitButtonSnapshot {
+                enabled: commit_enabled,
+                title: self.commit_button_title(),
+                tooltip: commit_tooltip,
+            },
+        }
     }
 
     fn reopen_commit_buffer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -4403,6 +5080,8 @@ impl GitPanel {
             self.reopen_commit_buffer_task = Task::ready(());
             return;
         };
+        let repository_transition_generation = self.repository_transition_generation;
+        let repository_id = active_repo.read(cx).id;
         let active_repository_abs_path = active_repo
             .read(cx)
             .work_directory_abs_path
@@ -4425,7 +5104,14 @@ impl GitPanel {
                 // doesn't know about `LoadCommitTemplate`) and must not block the
                 // commit editor from attaching to the shared buffer.
                 let buffer = load_buffer.await?;
-                git_panel.update_in(cx, |git_panel, window, cx| {
+                let is_current = git_panel.update_in(cx, |git_panel, window, cx| {
+                    if !git_panel.repository_transition_is_current(
+                        repository_transition_generation,
+                        repository_id,
+                        cx,
+                    ) {
+                        return false;
+                    }
                     if git_panel
                         .commit_editor
                         .read(cx)
@@ -4457,12 +5143,23 @@ impl GitPanel {
                                 git_panel.serialize(cx);
                             }
                         }));
+                    true
                 })?;
+                if !is_current {
+                    return anyhow::Ok(());
+                }
 
                 // Check whether there's a pending commit message for this
                 // repository and, if that's the case, update the buffer's
                 // text.
-                git_panel.update(cx, |git_panel, cx| {
+                let is_current = git_panel.update(cx, |git_panel, cx| {
+                    if !git_panel.repository_transition_is_current(
+                        repository_transition_generation,
+                        repository_id,
+                        cx,
+                    ) {
+                        return false;
+                    }
                     if let Some(restored_commit_message) = git_panel
                         .pending_commit_message_restores
                         .remove(&active_repository_abs_path)
@@ -4480,13 +5177,24 @@ impl GitPanel {
                             });
                         }
                     }
+                    true
                 })?;
+                if !is_current {
+                    return anyhow::Ok(());
+                }
 
                 // Only apply the template if it's non-empty and the buffer has no
                 // content, so we never override a commit message that was already
                 // in progress.
                 let commit_template = load_template.await?;
                 git_panel.update(cx, |git_panel, cx| {
+                    if !git_panel.repository_transition_is_current(
+                        repository_transition_generation,
+                        repository_id,
+                        cx,
+                    ) {
+                        return;
+                    }
                     git_panel.commit_template = commit_template;
 
                     if let Some(commit_template) = git_panel.commit_template.as_ref()
@@ -4507,11 +5215,27 @@ impl GitPanel {
         });
     }
 
+    fn repository_transition_is_current(
+        &self,
+        transition_generation: u64,
+        repository_id: RepositoryId,
+        cx: &App,
+    ) -> bool {
+        self.repository_transition_generation == transition_generation
+            && self
+                .active_repository
+                .as_ref()
+                .map(|repository| repository.read(cx).id)
+                == Some(repository_id)
+    }
+
     fn update_visible_entries(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let path_style = self.project.read(cx).path_style(cx);
-        let selected_change = self.selected_entry.and_then(|index| {
-            let entry = self.entries.get(index)?.status_entry()?;
-            Some((entry.repo_path.clone(), self.section_for_entry_index(index)))
+        let selected_change = self.pending_selection_restore.take().or_else(|| {
+            self.selected_entry.and_then(|index| {
+                let entry = self.entries.get(index)?.status_entry()?;
+                Some((entry.repo_path.clone(), self.section_for_entry_index(index)))
+            })
         });
         let bulk_staging = self.bulk_staging.take();
         let last_staged_path_prev_index = bulk_staging
@@ -4542,6 +5266,8 @@ impl GitPanel {
 
         if let Some(active_repo) = self.active_repository.as_ref() {
             if self.git_access.is_none() {
+                let repository_transition_generation = self.repository_transition_generation;
+                let repository_id = active_repo.read(cx).id;
                 let access = active_repo.update(cx, |active_repo, cx| active_repo.access(cx));
 
                 cx.spawn_in(window, async move |git_panel, cx| {
@@ -4559,8 +5285,14 @@ impl GitPanel {
                         Err(Canceled) => GitAccess::No,
                     };
 
-                    git_panel.update(cx, |this, _cx| {
-                        this.git_access = Some(access);
+                    git_panel.update(cx, |this, cx| {
+                        if this.repository_transition_is_current(
+                            repository_transition_generation,
+                            repository_id,
+                            cx,
+                        ) {
+                            this.git_access = Some(access);
+                        }
                     })
                 })
                 .detach_and_log_err(cx);
@@ -5124,6 +5856,7 @@ impl GitPanel {
         };
 
         let is_push = matches!(action, RemoteAction::Push(_, _));
+        let repository_scoped = self.repository_scope.is_some();
 
         workspace.update(cx, |workspace, cx| {
             let SuccessMessage { message, style } = remote_output::format_output(&action, info);
@@ -5141,7 +5874,7 @@ impl GitPanel {
                     (PushPrLink { label, url }, _) => {
                         this.action(label, move |_window, cx| cx.open_url(&url))
                     }
-                    (Toast | ToastWithLog { .. }, true) => {
+                    (Toast | ToastWithLog { .. }, true) if !repository_scoped => {
                         // If we were not able to parse a valid URL from the
                         // output of a push command, we'll simply dispatch the
                         // generic `CreatePullRequest` action when the toast
@@ -5151,6 +5884,7 @@ impl GitPanel {
                                 .dispatch_action(Box::new(zed_actions::git::CreatePullRequest), cx);
                         })
                     }
+                    (Toast | ToastWithLog { .. }, true) => this,
                     (Toast, false) => this,
                     (ToastWithLog { output }, false) => {
                         this.action("View Log", move |window, cx| {
@@ -5284,6 +6018,7 @@ impl GitPanel {
                             .tooltip(Tooltip::text("Cancel Commit Message Generation"))
                             .on_click(cx.listener(|this, _event, _window, cx| {
                                 this.generate_commit_message_task.take();
+                                this.generate_commit_message_generation = None;
                                 cx.notify();
                             })),
                     )
@@ -5544,6 +6279,7 @@ impl GitPanel {
         let has_unstaged_changes = self.has_unstaged_changes();
         let has_new_changes = self.new_count > 0;
         let has_stash_items = self.stash_entries.entries.len() > 0;
+        let repository_scoped = self.repository_scope.is_some();
 
         let focus_handle = self.focus_handle.clone();
         let menu_open = self.changes_actions_menu_handle.is_deployed();
@@ -5561,6 +6297,7 @@ impl GitPanel {
                     has_unstaged_changes,
                     has_new_changes,
                     has_stash_items,
+                    repository_scoped,
                     focus_handle.clone(),
                     window,
                     cx,
@@ -5693,7 +6430,8 @@ impl GitPanel {
                         &branch,
                         focus_handle,
                         true,
-                        self.pending_remote_operation,
+                        self.pending_remote_operation
+                            .map(|operation| operation.kind),
                         self.remote_action_menu_handle.clone(),
                     ))
                 })
@@ -5995,6 +6733,10 @@ impl GitPanel {
         let branch = active_repository.read(cx).branch.as_ref()?;
         let commit = branch.most_recent_commit.as_ref()?.clone();
         let workspace = self.workspace.clone();
+        let graph_workspace = self.workspace.clone();
+        let graph_repository_id = active_repository.read(cx).id;
+        let git_store = self.project.read(cx).git_store().clone();
+        let repository_scoped = self.repository_scope.is_some();
         let this = cx.entity();
 
         Some(
@@ -6076,15 +6818,32 @@ impl GitPanel {
                         .child(
                             IconButton::new("git-graph-button", IconName::GitGraph)
                                 .icon_size(IconSize::Small)
-                                .tooltip(|_window, cx| {
-                                    Tooltip::for_action(
-                                        "Open Git Graph",
-                                        &crate::git_graph::Open,
-                                        cx,
-                                    )
+                                .tooltip(move |_window, cx| {
+                                    if repository_scoped {
+                                        Tooltip::simple("Open Git Graph", cx)
+                                    } else {
+                                        Tooltip::for_action(
+                                            "Open Git Graph",
+                                            &crate::git_graph::Open,
+                                            cx,
+                                        )
+                                    }
                                 })
-                                .on_click(|_, window, cx| {
-                                    window.dispatch_action(crate::git_graph::Open.boxed_clone(), cx)
+                                .on_click(move |_, window, cx| {
+                                    graph_workspace
+                                        .update(cx, |workspace, cx| {
+                                            crate::git_graph::open_or_reuse_graph(
+                                                workspace,
+                                                graph_repository_id,
+                                                git_store.clone(),
+                                                LogSource::All,
+                                                None,
+                                                window,
+                                                cx,
+                                            );
+                                            workspace.reveal_zero_base_center(window, cx);
+                                        })
+                                        .log_err();
                                 }),
                         ),
                 ),
@@ -6770,7 +7529,9 @@ impl GitPanel {
     }
 
     fn render_no_changes_ui(&self, cx: &Context<Self>) -> AnyElement {
-        let show_branch_diff = self.changes_count == 0 && !self.is_on_main_branch(cx);
+        let show_branch_diff = self.repository_scope.is_none()
+            && self.changes_count == 0
+            && !self.is_on_main_branch(cx);
 
         v_flex()
             .gap_1()
@@ -7291,6 +8052,7 @@ impl GitPanel {
             has_unstaged_changes,
             has_new_changes,
             has_stash_items,
+            self.repository_scope.is_some(),
             self.focus_handle.clone(),
             window,
             cx,
@@ -8418,6 +9180,10 @@ impl RenderOnce for PanelRepoFooter {
             })
             .unzip();
 
+        let repository_scoped = self
+            .git_panel
+            .as_ref()
+            .is_some_and(|panel| panel.read(cx).repository_scope.is_some());
         let single_repo = project
             .as_ref()
             .map(|project| project.read(cx).git_store().read(cx).repositories().len() == 1)
@@ -8442,57 +9208,78 @@ impl RenderOnce for PanelRepoFooter {
 
         let active_repo_name = self.active_repository.clone();
 
-        let repo_selector = PopoverMenu::new("repository-switcher")
-            .menu({
-                let project = project;
-                move |window, cx| {
-                    let project = project.clone()?;
-                    Some(cx.new(|cx| RepositorySelector::new(project, rems(20.), window, cx)))
-                }
-            })
-            .trigger_with_tooltip(
-                Button::new("repo-selector", active_repo_name)
-                    .size(ButtonSize::None)
-                    .label_size(LabelSize::Small)
-                    .truncate(true),
-                move |_, cx| {
-                    if single_repo {
-                        cx.new(|_| Empty).into()
-                    } else {
-                        Tooltip::simple("Switch Active Repository", cx)
+        let repo_selector = if repository_scoped {
+            div()
+                .id("git-panel-scoped-repository-label")
+                .min_w_0()
+                .child(
+                    Label::new(active_repo_name)
+                        .size(LabelSize::Small)
+                        .truncate(),
+                )
+                .into_any_element()
+        } else {
+            PopoverMenu::new("repository-switcher")
+                .menu({
+                    let project = project;
+                    move |window, cx| {
+                        let project = project.clone()?;
+                        Some(cx.new(|cx| RepositorySelector::new(project, rems(20.), window, cx)))
                     }
-                },
-            )
-            .anchor(Anchor::BottomLeft)
-            .offset(gpui::Point {
-                x: px(0.0),
-                y: px(-2.0),
-            })
-            .into_any_element();
+                })
+                .trigger_with_tooltip(
+                    Button::new("repo-selector", active_repo_name)
+                        .size(ButtonSize::None)
+                        .label_size(LabelSize::Small)
+                        .truncate(true),
+                    move |_, cx| {
+                        if single_repo {
+                            cx.new(|_| Empty).into()
+                        } else {
+                            Tooltip::simple("Switch Active Repository", cx)
+                        }
+                    },
+                )
+                .anchor(Anchor::BottomLeft)
+                .offset(gpui::Point {
+                    x: px(0.0),
+                    y: px(-2.0),
+                })
+                .into_any_element()
+        };
 
-        let branch_selector_button = Button::new("branch-selector", branch_name)
-            .size(ButtonSize::None)
-            .label_size(LabelSize::Small)
-            .truncate(true)
-            .on_click(|_, window, cx| {
-                window.dispatch_action(zed_actions::git::Switch.boxed_clone(), cx);
-            });
+        let branch_selector = if repository_scoped {
+            div()
+                .id("git-panel-scoped-branch-label")
+                .min_w_0()
+                .child(Label::new(branch_name).size(LabelSize::Small).truncate())
+                .into_any_element()
+        } else {
+            let branch_selector_button = Button::new("branch-selector", branch_name)
+                .size(ButtonSize::None)
+                .label_size(LabelSize::Small)
+                .truncate(true)
+                .on_click(|_, window, cx| {
+                    window.dispatch_action(zed_actions::git::Switch.boxed_clone(), cx);
+                });
 
-        let branch_selector = PopoverMenu::new("popover-button")
-            .menu(move |window, cx| {
-                let workspace = workspace.clone()?;
-                let repo = repo.clone().flatten();
-                Some(branch_picker::popover(workspace, false, repo, window, cx))
-            })
-            .trigger_with_tooltip(
-                branch_selector_button,
-                Tooltip::for_action_title("Switch Branch", &zed_actions::git::Switch),
-            )
-            .anchor(Anchor::BottomLeft)
-            .offset(gpui::Point {
-                x: px(0.0),
-                y: px(-2.0),
-            });
+            PopoverMenu::new("popover-button")
+                .menu(move |window, cx| {
+                    let workspace = workspace.clone()?;
+                    let repo = repo.clone().flatten();
+                    Some(branch_picker::popover(workspace, false, repo, window, cx))
+                })
+                .trigger_with_tooltip(
+                    branch_selector_button,
+                    Tooltip::for_action_title("Switch Branch", &zed_actions::git::Switch),
+                )
+                .anchor(Anchor::BottomLeft)
+                .offset(gpui::Point {
+                    x: px(0.0),
+                    y: px(-2.0),
+                })
+                .into_any_element()
+        };
 
         h_flex()
             .w_full()
@@ -8506,13 +9293,13 @@ impl RenderOnce for PanelRepoFooter {
                     .overflow_hidden()
                     .gap_px()
                     .child(Icon::new(IconName::GitBranch).size(IconSize::Small).color(
-                        if single_repo {
+                        if single_repo && !repository_scoped {
                             Color::Disabled
                         } else {
                             Color::Muted
                         },
                     ))
-                    .when(!single_repo, |this| {
+                    .when(!single_repo || repository_scoped, |this| {
                         this.child(div().child(repo_selector).min_w_0()).when(
                             show_separator,
                             |this| {
@@ -8988,6 +9775,386 @@ mod tests {
         });
         cx.executor().advance_clock(2 * UPDATE_DEBOUNCE);
         handle.await;
+    }
+
+    fn repository_for_path(
+        project: &Entity<Project>,
+        path: &Path,
+        cx: &VisualTestContext,
+    ) -> Entity<Repository> {
+        project.read_with(cx, |project, cx| {
+            project
+                .repositories(cx)
+                .values()
+                .find(|repository| repository.read(cx).work_directory_abs_path.as_ref() == path)
+                .cloned()
+                .expect("repository should exist for path")
+        })
+    }
+
+    fn worktree_id_for_path(
+        project: &Entity<Project>,
+        path: &Path,
+        cx: &VisualTestContext,
+    ) -> WorktreeId {
+        project.read_with(cx, |project, cx| {
+            project
+                .worktrees(cx)
+                .find(|worktree| worktree.read(cx).abs_path().as_ref() == path)
+                .map(|worktree| worktree.read(cx).id())
+                .expect("worktree should exist for path")
+        })
+    }
+
+    #[gpui::test(iterations = 8)]
+    async fn test_repository_scope_isolated_from_workspace_active_repository(
+        cx: &mut TestAppContext,
+    ) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.background_executor.clone());
+        fs.insert_tree(
+            "/root",
+            json!({
+                "project-a": {
+                    ".git": {},
+                    "a.rs": "fn a() {}\n"
+                },
+                "project-b": {
+                    ".git": {},
+                    "b.rs": "fn b() {}\n"
+                }
+            }),
+        )
+        .await;
+        fs.set_status_for_repo(
+            Path::new(path!("/root/project-a/.git")),
+            &[("a.rs", StatusCode::Modified.worktree())],
+        );
+        fs.set_status_for_repo(
+            Path::new(path!("/root/project-b/.git")),
+            &[("b.rs", FileStatus::Untracked)],
+        );
+        fs.set_branch_name(Path::new(path!("/root/project-b/.git")), Some("feature-b"));
+        fs.set_branch_tracking_for_repo(
+            Path::new(path!("/root/project-b/.git")),
+            "feature-b",
+            2,
+            3,
+        );
+
+        let project = Project::test(
+            fs,
+            [
+                Path::new(path!("/root/project-a")),
+                Path::new(path!("/root/project-b")),
+            ],
+            cx,
+        )
+        .await;
+        let window_handle =
+            cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+        let workspace = window_handle
+            .read_with(cx, |multi_workspace, _| multi_workspace.workspace().clone())
+            .expect("workspace should exist");
+        let mut cx = VisualTestContext::from_window(window_handle.into(), cx);
+        let repository_a = repository_for_path(&project, Path::new(path!("/root/project-a")), &cx);
+        let repository_b = repository_for_path(&project, Path::new(path!("/root/project-b")), &cx);
+        let repository_a_id = repository_a.read_with(&cx, |repository, _| repository.id);
+        let repository_b_id = repository_b.read_with(&cx, |repository, _| repository.id);
+        let worktree_a_id =
+            worktree_id_for_path(&project, Path::new(path!("/root/project-a")), &cx);
+        let worktree_b_id =
+            worktree_id_for_path(&project, Path::new(path!("/root/project-b")), &cx);
+        let repository_a_scope = GitPanelRepositoryScope {
+            repository_id: repository_a_id,
+            worktree_id: worktree_a_id,
+            generation: 1,
+        };
+        let repository_b_scope = GitPanelRepositoryScope {
+            repository_id: repository_b_id,
+            worktree_id: worktree_b_id,
+            generation: 1,
+        };
+        repository_a.update(&mut cx, |repository, cx| {
+            repository.set_as_active_repository(cx)
+        });
+
+        let panel = workspace.update_in(&mut cx, GitPanel::new);
+        await_git_panel_entries(&panel, &mut cx).await;
+        panel
+            .update_in(&mut cx, |panel, window, cx| {
+                panel.set_repository_scope(Some(repository_b_scope), window, cx)
+            })
+            .expect("repository B should be available");
+        panel.update(&mut cx, |panel, cx| {
+            let snapshot = panel.state_snapshot(cx);
+            assert_eq!(snapshot.repository_id, Some(repository_b_id));
+            assert!(snapshot.status_entries.is_empty());
+            assert_eq!(snapshot.counts, GitPanelCountsSnapshot::default());
+            assert_eq!(snapshot.selection, None);
+        });
+        await_git_panel_entries(&panel, &mut cx).await;
+        cx.run_until_parked();
+
+        panel.update(&mut cx, |panel, cx| {
+            let snapshot = panel.state_snapshot(cx);
+            assert_eq!(snapshot.repository_scope, Some(repository_b_scope));
+            assert!(snapshot.repository_scope_available);
+            assert_eq!(snapshot.repository_id, Some(repository_b_id));
+            assert_eq!(snapshot.repository_label.as_deref(), Some("project-b"));
+            assert_eq!(
+                snapshot.head,
+                Some(GitPanelHeadState::Branch("feature-b".into()))
+            );
+            assert_eq!(
+                snapshot.tracking,
+                Some(GitPanelTrackingSnapshot {
+                    ahead: 2,
+                    behind: 3,
+                })
+            );
+            assert_eq!(snapshot.status_entries.len(), 1);
+            assert_eq!(snapshot.status_entries[0].repo_path, repo_path("b.rs"));
+            assert_eq!(snapshot.status_entries[0].status, FileStatus::Untracked);
+            assert_eq!(snapshot.status_entries[0].staging, StageStatus::Unstaged);
+            assert_eq!(snapshot.counts.entries, 1);
+            assert_eq!(snapshot.counts.new, 1);
+            assert_eq!(snapshot.counts.tracked, 0);
+            panel.commit_message_buffer(cx).update(cx, |buffer, cx| {
+                buffer.set_text("repository B draft", cx);
+            });
+        });
+        let repository_b_scroll_handle =
+            panel.read_with(&cx, |panel, _| panel.scroll_handle.clone());
+
+        repository_b.update(&mut cx, |repository, cx| {
+            repository.set_as_active_repository(cx)
+        });
+        repository_a.update(&mut cx, |repository, cx| {
+            repository.set_as_active_repository(cx)
+        });
+        cx.run_until_parked();
+        panel.update(&mut cx, |panel, cx| {
+            let snapshot = panel.state_snapshot(cx);
+            assert_eq!(snapshot.repository_id, Some(repository_b_id));
+            assert_eq!(snapshot.status_entries[0].repo_path, repo_path("b.rs"));
+        });
+
+        panel
+            .update_in(&mut cx, |panel, window, cx| {
+                panel.set_repository_scope(
+                    Some(GitPanelRepositoryScope {
+                        generation: 2,
+                        ..repository_a_scope
+                    }),
+                    window,
+                    cx,
+                )
+            })
+            .expect("repository A should be available");
+        panel
+            .update_in(&mut cx, |panel, window, cx| {
+                panel.set_repository_scope(
+                    Some(GitPanelRepositoryScope {
+                        generation: 3,
+                        ..repository_b_scope
+                    }),
+                    window,
+                    cx,
+                )
+            })
+            .expect("repository B should be available");
+        await_git_panel_entries(&panel, &mut cx).await;
+        cx.run_until_parked();
+        panel.update(&mut cx, |panel, cx| {
+            let snapshot = panel.state_snapshot(cx);
+            assert_eq!(snapshot.repository_id, Some(repository_b_id));
+            assert_eq!(snapshot.status_entries[0].repo_path, repo_path("b.rs"));
+            assert_eq!(
+                snapshot
+                    .selection
+                    .as_ref()
+                    .and_then(|selection| selection.repo_path.clone()),
+                Some(repo_path("b.rs"))
+            );
+            assert!(Rc::ptr_eq(
+                &repository_b_scroll_handle.0,
+                &panel.scroll_handle.0
+            ));
+            assert_eq!(
+                panel.commit_message_buffer(cx).read(cx).text(),
+                "repository B draft"
+            );
+        });
+
+        let missing_repository_id = RepositoryId(u64::MAX);
+        let current_repository_b_scope = GitPanelRepositoryScope {
+            generation: 3,
+            ..repository_b_scope
+        };
+        let error = panel
+            .update_in(&mut cx, |panel, window, cx| {
+                panel.set_repository_scope(
+                    Some(GitPanelRepositoryScope {
+                        repository_id: missing_repository_id,
+                        worktree_id: worktree_b_id,
+                        generation: 4,
+                    }),
+                    window,
+                    cx,
+                )
+            })
+            .expect_err("an unknown repository must not change panel scope");
+        assert!(error.to_string().contains("is not available"));
+        panel.update(&mut cx, |panel, cx| {
+            let snapshot = panel.state_snapshot(cx);
+            assert_eq!(snapshot.repository_scope, Some(current_repository_b_scope));
+            assert_eq!(snapshot.repository_id, Some(repository_b_id));
+        });
+
+        let unavailable_scope = GitPanelRepositoryScope {
+            generation: 4,
+            ..repository_b_scope
+        };
+        panel.update_in(&mut cx, |panel, window, cx| {
+            panel.set_repository_scope_unavailable(unavailable_scope, window, cx);
+        });
+        panel.update(&mut cx, |panel, cx| {
+            let snapshot = panel.state_snapshot(cx);
+            assert_eq!(snapshot.repository_id, None);
+            assert_eq!(snapshot.repository_label, None);
+            assert_eq!(snapshot.tracking, None);
+            assert!(snapshot.status_entries.is_empty());
+            assert_eq!(snapshot.counts, GitPanelCountsSnapshot::default());
+        });
+        await_git_panel_entries(&panel, &mut cx).await;
+        panel.update(&mut cx, |panel, cx| {
+            let snapshot = panel.state_snapshot(cx);
+            assert_eq!(snapshot.repository_scope, Some(unavailable_scope));
+            assert!(!snapshot.repository_scope_available);
+            assert_eq!(snapshot.repository_id, None);
+            assert!(snapshot.status_entries.is_empty());
+        });
+
+        panel
+            .update_in(&mut cx, |panel, window, cx| {
+                panel.set_repository_scope(None, window, cx)
+            })
+            .expect("clearing repository scope should succeed");
+        await_git_panel_entries(&panel, &mut cx).await;
+        panel.update(&mut cx, |panel, cx| {
+            let snapshot = panel.state_snapshot(cx);
+            assert_eq!(snapshot.repository_scope, None);
+            assert_eq!(snapshot.repository_id, Some(repository_a_id));
+            assert_eq!(snapshot.status_entries[0].repo_path, repo_path("a.rs"));
+        });
+    }
+
+    #[gpui::test(iterations = 8)]
+    async fn test_repository_scope_becomes_empty_when_repository_is_removed(
+        cx: &mut TestAppContext,
+    ) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.background_executor.clone());
+        fs.insert_tree(
+            "/root",
+            json!({
+                "project-a": {
+                    ".git": {},
+                    "a.rs": "fn a() {}\n"
+                },
+                "project-b": {
+                    ".git": {},
+                    "b.rs": "fn b() {}\n"
+                }
+            }),
+        )
+        .await;
+        fs.set_status_for_repo(
+            Path::new(path!("/root/project-a/.git")),
+            &[("a.rs", StatusCode::Modified.worktree())],
+        );
+        fs.set_status_for_repo(
+            Path::new(path!("/root/project-b/.git")),
+            &[("b.rs", StatusCode::Modified.worktree())],
+        );
+
+        let project = Project::test(
+            fs,
+            [
+                Path::new(path!("/root/project-a")),
+                Path::new(path!("/root/project-b")),
+            ],
+            cx,
+        )
+        .await;
+        let window_handle =
+            cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+        let workspace = window_handle
+            .read_with(cx, |multi_workspace, _| multi_workspace.workspace().clone())
+            .expect("workspace should exist");
+        let mut cx = VisualTestContext::from_window(window_handle.into(), cx);
+        let repository_a = repository_for_path(&project, Path::new(path!("/root/project-a")), &cx);
+        let repository_b = repository_for_path(&project, Path::new(path!("/root/project-b")), &cx);
+        let repository_a_id = repository_a.read_with(&cx, |repository, _| repository.id);
+        let repository_b_id = repository_b.read_with(&cx, |repository, _| repository.id);
+        let worktree_a_id =
+            worktree_id_for_path(&project, Path::new(path!("/root/project-a")), &cx);
+        let worktree_b_id =
+            worktree_id_for_path(&project, Path::new(path!("/root/project-b")), &cx);
+        let repository_a_scope = GitPanelRepositoryScope {
+            repository_id: repository_a_id,
+            worktree_id: worktree_a_id,
+            generation: 2,
+        };
+        let repository_b_scope = GitPanelRepositoryScope {
+            repository_id: repository_b_id,
+            worktree_id: worktree_b_id,
+            generation: 1,
+        };
+        repository_a.update(&mut cx, |repository, cx| {
+            repository.set_as_active_repository(cx)
+        });
+
+        let panel = workspace.update_in(&mut cx, GitPanel::new);
+        let panel_entity_id = panel.entity_id();
+        panel
+            .update_in(&mut cx, |panel, window, cx| {
+                panel.set_repository_scope(Some(repository_b_scope), window, cx)
+            })
+            .expect("repository B should be available");
+        await_git_panel_entries(&panel, &mut cx).await;
+
+        project.update(&mut cx, |project, cx| {
+            project.remove_worktree(worktree_b_id, cx);
+        });
+        cx.run_until_parked();
+        await_git_panel_entries(&panel, &mut cx).await;
+
+        panel.update(&mut cx, |panel, cx| {
+            let snapshot = panel.state_snapshot(cx);
+            assert_eq!(snapshot.repository_scope, Some(repository_b_scope));
+            assert!(!snapshot.repository_scope_available);
+            assert_eq!(snapshot.repository_id, None);
+            assert_eq!(snapshot.head, None);
+            assert!(snapshot.status_entries.is_empty());
+            assert_eq!(snapshot.counts, GitPanelCountsSnapshot::default());
+            assert_eq!(snapshot.selection, None);
+            assert!(!panel.has_pending_operation(cx));
+        });
+
+        panel
+            .update_in(&mut cx, |panel, window, cx| {
+                panel.set_repository_scope(Some(repository_a_scope), window, cx)
+            })
+            .expect("repository A should remain available");
+        await_git_panel_entries(&panel, &mut cx).await;
+        assert_eq!(panel.entity_id(), panel_entity_id);
+        panel.update(&mut cx, |panel, cx| {
+            let snapshot = panel.state_snapshot(cx);
+            assert_eq!(snapshot.repository_id, Some(repository_a_id));
+            assert_eq!(snapshot.status_entries[0].repo_path, repo_path("a.rs"));
+        });
     }
 
     fn assert_editor_opened_with_path(
@@ -11595,20 +12762,39 @@ mod tests {
         panel.update(cx, |panel, cx| {
             // The first remote operation starts and records its kind, which the
             // button uses to render an "in progress" tooltip.
-            assert!(panel.start_remote_operation(RemoteOperationKind::Fetch, cx));
+            let fetch = panel
+                .start_remote_operation(RemoteOperationKind::Fetch, cx)
+                .expect("fetch operation should start");
             assert!(matches!(
                 panel.pending_remote_operation,
-                Some(RemoteOperationKind::Fetch)
+                Some(PendingRemoteOperation {
+                    kind: RemoteOperationKind::Fetch,
+                    ..
+                })
             ));
 
             // A second remote operation is refused while one is pending, even a
             // different kind: we serialize all remote ops.
-            assert!(!panel.start_remote_operation(RemoteOperationKind::Push, cx));
+            assert!(
+                panel
+                    .start_remote_operation(RemoteOperationKind::Push, cx)
+                    .is_none()
+            );
 
-            // Clearing the pending operation re-opens the gate.
-            panel.clear_remote_operation(cx);
+            // A repository transition releases the UI gate while allowing an
+            // already-submitted operation to finish in the repository layer.
+            panel.advance_repository_transition();
             assert!(panel.pending_remote_operation.is_none());
-            assert!(panel.start_remote_operation(RemoteOperationKind::Pull, cx));
+            let pull = panel
+                .start_remote_operation(RemoteOperationKind::Pull, cx)
+                .expect("pull operation should start after the transition");
+
+            // Late completion of the old operation cannot clear the new
+            // repository generation's pending state.
+            panel.clear_remote_operation(fetch, cx);
+            assert_eq!(panel.pending_remote_operation, Some(pull));
+            panel.clear_remote_operation(pull, cx);
+            assert!(panel.pending_remote_operation.is_none());
         });
     }
 

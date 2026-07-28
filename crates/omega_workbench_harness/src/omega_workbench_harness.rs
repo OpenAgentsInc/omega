@@ -571,6 +571,162 @@ pub struct ReviewSessionFixture {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GitBindingFixture {
+    pub thread_id: String,
+    pub repository_id: String,
+    pub worktree_id: String,
+    pub repository_entity_id: String,
+    pub generation: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "state", content = "message")]
+pub enum GitLifecycleFixture {
+    Unbound,
+    Loading,
+    Ready,
+    Offline,
+    Reconnecting,
+    RepositoryRemoved,
+    Error(String),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "state")]
+pub enum GitBranchFixture {
+    Branch {
+        name: String,
+        ahead: u32,
+        behind: u32,
+    },
+    Detached {
+        head: String,
+    },
+    Unborn {
+        name: String,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GitFileStatusFixture {
+    Added,
+    Modified,
+    Deleted,
+    Renamed,
+    Untracked,
+    Conflicted,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GitStagingStateFixture {
+    Unstaged,
+    Staged,
+    PartiallyStaged,
+    Conflict,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GitStatusEntryFixture {
+    pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub old_path: Option<String>,
+    pub status: GitFileStatusFixture,
+    pub staging: GitStagingStateFixture,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GitStatusCountsFixture {
+    pub staged: u32,
+    pub unstaged: u32,
+    pub untracked: u32,
+    pub conflicts: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GitOperationKindFixture {
+    Stage,
+    Unstage,
+    Discard,
+    OpenDiff,
+    Commit,
+    CheckoutBranch,
+    Pull,
+    Push,
+    SwitchRepository,
+    Refresh,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "target", content = "value")]
+pub enum GitMutationTargetFixture {
+    None,
+    Path(String),
+    Branch(String),
+    CommitMessage(String),
+    Binding {
+        repository_id: String,
+        worktree_id: String,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "result", content = "message")]
+pub enum GitMutationResultFixture {
+    Succeeded,
+    Pending,
+    Cancelled,
+    Rejected,
+    Failed(String),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GitMutationFixture {
+    pub kind: GitOperationKindFixture,
+    pub target: GitMutationTargetFixture,
+    pub result: GitMutationResultFixture,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GitPendingOperationFixture {
+    pub id: String,
+    pub kind: GitOperationKindFixture,
+    pub target: GitMutationTargetFixture,
+    pub confirmation_required: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GitFocusFixture {
+    Surface,
+    StatusList,
+    StatusEntry,
+    CommitEditor,
+    BranchMenu,
+    Toolbar,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GitSnapshotFixture {
+    pub binding: GitBindingFixture,
+    pub lifecycle: GitLifecycleFixture,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<GitBranchFixture>,
+    pub status_entries: Vec<GitStatusEntryFixture>,
+    pub status_counts: GitStatusCountsFixture,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_operation: Option<GitPendingOperationFixture>,
+    pub badge_count: u32,
+    pub requested_mutations: Vec<GitMutationFixture>,
+    pub ignored_stale_refresh_count: u32,
+    pub focus: GitFocusFixture,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ThreadWorkbenchFixture {
     pub thread_id: String,
     pub generation: u64,
@@ -626,6 +782,8 @@ pub struct WorkbenchScene {
     pub thread_workbenches: Vec<ThreadWorkbenchFixture>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub review_sessions: Vec<ReviewSessionFixture>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub git_snapshots: Vec<GitSnapshotFixture>,
     pub persisted: Option<PersistedSceneFixture>,
 }
 
@@ -660,6 +818,7 @@ impl WorkbenchScene {
             dock_open: false,
             thread_workbenches: Vec::new(),
             review_sessions: Vec::new(),
+            git_snapshots: Vec::new(),
             persisted: None,
         }
     }
@@ -853,6 +1012,7 @@ impl WorkbenchScene {
         }
         self.validate_thread_workbenches()?;
         self.validate_review_sessions()?;
+        self.validate_git_snapshots()?;
 
         for artifact in &self.artifacts {
             if let Some(worktree_id) = &artifact.worktree_id
@@ -1188,6 +1348,251 @@ impl WorkbenchScene {
             .find(|review| review.binding.thread_id == active_thread_id)
     }
 
+    fn validate_git_snapshots(&self) -> Result<()> {
+        unique_ids(
+            "Git snapshot thread",
+            self.git_snapshots
+                .iter()
+                .map(|snapshot| snapshot.binding.thread_id.as_str()),
+        )?;
+
+        for snapshot in &self.git_snapshots {
+            let binding = &snapshot.binding;
+            let thread = self
+                .threads
+                .iter()
+                .find(|thread| thread.id == binding.thread_id)
+                .ok_or_else(|| {
+                    anyhow!(
+                        "Git snapshot references missing thread {:?}",
+                        binding.thread_id
+                    )
+                })?;
+            if thread.repository_id.as_deref() != Some(binding.repository_id.as_str())
+                || thread.worktree_id.as_deref() != Some(binding.worktree_id.as_str())
+            {
+                bail!(
+                    "Git snapshot for thread {:?} does not match its repository/worktree binding",
+                    binding.thread_id
+                );
+            }
+            if binding.repository_entity_id.trim().is_empty() {
+                bail!("Git repository entity ID must not be empty");
+            }
+
+            let workbench = self
+                .thread_workbenches
+                .iter()
+                .find(|workbench| workbench.thread_id == binding.thread_id)
+                .ok_or_else(|| {
+                    anyhow!(
+                        "Git snapshot for thread {:?} has no workbench projection",
+                        binding.thread_id
+                    )
+                })?;
+            if workbench.generation != binding.generation
+                || workbench.binding.as_ref()
+                    != Some(&WorkbenchBindingFixture {
+                        repository_id: binding.repository_id.clone(),
+                        worktree_id: binding.worktree_id.clone(),
+                    })
+            {
+                bail!(
+                    "Git snapshot for thread {:?} does not match its workbench generation/binding",
+                    binding.thread_id
+                );
+            }
+
+            let repository = self
+                .repositories
+                .iter()
+                .find(|repository| repository.id == binding.repository_id)
+                .ok_or_else(|| {
+                    anyhow!(
+                        "Git snapshot references missing repository {:?}",
+                        binding.repository_id
+                    )
+                })?;
+            let worktree = repository
+                .worktrees
+                .iter()
+                .find(|worktree| worktree.id == binding.worktree_id)
+                .ok_or_else(|| {
+                    anyhow!(
+                        "Git snapshot references missing worktree {:?}",
+                        binding.worktree_id
+                    )
+                })?;
+
+            if let GitLifecycleFixture::Error(message) = &snapshot.lifecycle
+                && message.trim().is_empty()
+            {
+                bail!("Git error lifecycle must contain a message");
+            }
+            if matches!(
+                snapshot.lifecycle,
+                GitLifecycleFixture::Unbound
+                    | GitLifecycleFixture::Loading
+                    | GitLifecycleFixture::RepositoryRemoved
+                    | GitLifecycleFixture::Error(_)
+            ) && (!snapshot.status_entries.is_empty()
+                || snapshot.selected_path.is_some()
+                || snapshot.pending_operation.is_some())
+            {
+                bail!(
+                    "Git lifecycle {:?} cannot expose status, selection, or pending operation state",
+                    snapshot.lifecycle
+                );
+            }
+            if matches!(
+                snapshot.lifecycle,
+                GitLifecycleFixture::Unbound | GitLifecycleFixture::RepositoryRemoved
+            ) && snapshot.branch.is_some()
+            {
+                bail!(
+                    "Git lifecycle {:?} cannot expose branch state",
+                    snapshot.lifecycle
+                );
+            }
+            if matches!(
+                snapshot.lifecycle,
+                GitLifecycleFixture::Ready
+                    | GitLifecycleFixture::Offline
+                    | GitLifecycleFixture::Reconnecting
+            ) && snapshot.branch.is_none()
+            {
+                bail!(
+                    "Git lifecycle {:?} requires branch state",
+                    snapshot.lifecycle
+                );
+            }
+
+            unique_ids(
+                "Git status path",
+                snapshot
+                    .status_entries
+                    .iter()
+                    .map(|entry| entry.path.as_str()),
+            )?;
+            if snapshot.status_entries.windows(2).any(|entries| {
+                entries
+                    .first()
+                    .zip(entries.get(1))
+                    .is_some_and(|(left, right)| left.path > right.path)
+            }) {
+                bail!("Git status entries must be ordered by path");
+            }
+            for entry in &snapshot.status_entries {
+                if entry.path.trim().is_empty()
+                    || entry
+                        .old_path
+                        .as_deref()
+                        .is_some_and(|path| path.trim().is_empty())
+                {
+                    bail!("Git status paths must not be empty");
+                }
+                match entry.status {
+                    GitFileStatusFixture::Renamed if entry.old_path.is_none() => {
+                        bail!("renamed Git status {:?} has no old path", entry.path);
+                    }
+                    GitFileStatusFixture::Renamed => {}
+                    _ if entry.old_path.is_some() => {
+                        bail!("non-renamed Git status {:?} has an old path", entry.path);
+                    }
+                    _ => {}
+                }
+                if entry.status == GitFileStatusFixture::Conflicted
+                    && entry.staging != GitStagingStateFixture::Conflict
+                {
+                    bail!(
+                        "conflicted Git status {:?} must use conflict staging state",
+                        entry.path
+                    );
+                }
+                if entry.staging == GitStagingStateFixture::Conflict
+                    && entry.status != GitFileStatusFixture::Conflicted
+                {
+                    bail!(
+                        "conflict staging state {:?} must use conflicted file status",
+                        entry.path
+                    );
+                }
+            }
+
+            let expected_counts = git_status_counts(&snapshot.status_entries)?;
+            if snapshot.status_counts != expected_counts {
+                bail!(
+                    "Git status counts {:?} do not match entries {expected_counts:?}",
+                    snapshot.status_counts
+                );
+            }
+            if u32::try_from(snapshot.status_entries.len()).ok() != Some(snapshot.badge_count) {
+                bail!(
+                    "Git badge count {} does not match {} unique status paths",
+                    snapshot.badge_count,
+                    snapshot.status_entries.len()
+                );
+            }
+            if worktree.dirty_files != snapshot.badge_count
+                || worktree.conflicts != snapshot.status_counts.conflicts
+            {
+                bail!(
+                    "Git snapshot counts do not match worktree {:?}",
+                    binding.worktree_id
+                );
+            }
+
+            validate_git_branch(&snapshot.branch, worktree)?;
+
+            if let Some(selected_path) = &snapshot.selected_path
+                && !snapshot
+                    .status_entries
+                    .iter()
+                    .any(|entry| entry.path == *selected_path)
+            {
+                bail!("Git selection references missing status path {selected_path:?}");
+            }
+
+            for mutation in &snapshot.requested_mutations {
+                validate_git_mutation(mutation)?;
+            }
+            if let Some(pending) = &snapshot.pending_operation {
+                if pending.id.trim().is_empty() {
+                    bail!("pending Git operation ID must not be empty");
+                }
+                validate_git_target(&pending.target)?;
+                if !snapshot.requested_mutations.iter().any(|mutation| {
+                    mutation.kind == pending.kind
+                        && mutation.target == pending.target
+                        && mutation.result == GitMutationResultFixture::Pending
+                }) {
+                    bail!(
+                        "pending Git operation {:?} has no matching requested mutation",
+                        pending.id
+                    );
+                }
+            }
+
+            let expected_badge = (snapshot.badge_count > 0).then_some(snapshot.badge_count);
+            let git_surface = surface_fixture(&workbench.surfaces, WorkSurfaceId::Git)?;
+            if git_surface.badge != expected_badge {
+                bail!(
+                    "Git rail badge {:?} disagrees with typed snapshot badge {expected_badge:?}",
+                    git_surface.badge
+                );
+            }
+        }
+
+        Ok(())
+    }
+
+    pub fn active_git_snapshot(&self) -> Option<&GitSnapshotFixture> {
+        let active_thread_id = self.active_thread_id.as_deref()?;
+        self.git_snapshots
+            .iter()
+            .find(|snapshot| snapshot.binding.thread_id == active_thread_id)
+    }
+
     fn validate_mutation(&self, mutation: &SceneMutation) -> Result<()> {
         match mutation {
             SceneMutation::SetActiveThread { thread_id } => {
@@ -1294,6 +1699,160 @@ fn unique_ids<'a>(kind: &str, ids: impl Iterator<Item = &'a str>) -> Result<()> 
     Ok(())
 }
 
+fn git_status_counts(entries: &[GitStatusEntryFixture]) -> Result<GitStatusCountsFixture> {
+    let mut counts = GitStatusCountsFixture::default();
+    for entry in entries {
+        match entry.staging {
+            GitStagingStateFixture::Unstaged => {
+                if entry.status == GitFileStatusFixture::Untracked {
+                    counts.untracked = counts
+                        .untracked
+                        .checked_add(1)
+                        .context("Git untracked count overflow")?;
+                } else {
+                    counts.unstaged = counts
+                        .unstaged
+                        .checked_add(1)
+                        .context("Git unstaged count overflow")?;
+                }
+            }
+            GitStagingStateFixture::Staged => {
+                if entry.status == GitFileStatusFixture::Untracked {
+                    bail!("untracked Git status {:?} cannot be staged", entry.path);
+                }
+                counts.staged = counts
+                    .staged
+                    .checked_add(1)
+                    .context("Git staged count overflow")?;
+            }
+            GitStagingStateFixture::PartiallyStaged => {
+                if entry.status == GitFileStatusFixture::Untracked {
+                    bail!(
+                        "untracked Git status {:?} cannot be partially staged",
+                        entry.path
+                    );
+                }
+                counts.staged = counts
+                    .staged
+                    .checked_add(1)
+                    .context("Git staged count overflow")?;
+                counts.unstaged = counts
+                    .unstaged
+                    .checked_add(1)
+                    .context("Git unstaged count overflow")?;
+            }
+            GitStagingStateFixture::Conflict => {
+                counts.conflicts = counts
+                    .conflicts
+                    .checked_add(1)
+                    .context("Git conflict count overflow")?;
+            }
+        }
+    }
+    Ok(counts)
+}
+
+fn validate_git_branch(
+    branch: &Option<GitBranchFixture>,
+    worktree: &WorktreeFixture,
+) -> Result<()> {
+    match branch {
+        Some(GitBranchFixture::Branch {
+            name,
+            ahead,
+            behind,
+        }) => {
+            if name.trim().is_empty() || worktree.branch.as_deref() != Some(name.as_str()) {
+                bail!("Git branch does not match its worktree branch");
+            }
+            if worktree.ahead != *ahead || worktree.behind != *behind {
+                bail!("Git branch ahead/behind counts do not match its worktree");
+            }
+            if worktree.git_state == Some(WorktreeGitStateFixture::Unborn) {
+                bail!("unborn worktree cannot expose an established Git branch");
+            }
+        }
+        Some(GitBranchFixture::Detached { head }) => {
+            if head.trim().is_empty() || worktree.branch.is_some() {
+                bail!("detached Git head must be non-empty and have no worktree branch");
+            }
+        }
+        Some(GitBranchFixture::Unborn { name }) => {
+            if name.trim().is_empty()
+                || worktree.branch.as_deref() != Some(name.as_str())
+                || worktree.git_state != Some(WorktreeGitStateFixture::Unborn)
+            {
+                bail!("unborn Git branch does not match its worktree");
+            }
+        }
+        None => {}
+    }
+    Ok(())
+}
+
+fn validate_git_target(target: &GitMutationTargetFixture) -> Result<()> {
+    match target {
+        GitMutationTargetFixture::None => {}
+        GitMutationTargetFixture::Path(value)
+        | GitMutationTargetFixture::Branch(value)
+        | GitMutationTargetFixture::CommitMessage(value) => {
+            if value.trim().is_empty() {
+                bail!("Git mutation target must not be empty");
+            }
+        }
+        GitMutationTargetFixture::Binding {
+            repository_id,
+            worktree_id,
+        } => {
+            if repository_id.trim().is_empty() || worktree_id.trim().is_empty() {
+                bail!("Git mutation binding target must not be empty");
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_git_mutation(mutation: &GitMutationFixture) -> Result<()> {
+    validate_git_target(&mutation.target)?;
+    let target_matches_kind = matches!(
+        (&mutation.kind, &mutation.target),
+        (
+            GitOperationKindFixture::Stage
+                | GitOperationKindFixture::Unstage
+                | GitOperationKindFixture::Discard
+                | GitOperationKindFixture::OpenDiff,
+            GitMutationTargetFixture::Path(_)
+        ) | (
+            GitOperationKindFixture::Commit,
+            GitMutationTargetFixture::CommitMessage(_)
+        ) | (
+            GitOperationKindFixture::CheckoutBranch,
+            GitMutationTargetFixture::Branch(_)
+        ) | (
+            GitOperationKindFixture::SwitchRepository,
+            GitMutationTargetFixture::Binding { .. }
+        ) | (
+            GitOperationKindFixture::Pull
+                | GitOperationKindFixture::Push
+                | GitOperationKindFixture::Refresh,
+            GitMutationTargetFixture::None
+        )
+    );
+    if !target_matches_kind {
+        bail!(
+            "Git {:?} mutation has incompatible target {:?}",
+            mutation.kind,
+            mutation.target
+        );
+    }
+    if let GitMutationResultFixture::Failed(message) = &mutation.result
+        && message.trim().is_empty()
+    {
+        bail!("failed Git mutation must contain a message");
+    }
+    Ok(())
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SceneSpec {
     pub name: &'static str,
@@ -1312,7 +1871,7 @@ impl SceneSpec {
     }
 }
 
-pub const WORKBENCH_SHELL_PIXEL_SCENES: [&str; 35] = [
+pub const WORKBENCH_SHELL_PIXEL_SCENES: [&str; 47] = [
     "omega_workbench_shell_default",
     "omega_workbench_shell_active_dock",
     "omega_workbench_shell_focus_visible",
@@ -1344,6 +1903,18 @@ pub const WORKBENCH_SHELL_PIXEL_SCENES: [&str; 35] = [
     "omega_workbench_review_all_reviewed",
     "omega_workbench_review_narrow",
     "omega_workbench_review_error",
+    "omega_workbench_git_clean",
+    "omega_workbench_git_dirty",
+    "omega_workbench_git_staged",
+    "omega_workbench_git_conflict",
+    "omega_workbench_git_detached",
+    "omega_workbench_git_unborn",
+    "omega_workbench_git_pending",
+    "omega_workbench_git_multi_repository",
+    "omega_workbench_git_repository_removed",
+    "omega_workbench_git_offline",
+    "omega_workbench_git_reconnect",
+    "omega_workbench_git_error",
     "omega_workbench_identity_clean",
     "omega_workbench_identity_dirty_conflict",
     "omega_workbench_identity_long_narrow",
@@ -1377,6 +1948,12 @@ pub const WORKBENCH_SEARCH_REGIONS: &[CaptureRegionSpec] = &[CaptureRegionSpec::
 pub const WORKBENCH_REVIEW_REGIONS: &[CaptureRegionSpec] = &[CaptureRegionSpec::selector_union(
     "review-surface",
     &["omega.workbench.surface.review"],
+    8,
+)];
+
+pub const WORKBENCH_GIT_REGIONS: &[CaptureRegionSpec] = &[CaptureRegionSpec::selector_union(
+    "git-surface",
+    &["omega.workbench.surface.git"],
     8,
 )];
 
@@ -1628,6 +2205,102 @@ pub const HERMETIC_SCENES: &[SceneSpec] = &[
         fixture_version: 2,
         pixel_policy: APPLE_SILICON_METAL_POLICY,
         regions: WORKBENCH_REVIEW_REGIONS,
+    },
+    SceneSpec {
+        name: "omega_workbench_git_clean",
+        phase: ScenePhase::Recording,
+        viewport: ViewportFixture::new(1200, 720, 2000),
+        fixture_version: 2,
+        pixel_policy: APPLE_SILICON_METAL_POLICY,
+        regions: WORKBENCH_GIT_REGIONS,
+    },
+    SceneSpec {
+        name: "omega_workbench_git_dirty",
+        phase: ScenePhase::Recording,
+        viewport: ViewportFixture::new(1200, 720, 2000),
+        fixture_version: 2,
+        pixel_policy: APPLE_SILICON_METAL_POLICY,
+        regions: WORKBENCH_GIT_REGIONS,
+    },
+    SceneSpec {
+        name: "omega_workbench_git_staged",
+        phase: ScenePhase::Recording,
+        viewport: ViewportFixture::new(1200, 720, 2000),
+        fixture_version: 2,
+        pixel_policy: APPLE_SILICON_METAL_POLICY,
+        regions: WORKBENCH_GIT_REGIONS,
+    },
+    SceneSpec {
+        name: "omega_workbench_git_conflict",
+        phase: ScenePhase::Recording,
+        viewport: ViewportFixture::new(1200, 720, 2000),
+        fixture_version: 2,
+        pixel_policy: APPLE_SILICON_METAL_POLICY,
+        regions: WORKBENCH_GIT_REGIONS,
+    },
+    SceneSpec {
+        name: "omega_workbench_git_detached",
+        phase: ScenePhase::Recording,
+        viewport: ViewportFixture::new(1200, 720, 2000),
+        fixture_version: 2,
+        pixel_policy: APPLE_SILICON_METAL_POLICY,
+        regions: WORKBENCH_GIT_REGIONS,
+    },
+    SceneSpec {
+        name: "omega_workbench_git_unborn",
+        phase: ScenePhase::Recording,
+        viewport: ViewportFixture::new(1200, 720, 2000),
+        fixture_version: 2,
+        pixel_policy: APPLE_SILICON_METAL_POLICY,
+        regions: WORKBENCH_GIT_REGIONS,
+    },
+    SceneSpec {
+        name: "omega_workbench_git_pending",
+        phase: ScenePhase::Recording,
+        viewport: ViewportFixture::new(1200, 720, 2000),
+        fixture_version: 2,
+        pixel_policy: APPLE_SILICON_METAL_POLICY,
+        regions: WORKBENCH_GIT_REGIONS,
+    },
+    SceneSpec {
+        name: "omega_workbench_git_multi_repository",
+        phase: ScenePhase::Recording,
+        viewport: ViewportFixture::new(1200, 720, 2000),
+        fixture_version: 2,
+        pixel_policy: APPLE_SILICON_METAL_POLICY,
+        regions: WORKBENCH_GIT_REGIONS,
+    },
+    SceneSpec {
+        name: "omega_workbench_git_repository_removed",
+        phase: ScenePhase::Recording,
+        viewport: ViewportFixture::new(1200, 720, 2000),
+        fixture_version: 2,
+        pixel_policy: APPLE_SILICON_METAL_POLICY,
+        regions: WORKBENCH_GIT_REGIONS,
+    },
+    SceneSpec {
+        name: "omega_workbench_git_offline",
+        phase: ScenePhase::Recording,
+        viewport: ViewportFixture::new(1200, 720, 2000),
+        fixture_version: 2,
+        pixel_policy: APPLE_SILICON_METAL_POLICY,
+        regions: WORKBENCH_GIT_REGIONS,
+    },
+    SceneSpec {
+        name: "omega_workbench_git_reconnect",
+        phase: ScenePhase::Recording,
+        viewport: ViewportFixture::new(1200, 720, 2000),
+        fixture_version: 2,
+        pixel_policy: APPLE_SILICON_METAL_POLICY,
+        regions: WORKBENCH_GIT_REGIONS,
+    },
+    SceneSpec {
+        name: "omega_workbench_git_error",
+        phase: ScenePhase::Recording,
+        viewport: ViewportFixture::new(1200, 720, 2000),
+        fixture_version: 2,
+        pixel_policy: APPLE_SILICON_METAL_POLICY,
+        regions: WORKBENCH_GIT_REGIONS,
     },
     SceneSpec {
         name: "omega_workbench_identity_clean",
@@ -2054,6 +2727,384 @@ fn review_hunk(
         end_row,
         end_column,
         status,
+    }
+}
+
+pub fn workbench_git_scene(name: &str) -> Result<WorkbenchScene> {
+    let spec = scene_spec(name).ok_or_else(|| anyhow!("unknown workbench scene {name:?}"))?;
+    if !name.starts_with("omega_workbench_git_") {
+        bail!("{name:?} is not a Git workbench scene");
+    }
+
+    let active_snapshot = git_fixture_for_scene(
+        name,
+        GitBindingFixture {
+            thread_id: "active-thread".into(),
+            repository_id: "visual-repository-beta".into(),
+            worktree_id: "beta-worktree".into(),
+            repository_entity_id: "beta-repository-entity".into(),
+            generation: 11,
+        },
+    )?;
+    let foreign_entries = vec![GitStatusEntryFixture {
+        path: "foreign/alpha_only.rs".into(),
+        old_path: None,
+        status: GitFileStatusFixture::Modified,
+        staging: GitStagingStateFixture::Unstaged,
+    }];
+    let foreign_snapshot = GitSnapshotFixture {
+        binding: GitBindingFixture {
+            thread_id: "foreign-thread".into(),
+            repository_id: "visual-repository-alpha".into(),
+            worktree_id: "alpha-worktree".into(),
+            repository_entity_id: "alpha-repository-entity".into(),
+            generation: 4,
+        },
+        lifecycle: GitLifecycleFixture::Ready,
+        branch: Some(GitBranchFixture::Branch {
+            name: "alpha-work".into(),
+            ahead: 1,
+            behind: 0,
+        }),
+        status_counts: git_status_counts(&foreign_entries)?,
+        status_entries: foreign_entries,
+        selected_path: Some("foreign/alpha_only.rs".into()),
+        pending_operation: None,
+        badge_count: 1,
+        requested_mutations: Vec::new(),
+        ignored_stale_refresh_count: 0,
+        focus: GitFocusFixture::StatusEntry,
+    };
+
+    let mut scene = spec.fixture();
+    scene.content_state = ContentStateFixture::Ready;
+    scene.connectivity = ConnectivityFixture::Online;
+    scene.project = Some(ProjectFixture {
+        id: "visual-project".into(),
+        display_name: "Omega".into(),
+    });
+    scene.repositories = vec![
+        RepositoryFixture {
+            id: "visual-repository-alpha".into(),
+            project_id: "visual-project".into(),
+            worktrees: vec![WorktreeFixture {
+                id: "alpha-worktree".into(),
+                branch: Some("alpha-work".into()),
+                git_state: None,
+                dirty_files: foreign_snapshot.badge_count,
+                conflicts: foreign_snapshot.status_counts.conflicts,
+                ahead: 1,
+                behind: 0,
+            }],
+        },
+        RepositoryFixture {
+            id: "visual-repository-beta".into(),
+            project_id: "visual-project".into(),
+            worktrees: vec![git_worktree_for_snapshot(&active_snapshot)?],
+        },
+    ];
+    scene.threads = vec![
+        ThreadFixture {
+            id: "active-thread".into(),
+            project_id: Some("visual-project".into()),
+            repository_id: Some("visual-repository-beta".into()),
+            worktree_id: Some("beta-worktree".into()),
+        },
+        ThreadFixture {
+            id: "foreign-thread".into(),
+            project_id: Some("visual-project".into()),
+            repository_id: Some("visual-repository-alpha".into()),
+            worktree_id: Some("alpha-worktree".into()),
+        },
+    ];
+    scene.active_thread_id = Some("active-thread".into());
+
+    for surface in &mut scene.surfaces {
+        surface.available = true;
+        if surface.id == WorkSurfaceId::Git {
+            surface.badge =
+                (active_snapshot.badge_count > 0).then_some(active_snapshot.badge_count);
+        }
+    }
+    scene.active_surface = Some(WorkSurfaceId::Git);
+    scene.dock_open = true;
+
+    let active_surfaces = scene.surfaces.clone();
+    let mut foreign_surfaces = scene.surfaces.clone();
+    let foreign_git_surface = foreign_surfaces
+        .iter_mut()
+        .find(|surface| surface.id == WorkSurfaceId::Git)
+        .context("Git surface fixture is missing")?;
+    foreign_git_surface.badge = Some(foreign_snapshot.badge_count);
+    scene.thread_workbenches = vec![
+        ThreadWorkbenchFixture {
+            thread_id: "active-thread".into(),
+            generation: active_snapshot.binding.generation,
+            binding: Some(WorkbenchBindingFixture {
+                repository_id: active_snapshot.binding.repository_id.clone(),
+                worktree_id: active_snapshot.binding.worktree_id.clone(),
+            }),
+            requested_surface: Some(WorkSurfaceId::Git),
+            effective_surface: Some(WorkSurfaceId::Git),
+            dock_open: true,
+            surfaces: active_surfaces,
+        },
+        ThreadWorkbenchFixture {
+            thread_id: "foreign-thread".into(),
+            generation: foreign_snapshot.binding.generation,
+            binding: Some(WorkbenchBindingFixture {
+                repository_id: foreign_snapshot.binding.repository_id.clone(),
+                worktree_id: foreign_snapshot.binding.worktree_id.clone(),
+            }),
+            requested_surface: Some(WorkSurfaceId::Git),
+            effective_surface: Some(WorkSurfaceId::Git),
+            dock_open: false,
+            surfaces: foreign_surfaces,
+        },
+    ];
+    scene.git_snapshots = vec![active_snapshot, foreign_snapshot];
+    scene.validate()?;
+    Ok(scene)
+}
+
+fn git_fixture_for_scene(name: &str, binding: GitBindingFixture) -> Result<GitSnapshotFixture> {
+    let mut fixture = GitSnapshotFixture {
+        binding,
+        lifecycle: GitLifecycleFixture::Ready,
+        branch: Some(GitBranchFixture::Branch {
+            name: "codex/git-surface".into(),
+            ahead: 0,
+            behind: 0,
+        }),
+        status_entries: Vec::new(),
+        status_counts: GitStatusCountsFixture::default(),
+        selected_path: None,
+        pending_operation: None,
+        badge_count: 0,
+        requested_mutations: Vec::new(),
+        ignored_stale_refresh_count: 0,
+        focus: GitFocusFixture::Surface,
+    };
+
+    match name {
+        "omega_workbench_git_clean" => {}
+        "omega_workbench_git_dirty" => {
+            fixture.branch = Some(GitBranchFixture::Branch {
+                name: "codex/git-surface".into(),
+                ahead: 2,
+                behind: 1,
+            });
+            fixture.status_entries = vec![
+                git_status(
+                    "README.md",
+                    GitFileStatusFixture::Modified,
+                    GitStagingStateFixture::Unstaged,
+                ),
+                git_status(
+                    "src/new.rs",
+                    GitFileStatusFixture::Untracked,
+                    GitStagingStateFixture::Unstaged,
+                ),
+            ];
+            fixture.selected_path = Some("README.md".into());
+            fixture.focus = GitFocusFixture::StatusEntry;
+            fixture.requested_mutations.push(GitMutationFixture {
+                kind: GitOperationKindFixture::OpenDiff,
+                target: GitMutationTargetFixture::Path("README.md".into()),
+                result: GitMutationResultFixture::Succeeded,
+            });
+        }
+        "omega_workbench_git_staged" => {
+            fixture.status_entries = vec![git_status(
+                "src/main.rs",
+                GitFileStatusFixture::Modified,
+                GitStagingStateFixture::Staged,
+            )];
+            fixture.selected_path = Some("src/main.rs".into());
+            fixture.focus = GitFocusFixture::StatusList;
+            fixture.requested_mutations.push(GitMutationFixture {
+                kind: GitOperationKindFixture::Stage,
+                target: GitMutationTargetFixture::Path("src/main.rs".into()),
+                result: GitMutationResultFixture::Succeeded,
+            });
+        }
+        "omega_workbench_git_conflict" => {
+            fixture.status_entries = vec![git_status(
+                "src/conflicted.rs",
+                GitFileStatusFixture::Conflicted,
+                GitStagingStateFixture::Conflict,
+            )];
+            fixture.selected_path = Some("src/conflicted.rs".into());
+            fixture.focus = GitFocusFixture::StatusEntry;
+            fixture.requested_mutations.push(GitMutationFixture {
+                kind: GitOperationKindFixture::Discard,
+                target: GitMutationTargetFixture::Path("src/conflicted.rs".into()),
+                result: GitMutationResultFixture::Cancelled,
+            });
+        }
+        "omega_workbench_git_detached" => {
+            fixture.branch = Some(GitBranchFixture::Detached {
+                head: "daac524".into(),
+            });
+            fixture.status_entries = vec![git_status(
+                "src/detached.rs",
+                GitFileStatusFixture::Modified,
+                GitStagingStateFixture::Unstaged,
+            )];
+            fixture.selected_path = Some("src/detached.rs".into());
+            fixture.focus = GitFocusFixture::BranchMenu;
+        }
+        "omega_workbench_git_unborn" => {
+            fixture.branch = Some(GitBranchFixture::Unborn {
+                name: "omega/initial".into(),
+            });
+            fixture.status_entries = vec![git_status(
+                "README.md",
+                GitFileStatusFixture::Untracked,
+                GitStagingStateFixture::Unstaged,
+            )];
+            fixture.selected_path = Some("README.md".into());
+            fixture.focus = GitFocusFixture::CommitEditor;
+        }
+        "omega_workbench_git_pending" => {
+            fixture.status_entries = vec![git_status(
+                "src/main.rs",
+                GitFileStatusFixture::Modified,
+                GitStagingStateFixture::Staged,
+            )];
+            fixture.selected_path = Some("src/main.rs".into());
+            fixture.focus = GitFocusFixture::CommitEditor;
+            let target = GitMutationTargetFixture::CommitMessage("Mount native Git surface".into());
+            fixture.pending_operation = Some(GitPendingOperationFixture {
+                id: "commit-operation".into(),
+                kind: GitOperationKindFixture::Commit,
+                target: target.clone(),
+                confirmation_required: false,
+            });
+            fixture.requested_mutations.push(GitMutationFixture {
+                kind: GitOperationKindFixture::Commit,
+                target,
+                result: GitMutationResultFixture::Pending,
+            });
+        }
+        "omega_workbench_git_multi_repository" => {
+            fixture.status_entries = vec![git_status(
+                "src/beta.rs",
+                GitFileStatusFixture::Modified,
+                GitStagingStateFixture::Unstaged,
+            )];
+            fixture.selected_path = Some("src/beta.rs".into());
+            fixture.focus = GitFocusFixture::StatusEntry;
+            fixture.requested_mutations.push(GitMutationFixture {
+                kind: GitOperationKindFixture::SwitchRepository,
+                target: GitMutationTargetFixture::Binding {
+                    repository_id: "visual-repository-beta".into(),
+                    worktree_id: "beta-worktree".into(),
+                },
+                result: GitMutationResultFixture::Succeeded,
+            });
+        }
+        "omega_workbench_git_repository_removed" => {
+            fixture.lifecycle = GitLifecycleFixture::RepositoryRemoved;
+            fixture.branch = None;
+            fixture.ignored_stale_refresh_count = 1;
+            fixture.requested_mutations.push(GitMutationFixture {
+                kind: GitOperationKindFixture::Refresh,
+                target: GitMutationTargetFixture::None,
+                result: GitMutationResultFixture::Rejected,
+            });
+        }
+        "omega_workbench_git_offline" => {
+            fixture.lifecycle = GitLifecycleFixture::Offline;
+            fixture.status_entries = vec![git_status(
+                "src/offline.rs",
+                GitFileStatusFixture::Modified,
+                GitStagingStateFixture::Unstaged,
+            )];
+            fixture.selected_path = Some("src/offline.rs".into());
+            fixture.focus = GitFocusFixture::Toolbar;
+            fixture.requested_mutations.push(GitMutationFixture {
+                kind: GitOperationKindFixture::Pull,
+                target: GitMutationTargetFixture::None,
+                result: GitMutationResultFixture::Rejected,
+            });
+        }
+        "omega_workbench_git_reconnect" => {
+            fixture.lifecycle = GitLifecycleFixture::Reconnecting;
+            fixture.branch = Some(GitBranchFixture::Branch {
+                name: "codex/git-surface".into(),
+                ahead: 3,
+                behind: 1,
+            });
+            fixture.status_entries = vec![git_status(
+                "src/reconnected.rs",
+                GitFileStatusFixture::Modified,
+                GitStagingStateFixture::Unstaged,
+            )];
+            fixture.selected_path = Some("src/reconnected.rs".into());
+            fixture.focus = GitFocusFixture::StatusList;
+            fixture.ignored_stale_refresh_count = 1;
+            fixture.requested_mutations.push(GitMutationFixture {
+                kind: GitOperationKindFixture::Refresh,
+                target: GitMutationTargetFixture::None,
+                result: GitMutationResultFixture::Succeeded,
+            });
+        }
+        "omega_workbench_git_error" => {
+            fixture.lifecycle =
+                GitLifecycleFixture::Error("Could not refresh repository status".into());
+            fixture.requested_mutations.push(GitMutationFixture {
+                kind: GitOperationKindFixture::Commit,
+                target: GitMutationTargetFixture::CommitMessage("Mount native Git surface".into()),
+                result: GitMutationResultFixture::Failed("pre-commit hook failed".into()),
+            });
+        }
+        _ => bail!("unknown Git workbench scene {name:?}"),
+    }
+
+    fixture.status_counts = git_status_counts(&fixture.status_entries)?;
+    fixture.badge_count = u32::try_from(fixture.status_entries.len())
+        .context("Git fixture contains more status entries than the badge can represent")?;
+    Ok(fixture)
+}
+
+fn git_worktree_for_snapshot(snapshot: &GitSnapshotFixture) -> Result<WorktreeFixture> {
+    let (branch, git_state, ahead, behind) = match &snapshot.branch {
+        Some(GitBranchFixture::Branch {
+            name,
+            ahead,
+            behind,
+        }) => (Some(name.clone()), None, *ahead, *behind),
+        Some(GitBranchFixture::Detached { .. }) => (None, None, 0, 0),
+        Some(GitBranchFixture::Unborn { name }) => (
+            Some(name.clone()),
+            Some(WorktreeGitStateFixture::Unborn),
+            0,
+            0,
+        ),
+        None => (Some("codex/git-surface".into()), None, 0, 0),
+    };
+    Ok(WorktreeFixture {
+        id: snapshot.binding.worktree_id.clone(),
+        branch,
+        git_state,
+        dirty_files: snapshot.badge_count,
+        conflicts: snapshot.status_counts.conflicts,
+        ahead,
+        behind,
+    })
+}
+
+fn git_status(
+    path: &str,
+    status: GitFileStatusFixture,
+    staging: GitStagingStateFixture,
+) -> GitStatusEntryFixture {
+    GitStatusEntryFixture {
+        path: path.into(),
+        old_path: None,
+        status,
+        staging,
     }
 }
 
@@ -2734,7 +3785,9 @@ pub fn prove_workbench_shell(
         probe.require_accessibility_property(
             selector,
             "expanded",
-            serde_json::Value::Bool(scene.dock_open && scene.active_surface == Some(surface.id)),
+            serde_json::Value::Bool(
+                surface.available && scene.dock_open && scene.active_surface == Some(surface.id),
+            ),
         )?;
         if surface.available {
             probe.require_interactive(selector)?;
@@ -2892,6 +3945,147 @@ pub fn prove_review_surface(
 }
 
 fn require_review_match<T>(
+    name: &str,
+    expected: &T,
+    actual: &T,
+    checks: &mut Vec<ProofCheck>,
+) -> Result<()>
+where
+    T: std::fmt::Debug + PartialEq,
+{
+    if expected != actual {
+        let detail = format!("expected {expected:?}, got {actual:?}");
+        checks.push(ProofCheck::failed(name, &detail));
+        bail!("{name}: {detail}");
+    }
+    checks.push(ProofCheck::passed(name));
+    Ok(())
+}
+
+pub fn prove_git_surface(
+    scene: &WorkbenchScene,
+    actual: &GitSnapshotFixture,
+) -> Result<Vec<ProofCheck>> {
+    scene.validate()?;
+    let expected = scene
+        .active_git_snapshot()
+        .context("Git proof scene has no active Git snapshot")?;
+    let mut checks = Vec::new();
+
+    require_git_match(
+        "git-binding-identity",
+        &expected.binding,
+        &actual.binding,
+        &mut checks,
+    )?;
+    require_git_match(
+        "git-lifecycle",
+        &expected.lifecycle,
+        &actual.lifecycle,
+        &mut checks,
+    )?;
+    require_git_match(
+        "git-branch-state",
+        &expected.branch,
+        &actual.branch,
+        &mut checks,
+    )?;
+
+    let expected_paths = expected
+        .status_entries
+        .iter()
+        .map(|entry| entry.path.as_str())
+        .collect::<BTreeSet<_>>();
+    let foreign_paths = scene
+        .git_snapshots
+        .iter()
+        .filter(|snapshot| snapshot.binding.repository_id != expected.binding.repository_id)
+        .flat_map(|snapshot| snapshot.status_entries.iter())
+        .map(|entry| entry.path.as_str())
+        .filter(|path| !expected_paths.contains(path))
+        .collect::<BTreeSet<_>>();
+    let leaked_paths = actual
+        .status_entries
+        .iter()
+        .map(|entry| entry.path.as_str())
+        .filter(|path| foreign_paths.contains(path))
+        .collect::<Vec<_>>();
+    if !leaked_paths.is_empty() {
+        let detail =
+            format!("active Git snapshot leaked foreign-repository paths {leaked_paths:?}");
+        checks.push(ProofCheck::failed(
+            "git-no-foreign-repository-status",
+            &detail,
+        ));
+        bail!("{detail}");
+    }
+    checks.push(ProofCheck::passed("git-no-foreign-repository-status"));
+
+    require_git_match(
+        "git-ordered-status-staging",
+        &expected.status_entries,
+        &actual.status_entries,
+        &mut checks,
+    )?;
+    require_git_match(
+        "git-status-counts",
+        &expected.status_counts,
+        &actual.status_counts,
+        &mut checks,
+    )?;
+    require_git_match(
+        "git-selected-path",
+        &expected.selected_path,
+        &actual.selected_path,
+        &mut checks,
+    )?;
+    require_git_match(
+        "git-pending-operation",
+        &expected.pending_operation,
+        &actual.pending_operation,
+        &mut checks,
+    )?;
+    require_git_match(
+        "git-badge-count",
+        &expected.badge_count,
+        &actual.badge_count,
+        &mut checks,
+    )?;
+    require_git_match(
+        "git-requested-mutations-results",
+        &expected.requested_mutations,
+        &actual.requested_mutations,
+        &mut checks,
+    )?;
+    require_git_match(
+        "git-ignored-stale-refresh-count",
+        &expected.ignored_stale_refresh_count,
+        &actual.ignored_stale_refresh_count,
+        &mut checks,
+    )?;
+    require_git_match(
+        "git-focus-owner",
+        &expected.focus,
+        &actual.focus,
+        &mut checks,
+    )?;
+
+    let active_workbench = scene
+        .active_thread_workbench()
+        .context("Git proof scene has no active workbench projection")?;
+    let rail_badge = surface_fixture(&active_workbench.surfaces, WorkSurfaceId::Git)?.badge;
+    let expected_badge = (actual.badge_count > 0).then_some(actual.badge_count);
+    require_git_match(
+        "git-badge-agreement",
+        &expected_badge,
+        &rail_badge,
+        &mut checks,
+    )?;
+
+    Ok(checks)
+}
+
+fn require_git_match<T>(
     name: &str,
     expected: &T,
     actual: &T,
@@ -4441,10 +5635,216 @@ mod tests {
     }
 
     #[test]
+    fn git_scene_catalog_uses_distinct_repository_entities_and_generations() -> Result<()> {
+        let names = [
+            "omega_workbench_git_clean",
+            "omega_workbench_git_dirty",
+            "omega_workbench_git_staged",
+            "omega_workbench_git_conflict",
+            "omega_workbench_git_detached",
+            "omega_workbench_git_unborn",
+            "omega_workbench_git_pending",
+            "omega_workbench_git_multi_repository",
+            "omega_workbench_git_repository_removed",
+            "omega_workbench_git_offline",
+            "omega_workbench_git_reconnect",
+            "omega_workbench_git_error",
+        ];
+        for name in names {
+            let scene = workbench_git_scene(name)?;
+            assert_eq!(scene.fixture_version, 2);
+            assert_eq!(scene.repositories.len(), 2);
+            assert_eq!(scene.git_snapshots.len(), 2);
+            assert_eq!(scene.active_surface, Some(WorkSurfaceId::Git));
+            assert!(scene.dock_open);
+
+            let active = scene
+                .active_git_snapshot()
+                .context("Git fixture has no active snapshot")?;
+            let foreign = scene
+                .git_snapshots
+                .iter()
+                .find(|snapshot| snapshot.binding.thread_id != active.binding.thread_id)
+                .context("Git fixture has no foreign snapshot")?;
+            assert_ne!(active.binding.thread_id, foreign.binding.thread_id);
+            assert_ne!(active.binding.repository_id, foreign.binding.repository_id);
+            assert_ne!(active.binding.worktree_id, foreign.binding.worktree_id);
+            assert_ne!(
+                active.binding.repository_entity_id,
+                foreign.binding.repository_entity_id
+            );
+            assert_ne!(active.binding.generation, foreign.binding.generation);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn git_fixture_validation_rejects_cross_binding_order_counts_and_badges() -> Result<()> {
+        let scene = workbench_git_scene("omega_workbench_git_dirty")?;
+
+        let mut cross_bound = scene.clone();
+        cross_bound
+            .git_snapshots
+            .first_mut()
+            .context("active Git snapshot")?
+            .binding
+            .repository_id = "visual-repository-alpha".into();
+        assert!(
+            cross_bound
+                .validate()
+                .expect_err("cross-bound Git fixture must fail")
+                .to_string()
+                .contains("does not match its repository/worktree binding")
+        );
+
+        let mut unordered = scene.clone();
+        unordered
+            .git_snapshots
+            .first_mut()
+            .context("active Git snapshot")?
+            .status_entries
+            .reverse();
+        assert!(
+            unordered
+                .validate()
+                .expect_err("unordered Git status must fail")
+                .to_string()
+                .contains("ordered by path")
+        );
+
+        let mut wrong_counts = scene.clone();
+        wrong_counts
+            .git_snapshots
+            .first_mut()
+            .context("active Git snapshot")?
+            .status_counts
+            .staged = 1;
+        assert!(
+            wrong_counts
+                .validate()
+                .expect_err("incorrect Git counts must fail")
+                .to_string()
+                .contains("do not match entries")
+        );
+
+        let mut wrong_badge = scene;
+        let active_workbench = wrong_badge
+            .thread_workbenches
+            .iter_mut()
+            .find(|workbench| workbench.thread_id == "active-thread")
+            .context("active workbench")?;
+        let git_surface = active_workbench
+            .surfaces
+            .iter_mut()
+            .find(|surface| surface.id == WorkSurfaceId::Git)
+            .context("Git surface")?;
+        git_surface.badge = Some(99);
+        wrong_badge.surfaces = active_workbench.surfaces.clone();
+        assert!(
+            wrong_badge
+                .validate()
+                .expect_err("disagreeing Git badge must fail")
+                .to_string()
+                .contains("disagrees with typed snapshot badge")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn git_proof_checks_identity_status_operations_focus_badge_and_leaks() -> Result<()> {
+        let scene = workbench_git_scene("omega_workbench_git_pending")?;
+        let actual = scene
+            .active_git_snapshot()
+            .context("Git fixture has no active snapshot")?
+            .clone();
+        let checks = prove_git_surface(&scene, &actual)?;
+        let names = checks
+            .iter()
+            .map(|check| check.name.as_str())
+            .collect::<BTreeSet<_>>();
+        for required in [
+            "git-binding-identity",
+            "git-lifecycle",
+            "git-branch-state",
+            "git-ordered-status-staging",
+            "git-status-counts",
+            "git-selected-path",
+            "git-pending-operation",
+            "git-badge-count",
+            "git-badge-agreement",
+            "git-requested-mutations-results",
+            "git-ignored-stale-refresh-count",
+            "git-focus-owner",
+            "git-no-foreign-repository-status",
+        ] {
+            assert!(names.contains(required), "missing Git proof {required}");
+        }
+
+        let mut leaked = actual;
+        let foreign_entry = scene
+            .git_snapshots
+            .iter()
+            .find(|snapshot| snapshot.binding.thread_id == "foreign-thread")
+            .and_then(|snapshot| snapshot.status_entries.first())
+            .context("foreign Git status entry")?
+            .clone();
+        leaked.status_entries.push(foreign_entry);
+        assert!(
+            prove_git_surface(&scene, &leaked)
+                .expect_err("foreign repository status must fail")
+                .to_string()
+                .contains("foreign-repository paths")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn git_proof_observes_cancelled_destructive_action_and_stale_refresh_rejection() -> Result<()> {
+        let conflict = workbench_git_scene("omega_workbench_git_conflict")?;
+        let conflict_actual = conflict
+            .active_git_snapshot()
+            .context("conflict fixture has no active Git snapshot")?
+            .clone();
+        assert_eq!(
+            conflict_actual.requested_mutations,
+            vec![GitMutationFixture {
+                kind: GitOperationKindFixture::Discard,
+                target: GitMutationTargetFixture::Path("src/conflicted.rs".into()),
+                result: GitMutationResultFixture::Cancelled,
+            }]
+        );
+        prove_git_surface(&conflict, &conflict_actual)?;
+
+        let reconnect = workbench_git_scene("omega_workbench_git_reconnect")?;
+        let reconnect_actual = reconnect
+            .active_git_snapshot()
+            .context("reconnect fixture has no active Git snapshot")?
+            .clone();
+        assert_eq!(reconnect_actual.ignored_stale_refresh_count, 1);
+        prove_git_surface(&reconnect, &reconnect_actual)?;
+
+        let mut missed_rejection = reconnect_actual;
+        missed_rejection.ignored_stale_refresh_count = 0;
+        assert!(prove_git_surface(&reconnect, &missed_rejection).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn git_fixture_round_trip_preserves_typed_pending_operation() -> Result<()> {
+        let scene = workbench_git_scene("omega_workbench_git_pending")?;
+        let encoded = serde_json::to_vec(&scene)?;
+        let decoded: WorkbenchScene = serde_json::from_slice(&encoded)?;
+        assert_eq!(decoded, scene);
+        decoded.validate()?;
+        Ok(())
+    }
+
+    #[test]
     fn version_1_fixture_encoding_remains_backward_compatible() {
         let scene = valid_scene();
         let encoded = serde_json::to_value(&scene).expect("encode version 1 scene");
         assert!(encoded.get("thread_workbenches").is_none());
+        assert!(encoded.get("git_snapshots").is_none());
 
         let decoded: WorkbenchScene =
             serde_json::from_value(encoded).expect("decode version 1 scene without new field");
@@ -4779,6 +6179,37 @@ mod tests {
             assert_eq!(scene.phase, ScenePhase::Recording);
             assert_eq!(scene.fixture_version, 2);
             assert_eq!(scene.regions, WORKBENCH_REVIEW_REGIONS);
+            assert!(WORKBENCH_SHELL_PIXEL_SCENES.contains(&name));
+        }
+    }
+
+    #[test]
+    fn git_pixel_catalog_covers_required_states_and_region() {
+        let expected = BTreeSet::from([
+            "omega_workbench_git_clean",
+            "omega_workbench_git_dirty",
+            "omega_workbench_git_staged",
+            "omega_workbench_git_conflict",
+            "omega_workbench_git_detached",
+            "omega_workbench_git_unborn",
+            "omega_workbench_git_pending",
+            "omega_workbench_git_multi_repository",
+            "omega_workbench_git_repository_removed",
+            "omega_workbench_git_offline",
+            "omega_workbench_git_reconnect",
+            "omega_workbench_git_error",
+        ]);
+        let registered = HERMETIC_SCENES
+            .iter()
+            .filter(|scene| scene.name.starts_with("omega_workbench_git_"))
+            .map(|scene| scene.name)
+            .collect::<BTreeSet<_>>();
+        assert_eq!(registered, expected);
+        for name in registered {
+            let scene = scene_spec(name).expect("registered Git scene");
+            assert_eq!(scene.phase, ScenePhase::Recording);
+            assert_eq!(scene.fixture_version, 2);
+            assert_eq!(scene.regions, WORKBENCH_GIT_REGIONS);
             assert!(WORKBENCH_SHELL_PIXEL_SCENES.contains(&name));
         }
     }

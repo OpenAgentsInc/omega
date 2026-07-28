@@ -34,6 +34,7 @@ use zed_actions::{
         ToggleFocus,
     },
     full_auto_panel::{OpenLauncher, ToggleFocus as ToggleFullAutoFocus},
+    git_panel::ToggleFocus as ToggleGitFocus,
     workroom::OpenPanel as OpenSarahWorkroomPanel,
 };
 
@@ -86,6 +87,9 @@ use http_client::{AsyncBody, HttpClientWithUrl};
 use fs::Fs;
 use full_auto_ui::FullAutoPanel;
 use futures::FutureExt as _;
+use git_ui::git_panel::{
+    Close as CloseGitPanel, GitPanel, GitPanelRepositoryScope, Toggle as ToggleGitPanel,
+};
 use gpui::{
     Action, Anchor, Animation, AnimationExt, AnyElement, App, AsyncWindowContext, ClipboardItem,
     Entity, EventEmitter, ExternalPaths, FocusHandle, Focusable, Hsla, KeyContext, Pixels,
@@ -95,7 +99,7 @@ use gpui::{
 use language::LanguageRegistry;
 use language_model::LanguageModelRegistry;
 use notifications::status_toast::StatusToast;
-use project::{Project, ProjectPath, Worktree, WorktreeId};
+use project::{Project, ProjectPath, Worktree, WorktreeId, git_store::RepositoryId};
 use project_panel::ProjectPanel;
 use settings::TerminalDockPosition;
 use settings::{NotifyWhenAgentWaiting, Settings, update_settings_file};
@@ -1361,10 +1365,16 @@ pub struct AgentPanel {
     workbench_files_panel_handed_off: bool,
     _workbench_files_panel_observation: Option<Subscription>,
     _workbench_files_panel_event_subscription: Option<Subscription>,
+    workbench_git_panel: Option<Entity<GitPanel>>,
+    workbench_git_panel_handed_off: bool,
+    _workbench_git_panel_observation: Option<Subscription>,
+    _workbench_git_panel_event_subscription: Option<Subscription>,
     #[cfg(any(test, feature = "test-support"))]
     workbench_identity_phase_override: Option<IdentityPhase>,
     #[cfg(any(test, feature = "test-support"))]
     workbench_identity_observation_override: Option<ThreadIdentityObservation>,
+    #[cfg(any(test, feature = "test-support"))]
+    workbench_git_lifecycle_override: Option<workbench_shell::NativeGitLifecycle>,
 }
 
 impl AgentPanel {
@@ -1680,6 +1690,23 @@ impl AgentPanel {
                     },
                 )
             });
+        let workbench_git_panel = workspace.panel::<GitPanel>(cx);
+        let workbench_git_panel_observation = workbench_git_panel.as_ref().map(|panel| {
+            cx.observe_in(panel, window, |this, _panel, window, cx| {
+                this.synchronize_git_surface_lifecycle_for_panel(cx);
+                this.sync_workbench_shell(window, cx);
+                cx.notify();
+            })
+        });
+        let workbench_git_panel_event_subscription = workbench_git_panel.as_ref().map(|panel| {
+            cx.subscribe_in(
+                panel,
+                window,
+                |this, _panel, event: &PanelEvent, window, cx| {
+                    this.handle_workbench_git_panel_event(event, window, cx);
+                },
+            )
+        });
         let workspace = workspace.weak_handle();
 
         let context_server_registry =
@@ -1831,10 +1858,16 @@ impl AgentPanel {
             workbench_files_panel_handed_off: false,
             _workbench_files_panel_observation: workbench_files_panel_observation,
             _workbench_files_panel_event_subscription: workbench_files_panel_event_subscription,
+            workbench_git_panel,
+            workbench_git_panel_handed_off: false,
+            _workbench_git_panel_observation: workbench_git_panel_observation,
+            _workbench_git_panel_event_subscription: workbench_git_panel_event_subscription,
             #[cfg(any(test, feature = "test-support"))]
             workbench_identity_phase_override: None,
             #[cfg(any(test, feature = "test-support"))]
             workbench_identity_observation_override: None,
+            #[cfg(any(test, feature = "test-support"))]
+            workbench_git_lifecycle_override: None,
         };
 
         let mut panel = panel;
@@ -8974,6 +9007,10 @@ impl AgentPanel {
             .workbench_shell
             .review_surface_for_active_binding(cx)
             .is_some_and(|surface| surface.focus_handle(cx).contains_focused(window, cx));
+        let git_surface_was_focused = self
+            .workbench_shell
+            .git_surface_for_active_binding(cx)
+            .is_some_and(|surface| surface.read(cx).contains_focus(window, cx));
         let context = self.workbench_thread_context(cx);
         let result = match context {
             Ok((thread_id, observation)) => self
@@ -8984,6 +9021,35 @@ impl AgentPanel {
         if let Err(error) = result {
             log::warn!("failed to synchronize workbench shell: {error:#}");
             self.workbench_shell.record_error(error.to_string());
+        }
+        if self.workbench_shell_enabled
+            && self.workbench_git_panel_handed_off
+            && let Some(panel) = self.workbench_git_panel.clone()
+        {
+            let desired_scope = self
+                .workbench_git_has_authority(cx)
+                .then(|| {
+                    Some(GitPanelRepositoryScope {
+                        repository_id: self.active_workbench_git_repository_id(cx)?,
+                        worktree_id: self.active_workbench_worktree_id(cx)?,
+                        generation: self
+                            .workbench_shell
+                            .projection()
+                            .visible_projection()?
+                            .generation,
+                    })
+                })
+                .flatten();
+            panel.update(cx, |panel, cx| {
+                if let Some(scope) = desired_scope {
+                    if let Err(error) = panel.set_repository_scope(Some(scope), window, cx) {
+                        panel.set_repository_scope_unavailable(scope, window, cx);
+                        log::warn!("failed to synchronize the exact native Git scope: {error:#}");
+                    }
+                } else if let Some(scope) = panel.repository_scope() {
+                    panel.set_repository_scope_unavailable(scope, window, cx);
+                }
+            });
         }
         if self.workbench_shell_enabled
             && self.workbench_files_panel_handed_off
@@ -9156,6 +9222,70 @@ impl AgentPanel {
                 }
             }
         }
+        if let Some(git_surface) = self.workbench_shell.git_surface_for_active_binding(cx) {
+            let binding = git_surface.read(cx).binding().cloned();
+            if let Some(binding) = binding {
+                let lifecycle = self.native_git_lifecycle(cx);
+                git_surface.update(cx, |git_surface, cx| {
+                    git_surface.set_lifecycle(
+                        binding.generation,
+                        binding.git_repository_id,
+                        lifecycle,
+                        cx,
+                    );
+                });
+            }
+        }
+        let git_is_visible = self
+            .workbench_shell
+            .projection()
+            .visible_projection()
+            .is_some_and(|visible| {
+                visible.dock_open
+                    && visible.effective_surface == Some(omega_workbench_state::WorkSurface::Git)
+            });
+        if self.workbench_shell_enabled && git_is_visible && self.workbench_git_has_authority(cx) {
+            let git_host_was_missing = self
+                .workbench_shell
+                .git_surface_for_active_binding(cx)
+                .is_none();
+            match self
+                .prepare_git_surface(window, cx)
+                .and_then(|git_surface| {
+                    let binding = git_surface
+                        .read(cx)
+                        .binding()
+                        .cloned()
+                        .ok_or_else(|| anyhow!("the native Git surface is not bound"))?;
+                    let lifecycle = self.native_git_lifecycle(cx);
+                    git_surface.update(cx, |git_surface, cx| {
+                        git_surface.set_lifecycle(
+                            binding.generation,
+                            binding.git_repository_id,
+                            lifecycle,
+                            cx,
+                        );
+                    });
+                    self.workbench_shell
+                        .ensure_visible_git_host(git_surface, cx)
+                }) {
+                Ok(Some(host)) if git_surface_was_focused && git_host_was_missing => {
+                    host.focus_handle(cx).focus(window, cx);
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    log::warn!("failed to synchronize the native Git host: {error:#}");
+                    self.workbench_shell.record_error(error.to_string());
+                    if let Err(collapse_error) = self.workbench_shell.collapse_dock() {
+                        log::warn!(
+                            "failed to collapse Git after host synchronization failed: \
+                             {collapse_error:#}"
+                        );
+                    }
+                    self.focus_thread_transcript(window, cx);
+                }
+            }
+        }
         let files_is_visible = self
             .workbench_shell
             .projection()
@@ -9187,6 +9317,9 @@ impl AgentPanel {
         {
             self.focus_thread_transcript(window, cx);
         }
+        if git_surface_was_focused && (!git_is_visible || !self.workbench_git_has_authority(cx)) {
+            self.focus_thread_transcript(window, cx);
+        }
     }
 
     fn active_workbench_worktree_id(&self, cx: &App) -> Option<WorktreeId> {
@@ -9200,6 +9333,22 @@ impl AgentPanel {
             .visible_worktrees(cx)
             .find(|worktree| worktree.read(cx).abs_path().as_ref() == selected_path)
             .map(|worktree| worktree.read(cx).id())
+    }
+
+    fn active_workbench_git_repository_id(&self, cx: &App) -> Option<RepositoryId> {
+        let visible = self.workbench_shell.projection().visible_projection()?;
+        let selected = self.workbench_shell.identity()?.selected.as_ref()?;
+        if visible.binding.as_ref() != Some(&selected.binding) {
+            return None;
+        }
+        let repository_id = RepositoryId(selected.git_repository_id?);
+        self.project
+            .read(cx)
+            .git_store()
+            .read(cx)
+            .repositories()
+            .contains_key(&repository_id)
+            .then_some(repository_id)
     }
 
     fn workbench_files_have_authority(&self, cx: &App) -> bool {
@@ -9221,6 +9370,11 @@ impl AgentPanel {
             omega_workbench_state::WorkSurface::Review,
             cx,
         ) && self.active_agent_thread(cx).is_some()
+    }
+
+    fn workbench_git_has_authority(&self, cx: &App) -> bool {
+        self.workbench_repository_surface_has_authority(omega_workbench_state::WorkSurface::Git, cx)
+            && self.active_workbench_git_repository_id(cx).is_some()
     }
 
     fn workbench_repository_surface_has_authority(
@@ -9323,6 +9477,53 @@ impl AgentPanel {
                 if files_is_open {
                     if let Err(error) = self.workbench_shell.collapse_dock() {
                         log::warn!("failed to close the native Files surface: {error:#}");
+                        self.workbench_shell.record_error(error.to_string());
+                    }
+                    self.focus_thread_transcript(window, cx);
+                }
+            }
+            PanelEvent::ZoomIn | PanelEvent::ZoomOut => {}
+        }
+    }
+
+    fn handle_workbench_git_panel_event(
+        &mut self,
+        event: &PanelEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.workbench_git_panel_handed_off {
+            return;
+        }
+        let git_is_open = self
+            .workbench_shell
+            .projection()
+            .visible_projection()
+            .is_some_and(|visible| {
+                visible.dock_open
+                    && visible.effective_surface == Some(omega_workbench_state::WorkSurface::Git)
+            });
+        match event {
+            PanelEvent::Activate => {
+                if !self.workbench_git_has_authority(cx) {
+                    if git_is_open && let Err(error) = self.workbench_shell.collapse_dock() {
+                        log::warn!("failed to close unavailable Git: {error:#}");
+                        self.workbench_shell.record_error(error.to_string());
+                    }
+                    self.focus_thread_transcript(window, cx);
+                } else if git_is_open {
+                    if let Some(panel) = self.workbench_git_panel.as_ref() {
+                        panel.read(cx).activation_focus_handle(cx).focus(window, cx);
+                    }
+                    cx.notify();
+                } else {
+                    self.select_work_surface(omega_workbench_state::WorkSurface::Git, window, cx);
+                }
+            }
+            PanelEvent::Close => {
+                if git_is_open {
+                    if let Err(error) = self.workbench_shell.collapse_dock() {
+                        log::warn!("failed to close the native Git surface: {error:#}");
                         self.workbench_shell.record_error(error.to_string());
                     }
                     self.focus_thread_transcript(window, cx);
@@ -9469,6 +9670,194 @@ impl AgentPanel {
         Ok(review_surface)
     }
 
+    fn prepare_git_surface(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<Entity<workbench_shell::NativeGitSurface>> {
+        if !self.workbench_git_has_authority(cx) {
+            anyhow::bail!("the native Git surface has no usable repository authority");
+        }
+        let visible = self
+            .workbench_shell
+            .projection()
+            .visible_projection()
+            .ok_or_else(|| anyhow!("open a thread before preparing native Git"))?;
+        let repository = visible
+            .binding
+            .clone()
+            .ok_or_else(|| anyhow!("the active thread has no repository binding"))?;
+        let generation = visible.generation;
+        let thread_id = visible.thread_id;
+        let worktree_id = self
+            .active_workbench_worktree_id(cx)
+            .ok_or_else(|| anyhow!("the active thread worktree is unavailable"))?;
+        let git_repository_id = self
+            .active_workbench_git_repository_id(cx)
+            .ok_or_else(|| anyhow!("the active thread Git repository is unavailable"))?;
+        let repository_ids = self
+            .project
+            .read(cx)
+            .git_store()
+            .read(cx)
+            .repository_ids_for_worktree(worktree_id);
+        if !repository_ids.contains(&git_repository_id) {
+            anyhow::bail!(
+                "repository {git_repository_id:?} does not belong to worktree {worktree_id:?}"
+            );
+        }
+        let panel = if let Some(panel) = self.workbench_git_panel.clone() {
+            panel
+        } else {
+            let panel = self
+                .workspace
+                .upgrade()
+                .and_then(|workspace| workspace.read(cx).panel::<GitPanel>(cx))
+                .ok_or_else(|| anyhow!("the native Git surface is still loading"))?;
+            self.workbench_git_panel = Some(panel.clone());
+            self._workbench_git_panel_observation =
+                Some(cx.observe_in(&panel, window, |this, _panel, window, cx| {
+                    this.synchronize_git_surface_lifecycle_for_panel(cx);
+                    this.sync_workbench_shell(window, cx);
+                    cx.notify();
+                }));
+            self._workbench_git_panel_event_subscription = Some(cx.subscribe_in(
+                &panel,
+                window,
+                |this, _panel, event: &PanelEvent, window, cx| {
+                    this.handle_workbench_git_panel_event(event, window, cx);
+                },
+            ));
+            panel
+        };
+        let binding = workbench_shell::NativeGitBinding {
+            thread_id,
+            repository,
+            worktree_id,
+            git_repository_id,
+            generation,
+        };
+        let lifecycle = self.native_git_lifecycle(cx);
+        if let Some(git_surface) = self.workbench_shell.git_surface_for_active_binding(cx) {
+            git_surface.update(cx, |git_surface, cx| {
+                git_surface.bind(binding.clone(), window, cx)?;
+                git_surface.set_lifecycle(
+                    binding.generation,
+                    binding.git_repository_id,
+                    lifecycle,
+                    cx,
+                );
+                Ok::<(), anyhow::Error>(())
+            })?;
+            return Ok(git_surface);
+        }
+        let git_surface = cx.new(|cx| workbench_shell::NativeGitSurface::new(panel.clone(), cx));
+        git_surface.update(cx, |git_surface, cx| {
+            git_surface.bind(binding.clone(), window, cx)?;
+            git_surface.set_lifecycle(binding.generation, binding.git_repository_id, lifecycle, cx);
+            Ok::<(), anyhow::Error>(())
+        })?;
+        Ok(git_surface)
+    }
+
+    fn native_git_lifecycle(&self, cx: &App) -> workbench_shell::NativeGitLifecycle {
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some(lifecycle) = &self.workbench_git_lifecycle_override {
+            return lifecycle.clone();
+        }
+        match self.workbench_shell.projection().connection {
+            omega_workbench_state::ConnectionPhase::Offline => {
+                return workbench_shell::NativeGitLifecycle::Offline;
+            }
+            omega_workbench_state::ConnectionPhase::Reconnecting
+            | omega_workbench_state::ConnectionPhase::StaleProjection => {
+                return workbench_shell::NativeGitLifecycle::Reconnecting;
+            }
+            omega_workbench_state::ConnectionPhase::Online => {}
+        }
+        let Some(identity) = self.workbench_shell.identity() else {
+            return workbench_shell::NativeGitLifecycle::Loading;
+        };
+        match &identity.phase {
+            IdentityPhase::NoProject | IdentityPhase::Missing => {
+                return workbench_shell::NativeGitLifecycle::RepositoryRemoved;
+            }
+            IdentityPhase::Loading | IdentityPhase::Stale | IdentityPhase::Reconnecting => {
+                return workbench_shell::NativeGitLifecycle::Loading;
+            }
+            IdentityPhase::Offline => {
+                return workbench_shell::NativeGitLifecycle::Offline;
+            }
+            IdentityPhase::Error(error) | IdentityPhase::Inconsistent(error) => {
+                return workbench_shell::NativeGitLifecycle::Error(error.clone());
+            }
+            IdentityPhase::Ready => {}
+        }
+        let Some(selected) = identity.selected.as_ref() else {
+            return workbench_shell::NativeGitLifecycle::RepositoryRemoved;
+        };
+        let Some(repository_id) = selected.git_repository_id.map(RepositoryId) else {
+            return workbench_shell::NativeGitLifecycle::RepositoryRemoved;
+        };
+        if self.workbench_git_panel_handed_off
+            && let Some(panel) = self.workbench_git_panel.as_ref()
+        {
+            let panel = panel.read(cx);
+            let Some(scope) = panel.repository_scope() else {
+                return workbench_shell::NativeGitLifecycle::RepositoryRemoved;
+            };
+            if scope.repository_id != repository_id {
+                return workbench_shell::NativeGitLifecycle::Loading;
+            }
+            if !panel.repository_scope_is_available(cx) {
+                return workbench_shell::NativeGitLifecycle::RepositoryRemoved;
+            }
+        }
+        let git_store = self.project.read(cx).git_store();
+        let git_store = git_store.read(cx);
+        let Some(repository) = git_store.repositories().get(&repository_id) else {
+            return workbench_shell::NativeGitLifecycle::RepositoryRemoved;
+        };
+        if self.workbench_git_panel.as_ref().is_some_and(|panel| {
+            let panel = panel.read(cx);
+            panel
+                .repository_scope()
+                .is_some_and(|scope| scope.repository_id == repository_id)
+                && panel.has_pending_operation(cx)
+        }) {
+            return workbench_shell::NativeGitLifecycle::OperationPending;
+        }
+        let pending = repository.read(cx).pending_ops_summary().item_summary;
+        if pending.staging_count > 0 {
+            return workbench_shell::NativeGitLifecycle::OperationPending;
+        }
+        if selected.git.conflicts > 0 {
+            return workbench_shell::NativeGitLifecycle::Conflicted;
+        }
+        match &selected.branch {
+            BranchIdentity::Detached(_) => return workbench_shell::NativeGitLifecycle::Detached,
+            BranchIdentity::Unborn => return workbench_shell::NativeGitLifecycle::Unborn,
+            BranchIdentity::Branch(_) | BranchIdentity::NoGit => {}
+        }
+        if selected.git.dirty_files > 0 {
+            workbench_shell::NativeGitLifecycle::Dirty
+        } else {
+            workbench_shell::NativeGitLifecycle::Clean
+        }
+    }
+
+    fn synchronize_git_surface_lifecycle_for_panel(&mut self, cx: &mut Context<Self>) {
+        let scope = self
+            .workbench_git_panel
+            .as_ref()
+            .and_then(|panel| panel.read(cx).repository_scope());
+        if let Some(scope) = scope {
+            let lifecycle = self.native_git_lifecycle(cx);
+            self.workbench_shell
+                .set_git_scope_lifecycle(scope, lifecycle, cx);
+        }
+    }
+
     fn synchronize_native_search_scope(
         search_view: &Entity<search::project_search::ProjectSearchView>,
         worktree_id: Option<WorktreeId>,
@@ -9511,6 +9900,23 @@ impl AgentPanel {
             workspace.rehome_panel(panel, window, cx)
         })?;
         self.workbench_files_panel_handed_off = true;
+        Ok(())
+    }
+
+    fn detach_workspace_git_panel(
+        &mut self,
+        panel: &Entity<GitPanel>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<()> {
+        let workspace = self
+            .workspace
+            .upgrade()
+            .context("the workspace closed while opening Git")?;
+        workspace.update(cx, |workspace, cx| {
+            workspace.rehome_panel(panel, window, cx)
+        })?;
+        self.workbench_git_panel_handed_off = true;
         Ok(())
     }
 
@@ -9825,13 +10231,34 @@ impl AgentPanel {
         } else {
             None
         };
-        let selection = self.workbench_shell.select_surface(
-            surface,
-            files_panel.clone(),
-            search_surface,
-            review_surface,
-            cx,
-        );
+        let previous_git_scope = self
+            .workbench_git_panel
+            .as_ref()
+            .and_then(|panel| panel.read(cx).repository_scope());
+        let git_surface = if surface == omega_workbench_state::WorkSurface::Git {
+            match self.prepare_git_surface(window, cx) {
+                Ok(git_surface) => Some(git_surface),
+                Err(error) => {
+                    log::warn!("could not prepare the Git work surface: {error:#}");
+                    self.workbench_shell.record_error(error.to_string());
+                    cx.notify();
+                    return;
+                }
+            }
+        } else {
+            None
+        };
+        let selection = if let Some(git_surface) = git_surface.clone() {
+            self.workbench_shell.select_git_surface(git_surface, cx)
+        } else {
+            self.workbench_shell.select_surface(
+                surface,
+                files_panel.clone(),
+                search_surface,
+                review_surface,
+                cx,
+            )
+        };
         match selection {
             Ok(workbench_shell::SurfaceSelection::Collapsed) => {
                 self.focus_thread_transcript(window, cx);
@@ -9860,6 +10287,33 @@ impl AgentPanel {
                     cx.notify();
                     return;
                 }
+                let git_panel = git_surface
+                    .as_ref()
+                    .map(|git_surface| git_surface.read(cx).git_panel().clone());
+                if let Some(git_panel) = git_panel.as_ref()
+                    && !self.workbench_git_panel_handed_off
+                    && let Err(error) = self.detach_workspace_git_panel(git_panel, window, cx)
+                {
+                    if let Some(panel) = self.workbench_git_panel.as_ref() {
+                        panel
+                            .update(cx, |panel, cx| {
+                                panel.set_repository_scope(previous_git_scope, window, cx)
+                            })
+                            .log_err();
+                    }
+                    if let Err(collapse_error) = self.workbench_shell.collapse_dock() {
+                        log::warn!(
+                            "failed to collapse Git after workspace handoff failed: \
+                             {collapse_error:#}"
+                        );
+                    }
+                    log::warn!(
+                        "could not hand the native Git panel to the work surface: {error:#}"
+                    );
+                    self.workbench_shell.record_error(error.to_string());
+                    cx.notify();
+                    return;
+                }
                 host.focus_handle(cx).focus(window, cx);
                 cx.notify();
             }
@@ -9872,6 +10326,15 @@ impl AgentPanel {
                             panel.set_worktree_scope(previous_scope, window, cx);
                         }
                     });
+                }
+                if git_surface.is_some()
+                    && let Some(panel) = self.workbench_git_panel.as_ref()
+                {
+                    panel
+                        .update(cx, |panel, cx| {
+                            panel.set_repository_scope(previous_git_scope, window, cx)
+                        })
+                        .log_err();
                 }
                 log::warn!(
                     "could not select the {} work surface: {error:#}",
@@ -10432,6 +10895,42 @@ impl Render for AgentPanel {
                         }
                     },
                 ))
+                .on_action(cx.listener(|this, _: &ToggleGitFocus, window, cx| {
+                    if this.workbench_git_panel_handed_off {
+                        cx.stop_propagation();
+                        this.select_work_surface(
+                            omega_workbench_state::WorkSurface::Git,
+                            window,
+                            cx,
+                        );
+                    }
+                }))
+                .on_action(cx.listener(|this, _: &ToggleGitPanel, window, cx| {
+                    if this.workbench_git_panel_handed_off {
+                        cx.stop_propagation();
+                        this.select_work_surface(
+                            omega_workbench_state::WorkSurface::Git,
+                            window,
+                            cx,
+                        );
+                    }
+                }))
+                .on_action(cx.listener(|this, _: &CloseGitPanel, window, cx| {
+                    if this.workbench_git_panel_handed_off
+                        && this
+                            .workbench_shell
+                            .projection()
+                            .visible_projection()
+                            .is_some_and(|visible| {
+                                visible.dock_open
+                                    && visible.effective_surface
+                                        == Some(omega_workbench_state::WorkSurface::Git)
+                            })
+                    {
+                        cx.stop_propagation();
+                        this.collapse_work_surface_dock(window, cx);
+                    }
+                }))
                 .on_action(
                     cx.listener(|this, _: &workspace::CloseActiveDock, window, cx| {
                         let files_is_open = this
@@ -10451,9 +10950,29 @@ impl Render for AgentPanel {
                             .workbench_shell
                             .visible_host()
                             .is_some_and(|host| host.focus_handle(cx).contains_focused(window, cx));
-                        if this.workbench_files_panel_handed_off
+                        let git_is_open = this
+                            .workbench_shell
+                            .projection()
+                            .visible_projection()
+                            .is_some_and(|visible| {
+                                visible.dock_open
+                                    && visible.effective_surface
+                                        == Some(omega_workbench_state::WorkSurface::Git)
+                            });
+                        let git_panel_is_focused =
+                            this.workbench_git_panel.as_ref().is_some_and(|panel| {
+                                panel.focus_handle(cx).contains_focused(window, cx)
+                            });
+                        let git_host_is_focused = this
+                            .workbench_shell
+                            .visible_host()
+                            .is_some_and(|host| host.focus_handle(cx).contains_focused(window, cx));
+                        if (this.workbench_files_panel_handed_off
                             && files_is_open
-                            && (files_tree_is_focused || files_host_is_focused)
+                            && (files_tree_is_focused || files_host_is_focused))
+                            || (this.workbench_git_panel_handed_off
+                                && git_is_open
+                                && (git_panel_is_focused || git_host_is_focused))
                         {
                             cx.stop_propagation();
                             this.collapse_work_surface_dock(window, cx);
@@ -10627,6 +11146,11 @@ impl AgentPanel {
         self.thread_repository_menu_handle.deployed_menu()
     }
 
+    pub fn workbench_identity_target_selection_ready_for_tests(&self, cx: &App) -> bool {
+        self.thread_identity_target_selection_unavailable_reason(cx)
+            .is_none()
+    }
+
     pub fn workbench_branch_menu_for_tests(
         &self,
     ) -> Option<Entity<git_ui::branch_picker::BranchList>> {
@@ -10728,6 +11252,23 @@ impl AgentPanel {
         cx: &App,
     ) -> Option<Entity<workbench_shell::NativeReviewSurface>> {
         self.workbench_shell.review_surface_for_active_binding(cx)
+    }
+
+    pub fn workbench_git_surface_for_tests(
+        &self,
+        cx: &App,
+    ) -> Option<Entity<workbench_shell::NativeGitSurface>> {
+        self.workbench_shell.git_surface_for_active_binding(cx)
+    }
+
+    pub fn set_workbench_git_lifecycle_for_tests(
+        &mut self,
+        lifecycle: Option<workbench_shell::NativeGitLifecycle>,
+        cx: &mut Context<Self>,
+    ) {
+        self.workbench_git_lifecycle_override = lifecycle;
+        self.synchronize_git_surface_lifecycle_for_panel(cx);
+        cx.notify();
     }
 
     pub fn workbench_host_count_for_tests(&self) -> usize {

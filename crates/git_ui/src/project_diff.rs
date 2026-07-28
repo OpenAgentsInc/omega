@@ -20,7 +20,7 @@ use multi_buffer::MultiBuffer;
 use project::{
     Project, ProjectPath,
     git_store::{
-        Repository,
+        Repository, RepositoryId,
         diff_buffer_list::{self, DiffBase},
     },
 };
@@ -104,6 +104,27 @@ impl ProjectDiff {
         window: &mut Window,
         cx: &mut Context<Workspace>,
     ) {
+        let intended_repository = workspace.project().read(cx).active_repository(cx);
+        Self::deploy_at_repository_inner(workspace, intended_repository, entry, window, cx);
+    }
+
+    pub fn deploy_at_repository(
+        workspace: &mut Workspace,
+        repository: Entity<Repository>,
+        entry: Option<GitStatusEntry>,
+        window: &mut Window,
+        cx: &mut Context<Workspace>,
+    ) {
+        Self::deploy_at_repository_inner(workspace, Some(repository), entry, window, cx);
+    }
+
+    fn deploy_at_repository_inner(
+        workspace: &mut Workspace,
+        intended_repository: Option<Entity<Repository>>,
+        entry: Option<GitStatusEntry>,
+        window: &mut Window,
+        cx: &mut Context<Workspace>,
+    ) {
         telemetry::event!(
             "Git Diff Opened",
             source = if entry.is_some() {
@@ -112,7 +133,6 @@ impl ProjectDiff {
                 "Action"
             }
         );
-        let intended_repo = workspace.project().read(cx).active_repository(cx);
 
         let existing = workspace.items_of_type::<Self>(cx).next();
         let project_diff = if let Some(existing) = existing {
@@ -136,7 +156,7 @@ impl ProjectDiff {
             project_diff
         };
 
-        if let Some(intended) = &intended_repo {
+        if let Some(intended) = &intended_repository {
             let needs_switch = project_diff
                 .read(cx)
                 .repo(cx)
@@ -252,6 +272,10 @@ impl ProjectDiff {
 
     pub(crate) fn repo(&self, cx: &App) -> Option<Entity<Repository>> {
         self.diff.read(cx).repo(cx)
+    }
+
+    pub fn repository_id(&self, cx: &App) -> Option<RepositoryId> {
+        self.repo(cx).map(|repository| repository.read(cx).id)
     }
 
     pub(crate) fn set_repo(&mut self, repo: Option<Entity<Repository>>, cx: &mut Context<Self>) {

@@ -108,7 +108,12 @@ The shared scene types and proof records live in
 - each Review session's thread, ACP session, repository, worktree, action-log
   checkpoint and generation, lifecycle, ordered files and hunks, statuses and
   ranges, selection, focus, pending work, rejected stale completions, and
-  observed mutations with resulting temporary-repository contents; and
+  observed mutations with resulting temporary-repository contents;
+- each Git snapshot's exact thread, repository, worktree, native repository
+  entity and generation, lifecycle, branch and tracking state, ordered status
+  entries, staging and conflict counts, selection, focus, pending operation,
+  requested mutation results, badge agreement, and rejected stale refresh
+  count; and
 - the requested surface, dock state, revision, and mutations persisted across a
   cold restart.
 
@@ -354,6 +359,73 @@ after native identity, lifecycle, mutation, focus, accessibility, leak, stale
 completion, and teardown assertions pass. Teardown invalidates the generation,
 clears tracked buffers, removes the GPUI window and project worktrees, drains
 scheduled work, and only then releases the temporary repositories.
+
+### Native Git scenes {#native-git-scenes}
+
+Twelve registered scenes exercise the retained native Git Panel under an exact
+thread repository/worktree scope:
+
+| Scene                                         | Fixture and proof boundary                                                                                                                        |
+| --------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `omega_workbench_git_clean`                   | A clean named branch. Proves exact native repository entity, zero status rows, no badge, and retained panel ownership.                            |
+| `omega_workbench_git_dirty`                   | Modified and untracked files with ahead/behind tracking. Proves ordered native rows, counts, header indicators, and rail badge agreement.          |
+| `omega_workbench_git_staged`                  | A staged change. Proves native section/staging state, selection, commit-button validation, and exact mutation target.                             |
+| `omega_workbench_git_conflict`                | A conflicted entry plus a cancelled destructive request. Proves conflict semantics and that cancellation leaves repository state unchanged.       |
+| `omega_workbench_git_detached`                | A detached HEAD. Proves head classification without inventing a branch or losing the scoped repository.                                           |
+| `omega_workbench_git_unborn`                  | A repository before its first commit. Proves the native unborn state and commit validation boundary.                                              |
+| `omega_workbench_git_pending`                 | A held safe operation. Proves pending lifecycle, retained entity/state across collapse and reopen, and one recorded operation.                    |
+| `omega_workbench_git_multi_repository`        | Workspace-global alpha with the thread scoped to beta. Proves every read, mutation, row, badge, and branch belongs to beta.                        |
+| `omega_workbench_git_repository_removed`      | Removes the scoped repository after handoff. Proves the scope remains fail-closed, native rows disappear, and no neighboring repository is chosen. |
+| `omega_workbench_git_offline`                 | Makes remote Git work unavailable while local status remains scoped. Proves the lifecycle hides native actions without treating it as project loss. |
+| `omega_workbench_git_reconnect`               | Rejects an older lifecycle generation while remote Git reconnects. Proves stale completion cannot overwrite local rows or tracking state.           |
+| `omega_workbench_git_error`                   | Surfaces a typed refresh failure. Proves an accessible alert, retained last-known branch, and deterministic retry identity.                         |
+
+The runner creates isolated temporary Git repositories and loads the real
+Workspace `GitPanel` before Agent Panel. It selects the target through the
+production identity and `SelectGit` paths, then compares the panel's
+`GitPanelStateSnapshot` with the scene's `GitSnapshotFixture`. Scope
+repository, worktree, generation, resolved repository entity, head state,
+ordered status rows and sections, counts, selection, pending operation, commit
+validation, focus, and mutation records must agree before a frame can be
+captured.
+
+Multi-repository fixtures deliberately put recognizable foreign-only paths in
+alpha while the thread owns beta. The proof rejects any foreign path before it
+compares aggregate counts, so equal dirty-file totals cannot conceal an
+incorrect global-repository fallback. It separately requires the thread
+header, Git rail badge, native scope, and normalized panel state to identify
+the same logical repository/worktree and binding generation.
+
+Portable front-door tests dispatch native stage, unstage, open-diff, commit,
+branch, and discard actions against fake Git backends and inspect recorded
+calls. Destructive fixtures prove both cancellation and backend failure leave
+status, selection, and files unchanged. The portable open-diff proof checks
+the resulting Workspace item's exact project path and worktree ID. The visual
+proof additionally requires the diff item's synchronous repository ID to equal
+the thread-scoped repository and rejects any materialized active path from the
+foreign worktree, then restores the retained Git surface before capture.
+Together these checks catch same-named paths being resolved through a foreign
+Workspace-global repository. Collapse/reopen compares the panel, surface,
+commit editor, and selected-entry identity rather than relying on a similar
+screenshot.
+
+The stale-refresh proof holds alpha's debounced status or repository task,
+switches to beta, advances the scope generation, and then releases alpha.
+Acceptance requires beta's entity and selected row to remain unchanged,
+alpha's completion to increment the rejected-stale count, and all alpha-only
+selectors to remain absent. Repository removal uses the explicit unavailable
+scope; `None` is never interpreted as permission to follow the
+Workspace-global active repository after handoff. Remote-offline and
+reconnecting lifecycles instead preserve the available local scope and its
+last status/tracking projection while rejecting unsafe remote work.
+
+Actionable scenes require the native Git content inside
+`omega.workbench.surface.git`, with unique ordered status-row semantics and
+the expected focus owner. Offline, reconnecting, removed, and error scenes
+require `omega.workbench.git.lifecycle` and no interactive stale panel.
+Every scene captures the whole workbench plus the named `git-surface` region
+from `WORKBENCH_GIT_REGIONS`; baselines are admitted only after typed identity,
+mutation, focus, accessibility, safety, no-leak, and teardown assertions pass.
 
 ### Registering a scene {#registering-a-scene}
 

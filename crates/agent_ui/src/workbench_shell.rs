@@ -2,6 +2,7 @@ use std::{cell::Cell, collections::BTreeMap};
 
 use acp_thread::AcpThread;
 use anyhow::{Result, anyhow, bail};
+use git_ui::git_panel::{GitPanel, GitPanelRepositoryScope};
 use gpui::{
     Action, App, Context, Entity, FocusHandle, Focusable, Pixels, Render, SharedString, WeakEntity,
     Window, actions, px,
@@ -10,7 +11,7 @@ use omega_workbench_state::{
     ConnectionPhase, ProjectionSnapshot, ProjectionTransition, RepositoryBinding, WorkSurface,
     WorkbenchProjection,
 };
-use project::Project;
+use project::{Project, WorktreeId, git_store::RepositoryId};
 use project_panel::ProjectPanel;
 use search::{
     FocusSearch, ReplaceAll, ReplaceNext, SearchOptions, SelectNextMatch, SelectPreviousMatch,
@@ -20,7 +21,7 @@ use search::{
     },
 };
 use ui::{Color, Icon, IconName, IconSize, Label, LabelSize, prelude::*, v_flex};
-use workspace::{ToolbarItemView, Workspace, item::Item};
+use workspace::{Panel, ToolbarItemView, Workspace, item::Item};
 
 use crate::{
     AgentDiff, AgentDiffBinding, AgentDiffLifecycle, AgentDiffPane, AgentDiffToolbar,
@@ -167,6 +168,191 @@ pub enum SurfaceContentState {
 pub enum NativeSearchFocusTarget {
     Query,
     Results,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NativeGitBinding {
+    pub thread_id: String,
+    pub repository: RepositoryBinding,
+    pub worktree_id: WorktreeId,
+    pub git_repository_id: RepositoryId,
+    pub generation: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum NativeGitLifecycle {
+    Loading,
+    Clean,
+    Dirty,
+    Conflicted,
+    Detached,
+    Unborn,
+    OperationPending,
+    Offline,
+    Reconnecting,
+    RepositoryRemoved,
+    Error(SharedString),
+}
+
+impl NativeGitLifecycle {
+    fn is_actionable(&self) -> bool {
+        matches!(
+            self,
+            Self::Clean
+                | Self::Dirty
+                | Self::Conflicted
+                | Self::Detached
+                | Self::Unborn
+                | Self::OperationPending
+        )
+    }
+
+    fn accessible_label(&self) -> SharedString {
+        match self {
+            Self::Loading => "Loading Git repository".into(),
+            Self::Clean => "Git repository is clean".into(),
+            Self::Dirty => "Git repository has changes".into(),
+            Self::Conflicted => "Git repository has conflicts".into(),
+            Self::Detached => "Git repository has a detached HEAD".into(),
+            Self::Unborn => "Git repository has an unborn branch".into(),
+            Self::OperationPending => "Git operation in progress".into(),
+            Self::Offline => "Git repository is unavailable offline".into(),
+            Self::Reconnecting => "Reconnecting Git repository".into(),
+            Self::RepositoryRemoved => "Git repository was removed".into(),
+            Self::Error(error) => error.clone(),
+        }
+    }
+}
+
+pub struct NativeGitSurface {
+    focus_handle: FocusHandle,
+    git_panel: Entity<GitPanel>,
+    binding: Option<NativeGitBinding>,
+    lifecycle: NativeGitLifecycle,
+}
+
+impl NativeGitSurface {
+    pub fn new(git_panel: Entity<GitPanel>, cx: &mut Context<Self>) -> Self {
+        Self {
+            focus_handle: cx.focus_handle(),
+            git_panel,
+            binding: None,
+            lifecycle: NativeGitLifecycle::Loading,
+        }
+    }
+
+    pub fn bind(
+        &mut self,
+        binding: NativeGitBinding,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<()> {
+        if self.binding.as_ref() == Some(&binding) {
+            return Ok(());
+        }
+        self.git_panel.update(cx, |git_panel, cx| {
+            git_panel.set_repository_scope(
+                Some(GitPanelRepositoryScope {
+                    repository_id: binding.git_repository_id,
+                    worktree_id: binding.worktree_id,
+                    generation: binding.generation,
+                }),
+                window,
+                cx,
+            )
+        })?;
+        self.binding = Some(binding);
+        self.lifecycle = NativeGitLifecycle::Loading;
+        cx.notify();
+        Ok(())
+    }
+
+    pub fn set_lifecycle(
+        &mut self,
+        generation: u64,
+        git_repository_id: RepositoryId,
+        lifecycle: NativeGitLifecycle,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(binding) = self.binding.as_ref() else {
+            return false;
+        };
+        if binding.generation != generation || binding.git_repository_id != git_repository_id {
+            return false;
+        }
+        if self.lifecycle == lifecycle {
+            return true;
+        }
+        self.lifecycle = lifecycle;
+        cx.notify();
+        true
+    }
+
+    pub fn git_panel(&self) -> &Entity<GitPanel> {
+        &self.git_panel
+    }
+
+    pub fn binding(&self) -> Option<&NativeGitBinding> {
+        self.binding.as_ref()
+    }
+
+    pub fn lifecycle(&self) -> &NativeGitLifecycle {
+        &self.lifecycle
+    }
+
+    pub fn contains_focus(&self, window: &Window, cx: &App) -> bool {
+        self.focus_handle.contains_focused(window, cx)
+            || self.git_panel.focus_handle(cx).contains_focused(window, cx)
+    }
+}
+
+impl Focusable for NativeGitSurface {
+    fn focus_handle(&self, cx: &App) -> FocusHandle {
+        if self.lifecycle.is_actionable() {
+            self.git_panel.read(cx).activation_focus_handle(cx)
+        } else {
+            self.focus_handle.clone()
+        }
+    }
+}
+
+impl Render for NativeGitSurface {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        let lifecycle = self.lifecycle.clone();
+        let lifecycle_label = lifecycle.accessible_label();
+        v_flex()
+            .id("omega-native-git-surface")
+            .debug_selector(|| "omega.workbench.git.content".to_string())
+            .role(gpui::Role::Group)
+            .aria_label("Git changes")
+            .track_focus(&self.focus_handle)
+            .size_full()
+            .when(lifecycle.is_actionable(), |this| {
+                this.child(self.git_panel.clone())
+            })
+            .when(!lifecycle.is_actionable(), |this| {
+                let role = if matches!(lifecycle, NativeGitLifecycle::Error(_)) {
+                    gpui::Role::Alert
+                } else {
+                    gpui::Role::Status
+                };
+                this.child(
+                    v_flex()
+                        .id("omega.workbench.git.lifecycle")
+                        .debug_selector(|| "omega.workbench.git.lifecycle".to_string())
+                        .role(role)
+                        .aria_label(lifecycle_label.clone())
+                        .size_full()
+                        .items_center()
+                        .justify_center()
+                        .child(
+                            Label::new(lifecycle_label)
+                                .size(LabelSize::Small)
+                                .color(Color::Muted),
+                        ),
+                )
+            })
+    }
 }
 
 pub struct NativeReviewSurface {
@@ -687,6 +873,7 @@ pub struct WorkSurfaceHost {
     files_panel: Option<Entity<ProjectPanel>>,
     search_surface: Option<Entity<NativeSearchSurface>>,
     review_surface: Option<Entity<NativeReviewSurface>>,
+    git_surface: Option<Entity<NativeGitSurface>>,
 }
 
 impl WorkSurfaceHost {
@@ -695,6 +882,7 @@ impl WorkSurfaceHost {
         files_panel: Option<Entity<ProjectPanel>>,
         search_surface: Option<Entity<NativeSearchSurface>>,
         review_surface: Option<Entity<NativeReviewSurface>>,
+        git_surface: Option<Entity<NativeGitSurface>>,
         cx: &mut Context<Self>,
     ) -> Self {
         Self {
@@ -704,6 +892,7 @@ impl WorkSurfaceHost {
             files_panel,
             search_surface,
             review_surface,
+            git_surface,
         }
     }
 
@@ -730,6 +919,11 @@ impl WorkSurfaceHost {
         self.review_surface.as_ref()
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn git_surface(&self) -> Option<&Entity<NativeGitSurface>> {
+        self.git_surface.as_ref()
+    }
+
     fn native_content_contains_focus(&self, window: &Window, cx: &App) -> bool {
         self.files_panel
             .as_ref()
@@ -742,6 +936,10 @@ impl WorkSurfaceHost {
                 .review_surface
                 .as_ref()
                 .is_some_and(|surface| surface.read(cx).contains_focus(window, cx))
+            || self
+                .git_surface
+                .as_ref()
+                .is_some_and(|surface| surface.read(cx).contains_focus(window, cx))
     }
 
     fn focus_native_content(&self, window: &mut Window, cx: &mut App) {
@@ -750,6 +948,8 @@ impl WorkSurfaceHost {
         } else if let Some(surface) = self.search_surface.as_ref() {
             surface.focus_handle(cx).focus(window, cx);
         } else if let Some(surface) = self.review_surface.as_ref() {
+            surface.focus_handle(cx).focus(window, cx);
+        } else if let Some(surface) = self.git_surface.as_ref() {
             surface.focus_handle(cx).focus(window, cx);
         }
     }
@@ -810,6 +1010,11 @@ impl Focusable for WorkSurfaceHost {
                         .as_ref()
                         .map(|surface| surface.focus_handle(cx))
                 })
+                .or_else(|| {
+                    self.git_surface
+                        .as_ref()
+                        .map(|surface| surface.focus_handle(cx))
+                })
                 .unwrap_or_else(|| self.focus_handle.clone())
         } else {
             self.focus_handle.clone()
@@ -836,11 +1041,17 @@ impl Render for WorkSurfaceHost {
         } else {
             None
         };
+        let git_surface = if matches!(self.content_state, SurfaceContentState::Ready) {
+            self.git_surface.clone()
+        } else {
+            None
+        };
         let status = match &self.content_state {
             SurfaceContentState::Ready
                 if files_panel.is_some()
                     || search_surface.is_some()
-                    || review_surface.is_some() =>
+                    || review_surface.is_some()
+                    || git_surface.is_some() =>
             {
                 None
             }
@@ -898,6 +1109,7 @@ impl Render for WorkSurfaceHost {
             .when_some(files_panel, |this, panel| this.child(panel))
             .when_some(search_surface, |this, surface| this.child(surface))
             .when_some(review_surface, |this, surface| this.child(surface))
+            .when_some(git_surface, |this, surface| this.child(surface))
             .when_some(status, |this, (status, role, message)| {
                 this.child(
                     v_flex()
@@ -1496,6 +1708,33 @@ impl WorkbenchShell {
         review_surface: Option<Entity<NativeReviewSurface>>,
         cx: &mut Context<crate::AgentPanel>,
     ) -> Result<SurfaceSelection> {
+        self.select_surface_with_native(
+            surface,
+            files_panel,
+            search_surface,
+            review_surface,
+            None,
+            cx,
+        )
+    }
+
+    pub fn select_git_surface(
+        &mut self,
+        git_surface: Entity<NativeGitSurface>,
+        cx: &mut Context<crate::AgentPanel>,
+    ) -> Result<SurfaceSelection> {
+        self.select_surface_with_native(WorkSurface::Git, None, None, None, Some(git_surface), cx)
+    }
+
+    fn select_surface_with_native(
+        &mut self,
+        surface: WorkSurface,
+        files_panel: Option<Entity<ProjectPanel>>,
+        search_surface: Option<Entity<NativeSearchSurface>>,
+        review_surface: Option<Entity<NativeReviewSurface>>,
+        git_surface: Option<Entity<NativeGitSurface>>,
+        cx: &mut Context<crate::AgentPanel>,
+    ) -> Result<SurfaceSelection> {
         let unavailable_reason = self
             .capability(surface)
             .ok_or_else(|| anyhow!("the {} surface is not registered", surface.label()))?
@@ -1532,6 +1771,7 @@ impl WorkbenchShell {
             files_panel,
             search_surface,
             review_surface,
+            git_surface,
             cx,
         ) {
             Ok(host) => host,
@@ -1554,6 +1794,7 @@ impl WorkbenchShell {
         files_panel: Option<Entity<ProjectPanel>>,
         search_surface: Option<Entity<NativeSearchSurface>>,
         review_surface: Option<Entity<NativeReviewSurface>>,
+        git_surface: Option<Entity<NativeGitSurface>>,
         cx: &mut Context<crate::AgentPanel>,
     ) -> Result<Entity<WorkSurfaceHost>> {
         if surface == WorkSurface::Files && files_panel.is_none() {
@@ -1564,6 +1805,9 @@ impl WorkbenchShell {
         }
         if surface == WorkSurface::Review && review_surface.is_none() {
             bail!("the native Review surface is unavailable");
+        }
+        if surface == WorkSurface::Git && git_surface.is_none() {
+            bail!("the native Git surface is unavailable");
         }
         let key = SurfaceHostKey {
             thread_id: thread_id.into(),
@@ -1582,7 +1826,14 @@ impl WorkbenchShell {
             bail!("{message}");
         }
         let host = cx.new(|cx| {
-            WorkSurfaceHost::new(key.clone(), files_panel, search_surface, review_surface, cx)
+            WorkSurfaceHost::new(
+                key.clone(),
+                files_panel,
+                search_surface,
+                review_surface,
+                git_surface,
+                cx,
+            )
         });
         self.hosts.insert(key, host.clone());
         Ok(host)
@@ -1606,6 +1857,7 @@ impl WorkbenchShell {
             binding,
             WorkSurface::Files,
             Some(files_panel),
+            None,
             None,
             None,
             cx,
@@ -1651,6 +1903,7 @@ impl WorkbenchShell {
             None,
             Some(search_surface),
             None,
+            None,
             cx,
         )
         .map(Some)
@@ -1694,9 +1947,102 @@ impl WorkbenchShell {
             None,
             None,
             Some(review_surface),
+            None,
             cx,
         )
         .map(Some)
+    }
+
+    pub fn git_surface_for_active_binding(&self, cx: &App) -> Option<Entity<NativeGitSurface>> {
+        let visible = self.projection.visible_projection()?;
+        let key = SurfaceHostKey {
+            thread_id: visible.thread_id,
+            binding: visible.binding,
+            surface: WorkSurface::Git,
+        };
+        self.hosts.get(&key)?.read(cx).git_surface.as_ref().cloned()
+    }
+
+    pub fn ensure_visible_git_host(
+        &mut self,
+        git_surface: Entity<NativeGitSurface>,
+        cx: &mut Context<crate::AgentPanel>,
+    ) -> Result<Option<Entity<WorkSurfaceHost>>> {
+        let Some(visible) = self.projection.visible_projection() else {
+            return Ok(None);
+        };
+        if !visible.dock_open || visible.effective_surface != Some(WorkSurface::Git) {
+            return Ok(None);
+        }
+        let thread_id = visible.thread_id.clone();
+        let binding = visible.binding;
+        self.ensure_host(
+            &thread_id,
+            binding,
+            WorkSurface::Git,
+            None,
+            None,
+            None,
+            Some(git_surface),
+            cx,
+        )
+        .map(Some)
+    }
+
+    pub fn set_active_git_content_state(
+        &mut self,
+        content_state: SurfaceContentState,
+        window: &mut Window,
+        cx: &mut Context<crate::AgentPanel>,
+    ) -> bool {
+        let Some(visible) = self.projection.visible_projection() else {
+            return false;
+        };
+        let key = SurfaceHostKey {
+            thread_id: visible.thread_id,
+            binding: visible.binding,
+            surface: WorkSurface::Git,
+        };
+        let Some(host) = self.hosts.get(&key) else {
+            return false;
+        };
+        host.update(cx, |host, cx| {
+            host.set_content_state_with_focus(content_state, window, cx);
+        });
+        true
+    }
+
+    pub fn set_git_scope_lifecycle(
+        &mut self,
+        scope: GitPanelRepositoryScope,
+        lifecycle: NativeGitLifecycle,
+        cx: &mut Context<crate::AgentPanel>,
+    ) -> usize {
+        let git_surfaces = self
+            .hosts
+            .values()
+            .filter_map(|host| host.read(cx).git_surface.as_ref().cloned())
+            .collect::<Vec<_>>();
+        let mut updated = 0;
+        for git_surface in git_surfaces {
+            let binding = git_surface.read(cx).binding().cloned();
+            if let Some(binding) = binding
+                && binding.git_repository_id == scope.repository_id
+                && binding.worktree_id == scope.worktree_id
+                && binding.generation == scope.generation
+                && git_surface.update(cx, |git_surface, cx| {
+                    git_surface.set_lifecycle(
+                        binding.generation,
+                        binding.git_repository_id,
+                        lifecycle.clone(),
+                        cx,
+                    )
+                })
+            {
+                updated += 1;
+            }
+        }
+        updated
     }
 
     pub fn set_active_review_content_state(

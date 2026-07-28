@@ -20,8 +20,9 @@ accessibility semantics, and deterministic tests. Issue 133 added the
 authoritative repository, worktree, branch, and Git-state projection described
 below. Issue 129 rehomes the Workspace-created native Project Panel into Files,
 issue 134 mounts native project Search, and issue 136 mounts native agent
-change review. The remaining generic hosts render loading, ready, error, or
-offline placeholders until their native adapters land.
+change review. Issue 132 rehomes the native Git Panel under an exact
+repository/worktree scope. The remaining generic hosts render loading, ready,
+error, or offline placeholders until their native adapters land.
 
 The remaining work is deliberately split so each native adapter can prove its
 own identity, behavior, and lifecycle:
@@ -31,12 +32,12 @@ own identity, behavior, and lifecycle:
 | [Issue 129](https://github.com/OpenAgentsInc/omega/issues/129) | Mounted the existing Project Panel as Files        |
 | [Issue 130](https://github.com/OpenAgentsInc/omega/issues/130) | Present the thread's typed plan                    |
 | [Issue 131](https://github.com/OpenAgentsInc/omega/issues/131) | Persist and cold-restore each thread's selection   |
-| [Issue 132](https://github.com/OpenAgentsInc/omega/issues/132) | Mount the existing Git Panel                       |
+| [Issue 132](https://github.com/OpenAgentsInc/omega/issues/132) | Mounted the existing Git Panel                     |
 | [Issue 134](https://github.com/OpenAgentsInc/omega/issues/134) | Mounted an embedded project-search entity          |
 | [Issue 136](https://github.com/OpenAgentsInc/omega/issues/136) | Mounted a thread-bound native review entity        |
 | [Issue 137](https://github.com/OpenAgentsInc/omega/issues/137) | Mount the existing Terminal Panel without spawning |
 
-Files, Search, and Review are production content. Until the other adapters
+Files, Search, Review, and Git are production content. Until the other adapters
 land, their entries remain retained-host foundations rather than replacements
 for the existing native panels.
 
@@ -258,6 +259,83 @@ exercise navigation, incremental updates, mutation, collapse/reopen, thread
 switch, invalidation, and a released stale completion. A passing screenshot is
 therefore impossible unless the underlying identity, selection, mutation,
 focus, and no-leak assertions have already passed.
+
+### Native Git adapter {#native-git-adapter}
+
+Git embeds the Workspace-created `GitPanel` and its existing repository
+entities, status subscriptions, commit editor, history view, diff navigation,
+branch operations, credential flow, hooks, signing, confirmation prompts, and
+error reporting. Agent Panel contributes only an ownership handoff, an exact
+scope, and the workbench lifecycle boundary. It does not create a parallel Git
+client or execute shell-string Git commands.
+
+The first successful Git activation resolves the selected
+`ThreadIdentityCandidate` to one typed `RepositoryId` and `WorktreeId`. The
+adapter verifies that `GitStore::repository_ids_for_worktree` contains that
+pair, applies a `GitPanelRepositoryScope`, creates or finds the retained host,
+and then calls `Workspace::rehome_panel` for the exact existing panel entity.
+The handoff is transactional: host or rehome failure restores the prior scope
+and collapses the attempted host. Later collapse, reopen, and thread switches
+reuse the same `GitPanel`; they do not recreate its editor, selection, scroll,
+history, or a safe operation already in progress.
+
+`GitPanelRepositoryScope` contains the repository ID, worktree ID, and
+workbench binding generation. While it is present, workspace-global
+`ActiveRepositoryChanged` events cannot retarget the panel. Repository updates
+are accepted only for the scoped repository, and every action continues
+through the existing panel's repository entity. A multi-root workspace may
+therefore have repository A selected globally while an Omega thread safely
+reads and mutates repository B.
+
+An unavailable scope is distinct from an unscoped legacy panel. After handoff,
+offline, reconnecting, inconsistent, removed, or unresolved thread identity
+retains the last typed scope but resolves no actionable repository. It never
+falls back to the first or globally active repository. Repository removal
+keeps that fail-closed scope so a late action cannot target a neighbor; a
+subsequent authoritative observation can bind a newly materialized runtime
+repository entity for the same logical thread target.
+
+The panel increments an internal transition generation whenever its scope or
+availability changes. Debounced row derivation, commit-buffer restore, Git
+access discovery, history loading, and follow-up work capture that generation
+and verify it before publishing into panel state. Repository operations that
+were already safely submitted may finish against their original repository,
+but their completion cannot replace the selection, rows, draft, access state,
+or history of a newer scope.
+
+The workbench header and rail derive repository, worktree, branch, dirty,
+conflict, and ahead/behind identity from the selected typed observation. The
+native surface binding carries the same logical repository/worktree,
+`RepositoryId`, `WorktreeId`, and workbench generation. Its deterministic
+snapshot then records the exact scope, resolved repository, head state,
+ordered native status entries and sections, counts, selection, commit-button
+validation, and pending operations. Proofs reject a frame unless the header
+binding, rail badge, native scope, repository entity, and generation agree.
+
+Clean, dirty, conflicted, detached, unborn, pending, offline, reconnecting,
+removed, and error are explicit native-surface lifecycles. Only actionable
+states render and focus `GitPanel`; non-actionable states hide it behind an
+accessible status or alert so stale rows cannot receive commands. Native
+`Toggle`, `ToggleFocus`, `Close`, `CloseActiveDock`, and `PanelEvent` routes
+are captured after rehome and open, focus, or collapse the embedded surface
+without unzooming Agent Panel or reopening a legacy Workspace dock.
+
+Stage, unstage, commit, discard, open-diff, checkout, pull, and push retain the
+native safety boundaries. In particular, discard still passes through the
+existing confirmation prompt, commit still uses the panel's validation,
+credential and signing failures remain visible, and opening a diff uses the
+existing Workspace item path with the scoped repository entity passed
+explicitly to `ProjectDiff`, `StagedDiff`, or `UnstagedDiff`. It cannot resolve
+a same-named path against the Workspace-global repository. The adapter never
+converts a cancelled, rejected, stale, or failed operation into success.
+
+Portable tests drive the production `SelectGit` action against fake Git
+backends and inspect the retained panel snapshot. They prove exact entity
+retention, global-A/scoped-B isolation, stage and unstage targeting, discard
+cancel/error invariance, commit validation, diff opening, repository and
+thread switching, removal, offline/reconnect, and rejection of a held stale
+refresh. Real-pixel scenes run only after the same typed snapshot, badge,
+focus, mutation log, and foreign-path exclusion checks pass.
 
 ## State ownership {#state-ownership}
 

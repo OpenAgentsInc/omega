@@ -21,7 +21,7 @@ use std::rc::Rc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use text::OffsetRangeExt as _;
 use workspace::{
-    MultiWorkspace, Sidebar as WorkspaceSidebar, SidebarEvent, SidebarSide, Workspace,
+    Item as _, MultiWorkspace, Sidebar as WorkspaceSidebar, SidebarEvent, SidebarSide, Workspace,
     dock::Panel as _,
 };
 
@@ -122,6 +122,7 @@ pub fn init_test(cx: &mut TestAppContext) {
         ));
         theme_settings::init(theme::LoadThemes::JustBase, cx);
         editor::init(cx);
+        git_ui::init(cx);
         release_channel::init("0.0.0".parse().unwrap(), cx);
         project_panel::init(cx);
         agent_panel::init(cx);
@@ -505,8 +506,16 @@ impl AgentWorkbenchFrontDoor {
         let project_panel = ProjectPanel::load(weak_workspace, async_window_context)
             .await
             .context("loading the native ProjectPanel for the Files surface")?;
+        let (weak_workspace, async_window_context) = workspace
+            .update_in(&mut visual, |workspace, window, cx| {
+                (workspace.weak_handle(), window.to_async(cx))
+            });
+        let git_panel = git_ui::git_panel::GitPanel::load(weak_workspace, async_window_context)
+            .await
+            .context("loading the native GitPanel for the Git surface")?;
         workspace.update_in(&mut visual, |workspace, window, cx| {
             workspace.add_panel(project_panel, window, cx);
+            workspace.add_panel(git_panel, window, cx);
         });
         visual.run_until_parked();
 
@@ -692,6 +701,171 @@ impl AgentWorkbenchFrontDoor {
         Some(pane.update_in(&mut visual, |pane, window, cx| {
             pane.snapshot_for_tests(window, cx)
         }))
+    }
+
+    pub fn native_git_surface(
+        &self,
+        cx: &TestAppContext,
+    ) -> Option<Entity<crate::workbench_shell::NativeGitSurface>> {
+        self.panel
+            .read_with(cx, |panel, cx| panel.workbench_git_surface_for_tests(cx))
+            .or_else(|| {
+                self.visible_surface_host(cx)
+                    .and_then(|host| host.read_with(cx, |host, _cx| host.git_surface().cloned()))
+            })
+    }
+
+    pub fn native_git_panel(
+        &self,
+        cx: &TestAppContext,
+    ) -> Option<Entity<git_ui::git_panel::GitPanel>> {
+        self.workspace
+            .read_with(cx, |workspace, cx| {
+                workspace.panel::<git_ui::git_panel::GitPanel>(cx)
+            })
+            .or_else(|| {
+                self.native_git_surface(cx).map(|surface| {
+                    surface.read_with(cx, |surface, _cx| surface.git_panel().clone())
+                })
+            })
+    }
+
+    pub fn native_git_state(
+        &self,
+        cx: &TestAppContext,
+    ) -> Option<git_ui::git_panel::GitPanelStateSnapshot> {
+        let panel = self.native_git_panel(cx)?;
+        let mut visual = VisualTestContext::from_window(self.window, cx);
+        Some(panel.update_in(&mut visual, |panel, _window, cx| panel.state_snapshot(cx)))
+    }
+
+    pub fn native_git_lifecycle(
+        &self,
+        cx: &TestAppContext,
+    ) -> Option<crate::workbench_shell::NativeGitLifecycle> {
+        self.native_git_surface(cx)
+            .map(|surface| surface.read_with(cx, |surface, _cx| surface.lifecycle().clone()))
+    }
+
+    pub fn fixture_repository_id(
+        &self,
+        fixture_id: &str,
+        cx: &TestAppContext,
+    ) -> Option<project::git_store::RepositoryId> {
+        let worktree_id = self.fixture_worktree_id(fixture_id, cx)?;
+        self.workspace.read_with(cx, |workspace, cx| {
+            workspace
+                .project()
+                .read(cx)
+                .git_store()
+                .read(cx)
+                .repository_ids_for_worktree(worktree_id)
+                .into_iter()
+                .next()
+        })
+    }
+
+    pub fn set_workspace_active_repository(
+        &self,
+        fixture_id: &str,
+        cx: &mut TestAppContext,
+    ) -> Result<project::git_store::RepositoryId> {
+        let repository_id = self
+            .fixture_repository_id(fixture_id, cx)
+            .with_context(|| format!("fixture repository {fixture_id:?} is unavailable"))?;
+        let project = self
+            .workspace
+            .read_with(cx, |workspace, _cx| workspace.project().clone());
+        let repository = project
+            .read_with(cx, |project, cx| {
+                project
+                    .git_store()
+                    .read(cx)
+                    .repositories()
+                    .get(&repository_id)
+                    .cloned()
+            })
+            .with_context(|| format!("repository {repository_id:?} disappeared"))?;
+        repository.update(cx, |repository, cx| {
+            repository.set_as_active_repository(cx);
+        });
+        self.settle_native_git(cx);
+        Ok(repository_id)
+    }
+
+    pub fn workspace_active_repository_id(
+        &self,
+        cx: &TestAppContext,
+    ) -> Option<project::git_store::RepositoryId> {
+        self.workspace.read_with(cx, |workspace, cx| {
+            workspace
+                .project()
+                .read(cx)
+                .active_repository(cx)
+                .map(|repository| repository.read(cx).id)
+        })
+    }
+
+    pub fn settle_native_git(&self, cx: &TestAppContext) {
+        cx.executor().advance_clock(Duration::from_millis(100));
+        let visual = VisualTestContext::from_window(self.window, cx);
+        visual.run_until_parked();
+    }
+
+    pub fn select_native_git_path(
+        &self,
+        fixture_id: &str,
+        relative_path: &str,
+        cx: &TestAppContext,
+    ) -> Result<()> {
+        let worktree_id = self
+            .fixture_worktree_id(fixture_id, cx)
+            .with_context(|| format!("fixture worktree {fixture_id:?} is unavailable"))?;
+        let panel = self
+            .native_git_panel(cx)
+            .context("native GitPanel is unavailable")?;
+        let project_path = ProjectPath {
+            worktree_id,
+            path: util::rel_path::rel_path(relative_path).into(),
+        };
+        let mut visual = VisualTestContext::from_window(self.window, cx);
+        panel.update_in(&mut visual, |panel, window, cx| {
+            panel.select_entry_by_path(project_path, window, cx);
+            panel.focus_handle(cx).focus(window, cx);
+        });
+        visual.run_until_parked();
+        Ok(())
+    }
+
+    pub fn dispatch_native_git_action(
+        &self,
+        action: impl Action,
+        cx: &TestAppContext,
+    ) -> Result<()> {
+        let panel = self
+            .native_git_panel(cx)
+            .context("native GitPanel is unavailable")?;
+        let mut visual = VisualTestContext::from_window(self.window, cx);
+        panel.update_in(&mut visual, |panel, window, cx| {
+            panel.focus_handle(cx).focus(window, cx);
+        });
+        visual.dispatch_action(action);
+        visual.run_until_parked();
+        Ok(())
+    }
+
+    pub fn set_native_git_commit_message(&self, text: &str, cx: &TestAppContext) -> Result<()> {
+        let panel = self
+            .native_git_panel(cx)
+            .context("native GitPanel is unavailable")?;
+        let mut visual = VisualTestContext::from_window(self.window, cx);
+        panel.update_in(&mut visual, |panel, _window, cx| {
+            panel
+                .commit_message_buffer(cx)
+                .update(cx, |buffer, cx| buffer.set_text(text, cx));
+        });
+        visual.run_until_parked();
+        Ok(())
     }
 
     pub fn complete_native_review_generation(
@@ -1024,6 +1198,15 @@ impl AgentWorkbenchFrontDoor {
         })
     }
 
+    pub fn active_project_diff_path(&self, cx: &TestAppContext) -> Option<ProjectPath> {
+        self.workspace.read_with(cx, |workspace, cx| {
+            workspace
+                .item_of_type::<git_ui::project_diff::ProjectDiff>(cx)?
+                .read(cx)
+                .active_project_path(cx)
+        })
+    }
+
     pub fn active_workspace_selection(
         &self,
         cx: &TestAppContext,
@@ -1249,6 +1432,22 @@ impl AgentWorkbenchFrontDoor {
         visual.simulate_click_selector(&repository_selector)?;
         visual.run_until_parked();
         Ok(())
+    }
+
+    pub fn select_identity_fixture(&self, fixture_id: &str, cx: &TestAppContext) -> Result<()> {
+        let expected_path = Path::new("/").join(fixture_id);
+        let row_index = self
+            .panel
+            .read_with(cx, |panel, _cx| {
+                panel.workbench_identity_for_tests().and_then(|identity| {
+                    identity
+                        .candidates
+                        .iter()
+                        .position(|candidate| candidate.worktree_abs_path == expected_path)
+                })
+            })
+            .with_context(|| format!("identity picker has no fixture {fixture_id:?}"))?;
+        self.select_identity_picker_row(row_index, cx)
     }
 
     pub fn select_worktree_picker_row(&self, row_index: usize, cx: &TestAppContext) -> Result<()> {
@@ -1640,6 +1839,7 @@ fn accessibility_expanded(snapshot: &DebugRenderSnapshot, element_id: &str) -> R
 #[cfg(test)]
 mod workbench_front_door_tests {
     use super::*;
+    use fs::Fs as _;
     use omega_workbench_harness::{
         ProjectFixture, RepositoryFixture, ThreadFixture, ViewportFixture, WorktreeFixture,
         WorktreeGitStateFixture,
@@ -1738,6 +1938,481 @@ mod workbench_front_door_tests {
             behind: 0,
         });
         scene
+    }
+
+    fn scene_with_two_git_repositories(name: &str) -> WorkbenchScene {
+        let mut scene = scene_with_thread(name, 1200, true);
+        scene.repositories.push(RepositoryFixture {
+            id: "repository-2".into(),
+            project_id: "project-1".into(),
+            worktrees: vec![WorktreeFixture {
+                id: "worktree-2".into(),
+                branch: Some("release".into()),
+                git_state: None,
+                dirty_files: 2,
+                conflicts: 0,
+                ahead: 2,
+                behind: 1,
+            }],
+        });
+        scene
+    }
+
+    #[gpui::test(iterations = 8)]
+    async fn native_git_front_door_scopes_exact_repository_and_retains_one_panel(
+        cx: &mut TestAppContext,
+    ) {
+        let scene = scene_with_two_git_repositories("native_git_exact_scope");
+        let front_door = AgentWorkbenchFrontDoor::mount(scene, cx)
+            .await
+            .expect("multi-repository Git fixture should mount");
+        let repository_a = front_door
+            .set_workspace_active_repository("worktree-1", cx)
+            .expect("workspace repository A should become globally active");
+        let repository_b = front_door
+            .fixture_repository_id("worktree-2", cx)
+            .expect("repository B should exist");
+        assert_ne!(repository_a, repository_b);
+        let workspace_panel_id = front_door
+            .native_git_panel(cx)
+            .expect("workspace should load one native GitPanel")
+            .entity_id();
+        front_door.settle_native_git(cx);
+        let clean_repository_a = front_door
+            .native_git_state(cx)
+            .expect("workspace GitPanel should project repository A");
+        assert_eq!(clean_repository_a.repository_id, Some(repository_a));
+        assert_eq!(clean_repository_a.counts.changes, 0);
+
+        front_door
+            .select_identity_fixture("worktree-2", cx)
+            .expect("thread should select repository B");
+        front_door.dispatch_action(crate::workbench_shell::SelectGit, cx);
+        front_door
+            .set_workspace_active_repository("worktree-1", cx)
+            .expect("workspace-global Git state should be reset to repository A");
+        front_door.settle_native_git(cx);
+
+        let panel = front_door
+            .native_git_panel(cx)
+            .expect("native GitPanel should be handed to the work surface");
+        let panel_id = panel.entity_id();
+        assert_eq!(
+            panel_id, workspace_panel_id,
+            "the work surface must rehome the existing workspace GitPanel"
+        );
+        let snapshot = front_door
+            .native_git_state(cx)
+            .expect("native GitPanel should expose typed state");
+        let binding_generation = front_door
+            .projection(cx)
+            .visible_projection()
+            .expect("visible workbench projection")
+            .generation;
+        let worktree_b = front_door
+            .fixture_worktree_id("worktree-2", cx)
+            .expect("worktree B should exist");
+        assert_eq!(
+            snapshot.repository_scope,
+            Some(git_ui::git_panel::GitPanelRepositoryScope {
+                repository_id: repository_b,
+                worktree_id: worktree_b,
+                generation: binding_generation,
+            })
+        );
+        assert_eq!(snapshot.repository_id, Some(repository_b));
+        assert!(snapshot.repository_scope_available);
+        assert_eq!(snapshot.counts.changes, 2);
+        assert_eq!(
+            snapshot.tracking,
+            Some(git_ui::git_panel::GitPanelTrackingSnapshot {
+                ahead: 2,
+                behind: 1,
+            })
+        );
+        assert!(
+            snapshot
+                .status_entries
+                .iter()
+                .all(|entry| entry.repo_path.as_unix_str().starts_with("fixture-status-")),
+            "scoped repository B must not render repository A entries"
+        );
+        assert_eq!(
+            front_door.workspace_active_repository_id(cx),
+            Some(repository_a),
+            "the scoped native panel must not require repository B to remain workspace-global"
+        );
+
+        front_door.fs.set_status_for_repo(
+            Path::new("/worktree-1/.git"),
+            &[("worktree-1-only.txt", git::status::FileStatus::Untracked)],
+        );
+        front_door
+            .set_workspace_active_repository("worktree-1", cx)
+            .expect("repository A should emit a late global refresh");
+        front_door.settle_native_git(cx);
+        let after_repository_a_refresh = front_door
+            .native_git_state(cx)
+            .expect("repository B should remain mounted");
+        assert_eq!(after_repository_a_refresh.repository_id, Some(repository_b));
+        assert_eq!(after_repository_a_refresh.counts.changes, 2);
+        assert!(
+            after_repository_a_refresh
+                .status_entries
+                .iter()
+                .all(|entry| entry.repo_path.as_unix_str().starts_with("fixture-status-")),
+            "a late repository A refresh must not publish into repository B's scope"
+        );
+
+        front_door
+            .select_native_git_path("worktree-2", "fixture-status-0.txt", cx)
+            .expect("repository B change should be selectable");
+        front_door
+            .dispatch_native_git_action(git::StageFile, cx)
+            .expect("stage should route to scoped repository B");
+        front_door.settle_native_git(cx);
+        assert_eq!(
+            front_door
+                .native_git_state(cx)
+                .expect("staged repository B state")
+                .counts
+                .tracked_staged,
+            1
+        );
+
+        front_door
+            .select_identity_fixture("worktree-1", cx)
+            .expect("thread should switch to repository A");
+        front_door.settle_native_git(cx);
+        let repository_a_state = front_door.native_git_state(cx).expect("repository A state");
+        assert_eq!(repository_a_state.repository_id, Some(repository_a));
+        assert_eq!(
+            repository_a_state.counts.tracked_staged, 0,
+            "staging repository B must not mutate repository A"
+        );
+        assert!(
+            repository_a_state
+                .status_entries
+                .iter()
+                .any(|entry| entry.repo_path.as_unix_str() == "worktree-1-only.txt")
+        );
+
+        front_door
+            .select_identity_fixture("worktree-2", cx)
+            .expect("thread should switch back to repository B");
+        front_door.settle_native_git(cx);
+        let repository_b_state = front_door
+            .native_git_state(cx)
+            .expect("restored repository B state");
+        assert_eq!(repository_b_state.repository_id, Some(repository_b));
+        assert_eq!(
+            repository_b_state.counts.tracked_staged, 1,
+            "repository B's staged state should survive exact scope switches"
+        );
+        assert_eq!(
+            front_door
+                .native_git_panel(cx)
+                .map(|current| current.entity_id()),
+            Some(panel_id)
+        );
+
+        front_door.dispatch_action(crate::workbench_shell::SelectGit, cx);
+        assert!(
+            !front_door
+                .projection(cx)
+                .visible_projection()
+                .expect("visible workbench")
+                .dock_open,
+            "reselecting Git should collapse the dock"
+        );
+        front_door.dispatch_action(crate::workbench_shell::SelectGit, cx);
+        front_door.settle_native_git(cx);
+        assert_eq!(
+            front_door
+                .native_git_panel(cx)
+                .map(|panel| panel.entity_id()),
+            Some(panel_id),
+            "collapse and reopen must reuse the exact native GitPanel entity"
+        );
+        assert_eq!(
+            front_door.native_git_lifecycle(cx),
+            Some(crate::workbench_shell::NativeGitLifecycle::Dirty)
+        );
+
+        front_door
+            .teardown(cx)
+            .expect("scoped native Git workbench should tear down");
+    }
+
+    #[gpui::test(iterations = 8)]
+    async fn native_git_front_door_routes_mutations_diff_validation_and_discard_cancel(
+        cx: &mut TestAppContext,
+    ) {
+        let mut scene = scene_with_thread("native_git_mutations", 1200, true);
+        scene.repositories[0].worktrees[0].dirty_files = 1;
+        let front_door = AgentWorkbenchFrontDoor::mount(scene, cx)
+            .await
+            .expect("dirty Git fixture should mount");
+        front_door.dispatch_action(crate::workbench_shell::SelectGit, cx);
+        front_door.settle_native_git(cx);
+        front_door
+            .select_native_git_path("worktree-1", "fixture-status-0.txt", cx)
+            .expect("dirty file should be selectable through the real GitPanel");
+        front_door
+            .set_native_git_commit_message(" ", cx)
+            .expect("commit validation should begin with an explicit blank message");
+
+        let initial = front_door.native_git_state(cx).expect("initial Git state");
+        assert_eq!(initial.status_entries.len(), 1);
+        assert_eq!(
+            initial.status_entries[0].staging,
+            git::status::StageStatus::Unstaged
+        );
+        assert!(!initial.commit_button.enabled);
+
+        front_door
+            .dispatch_native_git_action(git::StageFile, cx)
+            .expect("StageFile should route to the embedded GitPanel");
+        front_door.settle_native_git(cx);
+        let staged = front_door.native_git_state(cx).expect("staged Git state");
+        assert_eq!(
+            staged.status_entries[0].staging,
+            git::status::StageStatus::Staged
+        );
+        assert_eq!(staged.counts.tracked_staged, 1);
+        assert!(
+            !staged.commit_button.enabled,
+            "a blank commit message must keep commit disabled"
+        );
+
+        front_door
+            .set_native_git_commit_message("Test native Git commit", cx)
+            .expect("commit message should use the real GitPanel editor buffer");
+        let commit_ready = front_door
+            .native_git_state(cx)
+            .expect("commit validation state");
+        assert!(commit_ready.commit_button.enabled);
+
+        front_door
+            .dispatch_native_git_action(git::UnstageFile, cx)
+            .expect("UnstageFile should route to the embedded GitPanel");
+        front_door.settle_native_git(cx);
+        let unstaged = front_door.native_git_state(cx).expect("unstaged Git state");
+        assert_eq!(
+            unstaged.status_entries[0].staging,
+            git::status::StageStatus::Unstaged
+        );
+        assert_eq!(unstaged.counts.tracked_staged, 0);
+        assert!(unstaged.commit_button.enabled);
+        assert_eq!(unstaged.commit_button.title, "Commit Tracked");
+        front_door
+            .set_native_git_commit_message(" ", cx)
+            .expect("blank commit validation should remain deterministic after unstaging");
+        assert!(
+            !front_door
+                .native_git_state(cx)
+                .expect("blank unstaged commit state")
+                .commit_button
+                .enabled
+        );
+
+        front_door
+            .select_native_git_path("worktree-1", "fixture-status-0.txt", cx)
+            .expect("dirty file should remain selected");
+        front_door
+            .dispatch_native_git_action(menu::Confirm, cx)
+            .expect("Confirm should open the selected native diff");
+        front_door.settle_native_git(cx);
+        assert!(
+            front_door.workspace_center_is_visible(cx),
+            "opening a diff from the embedded GitPanel must reveal the workbench center"
+        );
+        assert_eq!(
+            front_door.active_project_diff_path(cx),
+            Some(ProjectPath {
+                worktree_id: front_door
+                    .fixture_worktree_id("worktree-1", cx)
+                    .expect("fixture worktree"),
+                path: util::rel_path::rel_path("fixture-status-0.txt").into(),
+            })
+        );
+
+        front_door
+            .select_native_git_path("worktree-1", "fixture-status-0.txt", cx)
+            .expect("dirty file should be selectable for discard");
+        front_door
+            .dispatch_native_git_action(git::RestoreFile::default(), cx)
+            .expect("RestoreFile should route to the embedded GitPanel");
+        let (message, _) = cx
+            .pending_prompt()
+            .expect("discarding a tracked change should require confirmation");
+        assert!(
+            message.contains("fixture-status-0.txt"),
+            "discard prompt must name the exact scoped path: {message}"
+        );
+        cx.simulate_prompt_answer("Cancel");
+        cx.run_until_parked();
+        front_door.settle_native_git(cx);
+        let after_cancel = front_door
+            .native_git_state(cx)
+            .expect("Git state after discard cancellation");
+        assert_eq!(after_cancel.status_entries.len(), 1);
+        assert_eq!(
+            front_door
+                .fs
+                .load(Path::new("/worktree-1/fixture-status-0.txt"))
+                .await
+                .expect("cancelled discard must leave the fixture file"),
+            "fixture"
+        );
+
+        front_door
+            .teardown(cx)
+            .expect("native Git mutation workbench should tear down");
+    }
+
+    #[gpui::test(iterations = 8)]
+    async fn native_git_front_door_fails_closed_across_offline_reconnect_and_removal(
+        cx: &mut TestAppContext,
+    ) {
+        let mut scene = scene_with_thread("native_git_lifecycle", 1200, true);
+        scene.repositories[0].worktrees[0].dirty_files = 1;
+        let front_door = AgentWorkbenchFrontDoor::mount(scene, cx)
+            .await
+            .expect("Git lifecycle fixture should mount");
+        front_door.dispatch_action(crate::workbench_shell::SelectGit, cx);
+        front_door.settle_native_git(cx);
+        let panel = front_door
+            .native_git_panel(cx)
+            .expect("native GitPanel should mount");
+        let surface = front_door
+            .native_git_surface(cx)
+            .expect("native Git surface should mount");
+        assert_eq!(
+            surface.read_with(cx, |surface, _cx| surface.lifecycle().clone()),
+            crate::workbench_shell::NativeGitLifecycle::Dirty
+        );
+
+        front_door.set_identity_phase(crate::thread_identity::IdentityPhase::Offline, cx);
+        assert_eq!(
+            surface.read_with(cx, |surface, _cx| surface.lifecycle().clone()),
+            crate::workbench_shell::NativeGitLifecycle::Offline
+        );
+        assert!(
+            !front_door
+                .projection(cx)
+                .visible_projection()
+                .expect("offline projection")
+                .dock_open,
+            "offline transition must fail closed instead of leaving mutable Git UI visible"
+        );
+
+        front_door.set_identity_phase(crate::thread_identity::IdentityPhase::Reconnecting, cx);
+        assert_eq!(
+            surface.read_with(cx, |surface, _cx| surface.lifecycle().clone()),
+            crate::workbench_shell::NativeGitLifecycle::Reconnecting
+        );
+        front_door.set_identity_phase(crate::thread_identity::IdentityPhase::Ready, cx);
+        front_door.dispatch_action(crate::workbench_shell::SelectGit, cx);
+        front_door.settle_native_git(cx);
+        assert_eq!(
+            front_door
+                .native_git_panel(cx)
+                .map(|current| current.entity_id()),
+            Some(panel.entity_id()),
+            "reconnect must restore the retained GitPanel instead of manufacturing another"
+        );
+        assert_eq!(
+            surface.read_with(cx, |surface, _cx| surface.lifecycle().clone()),
+            crate::workbench_shell::NativeGitLifecycle::Dirty
+        );
+
+        front_door
+            .remove_worktree(Path::new("/worktree-1"), cx)
+            .expect("fixture repository should be removable");
+        front_door.settle_native_git(cx);
+        let removed = panel.update(cx, |panel, cx| panel.state_snapshot(cx));
+        assert!(!removed.repository_scope_available);
+        assert_eq!(removed.repository_id, None);
+        assert!(removed.status_entries.is_empty());
+        assert_eq!(
+            surface.read_with(cx, |surface, _cx| surface.lifecycle().clone()),
+            crate::workbench_shell::NativeGitLifecycle::RepositoryRemoved
+        );
+
+        front_door
+            .teardown(cx)
+            .expect("native Git lifecycle workbench should tear down");
+    }
+
+    #[gpui::test]
+    async fn native_git_front_door_projects_detached_unborn_conflict_and_untracked_states(
+        cx: &mut TestAppContext,
+    ) {
+        let mut scene = scene_with_two_git_repositories("native_git_edge_states");
+        scene.repositories[0].worktrees[0].branch = None;
+        scene.repositories[0].worktrees[0].dirty_files = 2;
+        scene.repositories[0].worktrees[0].conflicts = 1;
+        scene.repositories[1].worktrees[0].git_state = Some(WorktreeGitStateFixture::Unborn);
+        scene.repositories[1].worktrees[0].dirty_files = 1;
+        let front_door = AgentWorkbenchFrontDoor::mount(scene, cx)
+            .await
+            .expect("Git edge-state fixture should mount");
+
+        front_door
+            .fs
+            .insert_file(Path::new("/worktree-1/untracked.txt"), b"new".to_vec())
+            .await;
+        front_door.fs.set_status_for_repo(
+            Path::new("/worktree-1/.git"),
+            &[
+                (
+                    "fixture-status-0.txt",
+                    git::status::FileStatus::Unmerged(git::status::UnmergedStatus {
+                        first_head: git::status::UnmergedStatusCode::Updated,
+                        second_head: git::status::UnmergedStatusCode::Updated,
+                    }),
+                ),
+                ("untracked.txt", git::status::FileStatus::Untracked),
+            ],
+        );
+        front_door.dispatch_action(crate::workbench_shell::SelectGit, cx);
+        front_door.settle_native_git(cx);
+        let detached = front_door
+            .native_git_state(cx)
+            .expect("detached repository state");
+        assert_eq!(
+            detached.head,
+            Some(git_ui::git_panel::GitPanelHeadState::Detached)
+        );
+        assert_eq!(detached.counts.conflicted, 1);
+        assert_eq!(detached.counts.new, 1);
+        assert!(
+            detached
+                .status_entries
+                .iter()
+                .any(|entry| entry.repo_path.as_unix_str() == "untracked.txt")
+        );
+
+        front_door
+            .select_identity_fixture("worktree-2", cx)
+            .expect("thread should switch to the unborn repository");
+        front_door.settle_native_git(cx);
+        let unborn = front_door
+            .native_git_state(cx)
+            .expect("unborn repository state");
+        assert!(matches!(
+            unborn.head,
+            Some(git_ui::git_panel::GitPanelHeadState::Unborn { .. })
+        ));
+        assert_eq!(
+            unborn.repository_id,
+            front_door.fixture_repository_id("worktree-2", cx)
+        );
+
+        front_door
+            .teardown(cx)
+            .expect("native Git edge-state workbench should tear down");
     }
 
     #[gpui::test]

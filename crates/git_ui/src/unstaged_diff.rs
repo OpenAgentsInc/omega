@@ -16,7 +16,10 @@ use gpui::{
 use language::Capability;
 use project::{
     Project, ProjectPath,
-    git_store::diff_buffer_list::{DiffBase, DiffBufferList},
+    git_store::{
+        Repository, RepositoryId,
+        diff_buffer_list::{DiffBase, DiffBufferList},
+    },
     project_settings::ProjectSettings,
 };
 use settings::Settings;
@@ -207,6 +210,27 @@ impl UnstagedDiff {
         window: &mut Window,
         cx: &mut Context<Workspace>,
     ) {
+        let intended_repository = workspace.project().read(cx).active_repository(cx);
+        Self::deploy_at_repository_inner(workspace, intended_repository, entry, window, cx);
+    }
+
+    pub fn deploy_at_repository(
+        workspace: &mut Workspace,
+        repository: Entity<Repository>,
+        entry: Option<GitStatusEntry>,
+        window: &mut Window,
+        cx: &mut Context<Workspace>,
+    ) {
+        Self::deploy_at_repository_inner(workspace, Some(repository), entry, window, cx);
+    }
+
+    fn deploy_at_repository_inner(
+        workspace: &mut Workspace,
+        intended_repository: Option<Entity<Repository>>,
+        entry: Option<GitStatusEntry>,
+        window: &mut Window,
+        cx: &mut Context<Workspace>,
+    ) {
         telemetry::event!(
             "Git Unstaged Diff Opened",
             source = if entry.is_some() {
@@ -215,7 +239,6 @@ impl UnstagedDiff {
                 "Action"
             }
         );
-        let intended_repo = workspace.project().read(cx).active_repository(cx);
         let existing = workspace.items_of_type::<Self>(cx).next();
         let unstaged_diff = if let Some(existing) = existing {
             workspace.activate_item(&existing, true, true, window, cx);
@@ -234,7 +257,7 @@ impl UnstagedDiff {
             unstaged_diff
         };
 
-        if let Some(intended) = &intended_repo {
+        if let Some(intended) = &intended_repository {
             let needs_switch = unstaged_diff
                 .read(cx)
                 .diff
@@ -265,6 +288,13 @@ impl UnstagedDiff {
     ) {
         self.diff
             .update(cx, |diff, cx| diff.move_to_entry(entry, window, cx));
+    }
+
+    pub fn repository_id(&self, cx: &App) -> Option<RepositoryId> {
+        self.diff
+            .read(cx)
+            .repo(cx)
+            .map(|repository| repository.read(cx).id)
     }
 
     pub(crate) fn new(

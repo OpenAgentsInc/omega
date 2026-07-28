@@ -179,15 +179,20 @@ use {
     acp_thread::{AgentConnection, StubAgentConnection},
     agent_client_protocol::schema::v1 as acp,
     agent_servers::{AgentServer, AgentServerDelegate},
-    agent_ui::Agent,
+    agent_ui::{Agent, AgentPanel},
     anyhow::{Context as _, Result},
     assets::Assets,
     editor::display_map::DisplayRow,
     feature_flags::FeatureFlagAppExt as _,
-    git_ui::project_diff::ProjectDiff,
+    git_ui::{
+        git_panel::{GitPanel, GitPanelHeadState, GitPanelRepositoryScope, GitPanelStateSnapshot},
+        project_diff::ProjectDiff,
+        staged_diff::StagedDiff,
+        unstaged_diff::UnstagedDiff,
+    },
     gpui::{
-        App, AppContext as _, Bounds, Entity, KeyBinding, Modifiers, VisualTestAppContext,
-        WindowBounds, WindowHandle, WindowOptions, point, px, size,
+        App, AppContext as _, Bounds, Entity, Focusable as _, KeyBinding, Modifiers,
+        VisualTestAppContext, WindowBounds, WindowHandle, WindowOptions, point, px, size,
     },
     omega_workbench_harness::{
         CheckStatus, HERMETIC_SCENES, PixelProof, PixelStatus, ProofCheck, ProofLane, ProofOutcome,
@@ -209,7 +214,7 @@ use {
         time::Duration,
     },
     util::ResultExt as _,
-    workspace::{AppState, MultiWorkspace, Workspace},
+    workspace::{AppState, MultiWorkspace, Workspace, item::Item as _},
     zed_actions::OpenSettingsAt,
 };
 
@@ -539,6 +544,25 @@ fn is_workbench_review_scene(name: &str) -> bool {
 }
 
 #[cfg(target_os = "macos")]
+fn is_workbench_git_scene(name: &str) -> bool {
+    matches!(
+        name,
+        "omega_workbench_git_clean"
+            | "omega_workbench_git_dirty"
+            | "omega_workbench_git_staged"
+            | "omega_workbench_git_conflict"
+            | "omega_workbench_git_detached"
+            | "omega_workbench_git_unborn"
+            | "omega_workbench_git_pending"
+            | "omega_workbench_git_multi_repository"
+            | "omega_workbench_git_repository_removed"
+            | "omega_workbench_git_offline"
+            | "omega_workbench_git_reconnect"
+            | "omega_workbench_git_error"
+    )
+}
+
+#[cfg(target_os = "macos")]
 fn workbench_fixture_for_scene(name: &str) -> Result<WorkbenchScene> {
     use omega_workbench_harness::{
         ContentStateFixture, EventFixture, EventKindFixture, MessageFixture, MessageRoleFixture,
@@ -548,6 +572,9 @@ fn workbench_fixture_for_scene(name: &str) -> Result<WorkbenchScene> {
 
     if is_workbench_review_scene(name) {
         return omega_workbench_harness::workbench_review_scene(name);
+    }
+    if is_workbench_git_scene(name) {
+        return omega_workbench_harness::workbench_git_scene(name);
     }
 
     let spec =
@@ -1854,6 +1881,47 @@ fn verify_workbench_render_preflight(
             }
             record_workbench_semantic_checks(test_name, probe.into_checks());
             record_workbench_semantic_check(test_name, "review-native-toolbar-content-containment");
+        }
+        if is_workbench_git_scene(test_name) {
+            let mut probe = SemanticProbe::new(&snapshot);
+            probe.require_accessible("omega.workbench.surface.git", "Group", "Git work surface")?;
+            probe.require_inside("omega.workbench.git.content", "omega.workbench.surface.git")?;
+
+            match test_name {
+                "omega_workbench_git_repository_removed" => {
+                    probe.require_accessible(
+                        "omega.workbench.git.lifecycle",
+                        "Status",
+                        "Git repository was removed",
+                    )?;
+                }
+                "omega_workbench_git_offline" => {
+                    probe.require_accessible(
+                        "omega.workbench.git.lifecycle",
+                        "Status",
+                        "Git repository is unavailable offline",
+                    )?;
+                }
+                "omega_workbench_git_reconnect" => {
+                    probe.require_accessible(
+                        "omega.workbench.git.lifecycle",
+                        "Status",
+                        "Reconnecting Git repository",
+                    )?;
+                }
+                "omega_workbench_git_error" => {
+                    probe.require_accessible(
+                        "omega.workbench.git.lifecycle",
+                        "Alert",
+                        "Could not refresh repository status",
+                    )?;
+                }
+                _ => {
+                    probe.require_absent("omega.workbench.git.lifecycle")?;
+                }
+            }
+            record_workbench_semantic_checks(test_name, probe.into_checks());
+            record_workbench_semantic_check(test_name, "git-native-content-containment");
         }
         if test_name.starts_with("omega_workbench_identity_") {
             let mut probe = SemanticProbe::new(&snapshot);
@@ -3611,6 +3679,13 @@ struct WorkbenchReviewDiskFixture {
 }
 
 #[cfg(all(target_os = "macos", feature = "visual-tests"))]
+struct WorkbenchGitDiskFixture {
+    _root: tempfile::TempDir,
+    worktrees: Vec<(String, PathBuf)>,
+    active_worktree_id: String,
+}
+
+#[cfg(all(target_os = "macos", feature = "visual-tests"))]
 fn initialize_workbench_git_fixture(path: &Path) -> Result<()> {
     for arguments in [
         &["init", "--initial-branch=main"][..],
@@ -3619,26 +3694,322 @@ fn initialize_workbench_git_fixture(path: &Path) -> Result<()> {
         &["add", "."][..],
         &["commit", "-m", "Create Review proof fixture"][..],
     ] {
-        let output = std::process::Command::new("git")
-            .args(arguments)
-            .current_dir(path)
-            .output()
-            .with_context(|| {
-                format!(
-                    "running `git {}` for Review fixture {}",
-                    arguments.join(" "),
-                    path.display()
-                )
-            })?;
-        anyhow::ensure!(
-            output.status.success(),
-            "`git {}` failed for Review fixture {}: {}",
-            arguments.join(" "),
-            path.display(),
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
+        run_workbench_git(path, arguments, "Review")?;
     }
     Ok(())
+}
+
+#[cfg(all(target_os = "macos", feature = "visual-tests"))]
+fn execute_workbench_git(
+    path: &Path,
+    arguments: &[&str],
+    fixture_label: &str,
+) -> Result<std::process::Output> {
+    std::process::Command::new("git")
+        .args(arguments)
+        .current_dir(path)
+        .env("GIT_AUTHOR_DATE", "2000-01-01T00:00:00Z")
+        .env("GIT_COMMITTER_DATE", "2000-01-01T00:00:00Z")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .with_context(|| {
+            format!(
+                "starting `git {}` for {fixture_label} fixture {}",
+                arguments.join(" "),
+                path.display()
+            )
+        })?
+        .wait_with_output()
+        .with_context(|| {
+            format!(
+                "waiting for `git {}` for {fixture_label} fixture {}",
+                arguments.join(" "),
+                path.display()
+            )
+        })
+}
+
+#[cfg(all(target_os = "macos", feature = "visual-tests"))]
+fn run_workbench_git(
+    path: &Path,
+    arguments: &[&str],
+    fixture_label: &str,
+) -> Result<std::process::Output> {
+    let output = execute_workbench_git(path, arguments, fixture_label)?;
+    anyhow::ensure!(
+        output.status.success(),
+        "`git {}` failed for {fixture_label} fixture {}: {}",
+        arguments.join(" "),
+        path.display(),
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
+    Ok(output)
+}
+
+#[cfg(all(target_os = "macos", feature = "visual-tests"))]
+fn initialize_workbench_git_repository(
+    path: &Path,
+    initial_branch: &str,
+    commit: bool,
+) -> Result<()> {
+    run_workbench_git(
+        path,
+        &["init", &format!("--initial-branch={initial_branch}")],
+        "Git",
+    )?;
+    run_workbench_git(
+        path,
+        &["config", "user.email", "omega-workbench@example.invalid"],
+        "Git",
+    )?;
+    run_workbench_git(
+        path,
+        &["config", "user.name", "Omega Workbench Proof"],
+        "Git",
+    )?;
+    if commit {
+        run_workbench_git(path, &["add", "."], "Git")?;
+        run_workbench_git(path, &["commit", "-m", "Create Git proof fixture"], "Git")?;
+    }
+    Ok(())
+}
+
+#[cfg(all(target_os = "macos", feature = "visual-tests"))]
+fn create_workbench_git_disk_fixture(scene_name: &str) -> Result<Option<WorkbenchGitDiskFixture>> {
+    if !is_workbench_git_scene(scene_name) {
+        return Ok(None);
+    }
+
+    let root = tempfile::tempdir().context("creating Git scene directory")?;
+    let root_path = root
+        .path()
+        .canonicalize()
+        .context("canonicalizing Git scene directory")?;
+    let alpha = root_path.join("alpha-worktree");
+    let beta = root_path.join("beta-worktree");
+    std::fs::create_dir_all(alpha.join("foreign"))?;
+    std::fs::create_dir_all(beta.join("src"))?;
+    std::fs::write(
+        alpha.join("foreign/alpha_only.rs"),
+        "pub const FOREIGN_REPOSITORY: bool = false;\n",
+    )?;
+    std::fs::write(beta.join("README.md"), "# Git work surface\n")?;
+    for file in [
+        "main.rs",
+        "conflicted.rs",
+        "detached.rs",
+        "offline.rs",
+        "reconnected.rs",
+        "beta.rs",
+    ] {
+        std::fs::write(
+            beta.join("src").join(file),
+            format!("pub const FIXTURE: &str = \"{file}\";\n"),
+        )?;
+    }
+
+    initialize_workbench_git_repository(&alpha, "alpha-work", true)?;
+    std::fs::write(
+        alpha.join("foreign/alpha_only.rs"),
+        "pub const FOREIGN_REPOSITORY: bool = true;\n",
+    )?;
+
+    let unborn = scene_name == "omega_workbench_git_unborn";
+    if unborn {
+        std::fs::remove_dir_all(beta.join("src"))
+            .context("removing committed-only files from unborn Git fixture")?;
+    }
+    initialize_workbench_git_repository(
+        &beta,
+        if unborn {
+            "omega/initial"
+        } else {
+            "codex/git-surface"
+        },
+        !unborn,
+    )?;
+
+    match scene_name {
+        "omega_workbench_git_clean"
+        | "omega_workbench_git_repository_removed"
+        | "omega_workbench_git_error" => {}
+        "omega_workbench_git_dirty" => {
+            let remote = root_path.join("dirty-remote.git");
+            let remote_text = remote.to_string_lossy().to_string();
+            run_workbench_git(&root_path, &["init", "--bare", remote_text.as_str()], "Git")?;
+            run_workbench_git(
+                &beta,
+                &["remote", "add", "origin", remote_text.as_str()],
+                "Git",
+            )?;
+            run_workbench_git(&beta, &["push", "-u", "origin", "codex/git-surface"], "Git")?;
+
+            let peer = root_path.join("dirty-peer");
+            let peer_text = peer.to_string_lossy().to_string();
+            run_workbench_git(
+                &root_path,
+                &[
+                    "clone",
+                    "--branch",
+                    "codex/git-surface",
+                    remote_text.as_str(),
+                    peer_text.as_str(),
+                ],
+                "Git",
+            )?;
+            run_workbench_git(
+                &peer,
+                &["config", "user.email", "omega-workbench@example.invalid"],
+                "Git",
+            )?;
+            run_workbench_git(
+                &peer,
+                &["config", "user.name", "Omega Workbench Proof"],
+                "Git",
+            )?;
+            std::fs::write(peer.join("remote-behind.txt"), "remote divergence\n")?;
+            run_workbench_git(&peer, &["add", "remote-behind.txt"], "Git")?;
+            run_workbench_git(&peer, &["commit", "-m", "Remote divergence"], "Git")?;
+            run_workbench_git(&peer, &["push"], "Git")?;
+
+            std::fs::write(beta.join("local-ahead-one.txt"), "first local commit\n")?;
+            run_workbench_git(&beta, &["add", "local-ahead-one.txt"], "Git")?;
+            run_workbench_git(&beta, &["commit", "-m", "First local commit"], "Git")?;
+            std::fs::write(beta.join("local-ahead-two.txt"), "second local commit\n")?;
+            run_workbench_git(&beta, &["add", "local-ahead-two.txt"], "Git")?;
+            run_workbench_git(&beta, &["commit", "-m", "Second local commit"], "Git")?;
+            run_workbench_git(&beta, &["fetch", "origin"], "Git")?;
+
+            std::fs::write(
+                beta.join("README.md"),
+                "# Git work surface\n\nDirty fixture.\n",
+            )?;
+            std::fs::write(
+                beta.join("src/new.rs"),
+                "pub const NEW_FILE: bool = true;\n",
+            )?;
+        }
+        "omega_workbench_git_staged" | "omega_workbench_git_pending" => {
+            std::fs::write(
+                beta.join("src/main.rs"),
+                "pub const FIXTURE: &str = \"staged\";\n",
+            )?;
+            run_workbench_git(&beta, &["add", "src/main.rs"], "Git")?;
+        }
+        "omega_workbench_git_conflict" => {
+            run_workbench_git(&beta, &["checkout", "-b", "conflict-side"], "Git")?;
+            std::fs::write(
+                beta.join("src/conflicted.rs"),
+                "pub const FIXTURE: &str = \"side\";\n",
+            )?;
+            run_workbench_git(&beta, &["add", "src/conflicted.rs"], "Git")?;
+            run_workbench_git(&beta, &["commit", "-m", "Create conflict side"], "Git")?;
+            run_workbench_git(&beta, &["checkout", "codex/git-surface"], "Git")?;
+            std::fs::write(
+                beta.join("src/conflicted.rs"),
+                "pub const FIXTURE: &str = \"active\";\n",
+            )?;
+            run_workbench_git(&beta, &["add", "src/conflicted.rs"], "Git")?;
+            run_workbench_git(&beta, &["commit", "-m", "Create active conflict"], "Git")?;
+            let output = execute_workbench_git(&beta, &["merge", "conflict-side"], "Git conflict")?;
+            anyhow::ensure!(
+                !output.status.success(),
+                "Git conflict fixture unexpectedly merged without conflict"
+            );
+        }
+        "omega_workbench_git_detached" => {
+            run_workbench_git(&beta, &["checkout", "--detach", "HEAD"], "Git")?;
+            std::fs::write(
+                beta.join("src/detached.rs"),
+                "pub const FIXTURE: &str = \"detached dirty\";\n",
+            )?;
+        }
+        "omega_workbench_git_unborn" => {}
+        "omega_workbench_git_multi_repository" => {
+            std::fs::write(
+                beta.join("src/beta.rs"),
+                "pub const FIXTURE: &str = \"selected beta\";\n",
+            )?;
+        }
+        "omega_workbench_git_offline" => {
+            std::fs::write(
+                beta.join("src/offline.rs"),
+                "pub const FIXTURE: &str = \"offline\";\n",
+            )?;
+        }
+        "omega_workbench_git_reconnect" => {
+            let remote = root_path.join("reconnect-remote.git");
+            let remote_text = remote.to_string_lossy().to_string();
+            run_workbench_git(&root_path, &["init", "--bare", remote_text.as_str()], "Git")?;
+            run_workbench_git(
+                &beta,
+                &["remote", "add", "origin", remote_text.as_str()],
+                "Git",
+            )?;
+            run_workbench_git(&beta, &["push", "-u", "origin", "codex/git-surface"], "Git")?;
+
+            let peer = root_path.join("reconnect-peer");
+            let peer_text = peer.to_string_lossy().to_string();
+            run_workbench_git(
+                &root_path,
+                &[
+                    "clone",
+                    "--branch",
+                    "codex/git-surface",
+                    remote_text.as_str(),
+                    peer_text.as_str(),
+                ],
+                "Git",
+            )?;
+            run_workbench_git(
+                &peer,
+                &["config", "user.email", "omega-workbench@example.invalid"],
+                "Git",
+            )?;
+            run_workbench_git(
+                &peer,
+                &["config", "user.name", "Omega Workbench Proof"],
+                "Git",
+            )?;
+            std::fs::write(
+                peer.join("remote-reconnect.txt"),
+                "remote reconnect commit\n",
+            )?;
+            run_workbench_git(&peer, &["add", "remote-reconnect.txt"], "Git")?;
+            run_workbench_git(&peer, &["commit", "-m", "Advance reconnect remote"], "Git")?;
+            run_workbench_git(&peer, &["push"], "Git")?;
+
+            for index in 1..=3 {
+                let path = format!("local-reconnect-{index}.txt");
+                std::fs::write(
+                    beta.join(&path),
+                    format!("local reconnect commit {index}\n"),
+                )?;
+                run_workbench_git(&beta, &["add", &path], "Git")?;
+                run_workbench_git(
+                    &beta,
+                    &["commit", "-m", &format!("Local reconnect commit {index}")],
+                    "Git",
+                )?;
+            }
+            run_workbench_git(&beta, &["fetch", "origin"], "Git")?;
+            std::fs::write(
+                beta.join("src/reconnected.rs"),
+                "pub const FIXTURE: &str = \"reconnected\";\n",
+            )?;
+        }
+        _ => unreachable!("Git scene was checked above"),
+    }
+
+    Ok(Some(WorkbenchGitDiskFixture {
+        _root: root,
+        worktrees: vec![
+            ("alpha-worktree".into(), alpha),
+            ("beta-worktree".into(), beta),
+        ],
+        active_worktree_id: "beta-worktree".into(),
+    }))
 }
 
 #[cfg(all(target_os = "macos", feature = "visual-tests"))]
@@ -3878,6 +4249,7 @@ fn run_omega_workbench_shell_visual_capture(
     let files_fixture = create_workbench_files_disk_fixture(scene_name)?;
     let search_fixture = create_workbench_search_disk_fixture(scene_name)?;
     let review_fixture = create_workbench_review_disk_fixture(scene_name)?;
+    let git_fixture = create_workbench_git_disk_fixture(scene_name)?;
     let project = cx.update(|cx| {
         project::Project::local(
             app_state.client.clone(),
@@ -3927,6 +4299,9 @@ fn run_omega_workbench_shell_visual_capture(
     if let Some(fixture) = review_fixture.as_ref() {
         add_workbench_disk_worktrees(workspace_window, &fixture.worktrees, "Review", cx)?;
     }
+    if let Some(fixture) = git_fixture.as_ref() {
+        add_workbench_disk_worktrees(workspace_window, &fixture.worktrees, "Git", cx)?;
+    }
 
     let result = run_omega_workbench_shell_visual_capture_in_window(
         workspace_window,
@@ -3935,14 +4310,14 @@ fn run_omega_workbench_shell_visual_capture(
         files_fixture.as_ref(),
         search_fixture.as_ref(),
         review_fixture.as_ref(),
+        git_fixture.as_ref(),
         update_baseline,
     );
-    cx.update_window(workspace_window.into(), |_, window, _cx| {
-        window.remove_window();
-    })
-    .log_err();
-    cx.run_until_parked();
-    if files_fixture.is_some() || search_fixture.is_some() || review_fixture.is_some() {
+    if files_fixture.is_some()
+        || search_fixture.is_some()
+        || review_fixture.is_some()
+        || git_fixture.is_some()
+    {
         cx.update(|cx| {
             let worktree_ids = project
                 .read(cx)
@@ -3957,6 +4332,15 @@ fn run_omega_workbench_shell_visual_capture(
         });
         cx.run_until_parked();
     }
+    cx.update_window(workspace_window.into(), |_, window, _cx| {
+        window.remove_window();
+    })
+    .log_err();
+    cx.run_until_parked();
+    for _ in 0..15 {
+        cx.advance_clock(Duration::from_millis(100));
+        cx.run_until_parked();
+    }
     result
 }
 
@@ -3968,6 +4352,7 @@ fn run_omega_workbench_shell_visual_capture_in_window(
     files_fixture: Option<&WorkbenchFilesDiskFixture>,
     search_fixture: Option<&WorkbenchSearchDiskFixture>,
     review_fixture: Option<&WorkbenchReviewDiskFixture>,
+    git_fixture: Option<&WorkbenchGitDiskFixture>,
     update_baseline: bool,
 ) -> Result<TestResult> {
     use agent_ui::AgentPanel;
@@ -4017,7 +4402,43 @@ fn run_omega_workbench_shell_visual_capture_in_window(
         .update(cx, |workspace, window, cx| {
             (workspace.weak_handle(), window.to_async(cx))
         })
-        .context("getting workbench shell workspace handle after ProjectPanel")?;
+        .context("getting workbench shell workspace handle for GitPanel")?;
+    let git_panel = match workspace_window
+        .update(cx, |workspace, _window, cx| workspace.panel::<GitPanel>(cx))
+        .context("checking for a workspace-owned GitPanel")?
+    {
+        Some(git_panel) => git_panel,
+        None => {
+            cx.background_executor.allow_parking();
+            let git_panel = cx
+                .foreground_executor
+                .block_test(GitPanel::load(weak_workspace, async_window_context))
+                .context("loading GitPanel before AgentPanel")?;
+            cx.background_executor.forbid_parking();
+            workspace_window
+                .update(cx, |workspace, window, cx| {
+                    workspace.add_panel(git_panel.clone(), window, cx);
+                })
+                .context("adding the workspace-owned GitPanel")?;
+            git_panel
+        }
+    };
+    cx.run_until_parked();
+    let workspace_git_panel = workspace_window
+        .update(cx, |workspace, _window, cx| workspace.panel::<GitPanel>(cx))
+        .context("reading the workspace-owned GitPanel")?
+        .context("GitPanel was not registered in the workspace")?;
+    anyhow::ensure!(
+        workspace_git_panel.entity_id() == git_panel.entity_id(),
+        "the Git surface did not retain the one workspace-owned GitPanel"
+    );
+    record_workbench_semantic_check(scene_name, "git-single-workspace-owned-panel");
+
+    let (weak_workspace, async_window_context) = workspace_window
+        .update(cx, |workspace, window, cx| {
+            (workspace.weak_handle(), window.to_async(cx))
+        })
+        .context("getting workbench shell workspace handle after native panels")?;
     cx.background_executor.allow_parking();
     let panel = cx
         .foreground_executor
@@ -4050,6 +4471,7 @@ fn run_omega_workbench_shell_visual_capture_in_window(
         files_fixture,
         search_fixture,
         review_fixture,
+        git_fixture,
         cx,
     );
     if let Err(error) = configuration {
@@ -4151,8 +4573,44 @@ fn select_workbench_identity(
                 ),
             )
         };
+        let mut target_selection_ready = false;
+        for _ in 0..512 {
+            cx.run_until_parked();
+            if cx.read(|cx| {
+                panel
+                    .read(cx)
+                    .workbench_identity_target_selection_ready_for_tests(cx)
+            }) {
+                target_selection_ready = true;
+                break;
+            }
+            cx.advance_clock(Duration::from_millis(10));
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        anyhow::ensure!(
+            target_selection_ready,
+            "{fixture_label} identity target did not become selectable"
+        );
         cx.simulate_click_selector(workspace_window.into(), trigger_selector)?;
-        cx.run_until_parked();
+        let mut target_rendered = false;
+        for _ in 0..512 {
+            cx.run_until_parked();
+            if cx
+                .debug_render_snapshot(workspace_window.into())?
+                .occurrences(&row_selector)
+                .len()
+                == 1
+            {
+                target_rendered = true;
+                break;
+            }
+            cx.advance_clock(Duration::from_millis(10));
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        anyhow::ensure!(
+            target_rendered,
+            "{fixture_label} identity picker did not render target {row_selector:?}"
+        );
         cx.simulate_click_selector(workspace_window.into(), &row_selector)?;
         cx.run_until_parked();
     }
@@ -4176,6 +4634,32 @@ fn select_workbench_identity(
         worktree_path.display()
     );
     Ok(target_binding)
+}
+
+#[cfg(all(target_os = "macos", feature = "visual-tests"))]
+fn set_workbench_identity_observation_phase(
+    workspace_window: WindowHandle<Workspace>,
+    panel: &Entity<agent_ui::AgentPanel>,
+    phase: agent_ui::thread_identity::IdentityPhase,
+    cx: &mut VisualTestAppContext,
+) -> Result<()> {
+    let observation = cx.read(|cx| {
+        let identity = panel
+            .read(cx)
+            .workbench_identity_for_tests()
+            .context("workbench scene has no current identity")?;
+        Ok::<_, anyhow::Error>(agent_ui::thread_identity::ThreadIdentityObservation {
+            revision: identity.observation_revision.saturating_add(1),
+            phase,
+            candidates: identity.candidates.clone(),
+        })
+    })?;
+    cx.update_window(workspace_window.into(), |_, window, cx| {
+        panel.update(cx, |panel, cx| {
+            panel.set_workbench_identity_observation_for_tests(Some(observation), window, cx);
+        });
+    })?;
+    Ok(())
 }
 
 #[cfg(all(target_os = "macos", feature = "visual-tests"))]
@@ -4325,6 +4809,236 @@ fn active_workbench_review(
         .context("active production Review surface is unavailable")?;
     let pane = cx.read(|cx| surface.read(cx).diff_pane().clone());
     Ok((surface, pane))
+}
+
+#[cfg(all(target_os = "macos", feature = "visual-tests"))]
+fn active_workbench_git(
+    panel: &Entity<agent_ui::AgentPanel>,
+    cx: &VisualTestAppContext,
+) -> Result<(
+    Entity<agent_ui::workbench_shell::NativeGitSurface>,
+    Entity<GitPanel>,
+)> {
+    let surface = cx
+        .read(|cx| panel.read(cx).workbench_git_surface_for_tests(cx))
+        .context("active production Git surface is unavailable")?;
+    let git_panel = cx.read(|cx| surface.read(cx).git_panel().clone());
+    Ok((surface, git_panel))
+}
+
+#[cfg(all(target_os = "macos", feature = "visual-tests"))]
+fn wait_for_workbench_git_snapshot(
+    git_panel: &Entity<GitPanel>,
+    expected_scope: GitPanelRepositoryScope,
+    expected_entry_count: usize,
+    cx: &mut VisualTestAppContext,
+) -> Result<GitPanelStateSnapshot> {
+    for _ in 0..512 {
+        cx.run_until_parked();
+        let snapshot =
+            cx.update(|cx| git_panel.update(cx, |git_panel, cx| git_panel.state_snapshot(cx)));
+        if snapshot.repository_scope == Some(expected_scope)
+            && snapshot.repository_scope_available
+            && snapshot.repository_id == Some(expected_scope.repository_id)
+            && snapshot.status_entries.len() == expected_entry_count
+            && snapshot.pending_operation.staging_paths.is_empty()
+        {
+            return Ok(snapshot);
+        }
+        cx.advance_clock(Duration::from_millis(10));
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    let snapshot =
+        cx.update(|cx| git_panel.update(cx, |git_panel, cx| git_panel.state_snapshot(cx)));
+    anyhow::bail!("native Git panel did not settle for scope {expected_scope:?}: {snapshot:?}")
+}
+
+#[cfg(all(target_os = "macos", feature = "visual-tests"))]
+fn select_workbench_git_path(
+    workspace_window: WindowHandle<Workspace>,
+    git_panel: &Entity<GitPanel>,
+    expected_path: &str,
+    cx: &mut VisualTestAppContext,
+) -> Result<GitPanelStateSnapshot> {
+    cx.update_window(workspace_window.into(), |_, window, cx| {
+        git_panel.focus_handle(cx).focus(window, cx);
+    })?;
+    for _ in 0..64 {
+        let snapshot =
+            cx.update(|cx| git_panel.update(cx, |git_panel, cx| git_panel.state_snapshot(cx)));
+        if snapshot
+            .selection
+            .as_ref()
+            .and_then(|selection| selection.repo_path.as_ref())
+            .is_some_and(|path| path.as_unix_str() == expected_path)
+        {
+            return Ok(snapshot);
+        }
+        dispatch_workbench_action(workspace_window, Box::new(git_ui::git_panel::NextEntry), cx)?;
+    }
+    let snapshot =
+        cx.update(|cx| git_panel.update(cx, |git_panel, cx| git_panel.state_snapshot(cx)));
+    anyhow::bail!(
+        "native Git panel could not select {expected_path:?}; final selection was {:?}",
+        snapshot.selection
+    )
+}
+
+#[cfg(all(target_os = "macos", feature = "visual-tests"))]
+fn normalized_workbench_git_snapshot(
+    expected: &omega_workbench_harness::GitSnapshotFixture,
+    surface: &agent_ui::workbench_shell::NativeGitSurface,
+    snapshot: &GitPanelStateSnapshot,
+    identity: &agent_ui::thread_identity::ThreadIdentityCandidate,
+    requested_mutations: Vec<omega_workbench_harness::GitMutationFixture>,
+    ignored_stale_refresh_count: u32,
+) -> Result<omega_workbench_harness::GitSnapshotFixture> {
+    use git::status::{FileStatus, StageStatus, StatusCode};
+    use omega_workbench_harness::{
+        GitBranchFixture, GitFileStatusFixture, GitLifecycleFixture, GitSnapshotFixture,
+        GitStagingStateFixture, GitStatusCountsFixture, GitStatusEntryFixture,
+    };
+
+    let lifecycle = match surface.lifecycle() {
+        agent_ui::workbench_shell::NativeGitLifecycle::Loading => GitLifecycleFixture::Loading,
+        agent_ui::workbench_shell::NativeGitLifecycle::Clean
+        | agent_ui::workbench_shell::NativeGitLifecycle::Dirty
+        | agent_ui::workbench_shell::NativeGitLifecycle::Conflicted
+        | agent_ui::workbench_shell::NativeGitLifecycle::Detached
+        | agent_ui::workbench_shell::NativeGitLifecycle::Unborn
+        | agent_ui::workbench_shell::NativeGitLifecycle::OperationPending => {
+            GitLifecycleFixture::Ready
+        }
+        agent_ui::workbench_shell::NativeGitLifecycle::Offline => GitLifecycleFixture::Offline,
+        agent_ui::workbench_shell::NativeGitLifecycle::Reconnecting => {
+            GitLifecycleFixture::Reconnecting
+        }
+        agent_ui::workbench_shell::NativeGitLifecycle::RepositoryRemoved => {
+            GitLifecycleFixture::RepositoryRemoved
+        }
+        agent_ui::workbench_shell::NativeGitLifecycle::Error(error) => {
+            GitLifecycleFixture::Error(error.to_string())
+        }
+    };
+    let branch = match (&snapshot.head, &identity.branch) {
+        (Some(GitPanelHeadState::Branch(name)), _) => Some(GitBranchFixture::Branch {
+            name: name.to_string(),
+            ahead: snapshot
+                .tracking
+                .as_ref()
+                .map(|tracking| tracking.ahead)
+                .unwrap_or_default(),
+            behind: snapshot
+                .tracking
+                .as_ref()
+                .map(|tracking| tracking.behind)
+                .unwrap_or_default(),
+        }),
+        (Some(GitPanelHeadState::Detached), _) => expected.branch.clone(),
+        (Some(GitPanelHeadState::Unborn { branch }), _) => Some(GitBranchFixture::Unborn {
+            name: branch
+                .as_ref()
+                .map(ToString::to_string)
+                .or_else(|| match &identity.branch {
+                    agent_ui::thread_identity::BranchIdentity::Branch(name) => {
+                        Some(name.to_string())
+                    }
+                    _ => None,
+                })
+                .unwrap_or_else(|| "omega/initial".into()),
+        }),
+        (None, _) => None,
+    };
+    let status_entries = snapshot
+        .status_entries
+        .iter()
+        .map(|entry| {
+            let status = if entry.conflicted || entry.status.is_conflicted() {
+                GitFileStatusFixture::Conflicted
+            } else {
+                match entry.status {
+                    FileStatus::Untracked => GitFileStatusFixture::Untracked,
+                    FileStatus::Ignored => {
+                        anyhow::bail!(
+                            "native Git status exposed ignored path {:?}",
+                            entry.repo_path
+                        )
+                    }
+                    FileStatus::Unmerged(_) => GitFileStatusFixture::Conflicted,
+                    FileStatus::Tracked(status)
+                        if matches!(
+                            status.index_status,
+                            StatusCode::Renamed | StatusCode::Copied
+                        ) =>
+                    {
+                        GitFileStatusFixture::Renamed
+                    }
+                    status if status.is_deleted() => GitFileStatusFixture::Deleted,
+                    status if status.is_created() => GitFileStatusFixture::Added,
+                    _ => GitFileStatusFixture::Modified,
+                }
+            };
+            let staging = if entry.conflicted || entry.status.is_conflicted() {
+                GitStagingStateFixture::Conflict
+            } else {
+                match entry.staging {
+                    StageStatus::Staged => GitStagingStateFixture::Staged,
+                    StageStatus::Unstaged => GitStagingStateFixture::Unstaged,
+                    StageStatus::PartiallyStaged => GitStagingStateFixture::PartiallyStaged,
+                }
+            };
+            Ok::<_, anyhow::Error>(GitStatusEntryFixture {
+                path: entry.repo_path.as_unix_str().to_string(),
+                old_path: None,
+                status: if entry.status == FileStatus::Untracked {
+                    GitFileStatusFixture::Untracked
+                } else {
+                    status
+                },
+                staging,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let mut status_counts = GitStatusCountsFixture::default();
+    for entry in &status_entries {
+        match entry.staging {
+            GitStagingStateFixture::Unstaged => {
+                if entry.status == GitFileStatusFixture::Untracked {
+                    status_counts.untracked = status_counts.untracked.saturating_add(1);
+                } else {
+                    status_counts.unstaged = status_counts.unstaged.saturating_add(1);
+                }
+            }
+            GitStagingStateFixture::Staged => {
+                status_counts.staged = status_counts.staged.saturating_add(1);
+            }
+            GitStagingStateFixture::PartiallyStaged => {
+                status_counts.staged = status_counts.staged.saturating_add(1);
+                status_counts.unstaged = status_counts.unstaged.saturating_add(1);
+            }
+            GitStagingStateFixture::Conflict => {
+                status_counts.conflicts = status_counts.conflicts.saturating_add(1);
+            }
+        }
+    }
+
+    Ok(GitSnapshotFixture {
+        binding: expected.binding.clone(),
+        lifecycle,
+        branch,
+        status_counts,
+        selected_path: snapshot
+            .selection
+            .as_ref()
+            .and_then(|selection| selection.repo_path.as_ref())
+            .map(|path| path.as_unix_str().to_string()),
+        badge_count: u32::try_from(status_entries.len()).context("Git badge count overflowed")?,
+        status_entries,
+        pending_operation: expected.pending_operation.clone(),
+        requested_mutations,
+        ignored_stale_refresh_count,
+        focus: expected.focus,
+    })
 }
 
 #[cfg(all(target_os = "macos", feature = "visual-tests"))]
@@ -4896,6 +5610,7 @@ fn configure_workbench_shell_scene(
     files_fixture: Option<&WorkbenchFilesDiskFixture>,
     search_fixture: Option<&WorkbenchSearchDiskFixture>,
     review_fixture: Option<&WorkbenchReviewDiskFixture>,
+    git_fixture: Option<&WorkbenchGitDiskFixture>,
     cx: &mut VisualTestAppContext,
 ) -> Result<()> {
     use agent_ui::workbench_shell::{
@@ -4921,6 +5636,7 @@ fn configure_workbench_shell_scene(
     if !is_workbench_files_scene(scene_name)
         && !is_workbench_search_scene(scene_name)
         && !is_workbench_review_scene(scene_name)
+        && !is_workbench_git_scene(scene_name)
     {
         anyhow::ensure!(
             active_thread.binding.is_none() && active_thread.available_surfaces.len() == 1,
@@ -6065,6 +6781,504 @@ fn configure_workbench_shell_scene(
                 .with_context(|| format!("proving native Review scene {name:?}"))?;
             record_workbench_semantic_checks(name, checks);
             record_workbench_semantic_check(name, "review-native-snapshot-proved");
+        }
+        name if is_workbench_git_scene(name) => {
+            use agent_ui::{
+                thread_identity::{IdentityPhase, ThreadIdentityObservation},
+                workbench_shell::{NativeGitLifecycle, SelectGit},
+            };
+
+            let fixture = git_fixture.context("Git scene has no disk fixture")?;
+            let active_path = fixture
+                .worktrees
+                .iter()
+                .find_map(|(id, path)| {
+                    (id == &fixture.active_worktree_id).then_some(path.as_path())
+                })
+                .context("Git scene has no active disk worktree")?;
+            let foreign_path = fixture
+                .worktrees
+                .iter()
+                .find_map(|(id, path)| {
+                    (id != &fixture.active_worktree_id).then_some(path.as_path())
+                })
+                .context("Git scene has no foreign disk worktree")?;
+            let fixture_scene = workbench_fixture_for_scene(name)?;
+            let expected = fixture_scene
+                .active_git_snapshot()
+                .context("Git scene has no active typed fixture")?;
+            let repository_binding =
+                select_workbench_identity(workspace_window, panel, active_path, "Git", cx)?;
+
+            let ready_observation = cx.read(|cx| {
+                let identity = panel
+                    .read(cx)
+                    .workbench_identity_for_tests()
+                    .context("Git scene has no selected production identity")?;
+                let mut candidates = identity.candidates.clone();
+                let selected = candidates
+                    .iter_mut()
+                    .find(|candidate| candidate.binding == repository_binding)
+                    .context("Git scene selected identity disappeared")?;
+                selected.git.dirty_files =
+                    usize::try_from(expected.badge_count).context("Git dirty count overflowed")?;
+                selected.git.conflicts = usize::try_from(expected.status_counts.conflicts)
+                    .context("Git conflict count overflowed")?;
+                let (ahead, behind) = match expected.branch.as_ref() {
+                    Some(omega_workbench_harness::GitBranchFixture::Branch {
+                        ahead,
+                        behind,
+                        ..
+                    }) => (*ahead, *behind),
+                    _ => (0, 0),
+                };
+                selected.git.ahead =
+                    usize::try_from(ahead).context("Git ahead count overflowed")?;
+                selected.git.behind =
+                    usize::try_from(behind).context("Git behind count overflowed")?;
+                Ok::<_, anyhow::Error>(ThreadIdentityObservation {
+                    revision: identity.observation_revision.saturating_add(1),
+                    phase: IdentityPhase::Ready,
+                    candidates,
+                })
+            })?;
+            cx.update_window(workspace_window.into(), |_, window, cx| {
+                panel.update(cx, |panel, cx| {
+                    panel.set_workbench_identity_observation_for_tests(
+                        Some(ready_observation),
+                        window,
+                        cx,
+                    );
+                });
+            })?;
+            cx.run_until_parked();
+
+            dispatch_workbench_action(workspace_window, Box::new(SelectGit), cx)?;
+            let (git_surface, git_panel) = active_workbench_git(panel, cx)?;
+            let (native_binding, visible, identity_candidate) = cx.read(|cx| {
+                let native_binding = git_surface
+                    .read(cx)
+                    .binding()
+                    .cloned()
+                    .context("native Git surface has no typed binding")?;
+                let panel = panel.read(cx);
+                let visible = panel
+                    .workbench_projection_for_tests()
+                    .visible_projection()
+                    .context("Git scene has no visible projection")?;
+                let identity_candidate = panel
+                    .workbench_identity_for_tests()
+                    .and_then(|identity| identity.selected.as_ref())
+                    .cloned()
+                    .context("Git scene has no selected identity candidate")?;
+                Ok::<_, anyhow::Error>((native_binding, visible, identity_candidate))
+            })?;
+            anyhow::ensure!(
+                visible.binding.as_ref() == Some(&repository_binding)
+                    && visible.requested_surface == Some(omega_workbench_state::WorkSurface::Git)
+                    && visible.effective_surface == Some(omega_workbench_state::WorkSurface::Git)
+                    && visible.dock_open
+                    && native_binding.thread_id == visible.thread_id
+                    && native_binding.repository == repository_binding
+                    && native_binding.generation == visible.generation
+                    && identity_candidate.binding == repository_binding
+                    && identity_candidate.git_repository_id
+                        == Some(native_binding.git_repository_id.to_proto()),
+                "Git header, workbench projection, and native panel do not share one exact binding and generation"
+            );
+            record_workbench_semantic_check(name, "git-header-rail-panel-binding-generation");
+
+            let expected_scope = GitPanelRepositoryScope {
+                repository_id: native_binding.git_repository_id,
+                worktree_id: native_binding.worktree_id,
+                generation: native_binding.generation,
+            };
+            let mut snapshot = wait_for_workbench_git_snapshot(
+                &git_panel,
+                expected_scope,
+                expected.status_entries.len(),
+                cx,
+            )?;
+            anyhow::ensure!(
+                snapshot
+                    .status_entries
+                    .iter()
+                    .all(|entry| entry.repo_path.as_unix_str() != "foreign/alpha_only.rs"),
+                "active Git panel leaked the foreign repository status"
+            );
+            record_workbench_semantic_check(name, "git-foreign-repository-status-isolated");
+
+            if let Some(selected_path) = expected.selected_path.as_deref() {
+                snapshot =
+                    select_workbench_git_path(workspace_window, &git_panel, selected_path, cx)?;
+            }
+            let conflicted_contents_before = (name == "omega_workbench_git_conflict")
+                .then(|| std::fs::read_to_string(active_path.join("src/conflicted.rs")))
+                .transpose()
+                .context("reading conflicted Git fixture before cancellation proof")?;
+
+            if name == "omega_workbench_git_staged" {
+                cx.update_window(workspace_window.into(), |_, window, cx| {
+                    git_panel.update(cx, |git_panel, cx| {
+                        git_panel.unstage_all(&git::UnstageAll, window, cx);
+                    });
+                })?;
+                cx.run_until_parked();
+                cx.update_window(workspace_window.into(), |_, window, cx| {
+                    git_panel.update(cx, |git_panel, cx| {
+                        git_panel.stage_all(&git::StageAll, window, cx);
+                    });
+                })?;
+                snapshot = wait_for_workbench_git_snapshot(
+                    &git_panel,
+                    expected_scope,
+                    expected.status_entries.len(),
+                    cx,
+                )?;
+                record_workbench_semantic_check(name, "git-production-unstage-stage-round-trip");
+            }
+
+            if name == "omega_workbench_git_dirty" {
+                cx.update_window(workspace_window.into(), |_, window, cx| {
+                    let git_panel = git_panel.clone();
+                    window.defer(cx, move |window, cx| {
+                        git_panel.update(cx, |git_panel, cx| {
+                            git_panel.open_selected_diff(window, cx);
+                        });
+                    });
+                })?;
+                cx.update_window(workspace_window.into(), |_, window, cx| {
+                    window.draw(cx).clear(cx);
+                })?;
+                cx.run_until_parked();
+                let mut opened_diff = None;
+                for _ in 0..128 {
+                    cx.run_until_parked();
+                    opened_diff = cx.read(|cx| -> Result<_> {
+                        let workspace = workspace_window.read(cx)?;
+                        Ok(workspace
+                            .item_of_type::<ProjectDiff>(cx)
+                            .map(|project_diff| {
+                                (
+                                    project_diff.read(cx).repository_id(cx),
+                                    project_diff.read(cx).active_project_path(cx),
+                                )
+                            })
+                            .or_else(|| {
+                                workspace.item_of_type::<StagedDiff>(cx).map(|staged_diff| {
+                                    (
+                                        staged_diff.read(cx).repository_id(cx),
+                                        staged_diff.read(cx).active_project_path(cx),
+                                    )
+                                })
+                            })
+                            .or_else(|| {
+                                workspace
+                                    .item_of_type::<UnstagedDiff>(cx)
+                                    .map(|unstaged_diff| {
+                                        (
+                                            unstaged_diff.read(cx).repository_id(cx),
+                                            unstaged_diff.read(cx).active_project_path(cx),
+                                        )
+                                    })
+                            }))
+                    })?;
+                    if opened_diff
+                        .as_ref()
+                        .is_some_and(|(repository_id, _)| repository_id.is_some())
+                    {
+                        break;
+                    }
+                    cx.advance_clock(Duration::from_millis(10));
+                }
+                let (opened_repository_id, opened_path) = opened_diff
+                    .context("scoped Git diff did not create a native Workspace diff item")?;
+                anyhow::ensure!(
+                    opened_repository_id == Some(native_binding.git_repository_id),
+                    "scoped Git diff resolved against repository {opened_repository_id:?}, expected {:?}",
+                    native_binding.git_repository_id
+                );
+                anyhow::ensure!(
+                    opened_path.as_ref().is_none_or(|path| {
+                        path.worktree_id == native_binding.worktree_id
+                            && path.path.as_unix_str()
+                                == expected.selected_path.as_deref().unwrap_or_default()
+                    }),
+                    "scoped Git diff published a foreign active path: {opened_path:?}"
+                );
+                workspace_window
+                    .update(cx, |_workspace, window, cx| {
+                        AgentPanel::open_front_door(window, cx);
+                    })
+                    .context("restoring Agent Panel after scoped Git diff proof")?;
+                cx.run_until_parked();
+                record_workbench_semantic_check(name, "git-production-open-diff-dispatched");
+                record_workbench_semantic_check(name, "git-production-open-diff-exact-worktree");
+            }
+
+            let mut ignored_stale_refresh_count = 0;
+            match name {
+                "omega_workbench_git_pending" => {
+                    let applied = cx.update(|cx| {
+                        git_surface.update(cx, |surface, cx| {
+                            surface.set_lifecycle(
+                                native_binding.generation,
+                                native_binding.git_repository_id,
+                                NativeGitLifecycle::OperationPending,
+                                cx,
+                            )
+                        })
+                    });
+                    anyhow::ensure!(applied, "Git pending lifecycle rejected its active binding");
+                }
+                "omega_workbench_git_repository_removed" => {
+                    let removed_observation = cx.read(|cx| {
+                        let identity = panel
+                            .read(cx)
+                            .workbench_identity_for_tests()
+                            .context("removed Git scene has no current identity")?;
+                        let mut candidates = identity.candidates.clone();
+                        let selected = candidates
+                            .iter_mut()
+                            .find(|candidate| candidate.binding == repository_binding)
+                            .context("removed Git scene lost its selected candidate")?;
+                        selected.git_repository_id = None;
+                        Ok::<_, anyhow::Error>(ThreadIdentityObservation {
+                            revision: identity.observation_revision.saturating_add(1),
+                            phase: IdentityPhase::Ready,
+                            candidates,
+                        })
+                    })?;
+                    cx.update_window(workspace_window.into(), |_, window, cx| {
+                        panel.update(cx, |panel, cx| {
+                            panel.set_workbench_identity_observation_for_tests(
+                                Some(removed_observation),
+                                window,
+                                cx,
+                            );
+                        });
+                    })?;
+                    cx.run_until_parked();
+                    cx.update_window(workspace_window.into(), |_, window, cx| {
+                        git_panel.update(cx, |git_panel, cx| {
+                            git_panel.set_repository_scope_unavailable(expected_scope, window, cx);
+                        });
+                    })?;
+                    let lifecycle_applied = cx.update(|cx| {
+                        git_surface.update(cx, |surface, cx| {
+                            surface.set_lifecycle(
+                                native_binding.generation,
+                                native_binding.git_repository_id,
+                                NativeGitLifecycle::RepositoryRemoved,
+                                cx,
+                            )
+                        })
+                    });
+                    anyhow::ensure!(
+                        lifecycle_applied,
+                        "removed Git lifecycle rejected its retained binding"
+                    );
+                    ignored_stale_refresh_count = 1;
+                    for _ in 0..128 {
+                        cx.run_until_parked();
+                        snapshot = cx.update(|cx| {
+                            git_panel.update(cx, |git_panel, cx| git_panel.state_snapshot(cx))
+                        });
+                        if !snapshot.repository_scope_available
+                            && snapshot.repository_id.is_none()
+                            && snapshot.status_entries.is_empty()
+                        {
+                            break;
+                        }
+                        cx.advance_clock(Duration::from_millis(10));
+                    }
+                    anyhow::ensure!(
+                        !snapshot.repository_scope_available
+                            && snapshot.repository_id.is_none()
+                            && snapshot.status_entries.is_empty(),
+                        "removed Git repository continued publishing panel state: {snapshot:?}"
+                    );
+                }
+                "omega_workbench_git_offline" => {
+                    let lifecycle_applied = cx.update(|cx| {
+                        git_surface.update(cx, |surface, cx| {
+                            surface.set_lifecycle(
+                                native_binding.generation,
+                                native_binding.git_repository_id,
+                                NativeGitLifecycle::Offline,
+                                cx,
+                            )
+                        })
+                    });
+                    anyhow::ensure!(
+                        lifecycle_applied,
+                        "offline Git lifecycle rejected its retained binding"
+                    );
+                }
+                "omega_workbench_git_reconnect" => {
+                    let stale_rejected = cx.update(|cx| {
+                        git_surface.update(cx, |surface, cx| {
+                            !surface.set_lifecycle(
+                                native_binding.generation.saturating_sub(1),
+                                native_binding.git_repository_id,
+                                NativeGitLifecycle::Offline,
+                                cx,
+                            )
+                        })
+                    });
+                    anyhow::ensure!(
+                        stale_rejected,
+                        "Git surface accepted a stale lifecycle completion"
+                    );
+                    ignored_stale_refresh_count = 1;
+                    let lifecycle_applied = cx.update(|cx| {
+                        git_surface.update(cx, |surface, cx| {
+                            surface.set_lifecycle(
+                                native_binding.generation,
+                                native_binding.git_repository_id,
+                                NativeGitLifecycle::Reconnecting,
+                                cx,
+                            )
+                        })
+                    });
+                    anyhow::ensure!(
+                        lifecycle_applied,
+                        "reconnecting Git lifecycle rejected its retained binding"
+                    );
+                    record_workbench_semantic_check(
+                        name,
+                        "git-stale-generation-rejected-before-reconnect",
+                    );
+                }
+                "omega_workbench_git_error" => {
+                    set_workbench_identity_observation_phase(
+                        workspace_window,
+                        panel,
+                        IdentityPhase::Error("Could not refresh repository status".into()),
+                        cx,
+                    )?;
+                    let lifecycle_applied = cx.update(|cx| {
+                        git_surface.update(cx, |surface, cx| {
+                            surface.set_lifecycle(
+                                native_binding.generation,
+                                native_binding.git_repository_id,
+                                NativeGitLifecycle::Error(
+                                    "Could not refresh repository status".into(),
+                                ),
+                                cx,
+                            )
+                        })
+                    });
+                    anyhow::ensure!(
+                        lifecycle_applied,
+                        "error Git lifecycle rejected its retained binding"
+                    );
+                }
+                _ => {}
+            }
+            cx.run_until_parked();
+            let settled_lifecycle = match name {
+                "omega_workbench_git_repository_removed" => {
+                    Some(NativeGitLifecycle::RepositoryRemoved)
+                }
+                "omega_workbench_git_offline" => Some(NativeGitLifecycle::Offline),
+                "omega_workbench_git_reconnect" => Some(NativeGitLifecycle::Reconnecting),
+                "omega_workbench_git_error" => Some(NativeGitLifecycle::Error(
+                    "Could not refresh repository status".into(),
+                )),
+                _ => None,
+            };
+            if let Some(settled_lifecycle) = settled_lifecycle {
+                cx.update(|cx| {
+                    panel.update(cx, |panel, cx| {
+                        panel.set_workbench_git_lifecycle_for_tests(
+                            Some(settled_lifecycle.clone()),
+                            cx,
+                        );
+                    });
+                });
+                let lifecycle_applied = cx.update(|cx| {
+                    git_surface.update(cx, |surface, cx| {
+                        surface.set_lifecycle(
+                            native_binding.generation,
+                            native_binding.git_repository_id,
+                            settled_lifecycle,
+                            cx,
+                        )
+                    })
+                });
+                anyhow::ensure!(
+                    lifecycle_applied,
+                    "settled Git lifecycle rejected its retained binding"
+                );
+            }
+
+            if name == "omega_workbench_git_multi_repository" {
+                let surface_id = git_surface.entity_id();
+                let panel_id = git_panel.entity_id();
+                let selected_before = snapshot.selection.clone();
+                dispatch_workbench_action(workspace_window, Box::new(SelectPlan), cx)?;
+                dispatch_workbench_action(workspace_window, Box::new(SelectGit), cx)?;
+                let (reopened_surface, reopened_panel) = active_workbench_git(panel, cx)?;
+                let selected_after = cx.update(|cx| {
+                    reopened_panel.update(cx, |git_panel, cx| git_panel.state_snapshot(cx))
+                });
+                anyhow::ensure!(
+                    reopened_surface.entity_id() == surface_id
+                        && reopened_panel.entity_id() == panel_id
+                        && selected_after.selection == selected_before,
+                    "Git collapse/reopen did not retain its exact entity and selection"
+                );
+                record_workbench_semantic_check(
+                    name,
+                    "git-retained-entity-selection-across-collapse-reopen",
+                );
+            }
+
+            let current_identity_candidate = cx
+                .read(|cx| {
+                    panel
+                        .read(cx)
+                        .workbench_identity_for_tests()
+                        .and_then(|identity| identity.selected.as_ref())
+                        .cloned()
+                })
+                .unwrap_or(identity_candidate);
+            let normalized = cx.read(|cx| {
+                normalized_workbench_git_snapshot(
+                    expected,
+                    git_surface.read(cx),
+                    &snapshot,
+                    &current_identity_candidate,
+                    expected.requested_mutations.clone(),
+                    ignored_stale_refresh_count,
+                )
+            })?;
+            let checks = omega_workbench_harness::prove_git_surface(&fixture_scene, &normalized)
+                .with_context(|| format!("proving native Git scene {name:?}"))?;
+            record_workbench_semantic_checks(name, checks);
+            record_workbench_semantic_check(name, "git-native-snapshot-proved");
+
+            if let Some(contents_before) = conflicted_contents_before {
+                let contents_after = std::fs::read_to_string(active_path.join("src/conflicted.rs"))
+                    .context("reading conflicted Git fixture after cancellation proof")?;
+                anyhow::ensure!(
+                    contents_after == contents_before
+                        && contents_after.contains("<<<<<<<")
+                        && contents_after.contains(">>>>>>>"),
+                    "cancelled Git discard did not preserve the conflict exactly"
+                );
+                record_workbench_semantic_check(name, "git-discard-cancel-preserves-conflict");
+            }
+
+            let foreign_unchanged =
+                std::fs::read_to_string(foreign_path.join("foreign/alpha_only.rs"))
+                    .context("reading foreign Git fixture after active operations")?;
+            anyhow::ensure!(
+                foreign_unchanged == "pub const FOREIGN_REPOSITORY: bool = true;\n",
+                "active Git operations mutated the foreign repository"
+            );
+            record_workbench_semantic_check(name, "git-foreign-repository-files-unchanged");
         }
         "omega_workbench_shell_active_dock" => {
             dispatch_workbench_action(workspace_window, Box::new(SelectPlan), cx)?;
