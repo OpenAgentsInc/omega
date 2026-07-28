@@ -23,6 +23,7 @@ mod read_subagent_transcript_tool;
 mod read_tool;
 mod read_tool_result_artifact_tool;
 mod rename_tool;
+mod resume_thread_tool;
 mod skill_tool;
 mod spawn_agent_tool;
 mod subagent_executor;
@@ -95,6 +96,7 @@ pub use read_subagent_transcript_tool::*;
 pub use read_tool::*;
 pub use read_tool_result_artifact_tool::*;
 pub use rename_tool::*;
+pub use resume_thread_tool::*;
 pub use skill_tool::*;
 pub use spawn_agent_tool::*;
 pub use subagent_executor::*;
@@ -221,6 +223,7 @@ tools! {
     ReadSubagentTranscriptTool,
     ReadToolResultArtifactTool,
     RenameTool,
+    ResumeThreadTool,
     SkillTool,
     SpawnAgentTool,
     TerminalTool,
@@ -228,7 +231,8 @@ tools! {
     WriteFileTool,
 }
 
-pub const BASIC_TOOL_NAMES: &[&str] = &["read", "write", "edit", "bash", "delegate"];
+pub const BASIC_TOOL_NAMES: &[&str] =
+    &["read", "write", "edit", "bash", "delegate", "resume_thread"];
 
 pub fn basic_tool_name(tool_name: &str) -> Option<&'static str> {
     match tool_name {
@@ -237,6 +241,7 @@ pub fn basic_tool_name(tool_name: &str) -> Option<&'static str> {
         EditFileTool::NAME => Some("edit"),
         TerminalTool::NAME | SandboxedTerminalTool::NAME => Some("bash"),
         SpawnAgentTool::NAME => Some("delegate"),
+        ResumeThreadTool::NAME => Some("resume_thread"),
         _ => None,
     }
 }

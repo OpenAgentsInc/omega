@@ -3067,6 +3067,124 @@ pub struct NativeThreadEnvironment {
 }
 
 impl NativeThreadEnvironment {
+    fn resume_external_thread(
+        &self,
+        request: ResumeThreadRequest,
+        cx: &mut AsyncApp,
+    ) -> Task<Result<ResumedThreadInfo>> {
+        if request.fork || request.event_sequence.is_some() || request.message_index.is_some() {
+            return Task::ready(Err(anyhow!(
+                "Harness `{}` exposes session resume by ID but not Omega event-log cursors or forks",
+                request.harness
+            )));
+        }
+
+        let Some(parent_thread) = self.thread.upgrade() else {
+            return Task::ready(Err(anyhow!("This thread no longer exists")));
+        };
+        let (project, work_dirs) = parent_thread.read_with(cx, |thread, cx| {
+            let project = thread.project().clone();
+            let work_dirs = self
+                .acp_thread
+                .upgrade()
+                .and_then(|acp_thread| acp_thread.read(cx).work_dirs().cloned())
+                .unwrap_or_else(|| project.read(cx).default_path_list(cx));
+            (project, work_dirs)
+        });
+        let harness = request.harness.clone();
+        let server: Rc<dyn agent_servers::AgentServer> =
+            Rc::new(agent_servers::CustomAgentServer::new(
+                project::agent_server_store::AgentId::new(harness.clone()),
+            ));
+        let delegate = agent_servers::AgentServerDelegate::new(
+            project.read_with(cx, |project, _cx| project.agent_server_store().clone()),
+            None,
+            None,
+        );
+        let connect = cx.update(|cx| server.connect(delegate, project.clone(), cx));
+
+        cx.spawn(async move |cx| {
+            let connection = connect
+                .await
+                .with_context(|| format!("Could not start harness `{harness}`"))?;
+            let session_id = request.session_id.clone();
+            let open_task = cx.update(|cx| {
+                if connection.supports_load_session() {
+                    connection.clone().load_session(
+                        session_id.clone(),
+                        project.clone(),
+                        work_dirs.clone(),
+                        None,
+                        cx,
+                    )
+                } else if connection.supports_resume_session() {
+                    connection.clone().resume_session(
+                        session_id.clone(),
+                        project.clone(),
+                        work_dirs.clone(),
+                        None,
+                        cx,
+                    )
+                } else {
+                    Task::ready(Err(anyhow!(
+                        "Harness `{harness}` does not advertise session load or resume"
+                    )))
+                }
+            });
+            let acp_thread = open_task.await.with_context(|| {
+                format!("Harness `{harness}` could not resume session {session_id}")
+            })?;
+            let (modes, config_options) = cx.update(|cx| {
+                (
+                    connection.session_modes(&session_id, cx),
+                    connection.session_config_options(&session_id, cx),
+                )
+            });
+            let unattended = unattended_mode_for_subagent(
+                &harness,
+                &harness,
+                modes.as_deref(),
+                config_options.as_deref(),
+            )?;
+            match unattended {
+                None => {}
+                Some(UnattendedMode::Mode(mode)) => {
+                    let modes =
+                        modes.context("the session's modes went away between check and set")?;
+                    cx.update(|cx| modes.set_mode(mode.clone(), cx))
+                        .await
+                        .with_context(|| refused_unattended_mode(&harness, &harness, &mode))?;
+                }
+                Some(UnattendedMode::ConfigOption(config_id, value)) => {
+                    let config_options = config_options
+                        .context("the session's config options went away between check and set")?;
+                    cx.update(|cx| {
+                        config_options.set_config_option(
+                            config_id,
+                            acp::SessionConfigOptionValue::value_id(value.clone()),
+                            cx,
+                        )
+                    })
+                    .await
+                    .with_context(|| refused_unattended_mode(&harness, &harness, &value))?;
+                }
+            }
+            let handle = ExternalAcpSubagentHandle::new(
+                session_id.clone(),
+                acp_thread,
+                harness.clone(),
+                harness,
+                connection,
+            );
+            let response = handle.send(request.prompt, cx).await?;
+            Ok(ResumedThreadInfo {
+                session_id,
+                forked: false,
+                response,
+            })
+        })
+    }
+
     pub(crate) fn create_subagent_thread(
         &self,
         label: String,
@@ -3785,6 +3903,155 @@ impl ThreadEnvironment for NativeThreadEnvironment {
             Err(err) => return Task::ready(Err(err)),
         };
         host.create_sibling_thread(request, cx)
+    }
+
+    fn resume_thread(
+        &self,
+        request: ResumeThreadRequest,
+        cx: &mut AsyncApp,
+    ) -> Task<Result<ResumedThreadInfo>> {
+        if request.harness.trim().is_empty() {
+            return Task::ready(Err(anyhow!("A harness ID is required")));
+        }
+        if request.harness != "omega" {
+            return self.resume_external_thread(request, cx);
+        }
+
+        let Some(parent_thread) = self.thread.upgrade() else {
+            return Task::ready(Err(anyhow!("This thread no longer exists")));
+        };
+        let (parent_session_id, project) = parent_thread.read_with(cx, |thread, _cx| {
+            (thread.id().clone(), thread.project().clone())
+        });
+        if parent_session_id == request.session_id {
+            return Task::ready(Err(anyhow!(
+                "A running thread cannot resume itself; specify another persisted session ID"
+            )));
+        }
+
+        let agent = self.agent.clone();
+        let thread_store = match agent.read_with(cx, |agent, _cx| agent.thread_store.clone()) {
+            Ok(thread_store) => thread_store,
+            Err(error) => return Task::ready(Err(error)),
+        };
+        let source_session_id = request.session_id.clone();
+        let source_is_open = agent
+            .read_with(cx, |agent, _cx| {
+                agent.sessions.contains_key(&source_session_id)
+            })
+            .unwrap_or(false);
+
+        if source_is_open
+            && (request.fork || request.event_sequence.is_some() || request.message_index.is_some())
+        {
+            return Task::ready(Err(anyhow!(
+                "Thread {} is currently open; close it before changing or forking its saved cursor",
+                source_session_id
+            )));
+        }
+
+        cx.spawn(async move |cx| {
+            let target_session_id = if request.fork {
+                match (request.event_sequence, request.message_index) {
+                    (Some(event_sequence), None) => {
+                        let fork_task = thread_store.update(cx, |store, cx| {
+                            store.fork_thread(source_session_id.clone(), event_sequence, cx)
+                        });
+                        fork_task.await?.ok_or_else(|| {
+                            anyhow!("No persisted thread found with ID {source_session_id}")
+                        })?
+                    }
+                    (None, Some(message_index)) => {
+                        let fork_task = thread_store.update(cx, |store, cx| {
+                            store.fork_thread_at_message_index(
+                                source_session_id.clone(),
+                                message_index,
+                                cx,
+                            )
+                        });
+                        fork_task.await?.ok_or_else(|| {
+                            anyhow!("No persisted thread found with ID {source_session_id}")
+                        })?
+                    }
+                    (None, None) => {
+                        let load_task = thread_store.update(cx, |store, cx| {
+                            store.load_thread(source_session_id.clone(), cx)
+                        });
+                        let source = load_task.await?.with_context(|| {
+                            format!("No persisted thread found with ID {source_session_id}")
+                        })?;
+                        let event_sequence =
+                            source.thread_log.active_sequence.with_context(|| {
+                                format!("Thread {source_session_id} has no resumable events")
+                            })?;
+                        let fork_task = thread_store.update(cx, |store, cx| {
+                            store.fork_thread(source_session_id.clone(), event_sequence, cx)
+                        });
+                        fork_task.await?.ok_or_else(|| {
+                            anyhow!("No persisted thread found with ID {source_session_id}")
+                        })?
+                    }
+                    (Some(_), Some(_)) => {
+                        unreachable!("resume_thread tool rejects multiple cursor selectors")
+                    }
+                }
+            } else {
+                let selection_task = match (request.event_sequence, request.message_index) {
+                    (Some(event_sequence), None) => Some(thread_store.update(cx, |store, cx| {
+                        store.select_thread_at(source_session_id.clone(), event_sequence, cx)
+                    })),
+                    (None, Some(message_index)) => Some(thread_store.update(cx, |store, cx| {
+                        store.select_thread_at_message_index(
+                            source_session_id.clone(),
+                            message_index,
+                            cx,
+                        )
+                    })),
+                    (None, None) => None,
+                    (Some(_), Some(_)) => {
+                        unreachable!("resume_thread tool rejects multiple cursor selectors")
+                    }
+                };
+                if let Some(selection_task) = selection_task
+                    && !selection_task.await?
+                {
+                    anyhow::bail!("No persisted thread found with ID {source_session_id}");
+                }
+                source_session_id.clone()
+            };
+
+            let open_task = agent.update(cx, |agent, cx| {
+                agent.open_thread(target_session_id.clone(), project, cx)
+            })?;
+            let acp_thread = open_task.await?;
+            let target_thread = agent.read_with(cx, |agent, _cx| {
+                agent
+                    .sessions
+                    .get(&target_session_id)
+                    .map(|session| session.thread.clone())
+                    .with_context(|| {
+                        format!("Resumed thread {target_session_id} was not registered")
+                    })
+            })??;
+            let handle = NativeSubagentHandle::new(
+                target_session_id.clone(),
+                target_thread,
+                acp_thread,
+                parent_thread,
+            );
+            let response = handle.send(request.prompt, cx).await;
+            let close_task =
+                agent.update(cx, |agent, cx| agent.close_session(&target_session_id, cx))?;
+            let close_result = close_task.await;
+            let response = response?;
+            close_result?;
+
+            Ok(ResumedThreadInfo {
+                session_id: target_session_id,
+                forked: request.fork,
+                response,
+            })
+        })
     }
 
     fn list_available_agents(&self, cx: &mut App) -> Result<AvailableAgents> {

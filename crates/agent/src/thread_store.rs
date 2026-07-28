@@ -1,4 +1,4 @@
-use crate::{DbThread, DbThreadMetadata, ThreadsDatabase};
+use crate::{DbThread, DbThreadMetadata, ThreadEventSequence, ThreadsDatabase};
 use agent_client_protocol::schema::v1 as acp;
 use anyhow::{Result, anyhow};
 use futures::{FutureExt, future::Shared};
@@ -56,6 +56,138 @@ impl ThreadStore {
         cx.background_spawn(async move {
             let database = database_future.await.map_err(|err| anyhow!(err))?;
             database.load_thread(id).await
+        })
+    }
+
+    pub fn load_thread_at(
+        &mut self,
+        id: acp::SessionId,
+        event_sequence: ThreadEventSequence,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<Option<DbThread>>> {
+        let database_future = ThreadsDatabase::connect(cx);
+        cx.background_spawn(async move {
+            let database = database_future.await.map_err(|err| anyhow!(err))?;
+            let Some(mut thread) = database.load_thread(id).await? else {
+                return Ok(None);
+            };
+            thread.prepare_for_resume(Some(event_sequence))?;
+            Ok(Some(thread))
+        })
+    }
+
+    pub fn load_thread_at_message_index(
+        &mut self,
+        id: acp::SessionId,
+        message_index: usize,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<Option<DbThread>>> {
+        let database_future = ThreadsDatabase::connect(cx);
+        cx.background_spawn(async move {
+            let database = database_future.await.map_err(|err| anyhow!(err))?;
+            let Some(mut thread) = database.load_thread(id).await? else {
+                return Ok(None);
+            };
+            thread.prepare_for_resume_at_message_index(message_index)?;
+            Ok(Some(thread))
+        })
+    }
+
+    pub fn select_thread_at(
+        &mut self,
+        id: acp::SessionId,
+        event_sequence: ThreadEventSequence,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<bool>> {
+        let folder_paths = self
+            .thread_from_session_id(&id)
+            .map(|metadata| metadata.folder_paths.clone())
+            .unwrap_or_default();
+        let database_future = ThreadsDatabase::connect(cx);
+        cx.spawn(async move |this, cx| {
+            let database = database_future.await.map_err(|error| anyhow!(error))?;
+            let Some(mut thread) = database.load_thread(id.clone()).await? else {
+                return Ok(false);
+            };
+            thread.prepare_for_resume(Some(event_sequence))?;
+            database.save_thread(id, thread, folder_paths).await?;
+            this.update(cx, |this, cx| this.reload(cx))?;
+            Ok(true)
+        })
+    }
+
+    pub fn select_thread_at_message_index(
+        &mut self,
+        id: acp::SessionId,
+        message_index: usize,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<bool>> {
+        let folder_paths = self
+            .thread_from_session_id(&id)
+            .map(|metadata| metadata.folder_paths.clone())
+            .unwrap_or_default();
+        let database_future = ThreadsDatabase::connect(cx);
+        cx.spawn(async move |this, cx| {
+            let database = database_future.await.map_err(|error| anyhow!(error))?;
+            let Some(mut thread) = database.load_thread(id.clone()).await? else {
+                return Ok(false);
+            };
+            thread.prepare_for_resume_at_message_index(message_index)?;
+            database.save_thread(id, thread, folder_paths).await?;
+            this.update(cx, |this, cx| this.reload(cx))?;
+            Ok(true)
+        })
+    }
+
+    pub fn fork_thread(
+        &mut self,
+        source_id: acp::SessionId,
+        event_sequence: ThreadEventSequence,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<Option<acp::SessionId>>> {
+        let folder_paths = self
+            .thread_from_session_id(&source_id)
+            .map(|metadata| metadata.folder_paths.clone())
+            .unwrap_or_default();
+        let database_future = ThreadsDatabase::connect(cx);
+        cx.spawn(async move |this, cx| {
+            let database = database_future.await.map_err(|err| anyhow!(err))?;
+            let Some(source) = database.load_thread(source_id.clone()).await? else {
+                return Ok(None);
+            };
+            let fork = source.fork_at(source_id, event_sequence)?;
+            let fork_id = acp::SessionId::new(uuid::Uuid::new_v4().to_string());
+            database
+                .save_thread(fork_id.clone(), fork, folder_paths)
+                .await?;
+            this.update(cx, |this, cx| this.reload(cx))?;
+            Ok(Some(fork_id))
+        })
+    }
+
+    pub fn fork_thread_at_message_index(
+        &mut self,
+        source_id: acp::SessionId,
+        message_index: usize,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<Option<acp::SessionId>>> {
+        let folder_paths = self
+            .thread_from_session_id(&source_id)
+            .map(|metadata| metadata.folder_paths.clone())
+            .unwrap_or_default();
+        let database_future = ThreadsDatabase::connect(cx);
+        cx.spawn(async move |this, cx| {
+            let database = database_future.await.map_err(|err| anyhow!(err))?;
+            let Some(source) = database.load_thread(source_id.clone()).await? else {
+                return Ok(None);
+            };
+            let fork = source.fork_at_message_index(source_id, message_index)?;
+            let fork_id = acp::SessionId::new(uuid::Uuid::new_v4().to_string());
+            database
+                .save_thread(fork_id.clone(), fork, folder_paths)
+                .await?;
+            this.update(cx, |this, cx| this.reload(cx))?;
+            Ok(Some(fork_id))
         })
     }
 
@@ -168,7 +300,149 @@ mod tests {
             ui_scroll_position: None,
             sandboxed_terminal_temp_dir: None,
             sandbox_grants: Default::default(),
+            thread_log: Default::default(),
+            fork_origin: None,
         }
+    }
+
+    fn user_message(text: &str) -> Arc<crate::Message> {
+        Arc::new(crate::Message::User(crate::UserMessage {
+            id: acp_thread::ClientUserMessageId::new(),
+            content: Arc::from([crate::UserMessageContent::Text(text.to_string())]),
+        }))
+    }
+
+    #[gpui::test]
+    async fn load_at_cursor_and_fork_preserve_the_selected_prefix(cx: &mut TestAppContext) {
+        let thread_store = cx.new(|cx| ThreadStore::new(cx));
+        cx.run_until_parked();
+        let source_id = session_id("source-thread");
+        let mut source = make_thread("Source", Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap());
+        let cursor = source.thread_log.append_message(user_message("inherited"));
+        source
+            .thread_log
+            .append_message(user_message("not inherited"));
+        source.messages = source.thread_log.messages().unwrap();
+
+        thread_store
+            .update(cx, |store, cx| {
+                store.save_thread(source_id.clone(), source, PathList::default(), cx)
+            })
+            .await
+            .unwrap();
+        cx.run_until_parked();
+
+        let resumed = thread_store
+            .update(cx, |store, cx| {
+                store.load_thread_at(source_id.clone(), cursor, cx)
+            })
+            .await
+            .unwrap()
+            .expect("source thread");
+        assert_eq!(resumed.messages.len(), 1);
+
+        assert!(
+            thread_store
+                .update(cx, |store, cx| {
+                    store.select_thread_at(source_id.clone(), cursor, cx)
+                })
+                .await
+                .unwrap()
+        );
+        let selected = thread_store
+            .update(cx, |store, cx| store.load_thread(source_id.clone(), cx))
+            .await
+            .unwrap()
+            .expect("selected source thread");
+        assert_eq!(selected.messages.len(), 1);
+        assert_eq!(selected.thread_log.active_sequence, Some(cursor));
+
+        let fork_id = thread_store
+            .update(cx, |store, cx| {
+                store.fork_thread(source_id.clone(), cursor, cx)
+            })
+            .await
+            .unwrap()
+            .expect("forked thread");
+        assert_ne!(fork_id, source_id);
+        let fork = thread_store
+            .update(cx, |store, cx| store.load_thread(fork_id, cx))
+            .await
+            .unwrap()
+            .expect("saved fork");
+        assert_eq!(fork.messages.len(), 1);
+        assert_eq!(
+            fork.fork_origin,
+            Some(crate::ThreadForkOrigin {
+                session_id: source_id,
+                event_sequence: cursor,
+            })
+        );
+    }
+
+    #[gpui::test]
+    async fn load_and_fork_at_message_index_preserve_the_selected_prefix(cx: &mut TestAppContext) {
+        let thread_store = cx.new(|cx| ThreadStore::new(cx));
+        cx.run_until_parked();
+        let source_id = session_id("source-thread-by-message");
+        let mut source = make_thread("Source", Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap());
+        source.thread_log.append_message(user_message("first"));
+        source
+            .thread_log
+            .append_prompt_cache_layout(crate::PromptCacheLayout {
+                system_prompt: "stable prompt".into(),
+                tool_order: vec!["terminal".into()],
+            });
+        let source_sequence = source.thread_log.append_message(user_message("second"));
+        source.messages = source.thread_log.messages().unwrap();
+
+        thread_store
+            .update(cx, |store, cx| {
+                store.save_thread(source_id.clone(), source, PathList::default(), cx)
+            })
+            .await
+            .unwrap();
+        cx.run_until_parked();
+
+        let resumed = thread_store
+            .update(cx, |store, cx| {
+                store.load_thread_at_message_index(source_id.clone(), 0, cx)
+            })
+            .await
+            .unwrap()
+            .expect("source thread");
+        assert_eq!(resumed.messages.len(), 1);
+        assert_eq!(
+            resumed
+                .thread_log
+                .prompt_cache_layout(resumed.thread_log.active_sequence)
+                .unwrap(),
+            Some(crate::PromptCacheLayout {
+                system_prompt: "stable prompt".into(),
+                tool_order: vec!["terminal".into()],
+            })
+        );
+
+        let fork_id = thread_store
+            .update(cx, |store, cx| {
+                store.fork_thread_at_message_index(source_id.clone(), 0, cx)
+            })
+            .await
+            .unwrap()
+            .expect("forked thread");
+        let fork = thread_store
+            .update(cx, |store, cx| store.load_thread(fork_id, cx))
+            .await
+            .unwrap()
+            .expect("saved fork");
+        assert_eq!(fork.messages.len(), 1);
+        assert_eq!(
+            fork.fork_origin,
+            Some(crate::ThreadForkOrigin {
+                session_id: source_id,
+                event_sequence: source_sequence,
+            })
+        );
     }
 
     #[gpui::test]

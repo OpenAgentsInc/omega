@@ -2,13 +2,14 @@ use crate::{
     ApplyCodeActionTool, CodeActionStore, ContextServerRegistry, CopyPathTool, CreateDirectoryTool,
     CreateThreadTool, DbLanguageModel, DbThread, DeletePathTool, DiagnosticsTool, EditFileTool,
     FetchTool, FindPathTool, FindReferencesTool, GetCodeActionsTool, GoToDefinitionTool, GrepTool,
-    ListAgentsAndModelsTool, ListDirectoryTool, MovePathTool, ProjectSnapshot, ReadFileTool,
-    ReadSubagentTranscriptTool, ReadTool, ReadToolResultArtifactTool, RenameTool,
-    SandboxedTerminalTool, SkillBodyResolver, SkillsResolver, SpawnAgentTool, SubagentExecutor,
-    SubagentTranscript, SystemPromptTemplate, Template, Templates, TerminalTool,
-    ToolPermissionDecision, ToolResultArtifactRegistry, TranscriptBlock, TranscriptEntry,
-    TranscriptRole, TranscriptWindowRequest, WebSearchTool, WriteFileTool,
-    decide_permission_from_settings, tool_result_artifact_source,
+    ListAgentsAndModelsTool, ListDirectoryTool, MovePathTool, ProjectSnapshot, PromptCacheLayout,
+    ReadFileTool, ReadSubagentTranscriptTool, ReadTool, ReadToolResultArtifactTool, RenameTool,
+    ResumeThreadTool, SandboxedTerminalTool, SkillBodyResolver, SkillsResolver, SpawnAgentTool,
+    SubagentExecutor, SubagentTranscript, SystemPromptTemplate, Template, Templates, TerminalTool,
+    ThreadEventLog, ThreadEventSequence, ThreadForkOrigin, ToolPermissionDecision,
+    ToolResultArtifactRegistry, TranscriptBlock, TranscriptEntry, TranscriptRole,
+    TranscriptWindowRequest, WebSearchTool, WriteFileTool, decide_permission_from_settings,
+    tool_result_artifact_source,
 };
 use acp_thread::{ClientUserMessageId, MentionUri, ToolResultArtifactStore};
 use action_log::ActionLog;
@@ -929,6 +930,18 @@ pub trait ThreadEnvironment {
         )))
     }
 
+    fn resume_thread(
+        &self,
+        request: ResumeThreadRequest,
+        cx: &mut AsyncApp,
+    ) -> Task<Result<ResumedThreadInfo>> {
+        let _ = request;
+        let _ = cx;
+        Task::ready(Err(anyhow::anyhow!(
+            "Resuming persisted threads is not supported in this environment"
+        )))
+    }
+
     /// Lists the agents and models available for use with `create_sibling_thread`.
     fn list_available_agents(&self, cx: &mut App) -> Result<AvailableAgents> {
         let _ = cx;
@@ -975,6 +988,23 @@ pub struct SiblingThreadInfo {
     /// unusual worktree layout that affected how the new worktree was set
     /// up). Empty when nothing noteworthy happened.
     pub warning: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ResumeThreadRequest {
+    pub harness: String,
+    pub session_id: acp::SessionId,
+    pub prompt: String,
+    pub fork: bool,
+    pub event_sequence: Option<ThreadEventSequence>,
+    pub message_index: Option<usize>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ResumedThreadInfo {
+    pub session_id: acp::SessionId,
+    pub forked: bool,
+    pub response: String,
 }
 
 /// A list of agents and, for each, the models available for use.
@@ -1423,6 +1453,10 @@ pub struct Thread {
     /// tool results `DbThread` already saves, rather than writing a second copy
     /// of the same bytes. See `TOOL_ARTIFACTS_ARE_REBUILT`.
     tool_result_artifacts: Rc<RefCell<ToolResultArtifactRegistry>>,
+    /// Canonical append-only conversation graph and prompt-layout history.
+    thread_log: RefCell<ThreadEventLog>,
+    /// Source cursor when this thread was created as a fork.
+    fork_origin: Option<ThreadForkOrigin>,
 }
 
 impl Thread {
@@ -1560,6 +1594,8 @@ impl Thread {
             sandboxed_terminal_temp_dir: None,
             sandbox_grants: Rc::new(RefCell::new(ThreadSandboxGrants::default())),
             tool_result_artifacts: Rc::new(RefCell::new(ToolResultArtifactRegistry::default())),
+            thread_log: RefCell::new(ThreadEventLog::default()),
+            fork_origin: None,
         }
     }
 
@@ -1880,6 +1916,11 @@ impl Thread {
         templates: Arc<Templates>,
         cx: &mut Context<Self>,
     ) -> Self {
+        let mut db_thread = db_thread;
+        if let Err(error) = db_thread.prepare_for_resume(None) {
+            log::error!("failed to reconstruct thread event log: {error:#}");
+            db_thread.thread_log = ThreadEventLog::from_messages(&db_thread.messages);
+        }
         let settings = AgentSettings::get_global(cx);
         let profile_id = db_thread
             .profile
@@ -1972,6 +2013,8 @@ impl Thread {
             // Nothing is rebuilt at construction because the tools have not
             // been registered yet — `tools` is empty two fields up.
             tool_result_artifacts: Rc::new(RefCell::new(ToolResultArtifactRegistry::default())),
+            thread_log: RefCell::new(db_thread.thread_log),
+            fork_origin: db_thread.fork_origin,
         }
     }
 
@@ -2069,6 +2112,8 @@ impl Thread {
             }),
             sandboxed_terminal_temp_dir: self.sandboxed_terminal_temp_dir.clone(),
             sandbox_grants: self.sandbox_grants.borrow().to_db(),
+            thread_log: self.thread_log.borrow().clone(),
+            fork_origin: self.fork_origin.clone(),
         };
 
         cx.background_spawn(async move {
@@ -2076,6 +2121,63 @@ impl Thread {
             thread.initial_project_snapshot = initial_project_snapshot;
             thread
         })
+    }
+
+    pub fn active_event_sequence(&self) -> Option<ThreadEventSequence> {
+        self.thread_log.borrow().active_sequence
+    }
+
+    pub fn fork_origin(&self) -> Option<&ThreadForkOrigin> {
+        self.fork_origin.as_ref()
+    }
+
+    pub fn resume_at_event_sequence(&mut self, sequence: ThreadEventSequence) -> Result<()> {
+        anyhow::ensure!(
+            self.running_turn.is_none(),
+            "cannot move a running thread cursor"
+        );
+        let mut thread_log = self.thread_log.borrow_mut();
+        thread_log.select(sequence)?;
+        self.messages = thread_log.messages()?;
+        self.pending_message = None;
+        self.updated_at = Utc::now();
+        Ok(())
+    }
+
+    pub fn resume_at_message_index(&mut self, message_index: usize) -> Result<()> {
+        anyhow::ensure!(
+            self.running_turn.is_none(),
+            "cannot move a running thread cursor"
+        );
+        anyhow::ensure!(
+            message_index < self.messages.len(),
+            "thread message index {message_index} does not exist; thread has {} messages",
+            self.messages.len()
+        );
+        let mut thread_log = self.thread_log.borrow_mut();
+        thread_log.truncate_messages(message_index.saturating_add(1));
+        self.messages = thread_log.messages()?;
+        self.pending_message = None;
+        self.updated_at = Utc::now();
+        Ok(())
+    }
+
+    fn append_message(&mut self, message: Arc<Message>) {
+        self.thread_log.borrow_mut().append_message(message.clone());
+        self.messages.push(message);
+    }
+
+    fn insert_message(&mut self, index: usize, message: Arc<Message>) {
+        self.thread_log
+            .borrow_mut()
+            .insert_message(index, message.clone());
+        self.messages
+            .insert(index.min(self.messages.len()), message);
+    }
+
+    fn truncate_messages(&mut self, len: usize) {
+        self.thread_log.borrow_mut().truncate_messages(len);
+        self.messages.truncate(len);
     }
 
     /// Create a snapshot of the current project state including git information and unsaved buffers.
@@ -2346,6 +2448,7 @@ impl Thread {
         self.add_tool(ReadToolResultArtifactTool::new(
             self.tool_result_artifacts.clone(),
         ));
+        self.add_tool(ResumeThreadTool::new(environment.clone()));
 
         // Sibling-thread tools are exposed at every depth: a subagent should
         // still be able to kick off independent sibling work on behalf of the
@@ -2578,14 +2681,15 @@ impl Thread {
             return Err(anyhow!("Message not found"));
         };
 
-        for message in self.messages.drain(position..) {
-            match &*message {
+        for message in &self.messages[position..] {
+            match &**message {
                 Message::User(message) => {
                     self.request_token_usage.remove(&message.id);
                 }
                 Message::Agent(_) | Message::Resume | Message::Compaction(_) => {}
             }
         }
+        self.truncate_messages(position);
         self.clear_summary();
         cx.notify();
         Ok(())
@@ -2684,7 +2788,7 @@ impl Thread {
         &mut self,
         cx: &mut Context<Self>,
     ) -> Result<mpsc::UnboundedReceiver<Result<ThreadEvent>>> {
-        self.messages.push(Arc::new(Message::Resume));
+        self.append_message(Arc::new(Message::Resume));
         cx.notify();
 
         log::debug!("Total messages in thread: {}", self.messages.len());
@@ -2706,8 +2810,7 @@ impl Thread {
         let content = content.into_iter().map(Into::into).collect::<Arc<_>>();
         log::debug!("Thread::send content: {:?}", content);
 
-        self.messages
-            .push(Arc::new(Message::User(UserMessage { id, content })));
+        self.append_message(Arc::new(Message::User(UserMessage { id, content })));
         cx.notify();
 
         self.send_existing(cx)
@@ -2833,8 +2936,7 @@ impl Thread {
             .into_iter()
             .map(|block| UserMessageContent::from_content_block(block, path_style))
             .collect::<Arc<_>>();
-        self.messages
-            .push(Arc::new(Message::User(UserMessage { id, content })));
+        self.append_message(Arc::new(Message::User(UserMessage { id, content })));
         cx.notify();
     }
 
@@ -2852,7 +2954,7 @@ impl Thread {
             _ => "[unknown]".to_string(),
         };
 
-        self.messages.push(Arc::new(Message::Agent(AgentMessage {
+        self.append_message(Arc::new(Message::Agent(AgentMessage {
             content: vec![AgentMessageContent::Text(text)],
             ..Default::default()
         })));
@@ -2904,7 +3006,7 @@ impl Thread {
                         match error.downcast::<CompletionError>() {
                             Ok(CompletionError::Refusal) => {
                                 event_stream.send_stop(acp::StopReason::Refusal);
-                                _ = this.update(cx, |this, _| this.messages.truncate(message_ix));
+                                _ = this.update(cx, |this, _| this.truncate_messages(message_ix));
                             }
                             Ok(CompletionError::MaxTokens) => {
                                 event_stream.send_stop(acp::StopReason::MaxTokens);
@@ -3255,7 +3357,7 @@ impl Thread {
                     if let Some(Message::Agent(message)) = this.last_message() {
                         if message.tool_results.is_empty() {
                             intent = CompletionIntent::UserPrompt;
-                            this.messages.push(Arc::new(Message::Resume));
+                            this.append_message(Arc::new(Message::Resume));
                         }
                     }
                 })?;
@@ -3428,17 +3530,17 @@ impl Thread {
             match insertion {
                 CompactionInsertion::Auto { insertion_ix } => {
                     if insertion_ix <= this.messages.len() {
-                        this.messages.insert(insertion_ix, compaction);
+                        this.insert_message(insertion_ix, compaction);
                     } else {
-                        this.messages.push(compaction);
+                        this.append_message(compaction);
                     }
                 }
                 CompactionInsertion::Manual { marker_id } => {
-                    this.messages.push(Arc::new(Message::User(UserMessage {
+                    this.append_message(Arc::new(Message::User(UserMessage {
                         id: marker_id,
                         content: Arc::from([]),
                     })));
-                    this.messages.push(compaction);
+                    this.append_message(compaction);
                 }
             }
             cx.notify();
@@ -4256,7 +4358,7 @@ impl Thread {
             }
         }
 
-        self.messages.push(Arc::new(Message::Agent(message)));
+        self.append_message(Arc::new(Message::Agent(message)));
         self.updated_at = Utc::now();
         self.clear_summary();
         cx.notify()
@@ -4278,10 +4380,17 @@ impl Thread {
             .model()
             .ok_or_else(|| anyhow!(NoModelConfiguredError))?;
         let sandboxing_enabled = crate::sandboxing::sandboxing_enabled(cx);
+        let available_tools = self.prompt_cache_tool_order(
+            self.running_turn
+                .as_ref()
+                .map(|turn| turn.tools.keys().cloned().collect())
+                .unwrap_or_default(),
+        );
         let tools = if let Some(turn) = self.running_turn.as_ref() {
-            turn.tools
+            available_tools
                 .iter()
-                .filter_map(|(tool_name, tool)| {
+                .filter_map(|tool_name| {
+                    let tool = turn.tools.get(tool_name)?;
                     log::trace!("Including tool: {}", tool_name);
                     let mut description = tool.description().to_string();
                     let mut schema = tool.input_schema(model.tool_input_format()).log_err()?;
@@ -4329,12 +4438,6 @@ impl Thread {
         log::debug!("Building completion request");
         log::debug!("Completion intent: {:?}", completion_intent);
 
-        let available_tools: Vec<_> = self
-            .running_turn
-            .as_ref()
-            .map(|turn| turn.tools.keys().cloned().collect())
-            .unwrap_or_default();
-
         log::debug!("Request includes {} tools", available_tools.len());
         let messages = self.build_request_messages(available_tools, cx);
         log::debug!("Request will include {} messages", messages.len());
@@ -4359,6 +4462,29 @@ impl Thread {
 
         log::debug!("Completion request built successfully");
         Ok(request)
+    }
+
+    fn prompt_cache_tool_order(&self, current_tools: Vec<SharedString>) -> Vec<SharedString> {
+        let Ok(Some(layout)) = self
+            .thread_log
+            .borrow()
+            .prompt_cache_layout(self.thread_log.borrow().active_sequence)
+        else {
+            return current_tools;
+        };
+        let current = current_tools.iter().cloned().collect::<HashSet<_>>();
+        let mut ordered = layout
+            .tool_order
+            .into_iter()
+            .filter(|name| current.contains(name))
+            .collect::<Vec<_>>();
+        let already_ordered = ordered.iter().cloned().collect::<HashSet<_>>();
+        ordered.extend(
+            current_tools
+                .into_iter()
+                .filter(|name| !already_ordered.contains(name)),
+        );
+        ordered
     }
 
     fn enabled_tools(&self, cx: &App) -> BTreeMap<SharedString, Arc<dyn AnyAgentTool>> {
@@ -4585,33 +4711,53 @@ impl Thread {
         log::trace!("Building request messages from {} thread messages", end_ix);
 
         let user_agents_md = UserAgentsMd::global(cx).and_then(|s| s.content().cloned());
-        let system_prompt = SystemPromptTemplate {
-            project: self.project_context.read(cx),
-            available_tools,
-            available_executors: omega_agent_detect::detected()
-                .iter()
-                .map(|agent| crate::InstalledAgent::new(agent.id, agent.name))
-                .collect(),
-            model_name: self.model().map(|m| m.name().0.to_string()),
-            date: Local::now().format("%Y-%m-%d").to_string(),
-            user_agents_md,
-            sandboxing: crate::sandboxing::sandboxing_enabled_for_project(
-                self.project.read(cx),
-                cx,
-            ),
-            is_linux: cfg!(target_os = "linux"),
-            is_windows: cfg!(target_os = "windows"),
-        };
-        let system_prompt = if self.profile_id.as_str() == builtin_profiles::BASIC {
-            system_prompt.render_basic(&self.templates)
+        let active_sequence = self.thread_log.borrow().active_sequence;
+        let persisted_layout = self
+            .thread_log
+            .borrow()
+            .prompt_cache_layout(active_sequence)
+            .ok()
+            .flatten()
+            .filter(|layout| layout.tool_order == available_tools);
+        let system_prompt = if let Some(layout) = persisted_layout {
+            layout.system_prompt
         } else {
-            system_prompt.render(&self.templates)
-        }
-        .context("failed to build system prompt")
-        .expect("Invalid template");
+            let system_prompt = SystemPromptTemplate {
+                project: self.project_context.read(cx),
+                available_tools: available_tools.clone(),
+                available_executors: omega_agent_detect::detected()
+                    .iter()
+                    .map(|agent| crate::InstalledAgent::new(agent.id, agent.name))
+                    .collect(),
+                model_name: self.model().map(|m| m.name().0.to_string()),
+                date: Local::now().format("%Y-%m-%d").to_string(),
+                user_agents_md,
+                sandboxing: crate::sandboxing::sandboxing_enabled_for_project(
+                    self.project.read(cx),
+                    cx,
+                ),
+                is_linux: cfg!(target_os = "linux"),
+                is_windows: cfg!(target_os = "windows"),
+            };
+            let system_prompt = if self.profile_id.as_str() == builtin_profiles::BASIC {
+                system_prompt.render_basic(&self.templates)
+            } else {
+                system_prompt.render(&self.templates)
+            }
+            .context("failed to build system prompt")
+            .expect("Invalid template");
+            let system_prompt: SharedString = system_prompt.into();
+            self.thread_log
+                .borrow_mut()
+                .append_prompt_cache_layout(PromptCacheLayout {
+                    system_prompt: system_prompt.clone(),
+                    tool_order: available_tools,
+                });
+            system_prompt
+        };
         let mut messages = vec![LanguageModelRequestMessage {
             role: Role::System,
-            content: vec![system_prompt.into()],
+            content: vec![system_prompt.to_string().into()],
             cache: false,
             reasoning_details: None,
         }];

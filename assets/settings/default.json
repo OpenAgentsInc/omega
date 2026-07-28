@@ -1208,6 +1208,7 @@
           "edit": true,
           "bash": true,
           "delegate": true,
+          "resume_thread": true,
         },
       },
       "editor": {
@@ -1231,6 +1232,7 @@
           "list_directory": true,
           "move_path": true,
           "rename_symbol": true,
+          "resume_thread": true,
           "read_file": true,
           "grep": true,
           "skill": true,
@@ -1260,6 +1262,7 @@
           "skill": true,
           "read_subagent_transcript": true,
           "read_tool_result_artifact": true,
+          "resume_thread": true,
           "spawn_agent": true,
           "search_web": true,
         },

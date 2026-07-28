@@ -224,6 +224,8 @@ pub(crate) struct FakeThreadEnvironment {
     subagent_handle: Option<Rc<FakeSubagentHandle>>,
     terminal_creations: Arc<AtomicUsize>,
     terminal_output_limits: std::cell::RefCell<Vec<Option<u64>>>,
+    resume_requests: std::cell::RefCell<Vec<crate::ResumeThreadRequest>>,
+    resume_result: std::cell::RefCell<Option<crate::ResumedThreadInfo>>,
 }
 
 impl FakeThreadEnvironment {
@@ -240,6 +242,15 @@ impl FakeThreadEnvironment {
 
     pub(crate) fn terminal_output_limits(&self) -> Vec<Option<u64>> {
         self.terminal_output_limits.borrow().clone()
+    }
+
+    fn with_resume_result(self, result: crate::ResumedThreadInfo) -> Self {
+        *self.resume_result.borrow_mut() = Some(result);
+        self
+    }
+
+    fn resume_requests(&self) -> Vec<crate::ResumeThreadRequest> {
+        self.resume_requests.borrow().clone()
     }
 }
 
@@ -276,6 +287,159 @@ impl crate::ThreadEnvironment for FakeThreadEnvironment {
             .expect("Subagent handle not available on FakeThreadEnvironment")
             as Rc<dyn SubagentHandle>))
     }
+
+    fn resume_thread(
+        &self,
+        request: crate::ResumeThreadRequest,
+        _cx: &mut AsyncApp,
+    ) -> Task<Result<crate::ResumedThreadInfo>> {
+        self.resume_requests.borrow_mut().push(request);
+        Task::ready(
+            self.resume_result
+                .borrow()
+                .clone()
+                .context("Resume result not available on FakeThreadEnvironment"),
+        )
+    }
+}
+
+#[gpui::test]
+#[allow(clippy::arc_with_non_send_sync)]
+async fn test_resume_thread_tool_forwards_cursor_and_returns_continuation(cx: &mut TestAppContext) {
+    init_test(cx);
+    let environment = Rc::new(FakeThreadEnvironment::default().with_resume_result(
+        crate::ResumedThreadInfo {
+            session_id: acp::SessionId::new("fork-session"),
+            forked: true,
+            response: "continued result".into(),
+        },
+    ));
+    let tool = Arc::new(crate::ResumeThreadTool::new(environment.clone()));
+    let (event_stream, _events) = crate::ToolCallEventStream::test();
+
+    let output = cx
+        .update(|cx| {
+            tool.run(
+                ToolInput::resolved(crate::ResumeThreadToolInput {
+                    harness: "omega".into(),
+                    session_id: "source-session".into(),
+                    prompt: "continue the work".into(),
+                    fork: true,
+                    event_sequence: Some(42),
+                    message_index: None,
+                }),
+                event_stream,
+                cx,
+            )
+        })
+        .await
+        .expect("resume tool should succeed");
+
+    let crate::ResumeThreadToolOutput::Success {
+        harness,
+        session_id,
+        source_session_id,
+        forked,
+        response,
+    } = output
+    else {
+        panic!("expected successful resume output");
+    };
+    assert_eq!(harness, "omega");
+    assert_eq!(session_id, "fork-session");
+    assert_eq!(source_session_id, "source-session");
+    assert!(forked);
+    assert_eq!(response, "continued result");
+
+    let requests = environment.resume_requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].session_id.to_string(), "source-session");
+    assert_eq!(requests[0].harness, "omega");
+    assert_eq!(requests[0].prompt, "continue the work");
+    assert!(requests[0].fork);
+    assert_eq!(requests[0].event_sequence, Some(42));
+    assert_eq!(requests[0].message_index, None);
+}
+
+#[gpui::test]
+#[allow(clippy::arc_with_non_send_sync)]
+async fn test_resume_thread_tool_rejects_multiple_cursor_selectors(cx: &mut TestAppContext) {
+    init_test(cx);
+    let environment = Rc::new(FakeThreadEnvironment::default());
+    let tool = Arc::new(crate::ResumeThreadTool::new(environment.clone()));
+    let (event_stream, _events) = crate::ToolCallEventStream::test();
+
+    let output = cx
+        .update(|cx| {
+            tool.run(
+                ToolInput::resolved(crate::ResumeThreadToolInput {
+                    harness: "omega".into(),
+                    session_id: "source-session".into(),
+                    prompt: "continue the work".into(),
+                    fork: false,
+                    event_sequence: Some(42),
+                    message_index: Some(3),
+                }),
+                event_stream,
+                cx,
+            )
+        })
+        .await
+        .expect_err("ambiguous cursor selectors should fail");
+
+    let crate::ResumeThreadToolOutput::Error { error } = output else {
+        panic!("expected resume error output");
+    };
+    assert!(error.contains("either event_sequence or message_index"));
+    assert!(environment.resume_requests().is_empty());
+}
+
+#[gpui::test]
+async fn test_resume_thread_tool_is_exposed_in_basic_profile(cx: &mut TestAppContext) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree(path!("/test"), json!({})).await;
+    let project = Project::test(fs, [path!("/test").as_ref()], cx).await;
+    let project_context = cx.new(|_cx| ProjectContext::default());
+    let context_server_store = project.read_with(cx, |project, _| project.context_server_store());
+    let context_server_registry = cx.new(|cx| ContextServerRegistry::new(context_server_store, cx));
+    let model = Arc::new(FakeLanguageModel::default());
+    let environment = Rc::new(cx.update(|cx| {
+        FakeThreadEnvironment::default().with_terminal(FakeTerminalHandle::new_never_exits(cx))
+    }));
+    let thread = cx.new(|cx| {
+        let mut thread = Thread::new(
+            project,
+            project_context,
+            context_server_registry,
+            Templates::new(),
+            Some(model.clone()),
+            cx,
+        );
+        thread.add_default_tools(environment, cx);
+        thread
+    });
+
+    thread
+        .update(cx, |thread, cx| {
+            thread.send(ClientUserMessageId::new(), ["hello"], cx)
+        })
+        .expect("thread should start a turn");
+    cx.run_until_parked();
+
+    let completion = model
+        .pending_completions()
+        .pop()
+        .expect("model should receive a completion");
+    let tool_names = tool_names_for_completion(&completion);
+    assert!(
+        tool_names
+            .iter()
+            .any(|tool_name| tool_name == crate::ResumeThreadTool::NAME),
+        "basic profile omitted resume_thread: {tool_names:?}"
+    );
+    model.end_last_completion_stream();
+    cx.run_until_parked();
 }
 
 /// Environment that creates multiple independent terminal handles for testing concurrent terminals.
@@ -799,6 +963,78 @@ async fn test_prompt_caching(cx: &mut TestAppContext) {
                 reasoning_details: None,
             }
         ]
+    );
+}
+
+#[gpui::test]
+async fn test_prompt_cache_layout_is_stable_after_thread_resume(cx: &mut TestAppContext) {
+    let ThreadTest {
+        model,
+        thread,
+        project_context,
+        ..
+    } = setup(cx, TestModel::Fake).await;
+    let fake_model = model.as_fake();
+
+    thread.update(cx, |thread, _| {
+        // Registration order must not affect the model-facing order.
+        thread.add_tool(DelayTool);
+        thread.add_tool(EchoTool);
+    });
+    thread
+        .update(cx, |thread, cx| {
+            thread.send(ClientUserMessageId::new(), ["First"], cx)
+        })
+        .unwrap();
+    cx.run_until_parked();
+    let first_request = fake_model.pending_completions().pop().unwrap();
+    fake_model.send_last_completion_stream_text_chunk("Done");
+    fake_model.end_last_completion_stream();
+    cx.run_until_parked();
+
+    let db_thread = thread.read_with(cx, |thread, cx| thread.to_db(cx)).await;
+    cx.update(LanguageModelRegistry::test);
+    let restored = cx.update(|cx| {
+        let thread = thread.read(cx);
+        let project = thread.project.clone();
+        let context_server_registry = thread.context_server_registry.clone();
+        let templates = thread.templates.clone();
+        cx.new(|cx| {
+            Thread::from_db(
+                acp::SessionId::new("resumed"),
+                db_thread,
+                project,
+                project_context,
+                context_server_registry,
+                templates,
+                cx,
+            )
+        })
+    });
+    restored.update(cx, |thread, cx| {
+        thread.set_model(model.clone(), cx);
+        thread.add_tool(EchoTool);
+        thread.add_tool(DelayTool);
+    });
+    restored
+        .update(cx, |thread, cx| {
+            thread.send(ClientUserMessageId::new(), ["Second"], cx)
+        })
+        .unwrap();
+    cx.run_until_parked();
+    let resumed_request = fake_model.pending_completions().pop().unwrap();
+
+    assert_eq!(resumed_request.messages[0], first_request.messages[0]);
+    assert_eq!(resumed_request.tools, first_request.tools);
+    assert_eq!(
+        resumed_request
+            .tools
+            .iter()
+            .map(|tool| tool.name.as_str())
+            .collect::<Vec<_>>(),
+        [DelayTool::NAME, EchoTool::NAME]
+            .into_iter()
+            .collect::<Vec<_>>()
     );
 }
 
@@ -5043,7 +5279,7 @@ fn tool_names_for_completion(completion: &LanguageModelRequest) -> Vec<String> {
 }
 
 #[gpui::test]
-async fn test_basic_profile_exposes_exactly_five_named_tools(cx: &mut TestAppContext) {
+async fn test_basic_profile_exposes_named_tools(cx: &mut TestAppContext) {
     let ThreadTest {
         model, thread, fs, ..
     } = setup(cx, TestModel::Fake).await;
@@ -5097,7 +5333,7 @@ async fn test_basic_profile_exposes_exactly_five_named_tools(cx: &mut TestAppCon
     let completion = fake_model.pending_completions().pop().unwrap();
     assert_eq!(
         tool_names_for_completion(&completion),
-        vec!["bash", "delegate", "edit", "read", "write"]
+        vec!["bash", "delegate", "edit", "read", "resume_thread", "write"]
     );
 
     fake_model.send_last_completion_stream_text_chunk("Fixture coding turn complete.");

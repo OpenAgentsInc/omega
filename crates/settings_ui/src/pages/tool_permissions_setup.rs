@@ -1435,6 +1435,9 @@ mod tests {
             // and the content it returns is content this thread already
             // produced. There is no per-call permission to configure.
             "read_tool_result_artifact",
+            // Resuming is limited to persisted native Omega threads and does
+            // not grant authority beyond the resumed thread's existing tools.
+            "resume_thread",
         ];
 
         let tool_info_ids: Vec<&str> = TOOLS.iter().map(|t| t.id).collect();

@@ -1,8 +1,8 @@
-use crate::{AgentMessage, AgentMessageContent, UserMessage, UserMessageContent};
+use crate::{AgentMessage, AgentMessageContent, Message, UserMessage, UserMessageContent};
 use acp_thread::ClientUserMessageId;
 use agent_client_protocol::schema::v1 as acp;
 use agent_settings::AgentProfileId;
-use anyhow::Result;
+use anyhow::{Context as _, Result};
 use chrono::{DateTime, Utc};
 use collections::{HashMap, IndexMap};
 use futures::{FutureExt, future::Shared};
@@ -24,6 +24,289 @@ use zed_env_vars::ZED_STATELESS;
 pub type DbMessage = crate::Message;
 pub type DbSummary = crate::legacy_thread::DetailedSummaryState;
 pub type DbLanguageModel = crate::legacy_thread::SerializedLanguageModel;
+
+/// A stable position in a thread's append-only event log.
+pub type ThreadEventSequence = u64;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ThreadForkOrigin {
+    pub session_id: acp::SessionId,
+    pub event_sequence: ThreadEventSequence,
+}
+
+/// The model-facing prefix that must remain byte-for-byte stable after reload.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PromptCacheLayout {
+    pub system_prompt: SharedString,
+    pub tool_order: Vec<SharedString>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolResultReplacementReference {
+    pub tool_use_id: SharedString,
+    pub content_index: usize,
+    pub marker: SharedString,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum ThreadLogEventKind {
+    MessageAppended {
+        message: Arc<Message>,
+    },
+    MessageInserted {
+        index: usize,
+        message: Arc<Message>,
+    },
+    MessagesTruncated {
+        len: usize,
+    },
+    PromptCacheLayout {
+        layout: PromptCacheLayout,
+    },
+    ToolResultReplacement {
+        reference: ToolResultReplacementReference,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ThreadLogEvent {
+    pub sequence: ThreadEventSequence,
+    pub parent_sequence: Option<ThreadEventSequence>,
+    pub kind: ThreadLogEventKind,
+}
+
+/// Structured thread authority. Events are never removed or rewritten.
+///
+/// `active_sequence` selects one leaf in the event graph. Loading an earlier
+/// sequence or forking from it changes the active leaf without deleting the
+/// abandoned branch.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ThreadEventLog {
+    #[serde(default)]
+    pub events: Vec<ThreadLogEvent>,
+    #[serde(default)]
+    pub active_sequence: Option<ThreadEventSequence>,
+}
+
+impl ThreadEventLog {
+    pub fn from_messages(messages: &[Arc<Message>]) -> Self {
+        let mut log = Self::default();
+        for message in messages {
+            log.append_message(message.clone());
+        }
+        log
+    }
+
+    pub fn append_message(&mut self, message: Arc<Message>) -> ThreadEventSequence {
+        let sequence = self.append(ThreadLogEventKind::MessageAppended {
+            message: message.clone(),
+        });
+        self.append_replacement_references(&message);
+        sequence
+    }
+
+    pub fn insert_message(&mut self, index: usize, message: Arc<Message>) -> ThreadEventSequence {
+        let sequence = self.append(ThreadLogEventKind::MessageInserted {
+            index,
+            message: message.clone(),
+        });
+        self.append_replacement_references(&message);
+        sequence
+    }
+
+    pub fn truncate_messages(&mut self, len: usize) -> ThreadEventSequence {
+        self.append(ThreadLogEventKind::MessagesTruncated { len })
+    }
+
+    pub fn append_prompt_cache_layout(&mut self, layout: PromptCacheLayout) -> ThreadEventSequence {
+        self.append(ThreadLogEventKind::PromptCacheLayout { layout })
+    }
+
+    pub fn messages(&self) -> Result<Vec<Arc<Message>>> {
+        self.messages_at(self.active_sequence)
+    }
+
+    pub fn messages_at(&self, sequence: Option<ThreadEventSequence>) -> Result<Vec<Arc<Message>>> {
+        let mut messages = Vec::new();
+        let mut last_message_position = None;
+        for event in self.events_on_path(sequence)? {
+            match &event.kind {
+                ThreadLogEventKind::MessageAppended { message } => {
+                    messages.push(message.clone());
+                    last_message_position = messages.len().checked_sub(1);
+                }
+                ThreadLogEventKind::MessageInserted { index, message } => {
+                    let index = (*index).min(messages.len());
+                    messages.insert(index, message.clone());
+                    last_message_position = Some(index);
+                }
+                ThreadLogEventKind::MessagesTruncated { len } => {
+                    messages.truncate(*len);
+                    last_message_position = None;
+                }
+                ThreadLogEventKind::PromptCacheLayout { .. } => {}
+                ThreadLogEventKind::ToolResultReplacement { reference } => {
+                    let position = last_message_position
+                        .context("tool-result replacement does not follow a message event")?;
+                    Self::restore_replacement_reference(&mut messages[position], reference)?;
+                }
+            }
+        }
+        Ok(messages)
+    }
+
+    pub fn prompt_cache_layout(
+        &self,
+        sequence: Option<ThreadEventSequence>,
+    ) -> Result<Option<PromptCacheLayout>> {
+        Ok(self
+            .events_on_path(sequence)?
+            .into_iter()
+            .rev()
+            .find_map(|event| match &event.kind {
+                ThreadLogEventKind::PromptCacheLayout { layout } => Some(layout.clone()),
+                _ => None,
+            }))
+    }
+
+    pub fn replacement_references(
+        &self,
+        sequence: Option<ThreadEventSequence>,
+    ) -> Result<Vec<ToolResultReplacementReference>> {
+        Ok(self
+            .events_on_path(sequence)?
+            .into_iter()
+            .filter_map(|event| match &event.kind {
+                ThreadLogEventKind::ToolResultReplacement { reference } => Some(reference.clone()),
+                _ => None,
+            })
+            .collect())
+    }
+
+    pub fn select(&mut self, sequence: ThreadEventSequence) -> Result<()> {
+        self.event(sequence)?;
+        self.active_sequence = Some(sequence);
+        Ok(())
+    }
+
+    pub fn fork_at(&self, sequence: ThreadEventSequence) -> Result<Self> {
+        let events = self.events_on_path(Some(sequence))?;
+        Ok(Self {
+            events: events.into_iter().cloned().collect(),
+            active_sequence: Some(sequence),
+        })
+    }
+
+    fn append(&mut self, kind: ThreadLogEventKind) -> ThreadEventSequence {
+        let sequence = self
+            .events
+            .last()
+            .map_or(0, |event| event.sequence.saturating_add(1));
+        self.events.push(ThreadLogEvent {
+            sequence,
+            parent_sequence: self.active_sequence,
+            kind,
+        });
+        self.active_sequence = Some(sequence);
+        sequence
+    }
+
+    fn append_replacement_references(&mut self, message: &Message) {
+        let Message::Agent(message) = message else {
+            return;
+        };
+        for result in message.tool_results.values() {
+            for (content_index, content) in result.content.iter().enumerate() {
+                let language_model::LanguageModelToolResultContent::Text(text) = content else {
+                    continue;
+                };
+                let (_, marker) = acp_thread::split_truncation_marker(text);
+                if marker.is_empty() {
+                    continue;
+                }
+                self.append(ThreadLogEventKind::ToolResultReplacement {
+                    reference: ToolResultReplacementReference {
+                        tool_use_id: result.tool_use_id.to_string().into(),
+                        content_index,
+                        marker: marker.into(),
+                    },
+                });
+            }
+        }
+    }
+
+    fn restore_replacement_reference(
+        message: &mut Arc<Message>,
+        reference: &ToolResultReplacementReference,
+    ) -> Result<()> {
+        let Message::Agent(agent_message) = message.as_ref() else {
+            anyhow::bail!("tool-result replacement follows a non-agent message");
+        };
+        let mut restored_message = agent_message.clone();
+        let result = restored_message
+            .tool_results
+            .values_mut()
+            .find(|result| result.tool_use_id.to_string() == reference.tool_use_id)
+            .with_context(|| {
+                format!(
+                    "tool-result replacement refers to missing tool use {}",
+                    reference.tool_use_id
+                )
+            })?;
+        let content = result
+            .content
+            .get_mut(reference.content_index)
+            .with_context(|| {
+                format!(
+                    "tool-result replacement content index {} does not exist for tool use {}",
+                    reference.content_index, reference.tool_use_id
+                )
+            })?;
+        let language_model::LanguageModelToolResultContent::Text(text) = content else {
+            anyhow::bail!(
+                "tool-result replacement content {} for tool use {} is not text",
+                reference.content_index,
+                reference.tool_use_id
+            );
+        };
+        let (body, current_marker) = acp_thread::split_truncation_marker(text);
+        if current_marker != reference.marker.as_ref() {
+            *text = format!("{body}{}", reference.marker).into();
+        }
+        *message = Arc::new(Message::Agent(restored_message));
+        Ok(())
+    }
+
+    fn event(&self, sequence: ThreadEventSequence) -> Result<&ThreadLogEvent> {
+        self.events
+            .iter()
+            .find(|event| event.sequence == sequence)
+            .ok_or_else(|| anyhow::anyhow!("thread event sequence {sequence} does not exist"))
+    }
+
+    fn events_on_path(
+        &self,
+        sequence: Option<ThreadEventSequence>,
+    ) -> Result<Vec<&ThreadLogEvent>> {
+        let Some(mut sequence) = sequence else {
+            return Ok(Vec::new());
+        };
+        let mut events = Vec::new();
+        let mut remaining = self.events.len();
+        loop {
+            let event = self.event(sequence)?;
+            events.push(event);
+            let Some(parent) = event.parent_sequence else {
+                break;
+            };
+            sequence = parent;
+            remaining = remaining.saturating_sub(1);
+            anyhow::ensure!(remaining > 0, "thread event log contains a parent cycle");
+        }
+        events.reverse();
+        Ok(events)
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct DbThreadMetadata {
@@ -86,6 +369,10 @@ pub struct DbThread {
     /// [`crate::sandboxing::ThreadSandboxGrants`].
     #[serde(default)]
     pub sandbox_grants: DbSandboxGrants,
+    #[serde(default)]
+    pub thread_log: ThreadEventLog,
+    #[serde(default)]
+    pub fork_origin: Option<ThreadForkOrigin>,
 }
 
 /// Serialized form of the sandbox permissions the user granted "for the rest of
@@ -147,6 +434,7 @@ impl SharedThread {
     }
 
     pub fn to_db_thread(self) -> DbThread {
+        let thread_log = ThreadEventLog::from_messages(&self.messages);
         DbThread {
             title: format!("🔗 {}", self.title).into(),
             messages: self.messages,
@@ -165,6 +453,8 @@ impl SharedThread {
             ui_scroll_position: None,
             sandboxed_terminal_temp_dir: None,
             sandbox_grants: DbSandboxGrants::default(),
+            thread_log,
+            fork_origin: None,
         }
     }
 
@@ -182,7 +472,104 @@ impl SharedThread {
 }
 
 impl DbThread {
-    pub const VERSION: &'static str = "0.3.0";
+    pub const VERSION: &'static str = "0.4.0";
+
+    pub fn prepare_for_resume(
+        &mut self,
+        event_sequence: Option<ThreadEventSequence>,
+    ) -> Result<()> {
+        if self.thread_log.events.is_empty() && !self.messages.is_empty() {
+            self.thread_log = ThreadEventLog::from_messages(&self.messages);
+        }
+        if let Some(sequence) = event_sequence {
+            self.thread_log.select(sequence)?;
+        }
+        self.messages = self.thread_log.messages()?;
+        Ok(())
+    }
+
+    pub fn prepare_for_resume_at_message_index(&mut self, message_index: usize) -> Result<()> {
+        self.prepare_for_resume(None)?;
+        anyhow::ensure!(
+            message_index < self.messages.len(),
+            "thread message index {message_index} does not exist; thread has {} messages",
+            self.messages.len()
+        );
+        self.thread_log
+            .truncate_messages(message_index.saturating_add(1));
+        self.messages = self.thread_log.messages()?;
+        Ok(())
+    }
+
+    pub fn fork_at(
+        &self,
+        source_session_id: acp::SessionId,
+        event_sequence: ThreadEventSequence,
+    ) -> Result<Self> {
+        let mut fork = self.clone_for_fork();
+        fork.thread_log = self.thread_log.fork_at(event_sequence)?;
+        fork.messages = fork.thread_log.messages()?;
+        fork.fork_origin = Some(ThreadForkOrigin {
+            session_id: source_session_id,
+            event_sequence,
+        });
+        fork.updated_at = Utc::now();
+        Ok(fork)
+    }
+
+    pub fn fork_at_message_index(
+        &self,
+        source_session_id: acp::SessionId,
+        message_index: usize,
+    ) -> Result<Self> {
+        let source_messages = self.thread_log.messages()?;
+        anyhow::ensure!(
+            message_index < source_messages.len(),
+            "thread message index {message_index} does not exist; thread has {} messages",
+            source_messages.len()
+        );
+        let source_sequence = self
+            .thread_log
+            .active_sequence
+            .context("cannot fork a thread with no active event")?;
+        let prompt_cache_layout = self.thread_log.prompt_cache_layout(Some(source_sequence))?;
+        let mut fork = self.clone_for_fork();
+        fork.messages = source_messages[..=message_index].to_vec();
+        fork.thread_log = ThreadEventLog::from_messages(&fork.messages);
+        if let Some(layout) = prompt_cache_layout {
+            fork.thread_log.append_prompt_cache_layout(layout);
+        }
+        fork.fork_origin = Some(ThreadForkOrigin {
+            session_id: source_session_id,
+            event_sequence: source_sequence,
+        });
+        fork.updated_at = Utc::now();
+        Ok(fork)
+    }
+
+    fn clone_for_fork(&self) -> Self {
+        Self {
+            title: self.title.clone(),
+            messages: self.messages.clone(),
+            updated_at: self.updated_at,
+            detailed_summary: self.detailed_summary.clone(),
+            initial_project_snapshot: self.initial_project_snapshot.clone(),
+            cumulative_token_usage: self.cumulative_token_usage,
+            request_token_usage: self.request_token_usage.clone(),
+            model: self.model.clone(),
+            profile: self.profile.clone(),
+            subagent_context: None,
+            speed: self.speed,
+            thinking_enabled: self.thinking_enabled,
+            thinking_effort: self.thinking_effort.clone(),
+            draft_prompt: None,
+            ui_scroll_position: None,
+            sandboxed_terminal_temp_dir: None,
+            sandbox_grants: self.sandbox_grants.clone(),
+            thread_log: self.thread_log.clone(),
+            fork_origin: self.fork_origin.clone(),
+        }
+    }
 
     pub fn to_markdown(&self) -> String {
         crate::messages_to_markdown(&self.messages)
@@ -192,7 +579,7 @@ impl DbThread {
         let saved_thread_json = serde_json::from_slice::<serde_json::Value>(json)?;
         match saved_thread_json.get("version") {
             Some(serde_json::Value::String(version)) => match version.as_str() {
-                Self::VERSION => Ok(serde_json::from_value(saved_thread_json)?),
+                Self::VERSION | "0.3.0" => Ok(serde_json::from_value(saved_thread_json)?),
                 _ => Self::upgrade_from_agent_1(crate::legacy_thread::SerializedThread::from_json(
                     json,
                 )?),
@@ -329,6 +716,7 @@ impl DbThread {
             messages.push(Arc::new(message));
         }
 
+        let thread_log = ThreadEventLog::from_messages(&messages);
         Ok(Self {
             title: thread.summary,
             messages,
@@ -351,6 +739,8 @@ impl DbThread {
             ui_scroll_position: None,
             sandboxed_terminal_temp_dir: None,
             sandbox_grants: DbSandboxGrants::default(),
+            thread_log,
+            fork_origin: None,
         })
     }
 }
@@ -448,6 +838,17 @@ impl ThreadsDatabase {
         "})?()
         .map_err(|e| e.context("Failed to create threads table"))?;
 
+        connection.exec(indoc! {"
+            CREATE TABLE IF NOT EXISTS thread_events (
+                thread_id TEXT NOT NULL,
+                sequence INTEGER NOT NULL,
+                parent_sequence INTEGER,
+                event_json TEXT NOT NULL,
+                PRIMARY KEY (thread_id, sequence)
+            )
+        "})?()
+        .map_err(|e| e.context("Failed to create append-only thread event table"))?;
+
         if let Ok(mut s) = connection.exec(indoc! {"
             ALTER TABLE threads ADD COLUMN parent_id TEXT
         "})
@@ -498,6 +899,7 @@ impl ThreadsDatabase {
         }
 
         let title = thread.title.to_string();
+        let event_rows = thread.thread_log.events.clone();
         let updated_at = thread.updated_at.to_rfc3339();
         let parent_id = thread
             .subagent_context
@@ -543,7 +945,7 @@ impl ThreadsDatabase {
         "})?;
 
         insert((
-            id.0,
+            id.0.clone(),
             parent_id,
             folder_paths_str,
             folder_paths_order_str,
@@ -553,6 +955,25 @@ impl ThreadsDatabase {
             data,
             created_at,
         ))?;
+
+        let mut append_event =
+            connection.exec_bound::<(Arc<str>, i64, Option<i64>, String)>(indoc! {"
+                INSERT OR IGNORE INTO thread_events
+                    (thread_id, sequence, parent_sequence, event_json)
+                VALUES (?1, ?2, ?3, ?4)
+            "})?;
+        for event in event_rows {
+            append_event((
+                id.0.clone(),
+                i64::try_from(event.sequence).context("thread event sequence exceeds SQLite")?,
+                event
+                    .parent_sequence
+                    .map(i64::try_from)
+                    .transpose()
+                    .context("thread event parent sequence exceeds SQLite")?,
+                serde_json::to_string(&event.kind)?,
+            ))?;
+        }
 
         Ok(())
     }
@@ -609,9 +1030,35 @@ impl ThreadsDatabase {
                 SELECT data_type, data FROM threads WHERE id = ? LIMIT 1
             "})?;
 
-            let rows = select(id.0)?;
+            let rows = select(id.0.clone())?;
             if let Some((data_type, data)) = rows.into_iter().next() {
-                Ok(Some(Self::deserialize_thread(data_type, data)?))
+                let mut thread = Self::deserialize_thread(data_type, data)?;
+                let mut select_events = connection
+                    .select_bound::<Arc<str>, (i64, Option<i64>, String)>(indoc! {"
+                        SELECT sequence, parent_sequence, event_json
+                          FROM thread_events
+                         WHERE thread_id = ?
+                         ORDER BY sequence
+                    "})?;
+                let event_rows = select_events(id.0)?;
+                if !event_rows.is_empty() {
+                    thread.thread_log.events = event_rows
+                        .into_iter()
+                        .map(|(sequence, parent_sequence, event_json)| {
+                            Ok(ThreadLogEvent {
+                                sequence: u64::try_from(sequence)
+                                    .context("negative thread event sequence")?,
+                                parent_sequence: parent_sequence
+                                    .map(u64::try_from)
+                                    .transpose()
+                                    .context("negative thread event parent sequence")?,
+                                kind: serde_json::from_str(&event_json)?,
+                            })
+                        })
+                        .collect::<Result<Vec<_>>>()?;
+                }
+                thread.prepare_for_resume(None)?;
+                Ok(Some(thread))
             } else {
                 Ok(None)
             }
@@ -695,6 +1142,9 @@ impl ThreadsDatabase {
                 let mut delete = connection.exec_bound::<Arc<str>>(indoc! {"
                     DELETE FROM threads WHERE id = ?
                 "})?;
+                let mut delete_events = connection.exec_bound::<Arc<str>>(indoc! {"
+                    DELETE FROM thread_events WHERE thread_id = ?
+                "})?;
 
                 let mut sandboxed_terminal_temp_dirs = Vec::new();
                 for thread_id in ids_to_delete {
@@ -703,6 +1153,7 @@ impl ThreadsDatabase {
                     ) {
                         sandboxed_terminal_temp_dirs.push(temp_dir);
                     }
+                    delete_events(thread_id.clone())?;
                     delete(thread_id)?;
                 }
 
@@ -738,7 +1189,11 @@ impl ThreadsDatabase {
                 let mut delete = connection.exec_bound::<()>(indoc! {"
                     DELETE FROM threads
                 "})?;
+                let mut delete_events = connection.exec_bound::<()>(indoc! {"
+                    DELETE FROM thread_events
+                "})?;
 
+                delete_events(())?;
                 delete(())?;
 
                 sandboxed_terminal_temp_dirs
@@ -802,7 +1257,217 @@ mod tests {
             ui_scroll_position: None,
             sandboxed_terminal_temp_dir: None,
             sandbox_grants: DbSandboxGrants::default(),
+            thread_log: ThreadEventLog::default(),
+            fork_origin: None,
         }
+    }
+
+    fn user_message(text: &str) -> Arc<Message> {
+        Arc::new(Message::User(UserMessage {
+            id: ClientUserMessageId::new(),
+            content: Arc::from([UserMessageContent::Text(text.to_string())]),
+        }))
+    }
+
+    fn message_text(message: &Message) -> &str {
+        let Message::User(UserMessage { content, .. }) = message else {
+            panic!("expected a user message");
+        };
+        let UserMessageContent::Text(text) = &content[0] else {
+            panic!("expected text");
+        };
+        text
+    }
+
+    #[test]
+    fn event_log_keeps_abandoned_events_and_reconstructs_selected_cursor() {
+        let mut log = ThreadEventLog::default();
+        let first = log.append_message(user_message("first"));
+        let second = log.append_message(user_message("second"));
+        log.truncate_messages(1);
+        let branch = log.append_message(user_message("branch"));
+
+        let active = log.messages().unwrap();
+        assert_eq!(
+            active
+                .iter()
+                .map(|message| message_text(message))
+                .collect::<Vec<_>>(),
+            ["first", "branch"]
+        );
+        assert_eq!(
+            log.messages_at(Some(second))
+                .unwrap()
+                .iter()
+                .map(|message| message_text(message))
+                .collect::<Vec<_>>(),
+            ["first", "second"]
+        );
+        assert_eq!(log.events.len(), 4);
+        assert_eq!(log.active_sequence, Some(branch));
+        assert_eq!(first, 0);
+    }
+
+    #[test]
+    fn fork_preserves_prompt_prefix_and_restamps_origin() {
+        let source_id = session_id("source");
+        let mut thread = make_thread("Source", Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap());
+        thread.thread_log.append_message(user_message("first"));
+        let layout = PromptCacheLayout {
+            system_prompt: "stable system prompt".into(),
+            tool_order: vec!["read_file".into(), "terminal".into()],
+        };
+        let cursor = thread.thread_log.append_prompt_cache_layout(layout.clone());
+        thread
+            .thread_log
+            .append_message(user_message("not inherited"));
+
+        let fork = thread.fork_at(source_id.clone(), cursor).unwrap();
+
+        assert_eq!(
+            fork.fork_origin,
+            Some(ThreadForkOrigin {
+                session_id: source_id,
+                event_sequence: cursor,
+            })
+        );
+        assert_eq!(
+            fork.thread_log
+                .prompt_cache_layout(fork.thread_log.active_sequence)
+                .unwrap(),
+            Some(layout)
+        );
+        assert_eq!(fork.messages.len(), 1);
+        assert_eq!(message_text(&fork.messages[0]), "first");
+    }
+
+    #[test]
+    fn fork_at_message_index_uses_the_visible_prefix_after_insertions() {
+        let source_id = session_id("source-with-insertion");
+        let mut thread = make_thread("Source", Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap());
+        thread.thread_log.append_message(user_message("first"));
+        thread.thread_log.append_message(user_message("second"));
+        thread.thread_log.insert_message(
+            0,
+            Arc::new(Message::Compaction(crate::CompactionInfo::Summary(
+                "summary".into(),
+            ))),
+        );
+        let layout = PromptCacheLayout {
+            system_prompt: "stable prompt".into(),
+            tool_order: vec!["terminal".into()],
+        };
+        let source_sequence = thread.thread_log.append_prompt_cache_layout(layout.clone());
+
+        let fork = thread.fork_at_message_index(source_id.clone(), 1).unwrap();
+        assert_eq!(fork.messages.len(), 2);
+        assert!(matches!(&*fork.messages[0], Message::Compaction(_)));
+        assert_eq!(message_text(&fork.messages[1]), "first");
+        assert_eq!(
+            fork.thread_log
+                .prompt_cache_layout(fork.thread_log.active_sequence)
+                .unwrap()
+                .as_ref(),
+            Some(&layout)
+        );
+        assert_eq!(
+            fork.fork_origin,
+            Some(ThreadForkOrigin {
+                session_id: source_id,
+                event_sequence: source_sequence,
+            })
+        );
+    }
+
+    #[test]
+    fn tool_result_replacement_marker_is_recorded_deterministically() {
+        let tool_use_id: language_model::LanguageModelToolUseId = "call-1".into();
+        let mut tool_results = IndexMap::default();
+        tool_results.insert(
+            tool_use_id.clone(),
+            language_model::LanguageModelToolResult {
+                tool_use_id: tool_use_id.clone(),
+                tool_name: "terminal".into(),
+                is_error: false,
+                content: vec![language_model::LanguageModelToolResultContent::Text(
+                    "preview\n… [tool result truncated: showed 10 of 100 bytes. \
+                     Full result: artifact terminal:call-1@v1.]"
+                        .into(),
+                )],
+                output: None,
+            },
+        );
+        let message = Arc::new(Message::Agent(AgentMessage {
+            content: Vec::new(),
+            tool_results,
+            reasoning_details: None,
+        }));
+        let mut log = ThreadEventLog::default();
+        log.append_message(message);
+
+        let ThreadLogEventKind::MessageAppended { message } = &mut log.events[0].kind else {
+            panic!("expected message event");
+        };
+        let Message::Agent(agent_message) = message.as_ref() else {
+            panic!("expected agent message");
+        };
+        let mut changed_message = agent_message.clone();
+        let result = changed_message.tool_results.get_mut(&tool_use_id).unwrap();
+        result.content[0] =
+            language_model::LanguageModelToolResultContent::Text("preview changed".into());
+        *message = Arc::new(Message::Agent(changed_message));
+
+        let references = log.replacement_references(log.active_sequence).unwrap();
+        assert_eq!(
+            references,
+            vec![ToolResultReplacementReference {
+                tool_use_id: "call-1".into(),
+                content_index: 0,
+                marker: "\n… [tool result truncated: showed 10 of 100 bytes. \
+                         Full result: artifact terminal:call-1@v1.]"
+                    .into(),
+            }]
+        );
+        let restored = log.messages().unwrap();
+        let Message::Agent(restored) = &*restored[0] else {
+            panic!("expected restored agent message");
+        };
+        let language_model::LanguageModelToolResultContent::Text(restored_text) =
+            &restored.tool_results[&tool_use_id].content[0]
+        else {
+            panic!("expected restored text");
+        };
+        assert_eq!(
+            restored_text.as_ref(),
+            "preview changed\n… [tool result truncated: showed 10 of 100 bytes. \
+             Full result: artifact terminal:call-1@v1.]"
+        );
+    }
+
+    #[gpui::test]
+    async fn database_load_resumes_the_saved_active_cursor(cx: &mut TestAppContext) {
+        let database = ThreadsDatabase::new(cx.executor()).unwrap();
+        let thread_id = session_id("resume-thread");
+        let mut thread = make_thread("Resume", Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap());
+        let cursor = thread.thread_log.append_message(user_message("first"));
+        thread.thread_log.append_message(user_message("second"));
+        thread.thread_log.select(cursor).unwrap();
+        thread.messages = thread.thread_log.messages().unwrap();
+
+        database
+            .save_thread(thread_id.clone(), thread, PathList::default())
+            .await
+            .unwrap();
+        let loaded = database
+            .load_thread(thread_id)
+            .await
+            .unwrap()
+            .expect("saved thread");
+
+        assert_eq!(loaded.thread_log.active_sequence, Some(cursor));
+        assert_eq!(loaded.messages.len(), 1);
+        assert_eq!(message_text(&loaded.messages[0]), "first");
+        assert_eq!(loaded.thread_log.events.len(), 2);
     }
 
     #[gpui::test]
