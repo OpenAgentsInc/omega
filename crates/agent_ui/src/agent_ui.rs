@@ -33,6 +33,7 @@ pub mod omega_exo_connection;
 pub mod omega_file_peek;
 pub mod omega_host_bridge;
 pub mod omega_nostr_activity;
+pub mod omega_public_channels;
 pub mod omega_router;
 pub mod omega_send_queue;
 pub mod omega_sidebar;

@@ -1,56 +1,14 @@
-//! The public NIP-29 group, read: the last few messages, and nothing else.
+//! Read-only NIP-29 parsing and one-shot relay primitives.
 //!
-//! `OMEGA-DELTA-0130`. The owner asked the sidebar to carry "nostr nip 29
-//! activity too", and then said which activity: *"for initial nip29 shit i want
-//! it showing the most recent 5 messages from the default channel, the one we
-//! show at /agentchat in apps/openagents.com of openagents repo"*.
+//! `OMEGA-DELTA-0130` first used these functions to put five public messages
+//! in the sidebar. `OMEGA-DELTA-0160` replaces those message rows with stable
+//! channel destinations and a selected-channel main shell. The panel now loads
+//! only the deployment manifest. It does not call [`fetch`].
 //!
-//! That page is `apps/openagents.com/apps/start/src/routes/-public-nostr-chat-page.tsx`
-//! in the `openagents` repository. It reads one relay, one group, one kind:
-//! `wss://relay.openagents.com`, `openagents-public`, kind `9` with an `h` tag.
-//! This module reads the same three things and draws five rows.
-//!
-//! # This is the first socket Omega opens to a relay from the UI
-//!
-//! `omega_community` says of itself that it "does not open a socket or touch a
-//! key", and [`crate::omega_community_control`] still tells a person that
-//! "nothing in this build signs or reaches a relay yet". Both remain true of
-//! *writing*. This reads, and it reads the one thing that needs no key at all:
-//! the manifest at `openagents.com` declares `auth.directRead: "public"`, and
-//! the relay serves the group's history to an unauthenticated connection. So
-//! there is no signer here, no secret key of any encoding, no NIP-42 exchange,
-//! and no publish path. The whole capability is one `REQ` and the frames that
-//! answer it.
-//!
-//! # What is not done, said plainly rather than implied
-//!
-//! - **No display names.** The web page issues a second `REQ` for each author's
-//!   kind `0` and prefers `display_name`. This shows the same fallback that
-//!   page shows while that request is outstanding — `abcdef01…89abcdef` — and
-//!   makes no second request. A name is a nicety; five rows that arrive is the
-//!   thing that was asked for.
-//! - **No live subscription.** One connection, one `REQ`, frames until `EOSE`,
-//!   then the socket closes. The sidebar re-reads when it is opened, not
-//!   continuously. A held-open socket is a lifecycle to get wrong, and getting
-//!   it wrong in a panel that must never interrupt is worse than being a minute
-//!   stale.
-//! - **No moderation state.** Deletions (kind `5`), reports (`1984`) and the
-//!   relay's group-state events (`39000`-`39005`) are not read, so a message
-//!   deleted after this window fetched it would still be drawn until the next
-//!   fetch. This is stated rather than hidden because it is the one way these
-//!   rows can be wrong about something a person would care about.
-//!
-//! Signatures **are** checked. `nostr::Event::verify` is already in this
-//! binary's dependency graph, so serving a forged event through the relay is
-//! not a way to put text in the owner's sidebar.
-//!
-//! # Why the parsing is here and the drawing is in the panel
-//!
-//! Everything above the socket is a function of bytes: a manifest is a config,
-//! a relay frame is a frame, five rows out of a hundred events is a sort and a
-//! truncation. None of it needs a window, and all of the parts that were
-//! actually easy to get wrong — the relay's non-standard three-element `EOSE`,
-//! the ordering, the deduplication — are answerable in a unit test.
+//! The manifest parser, signed-event verifier, relay-frame parser, ordering,
+//! and bounded one-shot reader remain here for the live selected timeline in
+//! issue #9269. If a caller uses [`fetch`], the capability is still read-only:
+//! no signer, secret key, NIP-42 exchange, or publish frame exists here.
 
 use std::time::Duration;
 

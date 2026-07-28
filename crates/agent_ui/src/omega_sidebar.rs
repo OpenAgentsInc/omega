@@ -54,8 +54,8 @@
 //!    is the draw order.
 //! 2. Its `key` and `title` arms. The key is what persists a collapsed section
 //!    across launches, so it must never be renamed once shipped.
-//! 3. One arm in the panel's `render_sidebar_section`, producing a
-//!    [`SectionBody`].
+//! 3. One arm in the panel's `render_sidebar_section`, producing the section's
+//!    element.
 //!
 //! `omega_deltas` asserts that every variant of [`SectionId`] appears in that
 //! match, so a section added here and forgotten there fails the suite rather
@@ -63,13 +63,9 @@
 //!
 //! # No section may interrupt
 //!
-//! A [`SectionBody`] cannot fail. It has rows, or it has a [`note`] — one quiet
-//! line, in place, in the section that could not load — and the sections around
-//! it do not know or care. There is no toast, no banner, no modal and no
-//! refusal anywhere in this file, and a sidebar that cannot reach a relay still
-//! draws the owner's threads.
-//!
-//! [`note`]: SectionBody::note
+//! There is no toast, banner, modal, or refusal in this model. A section that
+//! cannot load draws one quiet line in its own body. The sections around it do
+//! not know or care, and the sidebar still draws the owner's threads.
 
 use gpui::{Pixels, SharedString, px};
 use serde::{Deserialize, Serialize};
@@ -158,15 +154,15 @@ pub fn layout(available: Pixels, wants_open: bool) -> Layout {
 pub enum SectionId {
     /// The last [`RECENT_THREADS`] conversations. `OMEGA-DELTA-0118`'s rows.
     RecentThreads,
-    /// The last few messages in the public NIP-29 group.
-    NostrActivity,
+    /// Public channel destinations. Messages belong in the selected main view.
+    PublicChannels,
 }
 
 impl SectionId {
     /// Draw order, top to bottom.
     ///
     /// Threads first because that is the section with something to do in it.
-    pub const ALL: &'static [SectionId] = &[SectionId::RecentThreads, SectionId::NostrActivity];
+    pub const ALL: &'static [SectionId] = &[SectionId::RecentThreads, SectionId::PublicChannels];
 
     /// The stable name this section is remembered under.
     ///
@@ -177,7 +173,7 @@ impl SectionId {
     pub fn key(self) -> &'static str {
         match self {
             SectionId::RecentThreads => "recent-threads",
-            SectionId::NostrActivity => "nostr-activity",
+            SectionId::PublicChannels => "nostr-activity",
         }
     }
 
@@ -185,7 +181,7 @@ impl SectionId {
     pub fn title(self) -> &'static str {
         match self {
             SectionId::RecentThreads => "Recent threads",
-            SectionId::NostrActivity => "Public chat",
+            SectionId::PublicChannels => "Channels",
         }
     }
 }
@@ -215,7 +211,7 @@ impl SidebarState {
     pub fn default_open() -> Self {
         Self {
             open: true,
-            collapsed: vec![SectionId::NostrActivity.key().to_string()],
+            collapsed: vec![SectionId::PublicChannels.key().to_string()],
         }
     }
 
@@ -328,50 +324,9 @@ impl SectionBody {
     }
 }
 
-/// How far the public-chat read has got.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum ChatRead {
-    /// No read has been attempted in this window yet.
-    Idle,
-    /// A read is in flight.
-    Reading,
-    /// The relay answered.
-    Read(Vec<crate::omega_nostr_activity::ActivityRow>),
-    /// The read did not finish. The sentence is drawn as a note, in place.
-    Failed(SharedString),
-}
-
-/// The public-chat section.
-///
-/// The failed case is a note and not a refusal, and it names the relay so the
-/// sentence is about something rather than about failure in general. A group
-/// that is simply quiet gets a different sentence from one that could not be
-/// reached, because those are different facts and a person deciding whether
-/// anything is wrong needs to tell them apart.
-#[must_use]
-pub fn nostr_activity(read: &ChatRead, group: Option<&str>) -> SectionBody {
-    match read {
-        ChatRead::Idle | ChatRead::Reading => SectionBody::note("Reading the public chat…"),
-        ChatRead::Failed(why) => SectionBody::note(why.clone()),
-        ChatRead::Read(rows) if rows.is_empty() => SectionBody::note(match group {
-            Some(group) => format!("No messages in {group} yet."),
-            None => "No messages yet.".to_string(),
-        }),
-        ChatRead::Read(rows) => SectionBody::rows(
-            rows.iter()
-                .map(|row| {
-                    SectionRow::new(row.content.clone())
-                        .secondary(format!("{} · {}", row.author, row.age))
-                })
-                .collect(),
-        ),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::omega_nostr_activity::ActivityRow;
 
     #[test]
     fn a_wide_window_draws_the_sidebar_the_person_asked_for() {
@@ -418,7 +373,7 @@ mod tests {
         let state = SidebarState::from_stored(None);
         assert!(state.open, "the owner asked for default open on zero base");
         assert!(!state.is_collapsed(SectionId::RecentThreads));
-        assert!(state.is_collapsed(SectionId::NostrActivity));
+        assert!(state.is_collapsed(SectionId::PublicChannels));
     }
 
     #[test]
@@ -435,7 +390,7 @@ mod tests {
     fn section_choices_survive_a_round_trip() {
         let mut state = SidebarState::default_open();
         state.toggle_section(SectionId::RecentThreads);
-        state.toggle_section(SectionId::NostrActivity);
+        state.toggle_section(SectionId::PublicChannels);
         let json = serde_json::to_string(&state).expect("serialises");
         let restored = SidebarState::from_stored(Some(&json));
 
@@ -445,7 +400,7 @@ mod tests {
              before a restart must come back collapsed."
         );
         assert!(
-            !restored.is_collapsed(SectionId::NostrActivity),
+            !restored.is_collapsed(SectionId::PublicChannels),
             "an explicitly expanded section must not be reset to its default"
         );
         assert!(restored.open);
@@ -454,10 +409,10 @@ mod tests {
     #[test]
     fn toggling_a_section_twice_leaves_it_as_it_was() {
         let mut state = SidebarState::default_open();
-        state.toggle_section(SectionId::NostrActivity);
-        assert!(!state.is_collapsed(SectionId::NostrActivity));
-        state.toggle_section(SectionId::NostrActivity);
-        assert!(state.is_collapsed(SectionId::NostrActivity));
+        state.toggle_section(SectionId::PublicChannels);
+        assert!(!state.is_collapsed(SectionId::PublicChannels));
+        state.toggle_section(SectionId::PublicChannels);
+        assert!(state.is_collapsed(SectionId::PublicChannels));
         assert_eq!(state, SidebarState::default_open());
     }
 
@@ -495,13 +450,7 @@ mod tests {
 
     #[test]
     fn no_section_body_can_carry_a_refusal_shape() {
-        // There is no error variant to construct. The nearest thing to a
-        // failure a section can express is a note, and a note has rows beside
-        // it or in its place — never instead of the section.
-        let failed = nostr_activity(
-            &ChatRead::Failed("relay.openagents.com did not answer.".into()),
-            Some("openagents-public"),
-        );
+        let failed = SectionBody::note("relay.openagents.com did not answer.");
         assert!(failed.rows.is_empty());
         assert_eq!(
             failed.note.as_deref(),
@@ -513,52 +462,5 @@ mod tests {
             !failed.is_silent(),
             "a heading over blank space is the failure"
         );
-    }
-
-    #[test]
-    fn a_quiet_group_and_an_unreachable_relay_read_differently() {
-        let quiet = nostr_activity(&ChatRead::Read(Vec::new()), Some("openagents-public"));
-        let broken = nostr_activity(&ChatRead::Failed("could not connect".into()), Some("g"));
-        assert_ne!(
-            quiet.note, broken.note,
-            "a person deciding whether anything is wrong has to be able to tell \
-             'nobody has spoken' from 'we could not ask'"
-        );
-        assert!(
-            quiet
-                .note
-                .as_deref()
-                .is_some_and(|note| note.contains("openagents-public")),
-            "the empty sentence names the group it is empty of"
-        );
-    }
-
-    #[test]
-    fn a_read_in_flight_is_not_an_error() {
-        for pending in [ChatRead::Idle, ChatRead::Reading] {
-            let body = nostr_activity(&pending, Some("openagents-public"));
-            assert!(!body.is_silent());
-            assert!(body.rows.is_empty());
-        }
-    }
-
-    #[test]
-    fn a_chat_row_shows_the_message_with_its_author_and_age() {
-        let body = nostr_activity(
-            &ChatRead::Read(vec![ActivityRow {
-                author: "66277e0b…a0fbb7e4".into(),
-                content: "Testing NIP-29 message".into(),
-                age: "4m".into(),
-            }]),
-            Some("openagents-public"),
-        );
-        assert_eq!(body.rows.len(), 1);
-        assert_eq!(body.rows[0].primary.as_ref(), "Testing NIP-29 message");
-        assert_eq!(
-            body.rows[0].secondary.as_deref(),
-            Some("66277e0b…a0fbb7e4 · 4m"),
-            "who said it and how long ago, on the line under what they said"
-        );
-        assert!(body.note.is_none());
     }
 }

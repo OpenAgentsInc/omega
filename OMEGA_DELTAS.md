@@ -6189,24 +6189,21 @@ question rather than leaving it to whoever next reads the menu.
     under the executor that recorded it, and a row whose executor cannot run
     here still refuses in the composer's own words rather than dispatching a
     load that fails in somebody else's error text.
-  - *Public chat* is **real, and is the first socket Omega opens to a relay from
-    the UI**. It reads the manifest at `openagents.com`, then the NIP-29 group
-    that manifest names, and draws the five most recent kind-9 messages —
-    the same relay, group and kind the `/agentchat` page reads. Signatures are
-    verified against the pubkey drawn beside them.
+  - *Channels* is **real**. It reads the Agent Chat manifest at
+    `openagents.com`, adapts it to the versioned public-channel registry, and
+    draws one stable `#agent-chat` destination. It does not draw messages in
+    navigation. Selecting the destination opens the channel shell in the main
+    view. `OMEGA-DELTA-0160` owns this superseding interaction.
 
 - **The initial disclosure follows the task hierarchy.** On a profile with no
-  stored sidebar state, *Recent threads* starts expanded and *Public chat*
+  stored sidebar state, *Recent threads* starts expanded and *Channels*
   starts collapsed. Once a person changes either section, the stored choice
   remains authoritative across launches.
 
-- **The read is a read.** `auth.directRead` is `public` and the relay serves the
-  group's history unauthenticated, so there is no signer here, no key, no NIP-42
-  exchange and no publish path: one `REQ` out, frames in until `EOSE`, close.
-  `omega_community`'s claim that this build does not sign or write to a relay is
-  unchanged, and a delta check forbids the socket carrying a second frame. The
-  relay URL and group id are read from the manifest rather than compiled in,
-  which is the rule the built-in `public-nostr-chat` skill states.
+- **The registry load is a read.** It performs one HTTPS manifest read. It
+  opens no relay socket and has no signer, key, NIP-42 exchange, or publish
+  path. The relay URL and group ID come from that manifest rather than from the
+  generic controller.
 
 - **Adding a fourth section.** A variant on `omega_sidebar::SectionId` and its
   entry in `ALL`, its frozen `key` and its `title`, and one arm in the panel's
@@ -6223,7 +6220,9 @@ question rather than leaving it to whoever next reads the menu.
   visible window, so the sealed centre pane cannot hide it.
 
 - **Enforced by:** `zero_bases_sidebar_is_persistent_sectioned_and_silent_when_it_fails`
-  and `the_public_chat_section_reads_and_cannot_write` in `crates/omega_deltas`,
+  `the_public_chat_section_reads_and_cannot_write`, and
+  `public_chat_navigation_is_channel_first_and_read_only` in
+  `crates/omega_deltas`,
   for the wiring; `zero_bases_threads_sidebar_is_its_own_and_reopens_by_executor`
   in the same file, whose composer-clipping assertion moved from "draws
   absolutely" to "takes its width from `omega_sidebar::layout`" rather than
@@ -6727,7 +6726,7 @@ region cannot restore the editor or create an action-gate bypass.
 
 ### OMEGA-DELTA-0148 — The sidebar contains no empty rate-limits section
 
-Zero base's left sidebar contains **Recent threads** and **Public chat**. It
+Zero base's left sidebar contains **Recent threads** and **Channels**. It
 does not contain a rate-limits heading, executor rows saying “not reported,” or
 an explanation of why quota data is unavailable. That surface offered neither
 data nor an action, so it consumed persistent navigation space without helping
@@ -6983,3 +6982,42 @@ the HTTP status — and offers retry advice only when a retry could work.
   in `crates/omega_deltas`, plus unattended-provisioning tests in
   `omega_identity`, blocker tests in `omega_effectd`, and failure-message tests
   in `language_models`.
+
+### OMEGA-DELTA-0160 — Public chat navigation contains channels, not messages
+
+The zero-base sidebar shows stable public-channel destinations. It does not use
+individual relay events as navigation rows. The first production destination
+is `#agent-chat`. Selecting it opens a channel shell in the main view and keeps
+the thread or terminal behind that shell in memory.
+
+The generic controller consumes the versioned
+`openagents.public_channel_registry.v1` contract. The current OpenAgents web API
+still publishes one Agent Chat manifest, not a registry endpoint. Omega adapts
+that manifest to one production descriptor. An exact copy of the two-channel
+OpenAgents fixture is test data only. It proves that a second channel needs no
+schema or layout branch, including when two channels use the same group ID on
+different relays.
+
+Each channel owns its relay-qualified coordinate, lifecycle, cursor, verified
+event IDs, cached state, and unread count. The subscription policy is
+`SelectedOnly`: selection marks the prior observed snapshot as cached and
+clears unread for the new selection. It does not describe an initial,
+unobserved snapshot as cached. A snapshot for a different relay or group is
+refused. New events can change a snapshot or unread count, but they cannot
+change the destination count or order.
+
+Each destination is a keyboard-focusable button with a stable channel-based
+element ID. Its accessible label includes the visible channel label, lifecycle,
+cached state, and unread count. Enter or Space selects a focused destination.
+Selection moves both panel focus contracts into the channel surface. The
+existing 880-pixel layout floor remains authoritative, so the channel list
+yields with the rest of the sidebar in a narrow window.
+
+This slice opens no relay socket. It adds no live timeline, media loader,
+composer, signer, identity, join, or moderation control. The selected shell
+shows the authoritative relay, group, and lifecycle while the dependent live
+timeline work remains separate.
+
+- **Enforced by:** `public_chat_navigation_is_channel_first_and_read_only` in
+  `crates/omega_deltas`, plus registry, controller, coordinate, lifecycle,
+  unread, fixture, accessibility-label, and narrow-layout tests in `agent_ui`.

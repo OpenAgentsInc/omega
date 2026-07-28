@@ -215,29 +215,14 @@ struct SourcePanelInitialization {
 
 /// Reads the most recently used agent across all workspaces. Used as a fallback
 /// when opening a workspace that has no per-workspace agent preference yet.
-/// Read the published manifest, then the group it names. `OMEGA-DELTA-0130`.
+/// Read the published Agent Chat manifest and adapt it to the channel registry.
 ///
-/// Named apart from the panel's own `read_public_chat` on purpose. Two
-/// functions whose names are prefixes of one another are two functions a
-/// source-reading check cannot tell apart, and `OMEGA-DELTA-0130`'s toast
-/// check silently read this one while the method it was about grew a toast.
-///
-/// Two hops, in this order and not the other, because the relay and the group
-/// are configuration rather than constants — the built-in `public-nostr-chat`
-/// skill states the rule: "Do not put an OpenAgents host name or group
-/// identifier in the protocol code." The manifest URL is the single piece of
-/// configuration that has to exist somewhere, and it lives in
-/// [`omega_nostr_activity::MANIFEST_URL`].
-///
-/// The timeout covers the socket, which is the hop that can hang indefinitely;
-/// the HTTP client already bounds its own.
-async fn fetch_public_chat(
+/// The current web API publishes one deployment manifest, not a registry.
+/// `omega_public_channels` owns the compatibility adapter, so the generic
+/// controller never imports the deployment relay or group constants.
+async fn fetch_public_channel_registry(
     http_client: Arc<HttpClientWithUrl>,
-    timeout: impl std::future::Future<Output = ()>,
-) -> Result<(
-    omega_nostr_activity::GroupConfig,
-    Vec<omega_nostr_activity::ChatMessage>,
-)> {
+) -> Result<crate::omega_public_channels::ChannelRegistry> {
     let mut response = http_client
         .get(
             omega_nostr_activity::MANIFEST_URL,
@@ -257,14 +242,9 @@ async fn fetch_public_chat(
         "the public chat manifest answered {}",
         response.status().as_u16()
     );
-    let config = omega_nostr_activity::parse_manifest(&String::from_utf8_lossy(&body))?;
-    let messages = omega_nostr_activity::fetch(
-        config.clone(),
-        omega_nostr_activity::RECENT_MESSAGES,
-        timeout,
+    crate::omega_public_channels::ChannelRegistry::from_agent_chat_manifest(
+        &String::from_utf8_lossy(&body),
     )
-    .await?;
-    Ok((config, messages))
 }
 
 fn read_global_last_used_agent(kvp: &KeyValueStore) -> Option<Agent> {
@@ -1308,19 +1288,12 @@ pub struct AgentPanel {
     /// both the sidebar and a composer draws a rail without touching this, so
     /// widening the window restores what the person asked for.
     sidebar: omega_sidebar::SidebarState,
-    /// `OMEGA-DELTA-0130`. How far the public-chat read has got.
-    ///
-    /// Held rather than refetched per render because it crosses a network. It
-    /// starts [`ChatRead::Idle`] and moves once; nothing in the render path can
-    /// block on it, and every way it can fail lands in
-    /// [`omega_sidebar::ChatRead::Failed`] as one quiet line in that section.
-    ///
-    /// [`ChatRead::Idle`]: omega_sidebar::ChatRead::Idle
-    chat_read: omega_sidebar::ChatRead,
-    /// The group the read was for, for the sentence shown when it is empty.
-    chat_group: Option<SharedString>,
-    /// Held so the read dies with the panel.
-    _chat_read: Option<Task<()>>,
+    /// Versioned public-channel destinations and their independent snapshots.
+    public_channels: crate::omega_public_channels::PublicChannelController,
+    /// A bounded in-place registry load failure.
+    public_channels_error: Option<SharedString>,
+    /// Held so the manifest load dies with the panel.
+    _public_channels_load: Option<Task<()>>,
     /// The sentence the last refused reopen produced, if the sidebar is showing
     /// one.
     ///
@@ -1749,9 +1722,9 @@ impl AgentPanel {
                     .flatten()
                     .as_deref(),
             ),
-            chat_read: omega_sidebar::ChatRead::Idle,
-            chat_group: None,
-            _chat_read: None,
+            public_channels: crate::omega_public_channels::PublicChannelController::empty(),
+            public_channels_error: None,
+            _public_channels_load: None,
             threads_sidebar_refusal: None,
             device_pairing_surface: None,
             _engine_capacity_poll: None,
@@ -1760,7 +1733,7 @@ impl AgentPanel {
         let mut panel = panel;
         panel.ensure_native_agent_connection(cx);
         panel.observe_engine_capacity(cx);
-        panel.read_public_chat(cx);
+        panel.load_public_channels(cx);
         panel
     }
 
@@ -3365,46 +3338,26 @@ impl AgentPanel {
         .detach();
     }
 
-    /// Read the last few messages in the public NIP-29 group.
-    ///
-    /// `OMEGA-DELTA-0130`. Started once, when the panel is built, and never
-    /// awaited by a render. Everything it can do is write one of four values
-    /// into [`Self::chat_read`], and the worst of them is a sentence.
-    ///
-    /// Only in zero base. Outside it this panel sits beside an editor with its
-    /// own sidebar and this section is not drawn, so opening a socket for it
-    /// would be a network call for pixels nobody is going to see.
-    fn read_public_chat(&mut self, cx: &mut Context<Self>) {
+    /// Load the one-channel deployment manifest into the versioned registry.
+    fn load_public_channels(&mut self, cx: &mut Context<Self>) {
         if !omega_zero_base::is_active() {
             return;
         }
         let http_client = self.project.read(cx).client().http_client();
-        self.chat_read = omega_sidebar::ChatRead::Reading;
-        self._chat_read = Some(cx.spawn(async move |this, cx| {
-            let timeout = cx
-                .background_executor()
-                .timer(omega_nostr_activity::READ_TIMEOUT);
-            let read = fetch_public_chat(http_client, timeout).await;
+        self.public_channels_error = None;
+        self._public_channels_load = Some(cx.spawn(async move |this, cx| {
+            let read = fetch_public_channel_registry(http_client).await;
             this.update(cx, |this, cx| {
                 match read {
-                    Ok((config, messages)) => {
-                        this.chat_group = Some(config.group_id.into());
-                        this.chat_read = omega_sidebar::ChatRead::Read(omega_nostr_activity::rows(
-                            messages,
-                            Utc::now(),
-                            omega_nostr_activity::RECENT_MESSAGES,
-                        ));
+                    Ok(registry) => {
+                        this.public_channels =
+                            crate::omega_public_channels::PublicChannelController::new(registry);
+                        this.public_channels_error = None;
                     }
                     Err(error) => {
-                        // The log carries the chain; the sidebar carries one
-                        // line. `OMEGA-DELTA-0053` records that a zero-base
-                        // window is where a notification is least likely to be
-                        // where somebody is looking, and this is a section
-                        // failing to load, not a question for anybody.
-                        log::info!("public chat section could not read: {error:#}");
-                        this.chat_read = omega_sidebar::ChatRead::Failed(
-                            "Could not read the public chat just now.".into(),
-                        );
+                        log::info!("public channel registry could not load: {error:#}");
+                        this.public_channels_error =
+                            Some("Could not load public channels just now.".into());
                     }
                 }
                 cx.notify();
@@ -3754,10 +3707,9 @@ impl AgentPanel {
     ///
     /// # No arm may refuse
     ///
-    /// Every arm returns something drawable. `nostr_activity` returns an
-    /// [`omega_sidebar::SectionBody`], which has no error case: a section that
-    /// could not load has a note where its rows would be, and the sections
-    /// above and below it never find out.
+    /// Every arm returns something drawable. A section that cannot load puts
+    /// one quiet note where its rows would be. The sections above and below it
+    /// never find out.
     fn render_sidebar_section(
         &self,
         section: omega_sidebar::SectionId,
@@ -3801,56 +3753,196 @@ impl AgentPanel {
             omega_sidebar::SectionId::RecentThreads => {
                 column.child(self.render_recent_threads_section(cx))
             }
-            omega_sidebar::SectionId::NostrActivity => column.child(self.render_section_body(
-                &omega_sidebar::nostr_activity(&self.chat_read, self.chat_group.as_deref()),
-            )),
+            omega_sidebar::SectionId::PublicChannels => {
+                column.child(self.render_public_channel_destinations(cx))
+            }
         };
         column.into_any_element()
     }
 
-    /// The rows of a section that is not the threads list.
-    ///
-    /// Two lines and a mute, and the note underneath. The note is `Muted`
-    /// rather than `Warning`: a relay that did not answer is a thing to know,
-    /// not a thing to fix, and colouring it like an error in a panel the owner
-    /// keeps open all day would make it an alarm that never stops ringing.
-    fn render_section_body(&self, body: &omega_sidebar::SectionBody) -> AnyElement {
-        body.rows
-            .iter()
+    fn select_public_channel(
+        &mut self,
+        channel_id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.public_channels.select(channel_id) {
+            self.showing_full_auto = false;
+            self.threads_sidebar_refusal = None;
+            self.focus_handle.focus(window, cx);
+            cx.emit(AgentPanelEvent::ActiveViewChanged);
+            cx.notify();
+        }
+    }
+
+    fn close_selected_public_channel(&mut self, cx: &mut Context<Self>) {
+        self.public_channels.clear_selection();
+        cx.emit(AgentPanelEvent::ActiveViewChanged);
+        cx.notify();
+    }
+
+    fn render_public_channel_destinations(&self, cx: &mut Context<Self>) -> AnyElement {
+        let destinations = self.public_channels.destinations();
+        if destinations.is_empty() {
+            let note = self
+                .public_channels_error
+                .clone()
+                .unwrap_or_else(|| "Loading channels…".into());
+            return div()
+                .w_full()
+                .px_2()
+                .py_0p5()
+                .pb_1()
+                .child(Label::new(note).size(LabelSize::XSmall).color(Color::Muted))
+                .into_any_element();
+        }
+
+        destinations
+            .into_iter()
             .enumerate()
-            .fold(v_flex().w_full().pb_1(), |column, (index, row)| {
-                column.child(
-                    v_flex()
-                        .id(("omega-sidebar-row", index))
-                        .w_full()
-                        .px_2()
-                        .py_0p5()
-                        .gap_0p5()
-                        .child(
-                            Label::new(row.primary.clone())
-                                .size(LabelSize::Small)
-                                .color(if row.muted {
-                                    Color::Muted
-                                } else {
-                                    Color::Default
-                                })
-                                .truncate(),
-                        )
-                        .children(row.secondary.clone().map(|secondary| {
-                            Label::new(secondary)
-                                .size(LabelSize::XSmall)
-                                .color(Color::Muted)
-                                .truncate()
-                        })),
-                )
-            })
-            .children(body.note.clone().map(|note| {
-                div()
+            .fold(
+                v_flex().w_full().pb_1().gap_0p5(),
+                |list, (index, destination)| {
+                    let channel_id = destination.channel_id.clone();
+                    let channel_id_for_key = channel_id.clone();
+                    let lifecycle = if destination.cached {
+                        format!("{} · cached", destination.lifecycle.label())
+                    } else {
+                        destination.lifecycle.label().to_string()
+                    };
+                    let unread = (destination.unread > 0)
+                        .then(|| format!(" · {} unread", destination.unread));
+                    let accessible_description = format!(
+                        "{} on {} for group {}{}",
+                        lifecycle,
+                        destination.relay_url,
+                        destination.group_id,
+                        unread.clone().unwrap_or_default()
+                    );
+                    let accessible_label = destination.accessible_label();
+                    list.child(
+                        v_flex()
+                            .w_full()
+                            .px_1()
+                            .on_key_down(cx.listener(
+                                move |this, event: &gpui::KeyDownEvent, window, cx| {
+                                    if crate::omega_public_channels::is_channel_activation_key(
+                                        event.keystroke.key.as_str(),
+                                        event.keystroke.modifiers.modified(),
+                                    ) {
+                                        this.select_public_channel(&channel_id_for_key, window, cx);
+                                        cx.stop_propagation();
+                                    }
+                                },
+                            ))
+                            .child(
+                                Button::new(
+                                    ElementId::Name(
+                                        format!("omega-public-channel-{}", destination.channel_id)
+                                            .into(),
+                                    ),
+                                    destination.label,
+                                )
+                                .style(ButtonStyle::Subtle)
+                                .size(ButtonSize::Compact)
+                                .full_width()
+                                .tab_index(index as isize)
+                                .toggle_state(destination.selected)
+                                .aria_label(accessible_label)
+                                .aria_description(accessible_description)
+                                .on_click(cx.listener(
+                                    move |this, _, window, cx| {
+                                        this.select_public_channel(&channel_id, window, cx);
+                                    },
+                                )),
+                            )
+                            .child(
+                                Label::new(format!("{}{}", lifecycle, unread.unwrap_or_default()))
+                                    .size(LabelSize::XSmall)
+                                    .color(Color::Muted),
+                            ),
+                    )
+                },
+            )
+            .into_any_element()
+    }
+
+    fn render_selected_public_channel(&self, cx: &mut Context<Self>) -> AnyElement {
+        let Some(channel) = self.public_channels.selected_channel() else {
+            return div().into_any_element();
+        };
+        let lifecycle = self
+            .public_channels
+            .selected_snapshot()
+            .map(|snapshot| snapshot.lifecycle.label())
+            .unwrap_or("Not connected");
+        v_flex()
+            .id("omega-selected-public-channel")
+            .size_full()
+            .overflow_hidden()
+            .child(
+                h_flex()
                     .w_full()
-                    .px_2()
-                    .py_0p5()
-                    .child(Label::new(note).size(LabelSize::XSmall).color(Color::Muted))
-            }))
+                    .px_4()
+                    .py_3()
+                    .justify_between()
+                    .border_b_1()
+                    .border_color(cx.theme().colors().border)
+                    .child(
+                        v_flex()
+                            .gap_0p5()
+                            .child(Label::new(channel.destination_label()).size(LabelSize::Large))
+                            .child(
+                                Label::new(channel.display_name.clone())
+                                    .size(LabelSize::XSmall)
+                                    .color(Color::Muted),
+                            ),
+                    )
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .child(
+                                Label::new(lifecycle)
+                                    .size(LabelSize::XSmall)
+                                    .color(Color::Muted),
+                            )
+                            .child(
+                                IconButton::new(
+                                    "close-omega-selected-public-channel",
+                                    IconName::Close,
+                                )
+                                .icon_size(IconSize::Small)
+                                .tooltip(Tooltip::text("Close Channel"))
+                                .on_click(cx.listener(
+                                    |this, _, _, cx| {
+                                        this.close_selected_public_channel(cx);
+                                    },
+                                )),
+                            ),
+                    ),
+            )
+            .child(
+                v_flex()
+                    .id("omega-selected-public-channel-content")
+                    .flex_1()
+                    .p_4()
+                    .gap_2()
+                    .child(
+                        Label::new(format!("Relay: {}", channel.relay_url))
+                            .size(LabelSize::Small)
+                            .color(Color::Muted),
+                    )
+                    .child(
+                        Label::new(format!("Group: {}", channel.group_id))
+                            .size(LabelSize::Small)
+                            .color(Color::Muted),
+                    )
+                    .child(
+                        Label::new("The live timeline is not active in this build.")
+                            .size(LabelSize::Small)
+                            .color(Color::Muted),
+                    ),
+            )
             .into_any_element()
     }
 
@@ -5316,6 +5408,7 @@ impl AgentPanel {
         // the surface is retained, so returning to it restores the draft and
         // the selected run.
         self.showing_full_auto = false;
+        self.public_channels.clear_selection();
 
         let old_view = std::mem::replace(&mut self.base_view, new_view);
         self.retain_running_thread(old_view, cx);
@@ -6023,6 +6116,9 @@ impl agent::SiblingThreadHost for AgentPanelSiblingHost {
 
 impl Focusable for AgentPanel {
     fn focus_handle(&self, cx: &App) -> FocusHandle {
+        if self.public_channels.selected_channel().is_some() {
+            return self.focus_handle.clone();
+        }
         // The Full Auto surface owns focus while it is showing, so its
         // objective editor is what a keystroke reaches. `OMEGA-DELTA-0020`.
         if self.showing_full_auto
@@ -6063,6 +6159,9 @@ impl Panel for AgentPanel {
     }
 
     fn activation_focus_handle(&self, cx: &App) -> FocusHandle {
+        if self.public_channels.selected_channel().is_some() {
+            return self.focus_handle.clone();
+        }
         match self.visible_surface() {
             VisibleSurface::Uninitialized => self.focus_handle.clone(),
             VisibleSurface::AgentThread(conversation_view) => {
@@ -7768,9 +7867,18 @@ impl Render for AgentPanel {
                     })
                 }
             }))
-            .child(self.render_toolbar(window, cx))
-            .children(self.render_new_user_onboarding(window, cx))
+            .when(
+                self.public_channels.selected_channel().is_none(),
+                |parent| parent.child(self.render_toolbar(window, cx)),
+            )
+            .when(
+                self.public_channels.selected_channel().is_none(),
+                |parent| parent.children(self.render_new_user_onboarding(window, cx)),
+            )
             .map(|parent| {
+                if self.public_channels.selected_channel().is_some() {
+                    return parent.child(self.render_selected_public_channel(cx));
+                }
                 // Full Auto is a surface of this panel, not a destination
                 // beside it. `OMEGA-DELTA-0020`.
                 if self.showing_full_auto

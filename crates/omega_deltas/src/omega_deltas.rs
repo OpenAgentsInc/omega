@@ -148,6 +148,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0157",
     "OMEGA-DELTA-0158",
     "OMEGA-DELTA-0159",
+    "OMEGA-DELTA-0160",
 ];
 
 pub const GOOGLE_PROVIDER_PATH: &str = "crates/language_models/src/provider/google.rs";
@@ -2811,6 +2812,9 @@ pub const SIDEBAR_PATH: &str = "crates/agent_ui/src/omega_sidebar.rs";
 
 /// OMEGA-DELTA-0130. The read of the public NIP-29 group the sidebar shows.
 pub const NOSTR_ACTIVITY_PATH: &str = "crates/agent_ui/src/omega_nostr_activity.rs";
+
+/// OMEGA-DELTA-0160. The versioned registry and per-channel snapshot owner.
+pub const PUBLIC_CHANNELS_PATH: &str = "crates/agent_ui/src/omega_public_channels.rs";
 
 /// OMEGA-DELTA-0048, 0053. Where panels are added, where zero base skips them,
 /// and where the mode seals the window after the identity gate.
@@ -16878,7 +16882,7 @@ mod tests {
             .collect();
         assert_eq!(
             variants,
-            ["RecentThreads", "NostrActivity"],
+            ["RecentThreads", "PublicChannels"],
             "OMEGA-DELTA-0148: the sidebar must contain only useful sections \
              with real content. Found {variants:?} in {}.",
             sidebar_path.display()
@@ -16931,9 +16935,8 @@ mod tests {
         for function in [
             "render_sidebar",
             "render_sidebar_section",
-            "render_section_body",
-            "read_public_chat",
-            "fetch_public_chat",
+            "load_public_channels",
+            "fetch_public_channel_registry",
         ] {
             let body = body_of(&panel, function);
             assert!(
@@ -17079,9 +17082,10 @@ mod tests {
             }
         }
         assert!(
-            body_of(&panel, "fetch_public_chat").contains("omega_nostr_activity::MANIFEST_URL"),
-            "OMEGA-DELTA-0130: `fetch_public_chat` in {} no longer reads the \
-             published manifest before connecting.",
+            body_of(&panel, "fetch_public_channel_registry")
+                .contains("omega_nostr_activity::MANIFEST_URL"),
+            "OMEGA-DELTA-0130: `fetch_public_channel_registry` in {} no longer reads the \
+             published manifest before it creates the channel registry.",
             panel_path.display()
         );
     }
@@ -19951,6 +19955,105 @@ mod tests {
             "OMEGA-DELTA-0159: {} reports a generic incomplete sign-in again \
              instead of the reason the hosted lane actually refused.",
             repository_path(GOOGLE_PROVIDER_PATH).display()
+        );
+    }
+
+    /// OMEGA-DELTA-0160. Public chat is a registry of stable channel
+    /// destinations. Message events cannot become navigation rows.
+    #[test]
+    fn public_chat_navigation_is_channel_first_and_read_only() {
+        let channels_path = repository_path(PUBLIC_CHANNELS_PATH);
+        let channels = read_repository_file(PUBLIC_CHANNELS_PATH);
+        let shipped_channels = outside_the_tests(&channels);
+        for required in [
+            "openagents.public_channel_descriptor.v1",
+            "openagents.public_channel_registry.v1",
+            "pub struct PublicChannelController",
+            "pub const SUBSCRIPTION_POLICY",
+            "PublicChannelSubscriptionPolicy::SelectedOnly",
+            "pub fn is_channel_activation_key",
+            "pub fn from_agent_chat_manifest",
+            "duplicate relay-qualified group coordinate",
+        ] {
+            assert!(
+                shipped_channels.contains(required),
+                "OMEGA-DELTA-0160: {} lost `{required}`.",
+                channels_path.display()
+            );
+        }
+        for forbidden in [
+            "wss://relay.openagents.com",
+            "openagents-public",
+            "SecretKey",
+            "sign_event",
+            "nsec",
+        ] {
+            assert!(
+                !shipped_channels.contains(forbidden),
+                "OMEGA-DELTA-0160: the generic channel controller in {} contains \
+                 deployment data or signing capability `{forbidden}`.",
+                channels_path.display()
+            );
+        }
+
+        let panel_path = repository_path(AGENT_PANEL_PATH);
+        let panel = read_repository_file(AGENT_PANEL_PATH);
+        let destinations = body_of(&panel, "render_public_channel_destinations");
+        for required in [
+            "public_channels.destinations()",
+            "\"omega-public-channel-{}\"",
+            ".tab_index(index as isize)",
+            ".on_key_down(cx.listener",
+            ".aria_label(accessible_label)",
+            "select_public_channel",
+        ] {
+            assert!(
+                destinations.contains(required),
+                "OMEGA-DELTA-0160: the destination UI in {} lost `{required}`.",
+                panel_path.display()
+            );
+        }
+        assert!(
+            !destinations.contains("row.content")
+                && !destinations.contains("ChatMessage")
+                && !destinations.contains("ActivityRow"),
+            "OMEGA-DELTA-0160: public message data returned to the sidebar in {}.",
+            panel_path.display()
+        );
+        let shell = body_of(&panel, "render_selected_public_channel");
+        for required in [
+            "omega-selected-public-channel",
+            "channel.destination_label()",
+            "channel.relay_url",
+            "channel.group_id",
+        ] {
+            assert!(
+                shell.contains(required),
+                "OMEGA-DELTA-0160: the selected-channel shell in {} lost `{required}`.",
+                panel_path.display()
+            );
+        }
+        let selection = body_of(&panel, "select_public_channel");
+        assert!(
+            selection.contains("self.focus_handle.focus(window, cx)"),
+            "OMEGA-DELTA-0160: keyboard or pointer selection no longer moves focus \
+             into the selected channel surface in {}.",
+            panel_path.display()
+        );
+        assert!(
+            panel
+                .matches("if self.public_channels.selected_channel().is_some()")
+                .count()
+                >= 2,
+            "OMEGA-DELTA-0160: the panel focus and activation-focus contracts do \
+             not both select the channel surface in {}.",
+            panel_path.display()
+        );
+        assert!(
+            body_of(&panel, "set_base_view").contains("public_channels.clear_selection()"),
+            "OMEGA-DELTA-0160: opening a thread or terminal no longer leaves the \
+             selected-channel shell in {}.",
+            panel_path.display()
         );
     }
 }
