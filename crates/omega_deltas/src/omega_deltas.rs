@@ -145,6 +145,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0154",
     "OMEGA-DELTA-0155",
     "OMEGA-DELTA-0156",
+    "OMEGA-DELTA-0157",
 ];
 
 pub const GOOGLE_PROVIDER_PATH: &str = "crates/language_models/src/provider/google.rs";
@@ -19449,6 +19450,46 @@ mod tests {
                 repository_path(platform_path).display()
             );
         }
+    }
+
+    /// OMEGA-DELTA-0157. A titlebar view that nothing installs is a window
+    /// nobody can move, and every source check about what it renders passes.
+    #[test]
+    fn omega_installs_the_titlebar_view_it_renders() {
+        let main_path = "crates/zed/src/main.rs";
+        let main = without_comments(&read_repository_file(main_path));
+        assert!(
+            main.contains("title_bar::init(cx);"),
+            "OMEGA-DELTA-0157: {} no longer calls `title_bar::init`, so \
+             `Workspace::titlebar_item` is `None` in every window and no \
+             window has a drag region. This is exactly how the call was lost \
+             the first time: it lived inside `collab_ui::init`, and retiring \
+             that crate took it along silently.",
+            repository_path(main_path).display()
+        );
+
+        let title_bar_path = "crates/title_bar/src/title_bar.rs";
+        let title_bar = without_comments(&read_repository_file(title_bar_path));
+        let init = body_of(&title_bar, "init");
+        for required in [
+            "cx.observe_new(|workspace: &mut Workspace",
+            "workspace.set_titlebar_item(item.into(), window, cx);",
+        ] {
+            assert!(
+                without_whitespace(init).contains(&without_whitespace(required)),
+                "OMEGA-DELTA-0157: `title_bar::init` no longer installs the \
+                 titlebar view on each workspace; it lost `{required}`."
+            );
+        }
+
+        let filter = body_of(&title_bar, "update_layout_action_filter");
+        assert!(
+            filter.contains("omega_zero_base::is_active()") && filter.contains("hide_action_types"),
+            "OMEGA-DELTA-0157: installing the titlebar again also runs the \
+             layout-action filter, and `show_action_types` outranks the \
+             zero-base palette restriction. Without the zero-base branch the \
+             restricted palette lists two actions the gate refuses."
+        );
     }
 
     /// OMEGA-DELTA-0153. OpenAgents authentication uses the built-in identity

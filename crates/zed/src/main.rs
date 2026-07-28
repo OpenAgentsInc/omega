@@ -786,6 +786,16 @@ fn main() {
 
         audio::init(cx);
         workspace::init(app_state.clone(), cx);
+        // `OMEGA-DELTA-0157`. The titlebar view installs itself here, and for
+        // two days it installed nowhere. `title_bar::init` used to be called
+        // from `collab_ui::init`, and "Retire Zed collab" (990e4c6cc6) deleted
+        // that crate with the call inside it. Nothing else calls it, so
+        // `Workspace::titlebar_item` stayed `None` in every window of every
+        // mode: no `PlatformTitleBar`, no `WindowControlArea::Drag`, no
+        // `start_window_move` listener, and a window a person could not move.
+        // `OMEGA-DELTA-0147` then wrote the sealed-zero-base drag strip against
+        // an item that was never set, so its checks passed over a dead branch.
+        title_bar::init(cx);
         ui_prompt::init(cx);
 
         go_to_line::init(cx);

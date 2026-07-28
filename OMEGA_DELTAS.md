@@ -6819,3 +6819,24 @@ fresh snapshot.
 - **Enforced by:** `mobile_mirror_projects_live_state_without_new_authority` in
   `crates/omega_deltas`, plus projection journey, redaction, bound, resume, and
   restart tests in `omega_device_bridge`, `full_auto_ui`, and `agent_ui`.
+
+### OMEGA-DELTA-0157 — The titlebar view is installed by the shipped binary
+
+`title_bar::init` is called from Omega's own startup sequence in
+`crates/zed/src/main.rs`. It used to be called from `collab_ui::init`, and
+"Retire Zed collab" deleted that crate with the call inside it. Nothing else
+called it, so `Workspace::titlebar_item` was `None` in every window of every
+mode: no `PlatformTitleBar`, no `WindowControlArea::Drag` region, no
+`start_window_move` listener, and a window a person could not move at all.
+`OMEGA-DELTA-0147` describes what that view renders once sealed; this delta is
+what puts the view in the window.
+
+Zero base hides the two panel-layout actions from the command palette rather
+than showing them. `CommandPaletteFilter::is_hidden` answers `false` for a
+shown action type before it reads the admitted set, so the ordinary
+`show_action_types` call would list `workspace::UseClassicLayout` and
+`workspace::UseAgenticLayout` in a palette that admits neither.
+
+- **Enforced by:** `omega_installs_the_titlebar_view_it_renders` in
+  `crates/omega_deltas`, plus
+  `sealed_zero_base_keeps_a_full_width_platform_drag_strip`.

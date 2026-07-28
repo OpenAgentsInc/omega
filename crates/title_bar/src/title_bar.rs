@@ -171,14 +171,24 @@ pub fn init(cx: &mut App) {
 
 /// Hides or shows the panel layout actions in the command palette based on
 /// whether AI is currently disabled.
+///
+/// `OMEGA-DELTA-0157`. Zero base hides them either way. `show_action_types`
+/// outranks the palette restriction — `CommandPaletteFilter::is_hidden` answers
+/// `false` for a shown type before it ever reads the admitted set — so calling
+/// it here would list `workspace::UseClassicLayout` and
+/// `workspace::UseAgenticLayout` in a restricted palette that admits neither,
+/// and the action gate would then refuse whichever one a person picked. This
+/// mattered the moment `title_bar::init` was called again: while the title bar
+/// was uninstalled, this function never ran in the shipped binary.
 fn update_layout_action_filter(cx: &mut App) {
     let disable_ai = project::DisableAiSettings::get_global(cx).disable_ai;
     let layout_actions = [
         TypeId::of::<UseClassicLayout>(),
         TypeId::of::<UseAgenticLayout>(),
     ];
+    let hidden = disable_ai || omega_zero_base::is_active();
     CommandPaletteFilter::update_global(cx, |filter, _| {
-        if disable_ai {
+        if hidden {
             filter.hide_action_types(&layout_actions);
         } else {
             filter.show_action_types(layout_actions.iter());
