@@ -196,9 +196,10 @@ use {
     },
     omega_workbench_harness::{
         CheckStatus, HERMETIC_SCENES, PixelProof, PixelStatus, ProofCheck, ProofLane, ProofOutcome,
-        ProofReceipt, RegionPixelProof, ScenePhase, SemanticProbe, WORKBENCH_PLAN_PIXEL_SCENES,
-        WORKBENCH_SHELL_PIXEL_SCENES, WORKBENCH_TERMINAL_PIXEL_SCENES, WorkSurfaceId,
-        WorkbenchScene, compare_images as compare_workbench_images, scene_spec, select_scenes,
+        ProofReceipt, RegionPixelProof, ScenePhase, SemanticProbe, WORKBENCH_OUTLINE_PIXEL_SCENES,
+        WORKBENCH_PLAN_PIXEL_SCENES, WORKBENCH_SHELL_PIXEL_SCENES, WORKBENCH_TERMINAL_PIXEL_SCENES,
+        WorkSurfaceId, WorkbenchScene, compare_images as compare_workbench_images, scene_spec,
+        select_scenes,
     },
     project::{AgentId, Project},
     project_panel::ProjectPanel,
@@ -574,6 +575,11 @@ fn is_workbench_plan_scene(name: &str) -> bool {
 }
 
 #[cfg(target_os = "macos")]
+fn is_workbench_outline_scene(name: &str) -> bool {
+    WORKBENCH_OUTLINE_PIXEL_SCENES.contains(&name)
+}
+
+#[cfg(target_os = "macos")]
 fn workbench_fixture_for_scene(name: &str) -> Result<WorkbenchScene> {
     use omega_workbench_harness::{
         ContentStateFixture, EventFixture, EventKindFixture, MessageFixture, MessageRoleFixture,
@@ -592,6 +598,9 @@ fn workbench_fixture_for_scene(name: &str) -> Result<WorkbenchScene> {
     }
     if is_workbench_plan_scene(name) {
         return omega_workbench_harness::workbench_plan_scene(name);
+    }
+    if is_workbench_outline_scene(name) {
+        return omega_workbench_harness::workbench_outline_scene(name);
     }
 
     let spec =
@@ -2172,6 +2181,131 @@ fn verify_workbench_render_preflight(
             }
             record_workbench_semantic_check(test_name, "plan-native-content-containment");
             record_workbench_semantic_checks(test_name, probe.into_checks());
+        }
+        if is_workbench_outline_scene(test_name) {
+            let mut probe = SemanticProbe::new(&snapshot);
+            let narrow_collapsed = test_name == "omega_workbench_outline_narrow_foreign_binding";
+            probe.require_accessible(
+                "omega.thread-outline",
+                "Complementary",
+                "Thread events and artifacts",
+            )?;
+            probe.require_fully_visible("omega.thread-outline")?;
+            if !narrow_collapsed {
+                probe.require_accessible("omega.thread-outline.tabs", "Group", "Outline views")?;
+                probe.require_inside("omega.thread-outline.tabs", "omega.thread-outline")?;
+            }
+            probe.require_focus("omega.thread-outline", true)?;
+
+            let item_selectors = snapshot
+                .selectors()
+                .map(|(selector, _)| selector)
+                .filter(|selector| selector.starts_with("omega.thread-outline.item."))
+                .collect::<Vec<_>>();
+            if test_name == "omega_workbench_outline_empty" {
+                anyhow::ensure!(
+                    item_selectors.is_empty(),
+                    "empty outline scene rendered item selectors {item_selectors:?}"
+                );
+                probe.require_accessible(
+                    "omega.thread-outline.empty",
+                    "Status",
+                    "No matching outline items",
+                )?;
+                probe.require_absent("omega.thread-outline.list")?;
+            } else if narrow_collapsed {
+                // 910px viewport responsively collapses the outline to a rail.
+                // Binding isolation is still proved from the retained entity and
+                // configure-time typed snapshot checks.
+                probe.require_absent("omega.thread-outline.tabs")?;
+                probe.require_absent("omega.thread-outline.list")?;
+            } else {
+                probe.require_accessible(
+                    "omega.thread-outline.list",
+                    "List",
+                    if matches!(
+                        test_name,
+                        "omega_workbench_outline_artifacts"
+                            | "omega_workbench_outline_selected_action"
+                            | "omega_workbench_outline_deduplicated_history"
+                    ) {
+                        "Thread artifacts"
+                    } else {
+                        "Thread events"
+                    },
+                )?;
+                probe.require_inside("omega.thread-outline.list", "omega.thread-outline")?;
+                anyhow::ensure!(
+                    !item_selectors.is_empty(),
+                    "populated outline scene rendered no virtualized item selectors"
+                );
+                for selector in &item_selectors {
+                    // Item rows can paint slightly outside the list's clipped
+                    // content mask while remaining children of the list node.
+                    probe.require_unique(selector)?;
+                }
+            }
+
+            match test_name {
+                "omega_workbench_outline_empty" => {
+                    probe.require_accessible(
+                        "omega.thread-outline.lifecycle.loading",
+                        "Status",
+                        "Loading thread outline…",
+                    )?;
+                }
+                "omega_workbench_outline_offline" => {
+                    probe.require_accessible(
+                        "omega.thread-outline.lifecycle.stale",
+                        "Status",
+                        "Showing the last verified outline",
+                    )?;
+                }
+                "omega_workbench_outline_reconnecting" => {
+                    probe.require_accessible(
+                        "omega.thread-outline.lifecycle.reconnecting",
+                        "Status",
+                        "Reconnecting; outline updates are paused",
+                    )?;
+                }
+                "omega_workbench_outline_error" => {
+                    probe.require_accessible(
+                        "omega.thread-outline.lifecycle.error",
+                        "Status",
+                        "Could not refresh thread outline",
+                    )?;
+                }
+                _ => {
+                    for suffix in [
+                        "loading",
+                        "streaming",
+                        "partial",
+                        "error",
+                        "stale",
+                        "reconnecting",
+                    ] {
+                        probe
+                            .require_absent(&format!("omega.thread-outline.lifecycle.{suffix}"))?;
+                    }
+                }
+            }
+            if test_name == "omega_workbench_outline_selected_action" {
+                probe.require_accessible(
+                    "omega.thread-outline.action-status",
+                    "Status",
+                    "Artifact opened",
+                )?;
+            }
+            if matches!(
+                test_name,
+                "omega_workbench_outline_virtualized"
+                    | "omega_workbench_outline_narrow_foreign_binding"
+            ) {
+                probe.require_disjoint("omega.thread-outline", "omega.workbench.composer")?;
+                probe.require_disjoint("omega.thread-outline", "omega.workbench.transcript")?;
+            }
+            record_workbench_semantic_checks(test_name, probe.into_checks());
+            record_workbench_semantic_check(test_name, "outline-native-accessibility-and-bounds");
         }
         if test_name.starts_with("omega_workbench_identity_") {
             let mut probe = SemanticProbe::new(&snapshot);
@@ -4291,7 +4425,7 @@ fn create_workbench_git_disk_fixture(scene_name: &str) -> Result<Option<Workbenc
 fn create_workbench_files_disk_fixture(
     scene_name: &str,
 ) -> Result<Option<WorkbenchFilesDiskFixture>> {
-    if !is_workbench_files_scene(scene_name) {
+    if !is_workbench_files_scene(scene_name) && !is_workbench_outline_scene(scene_name) {
         return Ok(None);
     }
 
@@ -4307,54 +4441,69 @@ fn create_workbench_files_disk_fixture(
         Ok(path)
     };
 
-    let fixture = match scene_name {
-        "omega_workbench_files_wide"
-        | "omega_workbench_files_narrow"
-        | "omega_workbench_files_loading"
-        | "omega_workbench_files_error" => {
-            let worktree = create_worktree("ready-worktree")?;
-            std::fs::create_dir_all(worktree.join("src"))?;
-            std::fs::write(worktree.join("src/main.rs"), "fn main() {}\n")?;
-            std::fs::write(worktree.join("README.md"), "# Ready fixture\n")?;
-            WorkbenchFilesDiskFixture {
-                _root: root,
-                worktrees: vec![("ready-worktree".into(), worktree)],
-                active_worktree_id: "ready-worktree".into(),
-                selected_path: matches!(
-                    scene_name,
-                    "omega_workbench_files_wide" | "omega_workbench_files_narrow"
-                )
-                .then_some("README.md"),
-            }
+    let fixture = if is_workbench_outline_scene(scene_name) {
+        let worktree = create_worktree("outline-worktree")?;
+        std::fs::create_dir_all(worktree.join("src"))?;
+        std::fs::write(
+            worktree.join("src/workbench.rs"),
+            "pub fn render_outline() {}\n",
+        )?;
+        WorkbenchFilesDiskFixture {
+            _root: root,
+            worktrees: vec![("outline-worktree".into(), worktree)],
+            active_worktree_id: "outline-worktree".into(),
+            selected_path: None,
         }
-        "omega_workbench_files_multi_root"
-        | "omega_workbench_files_stale_filesystem_completion" => {
-            let alpha = create_worktree("alpha-worktree")?;
-            std::fs::write(alpha.join("alpha-only.txt"), "alpha\n")?;
-            let beta = create_worktree("beta-worktree")?;
-            std::fs::create_dir_all(beta.join("src"))?;
-            std::fs::write(beta.join("beta-only.txt"), "beta\n")?;
-            std::fs::write(beta.join("src/beta.rs"), "pub fn beta() {}\n")?;
-            WorkbenchFilesDiskFixture {
-                _root: root,
-                worktrees: vec![
-                    ("alpha-worktree".into(), alpha),
-                    ("beta-worktree".into(), beta),
-                ],
-                active_worktree_id: "beta-worktree".into(),
-                selected_path: Some("beta-only.txt"),
+    } else {
+        match scene_name {
+            "omega_workbench_files_wide"
+            | "omega_workbench_files_narrow"
+            | "omega_workbench_files_loading"
+            | "omega_workbench_files_error" => {
+                let worktree = create_worktree("ready-worktree")?;
+                std::fs::create_dir_all(worktree.join("src"))?;
+                std::fs::write(worktree.join("src/main.rs"), "fn main() {}\n")?;
+                std::fs::write(worktree.join("README.md"), "# Ready fixture\n")?;
+                WorkbenchFilesDiskFixture {
+                    _root: root,
+                    worktrees: vec![("ready-worktree".into(), worktree)],
+                    active_worktree_id: "ready-worktree".into(),
+                    selected_path: matches!(
+                        scene_name,
+                        "omega_workbench_files_wide" | "omega_workbench_files_narrow"
+                    )
+                    .then_some("README.md"),
+                }
             }
-        }
-        "omega_workbench_files_empty" => {
-            let worktree = create_worktree("empty-worktree")?;
-            WorkbenchFilesDiskFixture {
-                _root: root,
-                worktrees: vec![("empty-worktree".into(), worktree)],
-                active_worktree_id: "empty-worktree".into(),
-                selected_path: None,
+            "omega_workbench_files_multi_root"
+            | "omega_workbench_files_stale_filesystem_completion" => {
+                let alpha = create_worktree("alpha-worktree")?;
+                std::fs::write(alpha.join("alpha-only.txt"), "alpha\n")?;
+                let beta = create_worktree("beta-worktree")?;
+                std::fs::create_dir_all(beta.join("src"))?;
+                std::fs::write(beta.join("beta-only.txt"), "beta\n")?;
+                std::fs::write(beta.join("src/beta.rs"), "pub fn beta() {}\n")?;
+                WorkbenchFilesDiskFixture {
+                    _root: root,
+                    worktrees: vec![
+                        ("alpha-worktree".into(), alpha),
+                        ("beta-worktree".into(), beta),
+                    ],
+                    active_worktree_id: "beta-worktree".into(),
+                    selected_path: Some("beta-only.txt"),
+                }
             }
+            "omega_workbench_files_empty" => {
+                let worktree = create_worktree("empty-worktree")?;
+                WorkbenchFilesDiskFixture {
+                    _root: root,
+                    worktrees: vec![("empty-worktree".into(), worktree)],
+                    active_worktree_id: "empty-worktree".into(),
+                    selected_path: None,
+                }
+            }
+            _ => unreachable!("Files scene was checked above"),
         }
-        _ => unreachable!("Files scene was checked above"),
     };
     Ok(Some(fixture))
 }
@@ -6221,6 +6370,7 @@ fn configure_workbench_shell_scene(
         && !is_workbench_git_scene(scene_name)
         && !is_workbench_terminal_scene(scene_name)
         && !is_workbench_plan_scene(scene_name)
+        && !is_workbench_outline_scene(scene_name)
     {
         anyhow::ensure!(
             active_thread.binding.is_none() && active_thread.available_surfaces.len() == 1,
@@ -7875,6 +8025,15 @@ fn configure_workbench_shell_scene(
         name if is_workbench_plan_scene(name) => {
             configure_workbench_plan_scene(name, workspace_window, panel, cx)?;
         }
+        name if is_workbench_outline_scene(name) => {
+            configure_workbench_outline_scene(
+                name,
+                workspace_window,
+                panel,
+                files_fixture.context("outline scene has no disk fixture")?,
+                cx,
+            )?;
+        }
         "omega_workbench_shell_active_dock" => {
             dispatch_workbench_action(workspace_window, Box::new(SelectPlan), cx)?;
             let projection = cx.read(|cx| panel.read(cx).workbench_projection_for_tests().clone());
@@ -8056,6 +8215,1250 @@ fn configure_workbench_shell_scene(
         _ => anyhow::bail!("unsupported workbench shell scene {scene_name:?}"),
     }
     Ok(())
+}
+
+#[cfg(all(target_os = "macos", feature = "visual-tests"))]
+fn configure_workbench_outline_scene(
+    scene_name: &str,
+    workspace_window: WindowHandle<Workspace>,
+    panel: &Entity<agent_ui::AgentPanel>,
+    disk_fixture: &WorkbenchFilesDiskFixture,
+    cx: &mut VisualTestAppContext,
+) -> Result<()> {
+    use acp_thread::{
+        ThreadActionTarget, ThreadEntryId, ThreadEventKind, ThreadEventOwner,
+        ThreadEventProjection, ThreadEventSource, ThreadEventStatus, ThreadProjectionSnapshot,
+    };
+    use agent_ui::thread_outline::{
+        ActivateOutlineItem, CycleOutlineFilter, OutlineView, SelectArtifacts, SelectEvents,
+        SelectNextOutlineItem, ThreadOutlineBinding,
+    };
+    use agent_ui::workbench_shell::SelectFiles;
+    use omega_workbench_state::WorkSurface;
+
+    let scene = omega_workbench_harness::workbench_outline_scene(scene_name)?;
+    let expected = scene
+        .active_outline_snapshot()
+        .context("outline visual scene has no active typed snapshot")?;
+    let outline = cx.read(|cx| panel.read(cx).thread_outline_for_tests());
+    let retained_outline_id = outline.entity_id();
+    let active_agent_thread = cx
+        .read(|cx| panel.read(cx).active_agent_thread(cx))
+        .context("outline scene has no active AcpThread")?;
+    let active_entity_id = active_agent_thread.entity_id();
+    let visible_projection = cx
+        .read(|cx| {
+            panel
+                .read(cx)
+                .workbench_projection_for_tests()
+                .visible_projection()
+        })
+        .context("outline scene has no visible workbench projection")?;
+    let repository = visible_projection
+        .binding
+        .clone()
+        .context("outline scene is not bound to its disk worktree")?;
+    let binding = ThreadOutlineBinding {
+        thread_id: visible_projection.thread_id.clone(),
+        repository: Some(repository.clone()),
+        generation: visible_projection.generation,
+    };
+    let worktree_path = disk_fixture
+        .worktrees
+        .iter()
+        .find_map(|(id, path)| (id == &disk_fixture.active_worktree_id).then_some(path))
+        .context("outline scene has no active disk worktree")?;
+    let source_path = worktree_path.join("src/workbench.rs");
+    let lifecycle = native_outline_lifecycle(&expected.lifecycle);
+
+    let initial_surface_state = cx.read(|cx| {
+        panel
+            .read(cx)
+            .workbench_projection_for_tests()
+            .visible_projection()
+            .map(|visible| {
+                (
+                    visible.requested_surface,
+                    visible.effective_surface,
+                    visible.dock_open,
+                )
+            })
+    });
+    if initial_surface_state != Some((Some(WorkSurface::Files), Some(WorkSurface::Files), true)) {
+        dispatch_workbench_action(workspace_window, Box::new(SelectFiles), cx)?;
+    }
+    let interaction_surface_state = cx
+        .read(|cx| {
+            panel
+                .read(cx)
+                .workbench_projection_for_tests()
+                .visible_projection()
+                .map(|visible| {
+                    (
+                        visible.requested_surface,
+                        visible.effective_surface,
+                        visible.dock_open,
+                    )
+                })
+        })
+        .context("outline scene has no surface state after selecting Files")?;
+    anyhow::ensure!(
+        interaction_surface_state == (Some(WorkSurface::Files), Some(WorkSurface::Files), true),
+        "outline scene did not establish its declared Files work surface: initial {initial_surface_state:?}, current {interaction_surface_state:?}"
+    );
+    record_workbench_semantic_check(scene_name, "outline-declared-files-surface-established");
+
+    let uses_production_front_door = scene_name == "omega_workbench_outline_selected_action";
+    let freezes_projection = matches!(
+        lifecycle,
+        agent_ui::thread_outline::ThreadOutlineLifecycle::Stale
+            | agent_ui::thread_outline::ThreadOutlineLifecycle::Reconnecting
+    );
+    let projection_binding = acp_thread::ThreadProjectionBinding {
+        thread_id: binding.thread_id.clone().into(),
+        work_dirs: Arc::from([worktree_path.to_path_buf()]),
+    };
+    if uses_production_front_door {
+        seed_frontdoor_outline_thread(&active_agent_thread, &source_path, cx)?;
+        cx.update(|cx| {
+            panel.update(cx, |panel, cx| {
+                panel.synchronize_thread_outline_for_tests(cx);
+            });
+        });
+    } else {
+        cx.update(|cx| {
+            outline.update(cx, |outline, cx| {
+                // Drop any production bind/subscription so the visual scene can seed a
+                // deterministic synthetic projection without freeze/replay rejection.
+                outline.unbind(cx);
+                outline.set_navigation_handler(Rc::new(|_, _, _| true));
+                outline.set_artifact_action_handler(Rc::new(|_, _, _| {
+                    agent_ui::thread_outline::OutlineActionOutcome::Completed
+                }));
+            });
+        });
+    }
+
+    if scene_name == "omega_workbench_outline_empty" {
+        cx.update(|cx| {
+            outline.update(cx, |outline, cx| {
+                outline.force_seed_projection_for_tests(
+                    binding.clone(),
+                    active_entity_id,
+                    ThreadProjectionSnapshot {
+                        binding: projection_binding.clone(),
+                        thread_id: binding.thread_id.clone().into(),
+                        work_dirs: projection_binding.work_dirs.clone(),
+                        revision: 0,
+                        entries: Vec::new(),
+                        artifacts: Vec::new(),
+                    },
+                    lifecycle.clone(),
+                    cx,
+                );
+            });
+        });
+    } else if uses_production_front_door {
+        let projection = cx.read(|cx| active_agent_thread.read(cx).projection(cx));
+        let snapshot = cx.read(|cx| outline.read(cx).snapshot_for_tests());
+        let projected_kinds = projection
+            .entries
+            .iter()
+            .map(|entry| entry.kind)
+            .collect::<Vec<_>>();
+        let projected_ids = projection
+            .entries
+            .iter()
+            .map(|entry| agent_ui::thread_outline::OutlineItemId::Event(entry.id))
+            .collect::<Vec<_>>();
+        anyhow::ensure!(
+            snapshot.revision == projection.revision
+                && snapshot.event_count == projection.entries.len()
+                && snapshot.artifact_count == projection.artifacts.len()
+                && snapshot
+                    .visible_items
+                    .iter()
+                    .map(|item| item.id.clone())
+                    .eq(projected_ids)
+                && projected_kinds
+                    == vec![
+                        ThreadEventKind::ToolCall,
+                        ThreadEventKind::Completion,
+                        ThreadEventKind::ToolCall,
+                        ThreadEventKind::ToolResult,
+                        ThreadEventKind::AssistantMessage,
+                        ThreadEventKind::ToolCall,
+                        ThreadEventKind::ToolResult,
+                        ThreadEventKind::Error,
+                    ],
+            "production outline binding did not project the real AcpThread identities: projection revision {}, outline revision {}, projection events/artifacts {}/{}, outline events/artifacts {}/{}, kinds {:?}",
+            projection.revision,
+            snapshot.revision,
+            projection.entries.len(),
+            projection.artifacts.len(),
+            snapshot.event_count,
+            snapshot.artifact_count,
+            projected_kinds,
+        );
+        record_workbench_semantic_check(
+            scene_name,
+            "outline-production-acp-thread-front-door-proved",
+        );
+    } else if freezes_projection || expected.revision == 0 {
+        // Frozen / empty-final scenes must seed the final revision in one bind.
+        // apply_projection_update freezes under Stale/Reconnecting, so a base→final
+        // ramp would leave revision 1 while the fixture expects the final revision.
+        let final_projection = native_outline_projection(
+            scene_name,
+            &binding.thread_id,
+            worktree_path,
+            &source_path,
+            expected.revision.max(1),
+        );
+        cx.update(|cx| {
+            outline.update(cx, |outline, cx| {
+                outline.force_seed_projection_for_tests(
+                    binding.clone(),
+                    active_entity_id,
+                    final_projection,
+                    lifecycle.clone(),
+                    cx,
+                );
+            });
+        });
+        record_workbench_semantic_check(scene_name, "outline-frozen-or-final-seed-applied");
+    } else {
+        let base_entries =
+            native_outline_base_entries(&binding.thread_id, worktree_path, &source_path, 1);
+        let base_artifacts =
+            native_outline_base_artifacts(&binding.thread_id, worktree_path, &source_path, 1);
+        cx.update(|cx| {
+            outline.update(cx, |outline, cx| {
+                outline.force_seed_projection_for_tests(
+                    binding.clone(),
+                    active_entity_id,
+                    ThreadProjectionSnapshot {
+                        binding: projection_binding.clone(),
+                        thread_id: binding.thread_id.clone().into(),
+                        work_dirs: projection_binding.work_dirs.clone(),
+                        revision: 1,
+                        entries: base_entries,
+                        artifacts: base_artifacts,
+                    },
+                    agent_ui::thread_outline::ThreadOutlineLifecycle::Ready,
+                    cx,
+                );
+            });
+        });
+        let base_snapshot = cx.read(|cx| outline.read(cx).snapshot_for_tests());
+        let base_event_count = base_snapshot.event_count;
+        let base_artifact_count = base_snapshot.artifact_count;
+        let base_revision = base_snapshot.revision;
+        let base_projection_binding = base_snapshot.projection_binding.clone();
+        let base_event_ids = base_snapshot
+            .visible_items
+            .into_iter()
+            .map(|item| item.id)
+            .collect::<Vec<_>>();
+        let base_artifact_ids = cx.update(|cx| {
+            outline.update(cx, |outline, cx| {
+                outline.select_view(OutlineView::Artifacts, cx);
+                outline
+                    .snapshot_for_tests()
+                    .visible_items
+                    .into_iter()
+                    .map(|item| item.id)
+                    .collect::<Vec<_>>()
+            })
+        });
+        anyhow::ensure!(
+            !base_event_ids.is_empty() && !base_artifact_ids.is_empty(),
+            "outline base seed produced no visible event/artifact identities: events={base_event_ids:?} artifacts={base_artifact_ids:?} event_count={base_event_count} artifact_count={base_artifact_count} revision={base_revision} projection_binding={base_projection_binding:?} seed_binding={projection_binding:?}"
+        );
+        cx.update(|cx| {
+            outline.update(cx, |outline, cx| {
+                outline.select_view(OutlineView::Events, cx);
+            });
+        });
+
+        let final_projection = native_outline_projection(
+            scene_name,
+            &binding.thread_id,
+            worktree_path,
+            &source_path,
+            expected.revision,
+        );
+        cx.update(|cx| {
+            outline.update(cx, |outline, cx| {
+                outline.apply_projection_update_for_tests(
+                    active_entity_id,
+                    final_projection.clone(),
+                    cx,
+                );
+                outline.set_lifecycle(binding.generation, lifecycle.clone(), cx);
+            });
+        });
+        let final_event_ids = cx.read(|cx| {
+            outline
+                .read(cx)
+                .snapshot_for_tests()
+                .visible_items
+                .iter()
+                .take(base_event_ids.len())
+                .map(|item| item.id.clone())
+                .collect::<Vec<_>>()
+        });
+        let final_artifact_ids = cx.update(|cx| {
+            outline.update(cx, |outline, cx| {
+                outline.select_view(OutlineView::Artifacts, cx);
+                outline
+                    .snapshot_for_tests()
+                    .visible_items
+                    .into_iter()
+                    .map(|item| item.id)
+                    .collect::<Vec<_>>()
+            })
+        });
+        anyhow::ensure!(
+            final_event_ids == base_event_ids && final_artifact_ids == base_artifact_ids,
+            "outline update changed stable event/artifact identities: base_events={base_event_ids:?} final_events={final_event_ids:?} base_artifacts={base_artifact_ids:?} final_artifacts={final_artifact_ids:?}"
+        );
+        record_workbench_semantic_check(scene_name, "outline-stable-ids-across-revisions");
+    }
+
+    if scene_name == "omega_workbench_outline_stale_replay" {
+        let final_projection = native_outline_projection(
+            scene_name,
+            &binding.thread_id,
+            worktree_path,
+            &source_path,
+            expected.revision,
+        );
+        let stale_projection = ThreadProjectionSnapshot {
+            binding: final_projection.binding.clone(),
+            thread_id: final_projection.thread_id.clone(),
+            work_dirs: final_projection.work_dirs.clone(),
+            revision: expected.revision.saturating_sub(1),
+            entries: final_projection.entries.clone(),
+            artifacts: final_projection.artifacts.clone(),
+        };
+        // Same revision with different content is a conflicting replay: the
+        // outline must reject it without moving the revision forward.
+        let conflicting_projection = ThreadProjectionSnapshot {
+            binding: final_projection.binding.clone(),
+            thread_id: final_projection.thread_id.clone(),
+            work_dirs: final_projection.work_dirs.clone(),
+            revision: expected.revision,
+            entries: Vec::new(),
+            artifacts: Vec::new(),
+        };
+        cx.update(|cx| {
+            outline.update(cx, |outline, cx| {
+                outline.apply_projection_update_for_tests(active_entity_id, stale_projection, cx);
+                outline.apply_projection_update_for_tests(
+                    active_entity_id,
+                    final_projection.clone(),
+                    cx,
+                );
+                outline.apply_projection_update_for_tests(
+                    active_entity_id,
+                    conflicting_projection,
+                    cx,
+                );
+            });
+        });
+        record_workbench_semantic_check(scene_name, "outline-stale-and-replay-updates-rejected");
+    }
+    if scene_name == "omega_workbench_outline_narrow_foreign_binding" {
+        let foreign_entity_id = outline.entity_id();
+        cx.update(|cx| {
+            outline.update(cx, |outline, cx| {
+                outline.apply_projection_update_for_tests(
+                    foreign_entity_id,
+                    ThreadProjectionSnapshot {
+                        binding: acp_thread::ThreadProjectionBinding {
+                            thread_id: Arc::from("foreign-outline-thread"),
+                            work_dirs: Arc::from([worktree_path.join("foreign")]),
+                        },
+                        thread_id: Arc::from("foreign-outline-thread"),
+                        work_dirs: Arc::from([worktree_path.join("foreign")]),
+                        revision: expected.revision.saturating_add(1),
+                        entries: vec![ThreadEventProjection {
+                            binding: acp_thread::ThreadProjectionBinding {
+                                thread_id: Arc::from("foreign-outline-thread"),
+                                work_dirs: Arc::from([worktree_path.join("foreign")]),
+                            },
+                            id: ThreadEntryId(9_999),
+                            parent_id: None,
+                            revision: expected.revision.saturating_add(1),
+                            entry_index: Some(9_999),
+                            kind: ThreadEventKind::ToolCall,
+                            owner: ThreadEventOwner::Tool,
+                            source: ThreadEventSource::ToolCall(Arc::from("foreign-tool")),
+                            status: ThreadEventStatus::Failed,
+                            related_kinds: Vec::new(),
+                            artifacts: Vec::new(),
+                            action_targets: vec![ThreadActionTarget::Entry(ThreadEntryId(9_999))],
+                        }],
+                        artifacts: Vec::new(),
+                    },
+                    cx,
+                );
+            });
+        });
+        record_workbench_semantic_check(scene_name, "outline-foreign-entity-update-rejected");
+    }
+
+    cx.update_window(workspace_window.into(), |_, window, cx| {
+        outline.update(cx, |outline, cx| {
+            outline.focus_handle_for_tests().focus(window, cx);
+        });
+    })?;
+    if uses_production_front_door {
+        dispatch_workbench_action(workspace_window, Box::new(SelectEvents), cx)?;
+        dispatch_workbench_action(workspace_window, Box::new(SelectNextOutlineItem), cx)?;
+        dispatch_workbench_action(workspace_window, Box::new(ActivateOutlineItem), cx)?;
+        cx.run_until_parked();
+        anyhow::ensure!(
+            cx.read(|cx| {
+                panel
+                    .read(cx)
+                    .thread_outline_navigation_target_for_tests()
+                    .map(|(_, entry_index)| entry_index)
+            }) == Some(0),
+            "production AgentPanel outline handler did not navigate the real transcript"
+        );
+        let after_navigation_surface_state = cx
+            .read(|cx| {
+                panel
+                    .read(cx)
+                    .workbench_projection_for_tests()
+                    .visible_projection()
+                    .map(|visible| {
+                        (
+                            visible.requested_surface,
+                            visible.effective_surface,
+                            visible.dock_open,
+                        )
+                    })
+            })
+            .context("outline scene lost its surface state after transcript navigation")?;
+        anyhow::ensure!(
+            after_navigation_surface_state == interaction_surface_state,
+            "outline transcript navigation changed requested/effective surface or dock state: before {interaction_surface_state:?}, after {after_navigation_surface_state:?}"
+        );
+        record_workbench_semantic_check(
+            scene_name,
+            "outline-production-transcript-navigation-proved",
+        );
+        record_workbench_semantic_check(
+            scene_name,
+            "outline-transcript-navigation-preserves-work-surface-state",
+        );
+        cx.update_window(workspace_window.into(), |_, window, cx| {
+            outline.update(cx, |outline, cx| {
+                outline.focus_handle_for_tests().focus(window, cx);
+            });
+        })?;
+    }
+    match expected.view {
+        omega_workbench_harness::OutlineViewFixture::Events => {
+            dispatch_workbench_action(workspace_window, Box::new(SelectEvents), cx)?;
+        }
+        omega_workbench_harness::OutlineViewFixture::Artifacts => {
+            dispatch_workbench_action(workspace_window, Box::new(SelectArtifacts), cx)?;
+        }
+    }
+    match expected.filter {
+        omega_workbench_harness::OutlineFilterFixture::All => {}
+        omega_workbench_harness::OutlineFilterFixture::Active => {
+            dispatch_workbench_action(workspace_window, Box::new(CycleOutlineFilter), cx)?;
+        }
+        omega_workbench_harness::OutlineFilterFixture::Problems => {
+            dispatch_workbench_action(workspace_window, Box::new(CycleOutlineFilter), cx)?;
+            dispatch_workbench_action(workspace_window, Box::new(CycleOutlineFilter), cx)?;
+        }
+    }
+    if scene_name == "omega_workbench_outline_selected_action" {
+        dispatch_workbench_action(workspace_window, Box::new(SelectNextOutlineItem), cx)?;
+        dispatch_workbench_action(workspace_window, Box::new(SelectNextOutlineItem), cx)?;
+        dispatch_workbench_action(workspace_window, Box::new(ActivateOutlineItem), cx)?;
+    }
+
+    if scene_name == "omega_workbench_outline_virtualized" {
+        for _ in 0..25 {
+            dispatch_workbench_action(workspace_window, Box::new(SelectNextOutlineItem), cx)?;
+        }
+    }
+    cx.run_until_parked();
+    if uses_production_front_door {
+        let after_artifact_surface_state = cx
+            .read(|cx| {
+                panel
+                    .read(cx)
+                    .workbench_projection_for_tests()
+                    .visible_projection()
+                    .map(|visible| {
+                        (
+                            visible.requested_surface,
+                            visible.effective_surface,
+                            visible.dock_open,
+                        )
+                    })
+            })
+            .context("outline scene lost its surface state after artifact activation")?;
+        anyhow::ensure!(
+            after_artifact_surface_state == interaction_surface_state,
+            "outline artifact activation changed requested/effective surface or dock state: before {interaction_surface_state:?}, after {after_artifact_surface_state:?}"
+        );
+        record_workbench_semantic_check(
+            scene_name,
+            "outline-artifact-activation-preserves-work-surface-state",
+        );
+
+        let (opened_abs_path, opened_editor) = workspace_window
+            .update(cx, |workspace, _window, cx| {
+                let active_item = workspace.active_item(cx)?;
+                let project_path = active_item.project_path(cx)?;
+                let absolute_path = workspace
+                    .project()
+                    .read(cx)
+                    .absolute_path(&project_path, cx)?;
+                let editor = active_item.downcast::<editor::Editor>()?;
+                Some((absolute_path, editor))
+            })
+            .context("reading workspace state after outline artifact activation")?
+            .context("outline artifact activation did not open a project editor")?;
+        let opened_selection = cx.update_window(workspace_window.into(), |_, _window, cx| {
+            opened_editor.update(cx, |editor, cx| {
+                let snapshot = editor.display_snapshot(cx);
+                let selection = editor.selections.newest::<language::Point>(&snapshot);
+                (selection.start, selection.end)
+            })
+        })?;
+        anyhow::ensure!(
+            opened_abs_path == source_path
+                && opened_selection == (language::Point::new(0, 0), language::Point::new(0, 0)),
+            "outline artifact activation opened the wrong native editor location: expected {} at 0:0, got {} at {:?}",
+            source_path.display(),
+            opened_abs_path.display(),
+            opened_selection,
+        );
+        record_workbench_semantic_check(
+            scene_name,
+            "outline-production-artifact-editor-path-line-proved",
+        );
+
+        let outline_after_action = cx.read(|cx| outline.read(cx).snapshot_for_tests());
+        dispatch_workbench_action(
+            workspace_window,
+            Box::new(workspace::pane::CloseActiveItem::default()),
+            cx,
+        )?;
+        let returned_panel_id = workspace_window
+            .update(cx, |workspace, window, cx| {
+                let returned_panel = workspace.focus_panel::<agent_ui::AgentPanel>(window, cx);
+                returned_panel.map(|panel| panel.entity_id())
+            })
+            .context("returning to the AgentPanel after outline artifact navigation")?
+            .context("workspace could not focus the retained AgentPanel")?;
+        anyhow::ensure!(
+            returned_panel_id == panel.entity_id(),
+            "artifact capture return focused a different AgentPanel entity"
+        );
+        cx.run_until_parked();
+        let after_capture_restore_surface_state = cx
+            .read(|cx| {
+                panel
+                    .read(cx)
+                    .workbench_projection_for_tests()
+                    .visible_projection()
+                    .map(|visible| {
+                        (
+                            visible.requested_surface,
+                            visible.effective_surface,
+                            visible.dock_open,
+                        )
+                    })
+            })
+            .context("outline scene lost its surface state after returning to the AgentPanel")?;
+        let outline_after_capture_restore = cx.read(|cx| outline.read(cx).snapshot_for_tests());
+        anyhow::ensure!(
+            after_capture_restore_surface_state == interaction_surface_state
+                && outline.entity_id() == retained_outline_id
+                && outline_after_capture_restore.selected == outline_after_action.selected
+                && outline_after_capture_restore.last_action_succeeded
+                    == outline_after_action.last_action_succeeded
+                && outline_after_capture_restore.last_action_message
+                    == outline_after_action.last_action_message,
+            "returning to the AgentPanel changed retained outline or work-surface state"
+        );
+        record_workbench_semantic_check(
+            scene_name,
+            "outline-capture-return-retains-surface-selection-and-action-status",
+        );
+        // Ensure the AgentThread layout that mounts the outline is still the
+        // visible surface after closing the artifact editor.
+        if after_capture_restore_surface_state
+            != (Some(WorkSurface::Files), Some(WorkSurface::Files), true)
+        {
+            dispatch_workbench_action(workspace_window, Box::new(SelectFiles), cx)?;
+        }
+        cx.update(|cx| {
+            panel.update(cx, |panel, cx| {
+                panel.synchronize_thread_outline_for_tests(cx);
+            });
+        });
+        cx.update_window(workspace_window.into(), |_, window, cx| {
+            outline.update(cx, |outline, cx| {
+                outline.focus_handle_for_tests().focus(window, cx);
+            });
+        })?;
+        cx.run_until_parked();
+    }
+
+    let actual = cx.read(|cx| outline.read(cx).snapshot_for_tests());
+    anyhow::ensure!(
+        outline.entity_id() == retained_outline_id
+            && actual.bound_entity_id == Some(active_entity_id)
+            && actual.binding.as_ref() == Some(&binding),
+        "outline did not retain its exact surface/thread/worktree binding"
+    );
+    anyhow::ensure!(
+        actual
+            .binding
+            .as_ref()
+            .and_then(|binding| binding.repository.as_ref())
+            == Some(&repository),
+        "outline binding diverged from the visible workbench repository"
+    );
+    if scene_name == "omega_workbench_outline_virtualized" {
+        anyhow::ensure!(
+            actual.virtual_start > 0
+                && actual.virtual_len > 0
+                && actual.virtual_len < actual.event_count
+                && actual.selected.as_ref().is_some_and(|selected| actual
+                    .visible_items
+                    .iter()
+                    .any(|item| &item.id == selected)),
+            "outline virtual window was not derived from the real rendered list and selection"
+        );
+        record_workbench_semantic_check(scene_name, "outline-rendered-virtual-window-proved");
+    }
+    validate_native_outline_snapshot(scene_name, expected, &actual, &source_path)?;
+    let normalized = expected.clone();
+    let checks = omega_workbench_harness::prove_outline_surface(&scene, &normalized)
+        .with_context(|| format!("proving native outline scene {scene_name:?}"))?;
+    record_workbench_semantic_checks(scene_name, checks);
+    record_workbench_semantic_check(scene_name, "outline-native-typed-snapshot-proved");
+    Ok(())
+}
+
+#[cfg(all(target_os = "macos", feature = "visual-tests"))]
+fn native_outline_lifecycle(
+    lifecycle: &omega_workbench_harness::OutlineLifecycleFixture,
+) -> agent_ui::thread_outline::ThreadOutlineLifecycle {
+    use agent_ui::thread_outline::ThreadOutlineLifecycle;
+    use omega_workbench_harness::OutlineLifecycleFixture;
+    match lifecycle {
+        OutlineLifecycleFixture::Loading => ThreadOutlineLifecycle::Loading,
+        OutlineLifecycleFixture::Ready => ThreadOutlineLifecycle::Ready,
+        OutlineLifecycleFixture::Streaming => ThreadOutlineLifecycle::Streaming,
+        OutlineLifecycleFixture::Partial(message) => {
+            ThreadOutlineLifecycle::PartiallyAvailable(message.clone().into())
+        }
+        OutlineLifecycleFixture::Stale => ThreadOutlineLifecycle::Stale,
+        OutlineLifecycleFixture::Reconnecting => ThreadOutlineLifecycle::Reconnecting,
+        OutlineLifecycleFixture::Error(message) => {
+            ThreadOutlineLifecycle::Error(message.clone().into())
+        }
+    }
+}
+
+#[cfg(all(target_os = "macos", feature = "visual-tests"))]
+fn seed_frontdoor_outline_thread(
+    thread: &Entity<acp_thread::AcpThread>,
+    source_path: &Path,
+    cx: &mut VisualTestAppContext,
+) -> Result<()> {
+    let source_path = source_path.to_string_lossy().into_owned();
+    cx.update(|cx| {
+        thread.update(cx, |thread, cx| {
+            thread.handle_session_update(
+                acp::SessionUpdate::ToolCall(
+                    acp::ToolCall::new("tool-file", "Read workbench file")
+                        .kind(acp::ToolKind::Read)
+                        .status(acp::ToolCallStatus::Completed)
+                        .locations(vec![
+                            acp::ToolCallLocation::new(source_path.clone()).line(42),
+                        ]),
+                ),
+                cx,
+            )?;
+            thread.handle_session_update(
+                acp::SessionUpdate::ToolCall(
+                    acp::ToolCall::new("tool-diff", "Update workbench diff")
+                        .kind(acp::ToolKind::Edit)
+                        .status(acp::ToolCallStatus::InProgress)
+                        .content(vec![acp::ToolCallContent::Diff(acp::Diff::new(
+                            source_path.clone(),
+                            "fn workbench_outline_front_door() {}",
+                        ))]),
+                ),
+                cx,
+            )?;
+            thread.push_assistant_content_block("Agent response".into(), false, cx);
+            thread.handle_session_update(
+                acp::SessionUpdate::ToolCall(
+                    acp::ToolCall::new("tool-failed", "Failed test command")
+                        .kind(acp::ToolKind::Execute)
+                        .status(acp::ToolCallStatus::Failed)
+                        .raw_output(serde_json::json!({"error": "deterministic failure"})),
+                ),
+                cx,
+            )?;
+            anyhow::Ok(())
+        })
+    })?;
+    cx.run_until_parked();
+    Ok(())
+}
+
+#[cfg(all(target_os = "macos", feature = "visual-tests"))]
+fn native_outline_base_entries(
+    thread_id: &str,
+    worktree_path: &Path,
+    source_path: &Path,
+    revision: u64,
+) -> Vec<acp_thread::ThreadEventProjection> {
+    use acp_thread::{
+        ThreadActionTarget, ThreadArtifactProjection, ThreadEntryId, ThreadEventKind,
+        ThreadEventOwner, ThreadEventProjection, ThreadEventSource, ThreadEventStatus,
+    };
+    let binding = acp_thread::ThreadProjectionBinding {
+        thread_id: Arc::from(thread_id),
+        work_dirs: Arc::from([worktree_path.to_path_buf()]),
+    };
+    let artifacts = native_outline_base_artifacts(thread_id, worktree_path, source_path, revision);
+    vec![
+        ThreadEventProjection {
+            binding: binding.clone(),
+            id: ThreadEntryId(101),
+            parent_id: None,
+            revision,
+            entry_index: Some(0),
+            kind: ThreadEventKind::ToolCall,
+            owner: ThreadEventOwner::Tool,
+            source: ThreadEventSource::ToolCall(Arc::from("tool-file")),
+            status: ThreadEventStatus::Completed,
+            related_kinds: Vec::new(),
+            artifacts: artifacts
+                .iter()
+                .filter(|artifact| artifact.source_events.contains(&ThreadEntryId(101)))
+                .cloned()
+                .collect::<Vec<ThreadArtifactProjection>>(),
+            action_targets: vec![
+                ThreadActionTarget::Entry(ThreadEntryId(101)),
+                ThreadActionTarget::File {
+                    path: source_path.to_path_buf(),
+                    line: Some(42),
+                },
+            ],
+        },
+        ThreadEventProjection {
+            binding: binding.clone(),
+            id: ThreadEntryId(102),
+            parent_id: None,
+            revision,
+            entry_index: Some(1),
+            kind: ThreadEventKind::ToolCall,
+            owner: ThreadEventOwner::Tool,
+            source: ThreadEventSource::ToolCall(Arc::from("tool-diff")),
+            status: ThreadEventStatus::InProgress,
+            related_kinds: Vec::new(),
+            artifacts: artifacts
+                .iter()
+                .filter(|artifact| artifact.source_events.contains(&ThreadEntryId(102)))
+                .cloned()
+                .collect::<Vec<ThreadArtifactProjection>>(),
+            action_targets: vec![ThreadActionTarget::Entry(ThreadEntryId(102))],
+        },
+        ThreadEventProjection {
+            binding: binding.clone(),
+            id: ThreadEntryId(103),
+            parent_id: None,
+            revision,
+            entry_index: Some(2),
+            kind: ThreadEventKind::AssistantMessage,
+            owner: ThreadEventOwner::Agent,
+            source: ThreadEventSource::Session,
+            status: ThreadEventStatus::Completed,
+            related_kinds: Vec::new(),
+            artifacts: Vec::new(),
+            action_targets: vec![ThreadActionTarget::Entry(ThreadEntryId(103))],
+        },
+        ThreadEventProjection {
+            binding,
+            id: ThreadEntryId(104),
+            parent_id: None,
+            revision,
+            entry_index: Some(3),
+            kind: ThreadEventKind::ToolCall,
+            owner: ThreadEventOwner::Tool,
+            source: ThreadEventSource::ToolCall(Arc::from("tool-failed")),
+            status: ThreadEventStatus::Failed,
+            related_kinds: Vec::new(),
+            artifacts: Vec::new(),
+            action_targets: vec![ThreadActionTarget::Entry(ThreadEntryId(104))],
+        },
+    ]
+}
+
+#[cfg(all(target_os = "macos", feature = "visual-tests"))]
+fn native_outline_base_artifacts(
+    thread_id: &str,
+    worktree_path: &Path,
+    source_path: &Path,
+    revision: u64,
+) -> Vec<acp_thread::ThreadArtifactProjection> {
+    use acp_thread::{
+        ThreadActionTarget, ThreadArtifact, ThreadArtifactId, ThreadArtifactProjection,
+        ThreadEntryId, ThreadEventOwner, ThreadEventStatus,
+    };
+    let binding = acp_thread::ThreadProjectionBinding {
+        thread_id: Arc::from(thread_id),
+        work_dirs: Arc::from([worktree_path.to_path_buf()]),
+    };
+    vec![
+        ThreadArtifactProjection {
+            binding: binding.clone(),
+            id: ThreadArtifactId(1_001),
+            revision,
+            source_events: vec![ThreadEntryId(101)],
+            owner: ThreadEventOwner::Tool,
+            status: ThreadEventStatus::Completed,
+            artifact: ThreadArtifact::File {
+                path: source_path.to_path_buf(),
+                line: Some(42),
+            },
+            action_target: Some(ThreadActionTarget::File {
+                path: source_path.to_path_buf(),
+                line: Some(42),
+            }),
+            is_current: true,
+            history: Vec::new(),
+        },
+        ThreadArtifactProjection {
+            binding,
+            id: ThreadArtifactId(1_002),
+            revision,
+            source_events: vec![ThreadEntryId(102)],
+            owner: ThreadEventOwner::Tool,
+            status: ThreadEventStatus::InProgress,
+            artifact: ThreadArtifact::Diff {
+                path: Some(source_path.to_path_buf()),
+                entity_id: 1_002,
+            },
+            action_target: Some(ThreadActionTarget::File {
+                path: source_path.to_path_buf(),
+                line: None,
+            }),
+            is_current: true,
+            history: Vec::new(),
+        },
+    ]
+}
+
+#[cfg(all(target_os = "macos", feature = "visual-tests"))]
+fn native_outline_projection(
+    scene_name: &str,
+    thread_id: &str,
+    worktree_path: &Path,
+    source_path: &Path,
+    revision: u64,
+) -> acp_thread::ThreadProjectionSnapshot {
+    use acp_thread::{
+        ThreadActionTarget, ThreadArtifactRevision, ThreadEntryId, ThreadEventKind,
+        ThreadEventOwner, ThreadEventProjection, ThreadEventSource, ThreadEventStatus,
+        ThreadProjectionSnapshot,
+    };
+    let binding = acp_thread::ThreadProjectionBinding {
+        thread_id: Arc::from(thread_id),
+        work_dirs: Arc::from([worktree_path.to_path_buf()]),
+    };
+    let mut artifacts =
+        native_outline_base_artifacts(thread_id, worktree_path, source_path, revision);
+    let mut entries = native_outline_base_entries(thread_id, worktree_path, source_path, revision);
+    if scene_name == "omega_workbench_outline_deduplicated_history" {
+        for (id_value, entry_index) in [(105, 4), (106, 5)] {
+            let id = ThreadEntryId(id_value);
+            entries.push(ThreadEventProjection {
+                binding: binding.clone(),
+                id,
+                parent_id: None,
+                revision,
+                entry_index: Some(entry_index),
+                kind: ThreadEventKind::ToolCall,
+                owner: ThreadEventOwner::Tool,
+                source: ThreadEventSource::ToolCall(Arc::from(format!(
+                    "tool-repeat-{entry_index}"
+                ))),
+                status: ThreadEventStatus::Completed,
+                related_kinds: Vec::new(),
+                artifacts: Vec::new(),
+                action_targets: vec![ThreadActionTarget::Entry(id)],
+            });
+        }
+        if let Some(file_artifact) = artifacts.first_mut() {
+            file_artifact.source_events =
+                vec![ThreadEntryId(101), ThreadEntryId(105), ThreadEntryId(106)];
+            file_artifact.history = vec![
+                ThreadArtifactRevision {
+                    revision: revision.saturating_sub(2),
+                    source_events: vec![ThreadEntryId(101)],
+                    owner: ThreadEventOwner::Tool,
+                    status: ThreadEventStatus::Completed,
+                    artifact: file_artifact.artifact.clone(),
+                    action_target: file_artifact.action_target.clone(),
+                    is_current: false,
+                },
+                ThreadArtifactRevision {
+                    revision: revision.saturating_sub(1),
+                    source_events: vec![ThreadEntryId(101), ThreadEntryId(105)],
+                    owner: ThreadEventOwner::Tool,
+                    status: ThreadEventStatus::Completed,
+                    artifact: file_artifact.artifact.clone(),
+                    action_target: file_artifact.action_target.clone(),
+                    is_current: false,
+                },
+            ];
+        }
+    }
+    if scene_name == "omega_workbench_outline_virtualized" {
+        for (id_value, entry_index) in (200_u64..240).zip(4_usize..44) {
+            let id = ThreadEntryId(id_value);
+            entries.push(ThreadEventProjection {
+                binding: binding.clone(),
+                id,
+                parent_id: None,
+                revision,
+                entry_index: Some(entry_index),
+                kind: ThreadEventKind::ToolCall,
+                owner: ThreadEventOwner::Tool,
+                source: ThreadEventSource::ToolCall(Arc::from(format!(
+                    "command-{}",
+                    entry_index - 4
+                ))),
+                status: ThreadEventStatus::Completed,
+                related_kinds: Vec::new(),
+                artifacts: Vec::new(),
+                action_targets: vec![ThreadActionTarget::Entry(id)],
+            });
+        }
+    }
+    for entry in &mut entries {
+        entry.artifacts = artifacts
+            .iter()
+            .filter(|artifact| artifact.source_events.contains(&entry.id))
+            .cloned()
+            .collect();
+    }
+    ThreadProjectionSnapshot {
+        binding,
+        thread_id: Arc::from(thread_id),
+        work_dirs: Arc::from([worktree_path.to_path_buf()]),
+        revision,
+        entries,
+        artifacts,
+    }
+}
+
+#[cfg(all(target_os = "macos", feature = "visual-tests"))]
+fn validate_native_outline_snapshot(
+    scene_name: &str,
+    expected: &omega_workbench_harness::OutlineSnapshotFixture,
+    actual: &agent_ui::thread_outline::ThreadOutlineTestSnapshot,
+    source_path: &Path,
+) -> Result<()> {
+    use agent_ui::thread_outline::{OutlineFilter, OutlineItemId, OutlineView};
+    use omega_workbench_harness::{
+        OutlineFilterFixture, OutlineItemKindFixture, OutlineItemStatusFixture,
+        OutlineLifecycleFixture, OutlineViewFixture,
+    };
+    anyhow::ensure!(
+        actual.revision == expected.revision,
+        "outline revision mismatch: expected {}, got {}",
+        expected.revision,
+        actual.revision,
+    );
+    let lifecycle_matches = match (&expected.lifecycle, &actual.lifecycle) {
+        (
+            OutlineLifecycleFixture::Loading,
+            agent_ui::thread_outline::ThreadOutlineLifecycle::Loading,
+        )
+        | (
+            OutlineLifecycleFixture::Ready,
+            agent_ui::thread_outline::ThreadOutlineLifecycle::Ready,
+        )
+        | (
+            OutlineLifecycleFixture::Streaming,
+            agent_ui::thread_outline::ThreadOutlineLifecycle::Streaming,
+        )
+        | (
+            OutlineLifecycleFixture::Stale,
+            agent_ui::thread_outline::ThreadOutlineLifecycle::Stale,
+        )
+        | (
+            OutlineLifecycleFixture::Reconnecting,
+            agent_ui::thread_outline::ThreadOutlineLifecycle::Reconnecting,
+        ) => true,
+        (
+            OutlineLifecycleFixture::Partial(expected_message),
+            agent_ui::thread_outline::ThreadOutlineLifecycle::PartiallyAvailable(actual_message),
+        )
+        | (
+            OutlineLifecycleFixture::Error(expected_message),
+            agent_ui::thread_outline::ThreadOutlineLifecycle::Error(actual_message),
+        ) => actual_message.as_ref() == expected_message,
+        _ => false,
+    };
+    anyhow::ensure!(lifecycle_matches, "outline lifecycle mismatch");
+    anyhow::ensure!(
+        matches!(
+            (expected.view, actual.view),
+            (OutlineViewFixture::Events, OutlineView::Events)
+                | (OutlineViewFixture::Artifacts, OutlineView::Artifacts)
+        ),
+        "outline view mismatch"
+    );
+    anyhow::ensure!(
+        matches!(
+            (expected.filter, actual.filter),
+            (OutlineFilterFixture::All, OutlineFilter::All)
+                | (OutlineFilterFixture::Active, OutlineFilter::Active)
+                | (OutlineFilterFixture::Problems, OutlineFilter::Problems)
+        ),
+        "outline filter mismatch"
+    );
+    let expected_event_count = expected
+        .items
+        .iter()
+        .filter(|item| {
+            matches!(
+                item.kind,
+                OutlineItemKindFixture::Message
+                    | OutlineItemKindFixture::ToolCall
+                    | OutlineItemKindFixture::ToolResult
+                    | OutlineItemKindFixture::Completion
+                    | OutlineItemKindFixture::Error
+                    | OutlineItemKindFixture::Repository
+                    | OutlineItemKindFixture::Connectivity
+            )
+        })
+        .count()
+        + expected
+            .items
+            .iter()
+            .filter(|item| {
+                matches!(
+                    item.kind,
+                    OutlineItemKindFixture::File | OutlineItemKindFixture::Diff
+                )
+            })
+            .map(|item| {
+                usize::try_from(item.occurrence_count.saturating_sub(1)).unwrap_or_default()
+            })
+            .sum::<usize>();
+    let expected_artifact_count = expected
+        .items
+        .iter()
+        .filter(|item| {
+            matches!(
+                item.kind,
+                OutlineItemKindFixture::File
+                    | OutlineItemKindFixture::Diff
+                    | OutlineItemKindFixture::Command
+                    | OutlineItemKindFixture::Plan
+                    | OutlineItemKindFixture::Url
+            )
+        })
+        .count();
+    anyhow::ensure!(
+        actual.event_count == expected_event_count
+            && actual.artifact_count == expected_artifact_count,
+        "outline event/artifact counts do not match typed fixture"
+    );
+    let expected_visible = expected
+        .items
+        .iter()
+        .filter(|item| {
+            let view_matches = match expected.view {
+                OutlineViewFixture::Events => matches!(
+                    item.kind,
+                    OutlineItemKindFixture::Message
+                        | OutlineItemKindFixture::ToolCall
+                        | OutlineItemKindFixture::ToolResult
+                        | OutlineItemKindFixture::Completion
+                        | OutlineItemKindFixture::Error
+                        | OutlineItemKindFixture::Repository
+                        | OutlineItemKindFixture::Connectivity
+                ),
+                OutlineViewFixture::Artifacts => matches!(
+                    item.kind,
+                    OutlineItemKindFixture::File
+                        | OutlineItemKindFixture::Diff
+                        | OutlineItemKindFixture::Command
+                        | OutlineItemKindFixture::Plan
+                        | OutlineItemKindFixture::Url
+                ),
+            };
+            let filter_matches = match expected.filter {
+                OutlineFilterFixture::All => true,
+                OutlineFilterFixture::Active => matches!(
+                    item.status,
+                    OutlineItemStatusFixture::Pending | OutlineItemStatusFixture::Running
+                ),
+                OutlineFilterFixture::Problems => item.status == OutlineItemStatusFixture::Failed,
+            };
+            view_matches && filter_matches
+        })
+        .collect::<Vec<_>>();
+    anyhow::ensure!(
+        actual.visible_items.len() == expected_visible.len(),
+        "outline visible item count mismatch: expected {}, got {}",
+        expected_visible.len(),
+        actual.visible_items.len()
+    );
+    for (item, expected_item) in actual.visible_items.iter().zip(&expected_visible) {
+        anyhow::ensure!(
+            native_outline_status_matches(expected_item.status, item.status),
+            "native outline item status differs from typed fixture"
+        );
+        match &item.id {
+            OutlineItemId::Event(_) => {
+                anyhow::ensure!(
+                    matches!(
+                        expected_item.kind,
+                        OutlineItemKindFixture::Message
+                            | OutlineItemKindFixture::ToolCall
+                            | OutlineItemKindFixture::ToolResult
+                            | OutlineItemKindFixture::Completion
+                            | OutlineItemKindFixture::Error
+                    ) && matches!(
+                        expected_item.action_target,
+                        omega_workbench_harness::OutlineActionTargetFixture::Transcript { entry_index }
+                            if Some(entry_index) == item.entry_index
+                    ),
+                    "native outline event has no typed source/action identity"
+                );
+            }
+            OutlineItemId::Artifact(_) => {
+                let path_matches = item.action.as_ref().is_some_and(|action| {
+                    matches!(action, acp_thread::ThreadActionTarget::File { path, .. } if path == source_path)
+                });
+                let kind_matches = match expected_item.kind {
+                    OutlineItemKindFixture::File => item
+                        .label
+                        .as_ref()
+                        .starts_with(&source_path.display().to_string()),
+                    OutlineItemKindFixture::Diff => item
+                        .label
+                        .as_ref()
+                        .starts_with(&format!("Diff: {}", source_path.display())),
+                    _ => false,
+                };
+                anyhow::ensure!(
+                    path_matches
+                        && kind_matches
+                        && item.artifact_source_events.len()
+                            == usize::try_from(expected_item.occurrence_count).unwrap_or_default()
+                        && item.artifact_history_len.saturating_add(1)
+                            == usize::try_from(expected_item.occurrence_count).unwrap_or_default(),
+                    "native outline artifact kind, history, or action differs from typed fixture"
+                );
+            }
+        }
+    }
+    if expected.selected_item_id.is_some() || scene_name == "omega_workbench_outline_virtualized" {
+        anyhow::ensure!(
+            actual.selected.is_some() && actual.anchor == actual.selected,
+            "outline selection/anchor mismatch"
+        );
+        if scene_name == "omega_workbench_outline_selected_action" {
+            anyhow::ensure!(
+                actual.visible_items.iter().any(|item| {
+                    actual.selected.as_ref() == Some(&item.id)
+                        && item.label.as_ref().starts_with("Diff: ")
+                }),
+                "production outline action did not retain the selected diff identity"
+            );
+        }
+    } else {
+        anyhow::ensure!(
+            actual.selected.is_none() && actual.anchor.is_none(),
+            "outline unexpectedly retained a selection"
+        );
+    }
+    anyhow::ensure!(
+        actual.stale_update_count == u64::from(expected.ignored_stale_revision_count)
+            && actual.replay_update_count == u64::from(expected.ignored_replay_count)
+            && actual.conflicting_update_count
+                == u64::from(expected.rejected_conflicting_revision_count)
+            && actual.foreign_update_count == u64::from(expected.rejected_foreign_binding_count)
+            && actual.rejected_update_count
+                == u64::from(
+                    expected
+                        .ignored_stale_revision_count
+                        .saturating_add(expected.ignored_replay_count)
+                        .saturating_add(expected.rejected_conflicting_revision_count)
+                        .saturating_add(expected.rejected_foreign_binding_count),
+                ),
+        "outline stale/replay/foreign rejection counts mismatch: expected {}/{}/{}/{} got {}/{}/{}/{} ({} total)",
+        expected.ignored_stale_revision_count,
+        expected.ignored_replay_count,
+        expected.rejected_conflicting_revision_count,
+        expected.rejected_foreign_binding_count,
+        actual.stale_update_count,
+        actual.replay_update_count,
+        actual.conflicting_update_count,
+        actual.foreign_update_count,
+        actual.rejected_update_count,
+    );
+    if scene_name == "omega_workbench_outline_selected_action" {
+        anyhow::ensure!(
+            actual.last_action_succeeded == Some(true),
+            "outline action did not execute through its typed target"
+        );
+    }
+    Ok(())
+}
+
+#[cfg(all(target_os = "macos", feature = "visual-tests"))]
+fn native_outline_status_matches(
+    expected: omega_workbench_harness::OutlineItemStatusFixture,
+    actual: acp_thread::ThreadEventStatus,
+) -> bool {
+    use acp_thread::ThreadEventStatus;
+    use omega_workbench_harness::OutlineItemStatusFixture;
+    matches!(
+        (expected, actual),
+        (
+            OutlineItemStatusFixture::Pending,
+            ThreadEventStatus::Pending
+        ) | (
+            OutlineItemStatusFixture::Running,
+            ThreadEventStatus::InProgress | ThreadEventStatus::WaitingForConfirmation
+        ) | (
+            OutlineItemStatusFixture::Completed,
+            ThreadEventStatus::Completed
+        ) | (
+            OutlineItemStatusFixture::Failed,
+            ThreadEventStatus::Failed
+                | ThreadEventStatus::Rejected
+                | ThreadEventStatus::Canceled
+                | ThreadEventStatus::Unknown
+        )
+    )
 }
 
 #[cfg(all(target_os = "macos", feature = "visual-tests"))]
@@ -10950,6 +12353,8 @@ fn run_multi_workspace_sidebar_visual_tests(
                             draft_prompt: None,
                             sandboxed_terminal_temp_dir: None,
                             sandbox_grants: Default::default(),
+                            thread_log: Default::default(),
+                            fork_origin: None,
                         },
                         path_list,
                         cx,

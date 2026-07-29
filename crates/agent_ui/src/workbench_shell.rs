@@ -1988,40 +1988,11 @@ pub enum SurfaceLoadOutcome {
 }
 
 impl Focusable for WorkSurfaceHost {
-    fn focus_handle(&self, cx: &App) -> FocusHandle {
-        if matches!(self.content_state, SurfaceContentState::Ready) {
-            self.files_panel
-                .as_ref()
-                .map(|panel| panel.focus_handle(cx))
-                .or_else(|| {
-                    self.search_surface
-                        .as_ref()
-                        .map(|surface| surface.focus_handle(cx))
-                })
-                .or_else(|| {
-                    self.review_surface
-                        .as_ref()
-                        .map(|surface| surface.focus_handle(cx))
-                })
-                .or_else(|| {
-                    self.git_surface
-                        .as_ref()
-                        .map(|surface| surface.focus_handle(cx))
-                })
-                .or_else(|| {
-                    self.terminal_surface
-                        .as_ref()
-                        .map(|surface| surface.focus_handle(cx))
-                })
-                .or_else(|| {
-                    self.plan_surface
-                        .as_ref()
-                        .map(|surface| surface.focus_handle(cx))
-                })
-                .unwrap_or_else(|| self.focus_handle.clone())
-        } else {
-            self.focus_handle.clone()
-        }
+    fn focus_handle(&self, _cx: &App) -> FocusHandle {
+        // The host shell owns `omega.workbench.surface.*`. Native content is
+        // focused via `focus_native_content` when keyboard entry into Files/
+        // Search/Git/Terminal/Plan is required.
+        self.focus_handle.clone()
     }
 }
 

@@ -504,6 +504,23 @@ impl EntryViewState {
         self.entries.get(index)
     }
 
+    pub fn sync_missing_entries(
+        &mut self,
+        thread: &Entity<AcpThread>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Range<usize> {
+        let start = self.entries.len();
+        let end = thread.read(cx).entries().len();
+        if start >= end {
+            return end..end;
+        }
+        for index in start..end {
+            self.sync_entry(index, thread, window, cx);
+        }
+        start..end
+    }
+
     pub fn sync_entry(
         &mut self,
         index: usize,
@@ -1565,6 +1582,58 @@ mod tests {
             view_state.collapse_tool_call(&other);
             assert!(view_state.is_tool_call_expanded(&opened));
             assert!(!view_state.is_tool_call_expanded(&other));
+        });
+    }
+
+    #[gpui::test(iterations = 8)]
+    async fn test_burst_sync_materializes_every_missing_entry(cx: &mut TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree("/project", json!({})).await;
+        let project = Project::test(fs, [Path::new(path!("/project"))], cx).await;
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+        let workspace = multi_workspace.read_with(cx, |workspace, _| workspace.workspace().clone());
+        let connection = Rc::new(StubAgentConnection::new());
+        let thread = cx
+            .update(|_, cx| {
+                connection.clone().new_session(
+                    project.clone(),
+                    PathList::new(&[Path::new(path!("/project"))]),
+                    cx,
+                )
+            })
+            .await
+            .expect("test session should start");
+        let session_id = thread.read_with(cx, |thread, _| thread.session_id().clone());
+
+        cx.update(|_, cx| {
+            for index in 0..4 {
+                connection.send_update(
+                    session_id.clone(),
+                    acp::SessionUpdate::ToolCall(acp::ToolCall::new(
+                        format!("tool-{index}"),
+                        format!("Tool {index}"),
+                    )),
+                    cx,
+                );
+            }
+        });
+        assert_eq!(thread.read_with(cx, |thread, _| thread.entries().len()), 4);
+
+        let view_state = cx.new(|_| {
+            EntryViewState::new(
+                workspace.downgrade(),
+                project.downgrade(),
+                None,
+                Arc::new(RwLock::new(SessionCapabilities::default())),
+                "Test Agent".into(),
+            )
+        });
+        view_state.update_in(cx, |view_state, window, cx| {
+            assert_eq!(view_state.sync_missing_entries(&thread, window, cx), 0..4);
+            assert!((0..4).all(|index| view_state.entry(index).is_some()));
+            assert_eq!(view_state.sync_missing_entries(&thread, window, cx), 4..4);
         });
     }
 

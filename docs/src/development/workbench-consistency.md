@@ -56,6 +56,12 @@ derive a work surface:
 - connection and projection revision;
 - persisted selection, revision, and cold-restore status.
 
+The outline portion is not a pair of load counters. Each thread owns a typed
+`ThreadOutlineProjection`: ordered stable event IDs, authoritative global
+artifact IDs, lifecycle, selected view and filter, selected and anchored item,
+virtual window, collapse preference, and accepted projection revision. Ordinary
+surface loads do not advance that revision.
+
 `visible_projection()` is the only projection a renderer or command router
 should consume. A hidden thread retains its own requested surface, but cannot
 own global focus or receive a visible-surface command. Going offline clears
@@ -90,6 +96,9 @@ reviewable source-to-model map:
 | `PersistSelection`, `ColdStart`, `Restore`                          | `PersistSelection`, `ColdStart`, `RestoreSelection`                  | the corresponding persistence action                                     |
 | `InvalidateCapability`                                              | `InvalidateCapability`                                               | `invalidate_capability`                                                  |
 | `RouteCommand`                                                      | `DispatchSurfaceCommand`                                             | `dispatch_surface_command`                                               |
+| receive outline projection                                          | `ReceiveOutlineProjection`                                           | `receive_outline_projection`                                             |
+| select outline view/filter/item/anchor                              | the corresponding `SetOutline*` transition                           | the corresponding outline action                                         |
+| change outline virtual window or collapse preference                | `SetOutlineVirtualWindow`, `SetOutlineCollapsed`                      | the corresponding outline action                                         |
 
 Search and Review are represented by Files in the TLA+ state space because all
 three have the same binding rules for the checked properties. The production
@@ -116,6 +125,14 @@ Effects are:
 - `older_revision_ignored`;
 - `deterministic_fallback`; or
 - `rejected` with a closed reason code.
+
+Outline publications are accepted only for the exact active binding
+generation. A lower revision is ignored. Replaying the identical payload at
+the accepted revision is idempotent; different content at that same revision
+is a rejected `conflicting_outline_revision`, and rejection leaves the entire
+projection unchanged. Disconnect and reconnect change the outline lifecycle
+to stale and reconnecting without discarding its last good IDs, selection,
+anchor, or virtual range.
 
 Recording rejected attempts matters. Without the effect, a checker could not
 distinguish an intentionally ignored stale completion from an implementation

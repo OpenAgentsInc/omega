@@ -1635,6 +1635,17 @@ impl AgentWorkbenchFrontDoor {
             .read_with(cx, |workspace, _cx| workspace.center_visible_for_tests())
     }
 
+    pub fn return_to_agent_panel_for_capture(&self, cx: &TestAppContext) {
+        let mut visual = VisualTestContext::from_window(self.window, cx);
+        visual.dispatch_action(workspace::pane::CloseActiveItem::default());
+        visual.run_until_parked();
+        self.workspace
+            .update_in(&mut visual, |workspace, window, cx| {
+                workspace.focus_panel::<AgentPanel>(window, cx);
+            });
+        visual.run_until_parked();
+    }
+
     pub fn git_graph_file_history_paths(&self, cx: &TestAppContext) -> Vec<String> {
         self.workspace.read_with(cx, |workspace, cx| {
             workspace
@@ -3768,6 +3779,46 @@ mod workbench_front_door_tests {
                 .map(|selected| selected.branch),
             Some(crate::thread_identity::BranchIdentity::NoGit)
         ));
+        assert_eq!(
+            front_door
+                .projection(cx)
+                .visible_projection()
+                .and_then(|visible| {
+                    front_door
+                        .projection(cx)
+                        .threads
+                        .get(&visible.thread_id)
+                        .map(|thread| thread.available_surfaces.clone())
+                }),
+            Some(std::collections::BTreeSet::from([
+                omega_workbench_state::WorkSurface::Files,
+                omega_workbench_state::WorkSurface::Search,
+                omega_workbench_state::WorkSurface::Terminal,
+                omega_workbench_state::WorkSurface::Plan,
+            ]))
+        );
+        for surface in omega_workbench_state::WorkSurface::FALLBACK_ORDER {
+            let capability = front_door
+                .capability(surface, cx)
+                .expect("every rail surface has a typed capability");
+            assert_eq!(
+                capability.availability.is_available(),
+                matches!(
+                    surface,
+                    omega_workbench_state::WorkSurface::Files
+                        | omega_workbench_state::WorkSurface::Search
+                        | omega_workbench_state::WorkSurface::Terminal
+                        | omega_workbench_state::WorkSurface::Plan
+                )
+            );
+            assert_eq!(capability.badge, None);
+        }
+        assert_eq!(
+            front_door
+                .panel()
+                .read_with(cx, |panel, _| panel.workbench_focus_target_for_tests()),
+            crate::workbench_shell::WorkbenchFocusTarget::Transcript
+        );
 
         front_door
             .select_identity_picker_row(1, cx)
@@ -3779,10 +3830,73 @@ mod workbench_front_door_tests {
                 .map(|selected| selected.branch),
             Some(crate::thread_identity::BranchIdentity::Unborn)
         ));
+        assert_eq!(
+            front_door
+                .projection(cx)
+                .visible_projection()
+                .and_then(|visible| {
+                    front_door
+                        .projection(cx)
+                        .threads
+                        .get(&visible.thread_id)
+                        .map(|thread| thread.available_surfaces.clone())
+                }),
+            Some(omega_workbench_state::WorkSurface::FALLBACK_ORDER.into())
+        );
 
         front_door
             .teardown(cx)
             .expect("no-Git and unborn scene should tear down");
+    }
+
+    #[gpui::test(iterations = 8)]
+    async fn editor_navigation_can_return_to_same_agent_panel_without_mutating_workbench(
+        cx: &mut TestAppContext,
+    ) {
+        let mut scene = scene_with_thread("editor_agent_panel_capture_return", 1200, true);
+        scene.active_surface = Some(WorkSurfaceId::Files);
+        scene.dock_open = true;
+        let front_door = AgentWorkbenchFrontDoor::mount(scene, cx)
+            .await
+            .expect("capture-return fixture should mount");
+        front_door
+            .focus_and_select_files_path("worktree-1", "src/main.rs", cx)
+            .expect("fixture file should be selectable");
+        let panel_id = front_door.panel().entity_id();
+        let outline_id = front_door
+            .panel()
+            .read_with(cx, |panel, _| panel.thread_outline_for_tests().entity_id());
+        let projection_before = front_door.projection(cx);
+
+        front_door.dispatch_action(project_panel::OpenPermanent, cx);
+        assert_eq!(
+            front_door
+                .active_workspace_item_path(cx)
+                .map(|path| path.path),
+            Some(util::rel_path::rel_path("src/main.rs").into())
+        );
+        assert_eq!(
+            front_door.active_workspace_selection(cx),
+            Some((language::Point::new(0, 0), language::Point::new(0, 0)))
+        );
+        assert!(front_door.active_workspace_item_is_focused(cx));
+
+        front_door.return_to_agent_panel_for_capture(cx);
+        assert_eq!(front_door.panel().entity_id(), panel_id);
+        assert_eq!(
+            front_door.panel().read_with(cx, |panel, _| {
+                panel.thread_outline_for_tests().entity_id()
+            }),
+            outline_id
+        );
+        assert_eq!(front_door.projection(cx), projection_before);
+        SemanticProbe::new(&front_door.snapshot(cx))
+            .require_visible("omega.thread-outline")
+            .expect("returning to the same AgentPanel should render its retained outline");
+
+        front_door
+            .teardown(cx)
+            .expect("capture-return workbench should tear down");
     }
 
     #[gpui::test]

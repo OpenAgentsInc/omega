@@ -7364,7 +7364,10 @@ impl ThreadView {
         entry_index: usize,
         cx: &mut Context<Self>,
     ) -> bool {
-        if entry_index >= self.thread.read(cx).entries().len() {
+        let thread_entry_count = self.thread.read(cx).entries().len();
+        let view_state_is_materialized =
+            self.entry_view_state.read(cx).entry(entry_index).is_some();
+        if !entry_navigation_is_ready(entry_index, thread_entry_count, view_state_is_materialized) {
             return false;
         }
         self.list_state.scroll_to(ListOffset {
@@ -12742,6 +12745,14 @@ impl ThreadView {
     }
 }
 
+fn entry_navigation_is_ready(
+    entry_index: usize,
+    thread_entry_count: usize,
+    view_state_is_materialized: bool,
+) -> bool {
+    entry_index < thread_entry_count && view_state_is_materialized
+}
+
 impl ThreadView {
     /// OMEGA-DELTA-0021. Who executed this thread.
     ///
@@ -14507,6 +14518,19 @@ mod tests {
         assert_ne!(
             ThreadView::exo_reference("cd7c0d29db869e953fb7261d8390ca93007d36a6"),
             ThreadView::exo_reference("c61846e3f44daaf445930d1a499432ca9b069306")
+        );
+    }
+
+    #[test]
+    fn entry_navigation_waits_for_materialized_view_state() {
+        assert!(entry_navigation_is_ready(3, 4, true));
+        assert!(
+            !entry_navigation_is_ready(3, 4, false),
+            "a streamed projection may lead transcript view-state materialization"
+        );
+        assert!(
+            !entry_navigation_is_ready(4, 4, true),
+            "a materialized view state cannot authorize an out-of-range thread entry"
         );
     }
 
