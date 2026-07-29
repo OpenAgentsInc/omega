@@ -100,7 +100,8 @@ struct VoiceSessionResponse {
     ticket: String,
     ticket_expires_at_ms: u64,
     session_expires_at_ms: u64,
-    reserved_credit_msat: u64,
+    #[serde(rename = "reservedCreditMsat")]
+    _reserved_credit_msat: u64,
     max_duration_seconds: u64,
     input_audio: VoiceAudioFormat,
     output_audio: VoiceAudioFormat,
@@ -275,7 +276,6 @@ fn parse_voice_session_response(
         || response.session_expires_at_ms - now_ms > 900_000
         || response.max_duration_seconds < 60
         || response.max_duration_seconds > 900
-        || response.reserved_credit_msat == 0
         || !valid_base64url(&response.ticket)
         || response.gateway_url.len() > MAX_GATEWAY_URL_BYTES
         || gateway_url.scheme() != "wss"
