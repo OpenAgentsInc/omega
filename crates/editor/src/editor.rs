@@ -10131,7 +10131,7 @@ impl Editor {
         window.defer(cx, move |window, cx| {
             workspace
                 .update(cx, |workspace, cx| {
-                    workspace.reveal_zero_base_center(window, cx);
+                    workspace.reveal_zero_base_center_for_user_open(window, cx);
                     let pane = if split {
                         workspace.adjacent_pane(window, cx)
                     } else {

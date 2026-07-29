@@ -78,6 +78,18 @@ verifies all three registrations before it returns; a partial load fails the
 front door instead of leaving an enabled rail control permanently waiting for a
 panel that cannot arrive.
 
+User-triggered Workspace center opens share a separate presentation boundary.
+Every default-surface handler calls
+`Workspace::reveal_zero_base_center_for_user_open` before it opens or activates
+a center item. This includes Files, Git, Search, Review excerpts, transcript
+file and skill links, tool-call and outline locations, rule controls, debug JSON,
+the ACP registry, and file-like URL fallthrough. The low-level Workspace open
+APIs do not reveal implicitly: background restoration and preview machinery
+retain their existing presentation semantics, HTTP and HTTPS links stay in the
+system browser, and `AgentDiff::review_in_active_editor` may advance within the
+editor that is already visible. Intentional read-only file and Markdown peeks
+remain sheets. Closing the final revealed tab restores the agent-only surface.
+
 ### Native Files adapter {#native-files-adapter}
 
 The shared initializer creates the native `ProjectPanel` and initially
@@ -161,7 +173,8 @@ path-row semantics make the same production rendering observable to
 deterministic GPUI tests.
 
 Native actions that produce Workspace center items explicitly call
-`Workspace::reveal_zero_base_center` after revalidating the current scope.
+`Workspace::reveal_zero_base_center_for_user_open` after revalidating the
+current scope.
 Open, permanent open, split, File History, Markdown preview, compare, and search
 results therefore become visible beside the Agent Panel instead of succeeding
 into a hidden zero-base pane. Preview open preserves Project Panel focus;

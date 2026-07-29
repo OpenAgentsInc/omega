@@ -2099,6 +2099,7 @@ impl GitPanel {
             if self.repository_scope.is_some() {
                 self.workspace
                     .update(cx, |workspace, cx| {
+                        workspace.reveal_zero_base_center_for_user_open(window, cx);
                         match target {
                             DiffTarget::Uncommitted => ProjectDiff::deploy_at_repository(
                                 workspace,
@@ -2122,7 +2123,6 @@ impl GitPanel {
                                 cx,
                             ),
                         }
-                        workspace.reveal_zero_base_center(window, cx);
                     })
                     .log_err()?;
                 self.focus_handle.focus(window, cx);
@@ -2145,6 +2145,7 @@ impl GitPanel {
 
             self.workspace
                 .update(cx, |workspace, cx| {
+                    workspace.reveal_zero_base_center_for_user_open(window, cx);
                     match target {
                         DiffTarget::Uncommitted => {
                             ProjectDiff::deploy_at(workspace, Some(entry.clone()), window, cx);
@@ -2156,7 +2157,6 @@ impl GitPanel {
                             UnstagedDiff::deploy_at(workspace, Some(entry.clone()), window, cx);
                         }
                     }
-                    workspace.reveal_zero_base_center(window, cx);
                 })
                 .log_err();
             self.focus_handle.focus(window, cx);
@@ -2181,7 +2181,7 @@ impl GitPanel {
 
             self.workspace
                 .update(cx, |workspace, cx| {
-                    workspace.reveal_zero_base_center(window, cx);
+                    workspace.reveal_zero_base_center_for_user_open(window, cx);
                 })
                 .log_err()?;
             SoloDiffView::open_or_focus(entry, repository, self.workspace.clone(), window, cx)
@@ -2202,7 +2202,7 @@ impl GitPanel {
 
             self.workspace
                 .update(cx, |workspace, cx| {
-                    workspace.reveal_zero_base_center(window, cx);
+                    workspace.reveal_zero_base_center_for_user_open(window, cx);
                     workspace
                         .open_path_preview(project_path, None, false, false, true, window, cx)
                         .detach_and_log_err(cx);
@@ -6832,6 +6832,8 @@ impl GitPanel {
                                 .on_click(move |_, window, cx| {
                                     graph_workspace
                                         .update(cx, |workspace, cx| {
+                                            workspace
+                                                .reveal_zero_base_center_for_user_open(window, cx);
                                             crate::git_graph::open_or_reuse_graph(
                                                 workspace,
                                                 graph_repository_id,
@@ -6841,7 +6843,6 @@ impl GitPanel {
                                                 window,
                                                 cx,
                                             );
-                                            workspace.reveal_zero_base_center(window, cx);
                                         })
                                         .log_err();
                                 }),

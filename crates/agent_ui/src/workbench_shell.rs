@@ -869,7 +869,7 @@ impl NativeReviewSurface {
     ) {
         if let Some(workspace) = self.workspace.upgrade() {
             workspace.update(cx, |workspace, cx| {
-                workspace.reveal_zero_base_center(window, cx);
+                workspace.reveal_zero_base_center_for_user_open(window, cx);
             });
         }
         cx.propagate();
@@ -883,7 +883,7 @@ impl NativeReviewSurface {
     ) {
         if let Some(workspace) = self.workspace.upgrade() {
             workspace.update(cx, |workspace, cx| {
-                workspace.reveal_zero_base_center(window, cx);
+                workspace.reveal_zero_base_center_for_user_open(window, cx);
             });
         }
         cx.propagate();
@@ -1140,7 +1140,7 @@ impl NativeSearchSurface {
     ) {
         if let Some(workspace) = self.workspace.upgrade() {
             workspace.update(cx, |workspace, cx| {
-                workspace.reveal_zero_base_center(window, cx);
+                workspace.reveal_zero_base_center_for_user_open(window, cx);
             });
         }
         cx.propagate();
@@ -1154,7 +1154,7 @@ impl NativeSearchSurface {
     ) {
         if let Some(workspace) = self.workspace.upgrade() {
             workspace.update(cx, |workspace, cx| {
-                workspace.reveal_zero_base_center(window, cx);
+                workspace.reveal_zero_base_center_for_user_open(window, cx);
             });
         }
         cx.propagate();

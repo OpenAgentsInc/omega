@@ -816,6 +816,7 @@ pub fn open_markdown_in_workspace(
         workspace.update_in(cx, |workspace, window, cx| {
             let buffer = cx.new(|cx| MultiBuffer::singleton(buffer, cx).with_title(title.clone()));
 
+            workspace.reveal_zero_base_center_for_user_open(window, cx);
             workspace.add_item_to_active_pane(
                 Box::new(cx.new(|cx| {
                     let mut editor =
@@ -1451,7 +1452,7 @@ impl ThreadView {
         let open_task = self
             .workspace
             .update(cx, |workspace, cx| {
-                workspace.reveal_zero_base_center(window, cx);
+                workspace.reveal_zero_base_center_for_user_open(window, cx);
                 if split {
                     workspace.split_path(project_path, window, cx)
                 } else {
@@ -6283,6 +6284,7 @@ impl Render for TokenUsageTooltip {
                                                     .on_click(move |_, window, cx| {
                                                         workspace
                                                             .update(cx, |workspace, cx| {
+                                                                workspace.reveal_zero_base_center_for_user_open(window, cx);
                                                                 workspace
                                                                     .open_abs_path(
                                                                         paths::agents_file()
@@ -6322,8 +6324,8 @@ impl Render for TokenUsageTooltip {
                                                         .size(IconSize::XSmall),
                                                 )
                                                 .on_click(move |_, window, cx| {
-                                                    let _ =
-                                                        workspace.update(cx, |workspace, cx| {
+                                                    workspace
+                                                        .update(cx, |workspace, cx| {
                                                             let project =
                                                                 workspace.project().read(cx);
                                                             let paths = project_entry_ids
@@ -6332,6 +6334,7 @@ impl Render for TokenUsageTooltip {
                                                                     project.path_for_entry(*id, cx)
                                                                 })
                                                                 .collect::<Vec<_>>();
+                                                            workspace.reveal_zero_base_center_for_user_open(window, cx);
                                                             for path in paths {
                                                                 workspace
                                                                     .open_path(
@@ -6340,7 +6343,8 @@ impl Render for TokenUsageTooltip {
                                                                     )
                                                                     .detach_and_log_err(cx);
                                                             }
-                                                        });
+                                                        })
+                                                        .log_err();
                                                 }),
                                             )
                                         }),
@@ -10670,6 +10674,7 @@ impl ThreadView {
         let open_task = self
             .workspace
             .update(cx, |workspace, cx| {
+                workspace.reveal_zero_base_center_for_user_open(window, cx);
                 if let Some(project_path) = project_path {
                     workspace.open_path(project_path, None, true, window, cx)
                 } else {
@@ -12309,6 +12314,7 @@ impl ThreadView {
                                 let abs_path = abs_path.clone();
                                 workspace
                                     .update(cx, |workspace, cx| {
+                                        workspace.reveal_zero_base_center_for_user_open(window, cx);
                                         workspace
                                             .open_abs_path(
                                                 abs_path,
@@ -12386,6 +12392,7 @@ impl ThreadView {
                         let abs_path = abs_path.clone();
                         workspace
                             .update(cx, |workspace, cx| {
+                                workspace.reveal_zero_base_center_for_user_open(window, cx);
                                 workspace
                                     .open_abs_path(
                                         abs_path,
@@ -14542,17 +14549,7 @@ pub(crate) fn open_link(
             MentionUri::Skill {
                 skill_file_path, ..
             } => {
-                workspace
-                    .open_abs_path(
-                        skill_file_path,
-                        workspace::OpenOptions {
-                            focus: Some(true),
-                            ..Default::default()
-                        },
-                        window,
-                        cx,
-                    )
-                    .detach_and_log_err(cx);
+                crate::ui::open_skill_file(workspace, skill_file_path, window, cx);
             }
         })
     } else {

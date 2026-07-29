@@ -265,9 +265,9 @@ pub fn seal() {
 ///
 /// `OMEGA-DELTA-0053`. While this is true the workspace starts with no editor
 /// pane, tab bar, title bar, or status bar. They are not merely covered by a
-/// zoomed panel. `OMEGA-DELTA-0139` permits one explicit exception: a transcript
-/// file-link click can reveal an editable centre pane beside the agent surface
-/// until its final tab closes.
+/// zoomed panel. `OMEGA-DELTA-0139` introduced the explicit editable-center
+/// exception, and `OMEGA-DELTA-0174` applies it to user-triggered center opens:
+/// the center remains beside the agent surface until its final tab closes.
 #[must_use]
 pub fn is_sealed() -> bool {
     is_active() && SEALED.load(Ordering::SeqCst)

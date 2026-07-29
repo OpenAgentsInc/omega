@@ -162,6 +162,7 @@ pub const ENFORCED_DELTAS: &[&str] = &[
     "OMEGA-DELTA-0171",
     "OMEGA-DELTA-0172",
     "OMEGA-DELTA-0173",
+    "OMEGA-DELTA-0174",
 ];
 
 /// The concise product contract adjacent to the delta registry.
@@ -18884,7 +18885,6 @@ mod tests {
         let opener = without_comments(&read_repository_file(FILE_PEEK_PATH));
         for required in [
             "TranscriptFileOpenMode::EditablePane =>",
-            "workspace.reveal_zero_base_center(window, cx);",
             "crate::open_abs_path_at_point(workspace, abs_path, point, window, cx);",
             "TranscriptFileOpenMode::ReadOnlyPeek =>",
             "open_request(workspace, request, window, cx);",
@@ -18896,6 +18896,18 @@ mod tests {
                 "OMEGA-DELTA-0139: transcript file opening lost `{required}`."
             );
         }
+
+        let agent_ui = read_repository_file("crates/agent_ui/src/agent_ui.rs");
+        let editable_open = function_body(&agent_ui, "open_abs_path_at_point")
+            .expect("OMEGA-DELTA-0139: the shared editable path opener is gone");
+        assert_eq!(
+            editable_open
+                .matches("workspace.reveal_zero_base_center_for_user_open(window, cx);")
+                .count(),
+            2,
+            "OMEGA-DELTA-0139: project and filesystem transcript paths must both reveal \
+             after resolution and before opening"
+        );
 
         let workspace =
             without_comments(&read_repository_file("crates/workspace/src/workspace.rs"));
@@ -21154,6 +21166,240 @@ mod tests {
                 repository_path(retained).exists(),
                 "OMEGA-DELTA-0173: Vim retention lost `{retained}`. Removing \
                  Vim is a product-policy change, not a cleanup."
+            );
+        }
+    }
+
+    /// OMEGA-DELTA-0174. Default-surface actions reveal the Workspace center
+    /// before opening into it, while peeks, external URLs, and AgentDiff's
+    /// already-active editor transition keep their distinct behavior.
+    #[test]
+    fn default_surface_center_opens_reveal_before_opening() {
+        const REVEAL: &str = "reveal_zero_base_center_for_user_open(window, cx)";
+
+        fn assert_reveal_before(body: &str, open: &str, owner: &str) {
+            let reveal = body.find(REVEAL).unwrap_or_else(|| {
+                panic!("OMEGA-DELTA-0174: {owner} no longer calls the user-open reveal boundary")
+            });
+            let open = body.find(open).unwrap_or_else(|| {
+                panic!("OMEGA-DELTA-0174: {owner} no longer contains its audited center open")
+            });
+            assert!(
+                reveal < open,
+                "OMEGA-DELTA-0174: {owner} opens the center before revealing it"
+            );
+        }
+
+        let workspace = read_repository_file("crates/workspace/src/workspace.rs");
+        let helper = function_body(&workspace, "reveal_zero_base_center_for_user_open")
+            .expect("OMEGA-DELTA-0174: the Workspace user-open reveal helper is gone");
+        assert!(
+            helper.contains("self.reveal_zero_base_center(window, cx);"),
+            "OMEGA-DELTA-0174: the user-open boundary no longer reveals the sealed center"
+        );
+        let url_open = function_body(&workspace, "open_url_or_file")
+            .expect("OMEGA-DELTA-0174: Workspace::open_url_or_file is gone");
+        assert_eq!(
+            url_open.matches(REVEAL).count(),
+            2,
+            "OMEGA-DELTA-0174: file URI/absolute/base-path and project-path branches must use \
+             the two shared file-open points"
+        );
+        for external in [
+            r#""http" | "https" => cx.open_url(url_or_path)"#,
+            "_ => cx.open_url(url_or_path)",
+        ] {
+            assert!(
+                url_open.contains(external),
+                "OMEGA-DELTA-0174: external URL routing lost `{external}` and may now reveal \
+                 the Workspace center"
+            );
+        }
+        assert!(
+            url_open.contains(r#""file" => open_abs_path"#),
+            "OMEGA-DELTA-0174: file URLs bypass the revealed file-open branch"
+        );
+
+        let agent_ui = read_repository_file("crates/agent_ui/src/agent_ui.rs");
+        let abs_path_open = function_body(&agent_ui, "open_abs_path_at_point")
+            .expect("OMEGA-DELTA-0174: open_abs_path_at_point is gone");
+        let (project_path_open, filesystem_path_open) = abs_path_open
+            .split_once("} else {")
+            .expect("OMEGA-DELTA-0174: open_abs_path_at_point lost a path branch");
+        assert_reveal_before(
+            project_path_open,
+            "workspace.open_path(",
+            "project path open",
+        );
+        assert_reveal_before(
+            filesystem_path_open,
+            "workspace.open_abs_path(",
+            "filesystem path open",
+        );
+        let registry = agent_ui
+            .split_once("_: &zed_actions::AcpRegistry")
+            .and_then(|(_, source)| source.split_once("cx.observe_new(ManageProfilesModal"))
+            .map(|(source, _)| source)
+            .expect("OMEGA-DELTA-0174: cannot isolate the ACP registry action");
+        assert_eq!(
+            registry.matches(REVEAL).count(),
+            2,
+            "OMEGA-DELTA-0174: existing and newly-created ACP registry pages must both reveal"
+        );
+        let (existing_registry, new_registry) = registry
+            .split_once("} else {")
+            .expect("OMEGA-DELTA-0174: ACP registry action lost its existing/new branches");
+        for (body, open, owner) in [
+            (
+                existing_registry,
+                "workspace.activate_item",
+                "existing ACP registry page",
+            ),
+            (
+                new_registry,
+                "workspace.add_item_to_active_pane",
+                "new ACP registry page",
+            ),
+        ] {
+            assert_reveal_before(body, open, owner);
+        }
+
+        let agent_panel = read_repository_file("crates/agent_ui/src/agent_panel.rs");
+        for (function, open) in [
+            ("open_global_rules", ".open_abs_path("),
+            ("open_project_rules", ".open_abs_path("),
+            ("open_json_buffer", "workspace.add_item_to_active_pane("),
+            ("try_activate_outline_target", "workspace.open_path("),
+        ] {
+            let body = function_body(&agent_panel, function)
+                .unwrap_or_else(|| panic!("OMEGA-DELTA-0174: {function} is gone"));
+            assert_reveal_before(body, open, function);
+        }
+
+        let mention = read_repository_file("crates/agent_ui/src/ui/mention_crease.rs");
+        for (function, open) in [
+            ("open_skill_file", ".open_abs_path("),
+            ("open_skill_content_buffer", "workspace.add_item("),
+        ] {
+            let body = function_body(&mention, function)
+                .unwrap_or_else(|| panic!("OMEGA-DELTA-0174: {function} is gone"));
+            assert_reveal_before(body, open, function);
+        }
+
+        let thread = read_repository_file(ZERO_BASE_THREAD_VIEW_PATH);
+        for (function, open) in [
+            (
+                "open_markdown_in_workspace",
+                "workspace.add_item_to_active_pane(",
+            ),
+            ("open_diff_location", "if split"),
+            ("open_tool_call_location", "if let Some(project_path)"),
+            ("render_skill_loading_issues", ".open_abs_path("),
+            ("render_skill_description_warnings", ".open_abs_path("),
+        ] {
+            let body = function_body(&thread, function)
+                .unwrap_or_else(|| panic!("OMEGA-DELTA-0174: {function} is gone"));
+            assert_reveal_before(body, open, function);
+        }
+        for marker in [
+            "open-global-agents-md",
+            "open-project-rules",
+            "crate::ui::open_skill_file(workspace, skill_file_path, window, cx);",
+            "workspace.open_url_or_file(&url, None, window, cx);",
+        ] {
+            assert!(
+                thread.contains(marker),
+                "OMEGA-DELTA-0174: the audited thread-view route `{marker}` is gone"
+            );
+        }
+        let global_rules = thread
+            .split_once("open-global-agents-md")
+            .and_then(|(_, source)| source.split_once("open-project-rules"))
+            .map(|(source, _)| source)
+            .expect("OMEGA-DELTA-0174: cannot isolate the global Rules button");
+        assert_reveal_before(global_rules, ".open_abs_path(", "global Rules button");
+        let project_rules = thread
+            .split_once("open-project-rules")
+            .and_then(|(_, source)| source.split_once("fn open_tool_call_location"))
+            .map(|(source, _)| source)
+            .expect("OMEGA-DELTA-0174: cannot isolate the project Rules button");
+        assert_reveal_before(project_rules, ".open_path(", "project Rules button");
+        assert!(
+            thread.matches(REVEAL).count() >= 7,
+            "OMEGA-DELTA-0174: thread-view rules, tools, skills, diffs, and Markdown \
+             fallthrough no longer share the reveal boundary"
+        );
+
+        let peek = read_repository_file(FILE_PEEK_PATH);
+        let editable = function_body(&peek, "open_editable_request")
+            .expect("OMEGA-DELTA-0174: editable transcript file path is gone");
+        assert!(
+            editable
+                .contains("crate::open_abs_path_at_point(workspace, abs_path, point, window, cx);"),
+            "OMEGA-DELTA-0174: editable transcript files no longer delegate to the shared \
+             revealed path opener"
+        );
+        assert!(
+            peek.contains("TranscriptFileOpenMode::ReadOnlyPeek =>")
+                && peek.contains("open_request(workspace, request, window, cx);"),
+            "OMEGA-DELTA-0174: the intentional read-only transcript peek was removed"
+        );
+
+        let agent_diff = read_repository_file("crates/agent_ui/src/agent_diff.rs");
+        let active_editor = function_body(&agent_diff, "review_in_active_editor")
+            .expect("OMEGA-DELTA-0174: AgentDiff active-editor transition is gone");
+        assert!(
+            active_editor.contains("workspace.open_path(path, None, true, window, cx)")
+                && !active_editor.contains(REVEAL),
+            "OMEGA-DELTA-0174: AgentDiff's allowlisted already-visible editor transition \
+             was removed or gained a new-surface reveal"
+        );
+
+        fn rust_sources(directory: &std::path::Path, found: &mut Vec<std::path::PathBuf>) {
+            let Ok(entries) = std::fs::read_dir(directory) else {
+                return;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    if path.file_name().is_some_and(|name| name == "omega_deltas") {
+                        continue;
+                    }
+                    rust_sources(&path, found);
+                } else if path.extension().is_some_and(|extension| extension == "rs") {
+                    found.push(path);
+                }
+            }
+        }
+
+        let mut sources = Vec::new();
+        rust_sources(&repository_path("crates"), &mut sources);
+        let raw_reveals = sources
+            .into_iter()
+            .filter_map(|path| {
+                let source = std::fs::read_to_string(&path).ok()?;
+                source
+                    .contains(".reveal_zero_base_center(window, cx)")
+                    .then_some(path)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            raw_reveals,
+            vec![repository_path("crates/workspace/src/workspace.rs")],
+            "OMEGA-DELTA-0174: a default-surface handler bypasses the semantic user-open boundary"
+        );
+
+        let documentation =
+            read_repository_file("docs/src/development/omega-desktop-workbench-shell.md");
+        for required in [
+            "Workspace::reveal_zero_base_center_for_user_open",
+            "Closing the final revealed tab restores the agent-only surface.",
+            "Intentional read-only file and Markdown",
+            "remain sheets. Closing the final revealed tab",
+        ] {
+            assert!(
+                documentation.contains(required),
+                "OMEGA-DELTA-0174: workbench documentation lost `{required}`"
             );
         }
     }

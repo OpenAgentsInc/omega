@@ -267,7 +267,7 @@ pub(crate) fn open_migrated_rule(
     .detach_and_log_err(cx);
 }
 
-fn open_skill_file(
+pub(crate) fn open_skill_file(
     workspace: &mut Workspace,
     skill_file_path: PathBuf,
     window: &mut Window,
@@ -281,6 +281,7 @@ fn open_skill_file(
         return;
     }
 
+    workspace.reveal_zero_base_center_for_user_open(window, cx);
     workspace
         .open_abs_path(
             skill_file_path,
@@ -335,6 +336,7 @@ fn open_skill_content_buffer(
             .update(cx, |buffer, cx| buffer.set_title(title, cx));
         editor
     });
+    workspace.reveal_zero_base_center_for_user_open(window, cx);
     let pane = workspace.active_pane().clone();
     workspace.add_item(pane, Box::new(editor), None, true, true, window, cx);
 }

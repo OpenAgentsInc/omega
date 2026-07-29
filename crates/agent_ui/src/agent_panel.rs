@@ -327,6 +327,7 @@ fn open_global_rules(workspace: &mut Workspace, window: &mut Window, cx: &mut Co
     if crate::omega_file_peek::open_file(workspace, paths::agents_file().clone(), window, cx) {
         return;
     }
+    workspace.reveal_zero_base_center_for_user_open(window, cx);
     workspace
         .open_abs_path(
             paths::agents_file().clone(),
@@ -355,6 +356,7 @@ fn open_project_rules(workspace: &mut Workspace, window: &mut Window, cx: &mut C
         if crate::omega_file_peek::open_file(workspace, path.clone(), window, cx) {
             return;
         }
+        workspace.reveal_zero_base_center_for_user_open(window, cx);
         workspace
             .open_abs_path(
                 path,
@@ -5650,6 +5652,7 @@ impl AgentPanel {
                     let buffer =
                         cx.new(|cx| MultiBuffer::singleton(buffer, cx).with_title(title.clone()));
 
+                    workspace.reveal_zero_base_center_for_user_open(window, cx);
                     workspace.add_item_to_active_pane(
                         Box::new(cx.new(|cx| {
                             let mut editor =
@@ -11189,6 +11192,7 @@ impl AgentPanel {
                     );
                 };
                 let open_task = workspace.update(cx, |workspace, cx| {
+                    workspace.reveal_zero_base_center_for_user_open(window, cx);
                     workspace.open_path(project_path, None, true, window, cx)
                 });
                 let outline = self.thread_outline.downgrade();

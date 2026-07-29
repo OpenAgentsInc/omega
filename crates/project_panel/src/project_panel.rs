@@ -653,7 +653,7 @@ pub fn init(cx: &mut App) {
                         else {
                             return;
                         };
-                        workspace.reveal_zero_base_center(window, cx);
+                        workspace.reveal_zero_base_center_for_user_open(window, cx);
                         let git_store = workspace.project().read(cx).git_store().clone();
                         git_ui::git_graph::open_or_reuse_graph(
                             workspace, repo_id, git_store, log_source, None, window, cx,
@@ -1007,7 +1007,7 @@ impl ProjectPanel {
                                 return;
                             }
 
-                            workspace.reveal_zero_base_center(window, cx);
+                            workspace.reveal_zero_base_center_for_user_open(window, cx);
                             workspace
                                 .open_path_preview(
                                     ProjectPath {
@@ -1071,7 +1071,7 @@ impl ProjectPanel {
                             }) {
                                 return;
                             }
-                            workspace.reveal_zero_base_center(window, cx);
+                            workspace.reveal_zero_base_center_for_user_open(window, cx);
                             workspace
                                 .split_path_preview(
                                     ProjectPath {
@@ -2094,7 +2094,7 @@ impl ProjectPanel {
         };
         self.workspace
             .update(cx, |workspace, cx| {
-                workspace.reveal_zero_base_center(window, cx);
+                workspace.reveal_zero_base_center_for_user_open(window, cx);
                 MarkdownPreviewView::open_for_project_path(project_path, workspace, window, cx);
             })
             .ok();
@@ -2362,7 +2362,7 @@ impl ProjectPanel {
                                 project_panel
                                     .workspace
                                     .update(cx, |workspace, cx| {
-                                        workspace.reveal_zero_base_center(window, cx);
+                                        workspace.reveal_zero_base_center_for_user_open(window, cx);
                                         workspace.open_abs_path(
                                             abs_path,
                                             OpenOptions {
@@ -4130,7 +4130,7 @@ impl ProjectPanel {
         if let Some((file_path1, file_path2)) = selected_files {
             self.workspace
                 .update(cx, |workspace, cx| {
-                    workspace.reveal_zero_base_center(window, cx);
+                    workspace.reveal_zero_base_center_for_user_open(window, cx);
                     FileDiffView::open(
                         file_path1,
                         file_path2,
@@ -4206,7 +4206,7 @@ impl ProjectPanel {
                         // File at root, open search with empty filter
                         self.workspace
                             .update(cx, |workspace, cx| {
-                                workspace.reveal_zero_base_center(window, cx);
+                                workspace.reveal_zero_base_center_for_user_open(window, cx);
                                 search::ProjectSearchView::new_search_in_directory(
                                     workspace,
                                     RelPath::empty(),
@@ -4235,7 +4235,7 @@ impl ProjectPanel {
 
             self.workspace
                 .update(cx, |workspace, cx| {
-                    workspace.reveal_zero_base_center(window, cx);
+                    workspace.reveal_zero_base_center_for_user_open(window, cx);
                     search::ProjectSearchView::new_search_in_directory(
                         workspace, &dir_path, window, cx,
                     );

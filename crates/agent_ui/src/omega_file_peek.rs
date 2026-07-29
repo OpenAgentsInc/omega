@@ -167,7 +167,6 @@ fn open_editable_request(
                 )
             });
             workspace.update_in(cx, |workspace, window, cx| {
-                workspace.reveal_zero_base_center(window, cx);
                 crate::open_abs_path_at_point(workspace, abs_path, point, window, cx);
             })?;
             anyhow::Ok(())

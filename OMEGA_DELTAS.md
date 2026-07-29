@@ -5728,6 +5728,12 @@ sealed. The buffer opened, took the composer's focus with it, and landed
 somewhere with no pixels. This is `OMEGA-DELTA-0119` exactly, three entries it
 did not reach.
 
+`OMEGA-DELTA-0174` later generalized the editable half of this rule: every
+default-surface action that intentionally creates or activates a Workspace
+center item first calls the shared user-open reveal boundary. This delta's
+reader remains intentional for thread Markdown and rules-file peeks; it is not
+a substitute for making explicitly editable opens visible.
+
 - **Omega now:** all three open the reader `OMEGA-DELTA-0119` built —
   `crates/agent_ui/src/omega_file_peek.rs`, a read-only sheet in the workspace's
   modal layer, which `MultiWorkspace` renders outside the seal. Two new entry
@@ -7665,3 +7671,26 @@ current image build does not decode it inline.
 - **Enforced by:** `one_surface_three_conversation_modes_is_the_product_contract`
   in `crates/omega_deltas`, plus the creation and restore behavior tests that
   land with the three-mode front door.
+
+### OMEGA-DELTA-0174 — A user-triggered center open is visible before it succeeds
+
+- **Upstream Zed:** editor opens assume the Workspace center is rendered.
+- **Omega before:** sealed Zero Base could successfully open or activate a
+  center item without revealing the center. The operation stole focus while
+  Files, tool locations, artifact sources, skill and rule links, debug JSON,
+  the ACP registry, and file-like URLs remained invisible.
+- **Omega now:** `Workspace::reveal_zero_base_center_for_user_open` is the one
+  semantic boundary for default-surface center opens. It reveals first and is
+  a no-op outside sealed Zero Base. Low-level `open_path`, `open_abs_path`,
+  `add_item`, and activation APIs remain unchanged so restores and background
+  work do not acquire presentation side effects.
+- **The exceptions stay explicit.** Read-only file and Markdown peeks keep the
+  modal reader. `AgentDiff::review_in_active_editor` advances among files in an
+  already-visible editor and does not reveal a new surface. HTTP, HTTPS, and
+  other external URL schemes still go to the system without revealing the
+  Workspace center.
+- **Lifecycle is unchanged:** closing the final revealed center tab restores
+  the agent-only surface under `OMEGA-DELTA-0139`.
+- **Enforced by:** `default_surface_center_opens_reveal_before_opening` and the
+  amended `transcript_file_links_choose_editing_or_peeking` checks in
+  `crates/omega_deltas`, plus focused Workspace URL-routing tests.

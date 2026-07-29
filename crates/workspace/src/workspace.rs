@@ -4566,6 +4566,17 @@ impl Workspace {
         cx.notify();
     }
 
+    /// Makes the center pane visible before a user-triggered open. Low-level
+    /// open APIs deliberately do not reveal it so previews, background
+    /// restores, and active-editor operations keep their existing behavior.
+    pub fn reveal_zero_base_center_for_user_open(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.reveal_zero_base_center(window, cx);
+    }
+
     #[cfg(any(test, feature = "test-support"))]
     pub fn center_visible_for_tests(&self) -> bool {
         !omega_zero_base::is_sealed() || self.zero_base_center_visible
@@ -4897,6 +4908,7 @@ impl Workspace {
     ) {
         let mut open_abs_path = |this: &mut Self, path, cx: &mut _| {
             let url_or_path = url_or_path.to_owned();
+            this.reveal_zero_base_center_for_user_open(window, cx);
             let task = this.open_abs_path(
                 path,
                 OpenOptions {
@@ -4963,6 +4975,7 @@ impl Workspace {
         });
         if let Some(project_path) = project_path {
             let url_or_path = url_or_path.to_owned();
+            self.reveal_zero_base_center_for_user_open(window, cx);
             let task = self.open_path(project_path, None, true, window, cx);
             (**cx)
                 .spawn(async move |cx| {

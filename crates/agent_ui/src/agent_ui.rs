@@ -224,6 +224,7 @@ pub(crate) fn open_abs_path_at_point(
             let item = if let Some(project_path) = project_path {
                 workspace
                     .update_in(cx, |workspace, window, cx| {
+                        workspace.reveal_zero_base_center_for_user_open(window, cx);
                         workspace.open_path(project_path, None, true, window, cx)
                     })?
                     .await?
@@ -235,6 +236,7 @@ pub(crate) fn open_abs_path_at_point(
                 );
                 workspace
                     .update_in(cx, |workspace, window, cx| {
+                        workspace.reveal_zero_base_center_for_user_open(window, cx);
                         workspace.open_abs_path(
                             abs_path,
                             OpenOptions {
@@ -788,9 +790,11 @@ pub fn init(
                         project::AgentRegistryStore::global(cx)
                             .update(cx, |store, cx| store.refresh(cx));
                     });
+                    workspace.reveal_zero_base_center_for_user_open(window, cx);
                     workspace.activate_item(&existing, true, true, window, cx);
                 } else {
                     let registry_page = AgentRegistryPage::new(workspace, window, cx);
+                    workspace.reveal_zero_base_center_for_user_open(window, cx);
                     workspace.add_item_to_active_pane(
                         Box::new(registry_page),
                         None,
