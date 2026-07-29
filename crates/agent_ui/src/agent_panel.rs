@@ -3988,6 +3988,14 @@ impl AgentPanel {
                                         .color(Color::Muted),
                                 )
                                 .child(Label::new("Settings").size(LabelSize::Small))
+                                .end_slot(
+                                    Label::new(format!(
+                                        "v{}",
+                                        release_channel::AppVersion::global(cx)
+                                    ))
+                                    .size(LabelSize::Small)
+                                    .color(Color::Info),
+                                )
                                 .on_click(|_, window, cx| {
                                     window.dispatch_action(
                                         zed_actions::OpenSettings.boxed_clone(),
