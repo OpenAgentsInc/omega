@@ -134,6 +134,8 @@ Other entities can then register a callback to handle these events by doing `cx.
 ## Build guidelines
 
 - Use `./script/clippy` instead of `cargo clippy`
+- When editing Omega code, do it on a fresh worktree off the remote `main` branch so not to conflict with other changes locally — when done, merge to `main`.
+- Unless the user tells you not to, rebuild the app using the fast release build, then merge that to `main`.
 
 # Pull request hygiene
 
