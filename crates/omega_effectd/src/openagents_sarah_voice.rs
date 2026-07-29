@@ -96,6 +96,7 @@ struct VoiceSessionResponse {
     schema: String,
     session_ref: String,
     model: String,
+    client_profile: String,
     gateway_url: String,
     ticket: String,
     ticket_expires_at_ms: u64,
@@ -277,6 +278,7 @@ fn parse_voice_session_response(
         Url::parse(&response.gateway_url).map_err(|_| HostedSessionBlocker::ResponseInvalid)?;
     if response.schema != SARAH_VOICE_PROTOCOL
         || response.model != SARAH_VOICE_MODEL
+        || response.client_profile != "omega_editor"
         || response.session_ref != session_ref
         || !valid_ref(&response.session_ref)
         || response.ticket_expires_at_ms <= now_ms
@@ -536,6 +538,7 @@ mod tests {
             "schema": SARAH_VOICE_PROTOCOL,
             "sessionRef": "voice-session",
             "model": SARAH_VOICE_MODEL,
+            "clientProfile": "omega_editor",
             "gatewayUrl": "wss://openagents.com/api/omega/sarah/voice/connect",
             "ticket": "t".repeat(32),
             "ticketExpiresAtMs": now + 60_000,
@@ -573,6 +576,22 @@ mod tests {
         let mut invalid: serde_json::Value =
             serde_json::from_slice(&response).expect("decode response");
         invalid["auth"]["expiresIn"] = serde_json::json!(901);
+        let invalid = serde_json::to_vec(&invalid).expect("serialize invalid response");
+        assert!(
+            parse_voice_session_response(
+                &invalid,
+                "owner",
+                "device",
+                "thread",
+                "voice-session",
+                true,
+            )
+            .is_err()
+        );
+
+        let mut invalid: serde_json::Value =
+            serde_json::from_slice(&response).expect("decode response");
+        invalid["clientProfile"] = serde_json::json!("openagents_mobile");
         let invalid = serde_json::to_vec(&invalid).expect("serialize invalid response");
         assert!(
             parse_voice_session_response(
