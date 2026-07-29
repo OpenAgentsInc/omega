@@ -20270,7 +20270,7 @@ mod tests {
             repository_path(EXTERNAL_SUBAGENT_CARD_PATH).display()
         );
 
-        // Escape leaves the view rather than being swallowed. The guard that
+        // Escape closes the right pane rather than being swallowed. The guard that
         // keeps it from cancelling a parent's delegation stays; what changes is
         // that the key now does something. Read from the action itself rather
         // than from a `fn render` — `thread_view.rs` has several, and the first
@@ -20291,11 +20291,11 @@ mod tests {
         );
         assert!(
             handler.contains(&without_whitespace(
-                "view.navigate_to_thread(parent_session_id,"
+                "view.close_right_pane(cx)"
             )),
-            "OMEGA-DELTA-0162: Escape in a subagent view is swallowed again. It \
-             cannot cancel — see above — so a key that does nothing leaves one \
-             unlabelled button as the only way out."
+            "OMEGA-DELTA-0162: Escape in a subagent view no longer closes its \
+             right pane. It cannot cancel — see above — so a key that does \
+             nothing leaves one unlabelled button as the only way out."
         );
     }
 

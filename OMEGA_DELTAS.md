@@ -7173,9 +7173,11 @@ timeline work remains separate.
   one direction. It now carries collapse beside full-screen, and the header
   chevron stops hiding on hover once the card is open — a control that appears
   only under the pointer is not a control a reader can find at the bottom of
-  content they have just opened. Escape leaves the full-screen subagent view
-  rather than being swallowed, and the titlebar's minimize reads as the inverse
-  of the card's `Maximize` and names the key.
+  content they have just opened. Expanding a subagent now opens it beside the
+  root thread in the right pane instead of replacing the root thread. Escape
+  closes that pane rather than being swallowed, and the titlebar's minimize
+  reads as the inverse of the card's open-in-right-pane control and names the
+  key.
 - **The card scrolls.** The preview was a 14rem window onto content that is
   routinely taller, with `track_scroll` recording an offset and no
   `overflow_y_scroll` to move it, under an `overflow_hidden` that clipped the
