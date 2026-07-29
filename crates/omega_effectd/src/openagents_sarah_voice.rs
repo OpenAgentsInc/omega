@@ -26,7 +26,9 @@ const MAX_REF_BYTES: usize = 256;
 const MAX_ACCESS_TOKEN_BYTES: usize = 16 * 1024;
 const MAX_GATEWAY_URL_BYTES: usize = 2 * 1024;
 const MAX_CHALLENGE_LIFETIME_MS: u64 = 120_000;
-const MAX_CHALLENGE_CLOCK_SKEW_MS: u64 = 60_000;
+const MAX_TICKET_LIFETIME_MS: u64 = 60_000;
+const MAX_SESSION_LIFETIME_MS: u64 = 900_000;
+const MAX_SERVER_CLOCK_SKEW_MS: u64 = 60_000;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ManagedSarahVoiceSession {
@@ -295,11 +297,13 @@ fn parse_voice_session_response(
     } else if response.session_ref != session_ref || !valid_ref(&response.session_ref) {
         Some("session reference")
     } else if response.ticket_expires_at_ms <= now_ms
-        || response.ticket_expires_at_ms - now_ms > 60_000
+        || response.ticket_expires_at_ms - now_ms
+            > MAX_TICKET_LIFETIME_MS + MAX_SERVER_CLOCK_SKEW_MS
     {
         Some("ticket lifetime")
     } else if response.session_expires_at_ms < response.ticket_expires_at_ms
-        || response.session_expires_at_ms - now_ms > 900_000
+        || response.session_expires_at_ms - now_ms
+            > MAX_SESSION_LIFETIME_MS + MAX_SERVER_CLOCK_SKEW_MS
     {
         Some("session lifetime")
     } else if response.max_duration_seconds < 60 || response.max_duration_seconds > 900 {
@@ -364,8 +368,7 @@ fn validate_challenge(challenge: &ChallengeResponse) -> Result<(), HostedSession
     } else if !valid_base64url(&challenge.challenge) {
         Some("challenge format")
     } else if challenge.expires_at_ms <= now_ms
-        || challenge.expires_at_ms - now_ms
-            > MAX_CHALLENGE_LIFETIME_MS + MAX_CHALLENGE_CLOCK_SKEW_MS
+        || challenge.expires_at_ms - now_ms > MAX_CHALLENGE_LIFETIME_MS + MAX_SERVER_CLOCK_SKEW_MS
     {
         Some("lifetime")
     } else {
@@ -573,13 +576,13 @@ mod tests {
         let challenge = ChallengeResponse {
             schema: SARAH_VOICE_CHALLENGE_PROTOCOL.to_string(),
             challenge: "a".repeat(32),
-            expires_at_ms: now + MAX_CHALLENGE_LIFETIME_MS + MAX_CHALLENGE_CLOCK_SKEW_MS,
+            expires_at_ms: now + MAX_CHALLENGE_LIFETIME_MS + MAX_SERVER_CLOCK_SKEW_MS,
             owner_ref: "nostr-owner".to_string(),
         };
         assert!(validate_challenge(&challenge).is_ok());
 
         let invalid = ChallengeResponse {
-            expires_at_ms: now + MAX_CHALLENGE_LIFETIME_MS + MAX_CHALLENGE_CLOCK_SKEW_MS + 10_000,
+            expires_at_ms: now + MAX_CHALLENGE_LIFETIME_MS + MAX_SERVER_CLOCK_SKEW_MS + 10_000,
             ..challenge
         };
         assert!(validate_challenge(&invalid).is_err());
@@ -655,6 +658,61 @@ mod tests {
                 "thread",
                 "voice-session",
                 true,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn signed_response_allows_bounded_server_clock_skew() {
+        let now = now_ms().expect("system time");
+        let response = serde_json::json!({
+            "schema": SARAH_VOICE_PROTOCOL,
+            "sessionRef": "voice-session",
+            "model": SARAH_VOICE_MODEL,
+            "clientProfile": "omega_editor",
+            "gatewayUrl": "wss://openagents.com/api/omega/sarah/voice/connect",
+            "ticket": "t".repeat(32),
+            "ticketExpiresAtMs": now + MAX_TICKET_LIFETIME_MS + MAX_SERVER_CLOCK_SKEW_MS,
+            "sessionExpiresAtMs": now + MAX_SESSION_LIFETIME_MS + MAX_SERVER_CLOCK_SKEW_MS,
+            "reservedCreditMsat": 1,
+            "maxDurationSeconds": 900,
+            "inputAudio": {
+                "codec": "pcm_s16le",
+                "sampleRateHz": 24_000,
+                "channels": 1
+            },
+            "outputAudio": {
+                "codec": "pcm_s16le",
+                "sampleRateHz": 24_000,
+                "channels": 1
+            }
+        });
+        let body = serde_json::to_vec(&response).expect("serialize response");
+        assert!(
+            parse_voice_session_response(
+                &body,
+                "owner",
+                "device",
+                "thread",
+                "voice-session",
+                false,
+            )
+            .is_ok()
+        );
+
+        let mut invalid = response;
+        invalid["ticketExpiresAtMs"] =
+            serde_json::json!(now + MAX_TICKET_LIFETIME_MS + MAX_SERVER_CLOCK_SKEW_MS + 10_000);
+        let invalid = serde_json::to_vec(&invalid).expect("serialize invalid response");
+        assert!(
+            parse_voice_session_response(
+                &invalid,
+                "owner",
+                "device",
+                "thread",
+                "voice-session",
+                false,
             )
             .is_err()
         );
