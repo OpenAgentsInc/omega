@@ -12,6 +12,7 @@ pub use audio_settings::AudioSettings;
 mod audio_pipeline;
 pub use audio_pipeline::Audio;
 pub use audio_pipeline::{AudioDeviceInfo, AvailableAudioDevices};
+pub use audio_pipeline::{EchoCanceller, open_output_stream};
 pub use audio_pipeline::{ensure_devices_initialized, resolve_device};
 // TODO(audio) replace with input test functionality in the audio crate
 pub use audio_pipeline::RodioExt;

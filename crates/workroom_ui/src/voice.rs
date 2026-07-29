@@ -34,7 +34,6 @@ const MANAGED_SARAH_PROTOCOL: &str = "openagents.sarah.voice.v1";
 const AUDIO_PROTOCOL: &str = "openagents.audio.v1";
 const AUDIO_MEDIA_MAGIC: &[u8; 4] = b"OAA1";
 const MICROPHONE_CHUNK_SAMPLES: usize = 480;
-const PLAYBACK_ECHO_TAIL: Duration = Duration::from_millis(300);
 const MAX_EDITOR_TEXT_BYTES: usize = 64 * 1024;
 const MAX_AGENT_MESSAGE_BYTES: usize = 16 * 1024;
 const MAX_CONTEXT_CHARS: u32 = 16 * 1024;
@@ -563,10 +562,11 @@ impl ManagedSarahVoiceClient {
             ))
             .await
             .context("reporting microphone state")?;
-        let microphone = MicrophoneCapture::start(self.input_device_id)
+        let echo_canceller = audio::EchoCanceller::default();
+        let microphone = MicrophoneCapture::start(self.input_device_id, echo_canceller.clone())
             .context("opening the selected microphone")?;
-        let mut playback =
-            VoicePlayback::open(self.output_device_id).context("opening the selected speaker")?;
+        let mut playback = VoicePlayback::open(self.output_device_id, echo_canceller)
+            .context("opening the selected speaker")?;
 
         events
             .send(SarahVoiceEvent::State(SarahVoiceState::Connecting))
@@ -606,7 +606,6 @@ impl ManagedSarahVoiceClient {
         let mut audio_sequence = 0_u64;
         let mut expected_server_sequence = 0_u64;
         let mut expected_output_audio_sequence = 0_u64;
-        let mut capture_gate = PlaybackCaptureGate::default();
         let mut pending_tools = HashMap::<String, PendingGatewayTool>::new();
         send_gateway_control(
             &mut socket,
@@ -636,7 +635,6 @@ impl ManagedSarahVoiceClient {
                         }
                         Ok(SarahVoiceControl::Interrupt) => {
                             playback = playback.reopen()?;
-                            capture_gate.clear();
                             send_gateway_control(
                                 &mut socket,
                                 &identity,
@@ -699,7 +697,7 @@ impl ManagedSarahVoiceClient {
                     };
                     match incoming.context("reading Sarah voice gateway frame")? {
                         Message::Text(text) => {
-                            if handle_server_message(
+                            match handle_server_message(
                                 text.as_str(),
                                 &events,
                                 &identity,
@@ -707,7 +705,11 @@ impl ManagedSarahVoiceClient {
                                 &mut pending_tools,
                                 &transcript_log,
                             ).await? {
-                                return Ok(());
+                                GatewayServerAction::Continue => {}
+                                GatewayServerAction::StopPlayback => {
+                                    playback = playback.reopen()?;
+                                }
+                                GatewayServerAction::End => return Ok(()),
                             }
                         }
                         Message::Binary(bytes) => {
@@ -716,7 +718,6 @@ impl ManagedSarahVoiceClient {
                                 &identity,
                                 &mut expected_output_audio_sequence,
                             )?;
-                            capture_gate.note_playback(audio.len(), Instant::now());
                             playback.play_pcm16(audio)?;
                         }
                         Message::Ping(payload) => {
@@ -744,9 +745,6 @@ impl ManagedSarahVoiceClient {
                 }
                 audio = audio => {
                     let audio = audio.context("microphone capture stopped")?;
-                    if !capture_gate.should_forward(Instant::now()) {
-                        continue;
-                    }
                     let frame = encode_client_audio(&identity, audio_sequence, &audio)?;
                     audio_sequence = audio_sequence.saturating_add(1);
                     socket
@@ -866,6 +864,13 @@ async fn send_gateway_tool_decision(
     Ok(())
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum GatewayServerAction {
+    Continue,
+    StopPlayback,
+    End,
+}
+
 async fn handle_server_message(
     text: &str,
     events: &async_channel::Sender<SarahVoiceEvent>,
@@ -873,7 +878,7 @@ async fn handle_server_message(
     expected_sequence: &mut u64,
     pending_tools: &mut HashMap<String, PendingGatewayTool>,
     transcript_log: &LocalVoiceTranscriptLog,
-) -> Result<bool> {
+) -> Result<GatewayServerAction> {
     let envelope = decode_gateway_server_envelope(text)?;
     if envelope.schema != MANAGED_SARAH_PROTOCOL
         || envelope.identity != *identity
@@ -936,7 +941,7 @@ async fn handle_server_message(
         } => {
             validate_gateway_text("transcript item id", &utterance_ref, MAX_PROTOCOL_ID_BYTES)?;
             if text.trim().is_empty() {
-                return Ok(false);
+                return Ok(GatewayServerAction::Continue);
             }
             if text.len() > MAX_TRANSCRIPT_TEXT_BYTES {
                 bail!(
@@ -1053,9 +1058,10 @@ async fn handle_server_message(
                 })
                 .await
                 .context("reporting Sarah voice end")?;
-            return Ok(true);
+            return Ok(GatewayServerAction::End);
         }
-        GatewayServerMessage::InterruptAck | GatewayServerMessage::Heartbeat => {}
+        GatewayServerMessage::InterruptAck => return Ok(GatewayServerAction::StopPlayback),
+        GatewayServerMessage::Heartbeat => {}
         GatewayServerMessage::AudioAck {
             acknowledged_client_sequence,
         } => {
@@ -1064,7 +1070,7 @@ async fn handle_server_message(
             }
         }
     }
-    Ok(false)
+    Ok(GatewayServerAction::Continue)
 }
 
 #[derive(Serialize)]
@@ -1452,9 +1458,28 @@ struct MicrophoneCapture {
 }
 
 impl MicrophoneCapture {
-    fn start(input_device_id: Option<DeviceId>) -> Result<Self> {
+    fn start(
+        input_device_id: Option<DeviceId>,
+        mut echo_canceller: audio::EchoCanceller,
+    ) -> Result<Self> {
         let microphone = audio::open_input_stream(input_device_id)?;
+        let processing_failed = Arc::new(AtomicBool::new(false));
+        let processing_failed_for_audio = processing_failed.clone();
         let mut microphone = microphone
+            .constant_params(nz!(2), nz!(48_000))
+            .process_buffer::<960, _>(move |buffer| {
+                let mut pcm16: [i16; 960] = std::array::from_fn(|index| {
+                    (buffer[index].clamp(-1.0, 1.0) * i16::MAX as f32).round() as i16
+                });
+                if let Err(error) = echo_canceller.process_stream(&mut pcm16) {
+                    log::error!("Sarah microphone echo cancellation failed: {error:#}");
+                    processing_failed_for_audio.store(true, Ordering::Release);
+                    return;
+                }
+                for (sample, processed) in buffer.iter_mut().zip(pcm16) {
+                    *sample = processed as f32 / i16::MAX as f32;
+                }
+            })
             .possibly_disconnected_channels_to_mono()
             .constant_samplerate(nz!(24_000));
         let (sender, receiver) = async_channel::bounded(25);
@@ -1467,7 +1492,9 @@ impl MicrophoneCapture {
                 let stop = stop.clone();
                 move || {
                     let mut samples = Vec::with_capacity(MICROPHONE_CHUNK_SAMPLES);
-                    while !stop.load(Ordering::Acquire) {
+                    while !stop.load(Ordering::Acquire)
+                        && !processing_failed.load(Ordering::Acquire)
+                    {
                         let Some(sample) = microphone.next() else {
                             break;
                         };
@@ -1505,53 +1532,29 @@ impl Drop for MicrophoneCapture {
 
 struct VoicePlayback {
     output_device_id: Option<DeviceId>,
+    echo_canceller: audio::EchoCanceller,
     player: rodio::Player,
     _output: rodio::MixerDeviceSink,
 }
 
-#[derive(Default)]
-struct PlaybackCaptureGate {
-    playback_end: Option<Instant>,
-}
-
-impl PlaybackCaptureGate {
-    fn note_playback(&mut self, pcm16_byte_count: usize, now: Instant) {
-        let sample_count = pcm16_byte_count / size_of::<i16>();
-        let duration =
-            Duration::from_secs_f64(sample_count as f64 / f64::from(SARAH_AUDIO_SAMPLE_RATE));
-        let queued_from = self.playback_end.filter(|end| *end > now).unwrap_or(now);
-        self.playback_end = queued_from.checked_add(duration);
-    }
-
-    fn should_forward(&mut self, now: Instant) -> bool {
-        let Some(playback_end) = self.playback_end else {
-            return true;
-        };
-        if now.saturating_duration_since(playback_end) < PLAYBACK_ECHO_TAIL {
-            return false;
-        }
-        self.playback_end = None;
-        true
-    }
-
-    fn clear(&mut self) {
-        self.playback_end = None;
-    }
-}
-
 impl VoicePlayback {
-    fn open(output_device_id: Option<DeviceId>) -> Result<Self> {
-        let output = audio::open_test_output(output_device_id.clone())?;
-        let player = rodio::Player::connect_new(output.mixer());
+    fn open(
+        output_device_id: Option<DeviceId>,
+        echo_canceller: audio::EchoCanceller,
+    ) -> Result<Self> {
+        let (output, mixer) =
+            audio::open_output_stream(output_device_id.clone(), echo_canceller.clone())?;
+        let player = rodio::Player::connect_new(&mixer);
         Ok(Self {
             output_device_id,
+            echo_canceller,
             player,
             _output: output,
         })
     }
 
     fn reopen(self) -> Result<Self> {
-        Self::open(self.output_device_id)
+        Self::open(self.output_device_id, self.echo_canceller)
     }
 
     fn play_pcm16(&self, bytes: &[u8]) -> Result<()> {
@@ -1682,7 +1685,7 @@ mod tests {
             .await
             .expect("accept empty final transcript");
 
-            assert!(!should_end);
+            assert_eq!(should_end, GatewayServerAction::Continue);
             assert_eq!(expected_sequence, 1);
             assert!(received_events.is_empty());
             assert!(!transcript_log.path.exists());
@@ -1690,29 +1693,43 @@ mod tests {
     }
 
     #[test]
-    fn playback_capture_gate_drops_speaker_echo_and_reopens_after_the_tail() {
-        let started_at = Instant::now();
-        let mut gate = PlaybackCaptureGate::default();
-        assert!(gate.should_forward(started_at));
+    fn interrupt_ack_stops_current_playback() {
+        smol::block_on(async {
+            let directory = tempfile::tempdir().expect("create transcript directory");
+            let transcript_log = LocalVoiceTranscriptLog::new(
+                directory.path().join("voice/transcripts.jsonl"),
+                "session-1".into(),
+            );
+            let identity = GatewayVoiceIdentity {
+                owner_ref: "owner-1".into(),
+                device_ref: "device-1".into(),
+                thread_ref: "thread-1".into(),
+                session_ref: "session-1".into(),
+                generation: 1,
+            };
+            let (events, _) = async_channel::bounded(1);
+            let mut expected_sequence = 0;
+            let mut pending_tools = HashMap::new();
+            let envelope = json!({
+                "schema": MANAGED_SARAH_PROTOCOL,
+                "identity": identity,
+                "sequence": 0,
+                "_tag": "interrupt_ack",
+            });
 
-        gate.note_playback(48_000, started_at);
-        assert!(!gate.should_forward(started_at + Duration::from_secs(1)));
-        assert!(!gate.should_forward(
-            started_at + Duration::from_secs(1) + PLAYBACK_ECHO_TAIL - Duration::from_millis(1)
-        ));
-        assert!(gate.should_forward(started_at + Duration::from_secs(1) + PLAYBACK_ECHO_TAIL));
-    }
+            let action = handle_server_message(
+                &envelope.to_string(),
+                &events,
+                &identity,
+                &mut expected_sequence,
+                &mut pending_tools,
+                &transcript_log,
+            )
+            .await
+            .expect("accept interrupt acknowledgement");
 
-    #[test]
-    fn playback_capture_gate_accumulates_queued_audio_and_interrupt_clears_it() {
-        let started_at = Instant::now();
-        let mut gate = PlaybackCaptureGate::default();
-        gate.note_playback(24_000, started_at);
-        gate.note_playback(24_000, started_at + Duration::from_millis(100));
-        assert!(!gate.should_forward(started_at + Duration::from_millis(900)));
-
-        gate.clear();
-        assert!(gate.should_forward(started_at + Duration::from_millis(900)));
+            assert_eq!(action, GatewayServerAction::StopPlayback);
+        });
     }
 
     #[test]
