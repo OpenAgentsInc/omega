@@ -20290,9 +20290,7 @@ mod tests {
              a person presses to leave a view must not be the key that kills it."
         );
         assert!(
-            handler.contains(&without_whitespace(
-                "view.close_right_pane(cx)"
-            )),
+            handler.contains(&without_whitespace("view.close_right_pane(cx)")),
             "OMEGA-DELTA-0162: Escape in a subagent view no longer closes its \
              right pane. It cannot cancel — see above — so a key that does \
              nothing leaves one unlabelled button as the only way out."

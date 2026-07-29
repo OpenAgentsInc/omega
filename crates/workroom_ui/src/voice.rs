@@ -5,6 +5,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
     },
     thread,
+    time::{Duration, Instant},
 };
 
 use anyhow::{Context as _, Result, bail};
@@ -30,6 +31,7 @@ const MANAGED_SARAH_PROTOCOL: &str = "openagents.sarah.voice.v1";
 const AUDIO_PROTOCOL: &str = "openagents.audio.v1";
 const AUDIO_MEDIA_MAGIC: &[u8; 4] = b"OAA1";
 const MICROPHONE_CHUNK_SAMPLES: usize = 480;
+const PLAYBACK_ECHO_TAIL: Duration = Duration::from_millis(300);
 const MAX_EDITOR_TEXT_BYTES: usize = 64 * 1024;
 const MAX_AGENT_MESSAGE_BYTES: usize = 16 * 1024;
 const MAX_CONTEXT_CHARS: u32 = 16 * 1024;
@@ -594,6 +596,7 @@ impl ManagedSarahVoiceClient {
         let mut audio_sequence = 0_u64;
         let mut expected_server_sequence = 0_u64;
         let mut expected_output_audio_sequence = 0_u64;
+        let mut capture_gate = PlaybackCaptureGate::default();
         let mut pending_tools = HashMap::<String, PendingGatewayTool>::new();
         send_gateway_control(
             &mut socket,
@@ -619,6 +622,7 @@ impl ManagedSarahVoiceClient {
                         }
                         Ok(SarahVoiceControl::Interrupt) => {
                             playback = playback.reopen()?;
+                            capture_gate.clear();
                             send_gateway_control(
                                 &mut socket,
                                 &identity,
@@ -674,6 +678,9 @@ impl ManagedSarahVoiceClient {
                 }
                 audio = audio => {
                     let audio = audio.context("microphone capture stopped")?;
+                    if !capture_gate.should_forward(Instant::now()) {
+                        continue;
+                    }
                     let frame = encode_client_audio(&identity, audio_sequence, &audio)?;
                     audio_sequence = audio_sequence.saturating_add(1);
                     socket
@@ -706,6 +713,7 @@ impl ManagedSarahVoiceClient {
                                 &identity,
                                 &mut expected_output_audio_sequence,
                             )?;
+                            capture_gate.note_playback(audio.len(), Instant::now());
                             playback.play_pcm16(audio)?;
                         }
                         Message::Ping(payload) => {
@@ -1410,6 +1418,36 @@ struct VoicePlayback {
     output: rodio::MixerDeviceSink,
 }
 
+#[derive(Default)]
+struct PlaybackCaptureGate {
+    playback_end: Option<Instant>,
+}
+
+impl PlaybackCaptureGate {
+    fn note_playback(&mut self, pcm16_byte_count: usize, now: Instant) {
+        let sample_count = pcm16_byte_count / size_of::<i16>();
+        let duration =
+            Duration::from_secs_f64(sample_count as f64 / f64::from(SARAH_AUDIO_SAMPLE_RATE));
+        let queued_from = self.playback_end.filter(|end| *end > now).unwrap_or(now);
+        self.playback_end = queued_from.checked_add(duration);
+    }
+
+    fn should_forward(&mut self, now: Instant) -> bool {
+        let Some(playback_end) = self.playback_end else {
+            return true;
+        };
+        if now.saturating_duration_since(playback_end) < PLAYBACK_ECHO_TAIL {
+            return false;
+        }
+        self.playback_end = None;
+        true
+    }
+
+    fn clear(&mut self) {
+        self.playback_end = None;
+    }
+}
+
 impl VoicePlayback {
     fn open(output_device_id: Option<DeviceId>) -> Result<Self> {
         let output = audio::open_test_output(output_device_id.clone())?;
@@ -1483,6 +1521,32 @@ fn actionable_error(error: &anyhow::Error) -> (String, Option<String>) {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn playback_capture_gate_drops_speaker_echo_and_reopens_after_the_tail() {
+        let started_at = Instant::now();
+        let mut gate = PlaybackCaptureGate::default();
+        assert!(gate.should_forward(started_at));
+
+        gate.note_playback(48_000, started_at);
+        assert!(!gate.should_forward(started_at + Duration::from_secs(1)));
+        assert!(!gate.should_forward(
+            started_at + Duration::from_secs(1) + PLAYBACK_ECHO_TAIL - Duration::from_millis(1)
+        ));
+        assert!(gate.should_forward(started_at + Duration::from_secs(1) + PLAYBACK_ECHO_TAIL));
+    }
+
+    #[test]
+    fn playback_capture_gate_accumulates_queued_audio_and_interrupt_clears_it() {
+        let started_at = Instant::now();
+        let mut gate = PlaybackCaptureGate::default();
+        gate.note_playback(24_000, started_at);
+        gate.note_playback(24_000, started_at + Duration::from_millis(100));
+        assert!(!gate.should_forward(started_at + Duration::from_millis(900)));
+
+        gate.clear();
+        assert!(gate.should_forward(started_at + Duration::from_millis(900)));
+    }
 
     #[test]
     fn editor_command_allowlist_has_explicit_confirmation_policy() {
