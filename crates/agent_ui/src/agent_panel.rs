@@ -7692,10 +7692,8 @@ impl AgentPanel {
                                 .icon_color(Color::Accent)
                                 .handler({
                                     move |window, cx| {
-                                        window.dispatch_action(
-                                            Box::new(OpenSarahWorkroomPanel),
-                                            cx,
-                                        );
+                                        window
+                                            .dispatch_action(Box::new(OpenSarahWorkroomPanel), cx);
                                     }
                                 }),
                         )
