@@ -2,6 +2,7 @@ mod connection;
 mod diff;
 mod mention;
 mod terminal;
+mod thread_projection;
 mod tool_result_artifact;
 pub use ::terminal::HeadlessTerminal;
 use action_log::{ActionLog, ActionLogTelemetry};
@@ -41,6 +42,7 @@ use std::{fmt::Display, mem, path::PathBuf, sync::Arc};
 use task::{Shell, ShellBuilder};
 pub use terminal::*;
 use text::Bias;
+pub use thread_projection::*;
 pub use tool_result_artifact::*;
 use ui::App;
 use util::markdown::MarkdownEscaped;
@@ -2140,6 +2142,15 @@ pub struct AcpThread {
     title: Option<SharedString>,
     provisional_title: Option<SharedString>,
     entries: Vec<AgentThreadEntry>,
+    entry_projection_states: Vec<ThreadEntryProjectionState>,
+    entry_projection_bindings: Vec<ThreadProjectionBinding>,
+    entry_projection_fingerprints: Vec<u64>,
+    entry_projection_children: Vec<Vec<ThreadChildProjectionState>>,
+    artifact_projection_states: Vec<ThreadArtifactProjectionState>,
+    projection_markers: Vec<ThreadEventProjection>,
+    projection_revision: u64,
+    next_thread_entry_id: u64,
+    next_thread_artifact_id: u64,
     elicitations: ElicitationStore,
     plan: Plan,
     plan_revision: u64,
@@ -2160,6 +2171,7 @@ pub struct AcpThread {
     available_commands: Vec<acp::AvailableCommand>,
     _observe_prompt_capabilities: Task<anyhow::Result<()>>,
     terminals: HashMap<acp::TerminalId, Entity<Terminal>>,
+    _terminal_projection_subscriptions: Vec<Subscription>,
     pending_terminal_output: HashMap<acp::TerminalId, Vec<Vec<u8>>>,
     pending_terminal_exit: HashMap<acp::TerminalId, acp::TerminalExitStatus>,
     had_error: bool,
@@ -2227,6 +2239,7 @@ pub enum AcpThreadEvent {
     ConfigOptionsUpdated(Vec<acp::SessionConfigOption>),
     WorkingDirectoriesUpdated,
     PlanUpdated(u64),
+    ProjectionUpdated(u64),
 }
 
 impl EventEmitter<AcpThreadEvent> for AcpThread {}
@@ -2372,6 +2385,15 @@ impl AcpThread {
             update_last_checkpoint_if_changed_task: None,
             shared_buffers: Default::default(),
             entries: Default::default(),
+            entry_projection_states: Default::default(),
+            entry_projection_bindings: Default::default(),
+            entry_projection_fingerprints: Default::default(),
+            entry_projection_children: Default::default(),
+            artifact_projection_states: Default::default(),
+            projection_markers: Default::default(),
+            projection_revision: 0,
+            next_thread_entry_id: 1,
+            next_thread_artifact_id: 1,
             elicitations: ElicitationStore::default(),
             plan: Default::default(),
             plan_revision: 0,
@@ -2391,6 +2413,7 @@ impl AcpThread {
             available_commands: Vec::new(),
             _observe_prompt_capabilities: task,
             terminals: HashMap::default(),
+            _terminal_projection_subscriptions: Vec::new(),
             pending_terminal_output: HashMap::default(),
             pending_terminal_exit: HashMap::default(),
             had_error: false,
@@ -2487,6 +2510,81 @@ impl AcpThread {
         &self.entries
     }
 
+    fn projection_binding(&self) -> ThreadProjectionBinding {
+        ThreadProjectionBinding {
+            thread_id: self.session_id.to_string().into(),
+            work_dirs: self
+                .work_dirs
+                .as_ref()
+                .map(PathList::paths_owned)
+                .unwrap_or_default(),
+        }
+    }
+
+    pub fn projection(&self, _cx: &App) -> ThreadProjectionSnapshot {
+        let mut top_level_entries = Vec::new();
+        for (entry_index, ((entry, state), binding)) in self
+            .entries
+            .iter()
+            .zip(&self.entry_projection_states)
+            .zip(&self.entry_projection_bindings)
+            .enumerate()
+        {
+            let mut projection = project_entry(
+                entry,
+                *state,
+                &self.artifact_projection_states,
+                entry_index,
+                binding,
+            );
+            if self.running_turn.is_some()
+                && entry_index == self.entries.len().saturating_sub(1)
+                && matches!(entry, AgentThreadEntry::AssistantMessage(_))
+            {
+                projection.status = ThreadEventStatus::InProgress;
+            }
+            if let AgentThreadEntry::Elicitation(id) = entry
+                && let Some((_, elicitation)) = self.elicitations.elicitation(id)
+            {
+                projection.status = elicitation_status(&elicitation.status);
+            }
+            top_level_entries.push(projection);
+        }
+        top_level_entries.extend(self.projection_markers.iter().cloned());
+        top_level_entries.sort_by_key(|entry| entry.id);
+
+        let mut entries = Vec::new();
+        for entry in top_level_entries {
+            let parent_id = entry.id;
+            entries.push(entry.clone());
+            if let Some((entry_index, _)) = self
+                .entry_projection_states
+                .iter()
+                .enumerate()
+                .find(|(_, state)| state.id == parent_id)
+                && let Some(children) = self.entry_projection_children.get(entry_index)
+            {
+                entries.extend(children.iter().map(|child| {
+                    project_child_event(&entry, child.id, child.revision, child.kind)
+                }));
+            }
+        }
+        let binding = self.projection_binding();
+        let artifacts = self
+            .artifact_projection_states
+            .iter()
+            .map(project_artifact)
+            .collect();
+        ThreadProjectionSnapshot {
+            thread_id: binding.thread_id.clone(),
+            work_dirs: binding.work_dirs.clone(),
+            binding,
+            revision: self.projection_revision,
+            entries,
+            artifacts,
+        }
+    }
+
     pub fn is_compacting(&self) -> bool {
         self.entries.last().is_some_and(|entry| {
             matches!(
@@ -2529,8 +2627,13 @@ impl AcpThread {
     }
 
     pub fn set_work_dirs(&mut self, work_dirs: PathList, cx: &mut Context<Self>) {
+        if self.work_dirs.as_ref() == Some(&work_dirs) {
+            return;
+        }
         self.work_dirs = Some(work_dirs);
-        cx.emit(AcpThreadEvent::WorkingDirectoriesUpdated)
+        self.projection_revision = self.projection_revision.saturating_add(1);
+        cx.emit(AcpThreadEvent::WorkingDirectoriesUpdated);
+        cx.emit(AcpThreadEvent::ProjectionUpdated(self.projection_revision));
     }
 
     pub fn status(&self) -> ThreadStatus {
@@ -2827,7 +2930,7 @@ impl AcpThread {
             content.append(chunk.clone(), &language_registry, path_style, cx);
             chunks.push(chunk);
             let idx = entries_len - 1;
-            cx.emit(AcpThreadEvent::EntryUpdated(idx));
+            self.entry_updated(idx, cx);
         } else {
             let content = ContentBlock::new(chunk.clone(), &language_registry, path_style, cx);
             self.push_entry(
@@ -2881,7 +2984,7 @@ impl AcpThread {
                 self.streaming_markdown_target(message_id.as_ref(), is_thought, indented)
             {
                 let entries_len = self.entries.len();
-                cx.emit(AcpThreadEvent::EntryUpdated(entries_len - 1));
+                self.entry_updated(entries_len - 1, cx);
                 self.buffer_streaming_text(&markdown, text_content.text.clone(), cx);
                 return;
             }
@@ -2899,7 +3002,6 @@ impl AcpThread {
         {
             let idx = entries_len - 1;
             Self::flush_streaming_text(&mut self.streaming_text_buffer, cx);
-            cx.emit(AcpThreadEvent::EntryUpdated(idx));
             match (chunks.last_mut(), is_thought) {
                 (
                     Some(AssistantMessageChunk::Message {
@@ -2935,6 +3037,7 @@ impl AcpThread {
                     }
                 }
             }
+            self.entry_updated(idx, cx);
         } else {
             let block = ContentBlock::new(chunk, &language_registry, path_style, cx);
             let chunk = if is_thought {
@@ -3103,8 +3206,259 @@ impl AcpThread {
 
     fn push_entry(&mut self, entry: AgentThreadEntry, cx: &mut Context<Self>) {
         Self::flush_streaming_text(&mut self.streaming_text_buffer, cx);
+        let binding = self.projection_binding();
         self.entries.push(entry);
+        let id = ThreadEntryId(self.next_thread_entry_id);
+        self.next_thread_entry_id = self.next_thread_entry_id.saturating_add(1);
+        self.projection_revision = self.projection_revision.saturating_add(1);
+        self.entry_projection_states
+            .push(ThreadEntryProjectionState {
+                id,
+                revision: self.projection_revision,
+            });
+        self.entry_projection_bindings.push(binding);
+        let fingerprint = self.entry_projection_fingerprint(self.entries.len() - 1, cx);
+        self.entry_projection_fingerprints.push(fingerprint);
+        self.entry_projection_children.push(Vec::new());
+        self.reconcile_projection_children(self.entries.len() - 1);
+        self.reconcile_artifact_projection(cx);
         cx.emit(AcpThreadEvent::NewEntry);
+        cx.emit(AcpThreadEvent::ProjectionUpdated(self.projection_revision));
+    }
+
+    fn entry_updated(&mut self, index: usize, cx: &mut Context<Self>) {
+        if index >= self.entry_projection_states.len() {
+            return;
+        }
+        cx.emit(AcpThreadEvent::EntryUpdated(index));
+        let fingerprint = self.entry_projection_fingerprint(index, cx);
+        if self.entry_projection_fingerprints.get(index) == Some(&fingerprint) {
+            return;
+        }
+        self.projection_revision = self.projection_revision.saturating_add(1);
+        if let Some(state) = self.entry_projection_states.get_mut(index) {
+            state.revision = self.projection_revision;
+        }
+        if let Some(stored_fingerprint) = self.entry_projection_fingerprints.get_mut(index) {
+            *stored_fingerprint = fingerprint;
+        }
+        self.reconcile_projection_children(index);
+        self.reconcile_artifact_projection(cx);
+        cx.emit(AcpThreadEvent::ProjectionUpdated(self.projection_revision));
+    }
+
+    fn entry_projection_fingerprint(&self, index: usize, cx: &App) -> u64 {
+        let Some(entry) = self.entries.get(index) else {
+            return 0;
+        };
+        let status_override = if let AgentThreadEntry::Elicitation(id) = entry {
+            self.elicitations
+                .elicitation(id)
+                .map(|(_, elicitation)| elicitation_status(&elicitation.status))
+        } else {
+            None
+        };
+        entry_projection_fingerprint(entry, status_override, cx)
+    }
+
+    fn reconcile_projection_children(&mut self, index: usize) {
+        let Some(entry) = self.entries.get(index) else {
+            return;
+        };
+        let kinds = related_kinds(entry);
+        let previous = self
+            .entry_projection_children
+            .get_mut(index)
+            .map(mem::take)
+            .unwrap_or_default();
+        let mut children = Vec::with_capacity(kinds.len());
+        for kind in kinds {
+            if let Some(existing) = previous.iter().find(|child| child.kind == kind) {
+                children.push(ThreadChildProjectionState {
+                    id: existing.id,
+                    revision: self.projection_revision,
+                    kind,
+                });
+            } else {
+                let id = ThreadEntryId(self.next_thread_entry_id);
+                self.next_thread_entry_id = self.next_thread_entry_id.saturating_add(1);
+                children.push(ThreadChildProjectionState {
+                    id,
+                    revision: self.projection_revision,
+                    kind,
+                });
+            }
+        }
+        if let Some(stored_children) = self.entry_projection_children.get_mut(index) {
+            *stored_children = children;
+        }
+    }
+
+    fn entries_removed(&mut self, range: Range<usize>, cx: &mut Context<Self>) {
+        let first_removed_id = self
+            .entry_projection_states
+            .get(range.start)
+            .map(|state| state.id);
+        self.entry_projection_states.truncate(self.entries.len());
+        self.entry_projection_bindings.truncate(self.entries.len());
+        self.entry_projection_fingerprints
+            .truncate(self.entries.len());
+        self.entry_projection_children.truncate(self.entries.len());
+        if let Some(first_removed_id) = first_removed_id {
+            self.projection_markers
+                .retain(|marker| marker.id < first_removed_id);
+        }
+        self.projection_revision = self.projection_revision.saturating_add(1);
+        self.reconcile_artifact_projection(cx);
+        cx.emit(AcpThreadEvent::EntriesRemoved(range));
+        cx.emit(AcpThreadEvent::ProjectionUpdated(self.projection_revision));
+    }
+
+    fn push_projection_marker(
+        &mut self,
+        kind: ThreadEventKind,
+        owner: ThreadEventOwner,
+        status: ThreadEventStatus,
+        cx: &mut Context<Self>,
+    ) {
+        let id = ThreadEntryId(self.next_thread_entry_id);
+        self.next_thread_entry_id = self.next_thread_entry_id.saturating_add(1);
+        self.projection_revision = self.projection_revision.saturating_add(1);
+        self.projection_markers.push(ThreadEventProjection {
+            binding: self.projection_binding(),
+            id,
+            parent_id: None,
+            revision: self.projection_revision,
+            entry_index: None,
+            kind,
+            owner,
+            source: ThreadEventSource::Session,
+            status,
+            related_kinds: Vec::new(),
+            artifacts: Vec::new(),
+            action_targets: Vec::new(),
+        });
+        cx.emit(AcpThreadEvent::ProjectionUpdated(self.projection_revision));
+    }
+
+    fn reconcile_artifact_projection(&mut self, cx: &App) {
+        let mut candidates: Vec<(
+            ThreadProjectionBinding,
+            ThreadArtifact,
+            Option<ThreadActionTarget>,
+            Vec<ThreadEntryId>,
+            ThreadEventOwner,
+            ThreadEventStatus,
+        )> = Vec::new();
+        for ((entry, entry_state), binding) in self
+            .entries
+            .iter()
+            .zip(&self.entry_projection_states)
+            .zip(&self.entry_projection_bindings)
+        {
+            if !matches!(entry, AgentThreadEntry::ToolCall(_)) {
+                continue;
+            }
+            let owner = ThreadEventOwner::Tool;
+            let status = status_for_entry(entry);
+            for (artifact, action_target) in artifact_candidates(entry, cx) {
+                if let Some(existing) =
+                    candidates
+                        .iter_mut()
+                        .find(|(existing_binding, existing, _, _, _, _)| {
+                            existing_binding == binding
+                                && same_logical_artifact(existing, &artifact)
+                        })
+                {
+                    existing.1 = artifact;
+                    existing.2 = action_target;
+                    if !existing.3.contains(&entry_state.id) {
+                        existing.3.push(entry_state.id);
+                    }
+                    existing.4 = owner;
+                    existing.5 = status;
+                } else {
+                    candidates.push((
+                        binding.clone(),
+                        artifact,
+                        action_target,
+                        vec![entry_state.id],
+                        owner,
+                        status,
+                    ));
+                }
+            }
+        }
+
+        let mut states = mem::take(&mut self.artifact_projection_states);
+        let mut matched = vec![false; states.len()];
+
+        for (binding, artifact, action_target, source_events, owner, status) in candidates {
+            if let Some((state_index, state)) = states.iter_mut().enumerate().find(|(_, state)| {
+                state.binding == binding && same_logical_artifact(&state.artifact, &artifact)
+            }) {
+                if state.artifact != artifact
+                    || state.action_target != action_target
+                    || state.source_events != source_events
+                    || state.owner != owner
+                    || state.status != status
+                    || !state.is_current
+                {
+                    state.history.push(ThreadArtifactRevision {
+                        revision: state.revision,
+                        source_events: state.source_events.clone(),
+                        owner: state.owner,
+                        status: state.status,
+                        artifact: state.artifact.clone(),
+                        action_target: state.action_target.clone(),
+                        is_current: state.is_current,
+                    });
+                    state.revision = self.projection_revision;
+                    state.status = status;
+                    state.source_events = source_events;
+                    state.owner = owner;
+                    state.artifact = artifact;
+                    state.action_target = action_target;
+                    state.is_current = true;
+                }
+                if let Some(is_matched) = matched.get_mut(state_index) {
+                    *is_matched = true;
+                }
+            } else {
+                let id = ThreadArtifactId(self.next_thread_artifact_id);
+                self.next_thread_artifact_id = self.next_thread_artifact_id.saturating_add(1);
+                states.push(ThreadArtifactProjectionState {
+                    binding,
+                    id,
+                    revision: self.projection_revision,
+                    source_events,
+                    owner,
+                    status,
+                    artifact,
+                    action_target,
+                    is_current: true,
+                    history: Vec::new(),
+                });
+                matched.push(true);
+            }
+        }
+
+        for (state, matched) in states.iter_mut().zip(matched) {
+            if !matched && state.is_current {
+                state.history.push(ThreadArtifactRevision {
+                    revision: state.revision,
+                    source_events: state.source_events.clone(),
+                    owner: state.owner,
+                    status: state.status,
+                    artifact: state.artifact.clone(),
+                    action_target: state.action_target.clone(),
+                    is_current: true,
+                });
+                state.revision = self.projection_revision;
+                state.is_current = false;
+            }
+        }
+        self.artifact_projection_states = states;
     }
 
     /// OMEGA-DELTA-0045. Append a host-authored note to the thread the owner
@@ -3141,7 +3495,7 @@ impl AcpThread {
                 })
         {
             self.entries[ix] = AgentThreadEntry::ContextCompaction(compaction);
-            cx.emit(AcpThreadEvent::EntryUpdated(ix));
+            self.entry_updated(ix, cx);
         } else {
             self.push_entry(AgentThreadEntry::ContextCompaction(compaction), cx);
         }
@@ -3187,7 +3541,7 @@ impl AcpThread {
             compaction.status = status;
         }
 
-        cx.emit(AcpThreadEvent::EntryUpdated(ix));
+        self.entry_updated(ix, cx);
     }
 
     pub fn can_set_title(&mut self, cx: &mut Context<Self>) -> bool {
@@ -3231,6 +3585,12 @@ impl AcpThread {
     }
 
     pub fn update_retry_status(&mut self, status: RetryStatus, cx: &mut Context<Self>) {
+        self.push_projection_marker(
+            ThreadEventKind::Retry,
+            ThreadEventOwner::System,
+            ThreadEventStatus::InProgress,
+            cx,
+        );
         cx.emit(AcpThreadEvent::Retry(status));
     }
 
@@ -3303,7 +3663,7 @@ impl AcpThread {
             }
         }
 
-        cx.emit(AcpThreadEvent::EntryUpdated(ix));
+        self.entry_updated(ix, cx);
 
         Ok(())
     }
@@ -3362,7 +3722,7 @@ impl AcpThread {
             )?;
             call.update_status(status);
 
-            cx.emit(AcpThreadEvent::EntryUpdated(ix));
+            self.entry_updated(ix, cx);
         } else {
             let call = ToolCall::from_acp(
                 update.try_into()?,
@@ -3495,7 +3855,7 @@ impl AcpThread {
 
                 if tool_call.resolved_locations != resolved_locations {
                     tool_call.resolved_locations = resolved_locations;
-                    cx.emit(AcpThreadEvent::EntryUpdated(ix));
+                    this.entry_updated(ix, cx);
                 }
             })
         })
@@ -3551,7 +3911,7 @@ impl AcpThread {
         }
 
         call.status = ToolCallStatus::Canceled;
-        cx.emit(AcpThreadEvent::EntryUpdated(ix));
+        self.entry_updated(ix, cx);
         cx.emit(AcpThreadEvent::ToolAuthorizationReceived(id.clone()));
     }
 
@@ -3597,7 +3957,7 @@ impl AcpThread {
             respond_tx.send(outcome).ok();
         }
 
-        cx.emit(AcpThreadEvent::EntryUpdated(ix));
+        self.entry_updated(ix, cx);
     }
 
     pub fn request_elicitation(
@@ -3641,7 +4001,7 @@ impl AcpThread {
             return;
         }
 
-        cx.emit(AcpThreadEvent::EntryUpdated(ix));
+        self.entry_updated(ix, cx);
     }
 
     pub fn complete_url_elicitation(
@@ -3662,7 +4022,7 @@ impl AcpThread {
             return;
         }
 
-        cx.emit(AcpThreadEvent::EntryUpdated(ix));
+        self.entry_updated(ix, cx);
     }
 
     pub fn cancel_elicitation(&mut self, id: &ElicitationEntryId, cx: &mut Context<Self>) {
@@ -3673,7 +4033,7 @@ impl AcpThread {
             return;
         }
 
-        cx.emit(AcpThreadEvent::EntryUpdated(ix));
+        self.entry_updated(ix, cx);
     }
 
     fn elicitation_entry_ix(&self, id: &ElicitationEntryId) -> Option<usize> {
@@ -3721,6 +4081,25 @@ impl AcpThread {
 
     fn mark_plan_updated(&mut self, cx: &mut Context<Self>) {
         self.plan_revision = self.plan_revision.saturating_add(1);
+        let status = if self.plan_error.is_some() {
+            ThreadEventStatus::Failed
+        } else if self.plan.entries.is_empty()
+            || self
+                .plan
+                .entries
+                .iter()
+                .all(|entry| matches!(entry.status, acp::PlanEntryStatus::Completed))
+        {
+            ThreadEventStatus::Completed
+        } else {
+            ThreadEventStatus::InProgress
+        };
+        self.push_projection_marker(
+            ThreadEventKind::PlanUpdate,
+            ThreadEventOwner::Agent,
+            status,
+            cx,
+        );
         cx.emit(AcpThreadEvent::PlanUpdated(self.plan_revision));
         cx.notify();
     }
@@ -4030,6 +4409,12 @@ impl AcpThread {
                             }
                             this.had_error = true;
                             this.plan_interruption = Some("maximum tokens reached".into());
+                            this.push_projection_marker(
+                                ThreadEventKind::Error,
+                                ThreadEventOwner::Agent,
+                                ThreadEventStatus::Failed,
+                                cx,
+                            );
                             cx.emit(AcpThreadEvent::Error);
                             log::error!("Max tokens reached. Usage: {:?}", this.token_usage);
 
@@ -4090,7 +4475,7 @@ impl AcpThread {
                                     let range = user_msg_ix..this.entries.len();
                                     if range.start < range.end {
                                         this.entries.truncate(user_msg_ix);
-                                        cx.emit(AcpThreadEvent::EntriesRemoved(range));
+                                        this.entries_removed(range, cx);
                                     }
                                     cx.emit(AcpThreadEvent::Refusal);
                                 }
@@ -4112,6 +4497,16 @@ impl AcpThread {
                         if is_same_turn {
                             cx.emit(AcpThreadEvent::StatusChanged);
                         }
+                        let (kind, status) = if r.stop_reason == acp::StopReason::Cancelled {
+                            (ThreadEventKind::Cancellation, ThreadEventStatus::Canceled)
+                        } else if r.stop_reason == acp::StopReason::Refusal {
+                            (ThreadEventKind::Refusal, ThreadEventStatus::Rejected)
+                        } else if r.stop_reason == acp::StopReason::EndTurn {
+                            (ThreadEventKind::Completion, ThreadEventStatus::Completed)
+                        } else {
+                            (ThreadEventKind::Unknown, ThreadEventStatus::Unknown)
+                        };
+                        this.push_projection_marker(kind, ThreadEventOwner::Agent, status, cx);
                         cx.emit(AcpThreadEvent::Stopped(r.stop_reason));
                         Ok(Some(r))
                     }
@@ -4125,6 +4520,12 @@ impl AcpThread {
                         }
                         this.had_error = true;
                         this.plan_interruption = Some("agent error".into());
+                        this.push_projection_marker(
+                            ThreadEventKind::Error,
+                            ThreadEventOwner::Agent,
+                            ThreadEventStatus::Failed,
+                            cx,
+                        );
                         cx.emit(AcpThreadEvent::Error);
                         log::error!("Error in run turn: {:?}", e);
                         Err(e)
@@ -4156,6 +4557,7 @@ impl AcpThread {
     }
 
     fn mark_pending_entries_as_canceled(&mut self, cx: &mut Context<Self>) {
+        let mut updated_indices = Vec::new();
         for (ix, entry) in self.entries.iter_mut().enumerate() {
             match entry {
                 AgentThreadEntry::ToolCall(call) => {
@@ -4167,21 +4569,25 @@ impl AcpThread {
                     );
                     if cancel {
                         call.status = ToolCallStatus::Canceled;
-                        cx.emit(AcpThreadEvent::EntryUpdated(ix));
+                        updated_indices.push(ix);
                     }
                 }
                 AgentThreadEntry::ContextCompaction(compaction) => {
                     if compaction.status == ContextCompactionStatus::InProgress {
                         compaction.status = ContextCompactionStatus::Canceled;
-                        cx.emit(AcpThreadEvent::EntryUpdated(ix));
+                        updated_indices.push(ix);
                     }
                 }
                 _ => {}
             }
         }
+        for index in updated_indices {
+            self.entry_updated(index, cx);
+        }
     }
 
     fn cancel_outstanding_elicitations(&mut self, cx: &mut Context<Self>) {
+        let mut updated_indices = Vec::new();
         for ix in 0..self.entries.len() {
             let Some(AgentThreadEntry::Elicitation(elicitation_id)) = self.entries.get(ix) else {
                 continue;
@@ -4190,8 +4596,11 @@ impl AcpThread {
                 .elicitations
                 .cancel_elicitation_by_id(elicitation_id, true)
             {
-                cx.emit(AcpThreadEvent::EntryUpdated(ix));
+                updated_indices.push(ix);
             }
+        }
+        for index in updated_indices {
+            self.entry_updated(index, cx);
         }
     }
 
@@ -4255,7 +4664,7 @@ impl AcpThread {
 
                     let range = ix..this.entries.len();
                     this.entries.truncate(ix);
-                    cx.emit(AcpThreadEvent::EntriesRemoved(range));
+                    this.entries_removed(range, cx);
 
                     // Kill and remove the terminals
                     for terminal_id in terminals_to_remove {
@@ -4338,7 +4747,7 @@ impl AcpThread {
                     && !checkpoint.show
                 {
                     checkpoint.show = true;
-                    cx.emit(AcpThreadEvent::EntryUpdated(ix));
+                    this.entry_updated(ix, cx);
                 }
             })?;
 
@@ -4385,7 +4794,7 @@ impl AcpThread {
                 if let Some((ix, message)) = this.user_message_mut(&client_id) {
                     if let Some(checkpoint) = message.checkpoint.as_mut() {
                         checkpoint.show = !equal;
-                        cx.emit(AcpThreadEvent::EntryUpdated(ix));
+                        this.entry_updated(ix, cx);
                     }
                 }
             })?;
@@ -4809,6 +5218,12 @@ impl AcpThread {
     }
 
     pub fn emit_load_error(&mut self, error: LoadError, cx: &mut Context<Self>) {
+        self.push_projection_marker(
+            ThreadEventKind::Error,
+            ThreadEventOwner::System,
+            ThreadEventStatus::Failed,
+            cx,
+        );
         cx.emit(AcpThreadEvent::LoadError(error));
     }
 
@@ -4837,6 +5252,24 @@ impl AcpThread {
                 cx,
             )
         });
+        self._terminal_projection_subscriptions
+            .push(cx.observe(&entity, |this, terminal, cx| {
+                let terminal_id = terminal.read(cx).id().clone();
+                let updated_indices = this
+                    .entries
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, entry)| {
+                        entry
+                            .terminals()
+                            .any(|terminal| terminal.read(cx).id() == &terminal_id)
+                            .then_some(index)
+                    })
+                    .collect::<Vec<_>>();
+                for index in updated_indices {
+                    this.entry_updated(index, cx);
+                }
+            }));
         self.terminals.insert(terminal_id.clone(), entity.clone());
         entity
     }
@@ -7794,6 +8227,650 @@ mod tests {
         })
         .await
         .unwrap()
+    }
+
+    #[gpui::test(iterations = 8)]
+    async fn test_thread_projection_identity_survives_updates_and_truncation(
+        cx: &mut TestAppContext,
+    ) {
+        init_test(cx);
+        let thread = new_test_thread(cx).await;
+
+        thread.update(cx, |thread, cx| {
+            thread.push_user_content_block(None, "first".into(), cx);
+        });
+        let first = thread.read_with(cx, |thread, cx| thread.projection(cx));
+        let first_id = first.entries[0].id;
+        let first_item_revision = first.entries[0].revision;
+
+        thread.update(cx, |thread, cx| {
+            thread.push_user_content_block(None, " chunk".into(), cx);
+        });
+        let updated = thread.read_with(cx, |thread, cx| thread.projection(cx));
+        assert_eq!(updated.entries.len(), 1);
+        assert_eq!(updated.entries[0].id, first_id);
+        assert!(updated.entries[0].revision > first_item_revision);
+        assert!(updated.revision > first.revision);
+
+        thread.update(cx, |thread, cx| {
+            thread.push_assistant_content_block("reply".into(), false, cx);
+            thread.push_projection_marker(
+                ThreadEventKind::Retry,
+                ThreadEventOwner::System,
+                ThreadEventStatus::InProgress,
+                cx,
+            );
+            thread.push_user_content_block(None, "later".into(), cx);
+        });
+        let before_truncate = thread.read_with(cx, |thread, cx| thread.projection(cx));
+        let removed_id = before_truncate
+            .entries
+            .iter()
+            .find(|entry| entry.entry_index == Some(2))
+            .map(|entry| entry.id)
+            .expect("later user entry should be projected");
+
+        thread.update(cx, |thread, cx| {
+            let range = 1..thread.entries.len();
+            thread.entries.truncate(1);
+            thread.entries_removed(range, cx);
+            thread.push_assistant_content_block("replacement".into(), false, cx);
+        });
+        let after_truncate = thread.read_with(cx, |thread, cx| thread.projection(cx));
+        assert_eq!(after_truncate.entries[0].id, first_id);
+        assert!(after_truncate.entries[1].id > removed_id);
+        assert!(
+            !after_truncate
+                .entries
+                .iter()
+                .any(|entry| entry.kind == ThreadEventKind::Retry)
+        );
+        assert!(after_truncate.revision > before_truncate.revision);
+        assert_eq!(
+            after_truncate.entries[1].action_targets,
+            vec![ThreadActionTarget::Entry(after_truncate.entries[1].id)]
+        );
+    }
+
+    #[gpui::test(iterations = 8)]
+    async fn test_thread_projection_projects_typed_tool_artifacts_without_duplicates(
+        cx: &mut TestAppContext,
+    ) {
+        init_test(cx);
+        let thread = new_test_thread(cx).await;
+        let tool_call_id = acp::ToolCallId::new("projection-tool");
+        let terminal_id = acp::TerminalId::new("projection-terminal");
+        let mock_terminal = cx.new(|cx| {
+            let builder = ::terminal::TerminalBuilder::new_display_only(
+                ::terminal::terminal_settings::CursorShape::default(),
+                ::terminal::terminal_settings::AlternateScroll::On,
+                None,
+                0,
+                cx.background_executor(),
+                PathStyle::local(),
+            );
+            builder.subscribe(cx)
+        });
+
+        thread.update(cx, |thread, cx| {
+            thread.on_terminal_provider_event(
+                TerminalProviderEvent::Created {
+                    terminal_id: terminal_id.clone(),
+                    label: "printf artifact".to_string(),
+                    cwd: Some(PathBuf::from("/test")),
+                    output_byte_limit: None,
+                    terminal: mock_terminal,
+                },
+                cx,
+            );
+            thread.on_terminal_provider_event(
+                TerminalProviderEvent::Output {
+                    terminal_id: terminal_id.clone(),
+                    data: b"artifact output\n".to_vec(),
+                },
+                cx,
+            );
+            thread.on_terminal_provider_event(
+                TerminalProviderEvent::Exit {
+                    terminal_id: terminal_id.clone(),
+                    status: acp::TerminalExitStatus::new().exit_code(0),
+                },
+                cx,
+            );
+
+            let resource = acp::ToolCallContent::Content(acp::Content::new(
+                acp::ContentBlock::Resource(acp::EmbeddedResource::new(
+                    acp::EmbeddedResourceResource::TextResourceContents(
+                        acp::TextResourceContents::new("body", "tool://resource")
+                            .mime_type("text/plain".to_string()),
+                    ),
+                )),
+            ));
+            let link =
+                acp::ToolCallContent::Content(acp::Content::new(acp::ContentBlock::ResourceLink(
+                    acp::ResourceLink::new("docs", "https://example.com/docs")
+                        .mime_type("text/html".to_string()),
+                )));
+            thread
+                .handle_session_update(
+                    acp::SessionUpdate::ToolCall(
+                        acp::ToolCall::new(tool_call_id.clone(), "typed artifacts")
+                            .kind(acp::ToolKind::Edit)
+                            .status(acp::ToolCallStatus::InProgress)
+                            .locations(vec![
+                                acp::ToolCallLocation::new("/test/file.rs").line(7),
+                                acp::ToolCallLocation::new("/test/file.rs").line(7),
+                            ])
+                            .content(vec![
+                                acp::ToolCallContent::Diff(acp::Diff::new(
+                                    "/test/file.rs",
+                                    "fn changed() {}",
+                                )),
+                                resource,
+                                link,
+                                acp::ToolCallContent::Terminal(acp::Terminal::new(
+                                    terminal_id.clone(),
+                                )),
+                            ]),
+                    ),
+                    cx,
+                )
+                .expect("typed tool call should project");
+        });
+
+        let initial = thread.read_with(cx, |thread, cx| thread.projection(cx));
+        let event = initial
+            .entries
+            .iter()
+            .find(|entry| entry.parent_id.is_none() && entry.kind == ThreadEventKind::ToolCall)
+            .expect("expected one projected tool event");
+        assert_eq!(event.kind, ThreadEventKind::ToolCall);
+        assert_eq!(event.owner, ThreadEventOwner::Tool);
+        assert_eq!(event.status, ThreadEventStatus::InProgress);
+        assert_eq!(
+            event
+                .artifacts
+                .iter()
+                .filter(|artifact| matches!(artifact.artifact, ThreadArtifact::File { .. }))
+                .count(),
+            1
+        );
+        assert!(event.artifacts.iter().any(|artifact| matches!(
+            &artifact.artifact,
+            ThreadArtifact::Diff { path: Some(path), .. } if path == Path::new("/test/file.rs")
+        )));
+        assert!(event.artifacts.iter().any(|artifact| matches!(
+            &artifact.artifact,
+            ThreadArtifact::Resource { uri, .. } if uri.as_ref() == "tool://resource"
+        )));
+        assert!(event.artifacts.iter().any(|artifact| matches!(
+            &artifact.artifact,
+            ThreadArtifact::Link { uri, .. } if uri.as_ref() == "https://example.com/docs"
+        )));
+        assert!(event.artifacts.iter().any(|artifact| matches!(
+            &artifact.artifact,
+            ThreadArtifact::TerminalResult { terminal_id, .. }
+                if terminal_id.as_ref() == "projection-terminal"
+        )));
+
+        let stable_id = event.id;
+        let initial_item_revision = event.revision;
+        let artifact_ids = event
+            .artifacts
+            .iter()
+            .map(|artifact| artifact.id)
+            .collect::<Vec<_>>();
+        thread
+            .update(cx, |thread, cx| {
+                thread.handle_session_update(
+                    acp::SessionUpdate::ToolCallUpdate(acp::ToolCallUpdate::new(
+                        tool_call_id,
+                        acp::ToolCallUpdateFields::new().status(acp::ToolCallStatus::Completed),
+                    )),
+                    cx,
+                )
+            })
+            .expect("tool update should project");
+        thread.update(cx, |thread, cx| {
+            let language_registry = thread.project.read(cx).languages().clone();
+            let path_style = thread.project.read(cx).path_style(cx);
+            let Some((index, AgentThreadEntry::ToolCall(tool_call))) = thread
+                .entries
+                .iter_mut()
+                .enumerate()
+                .find(|(_, entry)| matches!(entry, AgentThreadEntry::ToolCall(_)))
+            else {
+                panic!("tool entry should exist");
+            };
+            tool_call.content = vec![ToolCallContent::ContentBlock(
+                ContentBlock::new_tool_call_content(
+                    acp::ContentBlock::Resource(acp::EmbeddedResource::new(
+                        acp::EmbeddedResourceResource::TextResourceContents(
+                            acp::TextResourceContents::new("updated body", "tool://resource")
+                                .mime_type("text/markdown".to_string()),
+                        ),
+                    )),
+                    &language_registry,
+                    path_style,
+                    cx,
+                ),
+            )];
+            thread.entry_updated(index, cx);
+        });
+        let completed = thread.read_with(cx, |thread, cx| thread.projection(cx));
+        assert_eq!(completed.entries[0].id, stable_id);
+        assert!(completed.entries[0].revision > initial_item_revision);
+        assert_eq!(completed.entries[0].status, ThreadEventStatus::Completed);
+        assert_eq!(
+            completed.entries[0]
+                .artifacts
+                .iter()
+                .map(|artifact| artifact.id)
+                .collect::<Vec<_>>(),
+            artifact_ids
+        );
+        assert!(completed.entries[0].artifacts.iter().all(|artifact| {
+            artifact.status == ThreadEventStatus::Completed
+                && !artifact.history.is_empty()
+                && artifact
+                    .history
+                    .first()
+                    .is_some_and(|revision| revision.status == ThreadEventStatus::InProgress)
+        }));
+        let updated_resource = completed.entries[0]
+            .artifacts
+            .iter()
+            .find(|artifact| {
+                matches!(
+                    &artifact.artifact,
+                    ThreadArtifact::Resource { uri, .. } if uri.as_ref() == "tool://resource"
+                )
+            })
+            .expect("updated resource should retain its logical artifact");
+        assert!(
+            matches!(
+                &updated_resource.artifact,
+                ThreadArtifact::Resource { mime_type: Some(mime_type), .. }
+                    if mime_type.as_ref() == "text/markdown"
+            ),
+            "{updated_resource:?}"
+        );
+        assert!(matches!(
+            updated_resource
+                .history
+                .first()
+                .map(|revision| &revision.artifact),
+            Some(ThreadArtifact::Resource { mime_type: Some(mime_type), .. })
+                if mime_type.as_ref() == "text/plain"
+        ));
+        let stable_resource_id = updated_resource.id;
+        thread
+            .update(cx, |thread, cx| {
+                thread.handle_session_update(
+                    acp::SessionUpdate::ToolCall(
+                        acp::ToolCall::new("projection-tool-later", "same logical resource")
+                            .kind(acp::ToolKind::Fetch)
+                            .status(acp::ToolCallStatus::Completed)
+                            .content(vec![
+                                acp::ToolCallContent::Content(acp::Content::new(
+                                    acp::ContentBlock::Resource(acp::EmbeddedResource::new(
+                                        acp::EmbeddedResourceResource::TextResourceContents(
+                                            acp::TextResourceContents::new(
+                                                "latest body",
+                                                "tool://resource",
+                                            )
+                                            .mime_type("application/json".to_string()),
+                                        ),
+                                    )),
+                                )),
+                                acp::ToolCallContent::Content(acp::Content::new(
+                                    acp::ContentBlock::ResourceLink(acp::ResourceLink::new(
+                                        "later",
+                                        "https://later.example/artifact",
+                                    )),
+                                )),
+                            ]),
+                    ),
+                    cx,
+                )
+            })
+            .expect("later source event should project");
+        let cross_event = thread.read_with(cx, |thread, cx| thread.projection(cx));
+        let logical_resources = cross_event
+            .artifacts
+            .iter()
+            .filter(|artifact| {
+                matches!(
+                    &artifact.artifact,
+                    ThreadArtifact::Resource { uri, .. } if uri.as_ref() == "tool://resource"
+                )
+            })
+            .collect::<Vec<_>>();
+        let [logical_resource] = logical_resources.as_slice() else {
+            panic!("same URI should produce one authority-owned artifact");
+        };
+        assert_eq!(logical_resource.id, stable_resource_id);
+        assert_eq!(logical_resource.source_events.len(), 2);
+        assert!(logical_resource.history.len() >= 2);
+        assert!(matches!(
+            &logical_resource.artifact,
+            ThreadArtifact::Resource { mime_type: Some(mime_type), .. }
+                if mime_type.as_ref() == "application/json"
+        ));
+        let first_event = cross_event
+            .entries
+            .iter()
+            .find(|event| event.id == stable_id)
+            .expect("first source event should remain projected");
+        assert!(!first_event.action_targets.iter().any(|target| matches!(
+            target,
+            ThreadActionTarget::Uri(uri) if uri.as_ref() == "https://later.example/artifact"
+        )));
+    }
+
+    #[gpui::test(iterations = 8)]
+    async fn test_thread_projection_exposes_typed_outline_semantics(cx: &mut TestAppContext) {
+        init_test(cx);
+        let thread = new_test_thread(cx).await;
+
+        thread.update(cx, |thread, cx| {
+            thread.push_assistant_content_block("reasoning".into(), true, cx);
+            thread.update_plan(
+                acp::Plan::new(vec![acp::PlanEntry::new(
+                    "verify projection",
+                    acp::PlanEntryPriority::High,
+                    acp::PlanEntryStatus::InProgress,
+                )]),
+                cx,
+            );
+            thread
+                .handle_session_update(
+                    acp::SessionUpdate::ToolCall(
+                        acp::ToolCall::new("failed-tool", "failed tool")
+                            .kind(acp::ToolKind::Fetch)
+                            .status(acp::ToolCallStatus::Failed)
+                            .raw_output(serde_json::json!({"error": "typed failure"})),
+                    ),
+                    cx,
+                )
+                .expect("failed tool should project");
+            thread.push_entry(
+                AgentThreadEntry::Elicitation(ElicitationEntryId("approval".into())),
+                cx,
+            );
+            thread.emit_load_error(LoadError::SessionGone, cx);
+            thread.push_projection_marker(
+                ThreadEventKind::Cancellation,
+                ThreadEventOwner::Agent,
+                ThreadEventStatus::Canceled,
+                cx,
+            );
+        });
+
+        let projection = thread.read_with(cx, |thread, cx| thread.projection(cx));
+        assert!(!projection.thread_id.is_empty());
+        assert_eq!(projection.work_dirs.as_ref(), &[PathBuf::from("/test")]);
+        assert!(projection.entries.iter().all(|entry| {
+            entry.parent_id.is_none_or(|parent_id| {
+                projection
+                    .entries
+                    .iter()
+                    .any(|parent| parent.id == parent_id)
+            })
+        }));
+        assert!(projection.entries.iter().any(|entry| {
+            entry.kind == ThreadEventKind::AssistantMessage
+                && entry.related_kinds.contains(&ThreadEventKind::Reasoning)
+        }));
+        assert!(projection.entries.iter().any(|entry| {
+            entry.kind == ThreadEventKind::ToolCall
+                && entry.related_kinds.contains(&ThreadEventKind::ToolResult)
+                && entry.related_kinds.contains(&ThreadEventKind::Error)
+                && entry.status == ThreadEventStatus::Failed
+        }));
+        assert!(projection.entries.iter().any(|entry| {
+            entry.kind == ThreadEventKind::Elicitation
+                && entry.related_kinds.contains(&ThreadEventKind::Approval)
+        }));
+        for (kind, status) in [
+            (ThreadEventKind::PlanUpdate, ThreadEventStatus::InProgress),
+            (ThreadEventKind::Error, ThreadEventStatus::Failed),
+            (ThreadEventKind::Cancellation, ThreadEventStatus::Canceled),
+        ] {
+            assert!(projection.entries.iter().any(|entry| {
+                entry.kind == kind && entry.status == status && entry.entry_index.is_none()
+            }));
+        }
+    }
+
+    #[gpui::test(iterations = 8)]
+    async fn test_thread_projection_identical_replay_and_canonical_reorder_are_stable(
+        cx: &mut TestAppContext,
+    ) {
+        init_test(cx);
+        let thread = new_test_thread(cx).await;
+        let tool_call_id = acp::ToolCallId::new("stable-replay-tool");
+        let first_buffer = cx.new(|cx| Buffer::local("first", cx));
+        let second_buffer = cx.new(|cx| Buffer::local("second", cx));
+        let first_diff = cx.new(|cx| Diff::new(first_buffer, cx));
+        let second_diff = cx.new(|cx| Diff::new(second_buffer, cx));
+
+        thread
+            .update(cx, |thread, cx| {
+                thread.handle_session_update(
+                    acp::SessionUpdate::ToolCall(
+                        acp::ToolCall::new(tool_call_id.clone(), "stable replay")
+                            .kind(acp::ToolKind::Edit)
+                            .status(acp::ToolCallStatus::InProgress)
+                            .locations(vec![
+                                acp::ToolCallLocation::new("/test/a.rs").line(7),
+                                acp::ToolCallLocation::new("/test/a.rs").line(11),
+                                acp::ToolCallLocation::new("/test/b.rs").line(3),
+                            ]),
+                    ),
+                    cx,
+                )
+            })
+            .expect("initial tool call should project");
+
+        let initial = thread.read_with(cx, |thread, cx| thread.projection(cx));
+        assert_eq!(
+            initial
+                .artifacts
+                .iter()
+                .filter(|artifact| matches!(artifact.artifact, ThreadArtifact::File { .. }))
+                .count(),
+            2,
+            "line changes must not split a file's canonical identity"
+        );
+
+        thread
+            .update(cx, |thread, cx| {
+                thread.handle_session_update(
+                    acp::SessionUpdate::ToolCallUpdate(acp::ToolCallUpdate::new(
+                        tool_call_id.clone(),
+                        acp::ToolCallUpdateFields::new().status(acp::ToolCallStatus::InProgress),
+                    )),
+                    cx,
+                )
+            })
+            .expect("identical replay should be accepted");
+        let replayed = thread.read_with(cx, |thread, cx| thread.projection(cx));
+        assert_eq!(
+            replayed, initial,
+            "identical replay must be a projection no-op"
+        );
+
+        thread.update(cx, |thread, cx| {
+            let Some((index, AgentThreadEntry::ToolCall(tool_call))) = thread
+                .entries
+                .iter_mut()
+                .enumerate()
+                .find(|(_, entry)| matches!(entry, AgentThreadEntry::ToolCall(_)))
+            else {
+                panic!("tool entry should exist");
+            };
+            tool_call.content = vec![
+                ToolCallContent::Diff(first_diff.clone()),
+                ToolCallContent::Diff(second_diff.clone()),
+            ];
+            thread.entry_updated(index, cx);
+        });
+        let with_pathless_diffs = thread.read_with(cx, |thread, cx| thread.projection(cx));
+        let pathless_diff_ids = with_pathless_diffs
+            .artifacts
+            .iter()
+            .filter(|artifact| {
+                artifact.is_current
+                    && matches!(artifact.artifact, ThreadArtifact::Diff { path: None, .. })
+            })
+            .map(|artifact| artifact.id)
+            .collect::<Vec<_>>();
+        assert_eq!(pathless_diff_ids.len(), 2);
+
+        thread.update(cx, |thread, cx| {
+            let Some((index, AgentThreadEntry::ToolCall(tool_call))) = thread
+                .entries
+                .iter_mut()
+                .enumerate()
+                .find(|(_, entry)| matches!(entry, AgentThreadEntry::ToolCall(_)))
+            else {
+                panic!("tool entry should exist");
+            };
+            tool_call.content.reverse();
+            tool_call.locations.reverse();
+            thread.entry_updated(index, cx);
+        });
+        let reordered = thread.read_with(cx, |thread, cx| thread.projection(cx));
+        assert_eq!(
+            reordered
+                .artifacts
+                .iter()
+                .filter(|artifact| matches!(artifact.artifact, ThreadArtifact::File { .. }))
+                .map(|artifact| artifact.id)
+                .collect::<Vec<_>>(),
+            initial
+                .artifacts
+                .iter()
+                .filter(|artifact| matches!(artifact.artifact, ThreadArtifact::File { .. }))
+                .map(|artifact| artifact.id)
+                .collect::<Vec<_>>(),
+            "reordering canonical artifacts must not relabel them"
+        );
+        assert_eq!(
+            reordered
+                .artifacts
+                .iter()
+                .filter(|artifact| {
+                    artifact.is_current
+                        && matches!(artifact.artifact, ThreadArtifact::Diff { path: None, .. })
+                })
+                .map(|artifact| artifact.id)
+                .collect::<Vec<_>>(),
+            pathless_diff_ids,
+            "pathless diff identities must not depend on list position"
+        );
+    }
+
+    #[gpui::test(iterations = 8)]
+    async fn test_thread_projection_retains_ownership_and_orders_navigable_children(
+        cx: &mut TestAppContext,
+    ) {
+        init_test(cx);
+        let thread = new_test_thread(cx).await;
+
+        thread
+            .update(cx, |thread, cx| {
+                thread.handle_session_update(
+                    acp::SessionUpdate::ToolCall(
+                        acp::ToolCall::new("owned-tool", "owned tool")
+                            .kind(acp::ToolKind::Fetch)
+                            .status(acp::ToolCallStatus::Failed)
+                            .locations(vec![acp::ToolCallLocation::new("/test/shared.rs").line(1)])
+                            .raw_output(serde_json::json!({"error": "failed"})),
+                    ),
+                    cx,
+                )
+            })
+            .expect("owned tool should project");
+
+        let initial = thread.read_with(cx, |thread, cx| thread.projection(cx));
+        let parent_index = initial
+            .entries
+            .iter()
+            .position(|entry| entry.parent_id.is_none() && entry.kind == ThreadEventKind::ToolCall)
+            .expect("tool parent should exist");
+        let parent = &initial.entries[parent_index];
+        let children = &initial.entries[parent_index + 1..parent_index + 3];
+        assert_eq!(
+            children.iter().map(|child| child.kind).collect::<Vec<_>>(),
+            vec![ThreadEventKind::ToolResult, ThreadEventKind::Error]
+        );
+        assert!(children.iter().all(|child| {
+            child.parent_id == Some(parent.id)
+                && child.action_targets == vec![ThreadActionTarget::Entry(parent.id)]
+        }));
+        let child_ids = children.iter().map(|child| child.id).collect::<Vec<_>>();
+        let original_binding = parent.binding.clone();
+
+        thread.update(cx, |thread, cx| {
+            thread.set_work_dirs(PathList::new(&[Path::new(path!("/test"))]), cx);
+        });
+        let identical_binding = thread.read_with(cx, |thread, cx| thread.projection(cx));
+        assert_eq!(identical_binding, initial);
+
+        thread.update(cx, |thread, cx| {
+            thread.set_work_dirs(PathList::new(&[Path::new(path!("/other"))]), cx);
+            thread
+                .handle_session_update(
+                    acp::SessionUpdate::ToolCall(
+                        acp::ToolCall::new("other-owned-tool", "other owned tool")
+                            .kind(acp::ToolKind::Fetch)
+                            .status(acp::ToolCallStatus::Completed)
+                            .locations(vec![acp::ToolCallLocation::new("/test/shared.rs").line(9)]),
+                    ),
+                    cx,
+                )
+                .expect("second owned tool should project");
+        });
+
+        let updated = thread.read_with(cx, |thread, cx| thread.projection(cx));
+        assert_eq!(
+            updated.binding.work_dirs.as_ref(),
+            &[PathBuf::from("/other")]
+        );
+        let retained_parent = updated
+            .entries
+            .iter()
+            .find(|entry| entry.id == parent.id)
+            .expect("original parent should be retained");
+        assert_eq!(retained_parent.binding, original_binding);
+        assert_eq!(
+            retained_parent.binding.work_dirs.as_ref(),
+            &[PathBuf::from("/test")]
+        );
+        assert_eq!(
+            updated
+                .entries
+                .iter()
+                .filter(|entry| entry.parent_id == Some(parent.id))
+                .map(|entry| entry.id)
+                .collect::<Vec<_>>(),
+            child_ids
+        );
+        assert_eq!(
+            updated
+                .artifacts
+                .iter()
+                .filter(|artifact| matches!(artifact.artifact, ThreadArtifact::File { .. }))
+                .count(),
+            2,
+            "the same path in a different worktree must remain separately owned"
+        );
+        assert!(updated.artifacts.iter().all(|artifact| {
+            artifact.binding.work_dirs.as_ref() == [PathBuf::from("/test")]
+                || artifact.binding.work_dirs.as_ref() == [PathBuf::from("/other")]
+        }));
     }
 
     fn only_thread_elicitation(thread: &AcpThread) -> (ElicitationEntryId, &Elicitation) {

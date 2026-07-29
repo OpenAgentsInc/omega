@@ -433,6 +433,7 @@ impl Conversation {
                     | AcpThreadEvent::ConfigOptionsUpdated(_)
                     | AcpThreadEvent::WorkingDirectoriesUpdated
                     | AcpThreadEvent::PlanUpdated(_)
+                    | AcpThreadEvent::ProjectionUpdated(_)
                     | AcpThreadEvent::PromptUpdated => {}
                 }
             }
@@ -688,6 +689,7 @@ fn affects_thread_metadata(event: &AcpThreadEvent) -> bool {
         | AcpThreadEvent::ConfigOptionsUpdated(_)
         | AcpThreadEvent::SubagentSpawned(_)
         | AcpThreadEvent::PlanUpdated(_)
+        | AcpThreadEvent::ProjectionUpdated(_)
         | AcpThreadEvent::PromptUpdated => false,
     }
 }
@@ -2346,22 +2348,23 @@ impl ConversationView {
                 }
             }
             AcpThreadEvent::NewEntry => {
-                let len = thread.read(cx).entries().len();
-                let index = len - 1;
                 if let Some(active) = self.thread_view(&session_id) {
                     let entry_view_state = active.read(cx).entry_view_state.clone();
                     let list_state = active.read(cx).list_state.clone();
-                    entry_view_state.update(cx, |view_state, cx| {
-                        view_state.sync_entry(index, thread, window, cx);
+                    let missing_range = entry_view_state.update(cx, |view_state, cx| {
+                        let missing_range = view_state.sync_missing_entries(thread, window, cx);
                         list_state.splice_focusable(
-                            index..index,
-                            [view_state
-                                .entry(index)
-                                .and_then(|entry| entry.focus_handle(cx))],
+                            missing_range.start..missing_range.start,
+                            missing_range
+                                .clone()
+                                .map(|index| view_state.entry(index)?.focus_handle(cx)),
                         );
+                        missing_range
                     });
                     active.update(cx, |active, cx| {
-                        active.sync_elicitation_state_for_entry(index, window, cx);
+                        for index in missing_range {
+                            active.sync_elicitation_state_for_entry(index, window, cx);
+                        }
                         active.sync_editor_mode(cx);
                         active.sync_generating_indicator(cx);
                     });
@@ -2638,6 +2641,7 @@ impl ConversationView {
             AcpThreadEvent::PlanUpdated(_) => {
                 cx.notify();
             }
+            AcpThreadEvent::ProjectionUpdated(_) => {}
             AcpThreadEvent::PromptUpdated => {
                 if !is_subagent && thread.read(cx).is_draft_thread() {
                     self.schedule_draft_prompt_persist(cx);

@@ -49,6 +49,7 @@ use crate::terminal_thread_metadata_store::{
 use crate::thread_metadata_store::{
     ThreadId, ThreadMetadataStore, ThreadMetadataStoreEvent, WorktreePaths,
 };
+use crate::thread_outline::OutlineActionOutcome;
 use crate::{
     Agent, AgentInitialContent, AgentThreadSource, ExternalSourcePrompt, NewExternalAgentThread,
     NewNativeAgentThreadFromSummary,
@@ -108,14 +109,14 @@ use search::{BufferSearchBar, buffer_search::Deploy as DeployBufferSearch};
 use sha2::{Digest as _, Sha256};
 use terminal::{Event as TerminalEvent, terminal_settings::TerminalSettings};
 use terminal_view::{TerminalView, terminal_panel::TerminalPanel};
-use text::OffsetRangeExt;
+use text::{OffsetRangeExt, Point};
 use theme_settings::ThemeSettings;
 use ui::{
     ContextMenu, ContextMenuEntry, GradientFade, IconButton, KeyBinding, ListItem, ListItemSpacing,
     PopoverMenu, PopoverMenuHandle, ProjectEmptyState, Tab, Tooltip, prelude::*,
     utils::WithRemSize,
 };
-use util::ResultExt as _;
+use util::{ResultExt as _, paths::PathStyle, rel_path::RelPath};
 use workspace::{
     CollaboratorId, DraggedSelection, DraggedTab, MultiWorkspace, PathList, SerializedPathList,
     SplitDirection, ToggleWorkspaceSidebar, ToggleZoom, ToolbarItemView, Workspace, WorkspaceId,
@@ -1423,6 +1424,9 @@ pub struct AgentPanel {
     /// this only lets the router know whether an engine-lane pin is honourable
     /// before it decides.
     _engine_capacity_poll: Option<Task<()>>,
+    thread_outline: Entity<crate::thread_outline::ThreadOutline>,
+    #[cfg(any(test, feature = "test-support"))]
+    thread_outline_navigation_target: Option<(acp_thread::ThreadEntryId, usize)>,
     workbench_shell: workbench_shell::WorkbenchShell,
     workbench_shell_enabled: bool,
     workbench_files_panel: Option<Entity<ProjectPanel>>,
@@ -1883,6 +1887,55 @@ impl AgentPanel {
         .detach();
 
         let workbench_shell = workbench_shell::WorkbenchShell::new(cx);
+        let thread_outline = cx.new(crate::thread_outline::ThreadOutline::new);
+        {
+            let panel = cx.entity().downgrade();
+            thread_outline.update(cx, |outline, _cx| {
+                outline.set_navigation_handler(Rc::new(move |item, window, cx| {
+                    panel
+                        .update(cx, |panel, cx| {
+                            panel.navigate_to_outline_entry(&item, window, cx)
+                        })
+                        .unwrap_or(false)
+                }));
+            });
+        }
+        {
+            let panel = cx.entity().downgrade();
+            thread_outline.update(cx, |outline, _cx| {
+                outline.set_artifact_action_handler(Rc::new(move |item, window, cx| {
+                    panel
+                        .update(cx, |panel, cx| {
+                            panel.activate_outline_artifact(item, window, cx)
+                        })
+                        .unwrap_or_else(|_| {
+                            OutlineActionOutcome::Unavailable(
+                                "The artifact panel is no longer available".into(),
+                            )
+                        })
+                }));
+            });
+        }
+        {
+            let panel = cx.entity().downgrade();
+            thread_outline.update(cx, |outline, _cx| {
+                outline.set_artifact_source_navigation_handler(Rc::new(
+                    move |item, source_event, entry_index, window, cx| {
+                        panel
+                            .update(cx, |panel, cx| {
+                                panel.navigate_to_outline_artifact_source(
+                                    item,
+                                    source_event,
+                                    entry_index,
+                                    window,
+                                    cx,
+                                )
+                            })
+                            .unwrap_or(false)
+                    },
+                ));
+            });
+        }
         let panel = Self {
             workspace_id,
             base_view,
@@ -1947,6 +2000,9 @@ impl AgentPanel {
             threads_sidebar_refusal: None,
             device_pairing_surface: None,
             _engine_capacity_poll: None,
+            thread_outline,
+            #[cfg(any(test, feature = "test-support"))]
+            thread_outline_navigation_target: None,
             workbench_shell,
             workbench_shell_enabled: omega_zero_base::is_active(),
             workbench_files_panel,
@@ -9135,6 +9191,7 @@ impl AgentPanel {
             log::warn!("failed to synchronize workbench shell: {error:#}");
             self.workbench_shell.record_error(error.to_string());
         }
+        self.synchronize_thread_outline(cx);
         if self.workbench_shell_enabled
             && self.workbench_git_panel_handed_off
             && let Some(panel) = self.workbench_git_panel.clone()
@@ -9499,6 +9556,42 @@ impl AgentPanel {
         if terminal_surface_was_focused && !terminal_is_visible {
             self.focus_thread_transcript(window, cx);
         }
+    }
+
+    fn synchronize_thread_outline(&mut self, cx: &mut Context<Self>) {
+        let Some(visible) = self.workbench_shell.projection().visible_projection() else {
+            self.thread_outline
+                .update(cx, |outline, cx| outline.unbind(cx));
+            return;
+        };
+        let Some(thread) = self.active_agent_thread(cx) else {
+            self.thread_outline
+                .update(cx, |outline, cx| outline.unbind(cx));
+            return;
+        };
+        let lifecycle = match self.workbench_shell.projection().connection {
+            omega_workbench_state::ConnectionPhase::Offline
+            | omega_workbench_state::ConnectionPhase::StaleProjection => {
+                crate::thread_outline::ThreadOutlineLifecycle::Stale
+            }
+            omega_workbench_state::ConnectionPhase::Reconnecting => {
+                crate::thread_outline::ThreadOutlineLifecycle::Reconnecting
+            }
+            omega_workbench_state::ConnectionPhase::Online => match thread.read(cx).status() {
+                ThreadStatus::Generating => {
+                    crate::thread_outline::ThreadOutlineLifecycle::Streaming
+                }
+                ThreadStatus::Idle => crate::thread_outline::ThreadOutlineLifecycle::Ready,
+            },
+        };
+        let binding = crate::thread_outline::ThreadOutlineBinding {
+            thread_id: visible.thread_id,
+            repository: visible.binding,
+            generation: visible.generation,
+        };
+        self.thread_outline.update(cx, |outline, cx| {
+            outline.bind_thread(binding, thread, lifecycle, cx);
+        });
     }
 
     fn active_workbench_worktree_id(&self, cx: &App) -> Option<WorktreeId> {
@@ -10776,6 +10869,343 @@ impl AgentPanel {
         navigated
     }
 
+    fn active_thread_for_outline_item(
+        &self,
+        item: &crate::thread_outline::OutlineItem,
+        cx: &App,
+    ) -> Option<Entity<AcpThread>> {
+        let Some(visible) = self.workbench_shell.projection().visible_projection() else {
+            return None;
+        };
+        if item.outline_binding.thread_id != visible.thread_id
+            || item.outline_binding.repository != visible.binding
+            || item.outline_binding.generation != visible.generation
+        {
+            return None;
+        }
+        if let Some(repository) = item.outline_binding.repository.as_ref() {
+            let selected = self.workbench_shell.identity()?.selected.as_ref()?;
+            if &selected.binding != repository
+                || !item
+                    .projection_binding
+                    .work_dirs
+                    .iter()
+                    .any(|work_dir| work_dir == &selected.worktree_abs_path)
+            {
+                return None;
+            }
+        }
+        let thread = self.active_agent_thread(cx)?;
+        (thread.read(cx).projection(cx).binding == item.projection_binding).then_some(thread)
+    }
+
+    fn navigate_to_outline_entry(
+        &mut self,
+        item: &crate::thread_outline::OutlineItem,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(entry_index) = item.entry_index else {
+            return false;
+        };
+        self.navigate_to_outline_projection_entry(
+            item,
+            item.entry_id,
+            Some(item.entry_revision),
+            entry_index,
+            window,
+            cx,
+        )
+    }
+
+    fn navigate_to_outline_projection_entry(
+        &mut self,
+        item: &crate::thread_outline::OutlineItem,
+        entry_id: acp_thread::ThreadEntryId,
+        entry_revision: Option<u64>,
+        entry_index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(thread) = self.active_thread_for_outline_item(item, cx) else {
+            return false;
+        };
+        let projection = thread.read(cx).projection(cx);
+        if !projection.entries.iter().any(|entry| {
+            entry.binding == projection.binding
+                && entry.id == entry_id
+                && entry_revision.is_none_or(|revision| entry.revision == revision)
+                && entry.entry_index == Some(entry_index)
+        }) {
+            return false;
+        }
+        let Some(thread_view) = self.active_thread_view(cx) else {
+            return false;
+        };
+        let navigated = thread_view.update(cx, |thread_view, cx| {
+            thread_view.scroll_to_entry_index(entry_index, cx)
+        });
+        if navigated {
+            #[cfg(any(test, feature = "test-support"))]
+            {
+                self.thread_outline_navigation_target = Some((entry_id, entry_index));
+            }
+            self.focus_thread_transcript(window, cx);
+        }
+        navigated
+    }
+
+    fn activate_outline_artifact(
+        &mut self,
+        item: crate::thread_outline::OutlineItem,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> OutlineActionOutcome {
+        let crate::thread_outline::OutlineItemId::Artifact(artifact_id) = &item.id else {
+            return OutlineActionOutcome::Unavailable("Select an artifact first".into());
+        };
+        let artifact_id = *artifact_id;
+        let Some(thread) = self.active_thread_for_outline_item(&item, cx) else {
+            return OutlineActionOutcome::Unavailable(
+                "The artifact no longer belongs to the active thread or worktree".into(),
+            );
+        };
+        let projection = thread.read(cx).projection(cx);
+        if projection.binding != item.projection_binding {
+            return OutlineActionOutcome::Unavailable(
+                "The artifact belongs to a different thread or worktree".into(),
+            );
+        }
+        let current_source_is_exact = projection.entries.iter().any(|entry| {
+            entry.binding == projection.binding
+                && entry.id == item.entry_id
+                && entry.revision == item.entry_revision
+                && entry.entry_index == item.entry_index
+        });
+        let current_artifact_is_exact = projection.artifacts.iter().any(|artifact| {
+            artifact.binding == projection.binding
+                && artifact.id == artifact_id
+                && Some(artifact.revision) == item.artifact_revision
+                && artifact.source_events == item.artifact_source_events
+                && artifact.source_events.contains(&item.entry_id)
+                && artifact.action_target == item.action
+        });
+        if !current_source_is_exact || !current_artifact_is_exact {
+            return OutlineActionOutcome::Unavailable(
+                "The artifact changed before it could be opened".into(),
+            );
+        }
+        let primary_outcome = item.action.as_ref().map_or_else(
+            || OutlineActionOutcome::Unavailable("No native artifact action is available".into()),
+            |target| self.try_activate_outline_target(target, &item, window, cx),
+        );
+        if primary_outcome.succeeded() {
+            return primary_outcome;
+        }
+        if self.navigate_to_outline_entry(&item, window, cx) {
+            OutlineActionOutcome::SourceFallback
+        } else {
+            primary_outcome
+        }
+    }
+
+    fn navigate_to_outline_artifact_source(
+        &mut self,
+        item: crate::thread_outline::OutlineItem,
+        source_event: acp_thread::ThreadEntryId,
+        entry_index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let crate::thread_outline::OutlineItemId::Artifact(artifact_id) = &item.id else {
+            return false;
+        };
+        let artifact_id = *artifact_id;
+        let Some(thread) = self.active_thread_for_outline_item(&item, cx) else {
+            return false;
+        };
+        let projection = thread.read(cx).projection(cx);
+        if projection.binding != item.projection_binding {
+            return false;
+        }
+        let source_is_exact = projection.entries.iter().any(|entry| {
+            entry.binding == projection.binding
+                && entry.id == source_event
+                && entry.entry_index == Some(entry_index)
+        });
+        let artifact_is_exact = projection.artifacts.iter().any(|artifact| {
+            artifact.binding == projection.binding
+                && artifact.id == artifact_id
+                && Some(artifact.revision) == item.artifact_revision
+                && artifact.source_events == item.artifact_source_events
+                && artifact.source_events.contains(&source_event)
+                && artifact.action_target == item.action
+        });
+        if !source_is_exact || !artifact_is_exact {
+            return false;
+        }
+        self.navigate_to_outline_projection_entry(
+            &item,
+            source_event,
+            None,
+            entry_index,
+            window,
+            cx,
+        )
+    }
+
+    fn try_activate_outline_target(
+        &mut self,
+        target: &acp_thread::ThreadActionTarget,
+        item: &crate::thread_outline::OutlineItem,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> OutlineActionOutcome {
+        match target {
+            acp_thread::ThreadActionTarget::Entry(entry_id) => {
+                let Some(thread) = self.active_agent_thread(cx) else {
+                    return OutlineActionOutcome::Unavailable(
+                        "The active thread is unavailable".into(),
+                    );
+                };
+                let projection = thread.read(cx).projection(cx);
+                let Some(entry) = projection
+                    .entries
+                    .iter()
+                    .find(|entry| entry.binding == projection.binding && entry.id == *entry_id)
+                else {
+                    return OutlineActionOutcome::Unavailable(
+                        "The source event is unavailable".into(),
+                    );
+                };
+                if entry.entry_index.is_some_and(|entry_index| {
+                    self.navigate_to_outline_projection_entry(
+                        item,
+                        entry.id,
+                        Some(entry.revision),
+                        entry_index,
+                        window,
+                        cx,
+                    )
+                }) {
+                    OutlineActionOutcome::Completed
+                } else {
+                    OutlineActionOutcome::Unavailable("The source event cannot be navigated".into())
+                }
+            }
+            acp_thread::ThreadActionTarget::File { path, line } => {
+                let Some(worktree_id) = self.active_workbench_worktree_id(cx) else {
+                    return OutlineActionOutcome::Unavailable(
+                        "The active worktree is unavailable".into(),
+                    );
+                };
+                let Some(worktree_abs_path) = self.active_workbench_worktree_abs_path() else {
+                    return OutlineActionOutcome::Unavailable(
+                        "The active worktree path is unavailable".into(),
+                    );
+                };
+                let relative_path = if path.is_absolute() {
+                    let Ok(path) = path.strip_prefix(&worktree_abs_path) else {
+                        return OutlineActionOutcome::Unavailable(
+                            "The file is outside the artifact's active worktree".into(),
+                        );
+                    };
+                    path
+                } else {
+                    path.as_path()
+                };
+                let Ok(relative_path) = RelPath::new(relative_path, PathStyle::local()) else {
+                    return OutlineActionOutcome::Unavailable(
+                        "The artifact path is invalid".into(),
+                    );
+                };
+                let project_path = ProjectPath {
+                    worktree_id,
+                    path: relative_path.into_owned().into(),
+                };
+                let Some(workspace) = self.workspace.upgrade() else {
+                    return OutlineActionOutcome::Unavailable(
+                        "The workspace is unavailable".into(),
+                    );
+                };
+                let expected_binding = item.outline_binding.clone();
+                let crate::thread_outline::OutlineItemId::Artifact(artifact_id) = &item.id else {
+                    return OutlineActionOutcome::Unavailable("Select an artifact first".into());
+                };
+                let artifact_id = *artifact_id;
+                let Some(artifact_revision) = item.artifact_revision else {
+                    return OutlineActionOutcome::Unavailable(
+                        "The artifact revision is unavailable".into(),
+                    );
+                };
+                let open_task = workspace.update(cx, |workspace, cx| {
+                    workspace.open_path(project_path, None, true, window, cx)
+                });
+                let outline = self.thread_outline.downgrade();
+                let line = *line;
+                window
+                    .spawn(cx, async move |cx| {
+                        let result = async {
+                            let opened_item = open_task.await?;
+                            if let Some(line) = line
+                                && let Some(editor) = opened_item.downcast::<Editor>()
+                            {
+                                editor.update_in(cx, |editor, window, cx| {
+                                    let snapshot = editor.buffer().read(cx).snapshot(cx);
+                                    let point =
+                                        snapshot.clip_point(Point::new(line, 0), text::Bias::Left);
+                                    editor.change_selections(
+                                        Default::default(),
+                                        window,
+                                        cx,
+                                        |selections| {
+                                            selections.select_ranges([point..point]);
+                                        },
+                                    );
+                                })?;
+                            }
+                            anyhow::Ok(())
+                        }
+                        .await;
+                        outline.update(cx, |outline, cx| {
+                            outline.report_artifact_action_result(
+                                &expected_binding,
+                                artifact_id,
+                                artifact_revision,
+                                result.map_err(|error| {
+                                    SharedString::from(format!(
+                                        "Failed to open artifact: {error:#}"
+                                    ))
+                                }),
+                                cx,
+                            );
+                        })?;
+                        anyhow::Ok(())
+                    })
+                    .detach_and_log_err(cx);
+                OutlineActionOutcome::Pending
+            }
+            acp_thread::ThreadActionTarget::Uri(uri) => {
+                let Ok(url) = url::Url::parse(&uri) else {
+                    return OutlineActionOutcome::Unavailable("The artifact URL is invalid".into());
+                };
+                if !matches!(url.scheme(), "https" | "http") {
+                    return OutlineActionOutcome::Unavailable(
+                        "Only HTTP and HTTPS artifact links can be opened".into(),
+                    );
+                }
+                cx.open_url(url.as_str());
+                OutlineActionOutcome::Completed
+            }
+            acp_thread::ThreadActionTarget::ToolCall(_) => OutlineActionOutcome::Unavailable(
+                "No native tool-call surface is available; opening the source event instead".into(),
+            ),
+            acp_thread::ThreadActionTarget::Terminal(_) => OutlineActionOutcome::Unavailable(
+                "No retained native terminal is available; opening the source event instead".into(),
+            ),
+        }
+    }
+
     fn select_work_surface(
         &mut self,
         surface: omega_workbench_state::WorkSurface,
@@ -10884,12 +11314,13 @@ impl AgentPanel {
                 cx,
             )
         };
-        self.persist_active_workbench_selection(cx);
         match selection {
             Ok(workbench_shell::SurfaceSelection::Collapsed) => {
+                self.persist_active_workbench_selection(cx);
                 self.focus_thread_transcript(window, cx);
             }
             Ok(workbench_shell::SurfaceSelection::Opened(host)) => {
+                self.persist_active_workbench_selection(cx);
                 if let Some(panel) = files_panel.as_ref()
                     && let Err(error) = self.detach_workspace_files_panel(panel, window, cx)
                 {
@@ -11626,12 +12057,21 @@ impl Render for AgentPanel {
                     VisibleSurface::Uninitialized => parent,
                     VisibleSurface::AgentThread(conversation_view) => parent
                         .child(
-                            v_flex()
-                                .id("omega-workbench-transcript")
-                                .debug_selector(|| "omega.workbench.transcript".into())
-                                .flex_1()
-                                .min_h_0()
-                                .child(conversation_view.clone()),
+                            h_flex()
+                                .size_full()
+                                .items_stretch()
+                                .child(
+                                    v_flex()
+                                        .id("omega-workbench-transcript")
+                                        .debug_selector(|| "omega.workbench.transcript".into())
+                                        .flex_1()
+                                        .min_w_0()
+                                        .min_h_0()
+                                        .child(conversation_view.clone()),
+                                )
+                                .when(self.workbench_shell_enabled, |this| {
+                                    this.child(self.thread_outline.clone())
+                                }),
                         )
                         .child(self.render_drag_target(cx)),
                     VisibleSurface::Terminal(terminal_view) => {
@@ -12190,6 +12630,20 @@ impl AgentPanel {
         cx: &App,
     ) -> Option<Entity<workbench_shell::NativePlanSurface>> {
         self.workbench_shell.plan_surface_for_active_binding(cx)
+    }
+
+    pub fn thread_outline_for_tests(&self) -> Entity<crate::thread_outline::ThreadOutline> {
+        self.thread_outline.clone()
+    }
+
+    pub fn synchronize_thread_outline_for_tests(&mut self, cx: &mut Context<Self>) {
+        self.synchronize_thread_outline(cx);
+    }
+
+    pub fn thread_outline_navigation_target_for_tests(
+        &self,
+    ) -> Option<(acp_thread::ThreadEntryId, usize)> {
+        self.thread_outline_navigation_target
     }
 
     pub fn workbench_plan_navigation_target_for_tests(&self) -> Option<usize> {
@@ -16827,8 +17281,6 @@ mod tests {
             thinking_effort: None,
             draft_prompt: None,
             ui_scroll_position: None,
-            sandboxed_terminal_temp_dir: None,
-            sandbox_grants: Default::default(),
             sandboxed_terminal_temp_dir: None,
             sandbox_grants: Default::default(),
             thread_log: Default::default(),
