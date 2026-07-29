@@ -268,37 +268,54 @@ fn parse_voice_session_response(
     session_ref: &str,
     expect_auth: bool,
 ) -> Result<IssuedSarahVoiceSession, HostedSessionBlocker> {
-    let response: VoiceSessionResponse =
-        serde_json::from_slice(body).map_err(|_| HostedSessionBlocker::ResponseInvalid)?;
+    let response: VoiceSessionResponse = serde_json::from_slice(body).map_err(|error| {
+        log::error!("Sarah voice session response could not be decoded: {error}");
+        HostedSessionBlocker::ResponseInvalid
+    })?;
     let now_ms = now_ms()?;
     let valid_audio = |audio: &VoiceAudioFormat| {
         audio.codec == "pcm_s16le" && audio.sample_rate_hz == 24_000 && audio.channels == 1
     };
     let gateway_url =
         Url::parse(&response.gateway_url).map_err(|_| HostedSessionBlocker::ResponseInvalid)?;
-    if response.schema != SARAH_VOICE_PROTOCOL
-        || response.model != SARAH_VOICE_MODEL
-        || response.client_profile != "omega_editor"
-        || response.session_ref != session_ref
-        || !valid_ref(&response.session_ref)
-        || response.ticket_expires_at_ms <= now_ms
+    let invalid_reason = if response.schema != SARAH_VOICE_PROTOCOL {
+        Some("schema")
+    } else if response.model != SARAH_VOICE_MODEL {
+        Some("model")
+    } else if response.client_profile != "omega_editor" {
+        Some("client profile")
+    } else if response.session_ref != session_ref || !valid_ref(&response.session_ref) {
+        Some("session reference")
+    } else if response.ticket_expires_at_ms <= now_ms
         || response.ticket_expires_at_ms - now_ms > 60_000
-        || response.session_expires_at_ms < response.ticket_expires_at_ms
+    {
+        Some("ticket lifetime")
+    } else if response.session_expires_at_ms < response.ticket_expires_at_ms
         || response.session_expires_at_ms - now_ms > 900_000
-        || response.max_duration_seconds < 60
-        || response.max_duration_seconds > 900
-        || !valid_base64url(&response.ticket)
-        || response.gateway_url.len() > MAX_GATEWAY_URL_BYTES
+    {
+        Some("session lifetime")
+    } else if response.max_duration_seconds < 60 || response.max_duration_seconds > 900 {
+        Some("maximum duration")
+    } else if !valid_base64url(&response.ticket) {
+        Some("ticket format")
+    } else if response.gateway_url.len() > MAX_GATEWAY_URL_BYTES
         || gateway_url.scheme() != "wss"
         || gateway_url.host_str() != Some("openagents.com")
         || !gateway_url.username().is_empty()
         || gateway_url.password().is_some()
         || gateway_url.query().is_some()
         || gateway_url.fragment().is_some()
-        || !valid_audio(&response.input_audio)
-        || !valid_audio(&response.output_audio)
-        || expect_auth != response.auth.is_some()
     {
+        Some("gateway URL")
+    } else if !valid_audio(&response.input_audio) || !valid_audio(&response.output_audio) {
+        Some("audio format")
+    } else if expect_auth != response.auth.is_some() {
+        Some("authentication shape")
+    } else {
+        None
+    };
+    if let Some(reason) = invalid_reason {
+        log::error!("Sarah voice session response failed validation: {reason}");
         return Err(HostedSessionBlocker::ResponseInvalid);
     }
     let access_token = if let Some(auth) = response.auth {
@@ -306,6 +323,7 @@ fn parse_voice_session_response(
             || auth.expires_in != 900
             || !valid_access_token(&auth.access_token)
         {
+            log::error!("Sarah voice session response failed validation: issued authentication");
             return Err(HostedSessionBlocker::ResponseInvalid);
         }
         Some(auth.access_token)
