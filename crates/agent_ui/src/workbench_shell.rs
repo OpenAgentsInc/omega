@@ -5,6 +5,7 @@ use std::{
 };
 
 use acp_thread::AcpThread;
+use agent_client_protocol::schema::v1 as acp;
 use anyhow::{Result, anyhow, bail};
 use git_ui::git_panel::{GitPanel, GitPanelRepositoryScope};
 use gpui::{
@@ -25,7 +26,10 @@ use search::{
     },
 };
 use terminal_view::terminal_panel::{TerminalPanel, TerminalPanelSnapshot};
-use ui::{Color, Icon, IconName, IconSize, Label, LabelSize, prelude::*, v_flex};
+use ui::{
+    Color, Icon, IconName, IconSize, Label, LabelSize, ListItem, ListItemSpacing, prelude::*,
+    v_flex,
+};
 use workspace::{Panel, ToolbarItemView, Workspace, item::Item};
 
 use crate::{
@@ -1160,6 +1164,238 @@ impl Render for NativeSearchSurface {
     }
 }
 
+/// Thread-local Plan dock. Reads typed ACP plan entries from the active
+/// agent thread — never markdown heuristics.
+pub struct NativePlanSurface {
+    focus_handle: FocusHandle,
+    thread: Option<Entity<AcpThread>>,
+    thread_id: String,
+    plan_revision: u64,
+    selected_step: Option<usize>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PlanSurfaceState {
+    Empty,
+    Active {
+        pending: u32,
+        completed: u32,
+        total: usize,
+    },
+    AllComplete {
+        total: usize,
+    },
+    Stale,
+}
+
+impl NativePlanSurface {
+    pub fn new(thread_id: impl Into<String>, cx: &mut Context<Self>) -> Self {
+        Self {
+            focus_handle: cx.focus_handle(),
+            thread: None,
+            thread_id: thread_id.into(),
+            plan_revision: 0,
+            selected_step: None,
+        }
+    }
+
+    pub fn thread_id(&self) -> &str {
+        &self.thread_id
+    }
+
+    pub fn bind_thread(
+        &mut self,
+        thread_id: impl Into<String>,
+        thread: Option<Entity<AcpThread>>,
+        plan_revision: u64,
+        cx: &mut Context<Self>,
+    ) {
+        self.thread_id = thread_id.into();
+        self.thread = thread;
+        if plan_revision < self.plan_revision {
+            // Reject stale foreign/older plan updates.
+            return;
+        }
+        self.plan_revision = plan_revision;
+        if self
+            .selected_step
+            .is_some_and(|index| self.entry_count(cx) <= index)
+        {
+            self.selected_step = None;
+        }
+        cx.notify();
+    }
+
+    pub fn plan_revision(&self) -> u64 {
+        self.plan_revision
+    }
+
+    pub fn selected_step(&self) -> Option<usize> {
+        self.selected_step
+    }
+
+    pub fn select_step(&mut self, index: Option<usize>, cx: &mut Context<Self>) {
+        if index.is_some_and(|index| self.entry_count(cx) <= index) {
+            return;
+        }
+        self.selected_step = index;
+        cx.notify();
+    }
+
+    fn entry_count(&self, cx: &App) -> usize {
+        self.thread
+            .as_ref()
+            .map(|thread| thread.read(cx).plan().entries.len())
+            .unwrap_or(0)
+    }
+
+    pub fn state(&self, cx: &App) -> PlanSurfaceState {
+        let Some(thread) = self.thread.as_ref() else {
+            return PlanSurfaceState::Empty;
+        };
+        let plan = thread.read(cx).plan();
+        if plan.is_empty() {
+            return PlanSurfaceState::Empty;
+        }
+        let stats = plan.stats();
+        if stats.pending == 0 {
+            PlanSurfaceState::AllComplete {
+                total: plan.entries.len(),
+            }
+        } else {
+            PlanSurfaceState::Active {
+                pending: stats.pending,
+                completed: stats.completed,
+                total: plan.entries.len(),
+            }
+        }
+    }
+}
+
+impl Focusable for NativePlanSurface {
+    fn focus_handle(&self, _cx: &App) -> FocusHandle {
+        self.focus_handle.clone()
+    }
+}
+
+impl Render for NativePlanSurface {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let state = self.state(cx);
+        let entries = self
+            .thread
+            .as_ref()
+            .map(|thread| {
+                thread
+                    .read(cx)
+                    .plan()
+                    .entries
+                    .iter()
+                    .enumerate()
+                    .map(|(index, entry)| {
+                        let label = entry.content.read(cx).source().to_string();
+                        let status = entry.status.clone();
+                        (index, label, status)
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let selected = self.selected_step;
+        let summary: SharedString = match &state {
+            PlanSurfaceState::Empty => "No plan for this thread".into(),
+            PlanSurfaceState::Active {
+                pending,
+                completed,
+                total,
+            } => format!("{completed}/{total} complete · {pending} remaining").into(),
+            PlanSurfaceState::AllComplete { total } => format!("All {total} steps complete").into(),
+            PlanSurfaceState::Stale => "Plan is stale".into(),
+        };
+
+        v_flex()
+            .id("omega.workbench.plan.content")
+            .debug_selector(|| "omega.workbench.plan.content".to_string())
+            .role(gpui::Role::Group)
+            .aria_label("Plan")
+            .track_focus(&self.focus_handle)
+            .size_full()
+            .child(
+                v_flex()
+                    .flex_none()
+                    .w_full()
+                    .border_b_1()
+                    .border_color(cx.theme().colors().border)
+                    .px_2()
+                    .py_1()
+                    .child(
+                        Label::new(summary)
+                            .size(LabelSize::XSmall)
+                            .color(Color::Muted),
+                    ),
+            )
+            .child(
+                v_flex()
+                    .id("omega.workbench.plan.entries")
+                    .debug_selector(|| "omega.workbench.plan.entries".to_string())
+                    .role(gpui::Role::List)
+                    .aria_label("Plan steps")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .when(entries.is_empty(), |this| {
+                        this.child(
+                            div()
+                                .id("omega.workbench.plan.empty")
+                                .debug_selector(|| "omega.workbench.plan.empty".to_string())
+                                .role(gpui::Role::Status)
+                                .aria_label("No plan for this thread")
+                                .p_3()
+                                .child(
+                                    Label::new("No plan for this thread")
+                                        .size(LabelSize::Small)
+                                        .color(Color::Muted),
+                                ),
+                        )
+                    })
+                    .children(entries.into_iter().map(|(index, label, status)| {
+                        let selected = selected == Some(index);
+                        let (icon, color) = match status {
+                            acp::PlanEntryStatus::InProgress => {
+                                (IconName::TodoProgress, Color::Accent)
+                            }
+                            acp::PlanEntryStatus::Completed => {
+                                (IconName::TodoComplete, Color::Success)
+                            }
+                            _ => (IconName::TodoPending, Color::Muted),
+                        };
+                        ListItem::new(("omega.workbench.plan.step", index))
+                            .debug_selector(format!("omega.workbench.plan.step.{index}"))
+                            .spacing(ListItemSpacing::Sparse)
+                            .toggle_state(selected)
+                            .child(
+                                h_flex()
+                                    .w_full()
+                                    .gap_2()
+                                    .min_w_0()
+                                    .child(Icon::new(icon).size(IconSize::Small).color(color))
+                                    .child(
+                                        Label::new(label)
+                                            .size(LabelSize::Small)
+                                            .color(if selected {
+                                                Color::Default
+                                            } else {
+                                                Color::Muted
+                                            })
+                                            .truncate(),
+                                    ),
+                            )
+                            .on_click(cx.listener(move |this, _, _window, cx| {
+                                this.select_step(Some(index), cx);
+                            }))
+                    })),
+            )
+    }
+}
+
 pub struct WorkSurfaceHost {
     key: SurfaceHostKey,
     focus_handle: FocusHandle,
@@ -1169,6 +1405,7 @@ pub struct WorkSurfaceHost {
     review_surface: Option<Entity<NativeReviewSurface>>,
     git_surface: Option<Entity<NativeGitSurface>>,
     terminal_surface: Option<Entity<NativeTerminalSurface>>,
+    plan_surface: Option<Entity<NativePlanSurface>>,
 }
 
 impl WorkSurfaceHost {
@@ -1179,6 +1416,7 @@ impl WorkSurfaceHost {
         review_surface: Option<Entity<NativeReviewSurface>>,
         git_surface: Option<Entity<NativeGitSurface>>,
         terminal_surface: Option<Entity<NativeTerminalSurface>>,
+        plan_surface: Option<Entity<NativePlanSurface>>,
         cx: &mut Context<Self>,
     ) -> Self {
         Self {
@@ -1190,6 +1428,7 @@ impl WorkSurfaceHost {
             review_surface,
             git_surface,
             terminal_surface,
+            plan_surface,
         }
     }
 
@@ -1364,13 +1603,19 @@ impl Render for WorkSurfaceHost {
         } else {
             None
         };
+        let plan_surface = if matches!(self.content_state, SurfaceContentState::Ready) {
+            self.plan_surface.clone()
+        } else {
+            None
+        };
         let status = match &self.content_state {
             SurfaceContentState::Ready
                 if files_panel.is_some()
                     || search_surface.is_some()
                     || review_surface.is_some()
                     || git_surface.is_some()
-                    || terminal_surface.is_some() =>
+                    || terminal_surface.is_some()
+                    || plan_surface.is_some() =>
             {
                 None
             }
@@ -1430,6 +1675,7 @@ impl Render for WorkSurfaceHost {
             .when_some(review_surface, |this, surface| this.child(surface))
             .when_some(git_surface, |this, surface| this.child(surface))
             .when_some(terminal_surface, |this, surface| this.child(surface))
+            .when_some(plan_surface, |this, surface| this.child(surface))
             .when_some(status, |this, (status, role, message)| {
                 this.child(
                     v_flex()
@@ -1574,6 +1820,10 @@ impl WorkbenchShell {
 
     pub fn projection(&self) -> &WorkbenchProjection {
         &self.projection
+    }
+
+    pub fn projection_mut(&mut self) -> &mut WorkbenchProjection {
+        &mut self.projection
     }
 
     pub fn identity(&self) -> Option<&ThreadIdentityState> {
@@ -2037,6 +2287,7 @@ impl WorkbenchShell {
         files_panel: Option<Entity<ProjectPanel>>,
         search_surface: Option<Entity<NativeSearchSurface>>,
         review_surface: Option<Entity<NativeReviewSurface>>,
+        plan_surface: Option<Entity<NativePlanSurface>>,
         cx: &mut Context<crate::AgentPanel>,
     ) -> Result<SurfaceSelection> {
         self.select_surface_with_native(
@@ -2046,6 +2297,7 @@ impl WorkbenchShell {
             review_surface,
             None,
             None,
+            plan_surface,
             cx,
         )
     }
@@ -2061,6 +2313,7 @@ impl WorkbenchShell {
             None,
             None,
             Some(git_surface),
+            None,
             None,
             cx,
         )
@@ -2078,6 +2331,24 @@ impl WorkbenchShell {
             None,
             None,
             Some(terminal_surface),
+            None,
+            cx,
+        )
+    }
+
+    pub fn select_plan_surface(
+        &mut self,
+        plan_surface: Entity<NativePlanSurface>,
+        cx: &mut Context<crate::AgentPanel>,
+    ) -> Result<SurfaceSelection> {
+        self.select_surface_with_native(
+            WorkSurface::Plan,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(plan_surface),
             cx,
         )
     }
@@ -2090,6 +2361,7 @@ impl WorkbenchShell {
         review_surface: Option<Entity<NativeReviewSurface>>,
         git_surface: Option<Entity<NativeGitSurface>>,
         terminal_surface: Option<Entity<NativeTerminalSurface>>,
+        plan_surface: Option<Entity<NativePlanSurface>>,
         cx: &mut Context<crate::AgentPanel>,
     ) -> Result<SurfaceSelection> {
         let unavailable_reason = self
@@ -2130,6 +2402,7 @@ impl WorkbenchShell {
             review_surface,
             git_surface,
             terminal_surface,
+            plan_surface,
             cx,
         ) {
             Ok(host) => host,
@@ -2154,6 +2427,7 @@ impl WorkbenchShell {
         review_surface: Option<Entity<NativeReviewSurface>>,
         git_surface: Option<Entity<NativeGitSurface>>,
         terminal_surface: Option<Entity<NativeTerminalSurface>>,
+        plan_surface: Option<Entity<NativePlanSurface>>,
         cx: &mut Context<crate::AgentPanel>,
     ) -> Result<Entity<WorkSurfaceHost>> {
         if surface == WorkSurface::Files && files_panel.is_none() {
@@ -2171,12 +2445,21 @@ impl WorkbenchShell {
         if surface == WorkSurface::Terminal && terminal_surface.is_none() {
             bail!("the native Terminal surface is unavailable");
         }
+        if surface == WorkSurface::Plan && plan_surface.is_none() {
+            bail!("the native Plan surface is unavailable");
+        }
         let key = SurfaceHostKey {
             thread_id: thread_id.into(),
             binding,
             surface,
         };
         if let Some(host) = self.hosts.get(&key) {
+            // Refresh plan content on reselection of an existing host.
+            if let Some(plan_surface) = plan_surface.as_ref() {
+                host.update(cx, |host, _cx| {
+                    host.plan_surface = Some(plan_surface.clone());
+                });
+            }
             return Ok(host.clone());
         }
         #[cfg(any(test, feature = "test-support"))]
@@ -2195,6 +2478,7 @@ impl WorkbenchShell {
                 review_surface,
                 git_surface,
                 terminal_surface,
+                plan_surface,
                 cx,
             )
         });
@@ -2220,6 +2504,7 @@ impl WorkbenchShell {
             binding,
             WorkSurface::Files,
             Some(files_panel),
+            None,
             None,
             None,
             None,
@@ -2269,6 +2554,7 @@ impl WorkbenchShell {
             None,
             None,
             None,
+            None,
             cx,
         )
         .map(Some)
@@ -2314,6 +2600,7 @@ impl WorkbenchShell {
             Some(review_surface),
             None,
             None,
+            None,
             cx,
         )
         .map(Some)
@@ -2350,6 +2637,7 @@ impl WorkbenchShell {
             None,
             None,
             Some(git_surface),
+            None,
             None,
             cx,
         )
@@ -2396,6 +2684,7 @@ impl WorkbenchShell {
             None,
             None,
             Some(terminal_surface),
+            None,
             cx,
         )
         .map(Some)

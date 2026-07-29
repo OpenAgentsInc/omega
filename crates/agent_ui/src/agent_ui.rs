@@ -52,8 +52,10 @@ pub mod test_support;
 pub mod thread_identity;
 mod thread_import;
 pub mod thread_metadata_store;
+pub mod thread_outline;
 pub mod thread_worktree_archive;
 pub mod workbench_shell;
+pub mod workbench_surface_store;
 
 pub mod threads_archive_view;
 mod ui;

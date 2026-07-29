@@ -152,7 +152,7 @@ pub struct PersistedSelection {
 }
 
 impl PersistedSelection {
-    fn validate(&self) -> Result<(), ProjectionError> {
+    pub fn validate(&self) -> Result<(), ProjectionError> {
         validate_id("persisted thread", &self.thread_id)?;
         if let Some(binding) = &self.binding {
             binding.validate()?;
