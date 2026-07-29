@@ -202,11 +202,10 @@ pub const ADMITTED_ACTIONS: &[&str] = &[
     // point is choosing what the thread can see, not opening arbitrary editor
     // surfaces.
     "workspace::Open",
-    // The Agent Panel intercepts this action before Workspace and accepts only
-    // non-local paths inside the active thread worktree. This keeps the native
-    // Files "Open in Terminal" route while preventing the legacy dock/default
-    // cwd path from bypassing workbench ownership.
-    "workspace::OpenTerminal",
+    // The scoped Files surface emits this instead of Workspace's global
+    // OpenTerminal action. Agent Panel validates it against the active thread
+    // binding; a centre-pane context menu therefore cannot bypass ownership.
+    "project_panel::OpenInThreadTerminal",
     // OMEGA-DELTA-0139, omega#119. A plain transcript file-link click reveals
     // the ordinary editable centre pane. Admit its standard save action
     // without admitting the rest of the workspace namespace.
@@ -351,7 +350,7 @@ mod tests {
             "omega_workbench::SelectFiles",
             "omega_workbench::CollapseWorkSurfaceDock",
             "omega_workbench::NewTerminalForThread",
-            "workspace::OpenTerminal",
+            "project_panel::OpenInThreadTerminal",
             "terminal::SendKeystroke",
             "terminal::Copy",
             "buffer_search::Deploy",
@@ -396,6 +395,7 @@ mod tests {
             "terminal::SearchTest",
             "buffer_search::DeployReplace",
             "workspace::NewTerminal",
+            "workspace::OpenTerminal",
             // The hosted-account path OMEGA-DELTA-0010 and OMEGA-DELTA-0011
             // removed. Admitting `onboarding::Finish` must not drag the rest of
             // its namespace in with it.
@@ -453,6 +453,16 @@ mod tests {
                 workbench_section.contains("omega_workbench::NewTerminalForThread"),
                 "{platform} must create terminals through the thread-bound workbench action"
             );
+            for action in [
+                "omega_workbench::ActivatePreviousTerminalTab",
+                "omega_workbench::ActivateNextTerminalTab",
+                "omega_workbench::CloseActiveTerminalTab",
+            ] {
+                assert!(
+                    workbench_section.contains(action),
+                    "{platform} must route native terminal tab shortcuts through {action}"
+                );
+            }
             assert!(
                 !workbench_section.contains("workspace::NewTerminal")
                     && !workbench_section.contains("pane::"),

@@ -27,7 +27,7 @@ use search::{
 };
 use terminal_view::terminal_panel::{TerminalPanel, TerminalPanelSnapshot};
 use ui::{
-    Color, Icon, IconName, IconSize, Label, LabelSize, ListItem, ListItemSpacing, prelude::*,
+    Color, Icon, IconName, IconSize, Label, LabelSize, ListItem, ListItemSpacing, Tooltip, prelude::*,
     v_flex,
 };
 use workspace::{Panel, ToolbarItemView, Workspace, item::Item};
@@ -80,6 +80,12 @@ actions!(
         FocusThreadTranscript,
         /// Create a terminal for the active thread's exact worktree.
         NewTerminalForThread,
+        /// Activate the next tab in the embedded Terminal pane.
+        ActivateNextTerminalTab,
+        /// Activate the previous tab in the embedded Terminal pane.
+        ActivatePreviousTerminalTab,
+        /// Close the active tab in the embedded Terminal pane.
+        CloseActiveTerminalTab,
         /// Open the active thread repository picker.
         ToggleRepositoryPicker,
         /// Open the active thread worktree picker.
@@ -294,11 +300,7 @@ impl NativeTerminalSurface {
         &self.terminal_owners
     }
 
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn active_terminal_owner_for_tests(
-        &self,
-        cx: &App,
-    ) -> Option<(u64, NativeTerminalBinding)> {
+    pub fn active_terminal_owner(&self, cx: &App) -> Option<(u64, NativeTerminalBinding)> {
         let terminal_id = self
             .terminal_panel
             .read(cx)
@@ -311,6 +313,14 @@ impl NativeTerminalSurface {
             .get(&terminal_id)
             .cloned()
             .map(|owner| (terminal_id, owner))
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn active_terminal_owner_for_tests(
+        &self,
+        cx: &App,
+    ) -> Option<(u64, NativeTerminalBinding)> {
+        self.active_terminal_owner(cx)
     }
 
     pub fn record_terminal_owner(
@@ -374,7 +384,22 @@ impl Focusable for NativeTerminalSurface {
 
 impl Render for NativeTerminalSurface {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let target = self.binding.worktree_abs_path.to_string_lossy().to_string();
+        let target_path = self
+            .binding
+            .worktree_abs_path
+            .to_string_lossy()
+            .into_owned();
+        let target = self
+            .binding
+            .worktree_abs_path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| {
+                self.binding
+                    .worktree_abs_path
+                    .to_string_lossy()
+                    .into_owned()
+            });
         let owner_label = self.owner_state.accessible_label();
         let can_create = self.owner_state.can_create();
         let active_owner = self
@@ -385,7 +410,15 @@ impl Render for NativeTerminalSurface {
                 let terminal_id = terminal_view.read(cx).terminal().entity_id().as_u64();
                 self.terminal_owners.get(&terminal_id)
             })
-            .map(|owner| owner.worktree_abs_path.to_string_lossy().to_string());
+            .map(|owner| {
+                let owner_path = owner.worktree_abs_path.to_string_lossy().into_owned();
+                let owner_name = owner
+                    .worktree_abs_path
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| owner_path.clone());
+                (owner_name, owner_path)
+            });
         v_flex()
             .id("omega.workbench.terminal.content")
             .debug_selector(|| "omega.workbench.terminal.content".to_string())
@@ -410,12 +443,23 @@ impl Render for NativeTerminalSurface {
                             .min_w_0()
                             .gap_2()
                             .child(
-                                div().min_w_0().flex_1().overflow_hidden().child(
-                                    Label::new(format!("New terminal target: {target}"))
-                                        .size(LabelSize::XSmall)
-                                        .color(Color::Muted)
-                                        .truncate(),
-                                ),
+                                div()
+                                    .id("omega.workbench.terminal.target")
+                                    .debug_selector(|| {
+                                        "omega.workbench.terminal.target".to_string()
+                                    })
+                                    .min_w_0()
+                                    .flex_1()
+                                    .overflow_hidden()
+                                    .role(gpui::Role::Label)
+                                    .aria_label(format!("New terminal target: {target_path}"))
+                                    .tooltip(Tooltip::text(target_path.clone()))
+                                    .child(
+                                        Label::new(format!("New terminal target: {target}"))
+                                            .size(LabelSize::XSmall)
+                                            .color(Color::Muted)
+                                            .truncate(),
+                                    ),
                             )
                             .child(
                                 div().flex_none().child(
@@ -426,7 +470,10 @@ impl Render for NativeTerminalSurface {
                                         .icon_size(IconSize::Small)
                                         .tab_index(0isize)
                                         .disabled(!can_create)
-                                        .aria_label("New terminal in thread worktree")
+                                        .aria_label(format!("New terminal in {target_path}"))
+                                        .tooltip(Tooltip::text(format!(
+                                            "New terminal in {target_path}"
+                                        )))
                                         .on_click(|_, window, cx| {
                                             window.dispatch_action(
                                                 NewTerminalForThread.boxed_clone(),
@@ -436,13 +483,14 @@ impl Render for NativeTerminalSurface {
                                 ),
                             ),
                     )
-                    .when_some(active_owner, |this, active_owner| {
+                    .when_some(active_owner, |this, (active_owner, active_owner_path)| {
                         this.child(
                             div()
                                 .id("omega.workbench.terminal.owner")
                                 .debug_selector(|| "omega.workbench.terminal.owner".to_string())
                                 .role(gpui::Role::Status)
-                                .aria_label(format!("Active terminal owner: {active_owner}"))
+                                .aria_label(format!("Active terminal owner: {active_owner_path}"))
+                                .tooltip(Tooltip::text(active_owner_path))
                                 .child(
                                     Label::new(format!("Active terminal owner: {active_owner}"))
                                         .size(LabelSize::XSmall)

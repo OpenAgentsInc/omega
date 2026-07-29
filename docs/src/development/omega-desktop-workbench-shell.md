@@ -352,25 +352,31 @@ creation target for the next explicit terminal, not permission to rewrite
 existing terminals. `NativeTerminalBinding` records the logical thread,
 repository/worktree binding, typed `WorktreeId`, canonical absolute worktree
 path, and binding generation. When the user explicitly invokes New Terminal
-from the visible embedded surface, Agent Panel passes that exact absolute path
-to `TerminalPanel::create_terminal_at_working_directory`. It neither uses the
-process-wide current directory nor falls back to another visible worktree.
-The native Files `Open in Terminal` action is intercepted at Agent Panel and
-accepted only for a non-local path inside that same worktree; local and
+or Split from the visible embedded surface, Agent Panel passes that exact
+absolute path to `TerminalPanel::create_terminal_at_working_directory`. It
+neither uses the process-wide current directory nor clones a terminal owned
+by another thread. The native Files surface switches its `Open in Terminal`
+command to the typed `project_panel::OpenInThreadTerminal` action while
+embedded. Agent Panel accepts only a path inside that same worktree;
 outside-worktree requests fail closed instead of reaching the legacy dock.
+The global `workspace::OpenTerminal` action remains refused in zero base, so
+a revealed center pane cannot bypass the thread-bound route.
 After creation succeeds, the surface associates the terminal entity ID with
 the binding that created it. That owner is immutable even when the active
 thread, repository, worktree, generation, or next-creation target changes.
 
 Selecting Terminal, focusing it, collapsing it, reopening it, switching
 threads, or rebinding a thread never creates or kills a process. Process
-creation is confined to the explicit New Terminal action. The embedded path
+creation is confined to explicit thread-bound New, Split, and Files Open in
+Terminal controls. The embedded path
 uses `RevealStrategy::Never`, so creation cannot reopen a legacy Workspace
 dock or unzoom Agent Panel. Spawn failures surface through the workbench error
-path and the panel's pending count is balanced. Existing tabs, tab selection,
-pane splits, zoom, copy, paste, search, scroll, task actions, close actions,
-and terminal input remain native `TerminalPanel`, `Pane`, `TerminalView`, and
-`Terminal` behavior.
+path and the panel's pending count is balanced. Existing tabs, pointer-driven
+tab selection and close controls, zoom, copy, paste, search, scroll, task
+actions, and terminal input remain native `TerminalPanel`, `Pane`,
+`TerminalView`, and `Terminal` behavior. Workbench New and Split controls call
+scoped handlers directly because the process-wide zero-base gate cannot safely
+admit Workspace or Pane creation actions.
 
 Focus follows the visible native tree. Opening Terminal transfers focus to the
 panel's activation focus handle. Native keystrokes reach only the focused
@@ -378,9 +384,10 @@ panel's activation focus handle. Native keystrokes reach only the focused
 being written to the terminal. The normal terminal keymap remains in force.
 The narrower `WorkbenchTerminal > Terminal` context adds explicit workbench
 escape routes: Collapse Work Surface Dock and Focus Thread Transcript, plus
-thread-bound new-terminal and native search bindings. Generic pane mutations
-are not globally admitted by zero base. A panel Activate event opens or
-focuses the embedded surface; Close collapses only the inner
+thread-bound new-terminal, tab-next, tab-previous, tab-close, and native search
+bindings. The tab wrappers call the embedded panel directly; generic pane
+mutations are not globally admitted by zero base. A panel Activate event opens
+or focuses the embedded surface; Close collapses only the inner
 work-surface dock and returns focus to the transcript.
 
 The panel entity and all terminal entities stay retained while the dock is
@@ -396,13 +403,15 @@ items close.
 Remote project availability and terminal-process lifetime are separate state.
 `Ready`, `Offline`, `Reconnecting`, `WorktreeRemoved`, and `Error` are explicit
 owner states. Offline, reconnecting, removed, and error states retain existing
-terminal entities and output but disable both the workbench New control and
-the native TerminalPanel New menu. Removal does not rebind
+terminal entities and output but disable the workbench New control and the
+native TerminalPanel New and Split menus. Removal does not rebind
 or kill a process; the active terminal continues to disclose its original
 owner while the header discloses the current creation target. Reconnect may
 restore creation only after current binding authority is ready. A stale spawn
-completion cannot be registered as if it belonged to a newer binding, and a
-foreign requested binding is rejected rather than redirected.
+completion cannot be registered as if it belonged to a newer binding: the
+just-created native item is synchronously removed before it can become owned
+or retained under the newer scope. A foreign requested binding is rejected
+rather than redirected.
 
 The retention boundary ends when the native terminal item, panel, window, or
 application is actually closed. In particular, app restart does not preserve a

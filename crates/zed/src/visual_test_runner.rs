@@ -7705,6 +7705,14 @@ fn configure_workbench_terminal_scene(
     let expected = fixture_scene
         .active_terminal_snapshot()
         .context("Terminal scene has no active typed fixture")?;
+    let active_worktree_label = active_path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .context("Terminal active worktree has no display name")?;
+    let foreign_worktree_label = foreign_path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .context("Terminal foreign worktree has no display name")?;
     let switched_from_foreign = if scene_name == "omega_workbench_terminal_thread_switch" {
         let foreign_repository_binding =
             select_workbench_identity(workspace_window, panel, foreign_path, "Terminal", cx)?;
@@ -7821,21 +7829,16 @@ fn configure_workbench_terminal_scene(
     for (index, process) in expected.processes.iter().enumerate() {
         let output = match &process.lifecycle {
             TerminalProcessLifecycleFixture::Starting => {
-                format!(
-                    "Starting {} in {}…\r\n",
-                    process.title,
-                    active_path.display()
-                )
+                format!("Starting {} in {active_worktree_label}…\r\n", process.title)
             }
             TerminalProcessLifecycleFixture::Running { .. } => format!(
                 "Omega Terminal · {}\r\ncwd: {}\r\n$ ",
                 process.title,
                 if process.owner.thread_id == expected.creation_binding.thread_id {
-                    active_path
+                    &active_worktree_label
                 } else {
-                    foreign_path
+                    &foreign_worktree_label
                 }
-                .display()
             ),
             TerminalProcessLifecycleFixture::Exited { exit_code } => format!(
                 "Omega Terminal · {}\r\nprocess exited with code {exit_code}\r\n",
@@ -7865,7 +7868,7 @@ fn configure_workbench_terminal_scene(
             .update_window(workspace_window.into(), |_, window, cx| {
                 terminal_panel.update(cx, |terminal_panel, cx| {
                     terminal_panel.create_and_insert_display_only_test_terminal(
-                        output,
+                        b"",
                         activate,
                         split_direction,
                         window,
@@ -7892,13 +7895,13 @@ fn configure_workbench_terminal_scene(
                 surface.record_terminal_owner(insertion.terminal_id, owner, cx);
             });
         });
-        insertions.push((process, insertion));
+        insertions.push((process, insertion, output));
     }
 
     if let Some(selected_terminal_id) = expected.selected_terminal_id.as_deref()
-        && let Some((_, insertion)) = insertions
+        && let Some((_, insertion, _)) = insertions
             .iter()
-            .find(|(process, _)| process.terminal_id == selected_terminal_id)
+            .find(|(process, _, _)| process.terminal_id == selected_terminal_id)
     {
         let activated = cx
             .update_window(workspace_window.into(), |_, window, cx| {
@@ -7915,9 +7918,19 @@ fn configure_workbench_terminal_scene(
         anyhow::ensure!(activated, "selected Terminal fixture was not activated");
     }
 
-    for (process, insertion) in &insertions {
+    cx.update_window(workspace_window.into(), |_, window, cx| {
+        window.draw(cx).clear(cx);
+    })?;
+    cx.run_until_parked();
+
+    for (process, insertion, output) in &insertions {
+        cx.update(|cx| insertion.write_output(output, cx));
         for input in &process.input_bytes {
             cx.update(|cx| insertion.input(input.clone(), cx));
+            // Display-only terminals have no PTY to echo input back into the grid.
+            // Mirror the exact bytes after recording them so the pixel proof also
+            // distinguishes the typed-input scene from an idle running terminal.
+            cx.update(|cx| insertion.write_output(input, cx));
         }
         let input_log = cx.update(|cx| insertion.take_input_log(cx));
         anyhow::ensure!(

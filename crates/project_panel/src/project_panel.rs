@@ -220,6 +220,7 @@ pub struct ProjectPanel {
     worktree_scope_unavailable: bool,
     scope_state: ProjectPanelScopeState,
     visible_entries_revision: u64,
+    route_open_terminal_to_thread: bool,
 }
 
 struct UpdateVisibleEntriesTask {
@@ -383,6 +384,15 @@ struct SelectNextDiagnostic {
 struct SelectPrevDiagnostic {
     #[serde(default)]
     pub severity: GoToDiagnosticSeverityFilter,
+}
+
+/// Opens a terminal at the selected Files path through the active agent-thread binding.
+#[derive(PartialEq, Clone, Default, Debug, Deserialize, JsonSchema, Action)]
+#[action(namespace = project_panel)]
+#[serde(deny_unknown_fields)]
+pub struct OpenInThreadTerminal {
+    /// The canonical directory selected in the thread-scoped Files surface.
+    pub working_directory: PathBuf,
 }
 
 actions!(
@@ -963,6 +973,7 @@ impl ProjectPanel {
                 worktree_scope_unavailable: false,
                 scope_state: ProjectPanelScopeState::Unscoped,
                 visible_entries_revision: 0,
+                route_open_terminal_to_thread: false,
             };
             this.update_visible_entries(None, false, false, window, cx);
 
@@ -1098,6 +1109,11 @@ impl ProjectPanel {
 
     pub fn scope_state(&self) -> ProjectPanelScopeState {
         self.scope_state
+    }
+
+    /// Routes Files' terminal command through the agent thread instead of Workspace.
+    pub fn route_open_terminal_to_thread(&mut self, enabled: bool) {
+        self.route_open_terminal_to_thread = enabled;
     }
 
     pub fn set_worktree_scope(
@@ -4145,14 +4161,21 @@ impl ProjectPanel {
                 abs_path.parent().map(|path| path.to_path_buf())
             };
             if let Some(working_directory) = working_directory {
-                window.dispatch_action(
-                    workspace::OpenTerminal {
-                        working_directory,
-                        local: false,
-                    }
-                    .boxed_clone(),
-                    cx,
-                )
+                if self.route_open_terminal_to_thread {
+                    window.dispatch_action(
+                        OpenInThreadTerminal { working_directory }.boxed_clone(),
+                        cx,
+                    );
+                } else {
+                    window.dispatch_action(
+                        workspace::OpenTerminal {
+                            working_directory,
+                            local: false,
+                        }
+                        .boxed_clone(),
+                        cx,
+                    );
+                }
             }
         }
     }

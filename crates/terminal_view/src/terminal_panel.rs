@@ -1,4 +1,4 @@
-use std::{cmp, path::PathBuf, process::ExitStatus, sync::Arc, time::Duration};
+use std::{cmp, path::PathBuf, process::ExitStatus, rc::Rc, sync::Arc, time::Duration};
 
 use crate::{
     TerminalView, default_working_directory,
@@ -41,6 +41,15 @@ use anyhow::{Result, anyhow};
 use zed_actions::assistant::InlineAssist;
 
 const TERMINAL_PANEL_KEY: &str = "TerminalPanel";
+
+fn split_action(direction: SplitDirection) -> Box<dyn Action> {
+    match direction {
+        SplitDirection::Right => SplitRight::default().boxed_clone(),
+        SplitDirection::Left => SplitLeft::default().boxed_clone(),
+        SplitDirection::Up => SplitUp::default().boxed_clone(),
+        SplitDirection::Down => SplitDown::default().boxed_clone(),
+    }
+}
 
 actions!(
     terminal_panel,
@@ -85,6 +94,8 @@ pub struct TerminalPanel {
     deferred_tasks: HashMap<TaskId, Task<()>>,
     assistant_enabled: bool,
     new_terminal_enabled: bool,
+    new_terminal_request_handler: Option<Rc<dyn Fn(&mut Window, &mut App)>>,
+    split_terminal_request_handler: Option<Rc<dyn Fn(SplitDirection, &mut Window, &mut App)>>,
     active: bool,
     #[cfg(any(test, feature = "test-support"))]
     display_only_creation_for_tests: bool,
@@ -94,6 +105,8 @@ pub struct TerminalPanel {
     creation_working_directories_for_tests: Vec<Option<PathBuf>>,
     #[cfg(any(test, feature = "test-support"))]
     deferred_creation_requests_for_tests: Vec<TestTerminalCreationRequest>,
+    #[cfg(any(test, feature = "test-support"))]
+    lifecycle_overrides_for_tests: HashMap<u64, TestTerminalLifecycle>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -194,6 +207,13 @@ pub struct TestTerminalCreationRequest {
 }
 
 #[cfg(any(test, feature = "test-support"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TestTerminalLifecycle {
+    Running { process_id: u32 },
+    Exited { exit_code: i32 },
+}
+
+#[cfg(any(test, feature = "test-support"))]
 impl TestTerminalCreationRequest {
     pub fn succeed(mut self) -> bool {
         self.completion
@@ -255,6 +275,8 @@ impl TerminalPanel {
             deferred_tasks: HashMap::default(),
             assistant_enabled: false,
             new_terminal_enabled: true,
+            new_terminal_request_handler: None,
+            split_terminal_request_handler: None,
             active: false,
             #[cfg(any(test, feature = "test-support"))]
             display_only_creation_for_tests: false,
@@ -264,6 +286,8 @@ impl TerminalPanel {
             creation_working_directories_for_tests: Vec::new(),
             #[cfg(any(test, feature = "test-support"))]
             deferred_creation_requests_for_tests: Vec::new(),
+            #[cfg(any(test, feature = "test-support"))]
+            lifecycle_overrides_for_tests: HashMap::default(),
         };
         terminal_panel.apply_tab_bar_buttons(&terminal_panel.active_pane, cx);
         terminal_panel
@@ -287,6 +311,34 @@ impl TerminalPanel {
         cx.notify();
     }
 
+    pub fn set_workbench_request_handlers(
+        &mut self,
+        new_terminal_request_handler: Option<Rc<dyn Fn(&mut Window, &mut App)>>,
+        split_terminal_request_handler: Option<Rc<dyn Fn(SplitDirection, &mut Window, &mut App)>>,
+        cx: &mut Context<Self>,
+    ) {
+        self.new_terminal_request_handler = new_terminal_request_handler;
+        self.split_terminal_request_handler = split_terminal_request_handler;
+        for pane in self.center.panes() {
+            self.apply_tab_bar_buttons(pane, cx);
+        }
+        cx.notify();
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn workbench_new_terminal_request_handler_for_tests(
+        &self,
+    ) -> Option<Rc<dyn Fn(&mut Window, &mut App)>> {
+        self.new_terminal_request_handler.clone()
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn workbench_split_terminal_request_handler_for_tests(
+        &self,
+    ) -> Option<Rc<dyn Fn(SplitDirection, &mut Window, &mut App)>> {
+        self.split_terminal_request_handler.clone()
+    }
+
     pub(crate) fn apply_tab_bar_buttons(
         &self,
         terminal_pane: &Entity<Pane>,
@@ -294,6 +346,8 @@ impl TerminalPanel {
     ) {
         let assistant_enabled = self.assistant_enabled;
         let new_terminal_enabled = self.new_terminal_enabled;
+        let new_terminal_request_handler = self.new_terminal_request_handler.clone();
+        let split_terminal_request_handler = self.split_terminal_request_handler.clone();
         terminal_pane.update(cx, |pane, cx| {
             pane.set_render_tab_bar_buttons(cx, move |pane, window, cx| {
                 let split_context = pane
@@ -310,6 +364,8 @@ impl TerminalPanel {
                 {
                     return (None, None);
                 }
+                let new_terminal_request_handler = new_terminal_request_handler.clone();
+                let split_terminal_request_handler = split_terminal_request_handler.clone();
                 let focus_handle = pane.focus_handle(cx);
                 let right_children = h_flex()
                     .gap(DynamicSpacing::Base02.rems(cx))
@@ -328,11 +384,26 @@ impl TerminalPanel {
                                     return None;
                                 }
                                 let focus_handle = focus_handle.clone();
+                                let new_terminal_request_handler =
+                                    new_terminal_request_handler.clone();
                                 let menu = ContextMenu::build(window, cx, |menu, _, _| {
                                     menu.context(focus_handle.clone())
-                                        .action(
+                                        .entry(
                                             "New Terminal",
-                                            workspace::NewTerminal::default().boxed_clone(),
+                                            Some(workspace::NewTerminal::default().boxed_clone()),
+                                            move |window, cx| {
+                                                if let Some(handler) =
+                                                    new_terminal_request_handler.as_ref()
+                                                {
+                                                    handler(window, cx);
+                                                } else {
+                                                    window.dispatch_action(
+                                                        workspace::NewTerminal::default()
+                                                            .boxed_clone(),
+                                                        cx,
+                                                    );
+                                                }
+                                            },
                                         )
                                         // We want the focus to go back to terminal panel once task modal is dismissed,
                                         // hence we focus that first. Otherwise, we'd end up without a focused element, as
@@ -355,24 +426,52 @@ impl TerminalPanel {
                         PopoverMenu::new("terminal-pane-tab-bar-split")
                             .trigger_with_tooltip(
                                 IconButton::new("terminal-pane-split", IconName::Split)
-                                    .icon_size(IconSize::Small),
+                                    .icon_size(IconSize::Small)
+                                    .disabled(!new_terminal_enabled),
                                 Tooltip::text("Split Pane"),
                             )
                             .anchor(Anchor::TopRight)
                             .with_handle(pane.split_item_context_menu_handle.clone())
                             .menu({
                                 move |window, cx| {
-                                    ContextMenu::build(window, cx, |menu, _, _| {
-                                        menu.when_some(
+                                    if !new_terminal_enabled {
+                                        return None;
+                                    }
+                                    let handler = split_terminal_request_handler.clone();
+                                    let menu = ContextMenu::build(window, cx, |menu, _, _| {
+                                        let menu = menu.when_some(
                                             split_context.clone(),
                                             |menu, split_context| menu.context(split_context),
+                                        );
+                                        [
+                                            ("Split Right", SplitDirection::Right),
+                                            ("Split Left", SplitDirection::Left),
+                                            ("Split Up", SplitDirection::Up),
+                                            ("Split Down", SplitDirection::Down),
+                                        ]
+                                        .into_iter()
+                                        .fold(
+                                            menu,
+                                            |menu, (label, direction)| {
+                                                let handler = handler.clone();
+                                                menu.entry(
+                                                    label,
+                                                    Some(split_action(direction)),
+                                                    move |window, cx| {
+                                                        if let Some(handler) = handler.as_ref() {
+                                                            handler(direction, window, cx);
+                                                        } else {
+                                                            window.dispatch_action(
+                                                                split_action(direction),
+                                                                cx,
+                                                            );
+                                                        }
+                                                    },
+                                                )
+                                            },
                                         )
-                                        .action("Split Right", SplitRight::default().boxed_clone())
-                                        .action("Split Left", SplitLeft::default().boxed_clone())
-                                        .action("Split Up", SplitUp::default().boxed_clone())
-                                        .action("Split Down", SplitDown::default().boxed_clone())
-                                    })
-                                    .into()
+                                    });
+                                    Some(menu)
                                 }
                             }),
                     )
@@ -565,6 +664,11 @@ impl TerminalPanel {
                 self.serialize(cx);
             }
             &pane::Event::Split { direction, mode } => {
+                if !self.new_terminal_enabled
+                    && matches!(mode, SplitMode::ClonePane | SplitMode::EmptyPane)
+                {
+                    return;
+                }
                 match mode {
                     SplitMode::ClonePane | SplitMode::EmptyPane => {
                         let clone = matches!(mode, SplitMode::ClonePane);
@@ -693,6 +797,71 @@ impl TerminalPanel {
                 .ok()
                 .flatten()
         })
+    }
+
+    pub fn move_terminal_to_split(
+        &mut self,
+        terminal_id: u64,
+        direction: SplitDirection,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !self.new_terminal_enabled {
+            return false;
+        }
+
+        let panes = self.center.panes().into_iter().cloned().collect::<Vec<_>>();
+        let Some((source_pane, item)) = panes.into_iter().find_map(|pane| {
+            let item = pane.read(cx).items().find_map(|item| {
+                let terminal_view = item.downcast::<TerminalView>()?;
+                (terminal_view.read(cx).terminal().entity_id().as_u64() == terminal_id)
+                    .then(|| item.boxed_clone())
+            })?;
+            Some((pane, item))
+        }) else {
+            return false;
+        };
+        let Some(project) = self
+            .workspace
+            .read_with(cx, |workspace, _| workspace.project().clone())
+            .ok()
+        else {
+            return false;
+        };
+        let item_id = item.item_id();
+        source_pane.update(cx, |pane, cx| {
+            pane.remove_item(item_id, false, false, window, cx);
+        });
+        let new_pane = new_terminal_pane(self.workspace.clone(), project, false, window, cx);
+        self.apply_tab_bar_buttons(&new_pane, cx);
+        new_pane.update(cx, |pane, cx| {
+            pane.add_item(item, true, true, None, window, cx);
+        });
+        self.center.split(&source_pane, &new_pane, direction, cx);
+        self.active_pane = new_pane.clone();
+        window.focus(&new_pane.focus_handle(cx), cx);
+        self.serialize(cx);
+        cx.notify();
+        true
+    }
+
+    pub fn activate_next_terminal_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.active_pane.update(cx, |pane, cx| {
+            pane.activate_next_item(&pane::ActivateNextItem::default(), window, cx);
+        });
+    }
+
+    pub fn activate_previous_terminal_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.active_pane.update(cx, |pane, cx| {
+            pane.activate_previous_item(&pane::ActivatePreviousItem::default(), window, cx);
+        });
+    }
+
+    pub fn close_active_terminal_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.active_pane.update(cx, |pane, cx| {
+            pane.close_active_item(&pane::CloseActiveItem::default(), window, cx)
+                .detach_and_log_err(cx);
+        });
     }
 
     pub fn open_terminal(
@@ -1420,13 +1589,47 @@ impl TerminalPanel {
                             let terminal = terminal_view.read(cx).terminal().clone();
                             let terminal_id = terminal.entity_id().as_u64();
                             let terminal = terminal.read(cx);
+                            #[cfg(any(test, feature = "test-support"))]
+                            let lifecycle_override = self
+                                .lifecycle_overrides_for_tests
+                                .get(&terminal_id)
+                                .copied();
+                            #[cfg(not(any(test, feature = "test-support")))]
+                            let lifecycle_override: Option<()> = None;
+                            #[cfg(any(test, feature = "test-support"))]
+                            let (process_id, exited, task_status) = match lifecycle_override {
+                                Some(TestTerminalLifecycle::Running { process_id }) => {
+                                    (Some(process_id), false, Some(TaskStatus::Running))
+                                }
+                                Some(TestTerminalLifecycle::Exited { exit_code }) => (
+                                    None,
+                                    true,
+                                    Some(TaskStatus::Completed {
+                                        success: exit_code == 0,
+                                    }),
+                                ),
+                                None => (
+                                    terminal.pid().map(|process_id| process_id.as_u32()),
+                                    terminal.has_exited(),
+                                    terminal.task().map(|task| task.status),
+                                ),
+                            };
+                            #[cfg(not(any(test, feature = "test-support")))]
+                            let (process_id, exited, task_status) = {
+                                let _ = lifecycle_override;
+                                (
+                                    terminal.pid().map(|process_id| process_id.as_u32()),
+                                    terminal.has_exited(),
+                                    terminal.task().map(|task| task.status),
+                                )
+                            };
                             TerminalPanelItemKind::Terminal {
                                 terminal_view_id,
                                 terminal_id,
                                 working_directory: terminal.working_directory(),
-                                process_id: terminal.pid().map(|process_id| process_id.as_u32()),
-                                exited: terminal.has_exited(),
-                                task_status: terminal.task().map(|task| task.status),
+                                process_id,
+                                exited,
+                                task_status,
                             }
                         } else if let Some(failed) = item.downcast::<FailedToSpawnTerminal>() {
                             TerminalPanelItemKind::FailedToSpawn {
@@ -1482,6 +1685,51 @@ impl TerminalPanel {
             terminal,
             terminal_view,
         })
+    }
+
+    pub fn remove_terminal(
+        &mut self,
+        terminal_id: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        for pane in self.center.panes() {
+            let item_id = pane.read(cx).items().find_map(|item| {
+                let terminal_view = item.downcast::<TerminalView>()?;
+                (terminal_view.read(cx).terminal().entity_id().as_u64() == terminal_id)
+                    .then(|| item.item_id())
+            });
+            let Some(item_id) = item_id else {
+                continue;
+            };
+            pane.update(cx, |pane, cx| {
+                pane.remove_item(item_id, false, false, window, cx);
+            });
+            #[cfg(any(test, feature = "test-support"))]
+            self.lifecycle_overrides_for_tests.remove(&terminal_id);
+            self.serialize(cx);
+            cx.notify();
+            return true;
+        }
+        false
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn set_test_terminal_lifecycle(
+        &mut self,
+        terminal_id: u64,
+        lifecycle: TestTerminalLifecycle,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !self.terminal_views(cx).iter().any(|terminal_view| {
+            terminal_view.read(cx).terminal().entity_id().as_u64() == terminal_id
+        }) {
+            return false;
+        }
+        self.lifecycle_overrides_for_tests
+            .insert(terminal_id, lifecycle);
+        cx.notify();
+        true
     }
 
     #[cfg(any(test, feature = "test-support"))]

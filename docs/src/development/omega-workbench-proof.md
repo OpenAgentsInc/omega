@@ -464,9 +464,12 @@ owner relabel, pane leak, or badge mismatch before GPUI rendering is involved.
 The rendered lane deliberately uses display-only `Terminal` entities so it can
 exercise the real `TerminalPanel`, terminal emulator, panes, tabs, focus, and
 surface ownership without launching a shell. Consequently, its
-running/exited/failed text and rail badge are controlled projections of the
-typed fixture rather than observations of an operating-system process. The
-portable front-door tests dispatch focus return and lifecycle transitions; the
+running/exited/failed text is a controlled projection of the typed fixture
+rather than an observation of an operating-system process. The portable
+front-door lane drives deterministic running and exited lifecycle overrides
+through the production `TerminalPanel` snapshot and proves that Agent Panel's
+derived badge clears. It also dispatches focus return, lifecycle transitions,
+disabled New/Split callbacks, and removed-worktree host retention. The
 independent typed checker covers pending/running/exited/failed lifecycle,
 stale-generation rejection, and foreign-spawn rejection. A scene receipt
 should be read as the combination of those layers, not as evidence that its
@@ -479,8 +482,8 @@ test factory makes that same explicit-create path record the requested cwd and
 return a display-only terminal, proving the production action passes the
 canonical active worktree and records immutable ownership without starting a
 shell. It can hold completion across a worktree switch and then
-deterministically succeed or fail, proving pending-badge balance,
-captured-owner immutability, and UI-visible failure propagation. Display-only
+deterministically succeed or fail, proving pending-badge balance, synchronous
+removal of stale completions, and UI-visible failure propagation. Display-only
 terminals receive output through the real terminal emulator and are inserted
 through native tab/split APIs. This makes output retention, selection, focus,
 and byte-level input assertions deterministic. The seam must not be described

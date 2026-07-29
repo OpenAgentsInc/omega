@@ -118,7 +118,7 @@ use ui::{
 use util::ResultExt as _;
 use workspace::{
     CollaboratorId, DraggedSelection, DraggedTab, MultiWorkspace, PathList, SerializedPathList,
-    ToggleWorkspaceSidebar, ToggleZoom, ToolbarItemView, Workspace, WorkspaceId,
+    SplitDirection, ToggleWorkspaceSidebar, ToggleZoom, ToolbarItemView, Workspace, WorkspaceId,
     dock::{DockPosition, Panel, PanelEvent},
     item::{ItemEvent, ItemHandle},
 };
@@ -1371,6 +1371,7 @@ pub struct AgentPanel {
     _workbench_git_panel_event_subscription: Option<Subscription>,
     workbench_terminal_panel: Option<Entity<TerminalPanel>>,
     workbench_terminal_panel_handed_off: bool,
+    workbench_terminal_handlers_installed: bool,
     _workbench_terminal_panel_observation: Option<Subscription>,
     _workbench_terminal_panel_event_subscription: Option<Subscription>,
     workbench_terminal_surface: Option<Entity<workbench_shell::NativeTerminalSurface>>,
@@ -1891,6 +1892,7 @@ impl AgentPanel {
             _workbench_git_panel_event_subscription: workbench_git_panel_event_subscription,
             workbench_terminal_panel,
             workbench_terminal_panel_handed_off: false,
+            workbench_terminal_handlers_installed: false,
             _workbench_terminal_panel_observation: workbench_terminal_panel_observation,
             _workbench_terminal_panel_event_subscription:
                 workbench_terminal_panel_event_subscription,
@@ -9348,10 +9350,7 @@ impl AgentPanel {
                 terminal_surface.set_owner_state(generation, owner_state, cx);
             });
         }
-        if self.workbench_shell_enabled
-            && terminal_is_visible
-            && self.workbench_terminal_has_authority(cx)
-        {
+        if self.workbench_shell_enabled && terminal_is_visible {
             let terminal_host_was_missing = self
                 .workbench_shell
                 .terminal_surface_for_active_binding(cx)
@@ -9741,6 +9740,7 @@ impl AgentPanel {
         );
         let files_are_actionable = self.workbench_files_are_actionable(cx);
         panel.update(cx, |panel, cx| {
+            panel.route_open_terminal_to_thread(true);
             if files_are_actionable {
                 panel.set_worktree_scope(Some(worktree_id), window, cx);
             } else {
@@ -10091,6 +10091,34 @@ impl AgentPanel {
             ));
             panel
         };
+        if !self.workbench_terminal_handlers_installed {
+            let panel_owner = cx.entity().downgrade();
+            let new_terminal_request_handler = Rc::new(move |window: &mut Window, cx: &mut App| {
+                panel_owner
+                    .update(cx, |panel, cx| {
+                        panel.create_terminal_for_active_thread(window, cx);
+                    })
+                    .log_err();
+            });
+            let panel_owner = cx.entity().downgrade();
+            let split_terminal_request_handler = Rc::new(
+                move |direction: SplitDirection, window: &mut Window, cx: &mut App| {
+                    panel_owner
+                        .update(cx, |panel, cx| {
+                            panel.create_terminal_split_for_active_thread(direction, window, cx);
+                        })
+                        .log_err();
+                },
+            );
+            panel.update(cx, |panel, cx| {
+                panel.set_workbench_request_handlers(
+                    Some(new_terminal_request_handler),
+                    Some(split_terminal_request_handler),
+                    cx,
+                );
+            });
+            self.workbench_terminal_handlers_installed = true;
+        }
         if let Some(surface) = self.workbench_terminal_surface.clone() {
             surface.update(cx, |surface, cx| surface.bind(binding, cx));
             return Ok(surface);
@@ -10864,6 +10892,7 @@ impl AgentPanel {
     fn create_terminal_for_active_thread_at(
         &mut self,
         requested_working_directory: Option<PathBuf>,
+        split_direction: Option<SplitDirection>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -10920,7 +10949,40 @@ impl AgentPanel {
                         .upgrade()
                         .context("the created terminal closed before it could be registered")?;
                     let terminal_id = terminal.entity_id().as_u64();
-                    this.update(cx, |this, cx| {
+                    this.update_in(cx, |this, window, cx| {
+                        let owner_is_current = this.workbench_terminal_has_authority(cx)
+                            && this
+                                .workbench_terminal_surface
+                                .as_ref()
+                                .is_some_and(|surface| {
+                                    let surface = surface.read(cx);
+                                    surface.binding() == &owner
+                                        && surface.owner_state().can_create()
+                                });
+                        if !owner_is_current {
+                            panel.update(cx, |panel, cx| {
+                                panel.remove_terminal(terminal_id, window, cx);
+                            });
+                            this.workbench_shell.record_error(
+                                "Ignored a terminal created for a stale thread/worktree binding",
+                            );
+                            cx.notify();
+                            return;
+                        }
+                        if split_direction.is_some_and(|direction| {
+                            !panel.update(cx, |panel, cx| {
+                                panel.move_terminal_to_split(terminal_id, direction, window, cx)
+                            })
+                        }) {
+                            panel.update(cx, |panel, cx| {
+                                panel.remove_terminal(terminal_id, window, cx);
+                            });
+                            this.workbench_shell.record_error(
+                                "Could not place the new terminal in the requested split",
+                            );
+                            cx.notify();
+                            return;
+                        }
                         if let Some(surface) = this.workbench_terminal_surface.as_ref() {
                             surface.update(cx, |surface, cx| {
                                 surface.record_terminal_owner(terminal_id, owner, cx);
@@ -10944,7 +11006,40 @@ impl AgentPanel {
     }
 
     fn create_terminal_for_active_thread(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.create_terminal_for_active_thread_at(None, window, cx);
+        self.create_terminal_for_active_thread_at(None, None, window, cx);
+    }
+
+    fn create_terminal_split_for_active_thread(
+        &mut self,
+        direction: SplitDirection,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.create_terminal_for_active_thread_at(None, Some(direction), window, cx);
+    }
+
+    fn activate_next_terminal_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(panel) = self.workbench_terminal_panel.as_ref() {
+            panel.update(cx, |panel, cx| {
+                panel.activate_next_terminal_tab(window, cx);
+            });
+        }
+    }
+
+    fn activate_previous_terminal_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(panel) = self.workbench_terminal_panel.as_ref() {
+            panel.update(cx, |panel, cx| {
+                panel.activate_previous_terminal_tab(window, cx);
+            });
+        }
+    }
+
+    fn close_active_terminal_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(panel) = self.workbench_terminal_panel.as_ref() {
+            panel.update(cx, |panel, cx| {
+                panel.close_active_terminal_tab(window, cx);
+            });
+        }
     }
 
     fn render_surface_badge(
@@ -11610,6 +11705,21 @@ impl Render for AgentPanel {
                         }
                     }
                 }))
+                .on_action(cx.listener(
+                    |this, action: &project_panel::OpenInThreadTerminal, window, cx| {
+                        if this.workbench_shell_enabled {
+                            cx.stop_propagation();
+                            if this.ensure_terminal_work_surface_open(window, cx) {
+                                this.create_terminal_for_active_thread_at(
+                                    Some(action.working_directory.clone()),
+                                    None,
+                                    window,
+                                    cx,
+                                );
+                            }
+                        }
+                    },
+                ))
                 .on_action(
                     cx.listener(|this, action: &workspace::OpenTerminal, window, cx| {
                         if this.workbench_shell_enabled {
@@ -11622,6 +11732,7 @@ impl Render for AgentPanel {
                             } else if this.ensure_terminal_work_surface_open(window, cx) {
                                 this.create_terminal_for_active_thread_at(
                                     Some(action.working_directory.clone()),
+                                    None,
                                     window,
                                     cx,
                                 );
@@ -11692,6 +11803,21 @@ impl Render for AgentPanel {
                 .on_action(cx.listener(
                     |this, _: &workbench_shell::NewTerminalForThread, window, cx| {
                         this.create_terminal_for_active_thread(window, cx);
+                    },
+                ))
+                .on_action(cx.listener(
+                    |this, _: &workbench_shell::ActivateNextTerminalTab, window, cx| {
+                        this.activate_next_terminal_tab(window, cx);
+                    },
+                ))
+                .on_action(cx.listener(
+                    |this, _: &workbench_shell::ActivatePreviousTerminalTab, window, cx| {
+                        this.activate_previous_terminal_tab(window, cx);
+                    },
+                ))
+                .on_action(cx.listener(
+                    |this, _: &workbench_shell::CloseActiveTerminalTab, window, cx| {
+                        this.close_active_terminal_tab(window, cx);
                     },
                 ))
                 // The activity rail hugs the window's left edge, with the

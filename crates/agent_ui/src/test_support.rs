@@ -21,6 +21,7 @@ use std::rc::Rc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use terminal_view::terminal_panel::{
     TerminalPanel, TerminalPanelSnapshot, TestTerminalCreationRequest, TestTerminalInsertion,
+    TestTerminalLifecycle,
 };
 use text::OffsetRangeExt as _;
 use workspace::{
@@ -882,6 +883,59 @@ impl AgentWorkbenchFrontDoor {
                 panel.creation_working_directories_for_tests().to_vec()
             })
         })
+    }
+
+    pub fn invoke_native_terminal_new_handler(&self, cx: &mut TestAppContext) -> Result<()> {
+        let panel = self
+            .native_terminal_panel(cx)
+            .context("native TerminalPanel is unavailable")?;
+        let handler = panel
+            .read_with(cx, |panel, _cx| {
+                panel.workbench_new_terminal_request_handler_for_tests()
+            })
+            .context("workbench New Terminal handler is unavailable")?;
+        cx.update_window(self.window, |_, window, cx| handler(window, cx))?;
+        self.settle(cx);
+        Ok(())
+    }
+
+    pub fn invoke_native_terminal_split_handler(
+        &self,
+        direction: SplitDirection,
+        cx: &mut TestAppContext,
+    ) -> Result<()> {
+        let panel = self
+            .native_terminal_panel(cx)
+            .context("native TerminalPanel is unavailable")?;
+        let handler = panel
+            .read_with(cx, |panel, _cx| {
+                panel.workbench_split_terminal_request_handler_for_tests()
+            })
+            .context("workbench Split Terminal handler is unavailable")?;
+        cx.update_window(self.window, |_, window, cx| handler(direction, window, cx))?;
+        self.settle(cx);
+        Ok(())
+    }
+
+    pub fn set_display_only_terminal_lifecycle(
+        &self,
+        terminal_id: u64,
+        lifecycle: TestTerminalLifecycle,
+        cx: &TestAppContext,
+    ) -> Result<()> {
+        let panel = self
+            .native_terminal_panel(cx)
+            .context("native TerminalPanel is unavailable")?;
+        let changed = cx.update(|cx| {
+            panel.update(cx, |panel, cx| {
+                panel.set_test_terminal_lifecycle(terminal_id, lifecycle, cx)
+            })
+        });
+        if !changed {
+            bail!("display-only terminal {terminal_id} is unavailable");
+        }
+        self.settle(cx);
+        Ok(())
     }
 
     pub fn native_terminal_front_door_snapshot(
@@ -2473,6 +2527,22 @@ mod workbench_front_door_tests {
         );
         assert_eq!(first.panel.pending_terminal_count, 0);
         assert_eq!(first.surface.terminal_owners.len(), 1);
+        let snapshot = front_door.snapshot(cx);
+        let mut probe = SemanticProbe::new(&snapshot);
+        probe
+            .require_accessible(
+                "omega.workbench.terminal.target",
+                "Label",
+                "New terminal target: /worktree-1",
+            )
+            .expect("Terminal target accessibility must preserve the canonical path");
+        probe
+            .require_accessible(
+                "omega.workbench.terminal.owner",
+                "Status",
+                "Active terminal owner: /worktree-1",
+            )
+            .expect("Terminal owner accessibility must preserve the canonical path");
         let first_owner = first
             .surface
             .active_terminal_owner
@@ -2528,10 +2598,54 @@ mod workbench_front_door_tests {
             Path::new("/worktree-2")
         );
 
+        front_door.dispatch_action(crate::workbench_shell::ActivatePreviousTerminalTab, cx);
+        assert_eq!(
+            front_door
+                .native_terminal_front_door_snapshot(cx)
+                .expect("previous-tab Terminal snapshot")
+                .surface
+                .active_terminal_owner
+                .expect("previous tab owner")
+                .1,
+            first_owner
+        );
+        front_door.dispatch_action(crate::workbench_shell::ActivateNextTerminalTab, cx);
+        front_door.dispatch_action(crate::workbench_shell::CloseActiveTerminalTab, cx);
+        let after_close = front_door
+            .native_terminal_front_door_snapshot(cx)
+            .expect("closed-tab Terminal snapshot");
+        assert_eq!(after_close.surface.terminal_owners.len(), 1);
+        assert_eq!(
+            after_close
+                .surface
+                .active_terminal_owner
+                .expect("first terminal should become active after closing the second")
+                .1,
+            first_owner
+        );
+
+        front_door
+            .invoke_native_terminal_split_handler(SplitDirection::Right, cx)
+            .expect("native Split callback should create through the active thread binding");
+        let split = front_door
+            .native_terminal_front_door_snapshot(cx)
+            .expect("split Terminal snapshot");
+        assert_eq!(split.panel.panes.len(), 2);
+        assert_eq!(split.surface.terminal_owners.len(), 2);
+        assert_eq!(
+            split
+                .surface
+                .active_terminal_owner
+                .expect("new split terminal owner")
+                .1
+                .worktree_abs_path,
+            Path::new("/worktree-2"),
+            "Split must use the current binding even when the active tab belongs to an old one"
+        );
+
         front_door.dispatch_action(
-            workspace::OpenTerminal {
+            project_panel::OpenInThreadTerminal {
                 working_directory: PathBuf::from("/worktree-2/src"),
-                local: false,
             },
             cx,
         );
@@ -2540,29 +2654,21 @@ mod workbench_front_door_tests {
             Some(vec![
                 Some(PathBuf::from("/worktree-1")),
                 Some(PathBuf::from("/worktree-2")),
+                Some(PathBuf::from("/worktree-2")),
                 Some(PathBuf::from("/worktree-2/src")),
             ]),
             "the native Files Open in Terminal action should retain its in-worktree directory"
         );
 
         front_door.dispatch_action(
-            workspace::OpenTerminal {
+            project_panel::OpenInThreadTerminal {
                 working_directory: PathBuf::from("/outside"),
-                local: false,
             },
             cx,
         );
         front_door.dispatch_action(
-            workspace::OpenTerminal {
-                working_directory: PathBuf::from("/worktree-2"),
-                local: true,
-            },
-            cx,
-        );
-        front_door.dispatch_action(
-            workspace::OpenTerminal {
+            project_panel::OpenInThreadTerminal {
                 working_directory: PathBuf::from("/worktree-2/../outside"),
-                local: false,
             },
             cx,
         );
@@ -2570,8 +2676,8 @@ mod workbench_front_door_tests {
             front_door
                 .terminal_creation_working_directories(cx)
                 .map(|directories| directories.len()),
-            Some(3),
-            "outside-worktree and local terminal routes must fail closed"
+            Some(4),
+            "outside-worktree terminal routes must fail closed"
         );
         SemanticProbe::new(&front_door.snapshot(cx))
             .require_visible("omega-workbench-rail-error")
@@ -2632,17 +2738,15 @@ mod workbench_front_door_tests {
             completed.surface.binding.worktree_abs_path,
             Path::new("/worktree-2")
         );
-        assert_eq!(completed.surface.terminal_owners.len(), 1);
-        assert_eq!(
-            completed
-                .surface
-                .active_terminal_owner
-                .expect("completed terminal owner")
-                .1
-                .worktree_abs_path,
-            Path::new("/worktree-1"),
-            "a late completion must keep the worktree captured by its request"
+        assert!(completed.surface.terminal_owners.is_empty());
+        assert!(completed.surface.active_terminal_owner.is_none());
+        assert!(
+            completed.panel.terminal_ids().next().is_none(),
+            "a stale completion must remove its just-created native item"
         );
+        SemanticProbe::new(&front_door.snapshot(cx))
+            .require_visible("omega-workbench-rail-error")
+            .expect("stale completion rejection should be visible in the workbench");
 
         front_door.dispatch_action(crate::workbench_shell::NewTerminalForThread, cx);
         assert_eq!(
@@ -2665,7 +2769,7 @@ mod workbench_front_door_tests {
             .native_terminal_front_door_snapshot(cx)
             .expect("failed terminal snapshot");
         assert_eq!(failed.panel.pending_terminal_count, 0);
-        assert_eq!(failed.surface.terminal_owners.len(), 1);
+        assert!(failed.surface.terminal_owners.is_empty());
         SemanticProbe::new(&front_door.snapshot(cx))
             .require_visible("omega-workbench-rail-error")
             .expect("spawn failure should be surfaced through the workbench UI");
@@ -2698,6 +2802,40 @@ mod workbench_front_door_tests {
             b"output survives ownership transitions\n",
             cx,
         );
+        front_door
+            .set_display_only_terminal_lifecycle(
+                original.insertion.terminal_id,
+                TestTerminalLifecycle::Running { process_id: 4242 },
+                cx,
+            )
+            .expect("display-only terminal should enter running state");
+        assert_eq!(
+            front_door
+                .native_terminal_snapshot(cx)
+                .expect("running Terminal snapshot")
+                .running_terminal_count(),
+            1
+        );
+        SemanticProbe::new(&front_door.snapshot(cx))
+            .require_visible("omega.workbench.badge.terminal")
+            .expect("running native lifecycle should drive the Terminal badge");
+        front_door
+            .set_display_only_terminal_lifecycle(
+                original.insertion.terminal_id,
+                TestTerminalLifecycle::Exited { exit_code: 0 },
+                cx,
+            )
+            .expect("display-only terminal should enter exited state");
+        assert_eq!(
+            front_door
+                .native_terminal_snapshot(cx)
+                .expect("exited Terminal snapshot")
+                .running_terminal_count(),
+            0
+        );
+        SemanticProbe::new(&front_door.snapshot(cx))
+            .require_absent("omega.workbench.badge.terminal")
+            .expect("terminal exit should clear the production-derived badge");
 
         front_door
             .select_identity_fixture("worktree-2", cx)
@@ -2732,22 +2870,6 @@ mod workbench_front_door_tests {
             Some(&original_binding),
             "a conflicting owner registration must not relabel an existing terminal"
         );
-        let stale_completion = front_door
-            .insert_display_only_terminal(true, None, Some(original_binding.clone()), cx)
-            .expect("controlled stale terminal completion");
-        let after_stale = front_door
-            .native_terminal_front_door_snapshot(cx)
-            .expect("Terminal snapshot after stale completion");
-        assert_eq!(after_stale.surface.binding, switched.surface.binding);
-        assert_eq!(
-            after_stale.surface.active_terminal_owner,
-            Some((
-                stale_completion.insertion.terminal_id,
-                original_binding.clone()
-            )),
-            "late completion ownership must come from the captured request, not current scope"
-        );
-
         front_door.dispatch_action(crate::workbench_shell::SelectTerminal, cx);
         assert!(front_door.visible_surface_host(cx).is_none());
         assert!(
@@ -2767,6 +2889,25 @@ mod workbench_front_door_tests {
             crate::workbench_shell::NativeTerminalOwnerState::Offline
         );
         assert!(!offline.surface.owner_state.can_create());
+        assert!(!offline.panel.new_terminal_enabled);
+        let creation_count = front_door
+            .terminal_creation_working_directories(cx)
+            .expect("terminal creation log")
+            .len();
+        front_door
+            .invoke_native_terminal_new_handler(cx)
+            .expect("workbench New callback should be installed");
+        front_door
+            .invoke_native_terminal_split_handler(SplitDirection::Right, cx)
+            .expect("workbench Split callback should be installed");
+        assert_eq!(
+            front_door
+                .terminal_creation_working_directories(cx)
+                .expect("offline terminal creation log")
+                .len(),
+            creation_count,
+            "offline New and Split callbacks must not request a process"
+        );
         front_door.set_identity_phase(crate::thread_identity::IdentityPhase::Reconnecting, cx);
         assert_eq!(
             front_door
@@ -2798,6 +2939,11 @@ mod workbench_front_door_tests {
             removed.surface.owner_state,
             crate::workbench_shell::NativeTerminalOwnerState::WorktreeRemoved
         );
+        assert!(!removed.panel.new_terminal_enabled);
+        assert!(
+            front_door.visible_surface_host(cx).is_some(),
+            "removed worktree must retain a visible host for existing terminal output"
+        );
         assert_eq!(
             removed
                 .surface
@@ -2809,6 +2955,20 @@ mod workbench_front_door_tests {
             front_door
                 .display_only_terminal_content(&original.insertion, cx)
                 .contains("output survives ownership transitions")
+        );
+        front_door
+            .invoke_native_terminal_new_handler(cx)
+            .expect("removed-worktree New callback should remain installed but disabled");
+        front_door
+            .invoke_native_terminal_split_handler(SplitDirection::Right, cx)
+            .expect("removed-worktree Split callback should remain installed but disabled");
+        assert_eq!(
+            front_door
+                .terminal_creation_working_directories(cx)
+                .expect("removed-worktree terminal creation log")
+                .len(),
+            creation_count,
+            "removed-worktree callbacks must not request a process"
         );
 
         front_door
