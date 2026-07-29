@@ -2725,6 +2725,23 @@ mod workbench_front_door_tests {
         front_door
             .select_identity_fixture("worktree-2", cx)
             .expect("identity should switch while creation is pending");
+        let current_binding = front_door
+            .native_terminal_front_door_snapshot(cx)
+            .expect("current Terminal binding after switch")
+            .surface
+            .binding;
+        let current = front_door
+            .insert_display_only_terminal(true, None, Some(current_binding.clone()), cx)
+            .expect("current-binding terminal should be retained during stale completion");
+        front_door.write_display_only_terminal_output(
+            &current.insertion,
+            b"current terminal survives stale completion\n",
+            cx,
+        );
+        let before_stale = front_door
+            .native_terminal_front_door_snapshot(cx)
+            .expect("Terminal snapshot before stale completion");
+        assert!(front_door.visible_surface_host(cx).is_some());
         assert!(first_request.succeed());
         front_door.settle(cx);
         let completed = front_door
@@ -2738,12 +2755,19 @@ mod workbench_front_door_tests {
             completed.surface.binding.worktree_abs_path,
             Path::new("/worktree-2")
         );
-        assert!(completed.surface.terminal_owners.is_empty());
-        assert!(completed.surface.active_terminal_owner.is_none());
-        assert!(
-            completed.panel.terminal_ids().next().is_none(),
-            "a stale completion must remove its just-created native item"
+        assert_eq!(completed.panel.panes, before_stale.panel.panes);
+        assert_eq!(completed.surface.terminal_owners.len(), 1);
+        assert_eq!(
+            completed.surface.active_terminal_owner,
+            Some((current.insertion.terminal_id, current_binding))
         );
+        assert!(
+            front_door
+                .display_only_terminal_content(&current.insertion, cx)
+                .contains("current terminal survives stale completion"),
+            "rejecting the stale item must preserve current terminal output"
+        );
+        assert!(front_door.visible_surface_host(cx).is_some());
         SemanticProbe::new(&front_door.snapshot(cx))
             .require_visible("omega-workbench-rail-error")
             .expect("stale completion rejection should be visible in the workbench");
@@ -2769,7 +2793,7 @@ mod workbench_front_door_tests {
             .native_terminal_front_door_snapshot(cx)
             .expect("failed terminal snapshot");
         assert_eq!(failed.panel.pending_terminal_count, 0);
-        assert!(failed.surface.terminal_owners.is_empty());
+        assert_eq!(failed.surface.terminal_owners.len(), 1);
         SemanticProbe::new(&front_door.snapshot(cx))
             .require_visible("omega-workbench-rail-error")
             .expect("spawn failure should be surfaced through the workbench UI");
