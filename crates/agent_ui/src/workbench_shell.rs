@@ -383,7 +383,7 @@ impl Render for NativeTerminalSurface {
             })
             .map(|owner| owner.worktree_abs_path.to_string_lossy().to_string());
         v_flex()
-            .id("omega-native-terminal-surface")
+            .id("omega.workbench.terminal.content")
             .debug_selector(|| "omega.workbench.terminal.content".to_string())
             .role(gpui::Role::Group)
             .aria_label("Terminal")
@@ -394,6 +394,8 @@ impl Render for NativeTerminalSurface {
                 v_flex()
                     .flex_none()
                     .w_full()
+                    .min_w_0()
+                    .overflow_hidden()
                     .border_b_1()
                     .border_color(cx.theme().colors().border)
                     .px_2()
@@ -401,25 +403,33 @@ impl Render for NativeTerminalSurface {
                     .child(
                         h_flex()
                             .w_full()
-                            .justify_between()
+                            .min_w_0()
+                            .gap_2()
                             .child(
-                                Label::new(format!("New terminal target: {target}"))
-                                    .size(LabelSize::XSmall)
-                                    .color(Color::Muted),
+                                div().min_w_0().flex_1().overflow_hidden().child(
+                                    Label::new(format!("New terminal target: {target}"))
+                                        .size(LabelSize::XSmall)
+                                        .color(Color::Muted)
+                                        .truncate(),
+                                ),
                             )
                             .child(
-                                IconButton::new("omega.workbench.terminal.new", IconName::Plus)
-                                    .debug_selector(|| "omega.workbench.terminal.new".to_string())
-                                    .icon_size(IconSize::Small)
-                                    .tab_index(0isize)
-                                    .disabled(!can_create)
-                                    .aria_label("New terminal in thread worktree")
-                                    .on_click(|_, window, cx| {
-                                        window.dispatch_action(
-                                            NewTerminalForThread.boxed_clone(),
-                                            cx,
-                                        );
-                                    }),
+                                div().flex_none().child(
+                                    IconButton::new("omega.workbench.terminal.new", IconName::Plus)
+                                        .debug_selector(|| {
+                                            "omega.workbench.terminal.new".to_string()
+                                        })
+                                        .icon_size(IconSize::Small)
+                                        .tab_index(0isize)
+                                        .disabled(!can_create)
+                                        .aria_label("New terminal in thread worktree")
+                                        .on_click(|_, window, cx| {
+                                            window.dispatch_action(
+                                                NewTerminalForThread.boxed_clone(),
+                                                cx,
+                                            );
+                                        }),
+                                ),
                             ),
                     )
                     .when_some(active_owner, |this, active_owner| {
