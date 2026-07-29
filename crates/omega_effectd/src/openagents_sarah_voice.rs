@@ -26,6 +26,7 @@ const MAX_REF_BYTES: usize = 256;
 const MAX_ACCESS_TOKEN_BYTES: usize = 16 * 1024;
 const MAX_GATEWAY_URL_BYTES: usize = 2 * 1024;
 const MAX_CHALLENGE_LIFETIME_MS: u64 = 120_000;
+const MAX_CHALLENGE_CLOCK_SKEW_MS: u64 = 60_000;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ManagedSarahVoiceSession {
@@ -363,7 +364,8 @@ fn validate_challenge(challenge: &ChallengeResponse) -> Result<(), HostedSession
     } else if !valid_base64url(&challenge.challenge) {
         Some("challenge format")
     } else if challenge.expires_at_ms <= now_ms
-        || challenge.expires_at_ms - now_ms > MAX_CHALLENGE_LIFETIME_MS
+        || challenge.expires_at_ms - now_ms
+            > MAX_CHALLENGE_LIFETIME_MS + MAX_CHALLENGE_CLOCK_SKEW_MS
     {
         Some("lifetime")
     } else {
@@ -563,6 +565,24 @@ mod tests {
         );
         assert_eq!(value["identity"]["generation"], 1);
         assert!(body.len() < 8 * 1024);
+    }
+
+    #[test]
+    fn challenge_validation_allows_bounded_server_clock_skew() {
+        let now = now_ms().expect("system time");
+        let challenge = ChallengeResponse {
+            schema: SARAH_VOICE_CHALLENGE_PROTOCOL.to_string(),
+            challenge: "a".repeat(32),
+            expires_at_ms: now + MAX_CHALLENGE_LIFETIME_MS + MAX_CHALLENGE_CLOCK_SKEW_MS,
+            owner_ref: "nostr-owner".to_string(),
+        };
+        assert!(validate_challenge(&challenge).is_ok());
+
+        let invalid = ChallengeResponse {
+            expires_at_ms: now + MAX_CHALLENGE_LIFETIME_MS + MAX_CHALLENGE_CLOCK_SKEW_MS + 10_000,
+            ..challenge
+        };
+        assert!(validate_challenge(&invalid).is_err());
     }
 
     #[test]
