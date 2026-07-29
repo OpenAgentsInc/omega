@@ -223,6 +223,14 @@ impl ThreadIdentityProjection {
                             && candidate.repository_name == previous.repository_name
                     })
                 })
+                .or_else(|| {
+                    observation.candidates.iter().find(|candidate| {
+                        candidate.worktree_abs_path == previous.worktree_abs_path
+                            && (matches!(previous.branch, BranchIdentity::NoGit)
+                                || previous.repository_name == "No Git"
+                                || previous.binding.worktree_id == candidate.binding.worktree_id)
+                    })
+                })
                 .cloned()
         });
         let selection_missing = previous_selected.is_some()
@@ -402,6 +410,31 @@ mod tests {
         assert_eq!(state.phase, IdentityPhase::Ready);
         assert_eq!(state.selected, Some(refreshed.clone()));
         assert_eq!(state.binding(), Some(&refreshed.binding));
+    }
+
+    #[test]
+    fn initial_no_git_fallback_upgrades_to_scanned_git_repository_without_missing_phase() {
+        let mut projection = ThreadIdentityProjection::default();
+        let mut fallback = candidate("project-worktree-0", "worktree-0");
+        fallback.repository_name = "No Git".into();
+        fallback.branch = BranchIdentity::NoGit;
+        projection.sync_active_thread(
+            Some("thread".into()),
+            observation(1, IdentityPhase::Ready, vec![fallback]),
+        );
+
+        let mut scanned = candidate("git-repository-1234", "worktree-0");
+        scanned.repository_name = "omega".into();
+        let effect = projection.sync_active_thread(
+            Some("thread".into()),
+            observation(2, IdentityPhase::Ready, vec![scanned.clone()]),
+        );
+
+        assert_eq!(effect, IdentitySyncEffect::Applied);
+        let state = projection.active().expect("active state");
+        assert_eq!(state.phase, IdentityPhase::Ready);
+        assert_eq!(state.selected, Some(scanned.clone()));
+        assert_eq!(state.binding(), Some(&scanned.binding));
     }
 
     #[test]
