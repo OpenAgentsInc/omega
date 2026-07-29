@@ -112,9 +112,9 @@ use terminal_view::{TerminalView, terminal_panel::TerminalPanel};
 use text::{OffsetRangeExt, Point};
 use theme_settings::ThemeSettings;
 use ui::{
-    ContextMenu, ContextMenuEntry, GradientFade, IconButton, KeyBinding, ListItem, ListItemSpacing,
-    PopoverMenu, PopoverMenuHandle, ProjectEmptyState, Tab, Tooltip, prelude::*,
-    utils::WithRemSize,
+    CommonAnimationExt, ContextMenu, ContextMenuEntry, GradientFade, IconButton, KeyBinding,
+    ListItem, ListItemSpacing, PopoverMenu, PopoverMenuHandle, ProjectEmptyState, Tab, Tooltip,
+    prelude::*, utils::WithRemSize,
 };
 use util::{ResultExt as _, paths::PathStyle, rel_path::RelPath};
 use workspace::{
@@ -4413,6 +4413,7 @@ impl AgentPanel {
             .enumerate()
             .fold(v_flex().w_full().pb_1(), |list, (index, row)| {
                 let is_active = active_thread_id.as_ref() == Some(&row.thread_id);
+                let is_generating = self.is_thread_generating(&row.thread_id, cx);
                 let reopenable = row.is_reopenable();
                 // A row that will refuse says so unclicked. It already knew, and
                 // a list whose dead rows look exactly like its live ones asks a
@@ -4432,35 +4433,56 @@ impl AgentPanel {
                             this.open_thread_from_threads_sidebar(&row, window, cx);
                         }))
                         .child(
-                            v_flex()
+                            h_flex()
                                 .w_full()
-                                .gap_0p5()
+                                .items_center()
+                                .justify_between()
                                 .child(
-                                    Label::new(title)
-                                        .size(LabelSize::Small)
-                                        .color(if is_active {
-                                            Color::Accent
-                                        } else if reopenable {
-                                            Color::Default
-                                        } else {
-                                            Color::Muted
-                                        })
-                                        .truncate(),
-                                )
-                                .child(
-                                    h_flex()
-                                        .gap_1p5()
+                                    v_flex()
+                                        .min_w_0()
+                                        .flex_1()
+                                        .gap_0p5()
                                         .child(
-                                            Label::new(age)
-                                                .size(LabelSize::XSmall)
-                                                .color(Color::Muted),
+                                            Label::new(title)
+                                                .size(LabelSize::Small)
+                                                .color(if is_active {
+                                                    Color::Accent
+                                                } else if reopenable {
+                                                    Color::Default
+                                                } else {
+                                                    Color::Muted
+                                                })
+                                                .truncate(),
                                         )
-                                        .children(executor.map(|executor| {
-                                            Label::new(executor)
-                                                .size(LabelSize::XSmall)
-                                                .color(Color::Muted)
-                                        })),
-                                ),
+                                        .child(
+                                            h_flex()
+                                                .gap_1p5()
+                                                .child(
+                                                    Label::new(age)
+                                                        .size(LabelSize::XSmall)
+                                                        .color(Color::Muted),
+                                                )
+                                                .children(executor.map(|executor| {
+                                                    Label::new(executor)
+                                                        .size(LabelSize::XSmall)
+                                                        .color(Color::Muted)
+                                                })),
+                                        ),
+                                )
+                                .when(is_generating, |this| {
+                                    this.child(
+                                        h_flex()
+                                            .id("running-spinner")
+                                            .flex_none()
+                                            .justify_center()
+                                            .child(
+                                                Icon::new(IconName::LoadCircle)
+                                                    .size(IconSize::Small)
+                                                    .color(Color::Muted)
+                                                    .with_rotate_animation(2),
+                                            ),
+                                    )
+                                }),
                         ),
                 )
             })
@@ -5784,6 +5806,28 @@ impl AgentPanel {
 
     pub fn is_retained_thread(&self, id: &ThreadId) -> bool {
         self.retained_threads.contains_key(id)
+    }
+
+    pub fn is_thread_generating(&self, thread_id: &ThreadId, cx: &App) -> bool {
+        if let Some(active_cv) = self.active_conversation_view() {
+            if active_cv.read(cx).thread_id == *thread_id {
+                if let Some(acp_thread) = active_cv.read(cx).root_thread(cx) {
+                    if acp_thread.read(cx).status() == ThreadStatus::Generating {
+                        return true;
+                    }
+                }
+            }
+        }
+        for cv in self.retained_threads.values() {
+            if cv.read(cx).thread_id == *thread_id {
+                if let Some(acp_thread) = cv.read(cx).root_thread(cx) {
+                    if acp_thread.read(cx).status() == ThreadStatus::Generating {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
     }
 
     pub fn cancel_thread(&self, thread_id: &ThreadId, cx: &mut Context<Self>) -> bool {
@@ -7642,6 +7686,19 @@ impl AgentPanel {
                         // the `full_auto_panel` namespace, because a surface
                         // that is only visually absent is still one key press
                         // away.
+                        .item(
+                            ContextMenuEntry::new("Sarah")
+                                .icon(IconName::OmegaAgent)
+                                .icon_color(Color::Accent)
+                                .handler({
+                                    move |window, cx| {
+                                        window.dispatch_action(
+                                            Box::new(OpenSarahWorkroomPanel),
+                                            cx,
+                                        );
+                                    }
+                                }),
+                        )
                         .when(!omega_zero_base::is_active(), |menu| {
                             menu.item(
                                 ContextMenuEntry::new("Full Auto")
@@ -7661,19 +7718,6 @@ impl AgentPanel {
                                         move |window, cx| {
                                             window.dispatch_action(
                                                 Box::new(OpenAgentComputerPanel),
-                                                cx,
-                                            );
-                                        }
-                                    }),
-                            )
-                            .item(
-                                ContextMenuEntry::new("Sarah")
-                                    .icon(IconName::OmegaAgent)
-                                    .icon_color(Color::Accent)
-                                    .handler({
-                                        move |window, cx| {
-                                            window.dispatch_action(
-                                                Box::new(OpenSarahWorkroomPanel),
                                                 cx,
                                             );
                                         }
@@ -11840,6 +11884,85 @@ impl AgentPanel {
         if !layout.dock_visible {
             return None;
         }
+
+        if let Some(channel) = self.public_channels.selected_channel() {
+            let resize_drag = workbench_shell::WorkbenchDockResizeDrag::new(layout.dock_width);
+            let maximum_dock_width = workbench_shell::WorkbenchLayout::clamp_dock_width(
+                window.viewport_size().width,
+                workbench_shell::MAX_DOCK_WIDTH,
+            )
+            .unwrap_or(layout.dock_width);
+
+            return Some(
+                v_flex()
+                    .id("omega-public-channel-dock")
+                    .debug_selector(|| "omega.public.channel.dock".into())
+                    .relative()
+                    .w(layout.dock_width)
+                    .h_full()
+                    .flex_shrink_0()
+                    .overflow_hidden()
+                    .bg(cx.theme().colors().panel_background)
+                    .border_r_1()
+                    .border_color(cx.theme().colors().border)
+                    .role(gpui::Role::Complementary)
+                    .aria_label(format!("{} channel", channel.destination_label()))
+                    .child(self.render_selected_public_channel(cx))
+                    .child(
+                        div()
+                            .id("omega.workbench.control.dock.resize")
+                            .debug_selector(|| "omega.workbench.control.dock.resize".into())
+                            .absolute()
+                            .right(px(0.))
+                            .top(px(0.))
+                            .h_full()
+                            .w(workbench_shell::RESIZE_HANDLE_WIDTH)
+                            .cursor_col_resize()
+                            .block_mouse_except_scroll()
+                            .role(gpui::Role::Splitter)
+                            .aria_label("Resize channel surface")
+                            .aria_orientation(gpui::accesskit::Orientation::Vertical)
+                            .aria_numeric_value(layout.dock_width.as_f32() as f64)
+                            .aria_min_numeric_value(workbench_shell::MIN_DOCK_WIDTH.as_f32() as f64)
+                            .aria_max_numeric_value(maximum_dock_width.as_f32() as f64)
+                            .tooltip(Tooltip::text("Drag to resize; double-click to reset"))
+                            .on_drag(resize_drag, |drag, _, window, cx| {
+                                drag.begin(window.mouse_position().x);
+                                cx.new(|_| gpui::Empty)
+                            })
+                            .on_drag_move::<workbench_shell::WorkbenchDockResizeDrag>(cx.listener(
+                                |this,
+                                 event: &gpui::DragMoveEvent<
+                                    workbench_shell::WorkbenchDockResizeDrag,
+                                >,
+                                 window,
+                                 cx| {
+                                    let requested_width =
+                                        event.drag(cx).requested_width(event.event.position.x);
+                                    if this
+                                        .workbench_shell
+                                        .resize_dock(requested_width, window.viewport_size().width)
+                                    {
+                                        cx.notify();
+                                    }
+                                },
+                            ))
+                            .on_click(cx.listener(|this, event: &gpui::ClickEvent, window, cx| {
+                                if event.click_count() >= 2
+                                    && this.workbench_shell.resize_dock(
+                                        workbench_shell::DEFAULT_DOCK_WIDTH,
+                                        window.viewport_size().width,
+                                    )
+                                {
+                                    cx.notify();
+                                }
+                                cx.stop_propagation();
+                            })),
+                    )
+                    .into_any_element(),
+            );
+        }
+
         let visible = self.workbench_shell.projection().visible_projection()?;
         if !visible.dock_open {
             return None;
@@ -12039,18 +12162,9 @@ impl Render for AgentPanel {
                     })
                 }
             }))
-            .when(
-                self.public_channels.selected_channel().is_none(),
-                |parent| parent.child(self.render_toolbar(window, cx)),
-            )
-            .when(
-                self.public_channels.selected_channel().is_none(),
-                |parent| parent.children(self.render_new_user_onboarding(window, cx)),
-            )
+            .child(self.render_toolbar(window, cx))
+            .children(self.render_new_user_onboarding(window, cx))
             .map(|parent| {
-                if self.public_channels.selected_channel().is_some() {
-                    return parent.child(self.render_selected_public_channel(cx));
-                }
                 // Full Auto is a surface of this panel, not a destination
                 // beside it. `OMEGA-DELTA-0020`.
                 if self.showing_full_auto
@@ -12114,13 +12228,16 @@ impl Render for AgentPanel {
             });
 
         let content = if self.workbench_shell_enabled {
+            let dock_open = self
+                .workbench_shell
+                .projection()
+                .visible_projection()
+                .is_some_and(|visible| visible.dock_open)
+                || self.public_channels.selected_channel().is_some();
             let mut layout = workbench_shell::WorkbenchLayout::allocate(
                 window.viewport_size().width,
                 self.sidebar.open,
-                self.workbench_shell
-                    .projection()
-                    .visible_projection()
-                    .is_some_and(|visible| visible.dock_open),
+                dock_open,
                 self.workbench_shell.dock_width(),
             );
             if !layout.dock_visible {
@@ -12138,10 +12255,7 @@ impl Render for AgentPanel {
             layout = workbench_shell::WorkbenchLayout::allocate(
                 window.viewport_size().width,
                 self.sidebar.open,
-                self.workbench_shell
-                    .projection()
-                    .visible_projection()
-                    .is_some_and(|visible| visible.dock_open),
+                dock_open,
                 self.workbench_shell.dock_width(),
             );
 
