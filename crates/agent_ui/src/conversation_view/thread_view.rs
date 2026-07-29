@@ -13641,7 +13641,9 @@ impl ThreadView {
             |choice| match choice {
                 // Codex and Claude Code are implementation lanes behind Omega
                 // in this release, not public executor choices.
-                SelectableExecutor::Codex | SelectableExecutor::Claude => SelectableExecutor::Omega,
+                SelectableExecutor::Codex
+                | SelectableExecutor::Claude
+                | SelectableExecutor::Grok => SelectableExecutor::Omega,
                 choice => choice,
             },
         );

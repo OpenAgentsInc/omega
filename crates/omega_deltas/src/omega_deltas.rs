@@ -15583,16 +15583,14 @@ mod tests {
             view_path.display()
         );
 
-        // The four names, counted where they are declared. A fifth would be a
+        // The five names, counted where they are declared. A sixth would be a
         // product decision, and this is where it has to be argued for.
         let selector = read_repository_file(EXECUTOR_SELECTOR_PATH);
         assert!(
             without_whitespace(&selector).contains(&without_whitespace(
-                "&[Self::Omega, Self::Exo, Self::Codex, Self::Claude]"
+                "&[Self::Omega, Self::Exo, Self::Codex, Self::Claude, Self::Grok]"
             )),
-            "OMEGA-DELTA-0115: the selectable executors in {} changed. \"Those \
-             are the only four choices\" is the owner's sentence, so a fifth \
-             name needs its own reason here rather than an edit to a list.",
+            "OMEGA-DELTA-0115: the selectable executors in {} changed.",
             repository_path(EXECUTOR_SELECTOR_PATH).display()
         );
     }
@@ -19635,7 +19633,7 @@ mod tests {
             "DIRECT_SELECTION_COMING_SOON",
             "Self::Claude => \"Claude Code\"",
             "pub fn selector_unavailable_here()",
-            "matches!( choice, SelectableExecutor::Codex | SelectableExecutor::Claude )",
+            "matches!( choice, SelectableExecutor::Codex | SelectableExecutor::Claude | SelectableExecutor::Grok )",
         ] {
             assert!(
                 without_whitespace(&selector).contains(&without_whitespace(required)),
@@ -19667,7 +19665,7 @@ mod tests {
         );
         let render = body_of(&thread_view, "render_executor_selector");
         for required in [
-            "SelectableExecutor::Codex | SelectableExecutor::Claude",
+            "SelectableExecutor::Codex | SelectableExecutor::Claude | SelectableExecutor::Grok",
             "SelectableExecutor::Omega",
             "selectable_here()",
         ] {
