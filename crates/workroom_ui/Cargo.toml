@@ -30,6 +30,7 @@ gpui.workspace = true
 log.workspace = true
 omega_effectd.workspace = true
 omega_identity.workspace = true
+paths.workspace = true
 rodio.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -47,3 +48,4 @@ zed_actions.workspace = true
 
 [dev-dependencies]
 gpui = { workspace = true, features = ["test-support"] }
+tempfile.workspace = true

@@ -1,5 +1,8 @@
 use std::{
     collections::HashMap,
+    fs::OpenOptions,
+    io::Write as _,
+    path::{Path, PathBuf},
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -39,6 +42,8 @@ const MAX_GATEWAY_FRAME_BYTES: usize = 256 * 1024;
 const MAX_PROTOCOL_ID_BYTES: usize = 256;
 const MAX_TRANSCRIPT_TEXT_BYTES: usize = 64 * 1024;
 const MAX_ERROR_TEXT_BYTES: usize = 4 * 1024;
+const VOICE_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15);
+const VOICE_TRANSCRIPT_SCHEMA: &str = "openagents.sarah.voice.transcript.v1";
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum SarahVoiceState {
@@ -525,6 +530,7 @@ impl ManagedSarahVoiceClient {
         let (event_sender, event_receiver) = async_channel::bounded(128);
         smol::spawn(async move {
             if let Err(error) = self.run(control_receiver, event_sender.clone()).await {
+                log::error!("Sarah voice session failed: {error:#}");
                 let (message, action) = actionable_error(&error);
                 if event_sender
                     .send(SarahVoiceEvent::Error {
@@ -592,6 +598,10 @@ impl ManagedSarahVoiceClient {
         .await
         .context("connecting to the managed Sarah voice gateway")?;
         let identity = GatewayVoiceIdentity::from(&self.managed_session);
+        let transcript_log = LocalVoiceTranscriptLog::new(
+            paths::data_dir().join("voice").join("transcripts.jsonl"),
+            identity.session_ref.clone(),
+        );
         let mut control_sequence = 0_u64;
         let mut audio_sequence = 0_u64;
         let mut expected_server_sequence = 0_u64;
@@ -608,12 +618,16 @@ impl ManagedSarahVoiceClient {
             }),
         )
         .await?;
+        let mut next_heartbeat_at = Instant::now() + VOICE_HEARTBEAT_INTERVAL;
 
         loop {
             let incoming = socket.next().fuse();
             let control = controls.recv().fuse();
             let audio = microphone.receiver.recv().fuse();
-            pin_mut!(incoming, control, audio);
+            let heartbeat = futures::FutureExt::fuse(smol::Timer::after(
+                next_heartbeat_at.saturating_duration_since(Instant::now()),
+            ));
+            pin_mut!(incoming, control, audio, heartbeat);
             select_biased! {
                 control = control => {
                     match control {
@@ -676,18 +690,6 @@ impl ManagedSarahVoiceClient {
                         }
                     }
                 }
-                audio = audio => {
-                    let audio = audio.context("microphone capture stopped")?;
-                    if !capture_gate.should_forward(Instant::now()) {
-                        continue;
-                    }
-                    let frame = encode_client_audio(&identity, audio_sequence, &audio)?;
-                    audio_sequence = audio_sequence.saturating_add(1);
-                    socket
-                        .send(Message::Binary(frame.into()))
-                        .await
-                        .context("sending microphone audio")?;
-                }
                 incoming = incoming => {
                     let Some(incoming) = incoming else {
                         events.send(SarahVoiceEvent::Ended {
@@ -703,6 +705,7 @@ impl ManagedSarahVoiceClient {
                                 &identity,
                                 &mut expected_server_sequence,
                                 &mut pending_tools,
+                                &transcript_log,
                             ).await? {
                                 return Ok(());
                             }
@@ -727,6 +730,29 @@ impl ManagedSarahVoiceClient {
                             return Ok(());
                         }
                     }
+                }
+                _ = heartbeat => {
+                    send_gateway_control(
+                        &mut socket,
+                        &identity,
+                        &mut control_sequence,
+                        serde_json::json!({ "_tag": "heartbeat" }),
+                    )
+                    .await
+                    .context("sending Sarah voice heartbeat")?;
+                    next_heartbeat_at = Instant::now() + VOICE_HEARTBEAT_INTERVAL;
+                }
+                audio = audio => {
+                    let audio = audio.context("microphone capture stopped")?;
+                    if !capture_gate.should_forward(Instant::now()) {
+                        continue;
+                    }
+                    let frame = encode_client_audio(&identity, audio_sequence, &audio)?;
+                    audio_sequence = audio_sequence.saturating_add(1);
+                    socket
+                        .send(Message::Binary(frame.into()))
+                        .await
+                        .context("sending microphone audio")?;
                 }
             }
         }
@@ -846,6 +872,7 @@ async fn handle_server_message(
     identity: &GatewayVoiceIdentity,
     expected_sequence: &mut u64,
     pending_tools: &mut HashMap<String, PendingGatewayTool>,
+    transcript_log: &LocalVoiceTranscriptLog,
 ) -> Result<bool> {
     let envelope = decode_gateway_server_envelope(text)?;
     if envelope.schema != MANAGED_SARAH_PROTOCOL
@@ -908,11 +935,20 @@ async fn handle_server_message(
             text,
         } => {
             validate_gateway_text("transcript item id", &utterance_ref, MAX_PROTOCOL_ID_BYTES)?;
-            validate_gateway_text("completed transcript", &text, MAX_TRANSCRIPT_TEXT_BYTES)?;
+            if text.trim().is_empty() {
+                return Ok(false);
+            }
+            if text.len() > MAX_TRANSCRIPT_TEXT_BYTES {
+                bail!(
+                    "Sarah voice completed transcript exceeded the {MAX_TRANSCRIPT_TEXT_BYTES}-byte limit"
+                );
+            }
+            let participant = gateway_participant(source);
+            transcript_log.append(&utterance_ref, participant, &text)?;
             events
                 .send(SarahVoiceEvent::TranscriptCompleted {
                     item_id: utterance_ref,
-                    participant: gateway_participant(source),
+                    participant,
                     text,
                 })
                 .await
@@ -1029,6 +1065,60 @@ async fn handle_server_message(
         }
     }
     Ok(false)
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LocalVoiceTranscriptEntry<'a> {
+    schema: &'static str,
+    recorded_at: String,
+    session_ref: &'a str,
+    utterance_ref: &'a str,
+    participant: VoiceParticipant,
+    text: &'a str,
+}
+
+struct LocalVoiceTranscriptLog {
+    path: PathBuf,
+    session_ref: String,
+}
+
+impl LocalVoiceTranscriptLog {
+    fn new(path: PathBuf, session_ref: String) -> Self {
+        Self { path, session_ref }
+    }
+
+    fn append(&self, utterance_ref: &str, participant: VoiceParticipant, text: &str) -> Result<()> {
+        append_local_voice_transcript(
+            &self.path,
+            &LocalVoiceTranscriptEntry {
+                schema: VOICE_TRANSCRIPT_SCHEMA,
+                recorded_at: chrono::Utc::now().to_rfc3339(),
+                session_ref: &self.session_ref,
+                utterance_ref,
+                participant,
+                text,
+            },
+        )
+    }
+}
+
+fn append_local_voice_transcript(path: &Path, entry: &LocalVoiceTranscriptEntry<'_>) -> Result<()> {
+    let parent = path
+        .parent()
+        .context("Sarah voice transcript path had no parent directory")?;
+    std::fs::create_dir_all(parent).context("creating the local Sarah transcript directory")?;
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .context("opening the local Sarah transcript log")?;
+    serde_json::to_writer(&mut file, entry).context("encoding a local Sarah transcript entry")?;
+    file.write_all(b"\n")
+        .context("writing a local Sarah transcript entry")?;
+    file.sync_data()
+        .context("persisting a local Sarah transcript entry")?;
+    Ok(())
 }
 
 fn decode_gateway_server_envelope(text: &str) -> Result<GatewayServerEnvelope> {
@@ -1526,6 +1616,78 @@ fn actionable_error(error: &anyhow::Error) -> (String, Option<String>) {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn local_transcript_log_appends_durable_json_lines() {
+        let directory = tempfile::tempdir().expect("create transcript test directory");
+        let path = directory.path().join("voice/transcripts.jsonl");
+        let log = LocalVoiceTranscriptLog::new(path.clone(), "session-1".into());
+
+        log.append("user-1", VoiceParticipant::User, "Hello")
+            .expect("append user transcript");
+        log.append("sarah-1", VoiceParticipant::Sarah, "Hi there")
+            .expect("append Sarah transcript");
+
+        let contents = std::fs::read_to_string(path).expect("read transcript log");
+        let entries = contents
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).expect("decode transcript entry"))
+            .collect::<Vec<_>>();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0]["schema"], VOICE_TRANSCRIPT_SCHEMA);
+        assert_eq!(entries[0]["sessionRef"], "session-1");
+        assert_eq!(entries[0]["utteranceRef"], "user-1");
+        assert_eq!(entries[0]["participant"], "user");
+        assert_eq!(entries[0]["text"], "Hello");
+        assert_eq!(entries[1]["participant"], "sarah");
+        assert_eq!(entries[1]["text"], "Hi there");
+    }
+
+    #[test]
+    fn empty_final_transcript_does_not_end_the_voice_session() {
+        smol::block_on(async {
+            let directory = tempfile::tempdir().expect("create transcript test directory");
+            let identity = GatewayVoiceIdentity {
+                owner_ref: "owner-1".into(),
+                device_ref: "device-1".into(),
+                thread_ref: "thread-1".into(),
+                session_ref: "session-1".into(),
+                generation: 1,
+            };
+            let transcript_log = LocalVoiceTranscriptLog::new(
+                directory.path().join("voice/transcripts.jsonl"),
+                identity.session_ref.clone(),
+            );
+            let (events, received_events) = async_channel::bounded(1);
+            let mut expected_sequence = 0;
+            let mut pending_tools = HashMap::new();
+            let envelope = json!({
+                "schema": MANAGED_SARAH_PROTOCOL,
+                "identity": identity,
+                "sequence": 0,
+                "_tag": "transcript_final",
+                "source": "user",
+                "utteranceRef": "utterance-1",
+                "text": "",
+            });
+
+            let should_end = handle_server_message(
+                &envelope.to_string(),
+                &events,
+                &identity,
+                &mut expected_sequence,
+                &mut pending_tools,
+                &transcript_log,
+            )
+            .await
+            .expect("accept empty final transcript");
+
+            assert!(!should_end);
+            assert_eq!(expected_sequence, 1);
+            assert!(received_events.is_empty());
+            assert!(!transcript_log.path.exists());
+        });
+    }
 
     #[test]
     fn playback_capture_gate_drops_speaker_echo_and_reopens_after_the_tail() {
