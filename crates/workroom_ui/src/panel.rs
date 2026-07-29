@@ -19,7 +19,7 @@
 
 use std::{
     collections::HashMap,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use agent_ui::{AgentPanel, ThreadId};
@@ -120,6 +120,28 @@ struct SarahCreatedAgentThread {
     thread_id: ThreadId,
     presentation: AgentThreadPresentation,
     status: SharedString,
+}
+
+const MAX_CONSECUTIVE_VOICE_RECONNECTS: usize = 3;
+const STABLE_VOICE_CONNECTION_DURATION: Duration = Duration::from_secs(30);
+
+fn next_voice_reconnect_attempt(
+    state: SarahVoiceState,
+    retryable_failure: bool,
+    previous_attempts: usize,
+    connected_for: Duration,
+) -> Option<usize> {
+    if (!state.is_active() && !(state == SarahVoiceState::Error && retryable_failure))
+        || state == SarahVoiceState::Ending
+    {
+        return None;
+    }
+    let next_attempt = if connected_for >= STABLE_VOICE_CONNECTION_DURATION {
+        1
+    } else {
+        previous_attempts.saturating_add(1)
+    };
+    (next_attempt <= MAX_CONSECUTIVE_VOICE_RECONNECTS).then_some(next_attempt)
 }
 
 pub struct SarahWorkroomPanel {
@@ -1345,69 +1367,102 @@ impl SarahWorkroomPanel {
         cx.notify();
 
         let voice_task = cx.spawn_in(window, async move |this, cx| {
-            let managed_session = match openagents_session
-                .create_sarah_voice_session("sarah-owner-private", cx)
-                .await
-            {
-                Ok(session) => session,
-                Err(blocker) => {
-                    this.update(cx, |panel, cx| {
-                        panel.voice_state = SarahVoiceState::Error;
-                        panel.voice_retryable = blocker.is_retryable();
-                        panel.voice_access_required = blocker.requires_voice_access();
-                        panel.voice_status = blocker.summary().into();
-                        cx.notify();
+            let mut reconnect_attempts = 0;
+            loop {
+                let managed_session = match openagents_session
+                    .create_sarah_voice_session("sarah-owner-private", cx)
+                    .await
+                {
+                    Ok(session) => session,
+                    Err(blocker) => {
+                        this.update(cx, |panel, cx| {
+                            panel.voice_state = SarahVoiceState::Error;
+                            panel.voice_retryable = blocker.is_retryable();
+                            panel.voice_access_required = blocker.requires_voice_access();
+                            panel.voice_status = blocker.summary().into();
+                            cx.notify();
+                        })?;
+                        return anyhow::Ok(());
+                    }
+                };
+                let client = match ManagedSarahVoiceClient::from_managed_session(
+                    managed_session,
+                    input_device_id.clone(),
+                    output_device_id.clone(),
+                ) {
+                    Ok(client) => client,
+                    Err(error) => {
+                        this.update(cx, |panel, cx| {
+                            panel.voice_state = SarahVoiceState::Error;
+                            panel.voice_retryable = true;
+                            panel.voice_access_required = false;
+                            panel.voice_status =
+                                format!("Sarah voice could not start: {error:#}").into();
+                            cx.notify();
+                        })?;
+                        return anyhow::Ok(());
+                    }
+                };
+                let connection_started_at = Instant::now();
+                let connection = client.connect();
+                let controls = connection.controls;
+                let events = connection.events;
+                this.update(cx, |panel, cx| {
+                    panel.voice_controls = Some(controls);
+                    if panel.voice_muted {
+                        panel.send_voice_control(SarahVoiceControl::SetMuted(true));
+                    }
+                    panel.voice_state = SarahVoiceState::RequestingMicrophone;
+                    panel.voice_status = panel.voice_state.label().into();
+                    cx.notify();
+                })?;
+
+                let mut retryable_failure = false;
+                while let Ok(event) = events.recv().await {
+                    let ended = matches!(event, SarahVoiceEvent::Ended { .. });
+                    retryable_failure = matches!(
+                        event,
+                        SarahVoiceEvent::Error {
+                            retryable: true,
+                            ..
+                        }
+                    );
+                    this.update_in(cx, |panel, window, cx| {
+                        panel.handle_voice_event(event, window, cx);
                     })?;
-                    return anyhow::Ok(());
+                    if ended || retryable_failure {
+                        break;
+                    }
                 }
-            };
-            let client = match ManagedSarahVoiceClient::from_managed_session(
-                managed_session,
-                input_device_id,
-                output_device_id,
-            ) {
-                Ok(client) => client,
-                Err(error) => {
-                    this.update(cx, |panel, cx| {
+                let reconnect_attempt = this.update(cx, |panel, cx| {
+                    panel.voice_controls = None;
+                    let reconnect_attempt = next_voice_reconnect_attempt(
+                        panel.voice_state,
+                        retryable_failure,
+                        reconnect_attempts,
+                        connection_started_at.elapsed(),
+                    );
+                    if reconnect_attempt.is_some() {
+                        panel.voice_state = SarahVoiceState::Reconnecting;
+                        panel.voice_retryable = false;
+                        panel.voice_status =
+                            "The Sarah voice connection dropped. Reconnecting automatically…"
+                                .into();
+                    } else if panel.voice_state.is_active()
+                        || (panel.voice_state == SarahVoiceState::Error && retryable_failure)
+                    {
                         panel.voice_state = SarahVoiceState::Error;
                         panel.voice_retryable = true;
-                        panel.voice_access_required = false;
-                        panel.voice_status =
-                            format!("Sarah voice could not start: {error:#}").into();
-                        cx.notify();
-                    })?;
-                    return anyhow::Ok(());
-                }
-            };
-            let connection = client.connect();
-            let controls = connection.controls;
-            let events = connection.events;
-            this.update(cx, |panel, cx| {
-                panel.voice_controls = Some(controls);
-                panel.voice_state = SarahVoiceState::RequestingMicrophone;
-                panel.voice_status = panel.voice_state.label().into();
-                cx.notify();
-            })?;
-
-            while let Ok(event) = events.recv().await {
-                let ended = matches!(event, SarahVoiceEvent::Ended { .. });
-                this.update_in(cx, |panel, window, cx| {
-                    panel.handle_voice_event(event, window, cx);
+                        panel.voice_status = "Sarah voice could not restore a stable connection after three attempts. Retry when the network is stable.".into();
+                    }
+                    cx.notify();
+                    reconnect_attempt
                 })?;
-                if ended {
+                let Some(reconnect_attempt) = reconnect_attempt else {
                     break;
-                }
+                };
+                reconnect_attempts = reconnect_attempt;
             }
-            this.update(cx, |panel, cx| {
-                panel.voice_controls = None;
-                if panel.voice_state.is_active() {
-                    panel.voice_state = SarahVoiceState::Reconnecting;
-                    panel.voice_retryable = true;
-                    panel.voice_status =
-                        "The Sarah voice connection ended. Retry to reconnect cleanly.".into();
-                }
-                cx.notify();
-            })?;
             anyhow::Ok(())
         });
         self.voice_task = Some(cx.spawn(async move |_, _| {
@@ -3308,6 +3363,58 @@ mod panel_logic_tests {
         let _retry_voice = RetryVoice;
         assert_eq!(WorkroomProjection::header(), "Sarah");
         assert_eq!(PANEL_KEY, "SarahWorkroomPanel");
+    }
+
+    #[test]
+    fn transient_voice_disconnects_reconnect_but_terminal_states_do_not() {
+        assert_eq!(
+            next_voice_reconnect_attempt(
+                SarahVoiceState::Reconnecting,
+                false,
+                0,
+                Duration::from_secs(65)
+            ),
+            Some(1)
+        );
+        assert_eq!(
+            next_voice_reconnect_attempt(
+                SarahVoiceState::Reconnecting,
+                false,
+                2,
+                Duration::from_secs(1)
+            ),
+            Some(3)
+        );
+        assert_eq!(
+            next_voice_reconnect_attempt(
+                SarahVoiceState::Reconnecting,
+                false,
+                3,
+                Duration::from_secs(1)
+            ),
+            None
+        );
+        assert_eq!(
+            next_voice_reconnect_attempt(SarahVoiceState::Error, true, 0, Duration::from_secs(65)),
+            Some(1)
+        );
+        assert_eq!(
+            next_voice_reconnect_attempt(SarahVoiceState::Idle, false, 0, Duration::from_secs(65)),
+            None
+        );
+        assert_eq!(
+            next_voice_reconnect_attempt(
+                SarahVoiceState::Ending,
+                false,
+                0,
+                Duration::from_secs(65)
+            ),
+            None
+        );
+        assert_eq!(
+            next_voice_reconnect_attempt(SarahVoiceState::Error, false, 0, Duration::from_secs(65)),
+            None
+        );
     }
 
     #[test]
