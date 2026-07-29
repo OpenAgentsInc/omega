@@ -1374,6 +1374,7 @@ pub struct AgentPanel {
     _workbench_terminal_panel_observation: Option<Subscription>,
     _workbench_terminal_panel_event_subscription: Option<Subscription>,
     workbench_terminal_surface: Option<Entity<workbench_shell::NativeTerminalSurface>>,
+    workbench_plan_revision: u64,
     #[cfg(any(test, feature = "test-support"))]
     workbench_identity_phase_override: Option<IdentityPhase>,
     #[cfg(any(test, feature = "test-support"))]
@@ -1894,6 +1895,7 @@ impl AgentPanel {
             _workbench_terminal_panel_event_subscription:
                 workbench_terminal_panel_event_subscription,
             workbench_terminal_surface: None,
+            workbench_plan_revision: 0,
             #[cfg(any(test, feature = "test-support"))]
             workbench_identity_phase_override: None,
             #[cfg(any(test, feature = "test-support"))]
@@ -9053,9 +9055,13 @@ impl AgentPanel {
             .is_some_and(|surface| surface.read(cx).contains_focus(window, cx));
         let context = self.workbench_thread_context(cx);
         let result = match context {
-            Ok((thread_id, observation)) => self
-                .workbench_shell
-                .sync_active_thread(thread_id, observation),
+            Ok((thread_id, observation)) => {
+                if let Some(thread_id) = thread_id.as_deref() {
+                    self.restore_workbench_selection_from_disk_if_needed(thread_id, cx);
+                }
+                self.workbench_shell
+                    .sync_active_thread(thread_id, observation)
+            }
             Err(error) => Err(error),
         };
         if let Err(error) = result {
@@ -9924,6 +9930,106 @@ impl AgentPanel {
         Ok(git_surface)
     }
 
+    fn restore_workbench_selection_from_disk_if_needed(
+        &mut self,
+        thread_id: &str,
+        _cx: &mut Context<Self>,
+    ) {
+        if self
+            .workbench_shell
+            .projection()
+            .persisted_selection
+            .is_some()
+        {
+            return;
+        }
+        match crate::workbench_surface_store::read_selection(paths::data_dir().as_path(), thread_id)
+        {
+            Ok(Some(selection)) => {
+                let revision = selection.revision.max(1);
+                let _ = self.workbench_shell.projection_mut().apply(
+                    omega_workbench_state::ProjectionTransition::PersistSelection { revision },
+                );
+                // Re-apply the disk record after PersistSelection stamped the active
+                // thread, so cold restore sees the saved surface request.
+                self.workbench_shell.projection_mut().persisted_selection = Some(selection);
+                let _ = self
+                    .workbench_shell
+                    .projection_mut()
+                    .apply(omega_workbench_state::ProjectionTransition::ColdStart);
+                let _ = self
+                    .workbench_shell
+                    .projection_mut()
+                    .apply(omega_workbench_state::ProjectionTransition::RestoreSelection);
+            }
+            Ok(None) => {}
+            Err(error) => {
+                log::warn!("workbench surface disk restore failed: {error:#}");
+            }
+        }
+    }
+
+    fn persist_active_workbench_selection(&mut self, cx: &mut Context<Self>) {
+        let Some(visible) = self.workbench_shell.projection().visible_projection() else {
+            return;
+        };
+        let revision = self
+            .workbench_shell
+            .projection()
+            .persistence_revision
+            .saturating_add(1);
+        if let Err(error) = self
+            .workbench_shell
+            .projection_mut()
+            .apply(omega_workbench_state::ProjectionTransition::PersistSelection { revision })
+        {
+            log::warn!("workbench surface persist transition failed: {error:#}");
+            return;
+        }
+        let Some(selection) = self
+            .workbench_shell
+            .projection()
+            .persisted_selection
+            .clone()
+        else {
+            return;
+        };
+        let data_dir = paths::data_dir().clone();
+        cx.background_spawn(async move {
+            if let Err(error) =
+                crate::workbench_surface_store::write_selection(&data_dir, &selection)
+            {
+                log::warn!("workbench surface disk persist failed: {error:#}");
+            }
+        })
+        .detach();
+        let _ = visible;
+    }
+
+    fn prepare_plan_surface(
+        &mut self,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<Entity<workbench_shell::NativePlanSurface>> {
+        let visible = self
+            .workbench_shell
+            .projection()
+            .visible_projection()
+            .ok_or_else(|| anyhow!("open a thread before preparing native Plan"))?;
+        let thread_id = visible.thread_id.clone();
+        let acp_thread = self.active_agent_thread(cx);
+        // Monotonic revision: one bump per bind so older async plan updates
+        // cannot replace a newer host selection.
+        self.workbench_plan_revision = self.workbench_plan_revision.saturating_add(1);
+        let plan_revision = self.workbench_plan_revision;
+        let plan_surface =
+            cx.new(|cx| workbench_shell::NativePlanSurface::new(thread_id.clone(), cx));
+        plan_surface.update(cx, |surface, cx| {
+            surface.bind_thread(thread_id, acp_thread, plan_revision, cx);
+        });
+        Ok(plan_surface)
+    }
+
     fn prepare_terminal_surface(
         &mut self,
         window: &mut Window,
@@ -10547,20 +10653,37 @@ impl AgentPanel {
         } else {
             None
         };
+        let plan_surface = if surface == omega_workbench_state::WorkSurface::Plan {
+            match self.prepare_plan_surface(window, cx) {
+                Ok(plan_surface) => Some(plan_surface),
+                Err(error) => {
+                    log::warn!("could not prepare the Plan work surface: {error:#}");
+                    self.workbench_shell.record_error(error.to_string());
+                    cx.notify();
+                    return;
+                }
+            }
+        } else {
+            None
+        };
         let selection = if let Some(git_surface) = git_surface.clone() {
             self.workbench_shell.select_git_surface(git_surface, cx)
         } else if let Some(terminal_surface) = terminal_surface.clone() {
             self.workbench_shell
                 .select_terminal_surface(terminal_surface, cx)
+        } else if let Some(plan_surface) = plan_surface.clone() {
+            self.workbench_shell.select_plan_surface(plan_surface, cx)
         } else {
             self.workbench_shell.select_surface(
                 surface,
                 files_panel.clone(),
                 search_surface,
                 review_surface,
+                None,
                 cx,
             )
         };
+        self.persist_active_workbench_selection(cx);
         match selection {
             Ok(workbench_shell::SurfaceSelection::Collapsed) => {
                 self.focus_thread_transcript(window, cx);
