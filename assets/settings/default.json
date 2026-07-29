@@ -237,10 +237,12 @@
   //
   // Default: true
   "zoomed_padding": true,
-  // What draws Omega's window decorations (titlebar):
-  // 1. Client application (Omega) draws its own window decorations
+  // On Linux, what draws Omega's window decorations (titlebar).
+  // This setting has no effect on other platforms:
+  // 1. Omega draws its own window decorations.
   //    "client"
-  // 2. Display server draws the window decorations. Not supported by GNOME Wayland.
+  // 2. The window manager or compositor draws the window decorations.
+  //    Not supported by GNOME Wayland.
   //    "server"
   //
   // This requires restarting Omega for changes to take effect.
