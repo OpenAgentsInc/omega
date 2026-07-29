@@ -4787,6 +4787,7 @@ impl ThreadView {
                                                     .children(self.mode_selector.clone())
                                                     .children(self.model_selector.clone()),
                                             })
+                                            .child(self.render_voice_controls(cx))
                                             .child(self.render_send_button(cx)),
                                     ),
                             )
@@ -5821,9 +5822,6 @@ impl ThreadView {
             .read(cx)
             .clone();
         let phase = status.phase;
-        if phase == ComposerVoicePhase::Unavailable {
-            return div().into_any_element();
-        }
         let detail = status.detail.clone();
         let label = if status.muted {
             "Microphone muted"
