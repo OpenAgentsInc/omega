@@ -2898,7 +2898,7 @@ than it sounds, because the harness omega#81's acceptance sentence names —
   spending budget on a thread routed elsewhere. The owner was asked and accepted
   it directly: *"i am ok with gemini flash being used for thread titles to api
   key"*.
-### OMEGA-DELTA-0060 — A parent can read the transcript of a subagent it spawned
+### OMEGA-DELTA-0060 — A session ID can read a live or persisted thread transcript
 
 - **Upstream behaviour.** `spawn_agent` returns the subagent's final message and
   nothing else. `SubagentSessionInfo` is attached to the tool call for the UI,
@@ -2910,31 +2910,21 @@ than it sounds, because the harness omega#81's acceptance sentence names —
   the parent cannot look at what the subagent did. It can only delegate again
   and hope for a better paragraph. The information exists — `Thread` keeps its
   messages, and `SubagentContext` records the thread that spawned it — but
-  nothing exposes it. `read_subagent_transcript` is that path.
-- **The law: a thread reads only what it delegated.** Access is
-  `subagent_transcript_access`, a total function of the caller, the target, and
-  the target's immediate parent. Four named outcomes and no catch-all arm.
-  - The caller is **not a parameter of the tool**. `ThreadEnvironment::
-    read_subagent_transcript` takes a session ID and a window; the environment
-    reads the caller from its own thread. The tool therefore cannot name the
-    thread whose subagents it may read. Scope is a property of the signature,
-    not of the tool's care.
-  - Access is decided from the target's stored parent **before any message is
-    read**. A shape that assembles a transcript and filters afterwards is one
-    early return away from a leak.
-  - A refusal says the thread belongs to somebody else. It does not report a
-    real session as missing. The caller already holds the ID, so the lie
-    protects nothing and sends a caller who is debugging its own delegation
-    after a defect that is not there.
-  - **Direct children only. The ancestor chain is never walked.** Today
-    `MAX_SUBAGENT_DEPTH` is 1, so no grandchild exists. The rule is written for
-    the day that constant changes, because this tool is what creates the
-    problem: once a parent can read its child's transcript, every session ID
-    the child mentions becomes quotable by the parent. Transitive access would
-    turn "read what you delegated" into "read anything named by anything you
-    delegated", and it would arrive as a side effect of raising a depth
-    constant rather than as a decision. Nested reads, if ever wanted, are a
-    separate change to that one function.
+  nothing exposes it. `read_subagent_transcript` is the compatibility-named
+  reader, and the basic `read` dispatcher routes session addresses to it.
+- **The law: an explicit Omega session ID is readable.** `read` accepts
+  `thread:`, `session:`, `agent:`, and `delegate:` addresses. The environment
+  first resolves the target from `NativeAgent.sessions`, which permits the
+  calling thread itself plus open top-level, sibling, parent, and subagent
+  threads. If the session is not open, it loads the `DbThread` asynchronously
+  from `ThreadStore` and renders the same stored messages without opening the
+  thread in the UI. Live external ACP transcripts remain process-local and are
+  available only while the spawning environment retains their handle.
+- **Live state wins over persisted state.** An open thread may have messages
+  newer than its last save, so lookup must consult `NativeAgent.sessions`
+  before `ThreadStore`. Persisted messages use the same flattening function as
+  live `Thread` messages so detail modes, message indexes, tool blocks, and
+  pagination do not drift between the two paths.
 - **The law: a bound that fires must be visible.** The reason the subagent's
   work is not in the parent's context is that it costs too much to put there,
   so an unbounded read hands that cost straight back and can exhaust the
@@ -2959,15 +2949,16 @@ than it sounds, because the harness omega#81's acceptance sentence names —
   subagent's thinking text.
 - **What this does not cover.** Nothing here reads a rendered pixel; the tool
   produces text for the model and the panel, and no check confirms how a
-  transcript looks on screen. Access is decided from the in-memory session map,
-  so a subagent whose thread is not loaded is reported as absent rather than
-  refused — the two are distinguishable to the caller only by the wording.
-  Image content becomes a marker rather than being carried. And the byte caps
-  are counts of bytes, not tokens: they bound the cost, they do not measure it.
-- **Enforced by:** `a_thread_reads_only_the_subagents_it_spawned`,
+  transcript looks on screen. External ACP agents do not have an Omega
+  `DbThread`, so their transcripts cannot be restored after the retaining
+  process exits. Image content becomes a marker rather than being carried. And
+  the byte caps are counts of bytes, not tokens: they bound the cost, they do
+  not measure it.
+- **Enforced by:** `a_session_id_reads_a_live_or_persisted_thread`,
   `a_truncated_transcript_says_that_it_was_truncated`, and
   `the_transcript_tool_reaches_the_model` in `crates/omega_deltas`; plus the
-  suite in `crates/agent/src/tools/read_subagent_transcript_tool.rs`.
+  renderer suite in `crates/agent/src/tools/read_subagent_transcript_tool.rs`
+  and live/self/persisted `read` integration tests in `crates/agent/src/agent.rs`.
 
 ### OMEGA-DELTA-0070 — A public Nostr chat skill is in every install
 
@@ -6497,8 +6488,8 @@ continue to hit the provider prompt cache.
 The six-tool profile no longer aliases `read_file` and then leaves artifact,
 delegation, and skill addresses stranded behind hidden canonical tools. Its
 `read` is a dispatcher over the existing readers: project files and images,
-this thread's tool-result registry, direct-child transcripts as answered by the
-calling thread's environment, and the live skill catalog. Editor and Ask retain
+this thread's tool-result registry, thread transcripts resolved from live
+sessions or `ThreadStore`, and the live skill catalog. Editor and Ask retain
 the separate canonical tools; no reader was deleted.
 
 File reads use 1-based `offset` and bounded `limit`, preserve line numbers,
@@ -6508,14 +6499,15 @@ typed tool error that names the available route, `bash` with `ls`, rather than a
 hidden `list_directory` tool.
 
 Artifact lookup still holds only the calling thread's registry.
-Transcript lookup still asks `ThreadEnvironment::read_subagent_transcript`, so
-`OMEGA-DELTA-0060`'s direct-parent decision remains the authority; quoting a
-foreign session cannot widen access. Skill locations are matched exactly
-against the current catalog before the existing skill loader and permission
-path reads the body. `delegate` prints `session:<session_id>` as a transcript
-address, so the model spends an address it received rather than inventing one.
+Transcript lookup asks `ThreadEnvironment::read_thread_transcript`; it reads
+the current, parent, sibling, top-level, or persisted Omega session named by
+`thread:`, `session:`, `agent:`, or `delegate:`. Skill locations are matched
+exactly against the current catalog before the existing skill loader and
+permission path reads the body. `delegate` prints `session:<session_id>` as a
+transcript address, so the model spends an address it received rather than
+inventing one.
 
-- **Enforced by:** `the_basic_read_tool_spends_only_thread_scoped_addresses` in
+- **Enforced by:** `the_basic_read_tool_spends_supported_addresses` in
   `crates/omega_deltas`, plus file, artifact, transcript, and skill-tool unit
   tests in `agent`.
 

@@ -1,4 +1,4 @@
-//! Reading the transcript of a subagent you spawned.
+//! Reading the transcript of an Omega thread by session ID.
 //!
 //! `spawn_agent` returns one final message. That is the right default — the
 //! whole point of delegating is that the subagent's intermediate work stays out
@@ -6,17 +6,10 @@
 //! work. If the summary is thin or wrong, the parent's only move is to delegate
 //! again and hope. This tool is the way to look.
 //!
-//! Two things constrain it, and both are load-bearing:
-//!
-//! 1. **Scope.** A thread reads only the subagents it spawned itself. The
-//!    decision is [`subagent_transcript_access`], a total function over
-//!    (caller, target, target's parent). The tool never names a thread; the
-//!    environment knows which thread is asking and answers for that one, so a
-//!    bug in the tool cannot widen the scope.
-//! 2. **Size.** A transcript can be larger than the context it is being read
-//!    into. Every rendering is bounded, and every bound that fires says so in
-//!    the output. Silently dropping the middle of a transcript is how a reader
-//!    concludes something did not happen when it did.
+//! A transcript can be larger than the context it is being read into. Every
+//! rendering is bounded, and every bound that fires says so in the output.
+//! Silently dropping the middle of a transcript is how a reader concludes
+//! something did not happen when it did.
 
 use agent_client_protocol::schema::v1 as acp;
 use anyhow::Result;
@@ -55,9 +48,8 @@ pub const OUTLINE_BLOCK_BYTE_LIMIT: usize = 200;
 /// total, because the number of blocks is not bounded.
 pub const MAX_TRANSCRIPT_BYTES: usize = 24_000;
 
-/// Read the transcript of a subagent that **this thread** spawned, to inspect
-/// delegated work: which tools the subagent ran, what it read, and where it
-/// went wrong.
+/// Read a thread transcript by session ID, including live and persisted Omega
+/// threads.
 ///
 /// ### When to use this
 /// - The final message from `spawn_agent` is usually enough. This is not a
@@ -70,10 +62,10 @@ pub const MAX_TRANSCRIPT_BYTES: usize = 24_000;
 ///   window once the outline shows you where to look.
 ///
 /// ### What you can read
-/// - Only subagents this thread spawned. A session belonging to another thread
-///   is refused, and the refusal says so.
-/// - Session IDs come from `spawn_agent`. A session ID you saw quoted inside
-///   another transcript is not yours to read.
+/// - The current thread, another open thread, or an Omega thread persisted in
+///   the thread store.
+/// - Live external-executor transcripts remain available only while retained
+///   by the thread that spawned them.
 ///
 /// ### Output
 /// - A header naming the session, the message range returned, and the total
@@ -84,7 +76,7 @@ pub const MAX_TRANSCRIPT_BYTES: usize = 24_000;
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub struct ReadSubagentTranscriptToolInput {
-    /// Session ID of the subagent to read, as returned by `spawn_agent`.
+    /// Session ID of the thread to read.
     pub session_id: acp::SessionId,
     /// Zero-based index of the first message to return. Defaults to 0.
     #[serde(default)]
@@ -150,89 +142,6 @@ impl TranscriptWindowRequest {
     }
 }
 
-/// Whether a thread may read another thread's transcript.
-///
-/// Every refusal names its reason. A caller debugging its own delegation is
-/// told the thread is not its own rather than that it does not exist: pretending
-/// a real session is missing sends the caller looking for a bug that is not
-/// there, and it does not withhold anything, because the caller already had the
-/// session ID.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum TranscriptAccess {
-    /// The target is a subagent of the caller.
-    Granted,
-    /// The caller asked for itself. Its own transcript is already its context.
-    RefusedIsCaller,
-    /// The target is a top-level thread — nobody spawned it.
-    RefusedNotASubagent,
-    /// The target is a subagent of some other thread.
-    RefusedOtherParent { parent: acp::SessionId },
-}
-
-impl TranscriptAccess {
-    #[must_use]
-    pub const fn is_granted(&self) -> bool {
-        matches!(self, Self::Granted)
-    }
-
-    /// The sentence the model is shown when the read is refused.
-    #[must_use]
-    pub fn refusal(&self, target: &acp::SessionId) -> Option<String> {
-        match self {
-            Self::Granted => None,
-            Self::RefusedIsCaller => Some(format!(
-                "Session {target} is this thread. Your own transcript is already \
-                 your context; this tool reads subagents you spawned."
-            )),
-            Self::RefusedNotASubagent => Some(format!(
-                "Session {target} is not a subagent of this thread — it is a \
-                 top-level thread, so this thread did not spawn it. You can \
-                 read only the subagents you spawned yourself."
-            )),
-            Self::RefusedOtherParent { parent } => Some(format!(
-                "Session {target} is a subagent of thread {parent}, not of this \
-                 thread. You can read only the subagents you spawned yourself. \
-                 If you saw this session ID quoted inside another transcript, it \
-                 belongs to that agent's delegation, not yours."
-            )),
-        }
-    }
-}
-
-/// Decide whether `caller` may read `target`, given the thread that spawned
-/// `target` (`None` when `target` is top-level).
-///
-/// Total by construction: every combination of the two inputs lands on a named
-/// variant, and there is no fallthrough arm that could quietly become "allow".
-///
-/// **Direct children only.** The parent is compared once; the ancestor chain is
-/// never walked. Today `MAX_SUBAGENT_DEPTH` is 1, so there are no grandchildren
-/// to walk to — but the rule is written for the day that constant changes,
-/// because this tool is exactly what makes a grandchild's session ID visible to
-/// a root thread. Once a parent can read its child's transcript, every session
-/// ID the child mentions becomes quotable, and transitive access would turn
-/// "read what you delegated" into "read anything named by anything you
-/// delegated". If nested reads are ever wanted, they should be a separate,
-/// argued change to this function, not a side effect of raising the depth
-/// constant.
-#[must_use]
-pub fn subagent_transcript_access(
-    caller: &acp::SessionId,
-    target: &acp::SessionId,
-    target_parent: Option<&acp::SessionId>,
-) -> TranscriptAccess {
-    if caller == target {
-        return TranscriptAccess::RefusedIsCaller;
-    }
-    match target_parent {
-        None => TranscriptAccess::RefusedNotASubagent,
-        Some(parent) if parent == caller => TranscriptAccess::Granted,
-        Some(parent) => TranscriptAccess::RefusedOtherParent {
-            parent: parent.clone(),
-        },
-    }
-}
-
 /// The sentence for a session Omega holds no transcript for.
 ///
 /// Live external ACP sessions spawned by this parent are retained by its
@@ -261,7 +170,7 @@ pub fn no_transcript_available(session_id: &acp::SessionId) -> String {
             "external executor such as `codex-acp` from an earlier Omega process, ",
             "its live session is no longer retained here; you have its ",
             "final message",
-            " only. Otherwise, check the ID — session IDs come from `delegate`."
+            " only. Otherwise, check the ID."
         ),
         session_id = session_id
     )
@@ -497,7 +406,7 @@ pub fn render_transcript(
 /// Bytes held back from `byte_cap` so the truncation marker always fits.
 const TRUNCATION_MARKER_RESERVE: usize = 320;
 
-/// Tool that reads the transcript of a subagent the calling thread spawned.
+/// Tool that reads an Omega thread transcript by session ID.
 pub struct ReadSubagentTranscriptTool {
     environment: Rc<dyn ThreadEnvironment>,
 }
@@ -512,24 +421,30 @@ impl ReadSubagentTranscriptTool {
         input: ReadSubagentTranscriptToolInput,
         event_stream: &ToolCallEventStream,
         cx: &mut App,
-    ) -> Result<ReadSubagentTranscriptToolOutput, ReadSubagentTranscriptToolOutput> {
+    ) -> Task<Result<ReadSubagentTranscriptToolOutput, ReadSubagentTranscriptToolOutput>> {
         let session_id = input.session_id.clone();
         let window = TranscriptWindowRequest::clamp(input.offset, input.limit);
-        let transcript = self
-            .environment
-            .read_subagent_transcript(session_id.clone(), window, cx)
-            .map_err(|reason| ReadSubagentTranscriptToolOutput::Refused {
-                session_id: session_id.clone(),
-                reason,
+        let transcript_task =
+            self.environment
+                .read_thread_transcript(session_id.clone(), window, cx);
+        let event_stream = event_stream.clone();
+        cx.spawn(async move |_| {
+            let transcript = transcript_task.await.map_err(|reason| {
+                ReadSubagentTranscriptToolOutput::Refused {
+                    session_id: session_id.clone(),
+                    reason,
+                }
             })?;
-        let rendered = render_transcript(&transcript, input.detail, MAX_TRANSCRIPT_BYTES);
-        event_stream
-            .update_fields(acp::ToolCallUpdateFields::new().content(vec![rendered.clone().into()]));
-        Ok(ReadSubagentTranscriptToolOutput::Transcript {
-            session_id,
-            total_messages: transcript.total_messages,
-            first_index: transcript.first_index,
-            rendered,
+            let rendered = render_transcript(&transcript, input.detail, MAX_TRANSCRIPT_BYTES);
+            event_stream.update_fields(
+                acp::ToolCallUpdateFields::new().content(vec![rendered.clone().into()]),
+            );
+            Ok(ReadSubagentTranscriptToolOutput::Transcript {
+                session_id,
+                total_messages: transcript.total_messages,
+                first_index: transcript.first_index,
+                rendered,
+            })
         })
     }
 }
@@ -605,7 +520,8 @@ impl AgentTool for ReadSubagentTranscriptTool {
                         reason: error.to_string(),
                     })?;
 
-            cx.update(|cx| self.read(input, &event_stream, cx))
+            let task = cx.update(|cx| self.read(input, &event_stream, cx));
+            task.await
         })
     }
 
@@ -699,113 +615,6 @@ mod tests {
                  classify: {message}"
             );
         }
-    }
-
-    /// It is a different sentence from every scoping refusal.
-    ///
-    /// The two are reached by different paths and mean different things —
-    /// "Omega never had this" against "this is not yours" — and a caller that
-    /// cannot tell them apart cannot tell a bookkeeping bug from a permission
-    /// boundary.
-    #[test]
-    fn a_missing_transcript_is_not_a_scoping_refusal() {
-        let target = session("sub-7");
-        let missing = no_transcript_available(&target);
-
-        for access in [
-            TranscriptAccess::RefusedIsCaller,
-            TranscriptAccess::RefusedNotASubagent,
-            TranscriptAccess::RefusedOtherParent {
-                parent: session("other"),
-            },
-        ] {
-            let refusal = access.refusal(&target).expect("must refuse");
-            assert_ne!(refusal, missing);
-            assert!(
-                !missing.contains("You can read only the subagents you spawned"),
-                "a session Omega does not hold must not be reported as a \
-                 permission decision: {missing}"
-            );
-        }
-    }
-
-    // --- Scoping. The boundary that matters. ---
-
-    #[test]
-    fn a_parent_reads_the_subagent_it_spawned() {
-        let access = subagent_transcript_access(
-            &session("parent"),
-            &session("child"),
-            Some(&session("parent")),
-        );
-        assert_eq!(access, TranscriptAccess::Granted);
-        assert!(access.is_granted());
-        assert!(access.refusal(&session("child")).is_none());
-    }
-
-    #[test]
-    fn a_thread_cannot_read_a_subagent_it_did_not_spawn() {
-        let access = subagent_transcript_access(
-            &session("stranger"),
-            &session("child"),
-            Some(&session("parent")),
-        );
-        assert_eq!(
-            access,
-            TranscriptAccess::RefusedOtherParent {
-                parent: session("parent")
-            }
-        );
-        assert!(!access.is_granted());
-
-        // The refusal says whose it is rather than claiming it is missing. A
-        // caller debugging its own delegation must not be sent looking for a
-        // bug that is not there.
-        let refusal = access.refusal(&session("child")).expect("refused");
-        assert!(refusal.contains("subagent of thread parent"));
-        assert!(!refusal.contains("does not exist"));
-        assert!(!refusal.contains("not found"));
-    }
-
-    #[test]
-    fn a_top_level_thread_is_nobodys_subagent() {
-        let access = subagent_transcript_access(&session("parent"), &session("other_root"), None);
-        assert_eq!(access, TranscriptAccess::RefusedNotASubagent);
-        assert!(
-            access
-                .refusal(&session("other_root"))
-                .expect("refused")
-                .contains("top-level thread")
-        );
-    }
-
-    #[test]
-    fn a_thread_does_not_read_itself() {
-        // Even a subagent asking for its own ID is refused: its transcript is
-        // already its context, and returning it would double the cost.
-        for parent in [None, Some(session("parent"))] {
-            let access =
-                subagent_transcript_access(&session("me"), &session("me"), parent.as_ref());
-            assert_eq!(access, TranscriptAccess::RefusedIsCaller);
-        }
-    }
-
-    #[test]
-    fn access_never_walks_past_the_immediate_parent() {
-        // A grandchild names its own parent (the child), not the root. The root
-        // asking for it is refused, and the refusal points at the child. This
-        // is the case `MAX_SUBAGENT_DEPTH > 1` would create.
-        let access = subagent_transcript_access(
-            &session("root"),
-            &session("grandchild"),
-            Some(&session("child")),
-        );
-        assert_eq!(
-            access,
-            TranscriptAccess::RefusedOtherParent {
-                parent: session("child")
-            }
-        );
     }
 
     // --- Bounds. ---
@@ -972,8 +781,10 @@ mod tests {
     }
 
     #[test]
-    fn the_description_tells_the_model_this_is_for_inspecting_delegated_work() {
+    fn the_description_names_general_thread_access_and_discourages_routine_delegation_reads() {
         let description = ReadSubagentTranscriptTool::description();
+        assert!(description.contains("current thread"));
+        assert!(description.contains("persisted"));
         assert!(description.contains("spawned"));
         assert!(
             description.contains("usually enough"),
