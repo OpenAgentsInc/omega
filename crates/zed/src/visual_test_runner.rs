@@ -7417,7 +7417,6 @@ fn configure_workbench_shell_scene(
             if name == "omega_workbench_git_multi_repository" {
                 let surface_id = git_surface.entity_id();
                 let panel_id = git_panel.entity_id();
-                let selected_before = snapshot.selection.clone();
                 dispatch_workbench_action(workspace_window, Box::new(SelectPlan), cx)?;
                 dispatch_workbench_action(workspace_window, Box::new(SelectGit), cx)?;
                 let (reopened_surface, reopened_panel) = active_workbench_git(panel, cx)?;
@@ -7427,7 +7426,7 @@ fn configure_workbench_shell_scene(
                 anyhow::ensure!(
                     reopened_surface.entity_id() == surface_id
                         && reopened_panel.entity_id() == panel_id
-                        && selected_after.selection == selected_before,
+                        && selected_after.selection.as_ref() == snapshot.selection.as_ref(),
                     "Git collapse/reopen did not retain its exact entity and selection"
                 );
                 record_workbench_semantic_check(

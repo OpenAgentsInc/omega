@@ -27,8 +27,8 @@ use search::{
 };
 use terminal_view::terminal_panel::{TerminalPanel, TerminalPanelSnapshot};
 use ui::{
-    Color, Icon, IconName, IconSize, Label, LabelSize, ListItem, ListItemSpacing, Tooltip, prelude::*,
-    v_flex,
+    Color, Icon, IconName, IconSize, Label, LabelSize, ListItem, ListItemSpacing, Tooltip,
+    prelude::*, v_flex,
 };
 use workspace::{Panel, ToolbarItemView, Workspace, item::Item};
 

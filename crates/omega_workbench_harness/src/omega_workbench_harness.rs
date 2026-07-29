@@ -4021,7 +4021,7 @@ pub fn workbench_terminal_scene(name: &str) -> Result<WorkbenchScene> {
             generation: active_binding.generation,
             binding: Some(WorkbenchBindingFixture {
                 repository_id: active_binding.repository_id.clone(),
-                worktree_id: active_binding.worktree_id.clone(),
+                worktree_id: active_binding.worktree_id,
             }),
             requested_surface: Some(WorkSurfaceId::Terminal),
             effective_surface: Some(WorkSurfaceId::Terminal),
@@ -4033,7 +4033,7 @@ pub fn workbench_terminal_scene(name: &str) -> Result<WorkbenchScene> {
             generation: foreign_binding.generation,
             binding: Some(WorkbenchBindingFixture {
                 repository_id: foreign_binding.repository_id.clone(),
-                worktree_id: foreign_binding.worktree_id.clone(),
+                worktree_id: foreign_binding.worktree_id,
             }),
             requested_surface: Some(WorkSurfaceId::Terminal),
             effective_surface: Some(WorkSurfaceId::Terminal),
