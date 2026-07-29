@@ -133,3 +133,48 @@ Download the importer
 ```rust
 let _timer = zlog::time!("my_function_name").warn_if_gt(std::time::Duration::from_millis(100));
 ```
+
+# GPUI element-tree budgets
+
+Elapsed-time tests are flaky for dense UI. Prefer failing on **how many
+elements a frame built**, not how long it took.
+
+In debug/test builds GPUI counts every element that crosses the drawable
+layout boundary and attributes counts to construction `file:line:column`.
+When a frame first exceeds the default budget of **10,000** elements, GPUI
+logs a warning with the five hottest construction sites.
+
+Override the threshold with:
+
+```bash
+GPUI_ELEMENT_TREE_BUDGET=2500 cargo run
+```
+
+Release builds compile the accounting out (or leave it idle), so production
+overhead stays negligible.
+
+## When to use it
+
+| Pattern | Prefer |
+| --- | --- |
+| QR codes, pixel grids, heatmaps | One `RenderImage`, SVG, or custom canvas paint — not one element per cell |
+| Charts / sparklines | Path/canvas or pre-rasterized image |
+| Long transcripts, file trees, outline rows | Virtualized lists (`uniform_list` / `List`) |
+| Dense icon sheets | Sprite atlas or shared image, not N×N icon buttons |
+
+## Deterministic tests
+
+`DebugRenderSnapshot` exposes:
+
+- `element_count()` — total nodes in the captured frame
+- `element_hotspots()` — ordered `(file, line, column, count)` sites
+
+Example (pairing QR card stays under a tight budget because modules are baked
+into a single image):
+
+```rust
+let snapshot = window.update(cx, |_, window, _| window.debug_render_snapshot())?;
+assert!(snapshot.element_count() <= 40, "{:?}", snapshot.element_hotspots());
+```
+
+See also [GPUI element-tree budgets](./development/gpui-element-tree-budgets.md).

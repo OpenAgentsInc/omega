@@ -243,6 +243,7 @@
   - [FreeBSD](./development/freebsd.md)
   - [Using Debuggers](./development/debuggers.md)
   - [Performance](./performance.md)
+  - [GPUI element-tree budgets](./development/gpui-element-tree-budgets.md)
   - [Glossary](./development/glossary.md)
 - [Release Notes](./development/release-notes.md)
 - [Debugging Crashes](./development/debugging-crashes.md)
