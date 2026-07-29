@@ -10637,6 +10637,10 @@ impl AgentPanel {
                     cx.notify();
                     return;
                 }
+                if let Some(terminal_surface) = terminal_surface.as_ref() {
+                    terminal_surface.update(cx, |_terminal_surface, cx| cx.notify());
+                    host.update(cx, |_host, cx| cx.notify());
+                }
                 host.focus_handle(cx).focus(window, cx);
                 cx.notify();
             }

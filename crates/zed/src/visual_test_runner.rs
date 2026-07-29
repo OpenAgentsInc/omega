@@ -1191,7 +1191,7 @@ fn run_visual_tests(project_path: PathBuf, update_baseline: bool) -> Result<()> 
         // reopens two threads the first process left on disk and photographs
         // the executor lines a cold process derives for them.
         let restart_phase = std::env::var("OMEGA_VISUAL_PHASE").as_deref() == Ok("restart");
-        let outcome = if restart_phase {
+        let outcome = if restart_phase && !workbench_proof_active() {
             println!("\n--- Omega: executor disclosure after a restart ---");
             run_omega_restart_visual_tests(app_state.clone(), &mut cx, update_baseline)
         } else {
@@ -4312,6 +4312,8 @@ fn create_workbench_terminal_disk_fixture(
         "fn main() {\n    println!(\"terminal fixture\");\n}\n",
     )?;
     std::fs::write(beta.join("README.md"), "# Terminal fixture\n")?;
+    initialize_workbench_git_fixture(&alpha)?;
+    initialize_workbench_git_fixture(&beta)?;
 
     Ok(Some(WorkbenchTerminalDiskFixture {
         _root: root,
@@ -7679,8 +7681,11 @@ fn configure_workbench_terminal_scene(
     fixture: &WorkbenchTerminalDiskFixture,
     cx: &mut VisualTestAppContext,
 ) -> Result<()> {
-    use agent_ui::workbench_shell::{
-        BadgeTone, NativeTerminalOwnerState, SelectPlan, SelectTerminal, SurfaceBadge,
+    use agent_ui::{
+        thread_identity::{IdentityPhase, ThreadIdentityObservation},
+        workbench_shell::{
+            BadgeTone, NativeTerminalOwnerState, SelectPlan, SelectTerminal, SurfaceBadge,
+        },
     };
     use omega_workbench_harness::{
         TerminalLifecycleFixture, TerminalProcessLifecycleFixture, TerminalSplitAxisFixture,
@@ -7703,6 +7708,15 @@ fn configure_workbench_terminal_scene(
     let switched_from_foreign = if scene_name == "omega_workbench_terminal_thread_switch" {
         let foreign_repository_binding =
             select_workbench_identity(workspace_window, panel, foreign_path, "Terminal", cx)?;
+        // Identity selection alone is not Ready authority; mark Ready so
+        // Terminal can prepare a native surface for the foreign worktree.
+        set_workbench_identity_observation_phase(
+            workspace_window,
+            panel,
+            IdentityPhase::Ready,
+            cx,
+        )?;
+        cx.run_until_parked();
         dispatch_workbench_action(workspace_window, Box::new(SelectTerminal), cx)?;
         let (foreign_surface, foreign_panel) = active_workbench_terminal(panel, cx)?;
         let foreign_native_binding = cx.read(|cx| foreign_surface.read(cx).binding().clone());
@@ -7721,11 +7735,52 @@ fn configure_workbench_terminal_scene(
     };
     let repository_binding =
         select_workbench_identity(workspace_window, panel, active_path, "Terminal", cx)?;
+    let ready_observation = cx.read(|cx| {
+        let identity = panel
+            .read(cx)
+            .workbench_identity_for_tests()
+            .context("Terminal scene has no selected production identity")?;
+        anyhow::ensure!(
+            identity
+                .candidates
+                .iter()
+                .any(|candidate| candidate.binding == repository_binding),
+            "Terminal scene selected identity disappeared"
+        );
+        Ok::<_, anyhow::Error>(ThreadIdentityObservation {
+            revision: identity.observation_revision.saturating_add(1),
+            phase: IdentityPhase::Ready,
+            candidates: identity.candidates.clone(),
+        })
+    })?;
+    cx.update_window(workspace_window.into(), |_, window, cx| {
+        panel.update(cx, |panel, cx| {
+            panel.set_workbench_identity_observation_for_tests(Some(ready_observation), window, cx);
+        });
+    })?;
+    cx.run_until_parked();
     if switched_from_foreign.is_none() {
         dispatch_workbench_action(workspace_window, Box::new(SelectTerminal), cx)?;
     }
     let (terminal_surface, terminal_panel) = active_workbench_terminal(panel, cx)?;
     let native_binding = cx.read(|cx| terminal_surface.read(cx).binding().clone());
+    let visible_host = cx
+        .read(|cx| panel.read(cx).visible_workbench_host_for_tests())
+        .context("Terminal scene has no visible work-surface host")?;
+    cx.read(|cx| {
+        visible_host.read_with(cx, |host, _cx| {
+            anyhow::ensure!(
+                matches!(
+                    host.content_state(),
+                    agent_ui::workbench_shell::SurfaceContentState::Ready
+                ) && host
+                    .terminal_surface()
+                    .is_some_and(|surface| surface.entity_id() == terminal_surface.entity_id()),
+                "Terminal scene visible host does not own its ready native surface"
+            );
+            Ok::<_, anyhow::Error>(())
+        })
+    })?;
     if let Some((foreign_surface_id, foreign_panel_id, _)) = &switched_from_foreign {
         anyhow::ensure!(
             terminal_surface.entity_id() == *foreign_surface_id
@@ -7806,8 +7861,8 @@ fn configure_workbench_terminal_scene(
         });
         let activate =
             expected.selected_terminal_id.as_deref() == Some(process.terminal_id.as_str());
-        let insertion = workspace_window
-            .update(cx, |_workspace, window, cx| {
+        let insertion = cx
+            .update_window(workspace_window.into(), |_, window, cx| {
                 terminal_panel.update(cx, |terminal_panel, cx| {
                     terminal_panel.create_and_insert_display_only_test_terminal(
                         output,
@@ -7845,8 +7900,8 @@ fn configure_workbench_terminal_scene(
             .iter()
             .find(|(process, _)| process.terminal_id == selected_terminal_id)
     {
-        let activated = workspace_window
-            .update(cx, |_workspace, window, cx| {
+        let activated = cx
+            .update_window(workspace_window.into(), |_, window, cx| {
                 terminal_panel.update(cx, |terminal_panel, cx| {
                     terminal_panel.activate_test_terminal(
                         insertion.terminal_view_id,

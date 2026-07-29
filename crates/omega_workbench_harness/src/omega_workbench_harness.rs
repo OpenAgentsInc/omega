@@ -3012,7 +3012,10 @@ pub const HERMETIC_SCENES: &[SceneSpec] = &[
     },
     SceneSpec {
         name: "omega_workbench_terminal_collapse_reopen",
-        phase: ScenePhase::Restart,
+        // In-process SelectPlan → SelectTerminal proves collapse/reopen without
+        // a cold process restart. Restart phase is reserved for durable
+        // executor-disclosure scenes that write a handoff file.
+        phase: ScenePhase::Recording,
         viewport: ViewportFixture::new(1200, 720, 2000),
         fixture_version: 2,
         pixel_policy: APPLE_SILICON_METAL_POLICY,
@@ -3998,7 +4001,7 @@ pub fn workbench_terminal_scene(name: &str) -> Result<WorkbenchScene> {
     ];
     scene.active_thread_id = Some(active_binding.thread_id.clone());
     for surface in &mut scene.surfaces {
-        surface.available = !matches!(surface.id, WorkSurfaceId::Review | WorkSurfaceId::Git);
+        surface.available = true;
         if surface.id == WorkSurfaceId::Terminal {
             surface.badge = (active_snapshot.running_badge_count > 0)
                 .then_some(active_snapshot.running_badge_count);
@@ -7801,12 +7804,7 @@ mod tests {
         );
         for name in registered {
             let scene = scene_spec(name).expect("registered Terminal scene");
-            let expected_phase = if name == "omega_workbench_terminal_collapse_reopen" {
-                ScenePhase::Restart
-            } else {
-                ScenePhase::Recording
-            };
-            assert_eq!(scene.phase, expected_phase);
+            assert_eq!(scene.phase, ScenePhase::Recording);
             assert_eq!(scene.fixture_version, 2);
             assert_eq!(scene.regions, WORKBENCH_TERMINAL_REGIONS);
             assert!(WORKBENCH_SHELL_PIXEL_SCENES.contains(&name));
