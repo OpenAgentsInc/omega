@@ -1361,6 +1361,16 @@
     },
   },
   {
+    "context": "WorkbenchTerminal > Terminal",
+    "use_key_equivalents": true,
+    "bindings": {
+      "cmd-alt-escape": "omega_workbench::FocusThreadTranscript",
+      "cmd-alt-[": "omega_workbench::CollapseWorkSurfaceDock",
+      "cmd-n": "omega_workbench::NewTerminalForThread",
+      "cmd-f": "buffer_search::Deploy",
+    },
+  },
+  {
     "context": "RatePredictionsModal",
     "use_key_equivalents": true,
     "bindings": {

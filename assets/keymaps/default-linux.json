@@ -1284,6 +1284,15 @@
     },
   },
   {
+    "context": "WorkbenchTerminal > Terminal",
+    "bindings": {
+      "ctrl-alt-escape": "omega_workbench::FocusThreadTranscript",
+      "ctrl-alt-[": "omega_workbench::CollapseWorkSurfaceDock",
+      "ctrl-~": "omega_workbench::NewTerminalForThread",
+      "ctrl-shift-f": "buffer_search::Deploy",
+    },
+  },
+  {
     "context": "ZedPredictModal",
     "bindings": {
       "escape": "menu::Cancel",

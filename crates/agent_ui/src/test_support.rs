@@ -16,13 +16,16 @@ use project_panel::ProjectPanel;
 use settings::SettingsStore;
 use std::any::Any;
 use std::cell::RefCell;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use terminal_view::terminal_panel::{
+    TerminalPanel, TerminalPanelSnapshot, TestTerminalCreationRequest, TestTerminalInsertion,
+};
 use text::OffsetRangeExt as _;
 use workspace::{
-    Item as _, MultiWorkspace, Sidebar as WorkspaceSidebar, SidebarEvent, SidebarSide, Workspace,
-    dock::Panel as _,
+    Item as _, MultiWorkspace, Sidebar as WorkspaceSidebar, SidebarEvent, SidebarSide,
+    SplitDirection, Workspace, dock::Panel as _,
 };
 
 use crate::AgentPanel;
@@ -123,6 +126,7 @@ pub fn init_test(cx: &mut TestAppContext) {
         theme_settings::init(theme::LoadThemes::JustBase, cx);
         editor::init(cx);
         git_ui::init(cx);
+        terminal_view::init(cx);
         release_channel::init("0.0.0".parse().unwrap(), cx);
         project_panel::init(cx);
         agent_panel::init(cx);
@@ -324,6 +328,26 @@ pub const WORKBENCH_REPOSITORY_SELECTOR: &str = "omega.workbench.control.identit
 pub const WORKBENCH_WORKTREE_SELECTOR: &str = "omega.workbench.control.identity.worktree";
 pub const WORKBENCH_BRANCH_SELECTOR: &str = "omega.workbench.control.identity.branch";
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NativeTerminalFrontDoorSnapshot {
+    pub panel: TerminalPanelSnapshot,
+    pub surface: NativeTerminalSurfaceSnapshot,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NativeTerminalSurfaceSnapshot {
+    pub panel_entity_id: EntityId,
+    pub binding: crate::workbench_shell::NativeTerminalBinding,
+    pub owner_state: crate::workbench_shell::NativeTerminalOwnerState,
+    pub terminal_owners:
+        std::collections::BTreeMap<u64, crate::workbench_shell::NativeTerminalBinding>,
+    pub active_terminal_owner: Option<(u64, crate::workbench_shell::NativeTerminalBinding)>,
+}
+
+pub struct TestWorkbenchTerminal {
+    pub insertion: TestTerminalInsertion,
+}
+
 pub struct AgentWorkbenchFrontDoor {
     scene: WorkbenchScene,
     fs: std::sync::Arc<fs::FakeFs>,
@@ -513,9 +537,17 @@ impl AgentWorkbenchFrontDoor {
         let git_panel = git_ui::git_panel::GitPanel::load(weak_workspace, async_window_context)
             .await
             .context("loading the native GitPanel for the Git surface")?;
+        let (weak_workspace, async_window_context) = workspace
+            .update_in(&mut visual, |workspace, window, cx| {
+                (workspace.weak_handle(), window.to_async(cx))
+            });
+        let terminal_panel = TerminalPanel::load(weak_workspace, async_window_context)
+            .await
+            .context("loading the native TerminalPanel for the Terminal surface")?;
         workspace.update_in(&mut visual, |workspace, window, cx| {
             workspace.add_panel(project_panel, window, cx);
             workspace.add_panel(git_panel, window, cx);
+            workspace.add_panel(terminal_panel, window, cx);
         });
         visual.run_until_parked();
 
@@ -591,6 +623,17 @@ impl AgentWorkbenchFrontDoor {
     pub fn dispatch_action(&self, action: impl Action, cx: &TestAppContext) {
         let mut visual = VisualTestContext::from_window(self.window, cx);
         visual.dispatch_action(action);
+        visual.run_until_parked();
+    }
+
+    pub fn settle(&self, cx: &TestAppContext) {
+        let visual = VisualTestContext::from_window(self.window, cx);
+        visual.run_until_parked();
+    }
+
+    pub fn simulate_keystrokes(&self, keystrokes: &str, cx: &TestAppContext) {
+        let mut visual = VisualTestContext::from_window(self.window, cx);
+        visual.simulate_keystrokes(keystrokes);
         visual.run_until_parked();
     }
 
@@ -745,6 +788,203 @@ impl AgentWorkbenchFrontDoor {
     ) -> Option<crate::workbench_shell::NativeGitLifecycle> {
         self.native_git_surface(cx)
             .map(|surface| surface.read_with(cx, |surface, _cx| surface.lifecycle().clone()))
+    }
+
+    pub fn native_terminal_surface(
+        &self,
+        cx: &TestAppContext,
+    ) -> Option<Entity<crate::workbench_shell::NativeTerminalSurface>> {
+        self.panel
+            .read_with(cx, |panel, _cx| {
+                panel.workbench_terminal_surface_for_tests()
+            })
+            .or_else(|| {
+                self.visible_surface_host(cx).and_then(|host| {
+                    host.read_with(cx, |host, _cx| host.terminal_surface().cloned())
+                })
+            })
+    }
+
+    pub fn native_terminal_panel(&self, cx: &TestAppContext) -> Option<Entity<TerminalPanel>> {
+        self.workspace
+            .read_with(cx, |workspace, cx| workspace.panel::<TerminalPanel>(cx))
+            .or_else(|| {
+                self.panel
+                    .read_with(cx, |panel, _cx| panel.workbench_terminal_panel_for_tests())
+            })
+    }
+
+    pub fn native_terminal_panel_entity_id(&self, cx: &TestAppContext) -> Option<EntityId> {
+        self.native_terminal_panel(cx)
+            .map(|panel| panel.entity_id())
+    }
+
+    pub fn mounted_terminal_panel_entity_id(&self, cx: &TestAppContext) -> Option<EntityId> {
+        self.native_terminal_surface(cx).map(|surface| {
+            surface.read_with(cx, |surface, _cx| surface.terminal_panel().entity_id())
+        })
+    }
+
+    pub fn native_terminal_snapshot(&self, cx: &TestAppContext) -> Option<TerminalPanelSnapshot> {
+        self.native_terminal_panel(cx)
+            .map(|panel| panel.read_with(cx, |panel, cx| panel.snapshot(cx)))
+    }
+
+    pub fn use_display_only_terminal_creation(
+        &self,
+        enabled: bool,
+        cx: &TestAppContext,
+    ) -> Result<()> {
+        let panel = self
+            .native_terminal_panel(cx)
+            .context("native TerminalPanel is unavailable")?;
+        cx.update(|cx| {
+            panel.update(cx, |panel, _cx| {
+                panel.use_display_only_terminal_creation_for_tests(enabled);
+            });
+        });
+        Ok(())
+    }
+
+    pub fn defer_display_only_terminal_creation(
+        &self,
+        enabled: bool,
+        cx: &TestAppContext,
+    ) -> Result<()> {
+        let panel = self
+            .native_terminal_panel(cx)
+            .context("native TerminalPanel is unavailable")?;
+        cx.update(|cx| {
+            panel.update(cx, |panel, _cx| {
+                panel.defer_display_only_terminal_creation_for_tests(enabled);
+            });
+        });
+        Ok(())
+    }
+
+    pub fn take_terminal_creation_request(
+        &self,
+        cx: &TestAppContext,
+    ) -> Option<TestTerminalCreationRequest> {
+        self.native_terminal_panel(cx).and_then(|panel| {
+            cx.update(|cx| {
+                panel.update(cx, |panel, _cx| panel.take_test_terminal_creation_request())
+            })
+        })
+    }
+
+    pub fn terminal_creation_working_directories(
+        &self,
+        cx: &TestAppContext,
+    ) -> Option<Vec<Option<PathBuf>>> {
+        self.native_terminal_panel(cx).map(|panel| {
+            panel.read_with(cx, |panel, _cx| {
+                panel.creation_working_directories_for_tests().to_vec()
+            })
+        })
+    }
+
+    pub fn native_terminal_front_door_snapshot(
+        &self,
+        cx: &TestAppContext,
+    ) -> Option<NativeTerminalFrontDoorSnapshot> {
+        let panel = self.native_terminal_snapshot(cx)?;
+        let surface = self.native_terminal_surface(cx)?;
+        let surface = surface.read_with(cx, |surface, cx| NativeTerminalSurfaceSnapshot {
+            panel_entity_id: surface.terminal_panel().entity_id(),
+            binding: surface.binding().clone(),
+            owner_state: surface.owner_state().clone(),
+            terminal_owners: surface.terminal_owners_for_tests().clone(),
+            active_terminal_owner: surface.active_terminal_owner_for_tests(cx),
+        });
+        Some(NativeTerminalFrontDoorSnapshot { panel, surface })
+    }
+
+    pub fn insert_display_only_terminal(
+        &self,
+        activate: bool,
+        split: Option<SplitDirection>,
+        owner: Option<crate::workbench_shell::NativeTerminalBinding>,
+        cx: &TestAppContext,
+    ) -> Result<TestWorkbenchTerminal> {
+        let panel = self
+            .native_terminal_panel(cx)
+            .context("native TerminalPanel is unavailable")?;
+        let surface = self
+            .native_terminal_surface(cx)
+            .context("native Terminal surface is unavailable")?;
+        let mut visual = VisualTestContext::from_window(self.window, cx);
+        let insertion = panel.update_in(&mut visual, |panel, window, cx| {
+            panel.create_and_insert_display_only_test_terminal(b"", activate, split, window, cx)
+        })?;
+        let owner = owner.unwrap_or_else(|| {
+            surface.read_with(&visual, |surface, _cx| surface.binding().clone())
+        });
+        surface.update(&mut visual, |surface, cx| {
+            surface.record_terminal_owner(insertion.terminal_id, owner, cx);
+        });
+        visual.run_until_parked();
+        Ok(TestWorkbenchTerminal { insertion })
+    }
+
+    pub fn activate_display_only_terminal(
+        &self,
+        terminal_view_id: u64,
+        focus: bool,
+        cx: &TestAppContext,
+    ) -> Result<()> {
+        let panel = self
+            .native_terminal_panel(cx)
+            .context("native TerminalPanel is unavailable")?;
+        let mut visual = VisualTestContext::from_window(self.window, cx);
+        let activated = panel.update_in(&mut visual, |panel, window, cx| {
+            panel.activate_test_terminal(terminal_view_id, focus, window, cx)
+        });
+        visual.run_until_parked();
+        if !activated {
+            bail!("display-only terminal view {terminal_view_id} is unavailable");
+        }
+        Ok(())
+    }
+
+    pub fn type_in_display_only_terminal(
+        &self,
+        terminal_view_id: u64,
+        keystrokes: &str,
+        cx: &TestAppContext,
+    ) -> Result<()> {
+        self.activate_display_only_terminal(terminal_view_id, true, cx)?;
+        let mut visual = VisualTestContext::from_window(self.window, cx);
+        visual.simulate_keystrokes(keystrokes);
+        visual.run_until_parked();
+        Ok(())
+    }
+
+    pub fn write_display_only_terminal_output(
+        &self,
+        terminal: &TestTerminalInsertion,
+        output: &[u8],
+        cx: &TestAppContext,
+    ) {
+        cx.update(|cx| terminal.write_output(output, cx));
+        let visual = VisualTestContext::from_window(self.window, cx);
+        visual.run_until_parked();
+    }
+
+    pub fn display_only_terminal_content(
+        &self,
+        terminal: &TestTerminalInsertion,
+        cx: &TestAppContext,
+    ) -> String {
+        cx.update(|cx| terminal.content(cx))
+    }
+
+    pub fn take_display_only_terminal_input(
+        &self,
+        terminal: &TestTerminalInsertion,
+        cx: &TestAppContext,
+    ) -> Vec<Vec<u8>> {
+        cx.update(|cx| terminal.take_input_log(cx))
     }
 
     pub fn fixture_repository_id(
@@ -1447,7 +1687,7 @@ impl AgentWorkbenchFrontDoor {
                 })
             })
             .with_context(|| format!("identity picker has no fixture {fixture_id:?}"))?;
-        self.select_identity_picker_row(row_index, cx)
+        self.select_worktree_picker_row(row_index, cx)
     }
 
     pub fn select_worktree_picker_row(&self, row_index: usize, cx: &TestAppContext) -> Result<()> {
@@ -1956,6 +2196,624 @@ mod workbench_front_door_tests {
             }],
         });
         scene
+    }
+
+    #[gpui::test(iterations = 8)]
+    async fn native_terminal_selection_collapse_and_reopen_never_spawn(cx: &mut TestAppContext) {
+        let mut scene = scene_with_thread("native_terminal_no_implicit_spawn", 1200, true);
+        scene.active_surface = Some(WorkSurfaceId::Terminal);
+        scene.dock_open = true;
+        let front_door = AgentWorkbenchFrontDoor::mount(scene, cx)
+            .await
+            .expect("native Terminal fixture should mount");
+        let panel_id = front_door
+            .native_terminal_panel_entity_id(cx)
+            .expect("workspace should load one native TerminalPanel");
+        let mounted_panel_id = front_door
+            .mounted_terminal_panel_entity_id(cx)
+            .expect("Terminal work surface should mount the native TerminalPanel");
+        assert_eq!(
+            mounted_panel_id, panel_id,
+            "the work surface must rehome the workspace-owned TerminalPanel"
+        );
+        let surface_id = front_door
+            .native_terminal_surface(cx)
+            .expect("native Terminal surface")
+            .entity_id();
+        let initial = front_door
+            .native_terminal_snapshot(cx)
+            .expect("native TerminalPanel snapshot");
+        assert_eq!(initial.pending_terminal_count, 0);
+        assert!(
+            initial.panes.iter().all(|pane| pane.items.is_empty()),
+            "selecting Terminal must not create a terminal tab or process"
+        );
+
+        front_door.dispatch_action(crate::workbench_shell::SelectTerminal, cx);
+        assert!(
+            front_door.visible_surface_host(cx).is_none(),
+            "selecting the visible Terminal surface should collapse the dock"
+        );
+        let collapsed = front_door
+            .native_terminal_snapshot(cx)
+            .expect("retained TerminalPanel after collapse");
+        assert_eq!(collapsed, initial);
+
+        front_door.dispatch_action(crate::workbench_shell::SelectTerminal, cx);
+        assert_eq!(
+            front_door
+                .native_terminal_surface(cx)
+                .expect("reopened native Terminal surface")
+                .entity_id(),
+            surface_id,
+            "collapse and reopen must retain the exact native Terminal surface"
+        );
+        assert_eq!(
+            front_door
+                .mounted_terminal_panel_entity_id(cx)
+                .expect("reopened native TerminalPanel"),
+            panel_id,
+            "collapse and reopen must retain the exact native TerminalPanel"
+        );
+        assert_eq!(
+            front_door
+                .native_terminal_snapshot(cx)
+                .expect("native Terminal snapshot after reopen"),
+            initial,
+            "reopening Terminal must not create or mutate a process"
+        );
+        let snapshot = front_door.snapshot(cx);
+        assert_eq!(
+            snapshot
+                .occurrences("omega.workbench.terminal.content")
+                .len(),
+            1
+        );
+        assert_eq!(
+            snapshot.occurrences("omega.workbench.terminal.new").len(),
+            1
+        );
+
+        front_door
+            .teardown(cx)
+            .expect("native Terminal fixture should tear down");
+    }
+
+    #[gpui::test(iterations = 8)]
+    async fn native_terminal_narrow_front_door_keeps_surface_and_controls_in_frame(
+        cx: &mut TestAppContext,
+    ) {
+        let mut scene = scene_with_thread("omega_workbench_terminal_narrow", 910, true);
+        scene.active_surface = Some(WorkSurfaceId::Terminal);
+        scene.dock_open = true;
+        let front_door = AgentWorkbenchFrontDoor::mount(scene, cx)
+            .await
+            .expect("narrow native Terminal fixture should mount");
+        front_door
+            .insert_display_only_terminal(true, None, None, cx)
+            .expect("narrow Terminal should accept a display-only fixture");
+
+        let snapshot = front_door.snapshot(cx);
+        let mut probe = SemanticProbe::new(&snapshot);
+        probe
+            .require_fully_visible("omega.workbench.surface.terminal")
+            .expect("narrow Terminal surface should remain fully visible");
+        probe
+            .require_fully_visible("omega.workbench.terminal.content")
+            .expect("narrow Terminal content should remain fully visible");
+        probe
+            .require_fully_visible("omega.workbench.terminal.new")
+            .expect("narrow new-terminal control should remain fully visible");
+        probe
+            .require_inside(
+                "omega.workbench.terminal.content",
+                "omega.workbench.surface.terminal",
+            )
+            .expect("native Terminal content should remain inside its surface");
+        probe
+            .require_disjoint(
+                "omega.workbench.surface.terminal",
+                WORKBENCH_TRANSCRIPT_SELECTOR,
+            )
+            .expect("narrow Terminal must not cover the transcript");
+        probe
+            .require_disjoint(
+                "omega.workbench.surface.terminal",
+                WORKBENCH_COMPOSER_SELECTOR,
+            )
+            .expect("narrow Terminal must not cover the composer");
+        assert_eq!(
+            front_door
+                .native_terminal_front_door_snapshot(cx)
+                .expect("typed narrow Terminal snapshot")
+                .panel
+                .pending_terminal_count,
+            0,
+            "the narrow proof fixture must remain process-free"
+        );
+
+        front_door
+            .teardown(cx)
+            .expect("narrow native Terminal fixture should tear down");
+    }
+
+    #[gpui::test(iterations = 8)]
+    async fn native_terminal_front_door_types_only_while_terminal_owns_focus(
+        cx: &mut TestAppContext,
+    ) {
+        let mut scene = scene_with_thread("native_terminal_focus", 1200, true);
+        scene.active_surface = Some(WorkSurfaceId::Terminal);
+        scene.dock_open = true;
+        let front_door = AgentWorkbenchFrontDoor::mount(scene, cx)
+            .await
+            .expect("native Terminal fixture should mount");
+        let terminal = front_door
+            .insert_display_only_terminal(true, None, None, cx)
+            .expect("display-only terminal should be inserted");
+
+        front_door.write_display_only_terminal_output(
+            &terminal.insertion,
+            b"deterministic prompt\n",
+            cx,
+        );
+        assert!(
+            front_door
+                .display_only_terminal_content(&terminal.insertion, cx)
+                .contains("deterministic prompt")
+        );
+        front_door
+            .type_in_display_only_terminal(terminal.insertion.terminal_view_id, "abc", cx)
+            .expect("the injected terminal should accept deterministic typing");
+        let input = front_door
+            .take_display_only_terminal_input(&terminal.insertion, cx)
+            .concat();
+        assert_eq!(input, b"abc");
+
+        front_door.dispatch_action(crate::workbench_shell::FocusThreadTranscript, cx);
+        front_door.simulate_keystrokes("z", cx);
+        assert!(
+            front_door
+                .take_display_only_terminal_input(&terminal.insertion, cx)
+                .is_empty(),
+            "global transcript focus must return keyboard ownership without terminal input"
+        );
+
+        front_door
+            .teardown(cx)
+            .expect("native Terminal focus fixture should tear down");
+    }
+
+    #[gpui::test(iterations = 8)]
+    async fn native_terminal_front_door_models_tabs_splits_and_active_owner(
+        cx: &mut TestAppContext,
+    ) {
+        let mut scene = scene_with_thread("native_terminal_tabs_and_splits", 1200, true);
+        scene.active_surface = Some(WorkSurfaceId::Terminal);
+        scene.dock_open = true;
+        let front_door = AgentWorkbenchFrontDoor::mount(scene, cx)
+            .await
+            .expect("native Terminal fixture should mount");
+        let first = front_door
+            .insert_display_only_terminal(true, None, None, cx)
+            .expect("first display-only terminal");
+        let second = front_door
+            .insert_display_only_terminal(false, None, None, cx)
+            .expect("second display-only terminal tab");
+        let split = front_door
+            .insert_display_only_terminal(true, Some(SplitDirection::Right), None, cx)
+            .expect("split display-only terminal");
+
+        let snapshot = front_door
+            .native_terminal_front_door_snapshot(cx)
+            .expect("typed Terminal snapshot");
+        assert_eq!(snapshot.panel.pending_terminal_count, 0);
+        assert_eq!(snapshot.panel.panes.len(), 2);
+        assert_eq!(
+            snapshot
+                .panel
+                .panes
+                .iter()
+                .map(|pane| pane.items.len())
+                .sum::<usize>(),
+            3
+        );
+        assert_eq!(
+            snapshot
+                .surface
+                .active_terminal_owner
+                .as_ref()
+                .map(|owner| owner.0),
+            Some(split.insertion.terminal_id)
+        );
+        assert_eq!(snapshot.surface.terminal_owners.len(), 3);
+
+        front_door
+            .activate_display_only_terminal(first.insertion.terminal_view_id, true, cx)
+            .expect("first terminal tab should activate across panes");
+        let activated = front_door
+            .native_terminal_front_door_snapshot(cx)
+            .expect("Terminal snapshot after tab activation");
+        assert_eq!(
+            activated
+                .surface
+                .active_terminal_owner
+                .as_ref()
+                .map(|owner| owner.0),
+            Some(first.insertion.terminal_id)
+        );
+        assert_ne!(first.insertion.pane_id, split.insertion.pane_id);
+        assert_eq!(first.insertion.pane_id, second.insertion.pane_id);
+
+        front_door
+            .teardown(cx)
+            .expect("native Terminal tab fixture should tear down");
+    }
+
+    #[gpui::test(iterations = 8)]
+    async fn native_terminal_explicit_create_uses_exact_worktree_without_shell(
+        cx: &mut TestAppContext,
+    ) {
+        let mut scene = scene_with_two_worktrees("native_terminal_explicit_create");
+        scene.active_surface = Some(WorkSurfaceId::Terminal);
+        scene.dock_open = true;
+        let front_door = AgentWorkbenchFrontDoor::mount(scene, cx)
+            .await
+            .expect("native Terminal fixture should mount");
+        front_door
+            .use_display_only_terminal_creation(true, cx)
+            .expect("display-only terminal creation should be enabled");
+
+        front_door.dispatch_action(crate::workbench_shell::NewTerminalForThread, cx);
+        let first = front_door
+            .native_terminal_front_door_snapshot(cx)
+            .expect("first explicit terminal snapshot");
+        assert_eq!(
+            front_door.terminal_creation_working_directories(cx),
+            Some(vec![Some(PathBuf::from("/worktree-1"))])
+        );
+        assert_eq!(first.panel.pending_terminal_count, 0);
+        assert_eq!(first.surface.terminal_owners.len(), 1);
+        let first_owner = first
+            .surface
+            .active_terminal_owner
+            .expect("first terminal should have an immutable owner")
+            .1;
+        assert_eq!(first_owner.worktree_abs_path, Path::new("/worktree-1"));
+        assert!(
+            first
+                .panel
+                .panes
+                .iter()
+                .flat_map(|pane| &pane.items)
+                .all(|item| matches!(
+                    &item.kind,
+                    terminal_view::terminal_panel::TerminalPanelItemKind::Terminal {
+                        process_id: None,
+                        task_status: None,
+                        ..
+                    }
+                ))
+        );
+
+        front_door
+            .select_identity_fixture("worktree-2", cx)
+            .expect("thread identity should switch worktrees");
+        front_door.dispatch_action(crate::workbench_shell::NewTerminalForThread, cx);
+        let second = front_door
+            .native_terminal_front_door_snapshot(cx)
+            .expect("second explicit terminal snapshot");
+        assert_eq!(
+            front_door.terminal_creation_working_directories(cx),
+            Some(vec![
+                Some(PathBuf::from("/worktree-1")),
+                Some(PathBuf::from("/worktree-2"))
+            ])
+        );
+        assert_eq!(second.surface.terminal_owners.len(), 2);
+        assert!(
+            second
+                .surface
+                .terminal_owners
+                .values()
+                .any(|owner| owner == &first_owner),
+            "switching worktrees must not relabel the first terminal"
+        );
+        assert_eq!(
+            second
+                .surface
+                .active_terminal_owner
+                .expect("second terminal should be active")
+                .1
+                .worktree_abs_path,
+            Path::new("/worktree-2")
+        );
+
+        front_door.dispatch_action(
+            workspace::OpenTerminal {
+                working_directory: PathBuf::from("/worktree-2/src"),
+                local: false,
+            },
+            cx,
+        );
+        assert_eq!(
+            front_door.terminal_creation_working_directories(cx),
+            Some(vec![
+                Some(PathBuf::from("/worktree-1")),
+                Some(PathBuf::from("/worktree-2")),
+                Some(PathBuf::from("/worktree-2/src")),
+            ]),
+            "the native Files Open in Terminal action should retain its in-worktree directory"
+        );
+
+        front_door.dispatch_action(
+            workspace::OpenTerminal {
+                working_directory: PathBuf::from("/outside"),
+                local: false,
+            },
+            cx,
+        );
+        front_door.dispatch_action(
+            workspace::OpenTerminal {
+                working_directory: PathBuf::from("/worktree-2"),
+                local: true,
+            },
+            cx,
+        );
+        front_door.dispatch_action(
+            workspace::OpenTerminal {
+                working_directory: PathBuf::from("/worktree-2/../outside"),
+                local: false,
+            },
+            cx,
+        );
+        assert_eq!(
+            front_door
+                .terminal_creation_working_directories(cx)
+                .map(|directories| directories.len()),
+            Some(3),
+            "outside-worktree and local terminal routes must fail closed"
+        );
+        SemanticProbe::new(&front_door.snapshot(cx))
+            .require_visible("omega-workbench-rail-error")
+            .expect("rejected terminal routes should surface a workbench error");
+
+        front_door
+            .teardown(cx)
+            .expect("native Terminal explicit-create fixture should tear down");
+    }
+
+    #[gpui::test(iterations = 8)]
+    async fn native_terminal_deferred_create_preserves_owner_and_reports_failure(
+        cx: &mut TestAppContext,
+    ) {
+        let mut scene = scene_with_two_worktrees("native_terminal_deferred_create");
+        scene.active_surface = Some(WorkSurfaceId::Terminal);
+        scene.dock_open = true;
+        let front_door = AgentWorkbenchFrontDoor::mount(scene, cx)
+            .await
+            .expect("native Terminal fixture should mount");
+        front_door
+            .use_display_only_terminal_creation(true, cx)
+            .expect("display-only creation should be enabled");
+        front_door
+            .defer_display_only_terminal_creation(true, cx)
+            .expect("deferred creation should be enabled");
+
+        front_door.dispatch_action(crate::workbench_shell::NewTerminalForThread, cx);
+        let pending = front_door
+            .native_terminal_front_door_snapshot(cx)
+            .expect("pending terminal snapshot");
+        assert_eq!(pending.panel.pending_terminal_count, 1);
+        assert!(pending.surface.terminal_owners.is_empty());
+        SemanticProbe::new(&front_door.snapshot(cx))
+            .require_visible("omega.workbench.badge.terminal")
+            .expect("pending creation should contribute to the Terminal rail badge");
+        let first_request = front_door
+            .take_terminal_creation_request(cx)
+            .expect("first terminal creation request");
+        assert_eq!(
+            first_request.working_directory,
+            Some(PathBuf::from("/worktree-1"))
+        );
+
+        front_door
+            .select_identity_fixture("worktree-2", cx)
+            .expect("identity should switch while creation is pending");
+        assert!(first_request.succeed());
+        front_door.settle(cx);
+        let completed = front_door
+            .native_terminal_front_door_snapshot(cx)
+            .expect("completed terminal snapshot");
+        assert_eq!(completed.panel.pending_terminal_count, 0);
+        SemanticProbe::new(&front_door.snapshot(cx))
+            .require_absent("omega.workbench.badge.terminal")
+            .expect("display-only completion should clear the pending badge");
+        assert_eq!(
+            completed.surface.binding.worktree_abs_path,
+            Path::new("/worktree-2")
+        );
+        assert_eq!(completed.surface.terminal_owners.len(), 1);
+        assert_eq!(
+            completed
+                .surface
+                .active_terminal_owner
+                .expect("completed terminal owner")
+                .1
+                .worktree_abs_path,
+            Path::new("/worktree-1"),
+            "a late completion must keep the worktree captured by its request"
+        );
+
+        front_door.dispatch_action(crate::workbench_shell::NewTerminalForThread, cx);
+        assert_eq!(
+            front_door
+                .native_terminal_snapshot(cx)
+                .expect("failed request pending snapshot")
+                .pending_terminal_count,
+            1
+        );
+        let failed_request = front_door
+            .take_terminal_creation_request(cx)
+            .expect("second terminal creation request");
+        assert_eq!(
+            failed_request.working_directory,
+            Some(PathBuf::from("/worktree-2"))
+        );
+        assert!(failed_request.fail("controlled terminal spawn failure"));
+        front_door.settle(cx);
+        let failed = front_door
+            .native_terminal_front_door_snapshot(cx)
+            .expect("failed terminal snapshot");
+        assert_eq!(failed.panel.pending_terminal_count, 0);
+        assert_eq!(failed.surface.terminal_owners.len(), 1);
+        SemanticProbe::new(&front_door.snapshot(cx))
+            .require_visible("omega-workbench-rail-error")
+            .expect("spawn failure should be surfaced through the workbench UI");
+
+        front_door
+            .teardown(cx)
+            .expect("native Terminal deferred-create fixture should tear down");
+    }
+
+    #[gpui::test(iterations = 8)]
+    async fn native_terminal_front_door_preserves_owner_and_output_across_scope_lifecycle(
+        cx: &mut TestAppContext,
+    ) {
+        let mut scene = scene_with_two_worktrees("native_terminal_owner_lifecycle");
+        scene.active_surface = Some(WorkSurfaceId::Terminal);
+        scene.dock_open = true;
+        let front_door = AgentWorkbenchFrontDoor::mount(scene, cx)
+            .await
+            .expect("native Terminal fixture should mount");
+        let original_binding = front_door
+            .native_terminal_front_door_snapshot(cx)
+            .expect("initial Terminal binding")
+            .surface
+            .binding;
+        let original = front_door
+            .insert_display_only_terminal(true, None, Some(original_binding.clone()), cx)
+            .expect("original display-only terminal");
+        front_door.write_display_only_terminal_output(
+            &original.insertion,
+            b"output survives ownership transitions\n",
+            cx,
+        );
+
+        front_door
+            .select_identity_fixture("worktree-2", cx)
+            .expect("thread identity should switch worktrees");
+        let switched = front_door
+            .native_terminal_front_door_snapshot(cx)
+            .expect("switched Terminal binding");
+        assert_ne!(switched.surface.binding, original_binding);
+        assert_eq!(
+            switched.surface.active_terminal_owner,
+            Some((original.insertion.terminal_id, original_binding.clone())),
+            "an existing terminal must retain its creation owner"
+        );
+        let terminal_surface = front_door
+            .native_terminal_surface(cx)
+            .expect("native Terminal surface");
+        let mut visual = VisualTestContext::from_window(front_door.window, cx);
+        terminal_surface.update(&mut visual, |surface, cx| {
+            surface.record_terminal_owner(
+                original.insertion.terminal_id,
+                switched.surface.binding.clone(),
+                cx,
+            );
+        });
+        assert_eq!(
+            front_door
+                .native_terminal_front_door_snapshot(cx)
+                .expect("Terminal snapshot after conflicting owner registration")
+                .surface
+                .terminal_owners
+                .get(&original.insertion.terminal_id),
+            Some(&original_binding),
+            "a conflicting owner registration must not relabel an existing terminal"
+        );
+        let stale_completion = front_door
+            .insert_display_only_terminal(true, None, Some(original_binding.clone()), cx)
+            .expect("controlled stale terminal completion");
+        let after_stale = front_door
+            .native_terminal_front_door_snapshot(cx)
+            .expect("Terminal snapshot after stale completion");
+        assert_eq!(after_stale.surface.binding, switched.surface.binding);
+        assert_eq!(
+            after_stale.surface.active_terminal_owner,
+            Some((
+                stale_completion.insertion.terminal_id,
+                original_binding.clone()
+            )),
+            "late completion ownership must come from the captured request, not current scope"
+        );
+
+        front_door.dispatch_action(crate::workbench_shell::SelectTerminal, cx);
+        assert!(front_door.visible_surface_host(cx).is_none());
+        assert!(
+            front_door
+                .display_only_terminal_content(&original.insertion, cx)
+                .contains("output survives ownership transitions"),
+            "collapsing an active work surface must retain terminal output"
+        );
+        front_door.dispatch_action(crate::workbench_shell::SelectTerminal, cx);
+
+        front_door.set_identity_phase(crate::thread_identity::IdentityPhase::Offline, cx);
+        let offline = front_door
+            .native_terminal_front_door_snapshot(cx)
+            .expect("offline Terminal snapshot");
+        assert_eq!(
+            offline.surface.owner_state,
+            crate::workbench_shell::NativeTerminalOwnerState::Offline
+        );
+        assert!(!offline.surface.owner_state.can_create());
+        front_door.set_identity_phase(crate::thread_identity::IdentityPhase::Reconnecting, cx);
+        assert_eq!(
+            front_door
+                .native_terminal_front_door_snapshot(cx)
+                .expect("reconnecting Terminal snapshot")
+                .surface
+                .owner_state,
+            crate::workbench_shell::NativeTerminalOwnerState::Reconnecting
+        );
+        front_door.set_identity_phase(crate::thread_identity::IdentityPhase::Ready, cx);
+        assert_eq!(
+            front_door
+                .native_terminal_front_door_snapshot(cx)
+                .expect("reconnected Terminal snapshot")
+                .surface
+                .owner_state,
+            crate::workbench_shell::NativeTerminalOwnerState::Ready
+        );
+        front_door
+            .select_identity_fixture("worktree-1", cx)
+            .expect("thread identity should return to original worktree");
+        front_door
+            .remove_worktree(Path::new("/worktree-1"), cx)
+            .expect("selected worktree should be removable");
+        let removed = front_door
+            .native_terminal_front_door_snapshot(cx)
+            .expect("removed-worktree Terminal snapshot");
+        assert_eq!(
+            removed.surface.owner_state,
+            crate::workbench_shell::NativeTerminalOwnerState::WorktreeRemoved
+        );
+        assert_eq!(
+            removed
+                .surface
+                .terminal_owners
+                .get(&original.insertion.terminal_id),
+            Some(&original_binding)
+        );
+        assert!(
+            front_door
+                .display_only_terminal_content(&original.insertion, cx)
+                .contains("output survives ownership transitions")
+        );
+
+        front_door
+            .teardown(cx)
+            .expect("native Terminal lifecycle fixture should tear down");
     }
 
     #[gpui::test(iterations = 8)]

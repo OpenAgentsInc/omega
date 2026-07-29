@@ -2873,6 +2873,14 @@ impl Terminal {
         }
     }
 
+    pub fn has_exited(&self) -> bool {
+        self.child_exited.is_some()
+            || self
+                .task
+                .as_ref()
+                .is_some_and(|task| task.status != TaskStatus::Running)
+    }
+
     pub fn pid_getter(&self) -> Option<&ProcessIdGetter> {
         match &self.terminal_type {
             TerminalType::Pty { info, .. } => Some(info.pid_getter()),
@@ -2908,6 +2916,7 @@ impl Terminal {
             self.child_exited = Some(e);
         }
         self.complete_init_command_startup_handshake();
+        cx.notify();
         let task = match &mut self.task {
             Some(task) => task,
             None => {
@@ -3361,7 +3370,13 @@ pub fn rgba_color(r: u8, g: u8, b: u8) -> Hsla {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
+    use std::{
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
+        time::Duration,
+    };
 
     use super::*;
     use crate::{
@@ -4421,6 +4436,19 @@ mod tests {
 
         terminal.update(cx, |terminal, cx| {
             terminal.write_output(b"shell failed to start\nprompt", cx);
+        });
+        cx.run_until_parked();
+
+        let notification_count = Arc::new(AtomicUsize::new(0));
+        cx.update(|cx| {
+            let notification_count = notification_count.clone();
+            cx.observe(&terminal, move |_, _| {
+                notification_count.fetch_add(1, Ordering::SeqCst);
+            })
+            .detach();
+        });
+
+        terminal.update(cx, |terminal, cx| {
             #[cfg(unix)]
             let exit_status =
                 <ExitStatus as std::os::unix::process::ExitStatusExt>::from_raw(1 << 8);
@@ -4428,6 +4456,11 @@ mod tests {
             let exit_status = <ExitStatus as std::os::windows::process::ExitStatusExt>::from_raw(1);
             terminal.register_task_finished(Some(exit_status), cx);
         });
+        cx.run_until_parked();
+        assert!(
+            notification_count.load(Ordering::SeqCst) > 0,
+            "child exit must notify lifecycle observers"
+        );
 
         let wrote = terminal.update(cx, |terminal, cx| {
             terminal.write_init_command_after_startup(b"agent\r".to_vec(), cx)

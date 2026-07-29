@@ -21,8 +21,10 @@ authoritative repository, worktree, branch, and Git-state projection described
 below. Issue 129 rehomes the Workspace-created native Project Panel into Files,
 issue 134 mounts native project Search, and issue 136 mounts native agent
 change review. Issue 132 rehomes the native Git Panel under an exact
-repository/worktree scope. The remaining generic hosts render loading, ready,
-error, or offline placeholders until their native adapters land.
+repository/worktree scope. Issue 137 rehomes the Workspace-owned native
+Terminal Panel and gives explicit terminal creation the active thread's exact
+worktree path. Plan is the remaining generic host; it renders its retained
+loading, ready, error, or offline content until its typed adapter lands.
 
 The remaining work is deliberately split so each native adapter can prove its
 own identity, behavior, and lifecycle:
@@ -35,11 +37,10 @@ own identity, behavior, and lifecycle:
 | [Issue 132](https://github.com/OpenAgentsInc/omega/issues/132) | Mounted the existing Git Panel                     |
 | [Issue 134](https://github.com/OpenAgentsInc/omega/issues/134) | Mounted an embedded project-search entity          |
 | [Issue 136](https://github.com/OpenAgentsInc/omega/issues/136) | Mounted a thread-bound native review entity        |
-| [Issue 137](https://github.com/OpenAgentsInc/omega/issues/137) | Mount the existing Terminal Panel without spawning |
+| [Issue 137](https://github.com/OpenAgentsInc/omega/issues/137) | Mounted the existing Terminal Panel without implicit spawning |
 
-Files, Search, Review, and Git are production content. Until the other adapters
-land, their entries remain retained-host foundations rather than replacements
-for the existing native panels.
+Files, Search, Review, Git, and Terminal are production content. Plan retains
+the generic-host foundation rather than replacing a native panel.
 
 ## Composition boundary {#composition-boundary}
 
@@ -336,6 +337,89 @@ cancel/error invariance, commit validation, diff opening, repository and
 thread switching, removal, offline/reconnect, and rejection of a held stale
 refresh. Real-pixel scenes run only after the same typed snapshot, badge,
 focus, mutation log, and foreign-path exclusion checks pass.
+
+### Native Terminal adapter {#native-terminal-adapter}
+
+Workspace creates one `TerminalPanel`. On the first successful Terminal
+activation, Agent Panel resolves that exact entity, creates a retained
+`NativeTerminalSurface`, and rehomes the panel out of the ordinary Workspace
+dock render list. Workspace lookup and native panel events continue to resolve
+the same entity. The workbench does not build a second terminal emulator,
+pane tree, tab model, PTY path, task integration, or action set.
+
+The panel remains Workspace-owned. The shell's active thread binding is the
+creation target for the next explicit terminal, not permission to rewrite
+existing terminals. `NativeTerminalBinding` records the logical thread,
+repository/worktree binding, typed `WorktreeId`, canonical absolute worktree
+path, and binding generation. When the user explicitly invokes New Terminal
+from the visible embedded surface, Agent Panel passes that exact absolute path
+to `TerminalPanel::create_terminal_at_working_directory`. It neither uses the
+process-wide current directory nor falls back to another visible worktree.
+The native Files `Open in Terminal` action is intercepted at Agent Panel and
+accepted only for a non-local path inside that same worktree; local and
+outside-worktree requests fail closed instead of reaching the legacy dock.
+After creation succeeds, the surface associates the terminal entity ID with
+the binding that created it. That owner is immutable even when the active
+thread, repository, worktree, generation, or next-creation target changes.
+
+Selecting Terminal, focusing it, collapsing it, reopening it, switching
+threads, or rebinding a thread never creates or kills a process. Process
+creation is confined to the explicit New Terminal action. The embedded path
+uses `RevealStrategy::Never`, so creation cannot reopen a legacy Workspace
+dock or unzoom Agent Panel. Spawn failures surface through the workbench error
+path and the panel's pending count is balanced. Existing tabs, tab selection,
+pane splits, zoom, copy, paste, search, scroll, task actions, close actions,
+and terminal input remain native `TerminalPanel`, `Pane`, `TerminalView`, and
+`Terminal` behavior.
+
+Focus follows the visible native tree. Opening Terminal transfers focus to the
+panel's activation focus handle. Native keystrokes reach only the focused
+`TerminalView`; returning focus to the transcript prevents later text from
+being written to the terminal. The normal terminal keymap remains in force.
+The narrower `WorkbenchTerminal > Terminal` context adds explicit workbench
+escape routes: Collapse Work Surface Dock and Focus Thread Transcript, plus
+thread-bound new-terminal and native search bindings. Generic pane mutations
+are not globally admitted by zero base. A panel Activate event opens or
+focuses the embedded surface; Close collapses only the inner
+work-surface dock and returns focus to the transcript.
+
+The panel entity and all terminal entities stay retained while the dock is
+collapsed, while another surface is selected, and across thread switches.
+Output, selection, pane geometry, tabs, splits, process identity, and the
+per-terminal creation owner therefore remain attached to the same entities.
+The rail badge is derived from the native panel snapshot: terminals with a
+process ID that have not exited, running task terminals, and pending explicit
+creations contribute to the running count. Terminal exit notifications
+invalidate that snapshot, and owner records are pruned when their terminal
+items close.
+
+Remote project availability and terminal-process lifetime are separate state.
+`Ready`, `Offline`, `Reconnecting`, `WorktreeRemoved`, and `Error` are explicit
+owner states. Offline, reconnecting, removed, and error states retain existing
+terminal entities and output but disable both the workbench New control and
+the native TerminalPanel New menu. Removal does not rebind
+or kill a process; the active terminal continues to disclose its original
+owner while the header discloses the current creation target. Reconnect may
+restore creation only after current binding authority is ready. A stale spawn
+completion cannot be registered as if it belonged to a newer binding, and a
+foreign requested binding is rejected rather than redirected.
+
+The retention boundary ends when the native terminal item, panel, window, or
+application is actually closed. In particular, app restart does not preserve a
+live operating-system process. Native panel persistence can restore eligible
+layout and working-directory metadata, but deserialization creates a new
+terminal shell; task terminals are not serialized. Tests and product copy must
+not describe restart restoration as process continuation.
+
+Test support constructs display-only native terminals inside `TerminalPanel`,
+injects output through the terminal emulator, inserts tabs or splits through
+the real pane APIs, activates the real `TerminalView`, and exposes exact input
+bytes and normalized panel snapshots. This gives the front-door and visual
+runner deterministic terminal content without starting a shell or importing
+the terminal implementation directly into the runner. The same panel-owned
+factory can defer an explicit production-path creation, then deterministically
+succeed or fail it, so tests observe pending badges, failure propagation, and
+late completion after a worktree switch without launching a process.
 
 ## State ownership {#state-ownership}
 
@@ -659,6 +743,10 @@ Stable selectors include:
 | Files tree       | `omega.project-panel.tree`                    |
 | Files row        | `omega.project-panel.row.<worktree>.<entry>`  |
 | Files scope      | `omega.project-panel.scope.<state>`           |
+| Terminal content | `omega.workbench.terminal.content`             |
+| Terminal create  | `omega.workbench.terminal.new`                 |
+| Terminal owner   | `omega.workbench.terminal.owner`               |
+| Terminal state   | `omega.workbench.terminal.owner-state`         |
 
 For every interaction, assert logical state and rendered semantics:
 
@@ -690,6 +778,15 @@ For every interaction, assert logical state and rendered semantics:
 - stale completion rejection after thread or binding changes; and
 - weak-entity release for both the Files host and rehomed Project Panel after
   window teardown.
+
+Terminal tests additionally assert the single Workspace-owned panel identity,
+zero implicit creations on selection/collapse/reopen, exact creation cwd,
+stable terminal/view/pane IDs, tab and split membership, active selection,
+exact input bytes, focus return, running-badge agreement, immutable creation
+owners, retained output through lifecycle changes, and explicit rejection or
+isolation of stale and foreign spawn epochs. The typed harness defines nineteen
+Terminal visual scene contracts; the proof page lists their exact names and
+commands. Registration is not evidence that reviewed pixel baselines exist.
 
 Identity tests additionally assert exact picker candidates, one-generation
 binding replacement, full tooltip/accessibility values under visual

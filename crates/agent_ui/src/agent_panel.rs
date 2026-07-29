@@ -1369,12 +1369,21 @@ pub struct AgentPanel {
     workbench_git_panel_handed_off: bool,
     _workbench_git_panel_observation: Option<Subscription>,
     _workbench_git_panel_event_subscription: Option<Subscription>,
+    workbench_terminal_panel: Option<Entity<TerminalPanel>>,
+    workbench_terminal_panel_handed_off: bool,
+    _workbench_terminal_panel_observation: Option<Subscription>,
+    _workbench_terminal_panel_event_subscription: Option<Subscription>,
+    workbench_terminal_surface: Option<Entity<workbench_shell::NativeTerminalSurface>>,
     #[cfg(any(test, feature = "test-support"))]
     workbench_identity_phase_override: Option<IdentityPhase>,
     #[cfg(any(test, feature = "test-support"))]
     workbench_identity_observation_override: Option<ThreadIdentityObservation>,
     #[cfg(any(test, feature = "test-support"))]
     workbench_git_lifecycle_override: Option<workbench_shell::NativeGitLifecycle>,
+    #[cfg(any(test, feature = "test-support"))]
+    workbench_terminal_owner_state_override: Option<workbench_shell::NativeTerminalOwnerState>,
+    #[cfg(any(test, feature = "test-support"))]
+    workbench_terminal_badge_override: Option<workbench_shell::SurfaceBadge>,
 }
 
 impl AgentPanel {
@@ -1707,6 +1716,23 @@ impl AgentPanel {
                 },
             )
         });
+        let workbench_terminal_panel = workspace.panel::<TerminalPanel>(cx);
+        let workbench_terminal_panel_observation = workbench_terminal_panel.as_ref().map(|panel| {
+            cx.observe_in(panel, window, |this, _panel, window, cx| {
+                this.sync_workbench_shell(window, cx);
+                cx.notify();
+            })
+        });
+        let workbench_terminal_panel_event_subscription =
+            workbench_terminal_panel.as_ref().map(|panel| {
+                cx.subscribe_in(
+                    panel,
+                    window,
+                    |this, _panel, event: &PanelEvent, window, cx| {
+                        this.handle_workbench_terminal_panel_event(event, window, cx);
+                    },
+                )
+            });
         let workspace = workspace.weak_handle();
 
         let context_server_registry =
@@ -1862,12 +1888,22 @@ impl AgentPanel {
             workbench_git_panel_handed_off: false,
             _workbench_git_panel_observation: workbench_git_panel_observation,
             _workbench_git_panel_event_subscription: workbench_git_panel_event_subscription,
+            workbench_terminal_panel,
+            workbench_terminal_panel_handed_off: false,
+            _workbench_terminal_panel_observation: workbench_terminal_panel_observation,
+            _workbench_terminal_panel_event_subscription:
+                workbench_terminal_panel_event_subscription,
+            workbench_terminal_surface: None,
             #[cfg(any(test, feature = "test-support"))]
             workbench_identity_phase_override: None,
             #[cfg(any(test, feature = "test-support"))]
             workbench_identity_observation_override: None,
             #[cfg(any(test, feature = "test-support"))]
             workbench_git_lifecycle_override: None,
+            #[cfg(any(test, feature = "test-support"))]
+            workbench_terminal_owner_state_override: None,
+            #[cfg(any(test, feature = "test-support"))]
+            workbench_terminal_badge_override: None,
         };
 
         let mut panel = panel;
@@ -9011,6 +9047,10 @@ impl AgentPanel {
             .workbench_shell
             .git_surface_for_active_binding(cx)
             .is_some_and(|surface| surface.read(cx).contains_focus(window, cx));
+        let terminal_surface_was_focused = self
+            .workbench_terminal_surface
+            .as_ref()
+            .is_some_and(|surface| surface.read(cx).contains_focus(window, cx));
         let context = self.workbench_thread_context(cx);
         let result = match context {
             Ok((thread_id, observation)) => self
@@ -9286,6 +9326,65 @@ impl AgentPanel {
                 }
             }
         }
+        let terminal_is_visible = self
+            .workbench_shell
+            .projection()
+            .visible_projection()
+            .is_some_and(|visible| {
+                visible.dock_open
+                    && visible.effective_surface
+                        == Some(omega_workbench_state::WorkSurface::Terminal)
+            });
+        if let Some(terminal_surface) = self.workbench_terminal_surface.clone() {
+            let generation = terminal_surface.read(cx).binding().generation;
+            let owner_state = self.native_terminal_owner_state();
+            terminal_surface.update(cx, |terminal_surface, cx| {
+                terminal_surface.set_owner_state(generation, owner_state, cx);
+            });
+        }
+        if self.workbench_shell_enabled
+            && terminal_is_visible
+            && self.workbench_terminal_has_authority(cx)
+        {
+            let terminal_host_was_missing = self
+                .workbench_shell
+                .terminal_surface_for_active_binding(cx)
+                .is_none();
+            match self
+                .prepare_terminal_surface(window, cx)
+                .and_then(|terminal_surface| {
+                    self.workbench_shell
+                        .ensure_visible_terminal_host(terminal_surface, cx)
+                }) {
+                Ok(Some(host)) if terminal_surface_was_focused && terminal_host_was_missing => {
+                    host.focus_handle(cx).focus(window, cx);
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    log::warn!("failed to synchronize the native Terminal host: {error:#}");
+                    self.workbench_shell.record_error(error.to_string());
+                    self.focus_thread_transcript(window, cx);
+                }
+            }
+        }
+        if let Some(panel) = self.workbench_terminal_panel.as_ref() {
+            let snapshot = panel.read(cx).snapshot(cx);
+            if let Some(surface) = self.workbench_terminal_surface.as_ref() {
+                surface.update(cx, |surface, cx| {
+                    surface.reconcile_terminal_owners(&snapshot, cx);
+                });
+            }
+            let running_count = snapshot.running_terminal_count();
+            let badge = (running_count > 0).then(|| workbench_shell::SurfaceBadge::Count {
+                count: running_count,
+                tone: workbench_shell::BadgeTone::Accent,
+                label: format!("{running_count} running terminal processes").into(),
+            });
+            #[cfg(any(test, feature = "test-support"))]
+            let badge = self.workbench_terminal_badge_override.clone().or(badge);
+            self.workbench_shell
+                .set_badge(omega_workbench_state::WorkSurface::Terminal, badge);
+        }
         let files_is_visible = self
             .workbench_shell
             .projection()
@@ -9320,6 +9419,9 @@ impl AgentPanel {
         if git_surface_was_focused && (!git_is_visible || !self.workbench_git_has_authority(cx)) {
             self.focus_thread_transcript(window, cx);
         }
+        if terminal_surface_was_focused && !terminal_is_visible {
+            self.focus_thread_transcript(window, cx);
+        }
     }
 
     fn active_workbench_worktree_id(&self, cx: &App) -> Option<WorktreeId> {
@@ -9333,6 +9435,13 @@ impl AgentPanel {
             .visible_worktrees(cx)
             .find(|worktree| worktree.read(cx).abs_path().as_ref() == selected_path)
             .map(|worktree| worktree.read(cx).id())
+    }
+
+    fn active_workbench_worktree_abs_path(&self) -> Option<PathBuf> {
+        self.workbench_shell
+            .identity()
+            .and_then(|identity| identity.selected.as_ref())
+            .map(|selected| selected.worktree_abs_path.clone())
     }
 
     fn active_workbench_git_repository_id(&self, cx: &App) -> Option<RepositoryId> {
@@ -9375,6 +9484,13 @@ impl AgentPanel {
     fn workbench_git_has_authority(&self, cx: &App) -> bool {
         self.workbench_repository_surface_has_authority(omega_workbench_state::WorkSurface::Git, cx)
             && self.active_workbench_git_repository_id(cx).is_some()
+    }
+
+    fn workbench_terminal_has_authority(&self, cx: &App) -> bool {
+        self.workbench_repository_surface_has_authority(
+            omega_workbench_state::WorkSurface::Terminal,
+            cx,
+        ) && self.active_workbench_worktree_id(cx).is_some()
     }
 
     fn workbench_repository_surface_has_authority(
@@ -9524,6 +9640,54 @@ impl AgentPanel {
                 if git_is_open {
                     if let Err(error) = self.workbench_shell.collapse_dock() {
                         log::warn!("failed to close the native Git surface: {error:#}");
+                        self.workbench_shell.record_error(error.to_string());
+                    }
+                    self.focus_thread_transcript(window, cx);
+                }
+            }
+            PanelEvent::ZoomIn | PanelEvent::ZoomOut => {}
+        }
+    }
+
+    fn handle_workbench_terminal_panel_event(
+        &mut self,
+        event: &PanelEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.workbench_terminal_panel_handed_off {
+            return;
+        }
+        let terminal_is_open = self
+            .workbench_shell
+            .projection()
+            .visible_projection()
+            .is_some_and(|visible| {
+                visible.dock_open
+                    && visible.effective_surface
+                        == Some(omega_workbench_state::WorkSurface::Terminal)
+            });
+        match event {
+            PanelEvent::Activate => {
+                if terminal_is_open {
+                    if let Some(panel) = self.workbench_terminal_panel.as_ref() {
+                        panel.read(cx).activation_focus_handle(cx).focus(window, cx);
+                    }
+                    cx.notify();
+                } else if self.workbench_terminal_has_authority(cx) {
+                    self.select_work_surface(
+                        omega_workbench_state::WorkSurface::Terminal,
+                        window,
+                        cx,
+                    );
+                } else {
+                    self.focus_thread_transcript(window, cx);
+                }
+            }
+            PanelEvent::Close => {
+                if terminal_is_open {
+                    if let Err(error) = self.workbench_shell.collapse_dock() {
+                        log::warn!("failed to close the native Terminal surface: {error:#}");
                         self.workbench_shell.record_error(error.to_string());
                     }
                     self.focus_thread_transcript(window, cx);
@@ -9760,6 +9924,76 @@ impl AgentPanel {
         Ok(git_surface)
     }
 
+    fn prepare_terminal_surface(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<Entity<workbench_shell::NativeTerminalSurface>> {
+        if !self.workbench_terminal_has_authority(cx) {
+            if let Some(surface) = self.workbench_terminal_surface.clone() {
+                let generation = surface.read(cx).binding().generation;
+                let owner_state = self.native_terminal_owner_state();
+                surface.update(cx, |surface, cx| {
+                    surface.set_owner_state(generation, owner_state, cx);
+                });
+                return Ok(surface);
+            }
+            anyhow::bail!("the native Terminal surface has no usable worktree authority");
+        }
+        let visible = self
+            .workbench_shell
+            .projection()
+            .visible_projection()
+            .ok_or_else(|| anyhow!("open a thread before preparing native Terminal"))?;
+        let repository = visible
+            .binding
+            .clone()
+            .ok_or_else(|| anyhow!("the active thread has no repository binding"))?;
+        let worktree_id = self
+            .active_workbench_worktree_id(cx)
+            .ok_or_else(|| anyhow!("the active thread worktree is unavailable"))?;
+        let worktree_abs_path = self
+            .active_workbench_worktree_abs_path()
+            .ok_or_else(|| anyhow!("the active thread worktree path is unavailable"))?;
+        let binding = workbench_shell::NativeTerminalBinding {
+            thread_id: visible.thread_id,
+            repository,
+            worktree_id,
+            worktree_abs_path,
+            generation: visible.generation,
+        };
+        let panel = if let Some(panel) = self.workbench_terminal_panel.clone() {
+            panel
+        } else {
+            let panel = self
+                .workspace
+                .upgrade()
+                .and_then(|workspace| workspace.read(cx).panel::<TerminalPanel>(cx))
+                .ok_or_else(|| anyhow!("the native Terminal surface is still loading"))?;
+            self.workbench_terminal_panel = Some(panel.clone());
+            self._workbench_terminal_panel_observation =
+                Some(cx.observe_in(&panel, window, |this, _panel, window, cx| {
+                    this.sync_workbench_shell(window, cx);
+                    cx.notify();
+                }));
+            self._workbench_terminal_panel_event_subscription = Some(cx.subscribe_in(
+                &panel,
+                window,
+                |this, _panel, event: &PanelEvent, window, cx| {
+                    this.handle_workbench_terminal_panel_event(event, window, cx);
+                },
+            ));
+            panel
+        };
+        if let Some(surface) = self.workbench_terminal_surface.clone() {
+            surface.update(cx, |surface, cx| surface.bind(binding, cx));
+            return Ok(surface);
+        }
+        let surface = cx.new(|cx| workbench_shell::NativeTerminalSurface::new(panel, binding, cx));
+        self.workbench_terminal_surface = Some(surface.clone());
+        Ok(surface)
+    }
+
     fn native_git_lifecycle(&self, cx: &App) -> workbench_shell::NativeGitLifecycle {
         #[cfg(any(test, feature = "test-support"))]
         if let Some(lifecycle) = &self.workbench_git_lifecycle_override {
@@ -9846,6 +10080,41 @@ impl AgentPanel {
         }
     }
 
+    fn native_terminal_owner_state(&self) -> workbench_shell::NativeTerminalOwnerState {
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some(owner_state) = self.workbench_terminal_owner_state_override.as_ref() {
+            return owner_state.clone();
+        }
+        match self.workbench_shell.projection().connection {
+            omega_workbench_state::ConnectionPhase::Offline => {
+                return workbench_shell::NativeTerminalOwnerState::Offline;
+            }
+            omega_workbench_state::ConnectionPhase::Reconnecting
+            | omega_workbench_state::ConnectionPhase::StaleProjection => {
+                return workbench_shell::NativeTerminalOwnerState::Reconnecting;
+            }
+            omega_workbench_state::ConnectionPhase::Online => {}
+        }
+        let Some(identity) = self.workbench_shell.identity() else {
+            return workbench_shell::NativeTerminalOwnerState::Error(
+                "Terminal worktree identity is still loading".into(),
+            );
+        };
+        match &identity.phase {
+            IdentityPhase::Ready => workbench_shell::NativeTerminalOwnerState::Ready,
+            IdentityPhase::NoProject | IdentityPhase::Missing => {
+                workbench_shell::NativeTerminalOwnerState::WorktreeRemoved
+            }
+            IdentityPhase::Offline => workbench_shell::NativeTerminalOwnerState::Offline,
+            IdentityPhase::Loading | IdentityPhase::Stale | IdentityPhase::Reconnecting => {
+                workbench_shell::NativeTerminalOwnerState::Reconnecting
+            }
+            IdentityPhase::Error(error) | IdentityPhase::Inconsistent(error) => {
+                workbench_shell::NativeTerminalOwnerState::Error(error.clone())
+            }
+        }
+    }
+
     fn synchronize_git_surface_lifecycle_for_panel(&mut self, cx: &mut Context<Self>) {
         let scope = self
             .workbench_git_panel
@@ -9917,6 +10186,23 @@ impl AgentPanel {
             workspace.rehome_panel(panel, window, cx)
         })?;
         self.workbench_git_panel_handed_off = true;
+        Ok(())
+    }
+
+    fn detach_workspace_terminal_panel(
+        &mut self,
+        panel: &Entity<TerminalPanel>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<()> {
+        let workspace = self
+            .workspace
+            .upgrade()
+            .context("the workspace closed while opening Terminal")?;
+        workspace.update(cx, |workspace, cx| {
+            workspace.rehome_panel(panel, window, cx)
+        })?;
+        self.workbench_terminal_panel_handed_off = true;
         Ok(())
     }
 
@@ -10248,8 +10534,24 @@ impl AgentPanel {
         } else {
             None
         };
+        let terminal_surface = if surface == omega_workbench_state::WorkSurface::Terminal {
+            match self.prepare_terminal_surface(window, cx) {
+                Ok(terminal_surface) => Some(terminal_surface),
+                Err(error) => {
+                    log::warn!("could not prepare the Terminal work surface: {error:#}");
+                    self.workbench_shell.record_error(error.to_string());
+                    cx.notify();
+                    return;
+                }
+            }
+        } else {
+            None
+        };
         let selection = if let Some(git_surface) = git_surface.clone() {
             self.workbench_shell.select_git_surface(git_surface, cx)
+        } else if let Some(terminal_surface) = terminal_surface.clone() {
+            self.workbench_shell
+                .select_terminal_surface(terminal_surface, cx)
         } else {
             self.workbench_shell.select_surface(
                 surface,
@@ -10313,6 +10615,31 @@ impl AgentPanel {
                     self.workbench_shell.record_error(error.to_string());
                     cx.notify();
                     return;
+                }
+                let terminal_panel = terminal_surface
+                    .as_ref()
+                    .map(|terminal_surface| terminal_surface.read(cx).terminal_panel().clone());
+                if let Some(terminal_panel) = terminal_panel.as_ref()
+                    && !self.workbench_terminal_panel_handed_off
+                    && let Err(error) =
+                        self.detach_workspace_terminal_panel(terminal_panel, window, cx)
+                {
+                    if let Err(collapse_error) = self.workbench_shell.collapse_dock() {
+                        log::warn!(
+                            "failed to collapse Terminal after workspace handoff failed: \
+                             {collapse_error:#}"
+                        );
+                    }
+                    log::warn!(
+                        "could not hand the native Terminal panel to the work surface: {error:#}"
+                    );
+                    self.workbench_shell.record_error(error.to_string());
+                    cx.notify();
+                    return;
+                }
+                if let Some(terminal_surface) = terminal_surface.as_ref() {
+                    terminal_surface.update(cx, |_terminal_surface, cx| cx.notify());
+                    host.update(cx, |_host, cx| cx.notify());
                 }
                 host.focus_handle(cx).focus(window, cx);
                 cx.notify();
@@ -10384,6 +10711,119 @@ impl AgentPanel {
         }
     }
 
+    fn ensure_terminal_work_surface_open(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let terminal_is_open = self
+            .workbench_shell
+            .projection()
+            .visible_projection()
+            .is_some_and(|visible| {
+                visible.dock_open
+                    && visible.effective_surface
+                        == Some(omega_workbench_state::WorkSurface::Terminal)
+            });
+        if !terminal_is_open {
+            self.select_work_surface(omega_workbench_state::WorkSurface::Terminal, window, cx);
+        }
+        self.workbench_shell
+            .projection()
+            .visible_projection()
+            .is_some_and(|visible| {
+                visible.dock_open
+                    && visible.effective_surface
+                        == Some(omega_workbench_state::WorkSurface::Terminal)
+            })
+    }
+
+    fn create_terminal_for_active_thread_at(
+        &mut self,
+        requested_working_directory: Option<PathBuf>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.workbench_terminal_has_authority(cx) {
+            self.workbench_shell
+                .record_error("The active thread worktree is unavailable");
+            cx.notify();
+            return;
+        }
+        let Some(surface) = self.workbench_terminal_surface.clone() else {
+            self.workbench_shell
+                .record_error("Open the Terminal work surface before creating a terminal");
+            cx.notify();
+            return;
+        };
+        let owner = surface.read(cx).binding().clone();
+        let requested_working_directory =
+            requested_working_directory.unwrap_or_else(|| owner.worktree_abs_path.clone());
+        let working_directory = match util::paths::normalize_lexically(&requested_working_directory)
+        {
+            Ok(working_directory) => working_directory,
+            Err(error) => {
+                self.workbench_shell.record_error(format!(
+                    "Terminal directory {} is invalid: {error}",
+                    requested_working_directory.display()
+                ));
+                cx.notify();
+                return;
+            }
+        };
+        if !working_directory.starts_with(&owner.worktree_abs_path) {
+            self.workbench_shell.record_error(format!(
+                "Terminal directory {} is outside the active thread worktree {}",
+                working_directory.display(),
+                owner.worktree_abs_path.display()
+            ));
+            cx.notify();
+            return;
+        }
+        if !surface.read(cx).owner_state().can_create() {
+            self.workbench_shell
+                .record_error("New terminals are unavailable for this worktree");
+            cx.notify();
+            return;
+        }
+        let panel = surface.read(cx).terminal_panel().clone();
+        let spawn = panel.update(cx, |panel, cx| {
+            panel.create_terminal_at_working_directory(Some(working_directory), window, cx)
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            match spawn.await {
+                Ok(terminal) => {
+                    let terminal = terminal
+                        .upgrade()
+                        .context("the created terminal closed before it could be registered")?;
+                    let terminal_id = terminal.entity_id().as_u64();
+                    this.update(cx, |this, cx| {
+                        if let Some(surface) = this.workbench_terminal_surface.as_ref() {
+                            surface.update(cx, |surface, cx| {
+                                surface.record_terminal_owner(terminal_id, owner, cx);
+                            });
+                        }
+                        cx.notify();
+                    })?;
+                }
+                Err(error) => {
+                    this.update(cx, |this, cx| {
+                        this.workbench_shell.record_error(format!(
+                            "Could not create terminal in the thread worktree: {error:#}"
+                        ));
+                        cx.notify();
+                    })?;
+                }
+            }
+            Ok::<(), anyhow::Error>(())
+        })
+        .detach_and_log_err(cx);
+    }
+
+    fn create_terminal_for_active_thread(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.create_terminal_for_active_thread_at(None, window, cx);
+    }
+
     fn render_surface_badge(
         surface: omega_workbench_state::WorkSurface,
         badge: &workbench_shell::SurfaceBadge,
@@ -10445,8 +10885,12 @@ impl AgentPanel {
             .into_iter()
             .map(|surface| {
                 let capability = self.workbench_shell.capability(surface);
-                let connection_unavailable =
-                    offline && surface != omega_workbench_state::WorkSurface::Plan;
+                let connection_unavailable = offline
+                    && !matches!(
+                        surface,
+                        omega_workbench_state::WorkSurface::Terminal
+                            | omega_workbench_state::WorkSurface::Plan
+                    );
                 let available = capability.is_some_and(|capability| {
                     capability.availability.is_available() && !connection_unavailable
                 });
@@ -10967,12 +11411,32 @@ impl Render for AgentPanel {
                             .workbench_shell
                             .visible_host()
                             .is_some_and(|host| host.focus_handle(cx).contains_focused(window, cx));
+                        let terminal_is_open = this
+                            .workbench_shell
+                            .projection()
+                            .visible_projection()
+                            .is_some_and(|visible| {
+                                visible.dock_open
+                                    && visible.effective_surface
+                                        == Some(omega_workbench_state::WorkSurface::Terminal)
+                            });
+                        let terminal_panel_is_focused =
+                            this.workbench_terminal_panel.as_ref().is_some_and(|panel| {
+                                panel.focus_handle(cx).contains_focused(window, cx)
+                            });
+                        let terminal_host_is_focused = this
+                            .workbench_shell
+                            .visible_host()
+                            .is_some_and(|host| host.focus_handle(cx).contains_focused(window, cx));
                         if (this.workbench_files_panel_handed_off
                             && files_is_open
                             && (files_tree_is_focused || files_host_is_focused))
                             || (this.workbench_git_panel_handed_off
                                 && git_is_open
                                 && (git_panel_is_focused || git_host_is_focused))
+                            || (this.workbench_terminal_panel_handed_off
+                                && terminal_is_open
+                                && (terminal_panel_is_focused || terminal_host_is_focused))
                         {
                             cx.stop_propagation();
                             this.collapse_work_surface_dock(window, cx);
@@ -11013,6 +11477,33 @@ impl Render for AgentPanel {
                             window,
                             cx,
                         );
+                    }),
+                )
+                .on_action(cx.listener(|this, _: &workspace::NewTerminal, window, cx| {
+                    if this.workbench_shell_enabled {
+                        cx.stop_propagation();
+                        if this.ensure_terminal_work_surface_open(window, cx) {
+                            this.create_terminal_for_active_thread(window, cx);
+                        }
+                    }
+                }))
+                .on_action(
+                    cx.listener(|this, action: &workspace::OpenTerminal, window, cx| {
+                        if this.workbench_shell_enabled {
+                            cx.stop_propagation();
+                            if action.local {
+                                this.workbench_shell.record_error(
+                                    "Local terminals are unavailable in the agent workbench",
+                                );
+                                cx.notify();
+                            } else if this.ensure_terminal_work_surface_open(window, cx) {
+                                this.create_terminal_for_active_thread_at(
+                                    Some(action.working_directory.clone()),
+                                    window,
+                                    cx,
+                                );
+                            }
+                        }
                     }),
                 )
                 .on_action(
@@ -11073,6 +11564,11 @@ impl Render for AgentPanel {
                 .on_action(cx.listener(
                     |this, _: &workbench_shell::FocusThreadTranscript, window, cx| {
                         this.focus_thread_transcript(window, cx);
+                    },
+                ))
+                .on_action(cx.listener(
+                    |this, _: &workbench_shell::NewTerminalForThread, window, cx| {
+                        this.create_terminal_for_active_thread(window, cx);
                     },
                 ))
                 // The activity rail hugs the window's left edge, with the
@@ -11259,6 +11755,36 @@ impl AgentPanel {
         cx: &App,
     ) -> Option<Entity<workbench_shell::NativeGitSurface>> {
         self.workbench_shell.git_surface_for_active_binding(cx)
+    }
+
+    pub fn workbench_terminal_surface_for_tests(
+        &self,
+    ) -> Option<Entity<workbench_shell::NativeTerminalSurface>> {
+        self.workbench_terminal_surface.clone()
+    }
+
+    pub fn workbench_terminal_panel_for_tests(&self) -> Option<Entity<TerminalPanel>> {
+        self.workbench_terminal_panel.clone()
+    }
+
+    pub fn set_workbench_terminal_owner_state_for_tests(
+        &mut self,
+        owner_state: Option<workbench_shell::NativeTerminalOwnerState>,
+        cx: &mut Context<Self>,
+    ) {
+        self.workbench_terminal_owner_state_override = owner_state;
+        cx.notify();
+    }
+
+    pub fn set_workbench_terminal_badge_for_tests(
+        &mut self,
+        badge: Option<workbench_shell::SurfaceBadge>,
+        cx: &mut Context<Self>,
+    ) {
+        self.workbench_terminal_badge_override = badge.clone();
+        self.workbench_shell
+            .set_badge(omega_workbench_state::WorkSurface::Terminal, badge);
+        cx.notify();
     }
 
     pub fn set_workbench_git_lifecycle_for_tests(

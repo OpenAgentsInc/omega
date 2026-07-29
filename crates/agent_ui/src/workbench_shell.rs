@@ -1,4 +1,8 @@
-use std::{cell::Cell, collections::BTreeMap};
+use std::{
+    cell::Cell,
+    collections::{BTreeMap, BTreeSet},
+    path::PathBuf,
+};
 
 use acp_thread::AcpThread;
 use anyhow::{Result, anyhow, bail};
@@ -20,6 +24,7 @@ use search::{
         ProjectSearch, ProjectSearchBar, ProjectSearchView, ToggleFilters, ToggleFocus,
     },
 };
+use terminal_view::terminal_panel::{TerminalPanel, TerminalPanelSnapshot};
 use ui::{Color, Icon, IconName, IconSize, Label, LabelSize, prelude::*, v_flex};
 use workspace::{Panel, ToolbarItemView, Workspace, item::Item};
 
@@ -69,6 +74,8 @@ actions!(
         CollapseWorkSurfaceDock,
         /// Return focus to the active thread transcript.
         FocusThreadTranscript,
+        /// Create a terminal for the active thread's exact worktree.
+        NewTerminalForThread,
         /// Open the active thread repository picker.
         ToggleRepositoryPicker,
         /// Open the active thread worktree picker.
@@ -177,6 +184,293 @@ pub struct NativeGitBinding {
     pub worktree_id: WorktreeId,
     pub git_repository_id: RepositoryId,
     pub generation: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NativeTerminalBinding {
+    pub thread_id: String,
+    pub repository: RepositoryBinding,
+    pub worktree_id: WorktreeId,
+    pub worktree_abs_path: PathBuf,
+    pub generation: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum NativeTerminalOwnerState {
+    Ready,
+    WorktreeRemoved,
+    Offline,
+    Reconnecting,
+    Error(SharedString),
+}
+
+impl NativeTerminalOwnerState {
+    fn accessible_label(&self) -> Option<SharedString> {
+        match self {
+            Self::Ready => None,
+            Self::WorktreeRemoved => Some(
+                "The target worktree was removed. Existing terminals keep their original owner."
+                    .into(),
+            ),
+            Self::Offline => Some(
+                "The project is offline. Existing terminal output is retained, but new terminals are unavailable."
+                    .into(),
+            ),
+            Self::Reconnecting => Some(
+                "The project is reconnecting. Existing terminal output is retained.".into(),
+            ),
+            Self::Error(error) => Some(error.clone()),
+        }
+    }
+
+    pub fn can_create(&self) -> bool {
+        matches!(self, Self::Ready)
+    }
+}
+
+pub struct NativeTerminalSurface {
+    focus_handle: FocusHandle,
+    terminal_panel: Entity<TerminalPanel>,
+    binding: NativeTerminalBinding,
+    owner_state: NativeTerminalOwnerState,
+    terminal_owners: BTreeMap<u64, NativeTerminalBinding>,
+}
+
+fn retain_live_terminal_owners<T>(
+    terminal_owners: &mut BTreeMap<u64, T>,
+    live_terminal_ids: impl IntoIterator<Item = u64>,
+) -> bool {
+    let live_terminal_ids = live_terminal_ids.into_iter().collect::<BTreeSet<_>>();
+    let previous_count = terminal_owners.len();
+    terminal_owners.retain(|terminal_id, _| live_terminal_ids.contains(terminal_id));
+    terminal_owners.len() != previous_count
+}
+
+impl NativeTerminalSurface {
+    pub fn new(
+        terminal_panel: Entity<TerminalPanel>,
+        binding: NativeTerminalBinding,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        Self {
+            focus_handle: cx.focus_handle(),
+            terminal_panel,
+            binding,
+            owner_state: NativeTerminalOwnerState::Ready,
+            terminal_owners: BTreeMap::new(),
+        }
+    }
+
+    pub fn terminal_panel(&self) -> &Entity<TerminalPanel> {
+        &self.terminal_panel
+    }
+
+    pub fn binding(&self) -> &NativeTerminalBinding {
+        &self.binding
+    }
+
+    pub fn bind(&mut self, binding: NativeTerminalBinding, cx: &mut Context<Self>) {
+        if self.binding == binding {
+            return;
+        }
+        self.binding = binding;
+        self.owner_state = NativeTerminalOwnerState::Ready;
+        self.terminal_panel.update(cx, |terminal_panel, cx| {
+            terminal_panel.set_new_terminal_enabled(true, cx);
+        });
+        cx.notify();
+    }
+
+    pub fn owner_state(&self) -> &NativeTerminalOwnerState {
+        &self.owner_state
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn terminal_owners_for_tests(&self) -> &BTreeMap<u64, NativeTerminalBinding> {
+        &self.terminal_owners
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn active_terminal_owner_for_tests(
+        &self,
+        cx: &App,
+    ) -> Option<(u64, NativeTerminalBinding)> {
+        let terminal_id = self
+            .terminal_panel
+            .read(cx)
+            .active_terminal_view(cx)?
+            .read(cx)
+            .terminal()
+            .entity_id()
+            .as_u64();
+        self.terminal_owners
+            .get(&terminal_id)
+            .cloned()
+            .map(|owner| (terminal_id, owner))
+    }
+
+    pub fn record_terminal_owner(
+        &mut self,
+        terminal_id: u64,
+        owner: NativeTerminalBinding,
+        cx: &mut Context<Self>,
+    ) {
+        if self.terminal_owners.contains_key(&terminal_id) {
+            return;
+        }
+        self.terminal_owners.insert(terminal_id, owner);
+        cx.notify();
+    }
+
+    pub fn reconcile_terminal_owners(
+        &mut self,
+        snapshot: &TerminalPanelSnapshot,
+        cx: &mut Context<Self>,
+    ) {
+        if retain_live_terminal_owners(&mut self.terminal_owners, snapshot.terminal_ids()) {
+            cx.notify();
+        }
+    }
+
+    pub fn set_owner_state(
+        &mut self,
+        generation: u64,
+        owner_state: NativeTerminalOwnerState,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.binding.generation != generation {
+            return false;
+        }
+        let can_create = owner_state.can_create();
+        self.terminal_panel.update(cx, |terminal_panel, cx| {
+            terminal_panel.set_new_terminal_enabled(can_create, cx);
+        });
+        if self.owner_state == owner_state {
+            return true;
+        }
+        self.owner_state = owner_state;
+        cx.notify();
+        true
+    }
+
+    pub fn contains_focus(&self, window: &Window, cx: &App) -> bool {
+        self.focus_handle.contains_focused(window, cx)
+            || self
+                .terminal_panel
+                .focus_handle(cx)
+                .contains_focused(window, cx)
+    }
+}
+
+impl Focusable for NativeTerminalSurface {
+    fn focus_handle(&self, cx: &App) -> FocusHandle {
+        self.terminal_panel.read(cx).activation_focus_handle(cx)
+    }
+}
+
+impl Render for NativeTerminalSurface {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let target = self.binding.worktree_abs_path.to_string_lossy().to_string();
+        let owner_label = self.owner_state.accessible_label();
+        let can_create = self.owner_state.can_create();
+        let active_owner = self
+            .terminal_panel
+            .read(cx)
+            .active_terminal_view(cx)
+            .and_then(|terminal_view| {
+                let terminal_id = terminal_view.read(cx).terminal().entity_id().as_u64();
+                self.terminal_owners.get(&terminal_id)
+            })
+            .map(|owner| owner.worktree_abs_path.to_string_lossy().to_string());
+        v_flex()
+            .id("omega.workbench.terminal.content")
+            .debug_selector(|| "omega.workbench.terminal.content".to_string())
+            .role(gpui::Role::Group)
+            .aria_label("Terminal")
+            .key_context("WorkbenchTerminal")
+            .track_focus(&self.focus_handle)
+            .size_full()
+            .child(
+                v_flex()
+                    .flex_none()
+                    .w_full()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .border_b_1()
+                    .border_color(cx.theme().colors().border)
+                    .px_2()
+                    .py_1()
+                    .child(
+                        h_flex()
+                            .w_full()
+                            .min_w_0()
+                            .gap_2()
+                            .child(
+                                div().min_w_0().flex_1().overflow_hidden().child(
+                                    Label::new(format!("New terminal target: {target}"))
+                                        .size(LabelSize::XSmall)
+                                        .color(Color::Muted)
+                                        .truncate(),
+                                ),
+                            )
+                            .child(
+                                div().flex_none().child(
+                                    IconButton::new("omega.workbench.terminal.new", IconName::Plus)
+                                        .debug_selector(|| {
+                                            "omega.workbench.terminal.new".to_string()
+                                        })
+                                        .icon_size(IconSize::Small)
+                                        .tab_index(0isize)
+                                        .disabled(!can_create)
+                                        .aria_label("New terminal in thread worktree")
+                                        .on_click(|_, window, cx| {
+                                            window.dispatch_action(
+                                                NewTerminalForThread.boxed_clone(),
+                                                cx,
+                                            );
+                                        }),
+                                ),
+                            ),
+                    )
+                    .when_some(active_owner, |this, active_owner| {
+                        this.child(
+                            div()
+                                .id("omega.workbench.terminal.owner")
+                                .debug_selector(|| "omega.workbench.terminal.owner".to_string())
+                                .role(gpui::Role::Status)
+                                .aria_label(format!("Active terminal owner: {active_owner}"))
+                                .child(
+                                    Label::new(format!("Active terminal owner: {active_owner}"))
+                                        .size(LabelSize::XSmall)
+                                        .color(Color::Muted),
+                                ),
+                        )
+                    })
+                    .when_some(owner_label, |this, owner_label| {
+                        this.child(
+                            div()
+                                .id("omega.workbench.terminal.owner-state")
+                                .debug_selector(|| {
+                                    "omega.workbench.terminal.owner-state".to_string()
+                                })
+                                .role(gpui::Role::Status)
+                                .aria_label(owner_label.clone())
+                                .child(
+                                    Label::new(owner_label)
+                                        .size(LabelSize::XSmall)
+                                        .color(Color::Warning),
+                                ),
+                        )
+                    }),
+            )
+            .child(
+                v_flex()
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_hidden()
+                    .child(self.terminal_panel.clone()),
+            )
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -874,6 +1168,7 @@ pub struct WorkSurfaceHost {
     search_surface: Option<Entity<NativeSearchSurface>>,
     review_surface: Option<Entity<NativeReviewSurface>>,
     git_surface: Option<Entity<NativeGitSurface>>,
+    terminal_surface: Option<Entity<NativeTerminalSurface>>,
 }
 
 impl WorkSurfaceHost {
@@ -883,6 +1178,7 @@ impl WorkSurfaceHost {
         search_surface: Option<Entity<NativeSearchSurface>>,
         review_surface: Option<Entity<NativeReviewSurface>>,
         git_surface: Option<Entity<NativeGitSurface>>,
+        terminal_surface: Option<Entity<NativeTerminalSurface>>,
         cx: &mut Context<Self>,
     ) -> Self {
         Self {
@@ -893,6 +1189,7 @@ impl WorkSurfaceHost {
             search_surface,
             review_surface,
             git_surface,
+            terminal_surface,
         }
     }
 
@@ -924,6 +1221,11 @@ impl WorkSurfaceHost {
         self.git_surface.as_ref()
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn terminal_surface(&self) -> Option<&Entity<NativeTerminalSurface>> {
+        self.terminal_surface.as_ref()
+    }
+
     fn native_content_contains_focus(&self, window: &Window, cx: &App) -> bool {
         self.files_panel
             .as_ref()
@@ -940,6 +1242,10 @@ impl WorkSurfaceHost {
                 .git_surface
                 .as_ref()
                 .is_some_and(|surface| surface.read(cx).contains_focus(window, cx))
+            || self
+                .terminal_surface
+                .as_ref()
+                .is_some_and(|surface| surface.read(cx).contains_focus(window, cx))
     }
 
     fn focus_native_content(&self, window: &mut Window, cx: &mut App) {
@@ -950,6 +1256,8 @@ impl WorkSurfaceHost {
         } else if let Some(surface) = self.review_surface.as_ref() {
             surface.focus_handle(cx).focus(window, cx);
         } else if let Some(surface) = self.git_surface.as_ref() {
+            surface.focus_handle(cx).focus(window, cx);
+        } else if let Some(surface) = self.terminal_surface.as_ref() {
             surface.focus_handle(cx).focus(window, cx);
         }
     }
@@ -1015,6 +1323,11 @@ impl Focusable for WorkSurfaceHost {
                         .as_ref()
                         .map(|surface| surface.focus_handle(cx))
                 })
+                .or_else(|| {
+                    self.terminal_surface
+                        .as_ref()
+                        .map(|surface| surface.focus_handle(cx))
+                })
                 .unwrap_or_else(|| self.focus_handle.clone())
         } else {
             self.focus_handle.clone()
@@ -1046,12 +1359,18 @@ impl Render for WorkSurfaceHost {
         } else {
             None
         };
+        let terminal_surface = if matches!(self.content_state, SurfaceContentState::Ready) {
+            self.terminal_surface.clone()
+        } else {
+            None
+        };
         let status = match &self.content_state {
             SurfaceContentState::Ready
                 if files_panel.is_some()
                     || search_surface.is_some()
                     || review_surface.is_some()
-                    || git_surface.is_some() =>
+                    || git_surface.is_some()
+                    || terminal_surface.is_some() =>
             {
                 None
             }
@@ -1110,6 +1429,7 @@ impl Render for WorkSurfaceHost {
             .when_some(search_surface, |this, surface| this.child(surface))
             .when_some(review_surface, |this, surface| this.child(surface))
             .when_some(git_surface, |this, surface| this.child(surface))
+            .when_some(terminal_surface, |this, surface| this.child(surface))
             .when_some(status, |this, (status, role, message)| {
                 this.child(
                     v_flex()
@@ -1337,7 +1657,14 @@ impl WorkbenchShell {
             .active()
             .ok_or_else(|| anyhow!("active thread identity disappeared during synchronization"))?;
         let binding = identity.binding().cloned();
-        let available_surfaces = available_surfaces_for_identity(identity);
+        let mut available_surfaces = available_surfaces_for_identity(identity);
+        let has_retained_terminal = self
+            .hosts
+            .keys()
+            .any(|key| key.surface == WorkSurface::Terminal);
+        if has_retained_terminal && !available_surfaces.contains(&WorkSurface::Terminal) {
+            available_surfaces.push(WorkSurface::Terminal);
+        }
         if !self.projection.threads.contains_key(&thread_id) {
             self.projection
                 .apply(ProjectionTransition::OpenThread {
@@ -1386,7 +1713,7 @@ impl WorkbenchShell {
             };
             if let Some(reason) = phase_reason {
                 for (surface, capability) in &mut capabilities {
-                    if *surface != WorkSurface::Plan {
+                    if !matches!(*surface, WorkSurface::Terminal | WorkSurface::Plan) {
                         capability.availability = SurfaceAvailability::Unavailable {
                             reason: reason.into(),
                         };
@@ -1405,7 +1732,7 @@ impl WorkbenchShell {
                 .label()
                 .unwrap_or_else(|| "Repository identity is unavailable".into());
             for (surface, capability) in &mut capabilities {
-                if *surface != WorkSurface::Plan {
+                if !matches!(*surface, WorkSurface::Terminal | WorkSurface::Plan) {
                     capability.availability = SurfaceAvailability::Unavailable {
                         reason: reason.clone(),
                     };
@@ -1451,9 +1778,13 @@ impl WorkbenchShell {
         if (self.projection.connection != ConnectionPhase::Online || identity_is_inconsistent)
             && self.projection.visible_projection().is_some_and(|visible| {
                 visible.dock_open
-                    && visible
-                        .effective_surface
-                        .is_some_and(|surface| surface != omega_workbench_state::WorkSurface::Plan)
+                    && visible.effective_surface.is_some_and(|surface| {
+                        !matches!(
+                            surface,
+                            omega_workbench_state::WorkSurface::Terminal
+                                | omega_workbench_state::WorkSurface::Plan
+                        )
+                    })
             })
         {
             self.projection
@@ -1714,6 +2045,7 @@ impl WorkbenchShell {
             search_surface,
             review_surface,
             None,
+            None,
             cx,
         )
     }
@@ -1723,7 +2055,31 @@ impl WorkbenchShell {
         git_surface: Entity<NativeGitSurface>,
         cx: &mut Context<crate::AgentPanel>,
     ) -> Result<SurfaceSelection> {
-        self.select_surface_with_native(WorkSurface::Git, None, None, None, Some(git_surface), cx)
+        self.select_surface_with_native(
+            WorkSurface::Git,
+            None,
+            None,
+            None,
+            Some(git_surface),
+            None,
+            cx,
+        )
+    }
+
+    pub fn select_terminal_surface(
+        &mut self,
+        terminal_surface: Entity<NativeTerminalSurface>,
+        cx: &mut Context<crate::AgentPanel>,
+    ) -> Result<SurfaceSelection> {
+        self.select_surface_with_native(
+            WorkSurface::Terminal,
+            None,
+            None,
+            None,
+            None,
+            Some(terminal_surface),
+            cx,
+        )
     }
 
     fn select_surface_with_native(
@@ -1733,6 +2089,7 @@ impl WorkbenchShell {
         search_surface: Option<Entity<NativeSearchSurface>>,
         review_surface: Option<Entity<NativeReviewSurface>>,
         git_surface: Option<Entity<NativeGitSurface>>,
+        terminal_surface: Option<Entity<NativeTerminalSurface>>,
         cx: &mut Context<crate::AgentPanel>,
     ) -> Result<SurfaceSelection> {
         let unavailable_reason = self
@@ -1772,6 +2129,7 @@ impl WorkbenchShell {
             search_surface,
             review_surface,
             git_surface,
+            terminal_surface,
             cx,
         ) {
             Ok(host) => host,
@@ -1795,6 +2153,7 @@ impl WorkbenchShell {
         search_surface: Option<Entity<NativeSearchSurface>>,
         review_surface: Option<Entity<NativeReviewSurface>>,
         git_surface: Option<Entity<NativeGitSurface>>,
+        terminal_surface: Option<Entity<NativeTerminalSurface>>,
         cx: &mut Context<crate::AgentPanel>,
     ) -> Result<Entity<WorkSurfaceHost>> {
         if surface == WorkSurface::Files && files_panel.is_none() {
@@ -1808,6 +2167,9 @@ impl WorkbenchShell {
         }
         if surface == WorkSurface::Git && git_surface.is_none() {
             bail!("the native Git surface is unavailable");
+        }
+        if surface == WorkSurface::Terminal && terminal_surface.is_none() {
+            bail!("the native Terminal surface is unavailable");
         }
         let key = SurfaceHostKey {
             thread_id: thread_id.into(),
@@ -1832,6 +2194,7 @@ impl WorkbenchShell {
                 search_surface,
                 review_surface,
                 git_surface,
+                terminal_surface,
                 cx,
             )
         });
@@ -1857,6 +2220,7 @@ impl WorkbenchShell {
             binding,
             WorkSurface::Files,
             Some(files_panel),
+            None,
             None,
             None,
             None,
@@ -1904,6 +2268,7 @@ impl WorkbenchShell {
             Some(search_surface),
             None,
             None,
+            None,
             cx,
         )
         .map(Some)
@@ -1948,6 +2313,7 @@ impl WorkbenchShell {
             None,
             Some(review_surface),
             None,
+            None,
             cx,
         )
         .map(Some)
@@ -1984,9 +2350,85 @@ impl WorkbenchShell {
             None,
             None,
             Some(git_surface),
+            None,
             cx,
         )
         .map(Some)
+    }
+
+    pub fn terminal_surface_for_active_binding(
+        &self,
+        cx: &App,
+    ) -> Option<Entity<NativeTerminalSurface>> {
+        let visible = self.projection.visible_projection()?;
+        let key = SurfaceHostKey {
+            thread_id: visible.thread_id,
+            binding: visible.binding,
+            surface: WorkSurface::Terminal,
+        };
+        self.hosts
+            .get(&key)?
+            .read(cx)
+            .terminal_surface
+            .as_ref()
+            .cloned()
+    }
+
+    pub fn ensure_visible_terminal_host(
+        &mut self,
+        terminal_surface: Entity<NativeTerminalSurface>,
+        cx: &mut Context<crate::AgentPanel>,
+    ) -> Result<Option<Entity<WorkSurfaceHost>>> {
+        let Some(visible) = self.projection.visible_projection() else {
+            return Ok(None);
+        };
+        if !visible.dock_open || visible.effective_surface != Some(WorkSurface::Terminal) {
+            return Ok(None);
+        }
+        let thread_id = visible.thread_id.clone();
+        let binding = visible.binding;
+        self.ensure_host(
+            &thread_id,
+            binding,
+            WorkSurface::Terminal,
+            None,
+            None,
+            None,
+            None,
+            Some(terminal_surface),
+            cx,
+        )
+        .map(Some)
+    }
+
+    pub fn set_terminal_owner_state(
+        &mut self,
+        binding: &NativeTerminalBinding,
+        owner_state: NativeTerminalOwnerState,
+        cx: &mut Context<crate::AgentPanel>,
+    ) -> usize {
+        let terminal_surfaces = self
+            .hosts
+            .values()
+            .filter_map(|host| host.read(cx).terminal_surface.as_ref().cloned())
+            .collect::<Vec<_>>();
+        let mut updated = 0;
+        for terminal_surface in terminal_surfaces {
+            let surface_binding = terminal_surface.read(cx).binding().clone();
+            if surface_binding.repository == binding.repository
+                && surface_binding.worktree_id == binding.worktree_id
+                && terminal_surface.update(cx, |terminal_surface, cx| {
+                    terminal_surface.set_owner_state(
+                        surface_binding.generation,
+                        owner_state.clone(),
+                        cx,
+                    )
+                })
+            {
+                updated += 1;
+            }
+        }
+        updated
     }
 
     pub fn set_active_git_content_state(
@@ -2287,7 +2729,6 @@ impl WorkbenchShell {
         self.fail_next_host_creation = Some(surface);
     }
 
-    #[cfg(any(test, feature = "test-support"))]
     pub fn set_badge(&mut self, surface: WorkSurface, badge: Option<SurfaceBadge>) {
         if let Some(capability) = self.capabilities.get_mut(&surface) {
             capability.badge = badge;
@@ -2477,6 +2918,15 @@ fn unavailable_capabilities(reason: &'static str) -> BTreeMap<WorkSurface, Surfa
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn closed_terminal_owner_bindings_are_reconciled() {
+        let mut owners = BTreeMap::from([(1, "first"), (2, "second"), (3, "third")]);
+
+        assert!(retain_live_terminal_owners(&mut owners, [1, 3]));
+        assert_eq!(owners, BTreeMap::from([(1, "first"), (3, "third")]));
+        assert!(!retain_live_terminal_owners(&mut owners, [1, 3]));
+    }
 
     #[test]
     fn layout_has_one_shared_allocation_boundary() {
