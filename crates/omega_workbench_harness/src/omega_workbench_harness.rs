@@ -3008,7 +3008,9 @@ pub const HERMETIC_SCENES: &[SceneSpec] = &[
         viewport: ViewportFixture::new(1200, 720, 2000),
         fixture_version: 2,
         pixel_policy: APPLE_SILICON_METAL_POLICY,
-        regions: WORKBENCH_TERMINAL_REGIONS,
+        // Dock is collapsed: no terminal-surface selector is on screen.
+        // Whole-window pixels still prove the rail badge and transcript.
+        regions: &[],
     },
     SceneSpec {
         name: "omega_workbench_terminal_collapse_reopen",
@@ -7806,7 +7808,12 @@ mod tests {
             let scene = scene_spec(name).expect("registered Terminal scene");
             assert_eq!(scene.phase, ScenePhase::Recording);
             assert_eq!(scene.fixture_version, 2);
-            assert_eq!(scene.regions, WORKBENCH_TERMINAL_REGIONS);
+            let expected_regions = if name == "omega_workbench_terminal_hidden_running" {
+                &[][..]
+            } else {
+                WORKBENCH_TERMINAL_REGIONS
+            };
+            assert_eq!(scene.regions, expected_regions);
             assert!(WORKBENCH_SHELL_PIXEL_SCENES.contains(&name));
         }
         let narrow = scene_spec("omega_workbench_terminal_narrow")
