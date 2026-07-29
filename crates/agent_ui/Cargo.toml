@@ -158,6 +158,7 @@ reqwest_client = { workspace = true, optional = true }
 
 [dev-dependencies]
 acp_thread = { workspace = true, features = ["test-support"] }
+action_log = { workspace = true, features = ["test-support"] }
 agent = { workspace = true, features = ["test-support"] }
 agent_servers = { workspace = true, features = ["test-support"] }
 buffer_diff = { workspace = true, features = ["test-support"] }
@@ -190,3 +191,4 @@ vim.workspace = true
 tree-sitter-md.workspace = true
 unindent.workspace = true
 terminal = { workspace = true, features = ["test-support"] }
+terminal_view = { workspace = true, features = ["test-support"] }
